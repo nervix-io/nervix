@@ -2372,6 +2372,47 @@ async fn given_node_has_resource_directory_containing(
         .insert(placeholder, resource_dir.display().to_string());
 }
 
+#[given(expr = "node {string} has resource directory {string} with file {string} of {int} MiB")]
+async fn given_node_has_large_resource_file(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    placeholder: String,
+    relative_path: String,
+    mebibytes: usize,
+) {
+    let base_dir = world
+        .cluster()
+        .node_base_dir(&node_id)
+        .expect("node base dir should exist");
+    let resource_dir = base_dir.join("fixtures").join(&placeholder);
+    if resource_dir.exists() {
+        std::fs::remove_dir_all(&resource_dir).expect("fixture directory should be removed");
+    }
+    let destination = resource_dir.join(relative_path);
+    let parent = destination
+        .parent()
+        .expect("fixture file must have a parent directory");
+    std::fs::create_dir_all(parent).expect("fixture parent directory should be created");
+    let total_bytes = mebibytes
+        .checked_mul(1024 * 1024)
+        .expect("fixture size must fit the target pointer width");
+    let mut file =
+        std::fs::File::create(&destination).expect("large fixture file should be created");
+    let chunk = vec![0x5a_u8; 64 * 1024];
+    let full_chunks = total_bytes / chunk.len();
+    let remainder = total_bytes % chunk.len();
+    for _ in 0..full_chunks {
+        file.write_all(&chunk)
+            .expect("large fixture chunk should be written");
+    }
+    file.write_all(&chunk[..remainder])
+        .expect("large fixture remainder should be written");
+
+    world
+        .placeholders
+        .insert(placeholder, resource_dir.display().to_string());
+}
+
 #[given(expr = "node {string} has ONNX fixture resource directory {string}")]
 async fn given_node_has_onnx_fixture_resource_directory(
     world: &mut ScenarioWorld,
@@ -5046,6 +5087,105 @@ async fn when_named_client_selects_domain(world: &mut ScenarioWorld, name: Strin
         .unwrap_or_else(|| panic!("client '{name}' must be connected"))
         .clone();
     client.set_domain(domain).await;
+}
+
+#[when(expr = "client {string} uploads resource {string} from {string} with identity {string}")]
+async fn when_named_client_uploads_resource_with_identity(
+    world: &mut ScenarioWorld,
+    name: String,
+    resource: String,
+    directory: String,
+    identity: String,
+) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    let name = expand_placeholders(world, &name);
+    let resource = expand_placeholders(world, &resource);
+    let directory = PathBuf::from(expand_placeholders(world, &directory));
+    let identity = expand_placeholders(world, &identity);
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let identity = nervix_client_core::ResourceUploadIdentity::parse(identity)
+        .expect("scenario upload identity must be valid");
+    let outcome = client
+        .upload_resource_from_directory_with_identity(&resource, directory, identity, |_| {})
+        .await
+        .unwrap_or_else(|error| panic!("client '{name}' resource upload failed: {error}"));
+    assert!(
+        outcome.success,
+        "client '{name}' resource upload must succeed: {}",
+        outcome.message
+    );
+    world.last_command_output = Some(outcome.message);
+}
+
+#[when(
+    expr = "client {string} upload of resource {string} from {string} with identity {string} \
+            fails with {string}"
+)]
+async fn when_named_client_resource_upload_fails_with(
+    world: &mut ScenarioWorld,
+    name: String,
+    resource: String,
+    directory: String,
+    identity: String,
+    expected: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let resource = expand_placeholders(world, &resource);
+    let directory = PathBuf::from(expand_placeholders(world, &directory));
+    let identity = expand_placeholders(world, &identity);
+    let expected = expand_placeholders(world, &expected);
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let identity = nervix_client_core::ResourceUploadIdentity::parse(identity)
+        .expect("scenario upload identity must be valid");
+    let outcome = client
+        .upload_resource_from_directory_with_identity(&resource, directory, identity, |_| {})
+        .await
+        .unwrap_or_else(|error| panic!("client '{name}' resource upload failed: {error}"));
+    assert!(!outcome.success, "resource upload unexpectedly succeeded");
+    assert!(
+        outcome.message.contains(&expected),
+        "resource upload error did not contain '{expected}': {}",
+        outcome.message
+    );
+    world.last_command_error = Some(outcome.message.clone());
+    world.last_command_output = Some(outcome.message);
+}
+
+#[when(expr = "client {string} waits {string} for resource {string} version {int} readiness")]
+async fn when_named_client_waits_for_resource_readiness(
+    world: &mut ScenarioWorld,
+    name: String,
+    duration: String,
+    resource: String,
+    version: u64,
+) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    let name = expand_placeholders(world, &name);
+    let resource = expand_placeholders(world, &resource);
+    let duration = humantime::parse_duration(&duration).expect("readiness duration must be valid");
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let readiness = client
+        .wait_for_resource_ready(&resource, version, duration)
+        .await
+        .unwrap_or_else(|error| panic!("client '{name}' resource readiness wait failed: {error}"));
+    world.last_command_output = Some(format!(
+        "version: {}\ncluster_ready: {}\nmessage: {}",
+        readiness.version, readiness.cluster_ready, readiness.message
+    ));
 }
 
 #[then(expr = "client {string} active domain is {string}")]

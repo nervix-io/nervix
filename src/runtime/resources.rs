@@ -495,10 +495,12 @@ mod tests {
                     manifest_checksum: "manifest".to_string(),
                     file_count: 1,
                     total_bytes: 7,
+                    archive_bytes: 2048,
                     created_at: Timestamp::from_unix_nanos(0),
                     created_by_node: ClusterNodeName::parse("node-1").expect("valid name"),
                 }]),
                 replicas: SortedVec::new(),
+                uploads: SortedVec::new(),
             },
         );
 

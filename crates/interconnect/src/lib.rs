@@ -36,11 +36,11 @@ mod identity;
 mod request;
 mod wire;
 
-pub use connection::{RelayAdmission, RelayCancellationGuard};
+pub use connection::{IncomingByteStream, RelayAdmission, RelayCancellationGuard};
 pub use identity::TlsConfigBundle;
 pub use request::{
-    HandlerRegistrationError, InterconnectRequest, RemoteRequestFailure, RequestContext,
-    RequestError, RequestSubquota,
+    HandlerRegistrationError, InterconnectRequest, InterconnectStreamRequest, RemoteRequestFailure,
+    RequestContext, RequestError, RequestSubquota, StreamHandlerError, StreamingResponse,
 };
 use request::{RequestEnvelope, RequestState, ResponseEnvelope};
 
@@ -1437,6 +1437,24 @@ mod tests {
         const TIMEOUT: Duration = Duration::from_secs(30);
     }
 
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct ResourceStreamRequest;
+
+    impl InterconnectStreamRequest for ResourceStreamRequest {
+        const NAME: &'static str = "test_resource_stream";
+        const SUBQUOTA: RequestSubquota = RequestSubquota::Resource;
+        const TIMEOUT: Duration = Duration::from_secs(2);
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct SnapshotStreamRequest;
+
+    impl InterconnectStreamRequest for SnapshotStreamRequest {
+        const NAME: &'static str = "test_snapshot_stream";
+        const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
+        const TIMEOUT: Duration = Duration::from_secs(2);
+    }
+
     struct ConnectedTransports {
         _authority: TestCertificateAuthority,
         transport_a: Transport,
@@ -1683,6 +1701,162 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resource_streams_leave_the_reserved_snapshot_slot_responsive() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_b,
+            ..
+        } = connected_transports().await;
+        let release = watch::channel(false).0;
+        let resource_executor = Executor::default();
+        transport_b
+            .register_stream_handler::<ResourceStreamRequest, _, _>({
+                let release = release.clone();
+                move |_context, _request| {
+                    let mut release = release.subscribe();
+                    let executor = resource_executor.clone();
+                    async move {
+                        let chunk = executor
+                            .charge_owned(MemoryClass::Bulk, b"resource".to_vec())
+                            .await
+                            .map_err(|error| StreamHandlerError::new(error.to_string()))?;
+                        let chunks = futures_util::stream::once(async move {
+                            if !*release.borrow() {
+                                release
+                                    .changed()
+                                    .await
+                                    .expect("the release sender lives through the test");
+                            }
+                            Ok(chunk)
+                        });
+                        Ok(StreamingResponse::new(8, chunks))
+                    }
+                }
+            })
+            .expect("resource stream handler should register");
+        let snapshot_executor = Executor::default();
+        transport_b
+            .register_stream_handler::<SnapshotStreamRequest, _, _>(move |_context, _request| {
+                let executor = snapshot_executor.clone();
+                async move {
+                    let chunk = executor
+                        .charge_owned(MemoryClass::Bulk, b"snapshot".to_vec())
+                        .await
+                        .map_err(|error| StreamHandlerError::new(error.to_string()))?;
+                    Ok(StreamingResponse::new(
+                        8,
+                        futures_util::stream::iter([Ok(chunk)]),
+                    ))
+                }
+            })
+            .expect("snapshot stream handler should register");
+        timeout(Duration::from_secs(5), async {
+            while !transport_a.is_connected_to(&node_b) {
+                tokio::task::consume_budget().await;
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the target should become ready");
+
+        let mut first = transport_a
+            .request_stream(&node_b, ResourceStreamRequest)
+            .await
+            .expect("first resource stream should open");
+        let mut second = transport_a
+            .request_stream(&node_b, ResourceStreamRequest)
+            .await
+            .expect("second resource stream should open");
+        let mut snapshot = timeout(
+            Duration::from_secs(1),
+            transport_a.request_stream(&node_b, SnapshotStreamRequest),
+        )
+        .await
+        .expect("resource streams must not occupy the snapshot slot")
+        .expect("snapshot stream should open");
+        let snapshot_chunk = snapshot
+            .next_chunk()
+            .await
+            .expect("snapshot chunk should be readable")
+            .expect("snapshot stream should contain one chunk");
+        assert_eq!(snapshot_chunk.as_ref(), b"snapshot");
+        assert!(
+            snapshot
+                .next_chunk()
+                .await
+                .expect("snapshot completion should be readable")
+                .is_none()
+        );
+
+        release.send_replace(true);
+        for resource in [&mut first, &mut second] {
+            let chunk = resource
+                .next_chunk()
+                .await
+                .expect("resource chunk should be readable")
+                .expect("resource stream should contain one chunk");
+            assert_eq!(chunk.as_ref(), b"resource");
+            assert!(
+                resource
+                    .next_chunk()
+                    .await
+                    .expect("resource completion should be readable")
+                    .is_none()
+            );
+        }
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn streamed_response_times_out_when_its_producer_stops_making_progress() {
+        let options = TransportOptions {
+            progress_timeout: Duration::from_millis(50),
+            ..TransportOptions::default()
+        };
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_b,
+            ..
+        } = connected_transports_with_options(options).await;
+        transport_b
+            .register_stream_handler::<ResourceStreamRequest, _, _>(|_context, _request| async {
+                Ok(StreamingResponse::new(
+                    1,
+                    futures_util::stream::pending::<Result<ChargedBytes, StreamHandlerError>>(),
+                ))
+            })
+            .expect("resource stream handler should register");
+        timeout(Duration::from_secs(5), async {
+            while !transport_a.is_connected_to(&node_b) {
+                tokio::task::consume_budget().await;
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the target should become ready");
+
+        let mut response = transport_a
+            .request_stream(&node_b, ResourceStreamRequest)
+            .await
+            .expect("stream response headers should arrive");
+        let error = timeout(Duration::from_secs(1), response.next_chunk())
+            .await
+            .expect("the stalled response should honor its progress timeout")
+            .expect_err("a stalled response must fail");
+        assert!(matches!(
+            error.current_context(),
+            RequestError::Stream { .. }
+        ));
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn queued_replication_request_wakes_when_the_stream_slot_is_released() {
         let ConnectedTransports {
             transport_a,
@@ -1897,120 +2071,8 @@ mod tests {
         transport_b.shutdown().await;
     }
 
-    #[tokio::test]
-    async fn progress_work_cannot_consume_liveness_streams() {
-        let ConnectedTransports {
-            transport_a,
-            transport_b,
-            node_b,
-            ..
-        } = connected_transports().await;
-        let observation_deadline = Instant::now()
-            .checked_add(LIVENESS_QUOTA_EVENT_FAILSAFE)
-            .assured("the fixed liveness quota test failsafe fits in Tokio's instant range");
-        let (progress_started, mut progress_started_rx) = watch::channel(0_usize);
-        let (release, release_rx) = watch::channel(false);
-        transport_b
-            .register_handler::<BlockingProgressRequest, _, _>({
-                let release_rx = release_rx.clone();
-                let progress_started = progress_started.clone();
-                move |_context, _request| {
-                    let mut release_rx = release_rx.clone();
-                    let progress_started = progress_started.clone();
-                    async move {
-                        progress_started.send_modify(|started| {
-                            *started = started.checked_add(1).assured(
-                                "the test starts only one bounded set of progress requests",
-                            );
-                        });
-                        release_rx.wait_for(|released| *released).await.assured(
-                            "the test retains its release sender until every request joins",
-                        );
-                        BlockingProgressResponse
-                    }
-                }
-            })
-            .assured("the fresh test transport has no progress handler with this name");
-        let (liveness_entered, mut liveness_entered_rx) = watch::channel(false);
-        transport_b
-            .register_handler::<LivenessRequest, _, _>({
-                move |_context, _request| {
-                    let liveness_entered = liveness_entered.clone();
-                    async move {
-                        liveness_entered.send_replace(true);
-                        LivenessResponse
-                    }
-                }
-            })
-            .assured("the fresh test transport has no liveness handler with this name");
-
-        let mut blocked = Vec::new();
-        for _ in 0..connection::MANAGEMENT_PROGRESS_STREAMS {
-            let requester = transport_a.clone();
-            let target = node_b.clone();
-            blocked.push(tokio::spawn(async move {
-                requester.request(&target, BlockingProgressRequest).await
-            }));
-        }
-        timeout_at(
-            observation_deadline,
-            progress_started_rx
-                .wait_for(|started| *started == connection::MANAGEMENT_PROGRESS_STREAMS),
-        )
-        .await
-        .assured("every reserved progress stream enters its handler within the test failsafe")
-        .assured("the registered progress handler retains its watch sender");
-
-        let requester = transport_a.clone();
-        let target = node_b.clone();
-        let liveness =
-            tokio::spawn(async move { requester.request(&target, LivenessRequest).await });
-        timeout_at(
-            observation_deadline,
-            liveness_entered_rx.wait_for(|entered| *entered),
-        )
-        .await
-        .assured(
-            "the liveness handler enters while every progress handler remains blocked within the \
-             test failsafe",
-        )
-        .assured("the registered liveness handler retains its watch sender");
-
-        release.send_replace(true);
-        let liveness = liveness
-            .await
-            .assured("the liveness request task contains no panic path");
-        for request in blocked {
-            let response = request
-                .await
-                .assured("the progress request task contains no panic path");
-            assert!(
-                response.is_ok(),
-                "blocking progress request should finish after release: {response:?}"
-            );
-        }
-        transport_a.shutdown().await;
-        transport_b.shutdown().await;
-
-        assert!(
-            liveness.is_ok(),
-            "liveness must retain a physical management stream: {liveness:?}"
-        );
-        assert_eq!(
-            liveness.verified("the liveness response was checked by the assertion above"),
-            LivenessResponse
-        );
-    }
-
-    #[test]
-    fn subscription_interest_visibility_uses_shared_request_capacity() {
-        assert_eq!(
-            <SubscriptionInterestVisibilityRequest as InterconnectRequest>::SUBQUOTA,
-            RequestSubquota::Shared,
-            "a request that can remain open for gossip convergence must not reserve liveness \
-             capacity",
-        );
-    }
+    #[path = "progress.rs"]
+    mod progress;
 
     #[tokio::test]
     async fn discovery_subquota_cannot_crowd_out_management_requests() {

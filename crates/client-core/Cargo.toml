@@ -16,6 +16,7 @@ default = []
 arch-into = { workspace = true }
 async-tar = { workspace = true, features = ["runtime-tokio"] }
 base64 = { workspace = true }
+error-stack = { workspace = true }
 meticulous = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true, features = ["client"] }
@@ -24,6 +25,7 @@ nervix-recovery = { workspace = true }
 prost = { workspace = true }
 rustls = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
   "fs",
@@ -36,3 +38,4 @@ tokio-stream = { workspace = true }
 tonic = { workspace = true }
 triomphe = { workspace = true }
 url = { workspace = true }
+uuid = { workspace = true, features = ["v7"] }

@@ -37,7 +37,7 @@ COMMIT;
 UPLOAD RESOURCE order_proto VERSION './proto';
 ```
 
-The client reports `uploaded resource version 1`. Uploads are immutable and versioned; see
+The client reports `published resource version 1`. Uploads are immutable and versioned; see
 [Versioning](resources.md#versioning).
 
 ## The Codec And Its Endpoint

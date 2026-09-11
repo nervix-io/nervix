@@ -144,10 +144,11 @@ transaction. Read-only statements, subscriptions, `CREATE DOMAIN`, `CREATE USER`
 administration are also rejected while queueing transaction content. `BEGIN` requires an existing
 active domain and binds the transaction to it; attaching a transaction switches the active domain
 to the transaction's domain. An upload targets the active domain, renders live progress, and
-finishes once the cluster has replicated the version:
+finishes once the leader has published the version; cluster replication continues asynchronously:
 
 ```text
-upload resource 'order_model' finished: 4.2 MiB sent, replication complete
+upload resource 'order_model' finished: 4.2 MiB sent, publication committed
+published resource version 1
 ```
 
 See [Resources](resources.md#lifecycle) for what a resource version contains.

@@ -24,7 +24,7 @@ use std::{
 use bytes::Bytes;
 use dashmap::{DashMap, mapref::entry::Entry};
 use error_stack::Report;
-use futures_util::{StreamExt as _, stream::FuturesUnordered};
+use futures_util::stream::FuturesUnordered;
 use h2::{Reason, RecvStream, SendStream, client, server};
 use http::{Method, Request, Response, StatusCode, Version};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -58,9 +58,14 @@ use crate::{
 };
 
 mod relay;
+mod stream;
+
+pub use stream::IncomingByteStream;
+pub(crate) use stream::OutboundByteStreamRequest;
 
 const CONNECT_PATH: &str = "/v1/connect";
 const CONTROL_PATH: &str = "/v1/control";
+const STREAM_PATH: &str = "/v1/stream";
 const ACK_PATH: &str = "/v1/ack";
 const RELAY_GRANT_PATH: &str = "/v1/relay-grants";
 const RELAY_CANCEL_PATH: &str = "/v1/relay-admissions/cancel";
@@ -141,8 +146,8 @@ struct ClientConnection {
 }
 
 /// Tokio's owned permits retain a `std::sync::Arc` to their one semaphore after the connection
-/// quota bundle is no longer borrowed. The surrounding `triomphe::Arc` keeps cloning the complete
-/// management bundle to one reference-count operation.
+/// quota bundle is no longer borrowed. The surrounding `triomphe::Arc` keeps cloning a complete
+/// quota bundle to one reference-count operation.
 struct ManagementStreamSlotQuotas {
     shared: StdArc<Semaphore>,
     discovery: StdArc<Semaphore>,
@@ -153,9 +158,16 @@ struct ManagementStreamSlotQuotas {
     terminal: StdArc<Semaphore>,
 }
 
+struct BulkStreamSlotQuotas {
+    shared: StdArc<Semaphore>,
+    resource: StdArc<Semaphore>,
+    snapshot: StdArc<Semaphore>,
+}
+
 #[derive(Clone)]
 enum StreamSlotQuotas {
     Management(Arc<ManagementStreamSlotQuotas>),
+    Bulk(Arc<BulkStreamSlotQuotas>),
     Shared {
         class: PoolClass,
         slots: StdArc<Semaphore>,
@@ -194,6 +206,19 @@ const _: () = assert!(
         && MANAGEMENT_TERMINAL_STREAMS > 0,
     "every reserved management stream class must have capacity",
 );
+const BULK_TOTAL_STREAMS: usize = PoolClass::Bulk.stream_slots_per_connection();
+const BULK_RESOURCE_STREAMS: usize = 2;
+const BULK_SNAPSHOT_STREAMS: usize = 1;
+const BULK_RESERVED_STREAMS: usize = BULK_RESOURCE_STREAMS + BULK_SNAPSHOT_STREAMS;
+const _: () = assert!(
+    BULK_RESERVED_STREAMS < BULK_TOTAL_STREAMS,
+    "reserved bulk stream quotas must leave shared capacity",
+);
+const BULK_SHARED_STREAMS: usize = BULK_TOTAL_STREAMS - BULK_RESERVED_STREAMS;
+const _: () = assert!(
+    BULK_SHARED_STREAMS + BULK_RESERVED_STREAMS == BULK_TOTAL_STREAMS,
+    "bulk stream subquotas must exactly partition the HTTP/2 stream capacity",
+);
 
 impl StreamSlotQuotas {
     fn new(class: PoolClass) -> Self {
@@ -208,6 +233,13 @@ impl StreamSlotQuotas {
                 terminal: StdArc::new(Semaphore::new(MANAGEMENT_TERMINAL_STREAMS)),
             }));
         }
+        if class == PoolClass::Bulk {
+            return Self::Bulk(Arc::new(BulkStreamSlotQuotas {
+                shared: StdArc::new(Semaphore::new(BULK_SHARED_STREAMS)),
+                resource: StdArc::new(Semaphore::new(BULK_RESOURCE_STREAMS)),
+                snapshot: StdArc::new(Semaphore::new(BULK_SNAPSHOT_STREAMS)),
+            }));
+        }
         Self::Shared {
             class,
             slots: StdArc::new(Semaphore::new(class.stream_slots_per_connection())),
@@ -216,7 +248,8 @@ impl StreamSlotQuotas {
 
     fn for_subquota(&self, subquota: RequestSubquota) -> Option<&StdArc<Semaphore>> {
         match self {
-            Self::Management(quotas) => Some(quotas.for_subquota(subquota)),
+            Self::Management(quotas) => quotas.for_subquota(subquota),
+            Self::Bulk(quotas) => quotas.for_subquota(subquota),
             Self::Shared { slots, .. } => {
                 if let RequestSubquota::Shared = subquota {
                     Some(slots)
@@ -230,6 +263,7 @@ impl StreamSlotQuotas {
     async fn drain(&self) {
         match self {
             Self::Management(quotas) => quotas.drain().await,
+            Self::Bulk(quotas) => quotas.drain().await,
             Self::Shared { class, slots } => {
                 let permits: u32 = class
                     .stream_slots_per_connection()
@@ -246,15 +280,16 @@ impl StreamSlotQuotas {
 }
 
 impl ManagementStreamSlotQuotas {
-    fn for_subquota(&self, subquota: RequestSubquota) -> &StdArc<Semaphore> {
+    fn for_subquota(&self, subquota: RequestSubquota) -> Option<&StdArc<Semaphore>> {
         match subquota {
-            RequestSubquota::Shared => &self.shared,
-            RequestSubquota::Discovery => &self.discovery,
-            RequestSubquota::Liveness => &self.liveness,
-            RequestSubquota::Progress => &self.progress,
-            RequestSubquota::Admission => &self.admission,
-            RequestSubquota::Cancellation => &self.cancellation,
-            RequestSubquota::Terminal => &self.terminal,
+            RequestSubquota::Shared => Some(&self.shared),
+            RequestSubquota::Discovery => Some(&self.discovery),
+            RequestSubquota::Liveness => Some(&self.liveness),
+            RequestSubquota::Progress => Some(&self.progress),
+            RequestSubquota::Admission => Some(&self.admission),
+            RequestSubquota::Cancellation => Some(&self.cancellation),
+            RequestSubquota::Terminal => Some(&self.terminal),
+            RequestSubquota::Resource | RequestSubquota::Snapshot => None,
         }
     }
 
@@ -277,7 +312,49 @@ impl ManagementStreamSlotQuotas {
             let permits: u32 = permits
                 .try_into()
                 .assured("management stream subquotas are much smaller than u32::MAX");
-            let permit = StdArc::clone(self.for_subquota(subquota))
+            let quota = self
+                .for_subquota(subquota)
+                .assured("the management drain list names only management subquotas");
+            let permit = StdArc::clone(quota)
+                .acquire_many_owned(permits)
+                .await
+                .assured("interconnect stream-slot semaphores are never closed");
+            drained.push(permit);
+        }
+    }
+}
+
+impl BulkStreamSlotQuotas {
+    fn for_subquota(&self, subquota: RequestSubquota) -> Option<&StdArc<Semaphore>> {
+        match subquota {
+            RequestSubquota::Shared => Some(&self.shared),
+            RequestSubquota::Resource => Some(&self.resource),
+            RequestSubquota::Snapshot => Some(&self.snapshot),
+            RequestSubquota::Discovery
+            | RequestSubquota::Liveness
+            | RequestSubquota::Progress
+            | RequestSubquota::Admission
+            | RequestSubquota::Cancellation
+            | RequestSubquota::Terminal => None,
+        }
+    }
+
+    async fn drain(&self) {
+        let quotas = [
+            (RequestSubquota::Shared, BULK_SHARED_STREAMS),
+            (RequestSubquota::Resource, BULK_RESOURCE_STREAMS),
+            (RequestSubquota::Snapshot, BULK_SNAPSHOT_STREAMS),
+        ];
+        let mut drained = Vec::with_capacity(quotas.len());
+        for (subquota, permits) in quotas {
+            tokio::task::consume_budget().await;
+            let permits: u32 = permits
+                .try_into()
+                .assured("bulk stream subquotas are much smaller than u32::MAX");
+            let quota = self
+                .for_subquota(subquota)
+                .assured("the bulk drain list names only bulk subquotas");
+            let permit = StdArc::clone(quota)
                 .acquire_many_owned(permits)
                 .await
                 .assured("interconnect stream-slot semaphores are never closed");
@@ -1342,9 +1419,10 @@ impl TransportState {
                     else {
                         continue;
                     };
-                    let stream_slots = connection.stream_slots.for_subquota(subquota).assured(
-                        "reserved stream subquotas are only assigned to management requests",
-                    );
+                    let stream_slots = connection
+                        .stream_slots
+                        .for_subquota(subquota)
+                        .assured("reserved stream subquotas are assigned to their configured pool");
                     let permit = match StdArc::clone(stream_slots).try_acquire_owned() {
                         Ok(permit) => permit,
                         Err(_) => continue,
@@ -1940,6 +2018,17 @@ impl TransportState {
             return Ok(());
         }
         let path = request.uri().path().to_string();
+        if path == STREAM_PATH {
+            self.handle_stream_request(
+                peer.node_id,
+                peer.advertised_host,
+                peer.class,
+                request.into_body(),
+                respond,
+            )
+            .await?;
+            return Ok(());
+        }
         if path == CONTROL_PATH {
             self.handle_control(
                 peer.addr,
@@ -2323,6 +2412,91 @@ impl TransportState {
 }
 
 impl ClientConnection {
+    async fn request_stream_raw(
+        &self,
+        state: &TransportState,
+        request: RawRequest<'_>,
+    ) -> Result<(RecvStream, u64), Report<TransportError>> {
+        if self.closed.is_cancelled() {
+            return Err(Report::new(TransportError::Closed(self.key.target.addr)));
+        }
+        let RawRequest {
+            path,
+            body,
+            response_class,
+            response_limit,
+            timeout: timeout_duration,
+            headers,
+        } = request;
+        let operation = async {
+            let sender = self.sender.clone().ready().await?;
+            let mut request_url = url::Url::parse("https://localhost/")
+                .assured("the fixed HTTPS request base is a valid URL");
+            request_url
+                .set_host(Some(&self.key.target.server_name))
+                .map_err(|_| {
+                    TransportError::InvalidServerName(self.key.target.server_name.clone())
+                })?;
+            request_url.set_path(path);
+            let mut builder = Request::builder()
+                .method(Method::POST)
+                .version(Version::HTTP_2)
+                .uri(request_url.as_str());
+            for (name, value) in headers {
+                builder = builder.header(*name, *value);
+            }
+            let request = builder
+                .body(())
+                .map_err(|error| TransportError::Http(error.to_string()))?;
+            let end_stream = body.as_ref().is_none_or(ChargedBytes::is_empty);
+            let (response, mut send_stream) = {
+                let mut sender = sender;
+                sender.send_request(request, end_stream)?
+            };
+            if let Some(body) = body
+                && !body.is_empty()
+            {
+                send_body(&mut send_stream, body).await?;
+            }
+            let response = response.await?;
+            let status = response.status();
+            if !status.is_success() {
+                let message = read_body(
+                    &state.executor,
+                    response_class.memory_class(),
+                    response_limit,
+                    state.options.progress_timeout,
+                    response.into_body(),
+                )
+                .await?;
+                return Err(TransportError::RemoteRejected {
+                    status: status.as_u16(),
+                    message: String::from_utf8_lossy(message.as_ref()).into_owned(),
+                });
+            }
+            let content_length = response
+                .headers()
+                .get(http::header::CONTENT_LENGTH)
+                .ok_or_else(|| {
+                    TransportError::Decode(
+                        "streamed response omitted its content length".to_string(),
+                    )
+                })?
+                .to_str()
+                .map_err(|error| TransportError::Decode(error.to_string()))?
+                .parse::<u64>()
+                .map_err(|error| TransportError::Decode(error.to_string()))?;
+            Ok((response.into_body(), content_length))
+        };
+        match timeout(timeout_duration, operation).await {
+            Ok(result) => result.map_err(Report::new),
+            Err(_) => Err(Report::new(TransportError::RequestTimeout {
+                peer: self.key.node_id.clone(),
+                timeout: timeout_duration,
+            })),
+        }
+    }
+
     async fn request_raw(
         &self,
         state: &TransportState,
@@ -2518,7 +2692,7 @@ async fn send_response(
 async fn send_static_error(
     respond: &mut server::SendResponse<Bytes>,
     status: StatusCode,
-    message: &'static str,
+    message: &str,
     progress_timeout: Duration,
 ) -> Result<(), TransportError> {
     let response = Response::builder()
@@ -2528,7 +2702,7 @@ async fn send_static_error(
         .map_err(|error| TransportError::Http(error.to_string()))?;
     let mut stream = respond.send_response(response, false)?;
     timeout(progress_timeout, async {
-        let body = Bytes::from_static(message.as_bytes());
+        let body = Bytes::copy_from_slice(message.as_bytes());
         let mut offset = 0;
         while offset < body.len() {
             tokio::task::consume_budget().await;
