@@ -73,7 +73,9 @@ larger cluster state becomes more sections instead of a snapshot that no longer 
 are written and synchronized first; the manifest naming the generation, its applied position, and
 its membership is published afterwards in one atomic write. A node interrupted between the two
 finishes the replacement on its next start, and a start also deletes every stored generation the
-published manifest does not name.
+published manifest does not name. A node keeps the newest snapshot and at most one older one, held
+only while a transfer is still reading it; a transfer that would hold a second older snapshot is
+cancelled and restarts from the newest.
 
 The node then keeps at most 1,000 snapshot-covered entries
 (`--raft-covered-log-entries-retained`) or 64 MiB of covered suffix
