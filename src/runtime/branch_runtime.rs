@@ -16,6 +16,7 @@ pub(super) struct BranchRuntime {
     pub(super) key: Option<BranchKey>,
     pub(super) runtime: Runtime,
     pub(super) domain: DomainName,
+    pub(super) domain_clock: DomainClock,
     pub(super) source_kind: ModelKind,
     pub(super) source: RelayName,
     pub(super) root_relay: RelayName,
@@ -110,7 +111,7 @@ pub(super) struct IngestorRouteRuntime {
 pub(super) struct PendingIngestorRouteBatch {
     pub(super) batches: Vec<RelayRecordBatch>,
     pub(super) estimated_bytes: u64,
-    pub(super) flush_at: Instant,
+    pub(super) flush_timer: BranchBufferTimer,
 }
 
 pub(super) struct IngestorRouteTask {
@@ -181,33 +182,6 @@ impl BranchDispatchLanes {
             for ack in dispatch.batch.acks.iter() {
                 ack.no_ack(reason.to_string());
             }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RuntimeFlushPolicy {
-    Each {
-        interval: Duration,
-        max_batch_size: u64,
-    },
-    Immediate,
-}
-
-impl RuntimeFlushPolicy {
-    pub(super) const IMMEDIATE_MINIMUM_TIMEOUT: Duration = Duration::from_micros(100);
-
-    pub(super) fn interval(self) -> Duration {
-        match self {
-            Self::Each { interval, .. } => interval,
-            Self::Immediate => Self::IMMEDIATE_MINIMUM_TIMEOUT,
-        }
-    }
-
-    pub(super) fn size_boundary_reached(self, pending_bytes: u64) -> bool {
-        match self {
-            Self::Each { max_batch_size, .. } => pending_bytes >= max_batch_size,
-            Self::Immediate => false,
         }
     }
 }
@@ -691,11 +665,7 @@ impl BranchRuntime {
                 &self.domain,
                 current.as_ref().map(StdArc::clone),
             );
-            for output in &mut processor.operation.output_routes_mut().routes {
-                if !output.pending.is_empty() {
-                    output.force_flush_at(now);
-                }
-            }
+            processor.flush_route_buffers(graph, self, now).await;
             processor.tick(graph, self, now).await;
             self.processors.insert(processor_id, processor);
         }
@@ -706,6 +676,25 @@ impl BranchRuntime {
             .values()
             .filter_map(RelayProcessorNode::next_deadline)
             .min()
+    }
+
+    pub(super) fn buffer_deadlines(&self) -> Vec<BranchBufferDeadline> {
+        self.processors
+            .values()
+            .flat_map(RelayProcessorNode::buffer_deadlines)
+            .collect()
+    }
+
+    pub(super) fn buffer_deadline_due(
+        &self,
+        snapshot: &DomainExecutionSnapshot,
+    ) -> BranchBufferTimingResult<bool> {
+        for processor in self.processors.values() {
+            if processor.buffer_deadline_due(&self.domain_clock, snapshot)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -882,19 +871,58 @@ impl IngestorRouteTask {
         }
     }
 
-    pub(super) async fn accept(&mut self, input: BranchedEntrypointInput) {
+    pub(super) async fn accept(
+        &mut self,
+        input: BranchedEntrypointInput,
+        domain_clock: &DomainClock,
+    ) {
         for batch in self.prepare_input(input).await {
             tokio::task::consume_budget().await;
             let key = batch.key.clone();
             let estimated_bytes = batch.estimated_bytes();
-            let pending =
-                self.pending
-                    .entry(key.clone())
-                    .or_insert_with(|| PendingIngestorRouteBatch {
+            if !self.pending.contains_key(&key) {
+                let snapshot = match domain_clock.snapshot() {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        self.handle_general_error(
+                            &batch.acks,
+                            format!(
+                                "{} '{}' could not read the domain clock while starting an output \
+                                 flush: {error}",
+                                self.template.branch.source_kind.as_str(),
+                                self.ingestor.as_str(),
+                            ),
+                        );
+                        continue;
+                    }
+                };
+                let mut flush_timer = BranchBufferTimer::default();
+                if let Err(error) =
+                    flush_timer.arm_flush(self.template.flush_policy, domain_clock, &snapshot)
+                {
+                    self.handle_general_error(
+                        &batch.acks,
+                        format!(
+                            "{} '{}' could not start an output flush deadline: {error}",
+                            self.template.branch.source_kind.as_str(),
+                            self.ingestor.as_str(),
+                        ),
+                    );
+                    continue;
+                }
+                self.pending.insert(
+                    key.clone(),
+                    PendingIngestorRouteBatch {
                         batches: Vec::new(),
                         estimated_bytes: 0,
-                        flush_at: Instant::now() + self.template.flush_policy.interval(),
-                    });
+                        flush_timer,
+                    },
+                );
+            }
+            let pending = self
+                .pending
+                .get_mut(&key)
+                .verified("the branch buffer is inserted above when it is absent");
             pending.estimated_bytes = pending
                 .estimated_bytes
                 .checked_add(estimated_bytes)
@@ -910,16 +938,24 @@ impl IngestorRouteTask {
         }
     }
 
-    pub(super) async fn flush_due(&mut self, now: Instant) {
-        let keys = self
-            .pending
-            .iter()
-            .filter_map(|(key, pending)| (pending.flush_at <= now).then_some(key.clone()))
-            .collect::<Vec<_>>();
+    pub(super) async fn flush_due(
+        &mut self,
+        domain_clock: &DomainClock,
+    ) -> BranchBufferTimingResult<()> {
+        let snapshot = domain_clock
+            .snapshot()
+            .map_err(|error| error.change_context(BranchBufferTimingError::LogicalDeadline))?;
+        let mut keys = Vec::new();
+        for (key, pending) in &self.pending {
+            if pending.flush_timer.is_due(domain_clock, &snapshot)? {
+                keys.push(key.clone());
+            }
+        }
         for key in keys {
             tokio::task::consume_budget().await;
             self.flush_key(&key).await;
         }
+        Ok(())
     }
 
     pub(super) async fn flush_all(&mut self) {
@@ -930,8 +966,19 @@ impl IngestorRouteTask {
         }
     }
 
-    pub(super) fn next_flush(&self) -> Option<Instant> {
-        self.pending.values().map(|pending| pending.flush_at).min()
+    pub(super) fn flush_deadlines(&self) -> Vec<BranchBufferDeadline> {
+        self.pending
+            .values()
+            .filter_map(|pending| pending.flush_timer.deadline())
+            .collect()
+    }
+
+    fn pending_acks(&self) -> Vec<AckSet> {
+        self.pending
+            .values()
+            .flat_map(|pending| &pending.batches)
+            .flat_map(|batch| batch.acks.iter().cloned())
+            .collect()
     }
 
     pub(super) async fn run(
@@ -939,11 +986,22 @@ impl IngestorRouteTask {
         mut input: mpsc::Receiver<BranchedEntrypointInput>,
         mut shutdown_rx: watch::Receiver<bool>,
     ) {
+        let domain_clock = match self.runtime_handle.bind_domain_clock(&self.domain) {
+            Ok(clock) => clock,
+            Err(error) => {
+                self.runtime_handle.events().report_error(format!(
+                    "{} '{}' in domain '{}' could not bind its route flush clock: {error}",
+                    self.template.branch.source_kind.as_str(),
+                    self.ingestor.as_str(),
+                    self.domain.as_str(),
+                ));
+                return;
+            }
+        };
         loop {
             tokio::task::consume_budget().await;
-            let next_flush = self.next_flush();
-            let flush_at =
-                next_flush.unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
+            let flush_deadlines = self.flush_deadlines();
+            let has_flush_deadlines = !flush_deadlines.is_empty();
             tokio::select! {
                 biased;
                 // A signalled stop and a dropped sender both mean the owner is gone, and this
@@ -952,20 +1010,47 @@ impl IngestorRouteTask {
                     input.close();
                     while let Some(message) = input.recv().await {
                         tokio::task::consume_budget().await;
-                        self.accept(message).await;
+                        self.accept(message, &domain_clock).await;
                     }
                     self.flush_all().await;
                     break;
                 }
-                _ = sleep_until(flush_at), if next_flush.is_some() => {
-                    self.flush_due(Instant::now()).await;
+                result = wait_for_branch_buffer_deadlines(&domain_clock, flush_deadlines),
+                    if has_flush_deadlines =>
+                {
+                    if let Err(error) = result {
+                        let acks = self.pending_acks();
+                        self.handle_general_error(
+                            &acks,
+                            format!(
+                                "{} '{}' could not wait for an output flush deadline: {error}",
+                                self.template.branch.source_kind.as_str(),
+                                self.ingestor.as_str(),
+                            ),
+                        );
+                        self.flush_all().await;
+                        break;
+                    }
+                    if let Err(error) = self.flush_due(&domain_clock).await {
+                        let acks = self.pending_acks();
+                        self.handle_general_error(
+                            &acks,
+                            format!(
+                                "{} '{}' could not inspect an output flush deadline: {error}",
+                                self.template.branch.source_kind.as_str(),
+                                self.ingestor.as_str(),
+                            ),
+                        );
+                        self.flush_all().await;
+                        break;
+                    }
                 }
                 message = input.recv() => {
                     let Some(message) = message else {
                         self.flush_all().await;
                         break;
                     };
-                    self.accept(message).await;
+                    self.accept(message, &domain_clock).await;
                 }
             }
         }
@@ -1960,11 +2045,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use nervix_interconnect::EntityGatePurpose;
-    use nervix_models::{
-        IngestorName, MessageErrorPolicy, ModelKind, ModelName, NodeRef, ParseAsType, RelayName,
-        Timestamp,
-    };
-    use tokio::time::Duration;
+    use nervix_models::{IngestorName, ModelKind, ModelName, NodeRef, ParseAsType, RelayName};
     use triomphe::Arc;
 
     use super::*;
@@ -1976,6 +2057,7 @@ mod tests {
     fn pending_materialized_batches_remain_visible_in_entity_drain_status() {
         let runtime = Runtime::default();
         let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
         let processor = named::<ModelName>("wait_for_customer");
         let input_relay = named::<RelayName>("orders");
         let template = junction_branch_template(processor.as_str(), input_relay.as_str());
@@ -2125,40 +2207,5 @@ mod tests {
         );
         assert_eq!(handoff.outstanding_acks, 0);
         assert!(handoff.is_drained());
-    }
-
-    #[test]
-    fn flush_immediate_schedules_100_microsecond_system_timeout() {
-        let now = Timestamp::from_unix_nanos(1_000_000);
-        let mut output = RelayProcessorOutputNode {
-            relay: named("notifications"),
-            construction: nervix_models::RouteConstruction::default(),
-            branch: None,
-            flush_policy: Some(RuntimeFlushPolicy::Immediate),
-            message_error_policy: MessageErrorPolicy::Log,
-            pending: Vec::new(),
-            next_flush: None,
-            compiled_program: None,
-            compiled_branch_program: None,
-        };
-
-        assert_eq!(output.schedule_input_flush(now, u64::MAX), Some(false));
-        assert_eq!(
-            output.next_flush,
-            Some(checked_add_duration_to_timestamp(
-                now,
-                Duration::from_micros(100)
-            ))
-        );
-        assert!(
-            !output.flush_deadline_due(checked_add_duration_to_timestamp(
-                now,
-                Duration::from_micros(99)
-            ))
-        );
-        assert!(output.flush_deadline_due(checked_add_duration_to_timestamp(
-            now,
-            Duration::from_micros(100)
-        )));
     }
 }

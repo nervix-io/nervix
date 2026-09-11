@@ -1037,7 +1037,48 @@ pub(super) async fn enqueue_correlator_output(
             return;
         }
     };
-    if !output.enqueue(batch, execution_now) {
+    let domain_clock = branch.domain_clock.clone();
+    let snapshot = match domain_clock.snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                node_kind,
+                processor,
+                error_policies,
+                batch.acks.iter(),
+                format!(
+                    "correlator '{}' could not read the domain clock while buffering output: \
+                     {error}",
+                    processor.as_str(),
+                ),
+            );
+            return;
+        }
+    };
+    let should_flush = match output.enqueue(batch, &domain_clock, &snapshot) {
+        Ok(should_flush) => should_flush,
+        Err(error) => {
+            let pending = output.take_pending();
+            let acks = pending
+                .iter()
+                .flat_map(|batch| batch.acks.iter().cloned())
+                .collect::<Vec<_>>();
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                node_kind,
+                processor,
+                error_policies,
+                acks.iter(),
+                format!(
+                    "correlator '{}' could not start an output flush deadline: {error}",
+                    processor.as_str(),
+                ),
+            );
+            return;
+        }
+    };
+    if !should_flush {
         return;
     }
     let pending = output.take_pending();
@@ -1131,7 +1172,7 @@ pub(super) async fn handle_correlator_timeout_action(
                 flush_policy: None,
                 message_error_policy: error_policies.message.clone(),
                 pending: Vec::new(),
-                next_flush: None,
+                flush_timer: BranchBufferTimer::default(),
                 compiled_program: None,
                 compiled_branch_program: None,
             };

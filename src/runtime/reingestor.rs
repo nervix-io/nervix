@@ -1,3 +1,5 @@
+use indexmap::IndexMap;
+
 use super::*;
 
 /// One reingestor input this node runs: the reingestor model, the relay that input reads from,
@@ -17,44 +19,192 @@ pub(super) struct ReingestorDispatchContext<'a> {
     pub(super) mode: AckMode,
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) branched_senders: &'a HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
+    pub(super) domain_clock: &'a DomainClock,
     pub(super) execution_now: Timestamp,
+}
+
+impl<'a> ReingestorDispatchContext<'a> {
+    fn output_flush(self) -> ReingestorOutputFlushContext<'a> {
+        ReingestorOutputFlushContext {
+            domain: self.domain,
+            reingestor: self.reingestor,
+            mode: self.mode,
+            error_policies: self.error_policies,
+            branched_senders: self.branched_senders,
+            domain_clock: self.domain_clock,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ReingestorOutputFlushContext<'a> {
+    domain: &'a DomainName,
+    reingestor: &'a ReingestorName,
+    mode: AckMode,
+    error_policies: &'a ErrorPolicies,
+    branched_senders: &'a HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
+    domain_clock: &'a DomainClock,
 }
 
 #[derive(Clone, Copy)]
 pub(super) enum ReingestorOutputFlush {
-    Due(Timestamp),
+    Due,
     All,
 }
 
-pub(super) struct ReingestorOutputQuiesceGauge {
-    pub(super) counters: Arc<NodeQuiesceCounters>,
-    pub(super) output_buffers: usize,
+#[derive(Default)]
+struct ReingestorBranchOutputBuffer {
+    pending: Vec<RelayRecordBatch>,
+    estimated_bytes: u64,
+    flush_timer: BranchBufferTimer,
+}
+
+impl ReingestorBranchOutputBuffer {
+    fn enqueue(
+        &mut self,
+        batch: RelayRecordBatch,
+        policy: RuntimeFlushPolicy,
+        clock: &DomainClock,
+        snapshot: &DomainExecutionSnapshot,
+    ) -> BranchBufferTimingResult<bool> {
+        self.flush_timer.arm_flush(policy, clock, snapshot)?;
+        let deadline_reached = self.flush_timer.is_due(clock, snapshot)?;
+        let estimated_bytes = self
+            .estimated_bytes
+            .checked_add(batch.estimated_bytes())
+            .assured("both counts estimate batches this reingestor already holds in memory");
+        self.pending.push(batch);
+        self.estimated_bytes = estimated_bytes;
+        Ok(deadline_reached || policy.size_boundary_reached(self.estimated_bytes))
+    }
+}
+
+#[derive(Clone)]
+struct ReingestorOutputBufferKey {
+    output_index: usize,
+    branch: Option<BranchKey>,
+}
+
+struct ReingestorOutputBuffers {
+    routes: Vec<IndexMap<Option<BranchKey>, ReingestorBranchOutputBuffer>>,
+    quiesce: ReingestorOutputQuiesceGauge,
+}
+
+impl ReingestorOutputBuffers {
+    fn new(route_count: usize, quiesce_counters: Arc<NodeQuiesceCounters>) -> Self {
+        Self {
+            routes: std::iter::repeat_with(IndexMap::new)
+                .take(route_count)
+                .collect(),
+            quiesce: ReingestorOutputQuiesceGauge::new(quiesce_counters),
+        }
+    }
+
+    fn enqueue(
+        &mut self,
+        output_index: usize,
+        batch: RelayRecordBatch,
+        policy: RuntimeFlushPolicy,
+        clock: &DomainClock,
+        snapshot: &DomainExecutionSnapshot,
+    ) -> BranchBufferTimingResult<(ReingestorOutputBufferKey, bool)> {
+        let branch = batch.key.clone();
+        let route = self
+            .routes
+            .get_mut(output_index)
+            .verified("the output index came from this reingestor's route list");
+        let should_flush = if let Some(buffer) = route.get_mut(&branch) {
+            buffer.enqueue(batch, policy, clock, snapshot)?
+        } else {
+            let mut buffer = ReingestorBranchOutputBuffer::default();
+            let should_flush = buffer.enqueue(batch, policy, clock, snapshot)?;
+            route.insert(branch.clone(), buffer);
+            should_flush
+        };
+        self.quiesce.add_batch();
+        Ok((
+            ReingestorOutputBufferKey {
+                output_index,
+                branch,
+            },
+            should_flush,
+        ))
+    }
+
+    fn keys(&self) -> Vec<ReingestorOutputBufferKey> {
+        self.routes
+            .iter()
+            .enumerate()
+            .flat_map(|(output_index, branches)| {
+                branches
+                    .keys()
+                    .cloned()
+                    .map(move |branch| ReingestorOutputBufferKey {
+                        output_index,
+                        branch,
+                    })
+            })
+            .collect()
+    }
+
+    fn get(&self, key: &ReingestorOutputBufferKey) -> &ReingestorBranchOutputBuffer {
+        self.routes
+            .get(key.output_index)
+            .verified("the buffer key came from this reingestor's route list")
+            .get(&key.branch)
+            .verified("buffer keys are collected from the same route map immediately before use")
+    }
+
+    fn take(&mut self, key: &ReingestorOutputBufferKey) -> Vec<RelayRecordBatch> {
+        let pending = self
+            .routes
+            .get_mut(key.output_index)
+            .verified("the buffer key came from this reingestor's route list")
+            .shift_remove(&key.branch)
+            .verified("buffer keys are collected from the same route map immediately before use")
+            .pending;
+        self.quiesce.remove_batches(pending.len());
+        pending
+    }
+
+    fn deadlines(&self) -> Vec<BranchBufferDeadline> {
+        self.routes
+            .iter()
+            .flat_map(IndexMap::values)
+            .filter_map(|buffer| buffer.flush_timer.deadline())
+            .collect()
+    }
+}
+
+struct ReingestorOutputQuiesceGauge {
+    counters: Arc<NodeQuiesceCounters>,
+    output_buffers: usize,
 }
 
 impl ReingestorOutputQuiesceGauge {
-    pub(super) fn new(counters: Arc<NodeQuiesceCounters>) -> Self {
+    fn new(counters: Arc<NodeQuiesceCounters>) -> Self {
         Self {
             counters,
             output_buffers: 0,
         }
     }
 
-    pub(super) fn observe(&mut self, outputs: &RelayProcessorOutputsNode) {
-        let output_buffers = outputs
-            .routes
-            .iter()
-            .map(|output| output.pending.len())
-            .fold(0usize, usize::saturating_add);
-        if output_buffers > self.output_buffers {
-            self.counters
-                .output_buffers
-                .fetch_add(output_buffers - self.output_buffers, Ordering::AcqRel);
-        } else if output_buffers < self.output_buffers {
-            self.counters
-                .output_buffers
-                .fetch_sub(self.output_buffers - output_buffers, Ordering::AcqRel);
-        }
-        self.output_buffers = output_buffers;
+    fn add_batch(&mut self) {
+        self.output_buffers = self
+            .output_buffers
+            .checked_add(1)
+            .assured("the count cannot exceed the batches this reingestor holds in memory");
+        self.counters.output_buffers.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn remove_batches(&mut self, count: usize) {
+        self.output_buffers = self
+            .output_buffers
+            .checked_sub(count)
+            .verified("only batches counted when they entered this buffer can be removed");
+        self.counters
+            .output_buffers
+            .fetch_sub(count, Ordering::AcqRel);
     }
 }
 
@@ -466,12 +616,12 @@ impl Runtime {
     /// `materialized_values` is the snapshot resolved when the batch was admitted; `FROM WHERE`,
     /// the FILTER-MAP program and each route's branch program read it instead of re-reading the
     /// state store, so the whole batch observes one consistent view of its dependencies.
-    pub(super) async fn dispatch_reingestor_outputs(
+    async fn dispatch_reingestor_outputs(
         &self,
         context: ReingestorDispatchContext<'_>,
         compiled_from_where: &mut Option<CompiledProgramWithMaterializedInterest>,
         output_routes: &mut RelayProcessorOutputsNode,
-        output_quiesce_gauge: &mut ReingestorOutputQuiesceGauge,
+        output_buffers: &mut ReingestorOutputBuffers,
         batch: RelayRecordBatch,
         materialized_values: &HashMap<String, RuntimeValue>,
     ) {
@@ -648,7 +798,29 @@ impl Runtime {
             .await;
         }
 
-        let execution_now = scope.execution_now;
+        let domain_clock = context.domain_clock;
+        let flush_snapshot = match domain_clock.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                for batches in batches_by_output {
+                    for batch in batches {
+                        self.handle_internal_processor_error_for_acks(
+                            domain,
+                            ModelKind::Reingestor,
+                            reingestor,
+                            error_policies,
+                            batch.acks.iter(),
+                            format!(
+                                "reingestor '{}' could not read the domain clock while buffering \
+                                 output: {error}",
+                                reingestor.as_str(),
+                            ),
+                        );
+                    }
+                }
+                return;
+            }
+        };
         for (output_index, mut batches) in batches_by_output.into_iter().enumerate() {
             tokio::task::consume_budget().await;
             let relay = &output_relays[output_index];
@@ -671,27 +843,52 @@ impl Runtime {
             if batches.is_empty() {
                 continue;
             }
-            let output = &mut output_routes.routes[output_index];
-            let mut should_flush = false;
+            let policy = output_routes.routes[output_index]
+                .flush_policy
+                .verified("the registry requires every reingestor output to declare FLUSH");
             for batch in batches.drain(..) {
-                should_flush |= output.enqueue(batch, execution_now);
+                let batch_acks = batch.acks.clone();
+                match output_buffers.enqueue(
+                    output_index,
+                    batch,
+                    policy,
+                    domain_clock,
+                    &flush_snapshot,
+                ) {
+                    Ok((key, should_flush)) => {
+                        if should_flush {
+                            let pending = output_buffers.take(&key);
+                            self.flush_reingestor_output(context.output_flush(), relay, pending)
+                                .await;
+                        }
+                    }
+                    Err(error) => {
+                        self.handle_internal_processor_error_for_acks(
+                            domain,
+                            ModelKind::Reingestor,
+                            reingestor,
+                            error_policies,
+                            batch_acks.iter(),
+                            format!(
+                                "reingestor '{}' could not start output '{}' flush deadline: \
+                                 {error}",
+                                reingestor.as_str(),
+                                relay.as_str(),
+                            ),
+                        );
+                    }
+                }
             }
-            output_quiesce_gauge.observe(output_routes);
-            if !should_flush {
-                continue;
-            }
-            self.flush_reingestor_output(context, &mut output_routes.routes[output_index])
-                .await;
-            output_quiesce_gauge.observe(output_routes);
         }
     }
 
-    pub(super) async fn flush_reingestor_output(
+    async fn flush_reingestor_output(
         &self,
-        context: ReingestorDispatchContext<'_>,
-        output: &mut RelayProcessorOutputNode,
+        context: ReingestorOutputFlushContext<'_>,
+        output_relay: &RelayName,
+        pending: Vec<RelayRecordBatch>,
     ) {
-        let ReingestorDispatchContext {
+        let ReingestorOutputFlushContext {
             domain,
             reingestor,
             mode,
@@ -699,7 +896,6 @@ impl Runtime {
             branched_senders,
             ..
         } = context;
-        let pending = output.take_pending();
         if pending.is_empty() {
             return;
         }
@@ -720,14 +916,14 @@ impl Runtime {
                         "reingestor '{}' failed to concat buffered output batches for relay '{}': \
                          {}",
                         reingestor.as_str(),
-                        output.relay.as_str(),
+                        output_relay.as_str(),
                         error
                     ),
                 );
                 return;
             }
         };
-        let Some(branched_sender) = branched_senders.get(&output.relay) else {
+        let Some(branched_sender) = branched_senders.get(output_relay) else {
             self.handle_internal_processor_error_for_acks(
                 domain,
                 ModelKind::Reingestor,
@@ -736,7 +932,7 @@ impl Runtime {
                 forwarded.acks.iter(),
                 format!(
                     "missing reingestor branched entrypoint for relay '{}'",
-                    output.relay.as_str()
+                    output_relay.as_str()
                 ),
             );
             return;
@@ -759,35 +955,100 @@ impl Runtime {
                     "reingestor '{}' failed to forward buffered batch to branch entrypoint for \
                      relay '{}'",
                     reingestor.as_str(),
-                    output.relay.as_str()
+                    output_relay.as_str()
                 ),
             );
         }
     }
 
-    pub(super) async fn flush_reingestor_outputs(
+    async fn flush_reingestor_outputs(
         &self,
-        context: ReingestorDispatchContext<'_>,
-        output_routes: &mut RelayProcessorOutputsNode,
+        context: ReingestorOutputFlushContext<'_>,
+        output_routes: &RelayProcessorOutputsNode,
+        output_buffers: &mut ReingestorOutputBuffers,
         flush: ReingestorOutputFlush,
-        output_quiesce_gauge: &mut ReingestorOutputQuiesceGauge,
     ) {
-        for output_index in 0..output_routes.routes.len() {
+        let snapshot = match flush {
+            ReingestorOutputFlush::Due => match context.domain_clock.snapshot() {
+                Ok(snapshot) => Some(snapshot),
+                Err(error) => {
+                    let keys = output_buffers.keys();
+                    for key in keys {
+                        tokio::task::consume_budget().await;
+                        let relay = &output_routes
+                            .routes
+                            .get(key.output_index)
+                            .verified("the buffer key came from this reingestor's route list")
+                            .relay;
+                        let pending = output_buffers.take(&key);
+                        let acks = pending
+                            .iter()
+                            .flat_map(|batch| batch.acks.iter().cloned())
+                            .collect::<Vec<_>>();
+                        self.handle_internal_processor_error_for_acks(
+                            context.domain,
+                            ModelKind::Reingestor,
+                            context.reingestor,
+                            context.error_policies,
+                            acks.iter(),
+                            format!(
+                                "reingestor '{}' could not read the domain clock while releasing \
+                                 output '{}': {error}",
+                                context.reingestor.as_str(),
+                                relay.as_str(),
+                            ),
+                        );
+                    }
+                    return;
+                }
+            },
+            ReingestorOutputFlush::All => None,
+        };
+        let keys = output_buffers.keys();
+        for key in keys {
             tokio::task::consume_budget().await;
-            let should_flush = match flush {
-                ReingestorOutputFlush::Due(now) => {
-                    output_routes.routes[output_index].flush_due(now)
+            let relay = &output_routes
+                .routes
+                .get(key.output_index)
+                .verified("the buffer key came from this reingestor's route list")
+                .relay;
+            let should_flush = if let Some(snapshot) = &snapshot {
+                match output_buffers
+                    .get(&key)
+                    .flush_timer
+                    .is_due(context.domain_clock, snapshot)
+                {
+                    Ok(due) => due,
+                    Err(error) => {
+                        let pending = output_buffers.take(&key);
+                        let acks = pending
+                            .iter()
+                            .flat_map(|batch| batch.acks.iter().cloned())
+                            .collect::<Vec<_>>();
+                        self.handle_internal_processor_error_for_acks(
+                            context.domain,
+                            ModelKind::Reingestor,
+                            context.reingestor,
+                            context.error_policies,
+                            acks.iter(),
+                            format!(
+                                "reingestor '{}' could not inspect output '{}' flush deadline: \
+                                 {error}",
+                                context.reingestor.as_str(),
+                                relay.as_str(),
+                            ),
+                        );
+                        continue;
+                    }
                 }
-                ReingestorOutputFlush::All => {
-                    !output_routes.routes[output_index].pending.is_empty()
-                }
+            } else {
+                true
             };
             if !should_flush {
                 continue;
             }
-            self.flush_reingestor_output(context, &mut output_routes.routes[output_index])
-                .await;
-            output_quiesce_gauge.observe(output_routes);
+            let pending = output_buffers.take(&key);
+            self.flush_reingestor_output(context, relay, pending).await;
         }
     }
 
@@ -980,7 +1241,7 @@ impl Runtime {
                         flush_policy,
                         message_error_policy: output.message_error_policy.clone(),
                         pending: Vec::new(),
-                        next_flush: None,
+                        flush_timer: BranchBufferTimer::default(),
                         compiled_program: None,
                         compiled_branch_program: None,
                     })
@@ -1032,10 +1293,21 @@ impl Runtime {
                     return;
                 }
             };
-            let mut output_quiesce_gauge =
-                ReingestorOutputQuiesceGauge::new(quiesce_counters.clone());
+            let mut task_output_buffers = ReingestorOutputBuffers::new(
+                task_output_routes.routes.len(),
+                quiesce_counters.clone(),
+            );
+            let output_flush_context = ReingestorOutputFlushContext {
+                domain: &task_domain,
+                reingestor: &task_reingestor,
+                mode: task_mode,
+                error_policies: &task_error_policies,
+                branched_senders: &task_branched_senders,
+                domain_clock: &domain_clock,
+            };
             let interaction_input =
-                RelayInteractionInput::new(task_from_relay.clone(), receiver, input_collect_policy);
+                RelayInteractionInput::new(task_from_relay.clone(), receiver, input_collect_policy)
+                    .with_domain_clock(domain_clock.clone());
             let mut interaction = RelayInteraction::new(
                 vec![interaction_input],
                 shutdown_rx,
@@ -1049,40 +1321,34 @@ impl Runtime {
             let mut compiled_from_where = None;
             loop {
                 tokio::task::consume_budget().await;
-                let scheduling_now = match domain_clock.snapshot() {
-                    Ok(snapshot) => snapshot.now(),
-                    Err(error) => {
-                        runtime.events().report_error(format!(
-                            "reingestor '{}' in domain '{}' lost its clock: {error}",
-                            task_reingestor.as_str(),
-                            task_domain.as_str(),
-                        ));
-                        break;
+                let output_deadlines = task_output_buffers.deadlines();
+                let has_output_deadlines = !output_deadlines.is_empty();
+                let work = tokio::select! {
+                    result = wait_for_branch_buffer_deadlines(&domain_clock, output_deadlines),
+                        if has_output_deadlines =>
+                    {
+                        if let Err(error) = result {
+                            runtime.events().report_error(format!(
+                                "reingestor '{}' in domain '{}' could not wait for an output \
+                                 flush deadline: {error}",
+                                task_reingestor.as_str(),
+                                task_domain.as_str(),
+                            ));
+                            break;
+                        }
+                        runtime
+                            .flush_reingestor_outputs(
+                                output_flush_context,
+                                &task_output_routes,
+                                &mut task_output_buffers,
+                                ReingestorOutputFlush::Due,
+                            )
+                            .await;
+                        continue;
                     }
+                    work = interaction.next(None) => work,
                 };
-                let wake_at = match task_output_routes.next_flush() {
-                    Some(deadline) => {
-                        let duration = match wall_duration_until_domain_deadline(
-                            &runtime,
-                            &task_domain,
-                            scheduling_now,
-                            deadline,
-                        ) {
-                            Ok(duration) => duration,
-                            Err(error) => {
-                                runtime.events().report_error(format!(
-                                    "reingestor '{}' in domain '{}' lost its clock: {error}",
-                                    task_reingestor.as_str(),
-                                    task_domain.as_str(),
-                                ));
-                                break;
-                            }
-                        };
-                        Some(Instant::now() + duration)
-                    }
-                    None => None,
-                };
-                let work = match interaction.next(wake_at).await {
+                let work = match work {
                     Ok(work) => work,
                     Err(error) => {
                         let reason = format!(
@@ -1101,36 +1367,8 @@ impl Runtime {
                     }
                 };
                 let (event, mut work) = work.into_parts();
-                let execution_now = match domain_clock.snapshot() {
-                    Ok(snapshot) => snapshot.now(),
-                    Err(error) => {
-                        runtime.events().report_error(format!(
-                            "reingestor '{}' in domain '{}' lost its clock: {error}",
-                            task_reingestor.as_str(),
-                            task_domain.as_str(),
-                        ));
-                        break;
-                    }
-                };
                 match event {
                     RelayInteractionEvent::Stopped(reason) => {
-                        runtime
-                            .flush_reingestor_outputs(
-                                ReingestorDispatchContext {
-                                    domain: &task_domain,
-                                    reingestor: &task_reingestor,
-                                    from_relay: &task_from_relay,
-                                    from_where: task_from_where.as_ref(),
-                                    mode: task_mode,
-                                    error_policies: &task_error_policies,
-                                    branched_senders: &task_branched_senders,
-                                    execution_now,
-                                },
-                                &mut task_output_routes,
-                                ReingestorOutputFlush::All,
-                                &mut output_quiesce_gauge,
-                            )
-                            .await;
                         debug!(
                             domain = task_domain.as_str(),
                             reingestor = task_reingestor.as_str(),
@@ -1142,38 +1380,20 @@ impl Runtime {
                     RelayInteractionEvent::Wake => {
                         runtime
                             .flush_reingestor_outputs(
-                                ReingestorDispatchContext {
-                                    domain: &task_domain,
-                                    reingestor: &task_reingestor,
-                                    from_relay: &task_from_relay,
-                                    from_where: task_from_where.as_ref(),
-                                    mode: task_mode,
-                                    error_policies: &task_error_policies,
-                                    branched_senders: &task_branched_senders,
-                                    execution_now,
-                                },
-                                &mut task_output_routes,
-                                ReingestorOutputFlush::Due(execution_now),
-                                &mut output_quiesce_gauge,
+                                output_flush_context,
+                                &task_output_routes,
+                                &mut task_output_buffers,
+                                ReingestorOutputFlush::Due,
                             )
                             .await;
                     }
                     RelayInteractionEvent::ForceFlush(completion) => {
                         runtime
                             .flush_reingestor_outputs(
-                                ReingestorDispatchContext {
-                                    domain: &task_domain,
-                                    reingestor: &task_reingestor,
-                                    from_relay: &task_from_relay,
-                                    from_where: task_from_where.as_ref(),
-                                    mode: task_mode,
-                                    error_policies: &task_error_policies,
-                                    branched_senders: &task_branched_senders,
-                                    execution_now,
-                                },
-                                &mut task_output_routes,
+                                output_flush_context,
+                                &task_output_routes,
+                                &mut task_output_buffers,
                                 ReingestorOutputFlush::All,
-                                &mut output_quiesce_gauge,
                             )
                             .await;
                         completion.complete();
@@ -1266,11 +1486,12 @@ impl Runtime {
                                     mode: task_mode,
                                     error_policies: &task_error_policies,
                                     branched_senders: &task_branched_senders,
+                                    domain_clock: &domain_clock,
                                     execution_now,
                                 },
                                 &mut compiled_from_where,
                                 &mut task_output_routes,
-                                &mut output_quiesce_gauge,
+                                &mut task_output_buffers,
                                 batch,
                                 &materialized_values,
                             )
@@ -1278,6 +1499,14 @@ impl Runtime {
                     }
                 }
             }
+            runtime
+                .flush_reingestor_outputs(
+                    output_flush_context,
+                    &task_output_routes,
+                    &mut task_output_buffers,
+                    ReingestorOutputFlush::All,
+                )
+                .await;
         }))
     }
 }
@@ -1680,7 +1909,7 @@ mod tests {
                         "tenant_orders",
                     )))
                     .with_flush_policy(FlushPolicy::Each {
-                        interval: "100ms".to_string(),
+                        interval: "500ms".to_string(),
                         max_batch_size: "1MiB".to_string(),
                     })
                     .with_branch(branched_by("tenant_orders", &["tenant"])),
@@ -1696,55 +1925,57 @@ mod tests {
         let (beta_acks, beta_completion) = AckSet::root();
         let mut acme_completion = Box::pin(acme_completion.wait());
         let mut beta_completion = Box::pin(beta_completion.wait());
-
-        broadcast
-            .broadcast(
-                RelayRecordBatch::from_messages(
-                    schema,
-                    vec![
-                        RelayMessage {
-                            key: None,
-                            record: test_runtime_row([
-                                (
-                                    "tenant".to_string(),
-                                    RuntimeValue::String("acme".to_string()),
-                                ),
-                                ("user_id".to_string(), RuntimeValue::U32(42)),
-                            ]),
-                            acks: acme_acks.attached(),
-                        },
-                        RelayMessage {
-                            key: None,
-                            record: test_runtime_row([
-                                (
-                                    "tenant".to_string(),
-                                    RuntimeValue::String("beta".to_string()),
-                                ),
-                                ("user_id".to_string(), RuntimeValue::U32(7)),
-                            ]),
-                            acks: beta_acks.attached(),
-                        },
-                    ],
-                )
-                .expect("batch should build"),
+        let output_counters = runtime.node_quiesce_counters(
+            &domain,
+            NodeRef::new(
+                ModelKind::Reingestor,
+                named::<ReingestorName>("tenant_partition"),
+            ),
+        );
+        let input_batch = |tenant: &str, user_id, acks| {
+            RelayRecordBatch::single(
+                schema.clone(),
+                None,
+                test_runtime_row([
+                    (
+                        "tenant".to_string(),
+                        RuntimeValue::String(tenant.to_string()),
+                    ),
+                    ("user_id".to_string(), RuntimeValue::U32(user_id)),
+                ]),
+                acks,
             )
+            .expect("input batch should build")
+        };
+        broadcast
+            .broadcast(input_batch("acme", 42, acme_acks.attached()))
             .await
-            .expect("message should broadcast");
+            .expect("acme message should broadcast");
         acme_acks.ack_success();
-        beta_acks.ack_success();
+        timeout(Duration::from_secs(1), async {
+            while output_counters.output_buffers.load(Ordering::Acquire) != 1 {
+                tokio::task::consume_budget().await;
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("acme output should enter its branch buffer");
 
-        assert!(
-            timeout(Duration::from_millis(20), output_subscription.recv())
-                .await
-                .is_err(),
-            "reingestor output must remain buffered until its flush deadline"
-        );
-        assert!(
-            timeout(Duration::from_millis(1), &mut acme_completion)
-                .await
-                .is_err(),
-            "attached acme ACK must remain pending with the buffered output"
-        );
+        sleep(Duration::from_millis(200)).await;
+        broadcast
+            .broadcast(input_batch("beta", 7, beta_acks.attached()))
+            .await
+            .expect("beta message should broadcast");
+        beta_acks.ack_success();
+        timeout(Duration::from_secs(1), async {
+            while output_counters.output_buffers.load(Ordering::Acquire) != 2 {
+                tokio::task::consume_budget().await;
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("beta output should enter its branch buffer");
+
         assert!(
             timeout(Duration::from_millis(1), &mut beta_completion)
                 .await
@@ -1756,39 +1987,51 @@ mod tests {
             .await
             .expect("first output subscription should receive")
             .expect("output subscription should stay open");
-        let second_output_batch = timeout(Duration::from_secs(1), output_subscription.recv())
-            .await
-            .expect("second output subscription should receive")
-            .expect("output subscription should stay open");
+        assert_eq!(
+            row_value(
+                &first_output_batch
+                    .runtime_row(0)
+                    .expect("first output should contain an Arrow row"),
+                "tenant",
+            ),
+            Some(RuntimeValue::String("acme".to_string()))
+        );
         assert_eq!(
             timeout(Duration::from_secs(1), &mut acme_completion)
                 .await
                 .expect("acme ack completion should resolve after output dispatch"),
             AckOutcome::Ack
         );
+        assert!(
+            timeout(Duration::from_millis(100), output_subscription.recv())
+                .await
+                .is_err(),
+            "beta branch must retain its independent flush deadline"
+        );
+        assert!(
+            timeout(Duration::from_millis(1), &mut beta_completion)
+                .await
+                .is_err(),
+            "beta ACK must remain pending until the beta branch flushes"
+        );
+        let second_output_batch = timeout(Duration::from_secs(1), output_subscription.recv())
+            .await
+            .expect("second output subscription should receive")
+            .expect("output subscription should stay open");
+        assert_eq!(
+            row_value(
+                &second_output_batch
+                    .runtime_row(0)
+                    .expect("second output should contain an Arrow row"),
+                "tenant",
+            ),
+            Some(RuntimeValue::String("beta".to_string()))
+        );
         assert_eq!(
             timeout(Duration::from_secs(1), &mut beta_completion)
                 .await
                 .expect("beta ack completion should resolve after output dispatch"),
             AckOutcome::Ack
-        );
-        let tenants = [first_output_batch, second_output_batch]
-            .into_iter()
-            .flat_map(|batch| {
-                batch
-                    .try_into_messages()
-                    .expect("output batch should expand")
-            })
-            .filter_map(|output| match output.record.value("tenant") {
-                Ok(Some(RuntimeValue::String(tenant))) => Some(tenant),
-                _ => None,
-            })
-            .collect::<HashSet<_>>();
-        assert_eq!(
-            tenants,
-            ["acme".to_string(), "beta".to_string()]
-                .into_iter()
-                .collect::<HashSet<_>>()
         );
 
         let _ = shutdown_tx.send(true);

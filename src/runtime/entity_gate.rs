@@ -206,7 +206,7 @@ impl BranchQuiesceGauges {
                 collected_inputs: processor
                     .input_collectors
                     .values()
-                    .map(|collector| collector.pending.len())
+                    .map(|collector| collector.pending_len())
                     .sum(),
                 pending_materialized: processor.pending_materialized.len(),
                 output_buffers: processor

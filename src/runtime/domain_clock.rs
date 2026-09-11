@@ -10,9 +10,7 @@
 use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
-#[cfg(any(test, feature = "testing"))]
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 #[cfg(test)]
 use nervix_models::DomainTick;
 use nervix_models::{
@@ -23,16 +21,13 @@ use nervix_models::{
 use nervix_wasm::WasmExecutionContext;
 use thiserror::Error;
 use tokio::sync::watch;
-#[cfg(any(test, feature = "testing"))]
 use tokio_util::sync::CancellationToken;
 use triomphe::Arc;
 
 #[cfg(test)]
 use super::VmExecutionContext;
 use super::{ObservedDomainTick, Runtime};
-#[cfg(any(test, feature = "testing"))]
-use crate::runtime::physical_time::PhysicalDeadlineCapability;
-use crate::runtime::physical_time::actual_utc_now;
+use crate::runtime::physical_time::{PhysicalDeadlineCapability, actual_utc_now};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum DomainClockAccessError {
@@ -54,7 +49,6 @@ pub enum DomainClockAccessError {
     #[error(
         "logical deadline for domain '{deadline_domain}' cannot be used by domain '{clock_domain}'"
     )]
-    #[cfg(any(test, feature = "testing"))]
     DeadlineDomainMismatch {
         clock_domain: DomainName,
         deadline_domain: DomainName,
@@ -79,7 +73,6 @@ pub enum DomainClockArithmetic {
 pub type DomainClockAccessResult<T> = Result<T, Report<DomainClockAccessError>>;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-#[cfg(any(test, feature = "testing"))]
 pub enum DomainClockWaitError {
     #[error("domain '{domain}' clock became unavailable while waiting for a logical deadline")]
     Clock { domain: DomainName },
@@ -89,7 +82,6 @@ pub enum DomainClockWaitError {
     PhysicalDeadline { domain: DomainName },
 }
 
-#[cfg(any(test, feature = "testing"))]
 pub type DomainClockWaitResult<T> = Result<T, Report<DomainClockWaitError>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -414,13 +406,43 @@ impl DomainClock {
         Ok(DomainIngestionSnapshot { snapshot, window })
     }
 
-    #[cfg(any(test, feature = "testing"))]
     pub fn deadline_at(&self, due_at: Timestamp) -> LogicalDeadline {
         LogicalDeadline {
             domain: self.inner.domain.clone(),
             generation: self.generation,
             due_at,
         }
+    }
+
+    pub(super) fn deadline_reached(
+        &self,
+        deadline: &LogicalDeadline,
+        snapshot: &DomainExecutionSnapshot,
+    ) -> DomainClockAccessResult<bool> {
+        self.revalidate()?;
+        if deadline.domain != self.inner.domain {
+            return Err(Report::new(
+                DomainClockAccessError::DeadlineDomainMismatch {
+                    clock_domain: self.inner.domain.clone(),
+                    deadline_domain: deadline.domain.clone(),
+                },
+            ));
+        }
+        if deadline.generation != self.generation {
+            return Err(Report::new(DomainClockAccessError::StaleGeneration {
+                domain: self.inner.domain.clone(),
+                bound_generation: deadline.generation,
+                current_generation: self.generation,
+            }));
+        }
+        if snapshot.generation != self.generation {
+            return Err(Report::new(DomainClockAccessError::StaleGeneration {
+                domain: self.inner.domain.clone(),
+                bound_generation: snapshot.generation,
+                current_generation: self.generation,
+            }));
+        }
+        Ok(snapshot.now >= deadline.due_at)
     }
 
     pub fn physical_duration_until(
@@ -442,7 +464,6 @@ impl DomainClock {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "testing"))]
     pub async fn wait_until(
         &self,
         deadline: LogicalDeadline,
@@ -581,7 +602,6 @@ impl DomainExecutionSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(any(test, feature = "testing"))]
 pub struct LogicalDeadline {
     domain: DomainName,
     generation: u64,
@@ -589,13 +609,12 @@ pub struct LogicalDeadline {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(any(test, feature = "testing"))]
 pub struct LogicalDeadlineReached {
     due_at: Timestamp,
     snapshot: DomainExecutionSnapshot,
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 impl LogicalDeadlineReached {
     pub const fn due_at(&self) -> Timestamp {
         self.due_at

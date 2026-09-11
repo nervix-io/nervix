@@ -133,6 +133,7 @@ just test-scenarios --input tests/features/runtime/domain_ingestion_time.feature
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @domain_bound_clock
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @domain_clock_authority
 just test-scenarios --input tests/features/runtime/domain_execution_time.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/domain_buffer_timing.feature --tags @domain_buffer_timing
 just test-scenarios --input tests/features/runtime/generator.feature --tags @domain_execution_time
 just test-scenarios --input tests/features/runtime/inferencer.feature --tags @domain_execution_time
 just test-scenarios --input tests/features/runtime/sqs_emission.feature --tags @domain_execution_time
@@ -150,7 +151,8 @@ logical-origin scenario and adds `domain_ingestion_time.feature` for admission, 
 duration-window coverage. The untagged
 `Out-of-range paced starts and projections return typed timestamp diagnostics` scenario records
 task 02's F10 public coverage. Task 06 adds `domain_execution_time.feature` and focused tagged
-coverage in the listed runtime feature files for F6 and F7.
+coverage in the listed runtime feature files for F6 and F7. Task 07 adds
+`domain_buffer_timing.feature` for F5's branch-local collection and flush clock classes.
 
 Physical controls are
 `tests::connection_lifetime::send_queue_admission_is_deadline_bound`,
@@ -271,5 +273,21 @@ Recorded on 10 September 2026 against the task 06 worktree, including the merged
 | `nervix-server` library suite | Pass; 793 tests passed after merging the current consensus and startup paths. |
 | `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline. The relay-boundary tests moved to their focused module, and bare-error signature debt fell from 844 to 843. |
+
+No complete Cucumber-suite or final qualification result is claimed by this record.
+
+## Task 07 validation record
+
+Recorded on 10 September 2026 against the task 07 worktree, including the merged task 06 fixes:
+
+| Probe | Result |
+| --- | --- |
+| Public paced branch-buffering reproducer before product changes | Expected red; fast logical `FLUSH EACH` and `COLLECT FOR` missed their physical observation windows, slow logical `COLLECT FOR` emitted too early, and physical `FLUSH IMMEDIATE` followed slow domain time. |
+| `Domain-paced branch buffering` | Pass; all six one- and three-node scenarios and all 48 steps covered fast logical collection and flush deadlines, slow physical immediate flushes, separate concrete-branch deadlines, payload fields, and acknowledgement completion. |
+| Reingestor branch-buffering regressions | Pass; staggered branches retained independent deadlines and acknowledgement ownership, forced and shutdown drains completed, and per-route byte bounds flushed independently. |
+| Generator flush regressions | Pass; route buffers honored `EACH` byte boundaries and drained on source gating, domain pause, and task exit. |
+| `nervix-server` library suite | Pass; 801 tests passed with no ignored tests. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline, and string-error debt fell from 497 to 496. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.

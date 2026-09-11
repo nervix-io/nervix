@@ -292,7 +292,8 @@ after each `LEFT FROM` and `RIGHT FROM` relay list. Emitters place it after thei
 `FROM <relay> [WHERE ...] [, ...]` list. All emitter inputs declare the same payload schema, but
 they may belong to differently named branches; collection remains independent for each source
 relay and concrete branch. Generators do not read a `FROM` relay and therefore have no input
-collection clause.
+collection clause. The duration is measured on the domain clock and starts when the source and
+branch collector changes from empty to non-empty. A paced domain's `TIME RATE` scales that wait.
 
 `FROM ... WHERE` runs first. `FILTER WHERE` runs next, before the node accepts rows into its state,
 buffer, inferencer, or guest. Every route then creates a new empty output, performs its own ordered
@@ -323,13 +324,16 @@ This surface is available on:
 - `CREATE EMITTER`
 
 Every `TO` destination on a flush-based node requires `FLUSH EACH <duration> MAX BATCH SIZE
-<bytes>` or `FLUSH IMMEDIATE`; there are no hidden defaults. Window processors use `WIDTH` and
-`STEP`, and WASM processors use guest-owned output cadence instead of `FLUSH`.
+<bytes>` or `FLUSH IMMEDIATE`; there are no hidden defaults. Each concrete output branch owns its
+buffer and deadline. `FLUSH EACH` measures its duration on the domain clock, beginning when data
+first enters an empty buffer. Window processors use `WIDTH` and `STEP`, and WASM processors use
+guest-owned output cadence instead of `FLUSH`.
 
 This is the authoritative `FLUSH IMMEDIATE` timing rule.
-During normal processing, `FLUSH IMMEDIATE` starts a system-owned 100 µs minimum batching timeout
-when data first enters an empty route buffer. The route flushes when that timeout expires, allowing
-nearby arrivals to remain in one Arrow batch instead of collapsing to one batch per message.
+During normal processing, `FLUSH IMMEDIATE` starts a system-owned physical 100 µs minimum batching
+timeout when data first enters an empty route buffer. Domain pacing never scales this monotonic
+wait. The route flushes when that timeout expires, allowing nearby arrivals to remain in one Arrow
+batch instead of collapsing to one batch per message.
 `FLUSH IMMEDIATE` has no size boundary; shutdown and error handling may still force pending data
 out.
 

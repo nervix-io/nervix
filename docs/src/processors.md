@@ -20,7 +20,8 @@ Without `COLLECT FOR`, each relay batch is executed immediately and Nervix creat
 input buffer. With it, the duration starts when data enters an empty input collector. The node
 executes the accumulated batch when that timer expires or the optional maximum size is reached.
 Collection is independent for each source relay and concrete branch, and occurs before
-source-specific `WHERE`, node-wide `FILTER WHERE`, and node-specific execution.
+source-specific `WHERE`, node-wide `FILTER WHERE`, and node-specific execution. The duration is a
+domain-logical wait that begins only when an empty collector receives data.
 
 This clause is available on junctions, deduplicators, reorderers, window processors, inferencers,
 WASM processors, and reingestors. Correlators configure it independently after each complete
@@ -82,9 +83,10 @@ visible independently to every route. They never initialize route outputs automa
 
 Every flush-based processor route declares `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or
 `FLUSH IMMEDIATE`. The [NSPL Overview](nspl-overview.md) defines the system-owned 100 µs minimum
-batching window and its forced-flush exceptions. A route using `ON MESSAGE ERROR SEND TO` buffers
-its error records independently and emits them on that route's same interval or maximum batch-size
-boundary.
+batching window and its forced-flush exceptions. `FLUSH EACH` is domain-logical, while the Immediate
+minimum is physical; both start on the empty-to-buffered transition and remain independent for
+each concrete branch. A route using `ON MESSAGE ERROR SEND TO` buffers its error records
+independently and emits them on that route's same interval or maximum batch-size boundary.
 
 ## Materialized relay state
 

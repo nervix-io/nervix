@@ -124,7 +124,7 @@ pub(super) async fn flush_branch_reorderer_output(
     let materialized_state = context.materialized_state;
     let execution_now = context.execution_now;
     let branch = context.branch;
-    output_routes.routes[output_index].clear_flush_deadline();
+    output_routes.routes[output_index].clear_flush_timer();
 
     if output_buffer.is_empty() {
         return;
@@ -145,7 +145,7 @@ pub(super) async fn flush_branch_reorderer_output(
                     failure.error
                 ),
             );
-            output_routes.routes[output_index].clear_flush_deadline();
+            output_routes.routes[output_index].clear_flush_timer();
             return;
         }
     };
@@ -172,7 +172,7 @@ pub(super) async fn flush_branch_reorderer_output(
             ack.ack_success();
         }
     }
-    output_routes.routes[output_index].clear_flush_deadline();
+    output_routes.routes[output_index].clear_flush_timer();
 }
 
 #[cfg(test)]

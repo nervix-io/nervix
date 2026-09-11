@@ -29,11 +29,12 @@ use ordered_float::OrderedFloat;
 use triomphe::Arc;
 
 use super::{
-    BranchRuntime, CompiledBranchProgram, CompiledDeduplicatorKeyProgram,
-    CompiledProgramWithMaterializedInterest, PendingMaterializedBatch, RelayBoundaryServices,
+    BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingResult, BranchRuntime,
+    CompiledBranchProgram, CompiledDeduplicatorKeyProgram, CompiledProgramWithMaterializedInterest,
+    DomainClock, DomainExecutionSnapshot, PendingMaterializedBatch, RelayBoundaryServices,
     RelayMessage, RelayRecordBatch, RelayRegistry, ReplicatedDeduplicatorState,
     ReplicatedWasmProcessorState, ReplicatedWindowProcessorState, RuntimeFlushPolicy,
-    RuntimeInputCollectPolicy, SharedActiveGraph, WindowProcessorState,
+    RuntimeInputCollectPolicy, RuntimeInputCollector, SharedActiveGraph, WindowProcessorState,
     inferencer::OnnxInferencerSession, relay_batch::RelayRecordBatchReorderError,
 };
 use crate::{
@@ -335,47 +336,6 @@ pub(super) struct RelayProcessorNode {
     pub(super) operation: RelayProcessorOperationNode,
     pub(super) last_graph: Option<StdArc<ActiveGraph>>,
     pub(super) applied_generation: u64,
-}
-
-#[derive(Debug)]
-pub(super) struct RuntimeInputCollector {
-    pub(super) policy: RuntimeInputCollectPolicy,
-    pub(super) pending: Vec<RelayRecordBatch>,
-    pub(super) pending_bytes: u64,
-    pub(super) deadline: Option<Timestamp>,
-}
-
-impl RuntimeInputCollector {
-    pub(super) fn new(policy: RuntimeInputCollectPolicy) -> Self {
-        Self {
-            policy,
-            pending: Vec::new(),
-            pending_bytes: 0,
-            deadline: None,
-        }
-    }
-
-    pub(super) fn push(&mut self, batch: RelayRecordBatch, now: Timestamp) -> bool {
-        self.pending_bytes = self
-            .pending_bytes
-            .checked_add(batch.estimated_bytes())
-            .assured("both counts estimate bytes of batches this node already holds in memory");
-        self.pending.push(batch);
-        self.deadline.get_or_insert_with(|| {
-            super::checked_add_duration_to_timestamp(now, self.policy.interval)
-        });
-        self.policy.size_boundary_reached(self.pending_bytes)
-    }
-
-    pub(super) fn is_due(&self, now: Timestamp) -> bool {
-        !self.pending.is_empty() && self.deadline.is_some_and(|deadline| deadline <= now)
-    }
-
-    pub(super) fn take_pending(&mut self) -> Vec<RelayRecordBatch> {
-        self.pending_bytes = 0;
-        self.deadline = None;
-        std::mem::take(&mut self.pending)
-    }
 }
 
 #[derive(Debug)]
@@ -903,11 +863,11 @@ impl RelayProcessorOutputsNode {
         self.routes.first().map(|output| output.relay.clone())
     }
 
-    pub(super) fn next_flush(&self) -> Option<Timestamp> {
+    pub(super) fn buffer_deadlines(&self) -> Vec<BranchBufferDeadline> {
         self.routes
             .iter()
-            .filter_map(|output| output.next_flush)
-            .min()
+            .filter_map(|output| output.flush_timer.deadline())
+            .collect()
     }
 }
 
@@ -919,7 +879,7 @@ pub(super) struct RelayProcessorOutputNode {
     pub(super) flush_policy: Option<RuntimeFlushPolicy>,
     pub(super) message_error_policy: MessageErrorPolicy,
     pub(super) pending: Vec<RelayRecordBatch>,
-    pub(super) next_flush: Option<Timestamp>,
+    pub(super) flush_timer: BranchBufferTimer,
     pub(super) compiled_program: Option<CompiledProgramWithMaterializedInterest>,
     pub(super) compiled_branch_program: Option<CompiledBranchProgram>,
 }
@@ -927,51 +887,65 @@ pub(super) struct RelayProcessorOutputNode {
 impl RelayProcessorOutputNode {
     pub(super) fn schedule_input_flush(
         &mut self,
-        now: Timestamp,
+        clock: &DomainClock,
+        snapshot: &DomainExecutionSnapshot,
         pending_bytes: u64,
-    ) -> Option<bool> {
-        let policy = self.flush_policy?;
-        let deadline = self.next_flush.get_or_insert_with(|| {
-            super::checked_add_duration_to_timestamp(now, policy.interval())
-        });
-        Some(*deadline <= now || policy.size_boundary_reached(pending_bytes))
+    ) -> BranchBufferTimingResult<Option<bool>> {
+        let Some(policy) = self.flush_policy else {
+            return Ok(None);
+        };
+        self.flush_timer.arm_flush(policy, clock, snapshot)?;
+        Ok(Some(
+            self.flush_timer.is_due(clock, snapshot)?
+                || policy.size_boundary_reached(pending_bytes),
+        ))
     }
 
-    pub(super) fn flush_deadline_due(&self, now: Timestamp) -> bool {
-        self.next_flush.is_some_and(|deadline| deadline <= now)
+    pub(super) fn flush_deadline_due(
+        &self,
+        clock: &DomainClock,
+        snapshot: &DomainExecutionSnapshot,
+    ) -> BranchBufferTimingResult<bool> {
+        self.flush_timer.is_due(clock, snapshot)
     }
 
-    pub(super) fn force_flush_at(&mut self, now: Timestamp) {
-        self.next_flush = Some(now);
+    pub(super) fn clear_flush_timer(&mut self) {
+        self.flush_timer.clear();
     }
 
-    pub(super) fn clear_flush_deadline(&mut self) {
-        self.next_flush = None;
-    }
-
-    pub(super) fn enqueue(&mut self, batch: RelayRecordBatch, now: Timestamp) -> bool {
+    pub(super) fn enqueue(
+        &mut self,
+        batch: RelayRecordBatch,
+        clock: &DomainClock,
+        snapshot: &DomainExecutionSnapshot,
+    ) -> BranchBufferTimingResult<bool> {
         self.pending.push(batch);
         let Some(policy) = self.flush_policy else {
-            return true;
+            return Ok(true);
         };
-        let deadline = self.next_flush.get_or_insert_with(|| {
-            super::checked_add_duration_to_timestamp(now, policy.interval())
-        });
-        *deadline <= now
+        self.flush_timer.arm_flush(policy, clock, snapshot)?;
+        Ok(self.flush_timer.is_due(clock, snapshot)?
             || policy.size_boundary_reached(
                 self.pending
                     .iter()
                     .map(RelayRecordBatch::estimated_bytes)
                     .sum::<u64>(),
-            )
+            ))
     }
 
-    pub(super) fn flush_due(&self, now: Timestamp) -> bool {
-        !self.pending.is_empty() && self.next_flush.is_some_and(|deadline| deadline <= now)
+    pub(super) fn flush_due(
+        &self,
+        clock: &DomainClock,
+        snapshot: &DomainExecutionSnapshot,
+    ) -> BranchBufferTimingResult<bool> {
+        if self.pending.is_empty() {
+            return Ok(false);
+        }
+        self.flush_timer.is_due(clock, snapshot)
     }
 
     pub(super) fn take_pending(&mut self) -> Vec<RelayRecordBatch> {
-        self.next_flush = None;
+        self.flush_timer.clear();
         std::mem::take(&mut self.pending)
     }
 }

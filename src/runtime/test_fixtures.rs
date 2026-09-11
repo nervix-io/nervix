@@ -481,7 +481,7 @@ pub(super) fn validate_wasm_test_output_groups(
                 flush_policy: None,
                 message_error_policy: MessageErrorPolicy::Log,
                 pending: Vec::new(),
-                next_flush: None,
+                flush_timer: BranchBufferTimer::default(),
                 compiled_program: None,
                 compiled_branch_program: None,
             })

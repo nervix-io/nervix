@@ -366,7 +366,7 @@ impl RelayProcessorTemplate {
             flush_policy: output.flush_policy,
             message_error_policy: output.message_error_policy.clone(),
             pending: Vec::new(),
-            next_flush: None,
+            flush_timer: BranchBufferTimer::default(),
             compiled_program: None,
             compiled_branch_program: None,
         }
@@ -683,10 +683,14 @@ impl BranchInstanceTemplate {
                 ))
             })
             .collect::<Result<HashMap<_, _>, String>>()?;
+        let domain_clock = runtime
+            .bind_domain_clock(domain)
+            .map_err(|error| format!("could not bind branch domain clock: {error}"))?;
         Ok(Mutex::new(BranchRuntime {
             key,
             runtime: runtime.clone(),
             domain: domain.clone(),
+            domain_clock,
             source_kind: self.source_kind,
             source: self.source.clone(),
             root_relay: self.root_relay.clone(),
@@ -766,7 +770,7 @@ mod tests {
             node.input_collectors
                 .get(&input)
                 .expect("collector must remain installed")
-                .policy
+                .policy()
                 .interval,
             Duration::from_secs(2)
         );
