@@ -3551,6 +3551,21 @@ impl EmitterTask {
                     || emitter_buffer_count.load(Ordering::Acquire) == 0;
                 let work = match interaction.next_with_input(wake, receive_input).await {
                     Ok(work) => work,
+                    // The emitter holds work whose cadence it cannot resolve, because the domain
+                    // clock is not readable in this generation. There is no wall-clock fallback
+                    // for a logical cadence, so the work stays buffered and unpublished while the
+                    // acknowledgements it owns are kept alive on the physical beat.
+                    Err(RelayInteractionError::WakeTiming { reason, .. }) => {
+                        runtime.record_emitter_transient_error(&task_domain, &task_emitter, reason);
+                        let acks = sink.pending_acks(&emitter_buffer);
+                        RuntimeReconnectBackoff::wait_duration_with_ack_alive(
+                            RETRY_ACK_ALIVE_EACH,
+                            &mut shutdown_rx,
+                            &acks,
+                        )
+                        .await;
+                        continue;
+                    }
                     Err(error) => {
                         let reason = error.to_string();
                         context.report_flush_error(task_sink.label(), &reason);

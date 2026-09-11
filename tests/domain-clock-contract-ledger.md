@@ -306,18 +306,23 @@ branched from:
 
 | Probe | Result |
 | --- | --- |
-| Public paced emitter reproducer before product changes | Expected red in both the one- and three-node examples of three scenarios: an accelerated `FLUSH EACH 20s` emitter published nothing within the four-second physical window, a slowed `FLUSH EACH 100ms` emitter published immediately instead of holding its logical deadline, and an accelerated Iceberg `FLUSH EACH 2s` with `COMMIT EACH 2s` produced no committed row within two seconds. |
+| Public paced emitter reproducer before product changes | Expected red in both the one- and three-node examples of three scenarios: an accelerated `FLUSH EACH 20s` emitter published nothing within its four-second physical window, a slowed `FLUSH EACH 100ms` emitter published immediately instead of holding its logical deadline, and an accelerated Iceberg `FLUSH EACH 2s` with `COMMIT EACH 2s` committed no row within two seconds. |
 | Physical controls in the same reproducer before product changes | Pass in both examples; emitter `FLUSH IMMEDIATE` kept its physical minimum in a slow domain, and a stalled emitter kept its upstream `MODE ACK` Kafka ingestor alive without replay. |
 | `Domain-paced emitter cadence` | Pass; all ten one- and three-node scenarios and all 104 steps covered logical emitter cadence, a stall that preserved the pending batch and its acknowledgements, a logically held flush released by a force flush, the physical immediate minimum, logical Iceberg flush and commit boundaries, and the physical acknowledgement keepalive. |
 | Kafka emission and ingestion regressions | Pass; all 56 scenarios and all 590 steps covered emitter stall, fault, detached and attached acknowledgement replay, and consumer-group offset boundaries. |
 | Iceberg emission regressions | Pass; all 20 scenarios and all 228 steps covered staging, commit, namespace, rejection, and clock-class behavior. |
 | Emitter input, metric, and publishing-mode regressions | Pass; all 12 scenarios and all 296 steps passed. |
-| Domain feature regressions | Pass; all 98 scenarios and all 978 steps covered domain lifecycle, buffer timing, execution time, ingestion time, pacing, cadence, and the new emitter cadence cases. |
+| Domain feature regressions | Pass; all 98 scenarios and all 978 steps covered domain lifecycle, buffer timing, execution time, ingestion time, pacing, and cadence. |
+| Relay-consumer regressions for the retyped wake | Pass; 296 scenarios across junctions, deduplicators, reorderers, correlators, window processors, inferencers, WASM processors, materialized relays, reingestors, generators, input collection, branch expiration, relay capacity and metrics, quiescing, and every `ALTER` feature. The WASM cluster-restart scenario timed out once while another suite held the machine and passed in isolation on re-run. |
+| Wake and cadence unit coverage | Pass; the branch-buffering suite covers a wake taking whichever coordinate arrives first and a cadence whose clock is gone being neither due nor silently postponed, and the emitter suite covers the logical and physical cadence coordinates, an active retry replacing the ordinary cadence wake, and a retry deadline preserved until its attempt. |
 | `nervix-server` library suite | Pass; 833 tests passed with no ignored tests. |
-| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and every executable NSPL documentation block. |
+| `just book 0.1.0-dev` | Pass; documentation tests, console screenshots, and the HTML, LLM, and Markdown renderers completed successfully. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline. |
 
-No complete Cucumber-suite or final qualification result is claimed by this record.
+No complete Cucumber-suite or final qualification result is claimed by this record. The full `just
+test` run was twice interrupted by another suite holding the machine, so this record names the
+focused runs above instead.
 
 ## Task 09 validation record
 

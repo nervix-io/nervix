@@ -396,7 +396,10 @@ pub(super) async fn wait_for_branch_buffer_deadline(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{domain, test_domain_clock};
+    use crate::runtime::{
+        DomainClockLifecycle, domain, test_domain_clock, test_domain_clock_authority,
+        unpaced_domain_state,
+    };
 
     #[test]
     fn each_and_immediate_keep_distinct_deadline_coordinates() {
@@ -462,6 +465,70 @@ mod tests {
             !timer
                 .is_due(&clock, &snapshot)
                 .assured("a cleared timer has no deadline")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wake_takes_whichever_coordinate_arrives_first() {
+        let clock = test_domain_clock(&domain("wake_timing"));
+        let snapshot = clock
+            .snapshot()
+            .assured("the fixture installs a running unpaced clock");
+        let mut logical = BranchBufferTimer::default();
+        logical.arm_logical(&clock, &snapshot, Duration::from_secs(3600));
+        let deadline = logical
+            .deadline()
+            .assured("arming a logical timer leaves a deadline");
+        let physical = PhysicalDeadlineCapability::new()
+            .after(Duration::from_secs(1))
+            .assured("the fixture timeout fits the monotonic clock range");
+        let wake = RuntimeWake::never()
+            .with_buffer(&clock, deadline)
+            .with_physical(physical);
+
+        assert!(
+            !wake
+                .is_reached()
+                .assured("the bound clock remains installed")
+        );
+        tokio::time::timeout(Duration::from_secs(2), wake.wait())
+            .await
+            .assured("the monotonic deadline arrives long before the logical one")
+            .assured("the bound clock remains installed");
+        assert!(
+            wake.is_reached()
+                .assured("the bound clock remains installed")
+        );
+    }
+
+    #[test]
+    fn a_wake_reports_a_clock_generation_it_can_no_longer_read() {
+        let clock_domain = domain("wake_lifecycle");
+        let lifecycle = DomainClockLifecycle::new(clock_domain.clone());
+        lifecycle.synchronize(
+            &unpaced_domain_state(clock_domain.as_str()),
+            &test_domain_clock_authority(),
+        );
+        let clock = lifecycle
+            .bind()
+            .assured("the fixture installs an unpaced domain clock");
+        let snapshot = clock
+            .snapshot()
+            .assured("the fixture installs a running unpaced clock");
+        let mut timer = BranchBufferTimer::default();
+        timer.arm_logical(&clock, &snapshot, Duration::from_secs(1));
+        let wake = RuntimeWake::never().with_buffer(
+            &clock,
+            timer
+                .deadline()
+                .assured("arming a logical timer leaves a deadline"),
+        );
+
+        lifecycle.stop(0);
+
+        assert!(
+            wake.is_reached().is_err(),
+            "a cadence whose clock is gone is neither due nor silently postponed"
         );
     }
 
