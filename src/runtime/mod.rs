@@ -548,7 +548,15 @@ use window_state::{
 #[cfg(test)]
 const STUPID_CHANNEL_CAPACITY_REMOVE_ME: NonZeroUsize = NonZeroUsize::MIN;
 
-const DEFAULT_DOMAIN_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
+/// Default deadline for draining one runtime branch during a domain or node transition.
+pub const DEFAULT_DOMAIN_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Includes the grace a branch task receives after its configured drain deadline.
+pub const fn branch_task_stop_timeout(domain_drain_timeout: Duration) -> Duration {
+    // Saturation is the meaning: a drain timeout configured near `Duration::MAX` already asks to
+    // wait for as long as the process runs, and no grace can extend that further.
+    domain_drain_timeout.saturating_add(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
+}
 
 /// How many runtime events the bus holds for a receiver that has fallen behind. A receiver that
 /// exceeds it is told how many it missed rather than being left to believe it saw everything.
@@ -629,6 +637,15 @@ pub enum RuntimeError {
     RuntimeRevisionReadiness {
         revision: u64,
         pending_nodes: Vec<ClusterNodeName>,
+    },
+    #[error(
+        "cannot represent a runtime revision readiness deadline from node-unavailability timeout \
+         {node_unavailability_timeout:?} and readiness propagation bound \
+         {readiness_propagation_bound:?}"
+    )]
+    RuntimeRevisionReadinessDeadlineOverflow {
+        node_unavailability_timeout: Duration,
+        readiness_propagation_bound: Duration,
     },
     #[error("failed to decode remote relay '{relay}' in domain '{domain}': {reason}")]
     DecodeRemoteRelay {

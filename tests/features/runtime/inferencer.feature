@@ -466,6 +466,8 @@ Feature: Inferencer resources
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
+    # Each length-one vector row is 24B and the length-two row is 40B under runtime Arrow
+    # payload accounting. Their 24B + 40B + 24B total reaches the 88B boundary only at row 3.
     When these NSPL commands are executed on the leader node
       """
       CREATE RESOURCE inference;
@@ -495,15 +497,17 @@ Feature: Inferencer resources
         UNBRANCHED
         TO scored_sequences
         SET scores = scores
-        FLUSH EACH 500ms MAX BATCH SIZE 16mb
+        FLUSH EACH 1h MAX BATCH SIZE 88B
         ON MESSAGE ERROR LOG;
       """
     And these NSPL commands are executed on the leader node
       """
       CREATE SUBSCRIPTION scored_sequences_subscription TO scored_sequences;
       START;
+      SHOW CLUSTER STATUS;
       """
-    And http payload is posted to host "infer-dynamic-batch-{{test_id}}.example.com" path "/sequence"
+    Then the last cluster status owner for scheduled "inferencer" "score_sequence_batch" is saved as placeholder "dynamic_inferencer_owner"
+    When http payload is posted to host "infer-dynamic-batch-{{test_id}}.example.com" path "/sequence"
       """
       {"features":[[1.0,10.0]],"mask":[[100.0,1000.0]]}
       """
@@ -520,6 +524,20 @@ Feature: Inferencer resources
       {"scores":[[103.0,1030.0]]}
       {"scores":[[204.0,2040.0],[408.0,4080.0]]}
       {"scores":[[305.0,3050.0]]}
+      """
+    And node "{{dynamic_inferencer_owner}}" observability metric "nervix_bytes_total" with labels eventually equals 88
+      """
+      target_kind="INFERENCER"
+      target="score_sequence_batch"
+      direction="received"
+      relay="sequences"
+      """
+    And node "{{dynamic_inferencer_owner}}" observability metric "nervix_batches_total" with labels eventually equals 1
+      """
+      target_kind="INFERENCER"
+      target="score_sequence_batch"
+      direction="sent"
+      relay="scored_sequences"
       """
 
     Examples:
@@ -614,6 +632,8 @@ Feature: Inferencer resources
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
+    # Each row has two fixed-size F32 pairs and accounts for 16B. Three rows reach the 48B
+    # boundary exactly, so neither of the first two inputs can start inference early.
     When these NSPL commands are executed on the leader node
       """
       CREATE RESOURCE inference;
@@ -649,15 +669,17 @@ Feature: Inferencer resources
         UNBRANCHED
         TO scored
         SET scores = scores
-        FLUSH EACH 500ms MAX BATCH SIZE 16mb
+        FLUSH EACH 1h MAX BATCH SIZE 48B
         ON MESSAGE ERROR LOG;
       """
     And these NSPL commands are executed on the leader node
       """
       CREATE SUBSCRIPTION scored_subscription TO scored;
       START;
+      SHOW CLUSTER STATUS;
       """
-    And http payload is posted to host "infer-batch-{{test_id}}.example.com" path "/features"
+    Then the last cluster status owner for scheduled "inferencer" "batch_score_messages" is saved as placeholder "batch_inferencer_owner"
+    When http payload is posted to host "infer-batch-{{test_id}}.example.com" path "/features"
       """
       {"features":[1.0,10.0],"mask":[100.0,1000.0]}
       """
@@ -675,6 +697,20 @@ Feature: Inferencer resources
       {"scores":[204.0,2040.0]}
       {"scores":[305.0,3050.0]}
       """
+    And node "{{batch_inferencer_owner}}" observability metric "nervix_bytes_total" with labels eventually equals 48
+      """
+      target_kind="INFERENCER"
+      target="batch_score_messages"
+      direction="received"
+      relay="features"
+      """
+    And node "{{batch_inferencer_owner}}" observability metric "nervix_batches_total" with labels eventually equals 1
+      """
+      target_kind="INFERENCER"
+      target="batch_score_messages"
+      direction="sent"
+      relay="scored"
+      """
 
     Examples:
       | cluster_size | replica_count | tensor_type       | input_field_type | output_field_type |
@@ -689,18 +725,22 @@ Feature: Inferencer resources
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
+    # Arrow 58.4 accounts this one-row input as 284B: 260B for padding Utf8, 8B for tenant
+    # Utf8, and 8B for each fixed-size F32 pair. Two batches total 568B and cross 512B.
     When these NSPL commands are executed on the leader node
       """
       CREATE RESOURCE inference;
       UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
       CREATE SCHEMA features (
         tenant STRING,
+        padding STRING,
         features <input_field_type>,
         mask <input_field_type>
       );
       CREATE SCHEMA scored ( scores <output_field_type> );
       CREATE WIRE JSON SCHEMA features_wire MODE STRICT (
         tenant string,
+        padding string,
         features array,
         mask array
       );
@@ -729,29 +769,31 @@ Feature: Inferencer resources
         BRANCHED BY by_tenant
         TO scored
         SET scores = scores
-        FLUSH EACH 500ms MAX BATCH SIZE 16mb
+        FLUSH EACH 1h MAX BATCH SIZE 512B
         ON MESSAGE ERROR LOG;
       """
     And these NSPL commands are executed on the leader node
       """
       CREATE SUBSCRIPTION scored_subscription TO scored;
       START;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "inferencer" "branch_batch_score" is saved as placeholder "inferencer_owner"
+    When http payload is posted to host "infer-branch-batch-{{test_id}}.example.com" path "/features"
+      """
+      {"tenant":"acme","padding":"<padding>","features":[1.0,10.0],"mask":[100.0,1000.0]}
       """
     And http payload is posted to host "infer-branch-batch-{{test_id}}.example.com" path "/features"
       """
-      {"tenant":"acme","features":[1.0,10.0],"mask":[100.0,1000.0]}
+      {"tenant":"beta","padding":"<padding>","features":[100.0,1000.0],"mask":[1.0,10.0]}
       """
     And http payload is posted to host "infer-branch-batch-{{test_id}}.example.com" path "/features"
       """
-      {"tenant":"beta","features":[100.0,1000.0],"mask":[1.0,10.0]}
+      {"tenant":"acme","padding":"<padding>","features":[3.0,30.0],"mask":[300.0,3000.0]}
       """
     And http payload is posted to host "infer-branch-batch-{{test_id}}.example.com" path "/features"
       """
-      {"tenant":"acme","features":[3.0,30.0],"mask":[300.0,3000.0]}
-      """
-    And http payload is posted to host "infer-branch-batch-{{test_id}}.example.com" path "/features"
-      """
-      {"tenant":"beta","features":[300.0,3000.0],"mask":[3.0,30.0]}
+      {"tenant":"beta","padding":"<padding>","features":[300.0,3000.0],"mask":[3.0,30.0]}
       """
     Then within "5s" the relay subscription receives payloads containing all fragments
       """
@@ -760,11 +802,18 @@ Feature: Inferencer resources
       key={"tenant":"beta"} | "scores":[301.0,3010.0]
       key={"tenant":"beta"} | "scores":[503.0,5030.0]
       """
+    And node "{{inferencer_owner}}" observability metric "nervix_batches_total" with labels eventually equals 2
+      """
+      target_kind="INFERENCER"
+      target="branch_batch_score"
+      direction="sent"
+      relay="scored"
+      """
 
     Examples:
-      | cluster_size | replica_count | tensor_type       | input_field_type | output_field_type |
-      | 1            | 0             | DENSE TENSOR<F32> | ARRAY<F32, 2>    | ARRAY<F32, 2>     |
-      | 3            | 0             | DENSE TENSOR<F32> | ARRAY<F32, 2>    | ARRAY<F32, 2>     |
+      | cluster_size | replica_count | tensor_type       | input_field_type | output_field_type | padding                                                                                                                                                                                                                                                          |
+      | 1            | 0             | DENSE TENSOR<F32> | ARRAY<F32, 2>    | ARRAY<F32, 2>     | 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef |
+      | 3            | 0             | DENSE TENSOR<F32> | ARRAY<F32, 2>    | ARRAY<F32, 2>     | 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef |
 
   Scenario Outline: Inferencer routes read defaulted materialized state
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"

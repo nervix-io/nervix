@@ -140,7 +140,7 @@ use nervix_models::{
     ResourceName, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
     ResourceUploadIdentity, ResourceUploadKey, ResourceUploadState, ScheduledModel, ScheduledNode,
     ShowRelayMaterializedState, StartDomain, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName, Timestamp,
+    SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName, Timestamp, TimestampError,
     UniquelyKindedModel, UploadResource, UserName, VhostTlsResource, expression_to_nspl,
     ingest_quiesce_to_nspl,
 };
@@ -205,10 +205,7 @@ use crate::{
 };
 
 const REMOTE_DESCRIBE_RELAY_TIMEOUT: Duration = Duration::from_secs(1);
-const SUBSCRIPTION_INTEREST_VISIBILITY_TIMEOUT: Duration = Duration::from_secs(5);
-const SUBSCRIPTION_INTEREST_CHECK_TIMEOUT: Duration = Duration::from_millis(250);
-const RUNTIME_REVISION_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
-const RUNTIME_REVISION_READINESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const RUNTIME_REVISION_READINESS_PROPAGATION_BOUND: Duration = Duration::from_secs(30);
 const ENTITY_GATE_RELEASE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const FORCED_OWNERSHIP_RECOVERY_BUDGET: Duration = Duration::from_secs(5);
 const BACKGROUND_TASK_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
@@ -2842,10 +2839,6 @@ impl BackgroundTask {
         self.cancel.cancel();
     }
 
-    fn is_finished(&self) -> bool {
-        self.handle.is_finished()
-    }
-
     async fn join(self) {
         self.handle.join_after_shutdown("background task").await;
     }
@@ -3546,6 +3539,11 @@ enum ActiveDomainError {
     NotFound { domain: DomainName },
 }
 
+struct ResolvedDomainStart {
+    concrete_start: DomainStartPoint,
+    clock: DomainClockState,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DomainClockTaskSpec {
     clock: DomainClockState,
@@ -3553,7 +3551,6 @@ struct DomainClockTaskSpec {
     generation: u64,
     authority_revision: nervix_models::DomainClockAuthorityRevision,
     authority: ClusterNodeIdentity,
-    targets: BTreeSet<ClusterNodeIdentity>,
 }
 
 struct DomainClockTask {
@@ -3568,38 +3565,50 @@ struct DomainClockTask {
 /// successor for the same domain starts only after every retiring local task has finished.
 #[derive(Default)]
 struct DomainClockRetirements {
-    tasks: HashMap<DomainName, Vec<BackgroundTask>>,
+    tasks: HashMap<DomainName, Vec<DomainClockTask>>,
 }
 
 impl DomainClockRetirements {
+    fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
     fn contains(&self, domain: &DomainName) -> bool {
         self.tasks.contains_key(domain)
     }
 
-    fn retire(&mut self, domain: DomainName, task: BackgroundTask) {
-        task.request_stop();
+    fn retire(&mut self, domain: DomainName, task: DomainClockTask) {
+        task.task.request_stop();
         self.tasks.entry(domain).or_default().push(task);
     }
 
-    async fn reap(&mut self) {
-        let domains = self.tasks.keys().cloned().collect::<Vec<_>>();
-        for domain in domains {
-            tokio::task::consume_budget().await;
-            let Some(tasks) = self.tasks.remove(&domain) else {
-                continue;
-            };
-            let mut pending = Vec::new();
-            for task in tasks {
-                tokio::task::consume_budget().await;
-                if task.is_finished() {
-                    task.join().await;
-                } else {
-                    pending.push(task);
-                }
-            }
-            if !pending.is_empty() {
-                self.tasks.insert(domain, pending);
-            }
+    async fn join_next(&mut self) {
+        let mut completions = self
+            .tasks
+            .iter_mut()
+            .flat_map(|(domain, tasks)| {
+                tasks.iter_mut().enumerate().map(move |(index, task)| {
+                    let domain = domain.clone();
+                    async move {
+                        (&mut task.task.handle)
+                            .join_after_shutdown("retiring domain clock")
+                            .await;
+                        (domain, index)
+                    }
+                })
+            })
+            .collect::<FuturesUnordered<_>>();
+        let completed = completions
+            .next()
+            .await
+            .assured("join_next is called only while a clock task is retiring");
+        drop(completions);
+        let Some(tasks) = self.tasks.get_mut(&completed.0) else {
+            return;
+        };
+        tasks.swap_remove(completed.1);
+        if tasks.is_empty() {
+            self.tasks.remove(&completed.0);
         }
     }
 
@@ -3608,7 +3617,7 @@ impl DomainClockRetirements {
             tokio::task::consume_budget().await;
             for task in tasks {
                 tokio::task::consume_budget().await;
-                task.stop().await;
+                task.task.stop().await;
             }
         }
     }
@@ -4420,6 +4429,7 @@ async fn apply_cluster_runtime_state(
     local_node_id: &ClusterNodeName,
     state: ConsensusRuntimeState,
 ) -> Result<(), crate::runtime::RuntimeError> {
+    let mut cluster_state = cluster.subscribe_state_changes().await;
     let has_running_domain = state
         .domains
         .values()
@@ -4440,9 +4450,33 @@ async fn apply_cluster_runtime_state(
         return Ok(());
     }
 
-    let deadline = tokio::time::Instant::now() + RUNTIME_REVISION_READINESS_TIMEOUT;
+    let node_unavailability_timeout = cluster.node_unavailability_timeout();
+    // Applying a revision gets one start-time operation budget: peer-failure detection followed
+    // by readiness propagation. A peer that disconnects after this starts has only the remaining
+    // portion of that budget.
+    let Some(readiness_timeout) =
+        node_unavailability_timeout.checked_add(RUNTIME_REVISION_READINESS_PROPAGATION_BOUND)
+    else {
+        return Err(
+            crate::runtime::RuntimeError::RuntimeRevisionReadinessDeadlineOverflow {
+                node_unavailability_timeout,
+                readiness_propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
+            },
+        );
+    };
+    let Some(deadline) = tokio::time::Instant::now().checked_add(readiness_timeout) else {
+        return Err(
+            crate::runtime::RuntimeError::RuntimeRevisionReadinessDeadlineOverflow {
+                node_unavailability_timeout,
+                readiness_propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
+            },
+        );
+    };
+    let mut deadline_elapsed = false;
     loop {
         tokio::task::consume_budget().await;
+        let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
+        tokio::pin!(cluster_change);
         let gossip = cluster.gossip_state().await;
         let expected_nodes = gossip.live_identities();
         let ready_nodes = cluster
@@ -4455,13 +4489,19 @@ async fn apply_cluster_runtime_state(
         if pending_nodes.is_empty() {
             break;
         }
-        if tokio::time::Instant::now() >= deadline {
+        if deadline_elapsed {
             return Err(crate::runtime::RuntimeError::RuntimeRevisionReadiness {
                 revision: state.revision,
                 pending_nodes,
             });
         }
-        tokio::time::sleep(RUNTIME_REVISION_READINESS_POLL_INTERVAL).await;
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep_until(deadline) => {
+                deadline_elapsed = true;
+            }
+            _ = &mut cluster_change => {}
+        }
     }
 
     runtime.start_running_domain_ingestors().await
@@ -5163,71 +5203,69 @@ impl SessionServiceImpl {
         domain: &DomainName,
         relay: &RelayName,
     ) -> Result<(), String> {
-        let local_node_id = self.inner.consensus.local_node_id();
-        let mut pending_nodes = self
+        let subscriber = self.inner.cluster.local_node_identity().await;
+        let target_nodes = self
             .inner
             .cluster
             .live_node_ids()
             .await
             .into_iter()
-            .filter(|node_id| node_id != local_node_id)
+            .filter(|node_id| node_id != subscriber.node_id())
             .collect::<BTreeSet<_>>();
-        let deadline = tokio::time::Instant::now() + SUBSCRIPTION_INTEREST_VISIBILITY_TIMEOUT;
-        let mut last_errors = HashMap::new();
-
-        while !pending_nodes.is_empty() {
-            tokio::task::consume_budget().await;
-            for node_id in pending_nodes.clone() {
-                tokio::task::consume_budget().await;
-                match self
-                    .subscription_interest_is_visible(&node_id, local_node_id, domain, relay)
-                    .await
-                {
-                    Ok(true) => {
-                        pending_nodes.remove(&node_id);
-                        last_errors.remove(&node_id);
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        last_errors.insert(node_id, error);
-                    }
+        let mut checks = target_nodes
+            .iter()
+            .map(|node_id| {
+                let subscriber = subscriber.clone();
+                async move {
+                    let result = self
+                        .wait_for_subscription_interest_visibility_on_node(
+                            node_id,
+                            &subscriber,
+                            domain,
+                            relay,
+                        )
+                        .await;
+                    (node_id, result)
                 }
-            }
-            if pending_nodes.is_empty() {
-                return Ok(());
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(format!(
-                    "timed out waiting for subscription interest in relay '{}' in domain '{}' to \
-                     become visible on nodes {:?}; last errors: {:?}",
-                    relay.as_str(),
-                    domain.as_str(),
-                    pending_nodes,
-                    last_errors,
-                ));
+            })
+            .collect::<FuturesUnordered<_>>();
+        let mut errors = BTreeMap::new();
+        while let Some((node_id, result)) = checks.next().await {
+            tokio::task::consume_budget().await;
+            if let Err(error) = result {
+                errors.insert(node_id.clone(), error);
             }
         }
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "subscription interest in relay '{}' in domain '{}' did not become visible on \
+                 every live node: {:?}",
+                relay.as_str(),
+                domain.as_str(),
+                errors,
+            ))
+        }
     }
 
-    async fn subscription_interest_is_visible(
+    async fn wait_for_subscription_interest_visibility_on_node(
         &self,
         target_node_id: &ClusterNodeName,
-        subscriber_node_id: &ClusterNodeName,
+        subscriber: &ClusterNodeIdentity,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> Result<bool, String> {
+    ) -> Result<(), String> {
         let response = self
             .inner
             .interconnect
-            .request_with_timeout(
+            .request(
                 target_node_id,
                 RemoteSubscriptionInterestVisibilityRequest {
-                    subscriber_node_id: subscriber_node_id.clone(),
+                    subscriber: subscriber.clone(),
                     domain: domain.clone(),
                     relay: relay.clone(),
                 },
-                SUBSCRIPTION_INTEREST_CHECK_TIMEOUT,
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -5273,28 +5311,11 @@ impl SessionServiceImpl {
         node_id: &ClusterNodeName,
         envelope: ControlEnvelope,
     ) -> Result<(), String> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            tokio::task::consume_budget().await;
-            let result = async {
-                self.inner
-                    .interconnect
-                    .send(node_id, Envelope::Control(envelope.clone()))
-                    .await
-                    .map_err(|error| {
-                        format!("failed to send interconnect control to '{node_id}': {error}")
-                    })
-            }
-            .await;
-            let error = match result {
-                Ok(()) => return Ok(()),
-                Err(error) => error,
-            };
-            if tokio::time::Instant::now() >= deadline {
-                return Err(error);
-            }
-            sleep(Duration::from_millis(25)).await;
-        }
+        self.inner
+            .interconnect
+            .send(node_id, Envelope::Control(envelope))
+            .await
+            .map_err(|error| format!("failed to send interconnect control to '{node_id}': {error}"))
     }
 
     async fn domain_clock_authority_candidates(&self) -> DomainClockAuthorityCandidates {
@@ -7053,6 +7074,105 @@ impl SessionServiceImpl {
         self.release_cluster_entity_gates(handoff.gate).await;
     }
 
+    async fn activate_local_ownership_handoff_state(
+        &self,
+        request: &RemoteActivateOwnershipHandoffStateRequest,
+    ) -> OwnershipHandoffResult<()> {
+        let deadline = tokio::time::Instant::now()
+            .checked_add(request.activation_budget)
+            .ok_or_else(|| {
+                OwnershipHandoffError::deadline(
+                    "ownership handoff activation deadline exceeds the runtime instant range",
+                )
+            })?;
+        let activation = async {
+            if request.destination != *self.inner.consensus.local_node_id() {
+                return Err(OwnershipHandoffError::participant(format!(
+                    "ownership handoff for {} '{}' targets node '{}' but reached '{}'",
+                    request.entity.kind.as_str(),
+                    request.entity.identifier.as_str(),
+                    request.destination,
+                    self.inner.consensus.local_node_id()
+                )));
+            }
+            let current_incarnations = self.live_node_incarnations().await;
+            Self::verify_ownership_handoff_node_incarnation(
+                &current_incarnations,
+                &request.source,
+                request.source_incarnation,
+                "source",
+            )?;
+            Self::verify_ownership_handoff_node_incarnation(
+                &current_incarnations,
+                &request.destination,
+                request.destination_incarnation,
+                "destination",
+            )?;
+
+            let mut schedule_rx = self.inner.consensus.subscribe_schedule();
+            let target_schedule = loop {
+                tokio::task::consume_budget().await;
+                let schedule = self.inner.consensus.current_schedule().await;
+                let current = schedule.domain(&request.domain).ok_or_else(|| {
+                    OwnershipHandoffError::schedule(format!(
+                        "domain '{}' has no committed schedule while activating ownership handoff",
+                        request.domain.as_str()
+                    ))
+                })?;
+                let fingerprint = Runtime::ownership_handoff_schedule_fingerprint(current)?;
+                if fingerprint == request.target_schedule_fingerprint {
+                    let node = current.nodes.get(&request.entity).ok_or_else(|| {
+                        OwnershipHandoffError::schedule(format!(
+                            "{} '{}' is absent from the ownership handoff target schedule",
+                            request.entity.kind.as_str(),
+                            request.entity.identifier.as_str()
+                        ))
+                    })?;
+                    if !node.is_primary_on(&request.destination) {
+                        return Err(OwnershipHandoffError::participant(format!(
+                            "{} '{}' is not owned by destination node '{}' in the committed \
+                             target schedule",
+                            request.entity.kind.as_str(),
+                            request.entity.identifier.as_str(),
+                            request.destination
+                        )));
+                    }
+                    break current.clone();
+                }
+                if fingerprint != request.base_schedule_fingerprint {
+                    return Err(OwnershipHandoffError::schedule(format!(
+                        "domain '{}' advanced to a different schedule before ownership handoff \
+                         activation",
+                        request.domain.as_str()
+                    )));
+                }
+                schedule_rx.changed().await.assured(
+                    "the consensus observer retains its schedule sender for the server lifetime",
+                );
+            };
+
+            self.inner
+                .runtime
+                .activate_persisted_ownership_handoff(
+                    self.inner.consensus.local_node_id(),
+                    request,
+                    target_schedule,
+                )
+                .await
+        };
+
+        tokio::time::timeout_at(deadline, activation)
+            .await
+            .map_err(|_| {
+                OwnershipHandoffError::deadline(format!(
+                    "timed out waiting for {} '{}' to activate on node '{}'",
+                    request.entity.kind.as_str(),
+                    request.entity.identifier.as_str(),
+                    request.destination
+                ))
+            })?
+    }
+
     async fn activate_planned_ownership_handoff(
         &self,
         domain: &DomainName,
@@ -7070,6 +7190,17 @@ impl SessionServiceImpl {
                 .node_incarnations
                 .get(&moved.destination)
                 .verified("every planned destination has a bound incarnation");
+            let remaining = handoff
+                .activation_deadline
+                .saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(OwnershipHandoffError::deadline(format!(
+                    "timed out waiting for {} '{}' to activate on node '{}'",
+                    moved.entity.kind.as_str(),
+                    moved.entity.identifier.as_str(),
+                    moved.destination
+                )));
+            }
             let request = RemoteActivateOwnershipHandoffStateRequest {
                 operation_id: handoff.operation_id.clone(),
                 source: moved.former_owner.clone(),
@@ -7080,34 +7211,21 @@ impl SessionServiceImpl {
                 entity: moved.entity.clone(),
                 base_schedule_fingerprint: handoff.base_schedule_fingerprint,
                 target_schedule_fingerprint: handoff.target_schedule_fingerprint,
+                activation_budget: remaining,
             };
-            let activation = async {
-                if request.destination == *self.inner.consensus.local_node_id() {
-                    return self
-                        .inner
-                        .runtime
-                        .verify_ownership_handoff_activation(&request);
-                }
+            if request.destination == *self.inner.consensus.local_node_id() {
+                self.activate_local_ownership_handoff_state(&request)
+                    .await?;
+            } else {
                 let destination = request.destination.clone();
                 let response = self
                     .inner
                     .interconnect
-                    .request(&destination, request)
+                    .request_with_timeout(&destination, request, remaining)
                     .await
                     .map_err(|error| OwnershipHandoffError::transport(error.to_string()))?;
-                response.map_err(|failure| OwnershipHandoffError::participant(failure.to_string()))
-            };
-            match tokio::time::timeout_at(handoff.activation_deadline, activation).await {
-                Ok(Ok(())) => {}
-                Ok(Err(reason)) => return Err(reason),
-                Err(_) => {
-                    return Err(OwnershipHandoffError::deadline(format!(
-                        "timed out waiting for {} '{}' to activate on node '{}'",
-                        moved.entity.kind.as_str(),
-                        moved.entity.identifier.as_str(),
-                        moved.destination
-                    )));
-                }
+                response
+                    .map_err(|failure| OwnershipHandoffError::participant(failure.to_string()))?;
             }
         }
         Ok(())
@@ -7118,24 +7236,9 @@ impl SessionServiceImpl {
         domain: &DomainName,
         handoff: PlannedOwnershipHandoff,
     ) -> OwnershipHandoffResult<()> {
-        let activation = loop {
-            tokio::task::consume_budget().await;
-            match self
-                .activate_planned_ownership_handoff(domain, &handoff)
-                .await
-            {
-                Ok(()) => break Ok(()),
-                Err(error) if tokio::time::Instant::now() < handoff.activation_deadline => {
-                    debug!(
-                        domain = domain.as_str(),
-                        error = %error,
-                        "planned ownership handoff activation will retry"
-                    );
-                    sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL).await;
-                }
-                Err(error) => break Err(error),
-            }
-        };
+        let activation = self
+            .activate_planned_ownership_handoff(domain, &handoff)
+            .await;
         if let Err(error) = activation {
             let hold_duration = handoff.started_at.elapsed();
             for moved in &handoff.moves {
@@ -7287,7 +7390,15 @@ impl SessionServiceImpl {
             if all_drained {
                 return Ok(());
             }
-            if tokio::time::Instant::now() >= deadline {
+            #[cfg(feature = "testing")]
+            let force_timeout = if last_status.is_some() {
+                self.inner.runtime.take_forced_entity_drain_timeout(domain)
+            } else {
+                false
+            };
+            #[cfg(not(feature = "testing"))]
+            let force_timeout = false;
+            if force_timeout || tokio::time::Instant::now() >= deadline {
                 let Some((pending_node, last_status)) = last_status.or_else(|| {
                     // A gate holding no nodes has nothing left to drain, so there is no pending
                     // node to name and no timeout to report.
@@ -9823,24 +9934,6 @@ impl SessionServiceImpl {
                         None,
                     )
                 } else {
-                    let wall_started_at = current_timestamp();
-                    let (mut logical_start, time_rate) = start.start.resolve_at(wall_started_at);
-                    if let DomainPace::Paced = domain.config.pace
-                        && let DomainStartPoint::Resume = &start.start
-                        && let Ok(Some(resume_at)) =
-                            self.inner.runtime.current_paced_domain_time(domain_id)
-                    {
-                        logical_start = resume_at;
-                    }
-                    let concrete_start = match &start.start {
-                        DomainStartPoint::Resume => DomainStartPoint::Resume,
-                        DomainStartPoint::Now { .. } => DomainStartPoint::At {
-                            timestamp: logical_start,
-                            time_rate,
-                        },
-                        DomainStartPoint::At { .. } => start.start.clone(),
-                    };
-                    let clock = DomainClockState::new(wall_started_at, logical_start, time_rate);
                     let authority = if let DomainPace::Paced = domain.config.pace {
                         match self.selected_domain_clock_authority(domain_id).await {
                             Some(authority) => Ok(Some(authority)),
@@ -9853,17 +9946,31 @@ impl SessionServiceImpl {
                         Ok(None)
                     };
                     match authority {
-                        Ok(authority) => (
-                            command_ok(format!("starting domain '{}'", domain_id.as_str())),
-                            Some(TransactionStepEffect::StartDomain {
-                                domain_id: domain_id.clone(),
-                                expected_start_version: domain.start_version,
-                                start: concrete_start,
-                                clock: matches!(domain.config.pace, DomainPace::Paced)
-                                    .then_some(clock),
-                                authority,
-                            }),
-                        ),
+                        Ok(authority) => {
+                            match self
+                                .resolve_domain_start(domain_id, &domain, &start.start)
+                                .await
+                            {
+                                Ok(resolved_start) => (
+                                    command_ok(format!("starting domain '{}'", domain_id.as_str())),
+                                    Some(TransactionStepEffect::StartDomain {
+                                        domain_id: domain_id.clone(),
+                                        expected_start_version: domain.start_version,
+                                        start: resolved_start.concrete_start,
+                                        clock: matches!(domain.config.pace, DomainPace::Paced)
+                                            .then_some(resolved_start.clock),
+                                        authority,
+                                    }),
+                                ),
+                                Err(error) => (
+                                    command_error(format!(
+                                        "failed to construct domain clock start for '{}': {error}",
+                                        domain_id.as_str()
+                                    )),
+                                    None,
+                                ),
+                            }
+                        }
                         Err(message) => (command_error(message), None),
                     }
                 }
@@ -12087,6 +12194,46 @@ impl SessionServiceImpl {
         })
     }
 
+    async fn resolve_domain_start(
+        &self,
+        domain_id: &DomainName,
+        domain: &DomainState,
+        requested_start: &DomainStartPoint,
+    ) -> Result<ResolvedDomainStart, Report<TimestampError>> {
+        let wall_started_at = current_timestamp();
+        let (mut logical_start, time_rate) = requested_start.resolve_at(wall_started_at);
+        if let DomainPace::Paced = domain.config.pace
+            && let DomainStartPoint::Resume = requested_start
+            && let Ok(Some(resume_at)) = self.inner.runtime.current_paced_domain_time(domain_id)
+        {
+            logical_start = resume_at;
+        }
+        #[cfg(feature = "testing")]
+        let wall_started_at = if let DomainPace::Paced = domain.config.pace
+            && let DomainStartPoint::Now { .. } | DomainStartPoint::At { .. } = requested_start
+            && let Some(initial_elapsed) = self
+                .inner
+                .runtime
+                .take_domain_clock_initial_elapsed(domain_id)
+        {
+            wall_started_at.checked_sub(initial_elapsed)?
+        } else {
+            wall_started_at
+        };
+        let concrete_start = match requested_start {
+            DomainStartPoint::Resume => DomainStartPoint::Resume,
+            DomainStartPoint::Now { .. } => DomainStartPoint::At {
+                timestamp: logical_start,
+                time_rate,
+            },
+            DomainStartPoint::At { .. } => requested_start.clone(),
+        };
+        Ok(ResolvedDomainStart {
+            concrete_start,
+            clock: DomainClockState::new(wall_started_at, logical_start, time_rate),
+        })
+    }
+
     async fn start_domain(&self, domain_id: &DomainName, start: StartDomain) -> CommandResult {
         let Some(domain) = self.inner.consensus.current_domain(domain_id).await else {
             return command_error(format!("domain '{}' does not exist", domain_id.as_str()));
@@ -12106,23 +12253,6 @@ impl SessionServiceImpl {
                 domain_id.as_str()
             ));
         }
-        let wall_started_at = current_timestamp();
-        let (mut logical_start, time_rate) = start.start.resolve_at(wall_started_at);
-        if let DomainPace::Paced = domain.config.pace
-            && let DomainStartPoint::Resume = &start.start
-            && let Ok(Some(resume_at)) = self.inner.runtime.current_paced_domain_time(domain_id)
-        {
-            logical_start = resume_at;
-        }
-        let concrete_start = match &start.start {
-            DomainStartPoint::Resume => DomainStartPoint::Resume,
-            DomainStartPoint::Now { .. } => DomainStartPoint::At {
-                timestamp: logical_start,
-                time_rate,
-            },
-            DomainStartPoint::At { .. } => start.start.clone(),
-        };
-        let clock = DomainClockState::new(wall_started_at, logical_start, time_rate);
         let authority = if let DomainPace::Paced = domain.config.pace {
             let Some(authority) = self.selected_domain_clock_authority(domain_id).await else {
                 return command_error(format!(
@@ -12134,13 +12264,26 @@ impl SessionServiceImpl {
         } else {
             None
         };
+        let resolved_start = match self
+            .resolve_domain_start(domain_id, &domain, &start.start)
+            .await
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                return command_error(format!(
+                    "failed to construct domain clock start for '{}': {error}",
+                    domain_id.as_str()
+                ));
+            }
+        };
         match self
             .inner
             .consensus
             .start_domain(
                 domain_id.clone(),
-                concrete_start,
-                matches!(domain.config.pace, DomainPace::Paced).then_some(clock.clone()),
+                resolved_start.concrete_start,
+                matches!(domain.config.pace, DomainPace::Paced)
+                    .then_some(resolved_start.clock.clone()),
                 authority,
             )
             .await
@@ -17799,64 +17942,56 @@ async fn reconcile_domain_clock_tasks(
     tasks: &mut HashMap<DomainName, DomainClockTask>,
     retirements: &mut DomainClockRetirements,
 ) {
-    retirements.reap().await;
     let state = service.inner.consensus.current_runtime_state().await;
     let local_identity = service.inner.cluster.local_node_identity().await;
-    let gossip = service.inner.cluster.gossip_state().await;
-    let targets = gossip.live_identities();
-    let ready_nodes = service
-        .inner
-        .cluster
-        .nodes_ready_for_runtime_revision(state.revision)
-        .await;
-    let all_targets_ready = !targets.is_empty()
-        && targets
-            .iter()
-            .all(|identity| ready_nodes.contains(identity));
 
     let mut desired = HashMap::<DomainName, DomainClockTaskSpec>::new();
-    if all_targets_ready {
-        for (domain_id, domain) in &state.domains {
-            tokio::task::consume_budget().await;
-            if matches!(domain.status, DomainStatus::Stopped)
-                || matches!(domain.config.pace, DomainPace::Unpaced)
-            {
-                continue;
-            }
-            let Some(clock) = domain.clock.clone() else {
-                continue;
-            };
-            let Some(authority) = state.domain_clock_authorities.get(domain_id) else {
-                continue;
-            };
-            let Some(owner) = authority.owner() else {
-                continue;
-            };
-            if owner != &local_identity {
-                continue;
-            }
-            let period = match domain_clock_period(&domain.config) {
-                Ok(period) => period,
-                Err(error) => {
-                    warn!(
-                        domain = domain_id.as_str(),
-                        error, "committed paced domain has an invalid clock period"
-                    );
-                    continue;
-                }
-            };
-            desired.insert(
-                domain_id.clone(),
-                DomainClockTaskSpec {
-                    clock,
-                    period,
-                    generation: domain.start_version,
-                    authority_revision: authority.revision(),
-                    authority: owner.clone(),
-                    targets: targets.clone(),
-                },
-            );
+    for (domain_id, domain) in &state.domains {
+        tokio::task::consume_budget().await;
+        if matches!(domain.status, DomainStatus::Stopped)
+            || matches!(domain.config.pace, DomainPace::Unpaced)
+        {
+            continue;
         }
+        let Some(clock) = domain.clock.clone() else {
+            continue;
+        };
+        let Some(authority) = state.domain_clock_authorities.get(domain_id) else {
+            continue;
+        };
+        if !service.inner.runtime.has_domain_clock_authority(
+            domain_id,
+            domain.start_version,
+            authority,
+        ) {
+            continue;
+        }
+        let Some(owner) = authority.owner() else {
+            continue;
+        };
+        if owner != &local_identity {
+            continue;
+        }
+        let period = match domain_clock_period(&domain.config) {
+            Ok(period) => period,
+            Err(error) => {
+                warn!(
+                    domain = domain_id.as_str(),
+                    error, "committed paced domain has an invalid clock period"
+                );
+                continue;
+            }
+        };
+        desired.insert(
+            domain_id.clone(),
+            DomainClockTaskSpec {
+                clock,
+                period,
+                generation: domain.start_version,
+                authority_revision: authority.revision(),
+                authority: owner.clone(),
+            },
+        );
     }
 
     let existing = tasks.keys().cloned().collect::<Vec<_>>();
@@ -17866,7 +18001,7 @@ async fn reconcile_domain_clock_tasks(
             _ => false,
         };
         if !unchanged && let Some(task) = tasks.remove(&domain_id) {
-            retirements.retire(domain_id, task.task);
+            retirements.retire(domain_id, task);
         }
     }
 
@@ -17880,8 +18015,16 @@ async fn reconcile_domain_clock_tasks(
         let task_domain_id = domain_id.clone();
         let task_token = token.clone();
         let task_spec = spec.clone();
+        let minimum_runtime_revision = state.revision;
         let handle = tokio::spawn(async move {
-            run_domain_clock(task_service, task_domain_id, task_spec, task_token).await;
+            run_domain_clock(
+                task_service,
+                task_domain_id,
+                task_spec,
+                minimum_runtime_revision,
+                task_token,
+            )
+            .await;
         });
         tasks.insert(
             domain_id,
@@ -17896,13 +18039,71 @@ async fn reconcile_domain_clock_tasks(
     }
 }
 
+async fn run_domain_clock_authority_reconciliation(
+    service: SessionServiceImpl,
+    shutdown: CancellationToken,
+) {
+    let mut topology_changes = service.inner.consensus.subscribe_topology();
+    let mut domain_changes = service.inner.consensus.subscribe_domains();
+    let mut cluster_state = service.inner.cluster.subscribe_state_changes().await;
+
+    loop {
+        tokio::task::consume_budget().await;
+        // Prepare the deadline-bearing wait before reading the effective cluster view. If the
+        // monotonic deadline elapses while reconciliation is running, the prepared sleep remains
+        // ready and causes a second predicate evaluation instead of losing that transition.
+        let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
+        tokio::pin!(cluster_change);
+        if service.inner.consensus.current_leader().await.as_ref()
+            == Some(service.inner.consensus.local_node_id())
+        {
+            service.reconcile_domain_clock_authorities().await;
+        }
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            open = topology_changes.changed() => {
+                if !open {
+                    break;
+                }
+            }
+            changed = domain_changes.changed() => changed.assured(
+                "the consensus store retains its domain sender for the server lifetime",
+            ),
+            _ = &mut cluster_change => {}
+        }
+    }
+}
+
 async fn run_domain_clock(
     service: SessionServiceImpl,
     domain_id: DomainName,
     spec: DomainClockTaskSpec,
+    minimum_runtime_revision: u64,
     shutdown: CancellationToken,
 ) {
+    let mut cluster_state = service.inner.cluster.subscribe_state_changes().await;
+    loop {
+        tokio::task::consume_budget().await;
+        let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
+        tokio::pin!(cluster_change);
+        let live_targets = service.inner.cluster.gossip_state().await.live_identities();
+        let ready_targets = service
+            .inner
+            .cluster
+            .nodes_ready_for_runtime_revision(minimum_runtime_revision)
+            .await;
+        if !live_targets.is_empty() && live_targets.is_subset(&ready_targets) {
+            break;
+        }
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            _ = &mut cluster_change => {}
+        }
+    }
+
     let mut next_tick_id = 1;
+    let mut latest_progress = None;
+    let mut delivered_targets = BTreeSet::new();
     loop {
         tokio::task::consume_budget().await;
         if shutdown.is_cancelled() {
@@ -17928,8 +18129,18 @@ async fn run_domain_clock(
             }
         };
         if let Some(advancement) = due {
-            emit_domain_clock_progress(&service, &domain_id, &spec, &mut next_tick_id, advancement)
-                .await;
+            latest_progress = Some(
+                emit_domain_clock_progress(
+                    &service,
+                    &domain_id,
+                    &spec,
+                    minimum_runtime_revision,
+                    &mut next_tick_id,
+                    advancement,
+                    &mut delivered_targets,
+                )
+                .await,
+            );
             continue;
         }
         let next_boundary = match spec.clock.tick_boundary(spec.period, next_tick_id) {
@@ -17972,9 +18183,26 @@ async fn run_domain_clock(
                 break;
             }
         };
+        // `due_advancement` returned `None`, so this boundary is strictly in the logical future.
+        // The model converts that positive delta with ceiling and a one-nanosecond minimum.
+        let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
+        tokio::pin!(cluster_change);
         tokio::select! {
             _ = shutdown.cancelled() => break,
-            _ = sleep(wait.clamp(Duration::from_millis(1), Duration::from_millis(250))) => {}
+            _ = sleep(wait) => {}
+            _ = &mut cluster_change => {
+                if let Some(progress) = latest_progress.as_ref() {
+                    deliver_domain_clock_progress(
+                        &service,
+                        &domain_id,
+                        &spec,
+                        minimum_runtime_revision,
+                        progress,
+                        &mut delivered_targets,
+                    )
+                    .await;
+                }
+            }
         }
     }
 }
@@ -17983,9 +18211,11 @@ async fn emit_domain_clock_progress(
     service: &SessionServiceImpl,
     domain_id: &DomainName,
     spec: &DomainClockTaskSpec,
+    minimum_runtime_revision: u64,
     next_tick_id: &mut u64,
     advancement: DomainClockAdvancement,
-) {
+    delivered_targets: &mut BTreeSet<ClusterNodeIdentity>,
+) -> DomainClockProgress {
     #[cfg(feature = "testing")]
     let progress_was_paused = service
         .inner
@@ -18007,9 +18237,53 @@ async fn emit_domain_clock_progress(
         authority: spec.authority.clone(),
         tick,
     };
-    for target in &spec.targets {
+    delivered_targets.clear();
+    deliver_domain_clock_progress(
+        service,
+        domain_id,
+        spec,
+        minimum_runtime_revision,
+        &progress,
+        delivered_targets,
+    )
+    .await;
+    #[cfg(feature = "testing")]
+    if progress_was_paused {
+        service.inner.runtime.mark_domain_clock_progress_delivered(
+            domain_id,
+            service.inner.consensus.local_node_id(),
+        );
+    }
+    progress
+}
+
+async fn deliver_domain_clock_progress(
+    service: &SessionServiceImpl,
+    domain_id: &DomainName,
+    spec: &DomainClockTaskSpec,
+    minimum_runtime_revision: u64,
+    progress: &DomainClockProgress,
+    delivered_targets: &mut BTreeSet<ClusterNodeIdentity>,
+) {
+    let gossip = service.inner.cluster.gossip_state().await;
+    let ready = service
+        .inner
+        .cluster
+        .nodes_ready_for_runtime_revision(minimum_runtime_revision)
+        .await;
+    let mut targets = gossip
+        .live_identities()
+        .intersection(&ready)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    targets.insert(spec.authority.clone());
+    let pending_targets = targets
+        .difference(delivered_targets)
+        .cloned()
+        .collect::<Vec<_>>();
+    for target in pending_targets {
         tokio::task::consume_budget().await;
-        if target == &spec.authority {
+        let delivered = if target == spec.authority {
             service.handle_domain_clock_progress(
                 spec.authority.node_id(),
                 DomainClockProgressEnvelope {
@@ -18017,32 +18291,33 @@ async fn emit_domain_clock_progress(
                     progress: progress.clone(),
                 },
             );
-            continue;
+            true
+        } else {
+            match service
+                .dispatch_interconnect_control(
+                    target.node_id(),
+                    ControlEnvelope::DomainClockProgress(DomainClockProgressEnvelope {
+                        domain_id: domain_id.clone(),
+                        progress: progress.clone(),
+                    }),
+                )
+                .await
+            {
+                Ok(()) => true,
+                Err(error) => {
+                    warn!(
+                        domain = domain_id.as_str(),
+                        node = %target,
+                        error = %error,
+                        "failed to deliver domain tick"
+                    );
+                    false
+                }
+            }
+        };
+        if delivered {
+            delivered_targets.insert(target);
         }
-        if let Err(error) = service
-            .dispatch_interconnect_control(
-                target.node_id(),
-                ControlEnvelope::DomainClockProgress(DomainClockProgressEnvelope {
-                    domain_id: domain_id.clone(),
-                    progress: progress.clone(),
-                }),
-            )
-            .await
-        {
-            warn!(
-                domain = domain_id.as_str(),
-                node = %target,
-                error = %error,
-                "failed to deliver domain tick"
-            );
-        }
-    }
-    #[cfg(feature = "testing")]
-    if progress_was_paused {
-        service.inner.runtime.mark_domain_clock_progress_delivered(
-            domain_id,
-            service.inner.consensus.local_node_id(),
-        );
     }
 }
 
@@ -19374,28 +19649,30 @@ impl Application {
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
-        let subscription_visibility_service = service.clone();
+        let subscription_interest_service = service.clone();
         interconnect
             .register_handler::<RemoteSubscriptionInterestVisibilityRequest, _, _>(
                 move |context, request| {
-                    let service = subscription_visibility_service.clone();
+                    let service = subscription_interest_service.clone();
                     async move {
-                        let result = if &request.subscriber_node_id != context.peer_node_id() {
+                        let result = if request.subscriber.node_id() != context.peer_node_id() {
                             Err(format!(
-                                "authenticated node '{}' cannot query interest for '{}'",
+                                "authenticated node '{}' cannot wait for subscription interest \
+                                 belonging to '{}'",
                                 context.peer_node_id(),
-                                request.subscriber_node_id,
+                                request.subscriber.node_id(),
                             ))
                         } else {
-                            Ok(service
+                            service
                                 .inner
                                 .cluster
-                                .nodes_with_subscription_interest(
+                                .wait_for_subscription_interest(
+                                    &request.subscriber,
                                     request.domain.as_str(),
                                     request.relay.as_str(),
                                 )
-                                .await
-                                .contains(&request.subscriber_node_id))
+                                .await;
+                            Ok(())
                         };
                         RemoteSubscriptionInterestVisibilityResponse { result }
                     }
@@ -19593,116 +19870,9 @@ impl Application {
                 move |_context, request| {
                     let service = activate_handoff_service.clone();
                     async move {
-                        let result: OwnershipHandoffResult<_> = async {
-                            if request.destination != *service.inner.consensus.local_node_id() {
-                                return Err(OwnershipHandoffError::participant(format!(
-                                    "ownership handoff for {} '{}' targets node '{}' but reached \
-                                     '{}'",
-                                    request.entity.kind.as_str(),
-                                    request.entity.identifier.as_str(),
-                                    request.destination,
-                                    service.inner.consensus.local_node_id()
-                                )));
-                            }
-                            let current_incarnations = service.live_node_incarnations().await;
-                            SessionServiceImpl::verify_ownership_handoff_node_incarnation(
-                                &current_incarnations,
-                                &request.source,
-                                request.source_incarnation,
-                                "source",
-                            )?;
-                            SessionServiceImpl::verify_ownership_handoff_node_incarnation(
-                                &current_incarnations,
-                                &request.destination,
-                                request.destination_incarnation,
-                                "destination",
-                            )?;
-                            let deadline = tokio::time::Instant::now()
-                                + service.inner.runtime.entity_gate_deadline();
-                            let target_schedule = loop {
-                                tokio::task::consume_budget().await;
-                                let schedule = service.inner.consensus.current_schedule().await;
-                                let current =
-                                    schedule.domain(&request.domain).ok_or_else(|| {
-                                        OwnershipHandoffError::schedule(format!(
-                                            "domain '{}' has no committed schedule while \
-                                             activating ownership handoff",
-                                            request.domain.as_str()
-                                        ))
-                                    })?;
-                                let fingerprint =
-                                    Runtime::ownership_handoff_schedule_fingerprint(current)?;
-                                if fingerprint == request.target_schedule_fingerprint {
-                                    let node =
-                                        current.nodes.get(&request.entity).ok_or_else(|| {
-                                            OwnershipHandoffError::schedule(format!(
-                                                "{} '{}' is absent from the ownership handoff \
-                                                 target schedule",
-                                                request.entity.kind.as_str(),
-                                                request.entity.identifier.as_str()
-                                            ))
-                                        })?;
-                                    if !node.is_primary_on(&request.destination) {
-                                        return Err(OwnershipHandoffError::participant(format!(
-                                            "{} '{}' is not owned by destination node '{}' in the \
-                                             committed target schedule",
-                                            request.entity.kind.as_str(),
-                                            request.entity.identifier.as_str(),
-                                            request.destination
-                                        )));
-                                    }
-                                    break current.clone();
-                                }
-                                if fingerprint != request.base_schedule_fingerprint {
-                                    return Err(OwnershipHandoffError::schedule(format!(
-                                        "domain '{}' advanced to a different schedule before \
-                                         ownership handoff activation",
-                                        request.domain.as_str()
-                                    )));
-                                }
-                                if tokio::time::Instant::now() >= deadline {
-                                    return Err(OwnershipHandoffError::deadline(format!(
-                                        "timed out waiting for the committed ownership handoff \
-                                         schedule in domain '{}'",
-                                        request.domain.as_str()
-                                    )));
-                                }
-                                tokio::time::sleep(Duration::from_millis(25)).await;
-                            };
-                            let activation_needed = service
-                                .inner
-                                .runtime
-                                .authorize_persisted_ownership_handoff_activation(&request)?;
-                            service
-                                .apply_current_cluster_state()
-                                .await
-                                .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
-                            if activation_needed
-                                && service
-                                    .inner
-                                    .runtime
-                                    .verify_ownership_handoff_activation(&request)
-                                    .is_err()
-                            {
-                                service
-                                    .inner
-                                    .runtime
-                                    .rebuild_ownership_handoff_target(
-                                        service.inner.consensus.local_node_id(),
-                                        &request.domain,
-                                        target_schedule,
-                                    )
-                                    .await
-                                    .map_err(|error| {
-                                        OwnershipHandoffError::state(error.to_string())
-                                    })?;
-                            }
-                            service
-                                .inner
-                                .runtime
-                                .verify_ownership_handoff_activation(&request)
-                        }
-                        .await;
+                        let result = service
+                            .activate_local_ownership_handoff_state(&request)
+                            .await;
                         match result {
                             Ok(()) => Ok(()),
                             Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
@@ -19773,15 +19943,22 @@ impl Application {
                 }
                 if is_leader {
                     transaction_service.reconcile_transactions_once().await;
-                    transaction_service
-                        .reconcile_domain_clock_authorities()
-                        .await;
                 }
                 tokio::select! {
                     _ = transaction_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_millis(250)) => {}
                 }
             }
+        }));
+
+        let clock_authority_service = service.clone();
+        let clock_authority_shutdown = shutdown.clone();
+        background_tasks.push(tokio::spawn(async move {
+            run_domain_clock_authority_reconciliation(
+                clock_authority_service,
+                clock_authority_shutdown,
+            )
+            .await;
         }));
 
         let runtime_event_service = service.clone();
@@ -19853,36 +20030,54 @@ impl Application {
             service.broadcast_error(format!("failed to refresh HTTP TLS config: {error}"));
         }
 
-        let domain_service = service.clone();
-        let domain_shutdown = shutdown.clone();
+        let domain_apply_service = service.clone();
+        let domain_apply_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
-            let mut domains_rx = domain_service.inner.consensus.subscribe_domains();
-            let mut tasks: HashMap<DomainName, DomainClockTask> = HashMap::new();
-            let mut retirements = DomainClockRetirements::default();
-            if let Err(error) = domain_service.apply_current_cluster_state().await {
+            let mut domains_rx = domain_apply_service.inner.consensus.subscribe_domains();
+            if let Err(error) = domain_apply_service.apply_current_cluster_state().await {
                 warn!(error = %error, "failed to apply cluster schedule after initial domain sync");
             }
 
             loop {
                 tokio::task::consume_budget().await;
+                tokio::select! {
+                    _ = domain_apply_shutdown.cancelled() => break,
+                    changed = domains_rx.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        if let Err(error) = domain_apply_service.apply_current_cluster_state().await {
+                            warn!(error = %error, "failed to apply cluster schedule after domain sync");
+                        }
+                    }
+                }
+            }
+        }));
+
+        let clock_service = service.clone();
+        let clock_shutdown = shutdown.clone();
+        background_tasks.push(tokio::spawn(async move {
+            let mut domain_state_rx = clock_service.inner.runtime.subscribe_domain_state();
+            let mut tasks: HashMap<DomainName, DomainClockTask> = HashMap::new();
+            let mut retirements = DomainClockRetirements::default();
+
+            loop {
+                tokio::task::consume_budget().await;
                 reconcile_domain_clock_tasks(
-                    &domain_service,
-                    &domain_shutdown,
+                    &clock_service,
+                    &clock_shutdown,
                     &mut tasks,
                     &mut retirements,
                 )
                 .await;
                 tokio::select! {
-                    _ = domain_shutdown.cancelled() => break,
-                    changed = domains_rx.changed() => {
+                    _ = clock_shutdown.cancelled() => break,
+                    changed = domain_state_rx.changed() => {
                         if changed.is_err() {
                             break;
                         }
-                        if let Err(error) = domain_service.apply_current_cluster_state().await {
-                            warn!(error = %error, "failed to apply cluster schedule after domain sync");
-                        }
                     }
-                    _ = sleep(Duration::from_millis(100)) => {}
+                    _ = retirements.join_next(), if !retirements.is_empty() => {}
                 }
             }
 

@@ -638,6 +638,16 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) fn take_domain_clock_initial_elapsed(
+        &self,
+        domain: &DomainName,
+    ) -> Option<Duration> {
+        self.inner
+            .fault_injection
+            .take_domain_clock_initial_elapsed(domain)
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_domain_clock_progress_if_armed(
         &self,
         domain: &DomainName,
