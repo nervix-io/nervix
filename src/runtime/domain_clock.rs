@@ -22,7 +22,6 @@ use nervix_models::{
 #[cfg(test)]
 use nervix_wasm::WasmExecutionContext;
 use thiserror::Error;
-#[cfg(any(test, feature = "testing"))]
 use tokio::sync::watch;
 #[cfg(any(test, feature = "testing"))]
 use tokio_util::sync::CancellationToken;
@@ -166,7 +165,6 @@ impl DomainClockInstallation {
 struct DomainClockSharedState {
     installation: DomainClockInstallation,
     last_read: Option<DomainExecutionSnapshot>,
-    #[cfg(any(test, feature = "testing"))]
     change_version: u64,
 }
 
@@ -174,7 +172,6 @@ struct DomainClockSharedState {
 struct DomainClockInner {
     domain: DomainName,
     state: parking_lot::Mutex<DomainClockSharedState>,
-    #[cfg(any(test, feature = "testing"))]
     changes: watch::Sender<u64>,
 }
 
@@ -189,7 +186,6 @@ pub struct DomainClockLifecycle {
 
 impl DomainClockLifecycle {
     pub fn new(domain: DomainName) -> Self {
-        #[cfg(any(test, feature = "testing"))]
         let (changes, _) = watch::channel(0);
         Self {
             inner: Arc::new(DomainClockInner {
@@ -197,10 +193,8 @@ impl DomainClockLifecycle {
                 state: parking_lot::Mutex::new(DomainClockSharedState {
                     installation: DomainClockInstallation::Missing,
                     last_read: None,
-                    #[cfg(any(test, feature = "testing"))]
                     change_version: 0,
                 }),
-                #[cfg(any(test, feature = "testing"))]
                 changes,
             }),
         }
@@ -342,14 +336,11 @@ impl DomainClockLifecycle {
         {
             shared.last_read = None;
         }
-        #[cfg(any(test, feature = "testing"))]
-        {
-            shared.change_version = shared
-                .change_version
-                .checked_add(1)
-                .assured("a runtime cannot install 2^64 domain clock lifecycle changes");
-            self.inner.changes.send_replace(shared.change_version);
-        }
+        shared.change_version = shared
+            .change_version
+            .checked_add(1)
+            .assured("a runtime cannot install 2^64 domain clock lifecycle changes");
+        self.inner.changes.send_replace(shared.change_version);
     }
 }
 
