@@ -36,11 +36,15 @@ mod identity;
 mod request;
 mod wire;
 
-pub use connection::{IncomingByteStream, RelayAdmission, RelayCancellationGuard};
+pub use connection::{
+    DuplexItems, DuplexReceiver, DuplexResponses, DuplexSender, IncomingByteStream, RelayAdmission,
+    RelayCancellationGuard,
+};
 pub use identity::TlsConfigBundle;
 pub use request::{
-    HandlerRegistrationError, InterconnectRequest, InterconnectStreamRequest, RemoteRequestFailure,
-    RequestContext, RequestError, RequestSubquota, StreamHandlerError, StreamingResponse,
+    HandlerRegistrationError, InterconnectDuplexRequest, InterconnectRequest,
+    InterconnectStreamRequest, RemoteRequestFailure, RequestContext, RequestError, RequestSubquota,
+    StreamHandlerError, StreamingResponse,
 };
 use request::{RequestEnvelope, RequestState, ResponseEnvelope};
 
@@ -2070,6 +2074,9 @@ mod tests {
         transport_a.shutdown().await;
         transport_b.shutdown().await;
     }
+
+    #[path = "duplex.rs"]
+    mod duplex;
 
     #[path = "progress.rs"]
     mod progress;

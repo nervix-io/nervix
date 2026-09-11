@@ -22,7 +22,7 @@ use std::{
 
 use dashmap::{DashMap, mapref::entry::Entry};
 use error_stack::Report;
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt as _};
 use meticulous::ResultExt as _;
 use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, Reservation};
 use nervix_models::ClusterNodeName;
@@ -47,7 +47,10 @@ use super::{
     PrepareForcedOwnershipRecoveryRequest, PrepareOwnershipHandoffStateRequest, Transport,
     TransportError, wire,
 };
-use crate::connection::OutboundByteStreamRequest;
+use crate::connection::{
+    DuplexItems, DuplexReceiver, DuplexResponses, DuplexSender, FrameReader,
+    OutboundByteStreamRequest, RawDuplexRequest,
+};
 
 #[doc(hidden)]
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -191,6 +194,25 @@ pub trait InterconnectRequest: RkyvMessage {
     const REQUIRES_LIVE_TARGET: bool = true;
 }
 
+/// A typed request that opens one ordered bidirectional frame stream.
+///
+/// The initiator submits `Item` frames after the opening message and the responder answers with
+/// `Response` frames. Both directions preserve submission order, and each side half-closes its own
+/// direction independently, so an idle stream stays open.
+pub trait InterconnectDuplexRequest: RkyvMessage {
+    /// The frames the initiator submits after the opening message.
+    type Item: RkyvMessage;
+    /// The frames the responder produces.
+    type Response: RkyvMessage;
+
+    const NAME: &'static str;
+    const CLASS: PoolClass;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
+    /// How long opening the stream may take. It is not a bound on the stream's lifetime.
+    const SETUP_TIMEOUT: Duration;
+    const REQUIRES_LIVE_TARGET: bool = true;
+}
+
 /// A typed request whose response is an incrementally flow-controlled byte stream.
 pub trait InterconnectStreamRequest: RkyvMessage {
     const NAME: &'static str;
@@ -215,6 +237,9 @@ impl StreamHandlerError {
 }
 
 pub type OutgoingByteStream =
+    Pin<Box<dyn Stream<Item = Result<ChargedBytes, StreamHandlerError>> + Send + 'static>>;
+
+pub(crate) type OutgoingFrameStream =
     Pin<Box<dyn Stream<Item = Result<ChargedBytes, StreamHandlerError>> + Send + 'static>>;
 
 /// A producer-owned stream with its exact byte count declared before response headers are sent.
@@ -322,6 +347,7 @@ impl HandledResponse {
 pub(crate) struct RequestState {
     handlers: DashMap<&'static str, Arc<Box<dyn ErasedRequestHandler>>, RandomState>,
     stream_handlers: DashMap<&'static str, Arc<Box<dyn ErasedStreamHandler>>, RandomState>,
+    duplex_handlers: DashMap<&'static str, Arc<Box<dyn ErasedDuplexHandler>>, RandomState>,
     live_nodes: DashMap<ClusterNodeName, (), RandomState>,
     live_nodes_observed: AtomicBool,
     membership_changed: Notify,
@@ -442,6 +468,7 @@ impl RequestState {
         Self {
             handlers: DashMap::default(),
             stream_handlers: DashMap::default(),
+            duplex_handlers: DashMap::default(),
             live_nodes: DashMap::default(),
             live_nodes_observed: AtomicBool::new(false),
             membership_changed: Notify::new(),
@@ -465,6 +492,9 @@ type HandlerFuture = Pin<
 
 type StreamHandlerFuture =
     Pin<Box<dyn Future<Output = Result<StreamingResponse, RemoteRequestFailure>> + Send + 'static>>;
+
+type DuplexHandlerFuture =
+    Pin<Box<dyn Future<Output = Result<OutgoingFrameStream, RemoteRequestFailure>> + Send + 'static>>;
 
 trait ErasedRequestHandler: Send + Sync {
     fn class(&self) -> PoolClass;
@@ -491,6 +521,19 @@ trait ErasedStreamHandler: Send + Sync {
     ) -> StreamHandlerFuture;
 }
 
+trait ErasedDuplexHandler: Send + Sync {
+    fn class(&self) -> PoolClass;
+    fn subquota(&self) -> RequestSubquota;
+
+    fn handle(
+        &self,
+        executor: Executor,
+        context: RequestContext,
+        payload: Vec<u8>,
+        frames: FrameReader,
+    ) -> DuplexHandlerFuture;
+}
+
 struct TypedRequestHandler<M, H> {
     handler: Arc<H>,
     request: PhantomData<fn(M)>,
@@ -499,6 +542,60 @@ struct TypedRequestHandler<M, H> {
 struct TypedStreamHandler<M, H> {
     handler: Arc<H>,
     request: PhantomData<fn(M)>,
+}
+
+struct TypedDuplexHandler<M, H> {
+    handler: Arc<H>,
+    request: PhantomData<fn(M)>,
+}
+
+impl<M, H, F> ErasedDuplexHandler for TypedDuplexHandler<M, H>
+where
+    M: InterconnectDuplexRequest,
+    H: Fn(RequestContext, M, DuplexItems<M::Item>) -> F + Send + Sync + 'static,
+    F: Future<Output = Result<DuplexResponses<M::Response>, StreamHandlerError>> + Send + 'static,
+{
+    fn class(&self) -> PoolClass {
+        M::CLASS
+    }
+
+    fn subquota(&self) -> RequestSubquota {
+        M::SUBQUOTA
+    }
+
+    fn handle(
+        &self,
+        executor: Executor,
+        context: RequestContext,
+        payload: Vec<u8>,
+        frames: FrameReader,
+    ) -> DuplexHandlerFuture {
+        let handler = self.handler.clone();
+        Box::pin(async move {
+            let (request, _request_reservation) =
+                M::decode_rkyv(executor.clone(), M::CLASS, payload)
+                    .await
+                    .map_err(|error| RemoteRequestFailure::InvalidPayload(error.to_string()))?;
+            let items = DuplexItems::new(frames, executor.clone(), M::CLASS, M::NAME);
+            let responses = (handler)(context, request, items)
+                .await
+                .map_err(|error| RemoteRequestFailure::ResponseEncode(error.to_string()))?;
+            let limit = M::CLASS.payload_limit(&executor);
+            let frames = responses.into_stream().then(move |response| {
+                let executor = executor.clone();
+                async move {
+                    let response = response?;
+                    let (payload, reservation) = response
+                        .encode_rkyv(executor, M::CLASS, limit)
+                        .await
+                        .map_err(|error| StreamHandlerError::new(error.to_string()))?;
+                    Ok(ChargedBytes::from_owned(payload, reservation))
+                }
+            });
+            let frames: OutgoingFrameStream = Box::pin(frames);
+            Ok(frames)
+        })
+    }
 }
 
 impl<M, H, F> ErasedStreamHandler for TypedStreamHandler<M, H>
@@ -541,6 +638,17 @@ pub(crate) struct HandledByteStream {
 impl HandledByteStream {
     pub(crate) fn into_parts(self) -> (StreamingResponse, RequestAdmission) {
         (self.response, self.admission)
+    }
+}
+
+pub(crate) struct HandledDuplexStream {
+    responses: OutgoingFrameStream,
+    admission: RequestAdmission,
+}
+
+impl HandledDuplexStream {
+    pub(crate) fn into_parts(self) -> (OutgoingFrameStream, RequestAdmission) {
+        (self.responses, self.admission)
     }
 }
 
@@ -648,6 +756,97 @@ impl RequestState {
                 Ok(())
             }
         }
+    }
+
+    pub(crate) fn register_duplex<M, H, F>(
+        &self,
+        handler: H,
+    ) -> Result<(), Report<HandlerRegistrationError>>
+    where
+        M: InterconnectDuplexRequest,
+        H: Fn(RequestContext, M, DuplexItems<M::Item>) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<DuplexResponses<M::Response>, StreamHandlerError>>
+            + Send
+            + 'static,
+    {
+        if !subquota_belongs_to_class(M::SUBQUOTA, M::CLASS) {
+            return Err(Report::new(
+                HandlerRegistrationError::SubquotaClassMismatch {
+                    request: M::NAME,
+                    subquota: M::SUBQUOTA,
+                },
+            ));
+        }
+        if self.handlers.contains_key(M::NAME) || self.stream_handlers.contains_key(M::NAME) {
+            return Err(Report::new(HandlerRegistrationError::AlreadyRegistered {
+                request: M::NAME,
+            }));
+        }
+        let erased: Box<dyn ErasedDuplexHandler> = Box::new(TypedDuplexHandler::<M, H> {
+            handler: Arc::new(handler),
+            request: PhantomData,
+        });
+        match self.duplex_handlers.entry(M::NAME) {
+            Entry::Occupied(_) => Err(Report::new(HandlerRegistrationError::AlreadyRegistered {
+                request: M::NAME,
+            })),
+            Entry::Vacant(entry) => {
+                entry.insert(Arc::new(erased));
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) async fn handle_duplex(
+        &self,
+        executor: &Executor,
+        peer_node_id: ClusterNodeName,
+        peer_advertised_host: String,
+        request: RequestEnvelope,
+        frames: FrameReader,
+    ) -> Result<HandledDuplexStream, RemoteRequestFailure> {
+        let handler = self
+            .duplex_handlers
+            .get(request.request.as_str())
+            .map(|handler| handler.value().clone());
+        let payload_limit = request.class.payload_limit(executor);
+        let payload_bytes = u64::try_from(request.payload.len())
+            .assured("supported targets have a pointer width no larger than u64");
+        let handler = match handler {
+            Some(_) if payload_bytes > payload_limit => {
+                return Err(RemoteRequestFailure::PayloadTooLarge {
+                    actual: payload_bytes,
+                    limit: payload_limit,
+                });
+            }
+            Some(handler) if handler.class() == request.class => handler,
+            Some(handler) => {
+                return Err(RemoteRequestFailure::WrongPoolClass {
+                    expected: handler.class(),
+                    actual: request.class,
+                });
+            }
+            None => return Err(RemoteRequestFailure::HandlerNotRegistered),
+        };
+        let subquota = handler.subquota();
+        let admission = self
+            .try_admit_inbound(subquota)
+            .ok_or(RemoteRequestFailure::AdmissionFull { subquota })?;
+        let responses = handler
+            .handle(
+                executor.clone(),
+                RequestContext {
+                    peer_node_id,
+                    peer_advertised_host,
+                },
+                request.payload,
+                frames,
+            )
+            .await?;
+        Ok(HandledDuplexStream {
+            responses,
+            admission,
+        })
     }
 
     pub(crate) async fn handle_stream(
@@ -797,6 +996,7 @@ impl RequestState {
     pub(crate) fn shutdown(&self) {
         self.handlers.clear();
         self.stream_handlers.clear();
+        self.duplex_handlers.clear();
         self.membership_changed.notify_waiters();
     }
 }
@@ -824,6 +1024,103 @@ impl Transport {
         F: Future<Output = Result<StreamingResponse, StreamHandlerError>> + Send + 'static,
     {
         self.inner.requests().register_stream::<M, H, F>(handler)
+    }
+
+    /// Answer one ordered bidirectional frame stream a peer opens.
+    pub fn register_duplex_handler<M, H, F>(
+        &self,
+        handler: H,
+    ) -> Result<(), Report<HandlerRegistrationError>>
+    where
+        M: InterconnectDuplexRequest,
+        H: Fn(RequestContext, M, DuplexItems<M::Item>) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<DuplexResponses<M::Response>, StreamHandlerError>>
+            + Send
+            + 'static,
+    {
+        self.inner.requests().register_duplex::<M, H, F>(handler)
+    }
+
+    /// Open one ordered bidirectional frame stream to `node`.
+    ///
+    /// The setup deadline covers reaching the peer and its acceptance. Once the stream is open it
+    /// stays open until a half-close or a transport failure; an idle stream is not a failure, so
+    /// the caller applies its own deadline to whatever work it has outstanding.
+    pub async fn open_duplex_stream<M>(
+        &self,
+        node: &ClusterNodeName,
+        message: M,
+    ) -> Result<(DuplexSender<M>, DuplexReceiver<M>), Report<RequestError>>
+    where
+        M: InterconnectDuplexRequest,
+    {
+        if self.inner.is_shutting_down() {
+            return Err(Report::new(RequestError::ShuttingDown {
+                node: node.clone(),
+                request: M::NAME,
+            }));
+        }
+        if M::REQUIRES_LIVE_TARGET && !self.inner.requests().target_is_live(node) {
+            return Err(Report::new(RequestError::TargetLeft {
+                node: node.clone(),
+                request: M::NAME,
+            }));
+        }
+        let admission = self
+            .inner
+            .requests()
+            .try_admit_outbound(M::SUBQUOTA)
+            .ok_or_else(|| {
+                Report::new(RequestError::AdmissionFull {
+                    request: M::NAME,
+                    subquota: M::SUBQUOTA,
+                })
+            })?;
+        let (payload, _payload_reservation) = message
+            .encode_rkyv(
+                self.inner.executor().clone(),
+                M::CLASS,
+                M::CLASS.payload_limit(self.inner.executor()),
+            )
+            .await
+            .map_err(|error| {
+                Report::new(RequestError::Encode { request: M::NAME }).attach_printable(error)
+            })?;
+        let opening = RequestEnvelope {
+            class: M::CLASS,
+            request: M::NAME.to_string(),
+            payload,
+        };
+        let body = wire::encode_rkyv(
+            self.inner.executor(),
+            M::CLASS.memory_class(),
+            M::CLASS.cpu_class(),
+            M::CLASS.control_body_limit(self.inner.executor()),
+            opening,
+        )
+        .await
+        .map_err(|error| {
+            Report::new(RequestError::Encode { request: M::NAME }).attach_printable(error)
+        })?;
+        self.inner
+            .open_duplex_stream::<M>(
+                node,
+                RawDuplexRequest {
+                    class: M::CLASS,
+                    subquota: M::SUBQUOTA,
+                    body,
+                    timeout: M::SETUP_TIMEOUT,
+                    admission,
+                },
+            )
+            .await
+            .map_err(|error| {
+                Report::new(RequestError::Stream {
+                    node: node.clone(),
+                    request: M::NAME,
+                    reason: error.to_string(),
+                })
+            })
     }
 
     pub fn replace_live_nodes(&self, live_nodes: &BTreeSet<ClusterNodeName>) {
