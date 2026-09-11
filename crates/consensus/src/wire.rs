@@ -293,6 +293,7 @@ impl InterconnectDuplexRequest for OpenAppendStream {
 
     const NAME: &'static str = "raft_append_stream";
     const CLASS: PoolClass = PoolClass::Replication;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Append;
     const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 }
 

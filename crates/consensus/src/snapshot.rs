@@ -96,6 +96,12 @@ pub(crate) fn section_generation(key: &[u8]) -> Option<u64> {
     Some(u64::from_be_bytes(generation))
 }
 
+/// Every sealed section of one generation, and what they encode to in total.
+pub(crate) struct SealedSections {
+    pub(crate) sections: Vec<Vec<u8>>,
+    pub(crate) total_bytes: u64,
+}
+
 /// Gathers keyed records into sections no larger than the configured section limit.
 ///
 /// A record never spans two sections, so a record larger than the limit forms a section of its own
@@ -143,15 +149,15 @@ impl SectionWriter {
         Ok(())
     }
 
-    pub(crate) fn finish(mut self) -> io::Result<Vec<Vec<u8>>> {
+    /// Seal whatever is still pending and hand over every section of this generation.
+    pub(crate) fn finish(mut self) -> io::Result<SealedSections> {
         if !self.pending.records.is_empty() {
             self.seal()?;
         }
-        Ok(self.sealed)
-    }
-
-    pub(crate) fn total_bytes(&self) -> u64 {
-        self.total_bytes
+        Ok(SealedSections {
+            sections: self.sealed,
+            total_bytes: self.total_bytes,
+        })
     }
 
     fn seal(&mut self) -> io::Result<()> {

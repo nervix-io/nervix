@@ -25,7 +25,7 @@ use error_stack::Report;
 use fjall::{Database, Keyspace};
 use futures_util::StreamExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_interconnect::Transport;
+use nervix_interconnect::{HandlerRegistrationError, Transport};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule,
     DomainClockAuthority, DomainClockState, DomainName, DomainPace, DomainSchedule,
@@ -346,6 +346,8 @@ const HEARTBEAT_ERROR_REPORT_MIN_INTERVAL: Duration = Duration::from_secs(10);
 const CONSENSUS_EVENT_CAPACITY: usize = 256;
 /// How often a mutation held back by log retention rechecks for reclaimed space.
 const RETENTION_ADMISSION_POLL: Duration = Duration::from_millis(50);
+/// How long one complete snapshot transfer may take.
+const SNAPSHOT_TRANSFER_TIMEOUT: Duration = Duration::from_secs(30);
 
 static NEXT_SNAPSHOT_TRANSFER_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -405,6 +407,19 @@ impl GossipState {
         }
         current.into_values().collect()
     }
+}
+
+/// What one node keeps of its Raft log at a point in time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RaftLogRetention {
+    /// The highest index whose entry has been removed, once a snapshot covered it.
+    pub purged_index: Option<u64>,
+    /// The highest index the node's current snapshot covers.
+    pub snapshot_index: Option<u64>,
+    /// The highest index the node's log holds.
+    pub last_log_index: Option<u64>,
+    /// What the retained log occupies in node-owned storage.
+    pub retained_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -1146,6 +1161,10 @@ impl Consensus {
                     retention.snapshot_entry_threshold,
                 ),
                 max_in_snapshot_log_to_keep: retention.covered_entries_retained,
+                // One snapshot moves section by section under one deadline, so this covers the
+                // whole transfer rather than one chunk of it.
+                install_snapshot_timeout: u64::try_from(SNAPSHOT_TRANSFER_TIMEOUT.as_millis())
+                    .unwrap_or(u64::MAX),
                 ..Default::default()
             }
             .validate()
@@ -1224,11 +1243,13 @@ impl Consensus {
                 retention_task: Mutex::new(Some(retention_task)),
             }),
         };
-        consensus.register_protocol_handlers()?;
+        consensus
+            .register_protocol_handlers()
+            .map_err(|_| ConsensusError::Startup)?;
         Ok(consensus)
     }
 
-    fn register_protocol_handlers(&self) -> Result<(), ConsensusError> {
+    fn register_protocol_handlers(&self) -> Result<(), Report<HandlerRegistrationError>> {
         let receiver = self.protocol_receiver();
         self.inner
             .interconnect
@@ -1253,8 +1274,7 @@ impl Consensus {
                         .map(wire::AppendEntriesResponseRecord::from)
                         .map_err(wire::ConsensusRequestError::raft)
                 }
-            })
-            .map_err(|_| ConsensusError::Startup)?;
+            })?;
 
         let receiver = self.protocol_receiver();
         self.inner
@@ -1276,8 +1296,7 @@ impl Consensus {
                         Ok(nervix_interconnect::DuplexResponses::new(answers.map(Ok)))
                     }
                 },
-            )
-            .map_err(|_| ConsensusError::Startup)?;
+            )?;
 
         let receiver = self.protocol_receiver();
         self.inner
@@ -1297,8 +1316,7 @@ impl Consensus {
                         .map(wire::VoteResponseRecord::from)
                         .map_err(wire::ConsensusRequestError::raft)
                 }
-            })
-            .map_err(|_| ConsensusError::Startup)?;
+            })?;
 
         let receiver = self.protocol_receiver();
         self.inner
@@ -1326,8 +1344,7 @@ impl Consensus {
                         )
                         .map_err(wire::ConsensusRequestError::snapshot_transfer)
                 }
-            })
-            .map_err(|_| ConsensusError::Startup)?;
+            })?;
 
         let receiver = self.protocol_receiver();
         self.inner
@@ -1349,8 +1366,7 @@ impl Consensus {
                         .await
                         .map_err(wire::ConsensusRequestError::snapshot_transfer)
                 }
-            })
-            .map_err(|_| ConsensusError::Startup)?;
+            })?;
 
         let receiver = self.protocol_receiver();
         self.inner
@@ -1364,8 +1380,7 @@ impl Consensus {
                         .map(wire::SnapshotResponseRecord::from)
                         .map_err(wire::ConsensusRequestError::snapshot_transfer)
                 }
-            })
-            .map_err(|_| ConsensusError::Startup)?;
+            })?;
 
         let receiver = self.protocol_receiver();
         self.inner
@@ -1386,12 +1401,12 @@ impl Consensus {
                         .map_err(wire::ConsensusRequestError::raft)
                 }
             })
-            .map_err(|_| ConsensusError::Startup)?;
+?;
 
         self.inner
             .interconnect
             .register_handler::<wire::HealthCheck, _, _>(|_, _| async {})
-            .map_err(|_| ConsensusError::Startup)?;
+?;
         Ok(())
     }
 
@@ -1480,6 +1495,17 @@ impl Observer {
             .get(domain_id)
             .cloned()
     }
+    /// What this node currently keeps of its Raft log, and what covers it.
+    pub fn raft_log_retention(&self) -> RaftLogRetention {
+        let metrics = self.inner.raft.metrics().borrow_watched().clone();
+        RaftLogRetention {
+            purged_index: metrics.purged.map(|log_id| log_id.index),
+            snapshot_index: metrics.snapshot.map(|log_id| log_id.index),
+            last_log_index: metrics.last_log_index,
+            retained_bytes: self.inner.store.retained_log_bytes(),
+        }
+    }
+
     pub async fn current_users(&self) -> BTreeMap<UserName, UserCredentials> {
         (&self.inner.store.inner.state().users).into()
     }
@@ -2242,37 +2268,31 @@ impl ConsensusState {
         &self,
         command: ConsensusCommand,
     ) -> Result<openraft::raft::ClientWriteResponse<TypeConfig>, ConsensusError> {
-        self.admit_mutation().await?;
+        let cap = self.raft_retention.retained_log_cap_bytes;
+        if self.store.retained_log_bytes() > cap {
+            let deadline = self.raft_retention.retention_admission_timeout;
+            let reclaimed = timeout(deadline, async {
+                loop {
+                    tokio::task::consume_budget().await;
+                    tokio::time::sleep(RETENTION_ADMISSION_POLL).await;
+                    if self.store.retained_log_bytes() <= cap {
+                        return;
+                    }
+                }
+            })
+            .await;
+            if reclaimed.is_err() {
+                return Err(ConsensusError::LogRetentionSaturated {
+                    retained: self.store.retained_log_bytes(),
+                    cap,
+                    waited: deadline,
+                });
+            }
+        }
         self.raft
             .client_write(command)
             .await
             .map_err(ConsensusError::from)
-    }
-
-    async fn admit_mutation(&self) -> Result<(), ConsensusError> {
-        let cap = self.raft_retention.retained_log_cap_bytes;
-        if self.store.retained_log_bytes() <= cap {
-            return Ok(());
-        }
-        let deadline = self.raft_retention.retention_admission_timeout;
-        let waited = timeout(deadline, async {
-            loop {
-                tokio::task::consume_budget().await;
-                tokio::time::sleep(RETENTION_ADMISSION_POLL).await;
-                if self.store.retained_log_bytes() <= cap {
-                    return;
-                }
-            }
-        })
-        .await;
-        match waited {
-            Ok(()) => Ok(()),
-            Err(_) => Err(ConsensusError::LogRetentionSaturated {
-                retained: self.store.retained_log_bytes(),
-                cap,
-                waited: deadline,
-            }),
-        }
     }
 }
 

@@ -103,6 +103,11 @@ not pay for a window's state, and a window width does not bound a correlator.
   Bulk subquotas independently reserve streams for resource transfer and for runtime and Raft
   snapshot transfer. A runtime state snapshot is described before it is fetched, so a node that
   already holds the current revision causes no scan and no encoding on the node that owns it.
+  Consensus replication uses one ordered append stream per follower, bounded at 16 outstanding
+  batches and 16 MiB, and charges each batch against the shared command budget for as long as it
+  is unacknowledged. That stream reserves its own replication stream slot, so the ownership
+  handoff requests sharing the replication pool never wait behind it. A Raft snapshot moves one bounded section at a time, so its transfer does not
+  grow with the size of the replicated state.
   Keep `MAX BATCH SIZE` well below 32 MiB on any route whose consumer may be scheduled on another
   node.
 - Stateful `MAX TIME`, `WIDTH`, and `STEP` trade history and aggregation coverage against retained

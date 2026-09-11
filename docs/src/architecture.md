@@ -73,7 +73,9 @@ replication, Arrow relay batches, and bulk transfers. Relay progress, cancellati
 terminal admission acknowledgements use reserved management capacity. Every pool except
 bulk is connected before a peer is reported ready, with capacity reserved in both directions. This
 keeps gossip, heartbeats, elections, administrative operations, and the first remote batch and its
-acknowledgement from waiting behind another traffic class. Gossip exchanges, Raft records,
+acknowledgement from waiting behind another traffic class. Consensus log replication uses one ordered
+bidirectional stream per follower on the replication pool, so a leader can keep several batches in
+flight without either side reordering them. Gossip exchanges, Raft records,
 resource chunks, and other non-Arrow messages use bounded, validated rkyv records. Relay payloads
 remain Arrow IPC end to end. Resource archives, runtime state snapshots, and Raft snapshots cross
 the bulk pool as bounded chunks rather than one whole in-memory wire message, so a transfer larger

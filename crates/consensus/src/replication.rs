@@ -114,11 +114,10 @@ struct AppendSubmission {
 
 impl AppendSubmission {
     async fn submit(&mut self, request: AppendEntriesRequest<TypeConfig>) -> Result<(), ()> {
-        let last_log_id = request
-            .entries
-            .last()
-            .map(|entry| entry.log_id.clone())
-            .or_else(|| request.prev_log_id.clone());
+        let last_log_id = match request.entries.last() {
+            Some(entry) => Some(entry.log_id.clone()),
+            None => request.prev_log_id.clone(),
+        };
         self.wait_for_follower_capacity().await?;
         let record = wire::AppendEntriesRecord::from_request(request);
         let Ok(bytes) = self.sender.send(record).await else {

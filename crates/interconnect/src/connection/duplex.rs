@@ -40,6 +40,8 @@ const FRAME_HEADER_BYTES: usize = 4;
 /// How much of the next frame may already have arrived while the current one is still incomplete.
 /// A peer that buries a frame boundary further than this has stopped following the framing.
 const FRAME_CARRY_SLACK_BYTES: u64 = 64 * 1024;
+/// What a reader charges before it has seen how large this stream's frames are.
+const INITIAL_FRAME_CHARGE: u64 = 4 * 1024;
 
 fn carry_limit(frame_limit: u64) -> u64 {
     frame_limit
@@ -51,11 +53,15 @@ fn carry_limit(frame_limit: u64) -> u64 {
 ///
 /// An open stream that is simply idle is not a failure, so this applies no progress deadline of its
 /// own: the caller that has work outstanding owns the deadline for its answer.
+///
+/// The charge follows what the reader actually buffers rather than the largest frame its class
+/// allows. A stream carrying small frames therefore holds a small charge for its whole life, and
+/// only a stream that really receives a large frame grows to it.
 pub(crate) struct FrameReader {
     body: RecvStream,
     carry: Vec<u8>,
     frame_limit: u64,
-    _charge: Reservation,
+    charge: Reservation,
     finished: bool,
 }
 
@@ -65,22 +71,22 @@ impl FrameReader {
         class: MemoryClass,
         frame_limit: u64,
         body: RecvStream,
-    ) -> Result<Self, TransportError> {
+    ) -> Result<Self, Report<TransportError>> {
         let charge = executor
-            .reserve(class, carry_limit(frame_limit))
+            .reserve(class, INITIAL_FRAME_CHARGE.min(carry_limit(frame_limit)))
             .await
-            .map_err(|error| TransportError::Decode(error.to_string()))?;
+            .map_err(|error| Report::new(TransportError::Decode(error.to_string())))?;
         Ok(Self {
             body,
             carry: Vec::new(),
             frame_limit,
-            _charge: charge,
+            charge,
             finished: false,
         })
     }
 
     /// The next complete frame, or `None` once the peer half-closed its direction.
-    pub(crate) async fn next_frame(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
+    pub(crate) async fn next_frame(&mut self) -> Result<Option<Vec<u8>>, Report<TransportError>> {
         loop {
             tokio::task::consume_budget().await;
             if let Some(frame) = self.take_buffered_frame()? {
@@ -90,28 +96,61 @@ impl FrameReader {
                 if self.carry.is_empty() {
                     return Ok(None);
                 }
-                return Err(TransportError::Decode(
+                return Err(Report::new(TransportError::Decode(
                     "duplex stream ended part-way through a frame".to_string(),
-                ));
+                )));
             }
             let Some(chunk) = self.body.data().await else {
                 self.finished = true;
                 continue;
             };
-            let chunk = chunk?;
-            self.body.flow_control().release_capacity(chunk.len())?;
+            let chunk = chunk.map_err(TransportError::from)?;
+            self.charge_for(chunk.len())?;
+            self.body
+                .flow_control()
+                .release_capacity(chunk.len())
+                .map_err(TransportError::from)?;
             self.carry.extend_from_slice(&chunk);
-            let carried = u64::try_from(self.carry.len())
-                .assured("supported targets have a pointer width no larger than u64");
-            if carried > carry_limit(self.frame_limit) {
-                return Err(TransportError::Decode(format!(
-                    "duplex peer buffered {carried} bytes without completing a frame"
-                )));
-            }
         }
     }
 
-    fn take_buffered_frame(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
+    /// Charge the room the arriving chunk needs before it is buffered.
+    fn charge_for(&mut self, additional: usize) -> Result<(), Report<TransportError>> {
+        let carried = u64::try_from(self.carry.len())
+            .assured("supported targets have a pointer width no larger than u64");
+        let additional = u64::try_from(additional)
+            .assured("supported targets have a pointer width no larger than u64");
+        let ceiling = carry_limit(self.frame_limit);
+        let target = carried.checked_add(additional).ok_or_else(|| {
+            Report::new(TransportError::Decode(
+                "duplex frame exceeds u64 bytes".to_string(),
+            ))
+        })?;
+        if target > ceiling {
+            return Err(Report::new(TransportError::Decode(format!(
+                "duplex peer buffered {target} bytes without completing a frame"
+            ))));
+        }
+        if target <= self.charge.bytes() {
+            return Ok(());
+        }
+        // Grow geometrically so a large frame takes the budget a logarithmic number of times, and
+        // a stream carrying small frames never holds room it will not use.
+        let doubled = self.charge.bytes().checked_mul(2).unwrap_or(ceiling);
+        let charged = target.max(doubled).min(ceiling);
+        self.charge
+            .grow_to(charged)
+            .map_err(|error| Report::new(TransportError::Decode(error.to_string())))?;
+        let charged: usize = usize::try_from(charged)
+            .assured("a charge bounded by the class limit fits the address space");
+        let room = charged
+            .checked_sub(self.carry.len())
+            .verified("the new charge covers everything already carried");
+        self.carry.reserve(room);
+        Ok(())
+    }
+
+    fn take_buffered_frame(&mut self) -> Result<Option<Vec<u8>>, Report<TransportError>> {
         let Some(header) = self.carry.get(..FRAME_HEADER_BYTES) else {
             return Ok(None);
         };
@@ -119,10 +158,10 @@ impl FrameReader {
         length.copy_from_slice(header);
         let length = u32::from_be_bytes(length);
         if u64::from(length) > self.frame_limit {
-            return Err(TransportError::Decode(format!(
+            return Err(Report::new(TransportError::Decode(format!(
                 "duplex frame of {length} bytes exceeds the {} byte limit",
                 self.frame_limit
-            )));
+            ))));
         }
         let length: usize = length.arch_into();
         let end = FRAME_HEADER_BYTES
@@ -157,9 +196,15 @@ impl FrameWriter {
         }
     }
 
-    pub(crate) async fn send_frame(&mut self, payload: ChargedBytes) -> Result<(), TransportError> {
-        let length = u32::try_from(payload.len())
-            .map_err(|_| TransportError::Encode("duplex frame exceeds u32 bytes".to_string()))?;
+    pub(crate) async fn send_frame(
+        &mut self,
+        payload: ChargedBytes,
+    ) -> Result<(), Report<TransportError>> {
+        let length = u32::try_from(payload.len()).map_err(|_| {
+            Report::new(TransportError::Encode(
+                "duplex frame exceeds u32 bytes".to_string(),
+            ))
+        })?;
         let progress_timeout = self.progress_timeout;
         let send = async {
             self.send_all(Bytes::copy_from_slice(&length.to_be_bytes()))
@@ -180,43 +225,48 @@ impl FrameWriter {
                 offset = end;
                 self.send_all(Bytes::from_owner(chunk)).await?;
             }
-            Ok::<(), TransportError>(())
+            Ok::<(), Report<TransportError>>(())
         };
         match timeout(progress_timeout, send).await {
             Ok(result) => result,
             Err(_) => {
                 self.stream.send_reset(Reason::CANCEL);
-                Err(TransportError::ProgressTimeout {
+                Err(Report::new(TransportError::ProgressTimeout {
                     timeout: progress_timeout,
-                })
+                }))
             }
         }
     }
 
-    async fn send_all(&mut self, mut body: Bytes) -> Result<(), TransportError> {
+    async fn send_all(&mut self, mut body: Bytes) -> Result<(), Report<TransportError>> {
         while !body.is_empty() {
             tokio::task::consume_budget().await;
             self.stream.reserve_capacity(body.len());
             let assigned = poll_fn(|context| self.stream.poll_capacity(context))
                 .await
                 .ok_or_else(|| {
-                    TransportError::Decode(
+                    Report::new(TransportError::Decode(
                         "HTTP/2 stream closed while assigning send capacity".to_string(),
-                    )
-                })??;
+                    ))
+                })?
+                .map_err(TransportError::from)?;
             let ready = assigned.min(body.len());
             if ready == 0 {
                 continue;
             }
-            self.stream.send_data(body.split_to(ready), false)?;
+            self.stream
+                .send_data(body.split_to(ready), false)
+                .map_err(TransportError::from)?;
         }
         self.stream.reserve_capacity(0);
         Ok(())
     }
 
     /// Half-close this direction. The peer sees the frame sequence end here.
-    pub(crate) fn finish(&mut self) -> Result<(), TransportError> {
-        self.stream.send_data(Bytes::new(), true)?;
+    pub(crate) fn finish(&mut self) -> Result<(), Report<TransportError>> {
+        self.stream
+            .send_data(Bytes::new(), true)
+            .map_err(TransportError::from)?;
         Ok(())
     }
 }
@@ -341,19 +391,22 @@ impl<T> DuplexItems<T> {
 
 impl<T: RkyvMessage> DuplexItems<T> {
     /// The next frame, or `None` once the peer half-closed its direction.
-    pub async fn next(&mut self) -> Result<Option<T>, StreamHandlerError> {
+    pub async fn next(&mut self) -> Result<Option<T>, Report<StreamHandlerError>> {
         let frame = self
             .reader
             .next_frame()
             .await
-            .map_err(|error| StreamHandlerError::new(error.to_string()))?;
+            .map_err(|error| Report::new(StreamHandlerError::new(error.to_string())))?;
         let Some(frame) = frame else {
             return Ok(None);
         };
         let (item, _reservation) = T::decode_rkyv(self.executor.clone(), self.class, frame)
             .await
             .map_err(|error| {
-                StreamHandlerError::new(format!("{} frame: {error}", self.request))
+                Report::new(StreamHandlerError::new(format!(
+                    "{} frame: {error}",
+                    self.request
+                )))
             })?;
         Ok(Some(item))
     }
@@ -361,13 +414,13 @@ impl<T: RkyvMessage> DuplexItems<T> {
 
 /// A handler-owned sequence of answers, delivered in the order the handler produces them.
 pub struct DuplexResponses<T> {
-    items: Pin<Box<dyn Stream<Item = Result<T, StreamHandlerError>> + Send + 'static>>,
+    items: Pin<Box<dyn Stream<Item = Result<T, Report<StreamHandlerError>>> + Send + 'static>>,
 }
 
 impl<T> DuplexResponses<T> {
     pub fn new<S>(items: S) -> Self
     where
-        S: Stream<Item = Result<T, StreamHandlerError>> + Send + 'static,
+        S: Stream<Item = Result<T, Report<StreamHandlerError>>> + Send + 'static,
     {
         Self {
             items: Box::pin(items),
@@ -376,7 +429,7 @@ impl<T> DuplexResponses<T> {
 
     pub(crate) fn into_stream(
         self,
-    ) -> Pin<Box<dyn Stream<Item = Result<T, StreamHandlerError>> + Send + 'static>> {
+    ) -> Pin<Box<dyn Stream<Item = Result<T, Report<StreamHandlerError>>> + Send + 'static>> {
         self.items
     }
 }

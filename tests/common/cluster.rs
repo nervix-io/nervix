@@ -30,6 +30,7 @@ use nervix_interconnect::{
     ControlEnvelope, Envelope, PeerTarget, RuntimeErrorEvent, TlsConfigBundle, Transport,
     TransportOptions,
 };
+use nervix_consensus::RaftRetentionPolicy;
 use nervix_models::ClusterNodeName;
 pub use nervix_proto as proto;
 
@@ -594,6 +595,7 @@ pub(crate) struct TestClusterConfig {
     pub graceful_shutdown_drain: bool,
     pub drain_timeout: Duration,
     pub memory_pressure: Option<MemoryPressureConfig>,
+    pub raft_retention: RaftRetentionPolicy,
     pub temp_dir: Option<PathBuf>,
     pub dependencies: DependencyEndpoints,
 }
@@ -614,6 +616,7 @@ impl Default for TestClusterConfig {
             graceful_shutdown_drain: false,
             drain_timeout: DEFAULT_TEST_DRAIN_TIMEOUT,
             memory_pressure: None,
+            raft_retention: RaftRetentionPolicy::default(),
             temp_dir: None,
             dependencies: DependencyEndpoints::default(),
         }
@@ -1935,6 +1938,36 @@ impl Cluster {
             .map(|status| status.current_leader)
     }
 
+    /// The leader every reachable node agrees on, ignoring nodes a scenario has stopped.
+    pub(crate) async fn wait_for_leader_among_running(&self) -> io::Result<String> {
+        let start = Instant::now();
+        while start.elapsed() < STATUS_TIMEOUT {
+            tokio::task::consume_budget().await;
+            let mut reported = BTreeMap::new();
+            for node_id in self.nodes.keys() {
+                if let Ok(status) = self.show_status(node_id).await {
+                    reported.insert(node_id.clone(), status);
+                }
+            }
+            let mut leaders = reported
+                .values()
+                .map(|status| status.current_leader.clone())
+                .collect::<Vec<_>>();
+            leaders.dedup();
+            if let [Some(leader)] = leaders.as_slice()
+                && reported
+                    .get(leader)
+                    .is_some_and(|status| status.raft_state.as_deref() == Some("Leader"))
+            {
+                return Ok(leader.clone());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        Err(io::Error::other(
+            "timed out waiting for a leader the running nodes agree on",
+        ))
+    }
+
     pub(crate) async fn wait_for_consistent_leader_on_all_nodes(&self) -> io::Result<String> {
         let start = Instant::now();
         let mut last_statuses = BTreeMap::new();
@@ -2171,6 +2204,7 @@ impl NodeHandle {
             .transaction_max_source_bytes(self.config.transaction_max_source_bytes)
             .transaction_max_open(self.config.transaction_max_open)
             .memory_pressure(self.config.memory_pressure)
+            .raft_retention(self.config.raft_retention)
             .cluster_bootstrap_host(self.spec.bootstrap_host.clone())
             .db_path(db_path)
             .temp_dir(

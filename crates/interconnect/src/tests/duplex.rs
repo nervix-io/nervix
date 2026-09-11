@@ -105,6 +105,80 @@ async fn a_duplex_stream_answers_every_frame_in_submission_order() {
     transport_b.shutdown().await;
 }
 
+#[derive(Debug, Archive, Serialize, Deserialize)]
+struct ReplicationShareRequest;
+
+#[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+struct ReplicationShareResponse;
+
+impl InterconnectRequest for ReplicationShareRequest {
+    type Response = ReplicationShareResponse;
+
+    const NAME: &'static str = "test_replication_share";
+    const CLASS: PoolClass = PoolClass::Replication;
+    const TIMEOUT: Duration = Duration::from_secs(5);
+}
+
+#[tokio::test]
+async fn an_open_append_stream_cannot_consume_shared_replication_streams() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_b,
+        ..
+    } = connected_transports().await;
+    // The handler never answers, so the stream this opens stays open for the whole test.
+    transport_b
+        .register_duplex_handler::<AppendLikeStream, _, _>(|_context, _opening, items| async move {
+            let held = futures_util::stream::unfold(items, |mut items| async move {
+                match items.next().await {
+                    Ok(Some(_)) | Ok(None) => None,
+                    Err(error) => Some((Err(error), items)),
+                }
+            });
+            Ok(DuplexResponses::new(held))
+        })
+        .assured("the fresh test transport has no append handler with this name");
+    transport_b
+        .register_handler::<ReplicationShareRequest, _, _>(|_context, _request| async move {
+            ReplicationShareResponse
+        })
+        .assured("the fresh test transport has no shared replication handler with this name");
+
+    let held = transport_a
+        .open_duplex_stream(&node_b, AppendLikeStream)
+        .await
+        .expect("the reserved append stream should open");
+
+    assert_eq!(
+        timeout(
+            Duration::from_secs(10),
+            transport_a.request(&node_b, ReplicationShareRequest),
+        )
+        .await
+        .expect("a shared replication request must not wait behind the append stream")
+        .expect("the shared replication request should succeed"),
+        ReplicationShareResponse
+    );
+
+    drop(held);
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
+#[derive(Debug, Archive, Serialize, Deserialize)]
+struct AppendLikeStream;
+
+impl InterconnectDuplexRequest for AppendLikeStream {
+    type Item = CountingItem;
+    type Response = CountingAnswer;
+
+    const NAME: &'static str = "test_append_like_stream";
+    const CLASS: PoolClass = PoolClass::Replication;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Append;
+    const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+}
+
 #[tokio::test]
 async fn opening_a_duplex_stream_without_a_handler_fails() {
     let ConnectedTransports {

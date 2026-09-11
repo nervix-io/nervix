@@ -322,12 +322,11 @@ impl StoreInner {
                         value: value.to_vec(),
                     })?;
                 }
-                let total_bytes = writer.total_bytes();
-                let sections = writer.finish()?;
+                let sealed = writer.finish()?;
                 Ok(SealedGeneration {
                     metadata,
-                    sections,
-                    total_bytes,
+                    sections: sealed.sections,
+                    total_bytes: sealed.total_bytes,
                 })
             })
             .await?;
@@ -588,12 +587,12 @@ impl FjallStore {
         let Some(generation) = installing else {
             return Ok(());
         };
-        let manifest = self
-            .inner
-            .snapshots
-            .active()
-            .filter(|manifest| manifest.generation == generation)
-            .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
+        let Some(manifest) = self.inner.snapshots.active() else {
+            return Err(io::Error::other(StorageFailure::InvalidState));
+        };
+        if manifest.generation != generation {
+            return Err(io::Error::other(StorageFailure::InvalidState));
+        }
         let state = self.inner.replace_state_machine(&manifest).await?;
         *self.inner.state_machine.write() = state;
         Ok(())

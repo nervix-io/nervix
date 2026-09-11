@@ -120,7 +120,9 @@ impl PoolClass {
         match self {
             Self::Management | Self::Relay => 64,
             Self::Commands => 32,
-            Self::Replication => 1,
+            // One ordered append stream per follower, and room beside it for the ownership
+            // handoff requests that share this pool.
+            Self::Replication => 8,
             Self::Bulk => 4,
         }
     }

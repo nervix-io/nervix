@@ -171,6 +171,8 @@ where
 #[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RequestSubquota {
     Shared,
+    /// The one ordered append stream a leader keeps open to each follower.
+    Append,
     Resource,
     Snapshot,
     Discovery,
@@ -239,8 +241,9 @@ impl StreamHandlerError {
 pub type OutgoingByteStream =
     Pin<Box<dyn Stream<Item = Result<ChargedBytes, StreamHandlerError>> + Send + 'static>>;
 
-pub(crate) type OutgoingFrameStream =
-    Pin<Box<dyn Stream<Item = Result<ChargedBytes, StreamHandlerError>> + Send + 'static>>;
+pub(crate) type OutgoingFrameStream = Pin<
+    Box<dyn Stream<Item = Result<ChargedBytes, Report<StreamHandlerError>>> + Send + 'static>,
+>;
 
 /// A producer-owned stream with its exact byte count declared before response headers are sent.
 pub struct StreamingResponse {
@@ -361,6 +364,7 @@ pub(crate) struct RequestAdmission {
 
 struct RequestQuotas {
     shared: StdArc<Semaphore>,
+    append: StdArc<Semaphore>,
     resource: StdArc<Semaphore>,
     snapshot: StdArc<Semaphore>,
     discovery: StdArc<Semaphore>,
@@ -393,6 +397,10 @@ impl RequestQuotas {
     fn new(capacity: usize) -> Self {
         Self {
             shared: StdArc::new(Semaphore::new(capacity)),
+            append: StdArc::new(Semaphore::new(capacity.clamp(
+                PER_NODE_RESERVED_REQUEST_MINIMUM,
+                PER_NODE_STANDARD_REQUEST_LIMIT,
+            ))),
             resource: StdArc::new(Semaphore::new(capacity.clamp(
                 PER_NODE_RESERVED_REQUEST_MINIMUM,
                 PER_NODE_STANDARD_REQUEST_LIMIT,
@@ -431,6 +439,7 @@ impl RequestQuotas {
     fn for_subquota(&self, subquota: RequestSubquota) -> &StdArc<Semaphore> {
         match subquota {
             RequestSubquota::Shared => &self.shared,
+            RequestSubquota::Append => &self.append,
             RequestSubquota::Resource => &self.resource,
             RequestSubquota::Snapshot => &self.snapshot,
             RequestSubquota::Discovery => &self.discovery,
@@ -453,6 +462,7 @@ impl RequestQuotas {
 fn subquota_belongs_to_class(subquota: RequestSubquota, class: PoolClass) -> bool {
     match subquota {
         RequestSubquota::Shared => true,
+        RequestSubquota::Append => class == PoolClass::Replication,
         RequestSubquota::Resource | RequestSubquota::Snapshot => class == PoolClass::Bulk,
         RequestSubquota::Discovery
         | RequestSubquota::Liveness
@@ -553,7 +563,9 @@ impl<M, H, F> ErasedDuplexHandler for TypedDuplexHandler<M, H>
 where
     M: InterconnectDuplexRequest,
     H: Fn(RequestContext, M, DuplexItems<M::Item>) -> F + Send + Sync + 'static,
-    F: Future<Output = Result<DuplexResponses<M::Response>, StreamHandlerError>> + Send + 'static,
+    F: Future<Output = Result<DuplexResponses<M::Response>, Report<StreamHandlerError>>>
+        + Send
+        + 'static,
 {
     fn class(&self) -> PoolClass {
         M::CLASS
@@ -588,7 +600,9 @@ where
                     let (payload, reservation) = response
                         .encode_rkyv(executor, M::CLASS, limit)
                         .await
-                        .map_err(|error| StreamHandlerError::new(error.to_string()))?;
+                        .map_err(|error| {
+                            Report::new(StreamHandlerError::new(error.to_string()))
+                        })?;
                     Ok(ChargedBytes::from_owned(payload, reservation))
                 }
             });
@@ -765,7 +779,7 @@ impl RequestState {
     where
         M: InterconnectDuplexRequest,
         H: Fn(RequestContext, M, DuplexItems<M::Item>) -> F + Send + Sync + 'static,
-        F: Future<Output = Result<DuplexResponses<M::Response>, StreamHandlerError>>
+        F: Future<Output = Result<DuplexResponses<M::Response>, Report<StreamHandlerError>>>
             + Send
             + 'static,
     {
@@ -1034,7 +1048,7 @@ impl Transport {
     where
         M: InterconnectDuplexRequest,
         H: Fn(RequestContext, M, DuplexItems<M::Item>) -> F + Send + Sync + 'static,
-        F: Future<Output = Result<DuplexResponses<M::Response>, StreamHandlerError>>
+        F: Future<Output = Result<DuplexResponses<M::Response>, Report<StreamHandlerError>>>
             + Send
             + 'static,
     {
