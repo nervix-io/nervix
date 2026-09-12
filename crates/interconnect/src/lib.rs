@@ -1930,7 +1930,7 @@ mod tests {
             .expect("cancellation handler should register");
 
         let mut blocked = Vec::new();
-        for _ in 0..connection::MANAGEMENT_SHARED_STREAMS {
+        for _ in 0..connection::stream_slots::MANAGEMENT_SHARED_STREAMS {
             let requester = transport_a.clone();
             let target = node_b.clone();
             blocked.push(tokio::spawn(async move {
@@ -1940,7 +1940,9 @@ mod tests {
         timeout(Duration::from_secs(2), async {
             loop {
                 tokio::task::consume_budget().await;
-                if started.load(Ordering::Acquire) == connection::MANAGEMENT_SHARED_STREAMS {
+                if started.load(Ordering::Acquire)
+                    == connection::stream_slots::MANAGEMENT_SHARED_STREAMS
+                {
                     break;
                 }
                 tokio::task::yield_now().await;
