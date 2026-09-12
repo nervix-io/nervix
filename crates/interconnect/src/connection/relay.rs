@@ -772,6 +772,8 @@ impl TransportState {
             metadata: grant.metadata.clone(),
             state: parking_lot::Mutex::new(RelayAdmissionState::Reserved { grant_id }),
             cancellation: CancellationToken::new(),
+            reserved_at: Instant::now(),
+            observations: Arc::clone(&self.observations),
             _item: item,
             _terminal: terminal,
         });

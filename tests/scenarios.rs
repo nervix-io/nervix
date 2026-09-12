@@ -104,6 +104,8 @@ const CUCUMBER_LOG_FILE: &str = "tests/logs/cucumber.log";
 static ONNX_RUNTIME_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<StdMutex<BTreeMap<String, String>>> = OnceLock::new();
+// Every scenario holds a read guard; `@exclusive` scenarios hold the write guard.
+static SCENARIO_EXECUTION_LOCK: OnceLock<StdArc<tokio::sync::RwLock<()>>> = OnceLock::new();
 static WEB_CONSOLE_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> = OnceLock::new();
 const MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS: usize = 2;
 const ZEROMQ_OBSERVER_BIND_ATTEMPTS: usize = 8;
@@ -112,8 +114,19 @@ const WEB_CONSOLE_FEATURE_NAMES: [&str; 2] =
 const DEPENDENCY_LIFECYCLE_HELPER_ENV: &str = "NERVIX_DEPENDENCY_LIFECYCLE_HELPER";
 const DEPENDENCY_LIFECYCLE_STARTED: &str = "NERVIX_DEPENDENCY_LIFECYCLE_STARTED=";
 
+#[derive(Debug)]
+enum ScenarioExecutionPermit {
+    Concurrent {
+        _permit: tokio::sync::OwnedRwLockReadGuard<()>,
+    },
+    Exclusive {
+        _permit: tokio::sync::OwnedRwLockWriteGuard<()>,
+    },
+}
+
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
+    scenario_execution_permit: Option<ScenarioExecutionPermit>,
     cluster: Option<Cluster>,
     active_session: Option<TestSession>,
     active_session_node: Option<String>,
@@ -298,6 +311,34 @@ impl ScenarioWorld {
                 &metric_name,
                 &label_fragments,
                 expected_value,
+                wait,
+            )
+            .await
+            .expect("observability endpoint did not report the expected metric value");
+    }
+
+    async fn wait_for_observability_metric_at_least(
+        &self,
+        node_id: &str,
+        metric_name: &str,
+        minimum_value: i64,
+        wait: Option<Duration>,
+        step: &Step,
+    ) {
+        let node_id = expand_placeholders(self, node_id);
+        let metric_name = expand_placeholders(self, metric_name);
+        let label_fragments = docstring(step)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| expand_placeholders(self, line))
+            .collect::<Vec<_>>();
+        self.cluster()
+            .wait_for_observability_metric_at_least(
+                &node_id,
+                &metric_name,
+                &label_fragments,
+                minimum_value,
                 wait,
             )
             .await
@@ -641,6 +682,101 @@ async fn then_clock_source_recorder_records_requests(
              {observed_count}: {observations}"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[then(expr = "within {string} clock source recorder {string} records at least {int} requests")]
+async fn then_clock_source_recorder_records_at_least_requests(
+    world: &mut ScenarioWorld,
+    duration: String,
+    name: String,
+    expected_count: u64,
+) {
+    let duration = humantime::parse_duration(&duration)
+        .assured("the Cucumber expression supplies a valid step duration");
+    let name = expand_placeholders(world, &name);
+    let deadline = Instant::now()
+        .checked_add(duration)
+        .assured("the Cucumber fixture duration fits the monotonic clock range");
+    loop {
+        tokio::task::consume_budget().await;
+        let observations = world
+            .dependencies
+            .clock_source_observations(&name)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("failed to read clock source recorder '{name}': {error}")
+            });
+        let Some(count) = observations.get("count") else {
+            panic!("clock source recorder '{name}' returned no count: {observations}");
+        };
+        let Some(observed_count) = count.as_u64() else {
+            panic!("clock source recorder '{name}' returned a nonnumeric count: {observations}");
+        };
+        if observed_count >= expected_count {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "clock source recorder '{name}' expected at least {expected_count} requests, observed \
+             {observed_count}: {observations}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[then(
+    expr = "the first {int} requests recorded by clock source recorder {string} are separated by \
+            at least {string}"
+)]
+async fn then_clock_source_requests_have_minimum_physical_gap(
+    world: &mut ScenarioWorld,
+    count: usize,
+    name: String,
+    minimum_gap: String,
+) {
+    let minimum_gap = humantime::parse_duration(&minimum_gap)
+        .assured("the Cucumber expression supplies a valid minimum gap duration");
+    let name = expand_placeholders(world, &name);
+    let observations = world
+        .dependencies
+        .clock_source_observations(&name)
+        .await
+        .unwrap_or_else(|error| panic!("failed to read clock source recorder '{name}': {error}"));
+    let Some(requests) = observations
+        .get("requests")
+        .and_then(serde_json::Value::as_array)
+    else {
+        panic!("clock source recorder '{name}' returned no request list: {observations}");
+    };
+    assert!(
+        requests.len() >= count,
+        "clock source recorder '{name}' expected at least {count} requests, observed {}: \
+         {observations}",
+        requests.len()
+    );
+    let mut received_at = Vec::with_capacity(count);
+    for (index, request) in requests.iter().take(count).enumerate() {
+        let Some(received_at_monotonic_nanos) = request
+            .get("received_at_monotonic_nanos")
+            .and_then(serde_json::Value::as_u64)
+        else {
+            panic!(
+                "clock source recorder '{name}' request {index} has no monotonic timestamp: \
+                 {request}"
+            );
+        };
+        received_at.push(received_at_monotonic_nanos);
+    }
+    for pair in received_at.windows(2) {
+        let gap = pair[1]
+            .checked_sub(pair[0])
+            .verified("the recorder returns requests in monotonic receipt order");
+        assert!(
+            u128::from(gap) >= minimum_gap.as_nanos(),
+            "clock source recorder '{name}' expected its first {count} requests to be at least \
+             {minimum_gap:?} apart, observed a {gap}ns gap in {received_at:?}"
+        );
     }
 }
 
@@ -6467,6 +6603,17 @@ async fn then_nspl_commands_complete_within(
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
 }
 
+#[then(expr = "within {string} these NSPL commands complete on the leader node")]
+#[when(expr = "within {string} these NSPL commands complete on the leader node")]
+async fn then_nspl_commands_complete_on_leader_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+    #[step] step: &Step,
+) {
+    let leader = current_leader_node(world).await;
+    then_nspl_commands_complete_within(world, duration, leader, step).await;
+}
+
 #[given("the leader node is configured with these NSPL commands")]
 async fn given_the_leader_node_is_configured_with_these_nspl_commands(
     world: &mut ScenarioWorld,
@@ -10649,6 +10796,39 @@ async fn then_within_duration_node_observability_metric_with_labels_eventually_e
             step,
         )
         .await;
+}
+
+#[then(
+    expr = "node {string} observability metric {string} with labels eventually reaches at least \
+            {int}"
+)]
+async fn then_node_observability_metric_with_labels_eventually_reaches(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    metric_name: String,
+    minimum_value: i64,
+    #[step] step: &Step,
+) {
+    world
+        .wait_for_observability_metric_at_least(&node_id, &metric_name, minimum_value, None, step)
+        .await;
+}
+
+#[then(expr = "node {string} interconnection metrics use only bounded dimensions")]
+async fn then_node_interconnection_metrics_use_bounded_dimensions(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let offending = world
+        .cluster()
+        .unbounded_interconnection_metric_samples(&node_id)
+        .await
+        .expect("observability endpoint did not answer with its metric exposition");
+    assert!(
+        offending.is_empty(),
+        "node '{node_id}' exposed interconnection samples with unbounded dimensions: {offending:?}"
+    );
 }
 
 #[then(expr = "within {string} node {string} eventually reports describe relay as {string}")]
@@ -15932,10 +16112,29 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
     let writer = ScenarioWorld::cucumber()
         .max_concurrent_scenarios(default_max_concurrent_scenarios)
         .retries(1)
-        .before(|feature, _rule, scenario, world| {
+        .before(|feature, rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();
+            let exclusive = scenario
+                .tags
+                .iter()
+                .chain(rule.iter().flat_map(|rule| &rule.tags))
+                .chain(&feature.tags)
+                .any(|tag| tag == "exclusive");
             Box::pin(async move {
+                let execution_lock = SCENARIO_EXECUTION_LOCK
+                    .get_or_init(|| StdArc::new(tokio::sync::RwLock::new(())))
+                    .clone();
+                let execution_permit = if exclusive {
+                    ScenarioExecutionPermit::Exclusive {
+                        _permit: execution_lock.write_owned().await,
+                    }
+                } else {
+                    ScenarioExecutionPermit::Concurrent {
+                        _permit: execution_lock.read_owned().await,
+                    }
+                };
+                world.scenario_execution_permit = Some(execution_permit);
                 append_cucumber_log_line(&format!(
                     "scenario started: feature={feature_name:?} scenario={scenario_name:?}"
                 ));
@@ -15993,6 +16192,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
                         }
                     }
                     world.web_console_scenario_permit = None;
+                    world.scenario_execution_permit = None;
                 }
             })
         })

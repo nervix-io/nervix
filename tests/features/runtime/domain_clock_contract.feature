@@ -218,7 +218,7 @@ Feature: Domain clock contract regressions
       | 1            |
       | 3            |
 
-  @domain_cadence
+  @domain_cadence @exclusive
   Scenario Outline: HTTP polling follows paced domain cadence over multiple periods
     Given the HTTP mock server is running
     And clock source recorder "{{test_id}}" is reset

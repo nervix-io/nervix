@@ -25,6 +25,7 @@ use super::{
 };
 use crate::{
     PoolClass, RequestError, RequestSubquota, TransportError,
+    observation::TransferDirection,
     request::{RequestAdmission, RequestEnvelope, StreamingResponse},
     wire,
 };
@@ -33,7 +34,7 @@ use crate::{
 /// its bulk slot; each returned chunk holds its own memory charge until the caller drops it.
 pub struct IncomingByteStream {
     body: RecvStream,
-    _lease: StreamLease,
+    lease: StreamLease,
     _request_admission: RequestAdmission,
     executor: Executor,
     class: PoolClass,
@@ -174,6 +175,11 @@ impl IncomingByteStream {
                 })
             })?;
         self.received = received;
+        self.lease.state.observations.bulk_transferred(
+            self.class,
+            TransferDirection::Received,
+            chunk_bytes,
+        );
         Ok(Some(ChargedBytes::from_owned(bytes, reservation)))
     }
 }
@@ -239,7 +245,7 @@ impl TransportState {
             }
         };
         let (response, _admission) = handled.into_parts();
-        send_streaming_response(respond, response, self.options.progress_timeout).await
+        self.send_streaming_response(class, respond, response).await
     }
 
     pub(crate) async fn open_byte_stream(
@@ -261,6 +267,7 @@ impl TransportState {
                 reason: "request deadline exceeds the monotonic clock range".to_string(),
             })?;
         let lease = self.lease(node_id, class, subquota, deadline).await?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
         let (body, content_length) = lease
             .connection
             .request_stream_raw(
@@ -270,14 +277,14 @@ impl TransportState {
                     body: Some(body),
                     response_class: class,
                     response_limit: class.control_body_limit(&self.executor),
-                    timeout: timeout_duration,
+                    timeout: remaining,
                     headers: &[],
                 },
             )
             .await?;
         Ok(IncomingByteStream {
             body,
-            _lease: lease,
+            lease,
             _request_admission: admission,
             executor: self.executor.clone(),
             class,
@@ -331,78 +338,86 @@ async fn send_stream_chunk(
     Ok(())
 }
 
-async fn send_streaming_response(
-    mut respond: server::SendResponse<Bytes>,
-    mut response: StreamingResponse,
-    progress_timeout: Duration,
-) -> Result<(), Report<TransportError>> {
-    let headers = Response::builder()
-        .status(StatusCode::OK)
-        .version(Version::HTTP_2)
-        .header(http::header::CONTENT_LENGTH, response.content_length)
-        .body(())
-        .map_err(|error| TransportError::Http(error.to_string()))?;
-    let mut stream = respond
-        .send_response(headers, false)
-        .map_err(TransportError::from)?;
-    let mut sent = 0_u64;
-    loop {
-        tokio::task::consume_budget().await;
-        let next = match timeout(progress_timeout, response.chunks.next()).await {
-            Ok(next) => next,
-            Err(_) => {
-                stream.send_reset(Reason::CANCEL);
-                return Err(Report::new(TransportError::ProgressTimeout {
-                    timeout: progress_timeout,
-                }));
-            }
-        };
-        let Some(chunk) = next else {
-            break;
-        };
-        let chunk = match chunk {
-            Ok(chunk) => chunk,
-            Err(error) => {
+impl TransportState {
+    /// Write one streamed response body, counting each chunk as it leaves so a long transfer is
+    /// observable while it is running rather than only once it completes.
+    async fn send_streaming_response(
+        &self,
+        class: PoolClass,
+        mut respond: server::SendResponse<Bytes>,
+        mut response: StreamingResponse,
+    ) -> Result<(), Report<TransportError>> {
+        let progress_timeout = self.options.progress_timeout;
+        let headers = Response::builder()
+            .status(StatusCode::OK)
+            .version(Version::HTTP_2)
+            .header(http::header::CONTENT_LENGTH, response.content_length)
+            .body(())
+            .map_err(|error| TransportError::Http(error.to_string()))?;
+        let mut stream = respond
+            .send_response(headers, false)
+            .map_err(TransportError::from)?;
+        let mut sent = 0_u64;
+        loop {
+            tokio::task::consume_budget().await;
+            let next = match timeout(progress_timeout, response.chunks.next()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    stream.send_reset(Reason::CANCEL);
+                    return Err(Report::new(TransportError::ProgressTimeout {
+                        timeout: progress_timeout,
+                    }));
+                }
+            };
+            let Some(chunk) = next else {
+                break;
+            };
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    stream.send_reset(Reason::INTERNAL_ERROR);
+                    return Err(Report::new(TransportError::Decode(error.to_string())));
+                }
+            };
+            if chunk.is_empty() {
                 stream.send_reset(Reason::INTERNAL_ERROR);
-                return Err(Report::new(TransportError::Decode(error.to_string())));
+                return Err(Report::new(TransportError::Decode(
+                    "stream producer yielded an empty chunk".to_string(),
+                )));
             }
-        };
-        if chunk.is_empty() {
-            stream.send_reset(Reason::INTERNAL_ERROR);
-            return Err(Report::new(TransportError::Decode(
-                "stream producer yielded an empty chunk".to_string(),
-            )));
-        }
-        let chunk_bytes = u64::try_from(chunk.len())
-            .map_err(|error| TransportError::Decode(error.to_string()))?;
-        sent = sent.checked_add(chunk_bytes).ok_or_else(|| {
-            TransportError::Decode("streamed response byte count overflowed".to_string())
-        })?;
-        if sent > response.content_length {
-            stream.send_reset(Reason::INTERNAL_ERROR);
-            return Err(Report::new(TransportError::Decode(
-                "stream producer exceeded its declared content length".to_string(),
-            )));
-        }
-        match timeout(progress_timeout, send_stream_chunk(&mut stream, chunk)).await {
-            Ok(result) => result?,
-            Err(_) => {
-                stream.send_reset(Reason::CANCEL);
-                return Err(Report::new(TransportError::ProgressTimeout {
-                    timeout: progress_timeout,
-                }));
+            let chunk_bytes = u64::try_from(chunk.len())
+                .map_err(|error| TransportError::Decode(error.to_string()))?;
+            sent = sent.checked_add(chunk_bytes).ok_or_else(|| {
+                TransportError::Decode("streamed response byte count overflowed".to_string())
+            })?;
+            if sent > response.content_length {
+                stream.send_reset(Reason::INTERNAL_ERROR);
+                return Err(Report::new(TransportError::Decode(
+                    "stream producer exceeded its declared content length".to_string(),
+                )));
             }
+            match timeout(progress_timeout, send_stream_chunk(&mut stream, chunk)).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    stream.send_reset(Reason::CANCEL);
+                    return Err(Report::new(TransportError::ProgressTimeout {
+                        timeout: progress_timeout,
+                    }));
+                }
+            }
+            self.observations
+                .bulk_transferred(class, TransferDirection::Sent, chunk_bytes);
         }
+        if sent != response.content_length {
+            stream.send_reset(Reason::INTERNAL_ERROR);
+            return Err(Report::new(TransportError::Decode(format!(
+                "stream producer declared {} bytes but produced {sent}",
+                response.content_length
+            ))));
+        }
+        stream
+            .send_data(Bytes::new(), true)
+            .map_err(TransportError::from)?;
+        Ok(())
     }
-    if sent != response.content_length {
-        stream.send_reset(Reason::INTERNAL_ERROR);
-        return Err(Report::new(TransportError::Decode(format!(
-            "stream producer declared {} bytes but produced {sent}",
-            response.content_length
-        ))));
-    }
-    stream
-        .send_data(Bytes::new(), true)
-        .map_err(TransportError::from)?;
-    Ok(())
 }

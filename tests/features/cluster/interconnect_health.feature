@@ -1,3 +1,4 @@
+@exclusive
 Feature: Interconnect health coordination
 
   Scenario: A silent peer does not delay peer health or control-plane work

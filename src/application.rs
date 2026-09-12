@@ -109,6 +109,7 @@ use transaction::{
 use web_console::{serve_web_console_http, serve_web_console_https, web_console_advertise_url};
 
 use crate::{
+    metrics::NodeObservations,
     registry::Registry,
     resource_interconnect::{
         FetchResourceArchive, PublishResourceReplica, ResourceInterconnectError,
@@ -961,6 +962,20 @@ impl Application {
             interconnect.verified("startup assigns this handle before it reaches this point");
         let mut interconnect_rx = interconnect_rx;
         runtime.attach_remote_dispatcher(node_id.clone(), cluster.clone(), interconnect.clone());
+        let node_observations = NodeObservations::new(
+            runtime.executor().clone(),
+            interconnect.clone(),
+            consensus.observer(),
+        );
+        runtime
+            .metrics()
+            .install_node_observations(node_observations.clone());
+        let scheduler_delay_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            node_observations
+                .sample_scheduler_delay(scheduler_delay_shutdown)
+                .await;
+        });
         #[cfg(feature = "testing")]
         fault_injection.register_bulk_executor(node_id.clone(), runtime.executor().clone());
         #[cfg(feature = "testing")]

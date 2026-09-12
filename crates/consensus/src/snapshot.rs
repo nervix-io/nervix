@@ -177,6 +177,21 @@ impl SectionWriter {
 /// The snapshot generations node-owned storage retains, and who is still reading them.
 ///
 /// The newest published generation is always retained. One older generation stays only while an
+/// What a node is keeping in snapshot storage at one instant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotRetention {
+    /// The generation a follower would be caught up from.
+    pub active_generation: Option<u64>,
+    /// Generations an outgoing transfer is holding against deletion.
+    pub pinned_generations: usize,
+    /// Readers those pins are held for.
+    pub pinned_readers: usize,
+    /// Pinned generations a newer one displaced, whose transfers restart from the newest.
+    pub obsolete_generations: usize,
+    /// Generations nothing references, waiting for the next durable batch to delete them.
+    pub unreferenced_generations: usize,
+}
+
 /// active transfer is reading it; a second older one would exceed that quota, so the transfer
 /// holding it is cancelled and restarts from the newest generation.
 pub(crate) struct SnapshotGenerations {
@@ -217,6 +232,24 @@ impl SnapshotGenerations {
 
     pub(crate) fn active(&self) -> Option<SnapshotManifest> {
         self.state.lock().active.clone()
+    }
+
+    /// What this node is holding in snapshot storage beyond its active generation.
+    pub(crate) fn retention(&self) -> SnapshotRetention {
+        let state = self.state.lock();
+        let mut readers = 0_usize;
+        for pinned in state.pinned.values() {
+            readers = readers
+                .checked_add(*pinned)
+                .assured("one node never opens usize::MAX concurrent snapshot transfers");
+        }
+        SnapshotRetention {
+            active_generation: state.active.as_ref().map(|manifest| manifest.generation),
+            pinned_generations: state.pinned.len(),
+            pinned_readers: readers,
+            obsolete_generations: state.obsolete.len(),
+            unreferenced_generations: state.unreferenced.len(),
+        }
     }
 
     /// The generation number the next build or staged transfer writes its sections under.

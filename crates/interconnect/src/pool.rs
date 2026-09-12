@@ -10,13 +10,27 @@
 use meticulous::OptionExt as _;
 use nervix_execution::{CpuClass, Executor, MemoryClass};
 use rkyv::{Archive, Deserialize, Serialize};
+use strum::{AsRefStr, EnumCount};
 
 use crate::RKYV_RECORD_OVERHEAD_BYTES;
 
 /// The independent connection pools that isolate internal traffic classes.
 #[derive(
-    Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+    Debug,
+    Clone,
+    Copy,
+    Archive,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    AsRefStr,
+    EnumCount,
 )]
+#[strum(serialize_all = "snake_case")]
 pub enum PoolClass {
     Management,
     Commands,
@@ -33,6 +47,17 @@ impl PoolClass {
         Self::Relay,
         Self::Bulk,
     ];
+
+    /// This class's position in the fixed observation arrays it indexes.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Management => 0,
+            Self::Commands => 1,
+            Self::Replication => 2,
+            Self::Relay => 3,
+            Self::Bulk => 4,
+        }
+    }
 
     pub(crate) const PRECONNECTED: [Self; 4] = [
         Self::Management,

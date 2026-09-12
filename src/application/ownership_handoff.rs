@@ -64,22 +64,75 @@ pub(in crate::application) enum AssignmentRelocation {
 }
 
 impl AssignmentRelocation {
-    pub(in crate::application) fn target(
+    pub(in crate::application) fn preferred_target(
         self,
         desired_target: Option<ClusterNodeName>,
         existing_replica: Option<ClusterNodeName>,
     ) -> Option<ClusterNodeName> {
         match self {
-            Self::Planned => desired_target.or(existing_replica),
-            Self::Failure => existing_replica.or(desired_target),
+            Self::Planned => {
+                if let Some(desired_target) = desired_target {
+                    Some(desired_target)
+                } else {
+                    existing_replica
+                }
+            }
+            Self::Failure => {
+                if let Some(existing_replica) = existing_replica {
+                    Some(existing_replica)
+                } else {
+                    desired_target
+                }
+            }
         }
     }
 
-    pub(in crate::application) fn retains_former_replica(self) -> bool {
+    pub(in crate::application) fn retains_former_owner_as_replica(self) -> bool {
         match self {
             Self::Planned => true,
             Self::Failure => false,
         }
+    }
+
+    pub(in crate::application) fn ordered_assignment<'a>(
+        self,
+        target: &ClusterNodeName,
+        unavailable_node_id: &ClusterNodeName,
+        live_nodes: &BTreeSet<ClusterNodeName>,
+        target_nodes: &BTreeSet<ClusterNodeName>,
+        assignment_slots: usize,
+        ordered_candidates: impl IntoIterator<Item = &'a ClusterNodeName>,
+    ) -> Vec<ClusterNodeName> {
+        let former_owner_is_live = live_nodes.contains(unavailable_node_id);
+        let former_owner_differs_from_target = unavailable_node_id != target;
+        let retain_former_owner = self.retains_former_owner_as_replica()
+            && former_owner_is_live
+            && former_owner_differs_from_target;
+
+        let mut assigned_nodes = vec![target.clone()];
+        if retain_former_owner {
+            assigned_nodes.push(unavailable_node_id.clone());
+        }
+
+        for candidate in ordered_candidates {
+            let candidate_is_target_eligible = target_nodes.contains(candidate);
+            let candidate_is_retained_former_owner =
+                retain_former_owner && candidate == unavailable_node_id;
+            let candidate_is_eligible =
+                candidate_is_target_eligible || candidate_is_retained_former_owner;
+            if !candidate_is_eligible {
+                continue;
+            }
+
+            let candidate_is_already_assigned = assigned_nodes.contains(candidate);
+            if candidate_is_already_assigned {
+                continue;
+            }
+            assigned_nodes.push(candidate.clone());
+        }
+
+        assigned_nodes.truncate(assignment_slots);
+        assigned_nodes
     }
 
     pub(in crate::application) fn ownership_transition(

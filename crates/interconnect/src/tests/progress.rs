@@ -57,7 +57,7 @@ async fn progress_work_cannot_consume_liveness_streams() {
         .assured("the fresh test transport has no liveness handler with this name");
 
     let mut blocked = Vec::new();
-    for _ in 0..connection::MANAGEMENT_PROGRESS_STREAMS {
+    for _ in 0..connection::stream_slots::MANAGEMENT_PROGRESS_STREAMS {
         let requester = transport_a.clone();
         let target = node_b.clone();
         blocked.push(tokio::spawn(async move {
@@ -66,7 +66,8 @@ async fn progress_work_cannot_consume_liveness_streams() {
     }
     timeout_at(
         observation_deadline,
-        progress_started_rx.wait_for(|started| *started == connection::MANAGEMENT_PROGRESS_STREAMS),
+        progress_started_rx
+            .wait_for(|started| *started == connection::stream_slots::MANAGEMENT_PROGRESS_STREAMS),
     )
     .await
     .assured("every reserved progress stream enters its handler within the test failsafe")

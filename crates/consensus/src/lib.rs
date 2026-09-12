@@ -66,7 +66,7 @@ mod replication;
 mod retention;
 mod snapshot;
 pub use retention::RaftRetentionPolicy;
-pub use snapshot::SealedSnapshot;
+pub use snapshot::{SealedSnapshot, SnapshotRetention};
 mod storage;
 mod storage_fault;
 
@@ -1611,6 +1611,11 @@ impl Observer {
             .get(domain_id)
             .cloned()
     }
+    /// What this node is keeping in snapshot storage, beside the log that snapshot covers.
+    pub fn snapshot_retention(&self) -> SnapshotRetention {
+        self.inner.store.snapshot_retention()
+    }
+
     /// What this node currently keeps of its Raft log, and what covers it.
     pub fn raft_log_retention(&self) -> RaftLogRetention {
         let metrics = self.inner.raft.metrics().borrow_watched().clone();

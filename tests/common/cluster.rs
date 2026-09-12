@@ -382,6 +382,89 @@ fn observability_metric_has_value(
     false
 }
 
+fn observability_metric_reaches(
+    body: &str,
+    metric_name: &str,
+    label_fragments: &[String],
+    minimum_value: i64,
+    matching_lines: &mut Vec<String>,
+) -> bool {
+    matching_lines.clear();
+    for line in body.lines() {
+        if line.starts_with('#') || !line_starts_with_metric(line, metric_name) {
+            continue;
+        }
+        if !label_fragments
+            .iter()
+            .all(|fragment| line.contains(fragment.as_str()))
+        {
+            continue;
+        }
+        matching_lines.push(line.to_string());
+        if let Some(value) = parse_prometheus_sample_value(line)
+            && value >= minimum_value.approx_into::<f64>()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The label names an interconnection series may carry. Every dimension here is a closed set of
+/// values fixed at compile time, so no branch key, peer identity or operation id can widen one.
+const BOUNDED_INTERCONNECTION_LABELS: &[&str] =
+    &["class", "direction", "reason", "outcome", "operation"];
+
+/// The metric name prefixes the interconnection qualification owns.
+const INTERCONNECTION_METRIC_PREFIXES: &[&str] = &[
+    "nervix_interconnect_",
+    "nervix_execution_",
+    "nervix_consensus_",
+    "nervix_node_scheduler_",
+];
+
+/// Every interconnection sample whose label set is outside [`BOUNDED_INTERCONNECTION_LABELS`].
+fn unbounded_interconnection_samples(body: &str) -> Vec<String> {
+    let mut offending = Vec::new();
+    for line in body.lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        if !INTERCONNECTION_METRIC_PREFIXES
+            .iter()
+            .any(|prefix| line.starts_with(prefix))
+        {
+            continue;
+        }
+        for label in sample_label_names(line) {
+            if !BOUNDED_INTERCONNECTION_LABELS.contains(&label.as_str()) {
+                offending.push(line.to_string());
+                break;
+            }
+        }
+    }
+    offending
+}
+
+fn sample_label_names(line: &str) -> Vec<String> {
+    let Some(open) = line.find('{') else {
+        return Vec::new();
+    };
+    let Some(close) = line.rfind('}') else {
+        return Vec::new();
+    };
+    let Some(labels) = line.get(open + 1..close) else {
+        return Vec::new();
+    };
+    labels
+        .split(',')
+        .filter_map(|pair| pair.split('=').next())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 fn line_starts_with_metric(line: &str, metric_name: &str) -> bool {
     let Some(remainder) = line.strip_prefix(metric_name) else {
         return false;
@@ -1958,6 +2041,108 @@ impl Cluster {
             message.push_str(&format!("\nlast error: {err}"));
         }
         Err(io::Error::other(message))
+    }
+
+    /// Wait until one series reaches `minimum_value`, which is how a scenario reads a counter that
+    /// keeps rising while it is being observed.
+    pub(crate) async fn wait_for_observability_metric_at_least(
+        &self,
+        node_id: &str,
+        metric_name: &str,
+        label_fragments: &[String],
+        minimum_value: i64,
+        wait: Option<Duration>,
+    ) -> io::Result<()> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        let url = format!("http://{}/metrics", handle.spec.observability_addr());
+        let client = reqwest::Client::new();
+        let mut last_response = None;
+        let mut last_error = None;
+        let mut last_matching_lines = Vec::new();
+        let deadline = Instant::now() + wait.unwrap_or(STATUS_TIMEOUT);
+
+        while Instant::now() < deadline {
+            tokio::task::consume_budget().await;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let response = timeout(remaining, async {
+                let response = client.get(&url).send().await?;
+                let status = response.status().as_u16();
+                response.text().await.map(|body| (status, body))
+            })
+            .await;
+            match response {
+                Ok(Ok((status, body))) => {
+                    if status == 200
+                        && observability_metric_reaches(
+                            &body,
+                            metric_name,
+                            label_fragments,
+                            minimum_value,
+                            &mut last_matching_lines,
+                        )
+                    {
+                        return Ok(());
+                    }
+                    last_response = Some((status, body));
+                }
+                Ok(Err(error)) => {
+                    last_error = Some(io::Error::other(error));
+                }
+                Err(_) => break,
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            sleep(POLL_INTERVAL.min(remaining)).await;
+        }
+
+        let mut message = format!(
+            "timed out waiting for observability metric '{metric_name}' from node '{node_id}' at \
+             {url}; expected labels {label_fragments:?} and a value of at least {minimum_value}"
+        );
+        if !last_matching_lines.is_empty() {
+            message.push_str(&format!("\nlast matching lines: {last_matching_lines:?}"));
+        }
+        if let Some((status, body)) = last_response {
+            message.push_str(&format!("\nlast response: status={status} body={body:?}"));
+        }
+        if let Some(err) = last_error {
+            message.push_str(&format!("\nlast error: {err}"));
+        }
+        Err(io::Error::other(message))
+    }
+
+    /// Read every interconnection series once and report the samples carrying a label outside the
+    /// bounded set the proposal allows.
+    pub(crate) async fn unbounded_interconnection_metric_samples(
+        &self,
+        node_id: &str,
+    ) -> io::Result<Vec<String>> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        let url = format!("http://{}/metrics", handle.spec.observability_addr());
+        let client = reqwest::Client::new();
+        let response = timeout(STATUS_TIMEOUT, async {
+            let response = client.get(&url).send().await?;
+            let status = response.status().as_u16();
+            response.text().await.map(|body| (status, body))
+        })
+        .await
+        .map_err(io::Error::other)?
+        .map_err(io::Error::other)?;
+        let (status, body) = response;
+        if status != 200 {
+            return Err(io::Error::other(format!(
+                "observability endpoint at {url} answered {status}"
+            )));
+        }
+        Ok(unbounded_interconnection_samples(&body))
     }
 
     pub(crate) async fn current_leader(&self, node_id: &str) -> io::Result<Option<String>> {

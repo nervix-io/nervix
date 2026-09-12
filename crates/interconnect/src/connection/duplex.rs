@@ -526,9 +526,10 @@ impl TransportState {
             }
         })?;
         let lease = self.lease(node_id, class, subquota, deadline).await?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
         let OpenedDuplexStream { writer, body } = lease
             .connection
-            .open_duplex_raw(self, DUPLEX_PATH, class, body, setup_timeout)
+            .open_duplex_raw(self, DUPLEX_PATH, class, body, remaining)
             .await?;
         let frame_limit = class.payload_limit(&self.executor);
         let reader =
