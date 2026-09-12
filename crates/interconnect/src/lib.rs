@@ -16,8 +16,7 @@ use std::{
 };
 
 use error_stack::Report;
-use meticulous::OptionExt as _;
-use nervix_execution::{ChargedBytes, CpuClass, Executor, MemoryClass, Reservation};
+use nervix_execution::{ChargedBytes, Executor, Reservation};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CodecName, DomainClockProgress,
     DomainName, EmitterName, FieldName, IngestorName, LookupName, ModelKind, ModelName, NodeRef,
@@ -33,15 +32,20 @@ use tokio::sync::mpsc;
 
 mod connection;
 mod identity;
+mod pool;
 mod request;
 mod wire;
 
-pub use connection::{IncomingByteStream, RelayAdmission, RelayCancellationGuard};
+pub use connection::{
+    DuplexItems, DuplexReceiver, DuplexResponses, DuplexSender, IncomingByteStream, RelayAdmission,
+    RelayCancellationGuard,
+};
 pub use identity::TlsConfigBundle;
+pub use pool::PoolClass;
 pub use request::{
-    ApplicationHealthProbe, HandlerRegistrationError, InterconnectRequest,
-    InterconnectStreamRequest, RemoteRequestFailure, RequestContext, RequestError, RequestSubquota,
-    StreamHandlerError, StreamingResponse,
+    ApplicationHealthProbe, HandlerRegistrationError, InterconnectDuplexRequest,
+    InterconnectRequest, InterconnectStreamRequest, RemoteRequestFailure, RequestContext,
+    RequestError, RequestSubquota, StreamHandlerError, StreamingResponse,
 };
 use request::{RequestEnvelope, RequestState, ResponseEnvelope};
 
@@ -62,113 +66,6 @@ const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_CONCURRENT_HEALTH_PROBES: usize = 32;
 pub(crate) const RELAY_GRANT_LIFETIME: Duration = Duration::from_secs(5);
 pub(crate) const RKYV_RECORD_OVERHEAD_BYTES: u64 = 4 * 1024;
-
-/// The independent connection pools that isolate internal traffic classes.
-#[derive(
-    Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
-)]
-pub enum PoolClass {
-    Management,
-    Commands,
-    Replication,
-    Relay,
-    Bulk,
-}
-
-impl PoolClass {
-    pub const ALL: [Self; 5] = [
-        Self::Management,
-        Self::Commands,
-        Self::Replication,
-        Self::Relay,
-        Self::Bulk,
-    ];
-
-    pub(crate) const PRECONNECTED: [Self; 4] = [
-        Self::Management,
-        Self::Commands,
-        Self::Replication,
-        Self::Relay,
-    ];
-
-    pub(crate) const fn is_preconnected(self) -> bool {
-        matches!(
-            self,
-            Self::Management | Self::Commands | Self::Replication | Self::Relay
-        )
-    }
-
-    pub(crate) fn preconnected_connections_per_peer() -> usize {
-        let mut connections = 0usize;
-        for class in Self::PRECONNECTED {
-            connections = connections
-                .checked_add(class.connections_per_peer())
-                .assured("the fixed set of preconnected pool slots fits in usize");
-        }
-        connections
-    }
-
-    pub const fn connections_per_peer(self) -> usize {
-        match self {
-            Self::Relay => 2,
-            Self::Management | Self::Commands | Self::Replication | Self::Bulk => 1,
-        }
-    }
-
-    pub const fn stream_slots_per_connection(self) -> usize {
-        match self {
-            Self::Management | Self::Relay => 64,
-            Self::Commands => 32,
-            Self::Replication => 1,
-            Self::Bulk => 4,
-        }
-    }
-
-    pub(crate) const fn memory_class(self) -> MemoryClass {
-        match self {
-            Self::Management => MemoryClass::Management,
-            Self::Commands | Self::Replication => MemoryClass::Commands,
-            Self::Relay => MemoryClass::Relay,
-            Self::Bulk => MemoryClass::Bulk,
-        }
-    }
-
-    pub(crate) const fn cpu_class(self) -> CpuClass {
-        match self {
-            Self::Management | Self::Commands | Self::Replication => CpuClass::Control,
-            Self::Relay => CpuClass::Data,
-            Self::Bulk => CpuClass::Bulk,
-        }
-    }
-
-    pub(crate) fn payload_limit(self, executor: &Executor) -> u64 {
-        match self {
-            Self::Management => executor.limits().management_event_bytes.as_u64(),
-            Self::Commands | Self::Replication => executor.limits().command_bytes.as_u64(),
-            Self::Relay => executor.limits().relay_encoded_bytes.as_u64(),
-            Self::Bulk => executor
-                .limits()
-                .bulk_chunk_bytes
-                .as_u64()
-                .checked_add(RKYV_RECORD_OVERHEAD_BYTES)
-                .assured("the bulk application limit leaves room inside a u64 for rkyv metadata"),
-        }
-    }
-
-    pub(crate) fn control_body_limit(self, executor: &Executor) -> u64 {
-        if self == Self::Bulk {
-            return executor
-                .limits()
-                .bulk_chunk_bytes
-                .as_u64()
-                .checked_add(2 * RKYV_RECORD_OVERHEAD_BYTES)
-                .assured(
-                    "the bulk application limit leaves room inside a u64 for nested rkyv metadata",
-                );
-        }
-        self.payload_limit(executor)
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct TransportOptions {
@@ -1171,7 +1068,7 @@ mod tests {
     };
 
     use futures_util::FutureExt as _;
-    use meticulous::ResultExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_execution::{CpuClass, MemoryClass};
     use nervix_models::RemoteAckOutcome;
     use rcgen::{
@@ -2073,6 +1970,9 @@ mod tests {
         transport_a.shutdown().await;
         transport_b.shutdown().await;
     }
+
+    #[path = "duplex.rs"]
+    mod duplex;
 
     #[path = "progress.rs"]
     mod progress;

@@ -98,12 +98,12 @@ belongs to [14](https://app.clickup.com/t/86bbwct0e).
 | Need | Fixture |
 | --- | --- |
 | Historical paced time | The historical-origin public scenario starts at `2000-01-01T00:00:00Z`. |
-| Slow paced time | `Paced branch expiration follows domain logical time` uses rate `0.01`. Task 10's fresh-activity scenario pairs rates `2.0` and `0.5` with logical TTLs `6s` and `1500ms` so both rates reach the same physical retention. |
-| Fast paced time | `Prometheus ingestor follows paced domain logical time and cadence` and `Domain commands isolate session context and drive a replicated clock` use rate `4.0`. |
+| Slow paced time | `Paced branch expiration follows domain logical time` uses rate `0.01`, and task 08's held-flush, immediate, and acknowledgement-keepalive emitter scenarios reuse it. Task 10's fresh-activity scenario pairs rates `2.0` and `0.5` with logical TTLs `6s` and `1500ms` so both rates reach the same physical retention. |
+| Fast paced time | `Prometheus ingestor follows paced domain logical time and cadence` and `Domain commands isolate session context and drive a replicated clock` use rate `4.0`; task 08's emitter and Iceberg cadence scenarios use rate `20.0`. |
 | Time-dependent expressions | The delayed-progress scenario emits `now()` into a schema-backed `DATETIME` field before and after controlled progress delivery. |
 | Delayed progress | `domain clock progress for domain ... is paused before delivery`, its bounded reached assertion, and `... resumes` form a test-only barrier around the next delivery. Teardown releases an armed barrier. |
 | Recorded external source | The explicitly started HTTP mock exposes `/clock-source/{name}`. Each request records its actual UTC nanoseconds, monotonic nanoseconds, query parameters, and count. `delay_ms` controls response latency. `clock source recorder ... is reset` and its bounded request-count assertion use `/clock-source-observations/{name}`. |
-| Sink retry and ACK | Existing emitter fault/stall controls and broker observers drive the scenarios `Kafka ACK ingestor waits while an attached emitter is stalled`, `Kafka ACK SEQUENTIAL replays on attached emitter failure`, and task 08's named cadence scenario. ACK state remains in memory. |
+| Sink retry and ACK | Existing emitter fault/stall controls and broker observers drive the scenarios `Kafka ACK ingestor waits while an attached emitter is stalled`, `Kafka ACK SEQUENTIAL replays on attached emitter failure`, and task 08's named cadence scenario together with `A stalled emitter keeps its upstream acknowledgement alive on the physical clock`. ACK state remains in memory. |
 | Join, restart, leader, and owner loss | Existing cluster start/stop/restart, leadership transfer, placement inspection, and entity-gate controls are reused. Clock-owner scenarios select the production sticky scheduler before startup, following `Losing the former owner during a held drain leaves relocation to failover`. |
 
 The fixture endpoints do not provision product-owned external objects. A scenario starts the mock
@@ -134,6 +134,7 @@ just test-scenarios --input tests/features/runtime/domain_clock_contract.feature
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @domain_clock_authority
 just test-scenarios --input tests/features/runtime/domain_execution_time.feature --tags @domain_execution_time
 just test-scenarios --input tests/features/runtime/domain_buffer_timing.feature --tags @domain_buffer_timing
+just test-scenarios --input tests/features/runtime/domain_emitter_cadence.feature --tags @domain_emitter_cadence
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @domain_cadence
 just test-scenarios --input tests/features/runtime/generator.feature --tags @domain_cadence
 just test-scenarios --input tests/features/runtime/generator.feature --tags @domain_execution_time
@@ -155,7 +156,10 @@ duration-window coverage. The untagged
 `Out-of-range paced starts and projections return typed timestamp diagnostics` scenario records
 task 02's F10 public coverage. Task 06 adds `domain_execution_time.feature` and focused tagged
 coverage in the listed runtime feature files for F6 and F7. Task 07 adds
-`domain_buffer_timing.feature` for F5's branch-local collection and flush clock classes. Task 09
+`domain_buffer_timing.feature` for F5's branch-local collection and flush clock classes. Task 08
+adds `domain_emitter_cadence.feature` for the remainder of F5 at the connector boundary: logical
+emitter and Iceberg cadence, the physical `FLUSH IMMEDIATE` minimum across sink families, the
+physical retry and acknowledgement keepalive, and force-flush drain. Task 09
 adds the `domain_cadence` cases for recurring HTTP, Prometheus, and generator work. Task 10 adds
 `branch_activity_sampling.feature` for F9's accepted-input activity and logical retention.
 
@@ -296,6 +300,32 @@ Recorded on 10 September 2026 against the task 07 worktree, including the merged
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline, and string-error debt fell from 497 to 496. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.
+
+## Task 08 validation record
+
+Recorded on 11 September 2026 against the task 08 worktree, which includes the task 09 work it
+branched from:
+
+| Probe | Result |
+| --- | --- |
+| Public paced emitter reproducer before product changes | Expected red in both the one- and three-node examples of three scenarios: an accelerated `FLUSH EACH 20s` emitter published nothing within its four-second physical window, a slowed `FLUSH EACH 100ms` emitter published immediately instead of holding its logical deadline, and an accelerated Iceberg `FLUSH EACH 2s` with `COMMIT EACH 2s` committed no row within two seconds. |
+| Physical controls in the same reproducer before product changes | Pass in both examples; emitter `FLUSH IMMEDIATE` kept its physical minimum in a slow domain, and a stalled emitter kept its upstream `MODE ACK` Kafka ingestor alive without replay. |
+| `Domain-paced emitter cadence` | Pass; all ten one- and three-node scenarios and all 104 steps covered logical emitter cadence, a stall that preserved the pending batch and its acknowledgements, a logically held flush released by a force flush, the physical immediate minimum, logical Iceberg flush and commit boundaries, and the physical acknowledgement keepalive. |
+| Kafka emission and ingestion regressions | Pass; all 56 scenarios and all 590 steps covered emitter stall, fault, detached and attached acknowledgement replay, and consumer-group offset boundaries. |
+| Iceberg emission regressions | Pass; all 20 scenarios and all 228 steps covered staging, commit, namespace, rejection, and clock-class behavior. |
+| Emitter input, metric, and publishing-mode regressions | Pass; all 12 scenarios and all 296 steps passed. |
+| Domain feature regressions | Pass; all 98 scenarios and all 978 steps covered domain lifecycle, buffer timing, execution time, ingestion time, pacing, and cadence. |
+| Relay-consumer regressions for the retyped wake | Pass; 296 scenarios across junctions, deduplicators, reorderers, correlators, window processors, inferencers, WASM processors, materialized relays, reingestors, generators, input collection, branch expiration, relay capacity and metrics, quiescing, and every `ALTER` feature. The WASM cluster-restart scenario timed out once while another suite held the machine and passed in isolation on re-run. |
+| Wake and cadence unit coverage | Pass; the branch-buffering suite covers a wake taking whichever coordinate arrives first and a cadence whose clock is gone being neither due nor silently postponed, and the emitter suite covers the logical and physical cadence coordinates, an active retry replacing the ordinary cadence wake, and a retry deadline preserved until its attempt. |
+| Merged `origin/main` re-run | Pass; after merging the current `origin/main`, the ten emitter cadence scenarios and 121 scenarios across Kafka emission and ingestion, Iceberg, emitter inputs, metrics and publishing modes, branch buffering, materialized relays, and reingestors passed again. |
+| `nervix-server` library suite | Pass; 840 tests passed with no ignored tests on the merged tree. |
+| `just book 0.1.0-dev` | Pass; documentation tests, console screenshots, and the HTML, LLM, and Markdown renderers completed successfully. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline. |
+
+No complete Cucumber-suite or final qualification result is claimed by this record. The full `just
+test` run was twice interrupted by another suite holding the machine, so this record names the
+focused runs above instead.
 
 ## Task 09 validation record
 
