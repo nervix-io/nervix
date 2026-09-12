@@ -16,6 +16,7 @@ use super::{
     tls::{INTERNAL_TLS_CA_FILE, internal_tls_path},
 };
 use crate::cluster;
+
 pub(in crate::application) fn grpc_uri_from_advertise_addr(addr: &str) -> Option<String> {
     if addr.is_empty() {
         None

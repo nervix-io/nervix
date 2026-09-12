@@ -14,6 +14,7 @@ use tracing::warn;
 
 use super::{error, error::AppError};
 use crate::task_shutdown::JoinShutdown as _;
+
 const BACKGROUND_TASK_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
 
 /// A running background task and the token that stops it.

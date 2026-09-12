@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::{AppError, http_endpoint::text_response};
+
 const OBSERVABILITY_LIVEZ_PATH: &str = "/livez";
 
 const OBSERVABILITY_READYZ_PATH: &str = "/readyz";

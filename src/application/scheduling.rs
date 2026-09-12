@@ -37,6 +37,7 @@ use super::{
     session_service::SessionServiceImpl,
 };
 use crate::{proto::CommandResult, registry::ActiveGraph, runtime::KafkaIngestor};
+
 pub(in crate::application) const LEADER_KAFKA_PARTITION_WATCH_INTERVAL: Duration =
     Duration::from_secs(1);
 

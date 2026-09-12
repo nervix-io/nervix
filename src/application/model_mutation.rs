@@ -30,6 +30,7 @@ use crate::{
     proto::{CommandResult, CommandResultKind, Diagnostic, SessionResponse},
     registry::{RegistryError, RegistryMutation},
 };
+
 /// One statement of a model-mutation batch that reached the registry: which statement it was,
 /// the model it changed, and the message its own result reports.
 struct AppliedModelMutation {

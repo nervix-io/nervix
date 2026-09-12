@@ -25,6 +25,7 @@ use tracing_subscriber::{
 use triomphe::Arc;
 
 use super::{AppError, Args};
+
 const DEFAULT_TRACE_FILTER: &str =
     "info,nervix=info,registry=info,openraft::core::heartbeat::worker=error,\
      openraft::replication=error,openraft::engine::handler::replication_handler=error";

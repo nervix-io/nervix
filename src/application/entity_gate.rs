@@ -25,6 +25,7 @@ use tracing::{debug, warn};
 
 use super::{domain_lifecycle::DomainAlterError, session_service::SessionServiceImpl};
 use crate::runtime::EntityGateLease;
+
 pub(in crate::application) const ENTITY_GATE_RELEASE_RETRY_INTERVAL: Duration =
     Duration::from_millis(100);
 

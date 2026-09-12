@@ -32,6 +32,7 @@ use crate::{
     },
     runtime::IngestorDescribe as RuntimeIngestorDescribe,
 };
+
 pub(in crate::application) fn runtime_ingestor_describe_to_envelope(
     summary: RuntimeIngestorDescribe,
     metrics: Vec<String>,

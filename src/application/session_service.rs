@@ -67,6 +67,7 @@ use crate::{
     resource::ResourceStore,
     runtime::{Runtime, RuntimeEvent},
 };
+
 /// How many events a session can fall behind before the bus drops the oldest.
 pub(in crate::application) const SESSION_EVENT_CAPACITY: usize = 256;
 

@@ -22,6 +22,7 @@ use nervix_models::{
 use nervix_vm::{CompileBinding, SchemaSensitivity};
 
 use crate::registry::error::RegistryError;
+
 pub(in crate::registry) fn ensure_schema_has_fields<T>(
     domain: &DomainName,
     identifier: &ModelName,

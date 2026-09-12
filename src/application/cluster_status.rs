@@ -10,6 +10,7 @@ use nervix_consensus::Observer;
 use nervix_models::ScheduledNode;
 
 use crate::cluster;
+
 pub(in crate::application) async fn render_cluster_status(
     cluster: &cluster::ClusterHandle,
     consensus: &Observer,

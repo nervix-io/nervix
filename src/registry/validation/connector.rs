@@ -47,6 +47,7 @@ use crate::{
         },
     },
 };
+
 pub(in crate::registry) fn validate_ingestor_source(
     domain: &DomainName,
     identifier: &ModelName,

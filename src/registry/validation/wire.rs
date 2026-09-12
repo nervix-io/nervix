@@ -18,6 +18,7 @@ use nervix_models::{
 };
 
 use crate::registry::{error::RegistryError, validation::schema::expect_schema_model};
+
 /// The wire schemas of a domain's proposed configuration, as a codec's format looks them up.
 ///
 /// The reference the format names is resolved against the store the whole configuration is

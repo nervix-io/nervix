@@ -35,6 +35,7 @@ use crate::registry::{
         wire::schema_for_ack_model,
     },
 };
+
 pub(in crate::registry) fn model_materialized_state_dependencies(
     model: &Model,
 ) -> &[MaterializedStateDependency] {

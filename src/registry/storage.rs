@@ -38,6 +38,7 @@ use crate::registry::{
     },
     placement::{PlacementPlan, ensure_placement_member_shape_change_allowed},
 };
+
 /// Why applying one alteration of a batch discards its outcome.
 /// See [`RegistryMutation::apply_alteration`].
 pub(in crate::registry) const ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS: &str =

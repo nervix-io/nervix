@@ -36,6 +36,7 @@ use crate::registry::{
         wire::{schema_for_ack_model, schema_for_codec_model},
     },
 };
+
 pub(in crate::registry) fn add_message_error_policy_edges(
     domain: &DomainName,
     identifier: &ModelName,

@@ -33,6 +33,7 @@ use crate::registry::{
         schema::arrow_data_type_for_parse_as, wire::schema_for_lookup_model,
     },
 };
+
 pub(in crate::registry) fn visit_model_expressions(
     model: &Model,
     visitor: &mut impl FnMut(&Expression),

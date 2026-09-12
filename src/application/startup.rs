@@ -23,6 +23,7 @@ use crate::{
     resource::{ResourceStore, ResourceStoreLimits},
     runtime::Runtime,
 };
+
 pub(in crate::application) struct ApplicationStartup {
     pub(in crate::application) db: Database,
     pub(in crate::application) resource_store: Arc<ResourceStore>,

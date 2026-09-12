@@ -34,6 +34,7 @@ use super::{
     session_service::SessionServiceImpl,
 };
 use crate::runtime::{OwnershipHandoffError, OwnershipHandoffResult, Runtime};
+
 pub(in crate::application) const FORCED_OWNERSHIP_RECOVERY_BUDGET: Duration =
     Duration::from_secs(5);
 

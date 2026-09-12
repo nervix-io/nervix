@@ -38,6 +38,7 @@ use crate::{
     resource::{ResourceStore, StagedResourceArchive},
     resource_interconnect::{FetchResourceArchive, PublishResourceReplica},
 };
+
 const MAX_CONCURRENT_RESOURCE_REPLICATIONS: usize = 4;
 
 #[derive(Debug, Error)]

@@ -39,6 +39,7 @@ use crate::registry::{
         vm::{BRANCH_NAMESPACE, udf_compile_options},
     },
 };
+
 pub(in crate::registry) fn validate_branch_model(
     domain: &DomainName,
     identifier: &ModelName,

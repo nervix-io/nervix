@@ -64,6 +64,7 @@ use crate::{
     runtime_schema,
     task_shutdown::JoinShutdown,
 };
+
 static SESSION_SAMPLE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct SessionSubscription {

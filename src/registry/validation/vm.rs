@@ -10,6 +10,7 @@
 use nervix_models::{Model, ModelIndex};
 use nervix_roto::signatures_for as udf_signatures_for;
 use nervix_vm::CompileOptions;
+
 pub(in crate::registry) const BRANCH_NAMESPACE: &str = "branch";
 
 pub(in crate::registry) const INGEST_MESSAGE_NAMESPACE: &str = "message";

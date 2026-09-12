@@ -33,6 +33,7 @@ use nervix_models::{
 use nonzero_ext::nonzero;
 
 use crate::registry::storage::Registry;
+
 pub(in crate::registry) fn temp_db_path() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

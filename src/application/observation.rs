@@ -71,6 +71,7 @@ use crate::{
     runtime::IngestorDescribe as RuntimeIngestorDescribe,
     runtime_schema,
 };
+
 const REMOTE_DESCRIBE_RELAY_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// A model as `DESCRIBE` reads it: the configuration it was created with, and the schedule entry

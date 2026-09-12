@@ -77,6 +77,7 @@ use crate::{
     },
     resource::{ResourceStoreError, StagedResourceArchive},
 };
+
 const WEB_CONSOLE_INDEX: &[u8] = include_bytes!("../../crates/web-console/dist/index.html");
 
 const WEB_CONSOLE_CSS: &[u8] = include_bytes!("../../crates/web-console/dist/console.css");

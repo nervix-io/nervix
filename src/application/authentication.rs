@@ -39,6 +39,7 @@ use super::{
     web_console::{WEB_CONSOLE_AUTH_QUERY_PARAM, web_console_query_param},
 };
 use crate::proto::CommandResult;
+
 pub(in crate::application) const DEFAULT_USER: &str = "default";
 
 const BASIC_AUTH_REALM: &str = "Nervix";
