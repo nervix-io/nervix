@@ -14830,6 +14830,51 @@ async fn then_mongodb_collection_eventually_contains_documents_across_bounded_in
     }
 }
 
+#[then(expr = "within {string} the Iceberg table {string} contains a row")]
+async fn then_within_duration_iceberg_table_contains_row(
+    world: &mut ScenarioWorld,
+    duration: String,
+    table: String,
+    #[step] step: &Step,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let table = expand_placeholders(world, &table);
+    let domain = world.domain.clone();
+    let expected = expand_placeholders(world, docstring(step));
+    let expected = serde_json::from_str::<serde_json::Value>(&expected)
+        .expect("Iceberg expected row must be valid JSON");
+    let dependencies = world.dependencies.endpoints().clone();
+    let deadline = Instant::now() + duration;
+    let mut observed = Vec::new();
+
+    loop {
+        tokio::task::consume_budget().await;
+        match iceberg_table_rows(&dependencies, &domain, &table).await {
+            Ok(rows) => {
+                if rows
+                    .iter()
+                    .any(|row| iceberg_row_matches_expected(row, &expected))
+                {
+                    append_cucumber_log_line(&format!(
+                        "observed searchable Iceberg row in table {table}: {expected}"
+                    ));
+                    return;
+                }
+                observed.push(format!("{rows:?}"));
+            }
+            Err(error) => observed.push(error),
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out after {duration:?} waiting for Iceberg table {table} to contain \
+             {expected}. observed {observed:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 #[then(expr = "the Iceberg table {string} eventually contains a row")]
 async fn then_iceberg_table_eventually_contains_row(
     world: &mut ScenarioWorld,

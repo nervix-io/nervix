@@ -217,9 +217,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   independently. Its duration uses the domain clock and starts when an empty collector receives
   data. Never add it to an ingestor.
 - Add `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` to every flush-based
-  route. `FLUSH EACH` is domain-logical and branch-local. Treat `FLUSH IMMEDIATE` as the physical,
-  system-owned 100 µs minimum batching window, not a one-message batch guarantee; domain pacing
-  never scales it. Both timers start when an empty route buffer receives data. `MAX BATCH SIZE`
+  route. `FLUSH EACH` is domain-logical and branch-local, in emitters and the Iceberg `COMMIT EACH`
+  exactly as elsewhere, while emitter retry backoff, acknowledgement keepalive, sink
+  acknowledgement timeouts, and an HTTP `Retry-After` stay physical. Treat `FLUSH IMMEDIATE` as the
+  physical, system-owned 100 µs minimum batching window, not a one-message batch guarantee; domain
+  pacing never scales it. Both timers start when an empty route buffer receives data. `MAX BATCH SIZE`
   counts logical Arrow value, offset, and validity bytes, not unused buffer capacity or object
   overhead. Windows use `WIDTH` and `STEP`; WASM output cadence is controlled by the guest. Choose
   `FLUSH` values as latency and boundary-cost controls, not as a throughput lever: `MAX BATCH SIZE`

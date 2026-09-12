@@ -246,7 +246,7 @@ use branch_aggregated_state::{
 };
 use branch_buffering::{
     BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingError, BranchBufferTimingResult,
-    RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector,
+    RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector, RuntimeWake,
     wait_for_branch_buffer_deadlines,
 };
 use branch_instance_registry::BranchInstanceRegistry;
@@ -343,7 +343,8 @@ pub(crate) use relay_channel::{
     RelayReceiver as RelaySubscriptionReceiver,
 };
 use relay_interaction::{
-    RelayInteraction, RelayInteractionCommand, RelayInteractionEvent, RelayInteractionInput,
+    RelayInteraction, RelayInteractionCommand, RelayInteractionError, RelayInteractionEvent,
+    RelayInteractionInput,
 };
 pub(crate) type RelaySubscriptionRecvError = async_broadcast::RecvError;
 use std::str::FromStr;
