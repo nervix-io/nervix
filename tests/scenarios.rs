@@ -2290,6 +2290,176 @@ async fn append_cluster_statuses(world: &ScenarioWorld, prefix: &str) {
     }
 }
 
+/// Shrink the snapshot and retention bounds so a scenario can reach compaction with a small
+/// number of committed entries instead of the production thresholds.
+#[given(expr = "raft snapshots after {int} entries retaining {int} covered entries")]
+async fn given_raft_retention_bounds(
+    world: &mut ScenarioWorld,
+    snapshot_entries: u64,
+    covered_entries: u64,
+) {
+    assert!(
+        world.cluster.is_none(),
+        "raft retention must be configured before the cluster starts"
+    );
+    world.cluster_config.raft_retention = nervix_consensus::RaftRetentionPolicy {
+        snapshot_entry_threshold: snapshot_entries,
+        covered_entries_retained: covered_entries,
+        ..nervix_consensus::RaftRetentionPolicy::default()
+    };
+}
+
+#[when(expr = "{int} domains named {string} are created on the leader node")]
+async fn when_domains_are_created_in_a_burst(
+    world: &mut ScenarioWorld,
+    count: usize,
+    prefix: String,
+) {
+    let leader = running_leader_node(world).await;
+    for index in 0..count {
+        tokio::task::consume_budget().await;
+        let name = burst_domain_name(&prefix, index);
+        run_nspl_commands_on_node(world, &leader, &format!("CREATE DOMAIN {name};"))
+            .await
+            .unwrap_or_else(|error| panic!("creating domain '{name}' failed: {error}"));
+    }
+}
+
+fn burst_domain_name(prefix: &str, index: usize) -> String {
+    format!("{prefix}_{index:03}")
+}
+
+async fn applied_burst_domains(world: &ScenarioWorld, node_id: &str, prefix: &str) -> usize {
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(node_id));
+    let domains = observer.current_domains().await;
+    let burst_prefix = format!("{prefix}_");
+    let mut applied = 0_usize;
+    for domain in domains.keys() {
+        if !domain.as_str().starts_with(&burst_prefix) {
+            continue;
+        }
+        applied = applied
+            .checked_add(1)
+            .assured("a scenario creates a bounded number of burst domains");
+    }
+    applied
+}
+
+#[then(expr = "within {string} node {string} has applied {int} domains named {string}")]
+async fn then_node_has_applied_burst_domains(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    count: usize,
+    prefix: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    await_burst_domains(world, &[node_id], &duration, count, &prefix).await;
+}
+
+#[then(expr = "within {string} every node has applied {int} domains named {string}")]
+async fn then_every_node_has_applied_burst_domains(
+    world: &mut ScenarioWorld,
+    duration: String,
+    count: usize,
+    prefix: String,
+) {
+    let nodes = world.cluster().node_ids();
+    await_burst_domains(world, &nodes, &duration, count, &prefix).await;
+}
+
+async fn await_burst_domains(
+    world: &ScenarioWorld,
+    nodes: &[String],
+    duration: &str,
+    count: usize,
+    prefix: &str,
+) {
+    let deadline = Instant::now()
+        + humantime::parse_duration(duration).expect("step duration must be a valid duration");
+    for node_id in nodes {
+        let applied = loop {
+            tokio::task::consume_budget().await;
+            let applied = applied_burst_domains(world, node_id, prefix).await;
+            if applied >= count || Instant::now() >= deadline {
+                break applied;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        assert_eq!(
+            applied, count,
+            "node '{node_id}' applied {applied} of {count} domains named '{prefix}' within \
+             {duration}"
+        );
+    }
+}
+
+#[then(expr = "within {string} the leader node has purged its covered raft log")]
+async fn then_leader_purged_covered_log(world: &mut ScenarioWorld, duration: String) {
+    let leader = running_leader_node(world).await;
+    let deadline = Instant::now()
+        + humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&leader));
+    loop {
+        tokio::task::consume_budget().await;
+        let retention = observer.raft_log_retention();
+        if retention.purged_index.is_some() {
+            assert!(
+                retention.snapshot_index >= retention.purged_index,
+                "the leader purged entries its snapshot does not cover: {retention:?}"
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the leader did not purge its covered raft log within {duration}: {retention:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[when(expr = "leadership is transferred to node {string}")]
+async fn when_leadership_is_transferred_to_node(world: &mut ScenarioWorld, to_node_id: String) {
+    let to_node_id = expand_placeholders(world, &to_node_id);
+    let leader = running_leader_node(world).await;
+    world.cluster().transfer_leadership(&leader, &to_node_id);
+    world
+        .cluster()
+        .wait_for_leader(&to_node_id, Some(&to_node_id))
+        .await
+        .unwrap_or_else(|error| panic!("leadership did not move to '{to_node_id}': {error}"));
+}
+
+#[then(expr = "within {string} node {string} recovers by installing a raft snapshot")]
+async fn then_node_recovers_by_snapshot(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let deadline = Instant::now()
+        + humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    loop {
+        tokio::task::consume_budget().await;
+        let observer = world
+            .fault_injection
+            .consensus_observer(&crate::common::cluster::node_name(&node_id));
+        let retention = observer.raft_log_retention();
+        if retention.snapshot_index.is_some() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node '{node_id}' did not install a raft snapshot within {duration}: {retention:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[given(expr = "a {int} node nervix cluster is started")]
 async fn given_cluster_is_started(world: &mut ScenarioWorld, node_count: usize) {
     assert!(world.cluster.is_none(), "cluster is already started");
@@ -5083,6 +5253,16 @@ async fn when_a_new_session_executes_these_nspl_commands(
     world.active_session = Some(session);
     world.active_session_node = Some(leader);
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
+}
+
+/// The leader the nodes a scenario still runs agree on. Unlike [`current_leader_node`] this
+/// tolerates nodes the scenario stopped on purpose.
+async fn running_leader_node(world: &ScenarioWorld) -> String {
+    world
+        .cluster()
+        .wait_for_leader_among_running()
+        .await
+        .expect("the running nodes did not agree on a leader")
 }
 
 async fn current_leader_node(world: &ScenarioWorld) -> String {

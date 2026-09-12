@@ -53,6 +53,39 @@ Inspect the resulting domain or transaction state before retrying an uncertain a
 operation. Persisted consensus records must have the current complete storage shape; incompatible
 or incomplete stored state fails startup and must be recreated.
 
+## Replication And Log Retention
+
+The leader replicates to each follower over one ordered append stream, separate from the
+management connection that carries heartbeats and votes. Batches are submitted and acknowledged in
+order, with at most 16 batches and 16 MiB outstanding per follower and a one-command target batch
+size; the node's aggregate transient memory bounds the sum across followers. A batch carries whole
+commands, so one command is never split into parts that could commit separately. A conflict, a
+higher vote, a partially accepted batch, a stalled answer, or a broken stream stops new
+submissions and delivers that first result; nothing later on that stream can advance past it, and
+replication resumes from the progress consensus confirmed. Response deadlines apply per answer
+while a batch is outstanding, so a healthy stream with nothing to carry stays open.
+
+A node snapshots its replicated state automatically after 10,000 committed entries
+(`--raft-snapshot-entry-threshold`) or 64 MiB of appended entries since its last completed
+snapshot (`--raft-snapshot-byte-threshold`), whichever comes first, with one build at a time. A
+snapshot is sealed as bounded sections of keyed records rather than one aggregate value, so a
+larger cluster state becomes more sections instead of a snapshot that no longer fits. The sections
+are written and synchronized first; the manifest naming the generation, its applied position, and
+its membership is published afterwards in one atomic write. A node interrupted between the two
+finishes the replacement on its next start, and a start also deletes every stored generation the
+published manifest does not name. A node keeps the newest snapshot and at most one older one, held
+only while a transfer is still reading it; a transfer that would hold a second older snapshot is
+cancelled and restarts from the newest.
+
+The node then keeps at most 1,000 snapshot-covered entries
+(`--raft-covered-log-entries-retained`) or 64 MiB of covered suffix
+(`--raft-covered-log-bytes-retained`), whichever bound is reached first. Entries a durable snapshot
+does not cover are never purged, so a failed or incomplete snapshot build leaves everything the
+node still needs in place. A follower whose next entries were already purged catches up by
+receiving the current snapshot instead. Once the retained log reaches
+`--raft-retained-log-cap` (1 GiB by default), new administrative writes wait for reclamation and
+fail with a retention error if it does not arrive; reads, health, and recovery continue throughout.
+
 ## Replicated NSPL Transactions
 
 NSPL command grouping is explicit. `BEGIN` creates a Raft-replicated control-plane transaction and
