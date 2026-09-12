@@ -32,6 +32,7 @@ storekey = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 triomphe = { workspace = true }
 

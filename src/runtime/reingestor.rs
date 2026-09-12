@@ -1346,7 +1346,7 @@ impl Runtime {
                             .await;
                         continue;
                     }
-                    work = interaction.next(None) => work,
+                    work = interaction.next(RuntimeWake::never()) => work,
                 };
                 let work = match work {
                     Ok(work) => work,

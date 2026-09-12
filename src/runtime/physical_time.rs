@@ -25,8 +25,9 @@ pub type PhysicalDeadlineResult<T> = Result<T, Report<PhysicalDeadlineError>>;
 ///
 /// Its instant is private so logical-clock policy cannot construct or inspect it as a domain
 /// timestamp. The policy that owns an operational timeout obtains one through
-/// [`PhysicalDeadlineCapability`].
-#[derive(Debug, Clone, Copy)]
+/// [`PhysicalDeadlineCapability`]. Two monotonic deadlines order against each other, so a task
+/// holding several of them waits for the earliest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PhysicalDeadline(Instant);
 
 /// The capability used by operational timeout, retry and cancellation policy.

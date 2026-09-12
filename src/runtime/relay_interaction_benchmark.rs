@@ -3,7 +3,7 @@
 //! This module only exists with the `benchmarks` feature. Its public surface deliberately exposes
 //! benchmark operations and observations instead of Nervix runtime carriers or channels.
 
-use std::{num::NonZeroUsize, sync::OnceLock};
+use std::{num::NonZeroUsize, sync::OnceLock, time::Duration};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
@@ -11,14 +11,11 @@ use nervix_models::{
     DomainState, DomainStatus, FieldName, ParseAsType, PlacementPolicy, RelayName, SchemaName,
     Timestamp,
 };
-use tokio::{
-    sync::{mpsc, watch},
-    time::Instant,
-};
+use tokio::sync::{mpsc, watch};
 
 use super::{
     DomainClockLifecycle, NodeQuiesceCounters, RelayBroadcast, RelayRecordBatch, RelayRuntimeFanIn,
-    RuntimeInputCollectPolicy,
+    RuntimeInputCollectPolicy, RuntimeWake,
     force_flush::DomainForceFlush,
     relay_interaction::{
         RelayInteraction, RelayInteractionCommand, RelayInteractionEvent, RelayInteractionInput,
@@ -187,7 +184,9 @@ impl RelayInteractionBenchmark {
 
     /// Advances directly to a due wake event.
     pub async fn wake_now(&mut self) -> RelayInteractionBenchmarkEvent {
-        self.next_at(Some(Instant::now())).await
+        let wake = RuntimeWake::after(Duration::ZERO)
+            .verified("a zero timeout is always inside the monotonic clock range");
+        self.next_at(wake).await
     }
 
     /// Returns all atomically tracked work owned by the isolated scheduler.
@@ -197,13 +196,13 @@ impl RelayInteractionBenchmark {
 
     /// Advances the shared scheduler by one event without exposing runtime carrier types.
     pub async fn next(&mut self) -> RelayInteractionBenchmarkEvent {
-        self.next_at(None).await
+        self.next_at(RuntimeWake::never()).await
     }
 
-    async fn next_at(&mut self, wake_at: Option<Instant>) -> RelayInteractionBenchmarkEvent {
+    async fn next_at(&mut self, wake: RuntimeWake) -> RelayInteractionBenchmarkEvent {
         let (event, _work) = self
             .interaction
-            .next(wake_at)
+            .next(wake)
             .await
             .verified(
                 "the benchmark keeps its sources and command channel alive, so the interaction \

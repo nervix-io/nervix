@@ -158,6 +158,9 @@ pub struct OperationLimits {
     pub relay_scratch_bytes: ByteUnit,
     /// One semantic command.
     pub command_bytes: ByteUnit,
+    /// The complete encoded body of one Raft replication batch. A batch carries whole commands, so
+    /// it must hold the largest one beside the entries already gathered ahead of it.
+    pub replication_batch_bytes: ByteUnit,
     /// One management or discovery event.
     pub management_event_bytes: ByteUnit,
     /// The application body a bulk transfer submits at a time.
@@ -180,6 +183,7 @@ impl Default for OperationLimits {
             relay_decoded_bytes: ByteUnit::Mebibyte(32),
             relay_scratch_bytes: ByteUnit::Mebibyte(16),
             command_bytes: ByteUnit::Mebibyte(1),
+            replication_batch_bytes: ByteUnit::Mebibyte(2),
             management_event_bytes: ByteUnit::Kibibyte(64),
             bulk_chunk_bytes: ByteUnit::Kibibyte(64),
             snapshot_header_bytes: ByteUnit::Kibibyte(64),
@@ -258,6 +262,13 @@ pub enum ExecutionConfigError {
     UnaddressableRelayOperation,
     #[error("the configured snapshot section limits do not add up to an addressable size")]
     UnaddressableSnapshotSection,
+    #[error(
+        "one replication batch of {batch} bytes cannot hold a semantic command of {command} bytes \
+         beside the entries gathered ahead of it"
+    )]
+    ReplicationBatchBelowCommandPair { batch: u64, command: u64 },
+    #[error("the configured replication batch limits do not add up to an addressable size")]
+    UnaddressableReplicationBatch,
 }
 
 impl ExecutionConfig {
@@ -286,6 +297,29 @@ impl ExecutionConfig {
                 ExecutionConfigError::UnaddressableSnapshotSection,
             ));
         };
+        // A replication batch gathers entries up to one command's worth and then admits the next
+        // whole command, so it has to hold that pair. The command budget holds one batch being
+        // encoded beside one being decoded.
+        let command_pair = self
+            .limits
+            .command_bytes
+            .as_u64()
+            .checked_mul(2)
+            .ok_or_else(|| Report::new(ExecutionConfigError::UnaddressableReplicationBatch))?;
+        if self.limits.replication_batch_bytes.as_u64() < command_pair {
+            return Err(Report::new(
+                ExecutionConfigError::ReplicationBatchBelowCommandPair {
+                    batch: self.limits.replication_batch_bytes.as_u64(),
+                    command: self.limits.command_bytes.as_u64(),
+                },
+            ));
+        }
+        let commands_required = self
+            .limits
+            .replication_batch_bytes
+            .as_u64()
+            .checked_mul(2)
+            .ok_or_else(|| Report::new(ExecutionConfigError::UnaddressableReplicationBatch))?;
         Ok(ValidatedConfig {
             workers: self.workers,
             budgets: ValidatedBudgets {
@@ -298,8 +332,8 @@ impl ExecutionConfig {
                 commands: permits(
                     MemoryClass::Commands.as_str(),
                     self.budgets.commands,
-                    "semantic command",
-                    self.limits.command_bytes.as_u64(),
+                    "pair of replication batches",
+                    commands_required,
                 )?,
                 relay: permits(
                     MemoryClass::Relay.as_str(),

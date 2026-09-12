@@ -181,6 +181,11 @@ relay. Do not use them to scan across branches.
 - Every flush-based route has a flush policy and every route has a message error policy. Treat
   `FLUSH EACH` as a branch-local domain-logical duration and `FLUSH IMMEDIATE` as a branch-local
   physical 100 µs minimum; start either only when its route buffer changes from empty to non-empty.
+- Treat an emitter's `FLUSH EACH` and the Iceberg `COMMIT EACH` as domain-logical, and its publish
+  retry backoff, acknowledgement keepalive, sink acknowledgement timeout, stop and drain deadlines,
+  and any server-supplied HTTP `Retry-After` as physical. A failed attempt keeps the pending
+  batches, their acknowledgements, and the unchanged cadence; never describe a paced domain as
+  shortening or lengthening a real retry wait.
 - Every `MAX BATCH SIZE` is chosen as a logical Arrow payload boundary, excluding unused buffer
   capacity and object overhead. Delivery-mode `MAX <n>` appears only on `ACK PARALLEL`, never on
   `NO_ACK`.
