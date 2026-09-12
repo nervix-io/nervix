@@ -152,10 +152,8 @@ fn describe(series: &SeriesSpec) -> Desc {
     let naming = "the series names, help text and label names are constants that satisfy \
                   Prometheus naming rules";
     let vector: Box<dyn Collector> = match series.kind {
-        MetricType::COUNTER => Box::new(CounterVec::new(options, series.labels).assured(naming)),
-        MetricType::GAUGE | MetricType::SUMMARY | MetricType::UNTYPED | MetricType::HISTOGRAM => {
-            Box::new(GaugeVec::new(options, series.labels).assured(naming))
-        }
+        SeriesKind::Counter => Box::new(CounterVec::new(options, series.labels).assured(naming)),
+        SeriesKind::Gauge => Box::new(GaugeVec::new(options, series.labels).assured(naming)),
     };
     let descs = vector.desc();
     let desc = descs
@@ -168,8 +166,26 @@ fn describe(series: &SeriesSpec) -> Desc {
 struct SeriesSpec {
     name: &'static str,
     help: &'static str,
-    kind: MetricType,
+    kind: SeriesKind,
     labels: &'static [&'static str],
+}
+
+/// The two kinds of series this collector has: a level that can fall again, and a total that only
+/// rises. Declaring only these two is what lets a sample take its shape from the family it is
+/// added to, so a family can never hold a sample of the wrong kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeriesKind {
+    Gauge,
+    Counter,
+}
+
+impl SeriesKind {
+    fn metric_type(self) -> MetricType {
+        match self {
+            Self::Gauge => MetricType::GAUGE,
+            Self::Counter => MetricType::COUNTER,
+        }
+    }
 }
 
 const CLASS: &[&str] = &["class"];
@@ -186,230 +202,230 @@ const SERIES: &[SeriesSpec] = &[
     SeriesSpec {
         name: "nervix_interconnect_connections",
         help: "Physical interconnect connections this node currently holds.",
-        kind: MetricType::GAUGE,
+        kind: SeriesKind::Gauge,
         labels: CLASS_DIRECTION,
     },
     SeriesSpec {
         name: "nervix_interconnect_streams",
         help: "HTTP/2 stream slots leased on this node's outbound interconnect connections.",
-        kind: MetricType::GAUGE,
+        kind: SeriesKind::Gauge,
         labels: CLASS,
     },
     SeriesSpec {
         name: "nervix_interconnect_pending_operations",
         help: "Interconnect requests admitted by this node and not yet resolved.",
-        kind: MetricType::GAUGE,
+        kind: SeriesKind::Gauge,
         labels: DIRECTION_OPERATION,
     },
     SeriesSpec {
         name: "nervix_interconnect_relay_channels",
         help: "Logical relay channels with unresolved work on this node.",
-        kind: MetricType::GAUGE,
+        kind: SeriesKind::Gauge,
         labels: NO_LABELS,
     },
     SeriesSpec {
         name: "nervix_interconnect_relay_attempts",
         help: "Relay attempts whose outcome this node has not retired yet.",
-        kind: MetricType::GAUGE,
+        kind: SeriesKind::Gauge,
         labels: NO_LABELS,
     },
     SeriesSpec {
         name: "nervix_interconnect_relay_grants",
         help: "Relay transfer grants this node has issued and not yet spent.",
-        kind: MetricType::GAUGE,
+        kind: SeriesKind::Gauge,
         labels: NO_LABELS,
     },
     SeriesSpec {
         name: "nervix_interconnect_unresolved_outcome_age_seconds",
         help: "Age of the oldest relay outcome this node has not acknowledged.",
-        kind: MetricType::GAUGE,
+        kind: SeriesKind::Gauge,
         labels: NO_LABELS,
     },
     SeriesSpec {
         name: "nervix_interconnect_connections_established_total",
         help: "Interconnect connections this node has established.",
-        kind: MetricType::COUNTER,
+        kind: SeriesKind::Counter,
         labels: CLASS,
     },
     SeriesSpec {
         name: "nervix_interconnect_connection_failures_total",
         help: "Interconnect connections that failed to establish or ended, by cause.",
-        kind: MetricType::COUNTER,
+        kind: SeriesKind::Counter,
         labels: CLASS_REASON,
     },
     SeriesSpec {
         name: "nervix_interconnect_stream_resets_total",
         help: "Interconnect streams that ended without delivering a result, by cause.",
-        kind: MetricType::COUNTER,
+        kind: SeriesKind::Counter,
         labels: CLASS_REASON,
     },
     SeriesSpec {
         name: "nervix_interconnect_quota_failures_total",
         help: "Interconnect requests refused because their reserved subquota was full.",
-        kind: MetricType::COUNTER,
+        kind: SeriesKind::Counter,
         labels: DIRECTION_OPERATION,
     },
     SeriesSpec {
         name: "nervix_interconnect_requests_total",
         help: "Typed interconnect requests this node completed, by reserved subquota.",
-        kind: MetricType::COUNTER,
+        kind: SeriesKind::Counter,
         labels: OPERATION_OUTCOME,
     },
     SeriesSpec {
         name: "nervix_interconnect_request_seconds_total",
         help: "Round-trip time of typed interconnect requests. The liveness subquota is the peer \
                health probe.",
-        kind: MetricType::COUNTER,
+        kind: SeriesKind::Counter,
         labels: OPERATION,
     },
     SeriesSpec {
         name: "nervix_interconnect_relay_admissions_total",
         help: "Relay attempts this node resolved, by how they left its unresolved set.",
-        kind: MetricType::COUNTER,
+        kind: SeriesKind::Counter,
         labels: OUTCOME,
     },
     SeriesSpec {
         name: "nervix_interconnect_relay_admission_wait_seconds_total",
         help: "Time relay attempts spent between an accepted reservation and their resolution.",
-        kind: MetricType::COUNTER,
+        kind: SeriesKind::Counter,
         labels: NO_LABELS,
     },
     SeriesSpec {
         name: "nervix_interconnect_bulk_bytes_total",
         help: "Bytes carried by streamed interconnect bodies.",
-        kind: MetricType::COUNTER,
+        kind: SeriesKind::Counter,
         labels: CLASS_DIRECTION,
     },
     SeriesSpec {
         name: "nervix_execution_memory_capacity_bytes",
         help: "Transient interconnection memory reserved for one execution class.",
-        kind: MetricType::GAUGE,
+        kind: SeriesKind::Gauge,
         labels: CLASS,
     },
     SeriesSpec {
         name: "nervix_execution_memory_reserved_bytes",
         help: "Transient interconnection memory one execution class is currently holding.",
-        kind: MetricType::GAUGE,
+        kind: SeriesKind::Gauge,
         labels: CLASS,
     },
     SeriesSpec {
         name: "nervix_execution_memory_reservations_total",
         help: "Memory charges one execution class has granted.",
-        kind: MetricType::COUNTER,
+        kind: SeriesKind::Counter,
         labels: CLASS,
     },
     SeriesSpec {
         name: "nervix_execution_memory_rejections_total",
         help: "Memory charges one execution class refused outright.",
-        kind: MetricType::COUNTER,
+        kind: SeriesKind::Counter,
         labels: CLASS,
     },
     SeriesSpec {
         name: "nervix_execution_workers",
         help: "Jobs one execution class may have on the blocking pool at once.",
-        kind: MetricType::GAUGE,
+        kind: SeriesKind::Gauge,
         labels: CLASS,
     },
     SeriesSpec {
         name: "nervix_execution_jobs_running",
         help: "Jobs one execution class currently holds a worker for.",
-        kind: MetricType::GAUGE,
+        kind: SeriesKind::Gauge,
         labels: CLASS,
     },
     SeriesSpec {
         name: "nervix_execution_jobs_pending",
         help: "Jobs waiting in one execution class's bounded queue.",
-        kind: MetricType::GAUGE,
+        kind: SeriesKind::Gauge,
         labels: CLASS,
     },
     SeriesSpec {
         name: "nervix_execution_jobs_total",
         help: "Jobs one execution class has admitted.",
-        kind: MetricType::COUNTER,
+        kind: SeriesKind::Counter,
         labels: CLASS,
     },
     SeriesSpec {
         name: "nervix_execution_jobs_completed_total",
         help: "Jobs that have left a worker of one execution class.",
-        kind: MetricType::COUNTER,
+        kind: SeriesKind::Counter,
         labels: CLASS,
     },
     SeriesSpec {
         name: "nervix_execution_job_rejections_total",
         help: "Jobs refused because one execution class already held its whole wait queue.",
-        kind: MetricType::COUNTER,
+        kind: SeriesKind::Counter,
         labels: CLASS,
     },
     SeriesSpec {
         name: "nervix_execution_job_queue_seconds_total",
         help: "Time admitted jobs spent waiting for a worker of one execution class.",
-        kind: MetricType::COUNTER,
+        kind: SeriesKind::Counter,
         labels: CLASS,
     },
     SeriesSpec {
         name: "nervix_execution_job_work_seconds_total",
         help: "Time completed jobs spent holding a worker of one execution class.",
-        kind: MetricType::COUNTER,
+        kind: SeriesKind::Counter,
         labels: CLASS,
     },
     SeriesSpec {
         name: "nervix_node_scheduler_delay_seconds_total",
         help: "Total delay this node's reactor added to work that was already runnable.",
-        kind: MetricType::COUNTER,
+        kind: SeriesKind::Counter,
         labels: NO_LABELS,
     },
     SeriesSpec {
         name: "nervix_node_scheduler_delay_peak_seconds",
         help: "The longest single reactor delay this node has observed.",
-        kind: MetricType::GAUGE,
+        kind: SeriesKind::Gauge,
         labels: NO_LABELS,
     },
     SeriesSpec {
         name: "nervix_node_scheduler_samples_total",
         help: "Reactor delay samples this node has taken.",
-        kind: MetricType::COUNTER,
+        kind: SeriesKind::Counter,
         labels: NO_LABELS,
     },
     SeriesSpec {
         name: "nervix_consensus_log_last_index",
         help: "The highest Raft index this node's log holds.",
-        kind: MetricType::GAUGE,
+        kind: SeriesKind::Gauge,
         labels: NO_LABELS,
     },
     SeriesSpec {
         name: "nervix_consensus_log_snapshot_index",
         help: "The highest Raft index this node's current snapshot covers.",
-        kind: MetricType::GAUGE,
+        kind: SeriesKind::Gauge,
         labels: NO_LABELS,
     },
     SeriesSpec {
         name: "nervix_consensus_log_purged_index",
         help: "The highest Raft index this node has removed from its log.",
-        kind: MetricType::GAUGE,
+        kind: SeriesKind::Gauge,
         labels: NO_LABELS,
     },
     SeriesSpec {
         name: "nervix_consensus_log_retained_bytes",
         help: "What this node's retained Raft log occupies in node-owned storage.",
-        kind: MetricType::GAUGE,
+        kind: SeriesKind::Gauge,
         labels: NO_LABELS,
     },
     SeriesSpec {
         name: "nervix_consensus_snapshot_pinned_generations",
         help: "Snapshot generations an outgoing transfer is holding against deletion.",
-        kind: MetricType::GAUGE,
+        kind: SeriesKind::Gauge,
         labels: NO_LABELS,
     },
     SeriesSpec {
         name: "nervix_consensus_snapshot_pinned_readers",
         help: "Readers those snapshot pins are held for.",
-        kind: MetricType::GAUGE,
+        kind: SeriesKind::Gauge,
         labels: NO_LABELS,
     },
     SeriesSpec {
         name: "nervix_consensus_snapshot_unreferenced_generations",
         help: "Snapshot generations waiting for the next durable batch to delete them.",
-        kind: MetricType::GAUGE,
+        kind: SeriesKind::Gauge,
         labels: NO_LABELS,
     },
 ];
@@ -502,7 +518,7 @@ impl Families {
     /// produced order matches the declared order and every family is produced exactly once, which
     /// [`produces_every_declared_series_once`] checks. The lookup walks the declared table, whose
     /// length is fixed at compile time and which is only read while a scrape is being answered.
-    fn open(&mut self, name: &'static str) -> &mut MetricFamily {
+    fn open(&mut self, name: &'static str) -> OpenFamily<'_> {
         let spec = SERIES
             .iter()
             .find(|series| series.name == name)
@@ -510,11 +526,15 @@ impl Families {
         let mut family = MetricFamily::new();
         family.set_name(spec.name.to_string());
         family.set_help(spec.help.to_string());
-        family.set_field_type(spec.kind);
+        family.set_field_type(spec.kind.metric_type());
         self.built.push(family);
-        self.built
-            .last_mut()
-            .verified("the family was pushed on the line above")
+        OpenFamily {
+            family: self
+                .built
+                .last_mut()
+                .verified("the family was pushed on the line above"),
+            kind: spec.kind,
+        }
     }
 
     fn finish(self) -> Vec<MetricFamily> {
@@ -522,57 +542,62 @@ impl Families {
     }
 }
 
-/// Add one sample to the family being filled.
-fn sample(family: &mut MetricFamily, labels: &[(&str, &str)], value: f64) {
-    let mut metric = Metric::new();
-    let mut pairs = Vec::with_capacity(labels.len());
-    for (name, label_value) in labels {
-        let mut pair = LabelPair::new();
-        pair.set_name((*name).to_string());
-        pair.set_value((*label_value).to_string());
-        pairs.push(pair);
-    }
-    metric.set_label(pairs);
-    match family.get_field_type() {
-        MetricType::COUNTER => {
-            let mut counter = Counter::new();
-            counter.set_value(value);
-            metric.set_counter(counter);
+/// The family currently being filled, and the kind every sample added to it takes.
+struct OpenFamily<'a> {
+    family: &'a mut MetricFamily,
+    kind: SeriesKind,
+}
+
+impl OpenFamily<'_> {
+    fn sample(&mut self, labels: &[(&str, &str)], value: f64) {
+        let mut metric = Metric::new();
+        let mut pairs = Vec::with_capacity(labels.len());
+        for (name, label_value) in labels {
+            let mut pair = LabelPair::new();
+            pair.set_name((*name).to_string());
+            pair.set_value((*label_value).to_string());
+            pairs.push(pair);
         }
-        MetricType::GAUGE | MetricType::SUMMARY | MetricType::UNTYPED | MetricType::HISTOGRAM => {
-            let mut gauge = Gauge::new();
-            gauge.set_value(value);
-            metric.set_gauge(gauge);
+        metric.set_label(pairs);
+        match self.kind {
+            SeriesKind::Counter => {
+                let mut counter = Counter::new();
+                counter.set_value(value);
+                metric.set_counter(counter);
+            }
+            SeriesKind::Gauge => {
+                let mut gauge = Gauge::new();
+                gauge.set_value(value);
+                metric.set_gauge(gauge);
+            }
         }
+        self.family.mut_metric().push(metric);
     }
-    family.mut_metric().push(metric);
 }
 
 fn transport_families(families: &mut Families, transport: &TransportSnapshot) {
-    let connections = families.open("nervix_interconnect_connections");
+    let mut connections = families.open("nervix_interconnect_connections");
     for direction in ConnectionDirection::iter() {
         for class in PoolClass::ALL {
             let held = transport.connections[direction.index()][class.index()];
-            sample(
-                connections,
+            connections.sample(
                 &[("class", class.as_ref()), ("direction", direction.as_ref())],
                 held.approx_into(),
             );
         }
     }
 
-    let streams = families.open("nervix_interconnect_streams");
+    let mut streams = families.open("nervix_interconnect_streams");
     for class in PoolClass::ALL {
         let leased = transport.leased_streams[class.index()];
-        sample(streams, &[("class", class.as_ref())], leased.approx_into());
+        streams.sample(&[("class", class.as_ref())], leased.approx_into());
     }
 
-    let pending = families.open("nervix_interconnect_pending_operations");
+    let mut pending = families.open("nervix_interconnect_pending_operations");
     for direction in ConnectionDirection::iter() {
         for operation in RequestSubquota::iter() {
             let held = transport.pending_operations[direction.index()][operation.index()];
-            sample(
-                pending,
+            pending.sample(
                 &[
                     ("direction", direction.as_ref()),
                     ("operation", operation.as_ref()),
@@ -582,60 +607,49 @@ fn transport_families(families: &mut Families, transport: &TransportSnapshot) {
         }
     }
 
-    let channels = families.open("nervix_interconnect_relay_channels");
-    sample(channels, &[], transport.relay_channels.approx_into());
-    let attempts = families.open("nervix_interconnect_relay_attempts");
-    sample(attempts, &[], transport.relay_attempts.approx_into());
-    let grants = families.open("nervix_interconnect_relay_grants");
-    sample(grants, &[], transport.relay_grants.approx_into());
-    let outcome_age = families.open("nervix_interconnect_unresolved_outcome_age_seconds");
-    sample(
-        outcome_age,
-        &[],
-        transport.oldest_unresolved_outcome.as_secs_f64(),
-    );
+    let mut channels = families.open("nervix_interconnect_relay_channels");
+    channels.sample(&[], transport.relay_channels.approx_into());
+    let mut attempts = families.open("nervix_interconnect_relay_attempts");
+    attempts.sample(&[], transport.relay_attempts.approx_into());
+    let mut grants = families.open("nervix_interconnect_relay_grants");
+    grants.sample(&[], transport.relay_grants.approx_into());
+    let mut outcome_age = families.open("nervix_interconnect_unresolved_outcome_age_seconds");
+    outcome_age.sample(&[], transport.oldest_unresolved_outcome.as_secs_f64());
 
     let counters = &transport.counters;
-    let established = families.open("nervix_interconnect_connections_established_total");
+    let mut established = families.open("nervix_interconnect_connections_established_total");
     for class in PoolClass::ALL {
         let count = counters.connections_established[class.index()];
-        sample(
-            established,
-            &[("class", class.as_ref())],
-            count.approx_into(),
-        );
+        established.sample(&[("class", class.as_ref())], count.approx_into());
     }
 
-    let failures = families.open("nervix_interconnect_connection_failures_total");
+    let mut failures = families.open("nervix_interconnect_connection_failures_total");
     for class in PoolClass::ALL {
         for reason in ConnectionFailureReason::iter() {
             let count = counters.connection_failures[class.index()][reason.index()];
-            sample(
-                failures,
+            failures.sample(
                 &[("class", class.as_ref()), ("reason", reason.as_ref())],
                 count.approx_into(),
             );
         }
     }
 
-    let resets = families.open("nervix_interconnect_stream_resets_total");
+    let mut resets = families.open("nervix_interconnect_stream_resets_total");
     for class in PoolClass::ALL {
         for reason in StreamResetReason::iter() {
             let count = counters.stream_resets[class.index()][reason.index()];
-            sample(
-                resets,
+            resets.sample(
                 &[("class", class.as_ref()), ("reason", reason.as_ref())],
                 count.approx_into(),
             );
         }
     }
 
-    let quota_failures = families.open("nervix_interconnect_quota_failures_total");
+    let mut quota_failures = families.open("nervix_interconnect_quota_failures_total");
     for direction in ConnectionDirection::iter() {
         for operation in RequestSubquota::iter() {
             let count = counters.quota_failures[direction.index()][operation.index()];
-            sample(
-                quota_failures,
+            quota_failures.sample(
                 &[
                     ("direction", direction.as_ref()),
                     ("operation", operation.as_ref()),
@@ -645,12 +659,11 @@ fn transport_families(families: &mut Families, transport: &TransportSnapshot) {
         }
     }
 
-    let requests = families.open("nervix_interconnect_requests_total");
+    let mut requests = families.open("nervix_interconnect_requests_total");
     for outcome in RequestOutcome::iter() {
         for operation in RequestSubquota::iter() {
             let count = counters.requests[outcome.index()][operation.index()];
-            sample(
-                requests,
+            requests.sample(
                 &[
                     ("operation", operation.as_ref()),
                     ("outcome", outcome.as_ref()),
@@ -660,39 +673,27 @@ fn transport_families(families: &mut Families, transport: &TransportSnapshot) {
         }
     }
 
-    let request_time = families.open("nervix_interconnect_request_seconds_total");
+    let mut request_time = families.open("nervix_interconnect_request_seconds_total");
     for operation in RequestSubquota::iter() {
         let elapsed = counters.request_time[operation.index()];
-        sample(
-            request_time,
-            &[("operation", operation.as_ref())],
-            elapsed.as_secs_f64(),
-        );
+        request_time.sample(&[("operation", operation.as_ref())], elapsed.as_secs_f64());
     }
 
-    let admissions = families.open("nervix_interconnect_relay_admissions_total");
+    let mut admissions = families.open("nervix_interconnect_relay_admissions_total");
     for outcome in RelayAdmissionOutcome::iter() {
         let count = counters.relay_outcomes[outcome.index()];
-        sample(
-            admissions,
-            &[("outcome", outcome.as_ref())],
-            count.approx_into(),
-        );
+        admissions.sample(&[("outcome", outcome.as_ref())], count.approx_into());
     }
 
-    let admission_wait = families.open("nervix_interconnect_relay_admission_wait_seconds_total");
-    sample(
-        admission_wait,
-        &[],
-        counters.relay_admission_wait.as_secs_f64(),
-    );
+    let mut admission_wait =
+        families.open("nervix_interconnect_relay_admission_wait_seconds_total");
+    admission_wait.sample(&[], counters.relay_admission_wait.as_secs_f64());
 
-    let bulk = families.open("nervix_interconnect_bulk_bytes_total");
+    let mut bulk = families.open("nervix_interconnect_bulk_bytes_total");
     for class in PoolClass::ALL {
         for direction in TransferDirection::iter() {
             let bytes = counters.bulk_bytes[class.index()][direction.index()];
-            sample(
-                bulk,
+            bulk.sample(
                 &[("class", class.as_ref()), ("direction", direction.as_ref())],
                 bytes.approx_into(),
             );
@@ -754,99 +755,87 @@ fn execution_families(families: &mut Families, executor: &nervix_execution::Exec
         },
     ];
 
-    let capacity = families.open("nervix_execution_memory_capacity_bytes");
+    let mut capacity = families.open("nervix_execution_memory_capacity_bytes");
     for entry in &memory {
-        sample(
-            capacity,
+        capacity.sample(
             &[("class", entry.class)],
             entry.budget.capacity_bytes.approx_into(),
         );
     }
-    let reserved = families.open("nervix_execution_memory_reserved_bytes");
+    let mut reserved = families.open("nervix_execution_memory_reserved_bytes");
     for entry in &memory {
-        sample(
-            reserved,
+        reserved.sample(
             &[("class", entry.class)],
             entry.budget.reserved_bytes.approx_into(),
         );
     }
-    let reservations = families.open("nervix_execution_memory_reservations_total");
+    let mut reservations = families.open("nervix_execution_memory_reservations_total");
     for entry in &memory {
-        sample(
-            reservations,
+        reservations.sample(
             &[("class", entry.class)],
             entry.budget.granted.approx_into(),
         );
     }
-    let rejections = families.open("nervix_execution_memory_rejections_total");
+    let mut rejections = families.open("nervix_execution_memory_rejections_total");
     for entry in &memory {
-        sample(
-            rejections,
+        rejections.sample(
             &[("class", entry.class)],
             entry.budget.refused.approx_into(),
         );
     }
 
-    let worker_count = families.open("nervix_execution_workers");
+    let mut worker_count = families.open("nervix_execution_workers");
     for entry in &workers {
-        sample(
-            worker_count,
+        worker_count.sample(
             &[("class", entry.class)],
             entry.workers.workers.approx_into(),
         );
     }
-    let running = families.open("nervix_execution_jobs_running");
+    let mut running = families.open("nervix_execution_jobs_running");
     for entry in &workers {
-        sample(
-            running,
+        running.sample(
             &[("class", entry.class)],
             entry.workers.running.approx_into(),
         );
     }
-    let pending = families.open("nervix_execution_jobs_pending");
+    let mut pending = families.open("nervix_execution_jobs_pending");
     for entry in &workers {
-        sample(
-            pending,
+        pending.sample(
             &[("class", entry.class)],
             entry.workers.pending.approx_into(),
         );
     }
-    let admitted = families.open("nervix_execution_jobs_total");
+    let mut admitted = families.open("nervix_execution_jobs_total");
     for entry in &workers {
-        sample(
-            admitted,
+        admitted.sample(
             &[("class", entry.class)],
             entry.workers.admitted.approx_into(),
         );
     }
-    let completed = families.open("nervix_execution_jobs_completed_total");
+    let mut completed = families.open("nervix_execution_jobs_completed_total");
     for entry in &workers {
-        sample(
-            completed,
+        completed.sample(
             &[("class", entry.class)],
             entry.workers.completed.approx_into(),
         );
     }
-    let refused = families.open("nervix_execution_job_rejections_total");
+    let mut refused = families.open("nervix_execution_job_rejections_total");
     for entry in &workers {
-        sample(
-            refused,
+        refused.sample(
             &[("class", entry.class)],
             entry.workers.refused.approx_into(),
         );
     }
-    let queued = families.open("nervix_execution_job_queue_seconds_total");
+    let mut queued = families.open("nervix_execution_job_queue_seconds_total");
     for entry in &workers {
-        sample(
-            queued,
+        queued.sample(
             &[("class", entry.class)],
             entry.workers.queued.as_secs_f64(),
         );
     }
-    let worked = families.open("nervix_execution_job_work_seconds_total");
+    let mut worked = families.open("nervix_execution_job_work_seconds_total");
     for entry in &workers {
-        sample(
-            worked,
+        worked.sample(
             &[("class", entry.class)],
             entry.workers.worked.as_secs_f64(),
         );
@@ -854,12 +843,12 @@ fn execution_families(families: &mut Families, executor: &nervix_execution::Exec
 }
 
 fn scheduler_families(families: &mut Families, scheduler: &SchedulerDelaySnapshot) {
-    let total = families.open("nervix_node_scheduler_delay_seconds_total");
-    sample(total, &[], scheduler.total.as_secs_f64());
-    let peak = families.open("nervix_node_scheduler_delay_peak_seconds");
-    sample(peak, &[], scheduler.peak.as_secs_f64());
-    let samples = families.open("nervix_node_scheduler_samples_total");
-    sample(samples, &[], scheduler.observations.approx_into());
+    let mut total = families.open("nervix_node_scheduler_delay_seconds_total");
+    total.sample(&[], scheduler.total.as_secs_f64());
+    let mut peak = families.open("nervix_node_scheduler_delay_peak_seconds");
+    peak.sample(&[], scheduler.peak.as_secs_f64());
+    let mut samples = families.open("nervix_node_scheduler_samples_total");
+    samples.sample(&[], scheduler.observations.approx_into());
 }
 
 fn consensus_families(
@@ -867,24 +856,20 @@ fn consensus_families(
     log: &nervix_consensus::RaftLogRetention,
     snapshots: &nervix_consensus::SnapshotRetention,
 ) {
-    let last_index = families.open("nervix_consensus_log_last_index");
-    sample(last_index, &[], optional_index(log.last_log_index));
-    let snapshot_index = families.open("nervix_consensus_log_snapshot_index");
-    sample(snapshot_index, &[], optional_index(log.snapshot_index));
-    let purged_index = families.open("nervix_consensus_log_purged_index");
-    sample(purged_index, &[], optional_index(log.purged_index));
-    let retained = families.open("nervix_consensus_log_retained_bytes");
-    sample(retained, &[], log.retained_bytes.approx_into());
-    let pinned = families.open("nervix_consensus_snapshot_pinned_generations");
-    sample(pinned, &[], snapshots.pinned_generations.approx_into());
-    let readers = families.open("nervix_consensus_snapshot_pinned_readers");
-    sample(readers, &[], snapshots.pinned_readers.approx_into());
-    let unreferenced = families.open("nervix_consensus_snapshot_unreferenced_generations");
-    sample(
-        unreferenced,
-        &[],
-        snapshots.unreferenced_generations.approx_into(),
-    );
+    let mut last_index = families.open("nervix_consensus_log_last_index");
+    last_index.sample(&[], optional_index(log.last_log_index));
+    let mut snapshot_index = families.open("nervix_consensus_log_snapshot_index");
+    snapshot_index.sample(&[], optional_index(log.snapshot_index));
+    let mut purged_index = families.open("nervix_consensus_log_purged_index");
+    purged_index.sample(&[], optional_index(log.purged_index));
+    let mut retained = families.open("nervix_consensus_log_retained_bytes");
+    retained.sample(&[], log.retained_bytes.approx_into());
+    let mut pinned = families.open("nervix_consensus_snapshot_pinned_generations");
+    pinned.sample(&[], snapshots.pinned_generations.approx_into());
+    let mut readers = families.open("nervix_consensus_snapshot_pinned_readers");
+    readers.sample(&[], snapshots.pinned_readers.approx_into());
+    let mut unreferenced = families.open("nervix_consensus_snapshot_unreferenced_generations");
+    unreferenced.sample(&[], snapshots.unreferenced_generations.approx_into());
 }
 
 /// A Raft position that does not exist yet reports as `-1`, which no real index can take, rather
