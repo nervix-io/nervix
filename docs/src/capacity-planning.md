@@ -111,7 +111,8 @@ not pay for a window's state, and a window width does not bound a correlator.
   handoff requests sharing the replication pool never wait behind it. A Raft snapshot moves one bounded section at a time, so its transfer does not
   grow with the size of the replicated state.
   Keep `MAX BATCH SIZE` well below 32 MiB on any route whose consumer may be scheduled on another
-  node.
+  node. Each node publishes what its pools and budgets are actually holding; see the
+  [interconnection metrics](metrics-and-observability.md) for the series to size against.
 - Stateful `MAX TIME`, `WIDTH`, and `STEP` trade history and aggregation coverage against retained
   entries, open windows, and buffered rows.
 - Source `INSTANCES` trades source parallelism against concurrent admission pressure. It does not

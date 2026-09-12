@@ -304,6 +304,34 @@ impl ScenarioWorld {
             .expect("observability endpoint did not report the expected metric value");
     }
 
+    async fn wait_for_observability_metric_at_least(
+        &self,
+        node_id: &str,
+        metric_name: &str,
+        minimum_value: i64,
+        wait: Option<Duration>,
+        step: &Step,
+    ) {
+        let node_id = expand_placeholders(self, node_id);
+        let metric_name = expand_placeholders(self, metric_name);
+        let label_fragments = docstring(step)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| expand_placeholders(self, line))
+            .collect::<Vec<_>>();
+        self.cluster()
+            .wait_for_observability_metric_at_least(
+                &node_id,
+                &metric_name,
+                &label_fragments,
+                minimum_value,
+                wait,
+            )
+            .await
+            .expect("observability endpoint did not report the expected metric value");
+    }
+
     async fn wait_for_domain_clock_progress_pause_on(
         &self,
         duration: Duration,
@@ -10755,6 +10783,39 @@ async fn then_within_duration_node_observability_metric_with_labels_eventually_e
             step,
         )
         .await;
+}
+
+#[then(
+    expr = "node {string} observability metric {string} with labels eventually reaches at least \
+            {int}"
+)]
+async fn then_node_observability_metric_with_labels_eventually_reaches(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    metric_name: String,
+    minimum_value: i64,
+    #[step] step: &Step,
+) {
+    world
+        .wait_for_observability_metric_at_least(&node_id, &metric_name, minimum_value, None, step)
+        .await;
+}
+
+#[then(expr = "node {string} interconnection metrics use only bounded dimensions")]
+async fn then_node_interconnection_metrics_use_bounded_dimensions(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let offending = world
+        .cluster()
+        .unbounded_interconnection_metric_samples(&node_id)
+        .await
+        .expect("observability endpoint did not answer with its metric exposition");
+    assert!(
+        offending.is_empty(),
+        "node '{node_id}' exposed interconnection samples with unbounded dimensions: {offending:?}"
+    );
 }
 
 #[then(expr = "within {string} node {string} eventually reports describe relay as {string}")]

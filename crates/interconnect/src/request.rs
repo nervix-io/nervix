@@ -23,7 +23,7 @@ use std::{
 use dashmap::{DashMap, mapref::entry::Entry};
 use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, Reservation};
 use nervix_models::{ClusterNodeIdentity, ClusterNodeName};
 use rkyv::{
@@ -32,10 +32,11 @@ use rkyv::{
     rancor::Error as RkyvError,
     ser::{allocator::ArenaHandle, writer::IoWriter},
 };
+use strum::{AsRefStr, EnumCount, EnumIter, IntoEnumIterator as _};
 use thiserror::Error;
 use tokio::{
     sync::{Notify, OwnedSemaphorePermit, Semaphore},
-    time::timeout,
+    time::{Instant, timeout},
 };
 use triomphe::Arc;
 
@@ -47,9 +48,12 @@ use super::{
     OwnershipHandoffResponse, PoolClass, PrepareForcedOwnershipRecoveryRequest,
     PrepareOwnershipHandoffStateRequest, Transport, TransportError, wire,
 };
-use crate::connection::{
-    DuplexItems, DuplexReceiver, DuplexResponses, DuplexSender, FrameReader,
-    OutboundByteStreamRequest, RawDuplexRequest,
+use crate::{
+    connection::{
+        DuplexItems, DuplexReceiver, DuplexResponses, DuplexSender, FrameReader,
+        OutboundByteStreamRequest, RawDuplexRequest,
+    },
+    observation::{ConnectionDirection, RequestOutcome, TransportObservations},
 };
 
 #[doc(hidden)]
@@ -168,7 +172,20 @@ where
     }
 }
 
-#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Archive,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    AsRefStr,
+    EnumCount,
+    EnumIter,
+)]
+#[strum(serialize_all = "snake_case")]
 pub enum RequestSubquota {
     Shared,
     /// The one ordered append stream a leader keeps open to each follower.
@@ -181,6 +198,24 @@ pub enum RequestSubquota {
     Admission,
     Cancellation,
     Terminal,
+}
+
+impl RequestSubquota {
+    /// This subquota's position in the fixed observation arrays it indexes.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Shared => 0,
+            Self::Append => 1,
+            Self::Resource => 2,
+            Self::Snapshot => 3,
+            Self::Discovery => 4,
+            Self::Liveness => 5,
+            Self::Progress => 6,
+            Self::Admission => 7,
+            Self::Cancellation => 8,
+            Self::Terminal => 9,
+        }
+    }
 }
 
 /// One typed request message and the response type its handler produces.
@@ -396,6 +431,9 @@ pub(crate) struct RequestState {
     membership_changed: Notify,
     outbound: RequestQuotas,
     inbound: RequestQuotas,
+    /// The same observations the transport records connection and relay events into, so a node
+    /// reports one view of what its pools carried.
+    observations: Arc<TransportObservations>,
 }
 
 pub(crate) struct RequestAdmission {
@@ -413,6 +451,9 @@ struct RequestQuotas {
     admission: StdArc<Semaphore>,
     cancellation: StdArc<Semaphore>,
     terminal: StdArc<Semaphore>,
+    /// What each subquota was built with, so the requests in flight can be read back out of the
+    /// permits the subquota is currently holding.
+    capacities: [usize; RequestSubquota::COUNT],
 }
 
 // Per-node admission limits for reserved request classes. These cap requests across all peers and
@@ -437,6 +478,14 @@ const _: () = assert!(
 
 impl RequestQuotas {
     fn new(capacity: usize) -> Self {
+        let standard = capacity.clamp(
+            PER_NODE_RESERVED_REQUEST_MINIMUM,
+            PER_NODE_STANDARD_REQUEST_LIMIT,
+        );
+        let completion = capacity.clamp(
+            PER_NODE_RESERVED_REQUEST_MINIMUM,
+            PER_NODE_COMPLETION_REQUEST_LIMIT,
+        );
         Self {
             shared: StdArc::new(Semaphore::new(capacity)),
             append: StdArc::new(Semaphore::new(capacity.clamp(
@@ -472,6 +521,18 @@ impl RequestQuotas {
                 PER_NODE_RESERVED_REQUEST_MINIMUM,
                 PER_NODE_COMPLETION_REQUEST_LIMIT,
             ))),
+            capacities: [
+                capacity,
+                standard,
+                standard,
+                standard,
+                standard,
+                MAX_CONCURRENT_HEALTH_PROBES,
+                standard,
+                standard,
+                completion,
+                completion,
+            ],
         }
     }
 
@@ -496,6 +557,19 @@ impl RequestQuotas {
             .ok()?;
         Some(RequestAdmission { _permit: permit })
     }
+
+    /// Requests admitted into each subquota and not yet resolved.
+    fn in_flight(&self) -> [usize; RequestSubquota::COUNT] {
+        let mut pending = [0_usize; RequestSubquota::COUNT];
+        for subquota in RequestSubquota::iter() {
+            let capacity = self.capacities[subquota.index()];
+            let available = self.for_subquota(subquota).available_permits();
+            pending[subquota.index()] = capacity.checked_sub(available).verified(
+                "subquota permits are only taken and returned by the requests this node admitted",
+            );
+        }
+        pending
+    }
 }
 
 fn subquota_belongs_to_class(subquota: RequestSubquota, class: PoolClass) -> bool {
@@ -513,7 +587,7 @@ fn subquota_belongs_to_class(subquota: RequestSubquota, class: PoolClass) -> boo
 }
 
 impl RequestState {
-    pub(crate) fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize, observations: Arc<TransportObservations>) -> Self {
         Self {
             handlers: DashMap::default(),
             stream_handlers: DashMap::default(),
@@ -523,15 +597,47 @@ impl RequestState {
             membership_changed: Notify::new(),
             outbound: RequestQuotas::new(capacity),
             inbound: RequestQuotas::new(capacity),
+            observations,
         }
     }
 
     pub(crate) fn try_admit_outbound(&self, subquota: RequestSubquota) -> Option<RequestAdmission> {
-        self.outbound.try_admit(subquota)
+        let admitted = self.outbound.try_admit(subquota);
+        if admitted.is_none() {
+            self.observations
+                .quota_failure(ConnectionDirection::Outbound, subquota);
+        }
+        admitted
     }
 
     fn try_admit_inbound(&self, subquota: RequestSubquota) -> Option<RequestAdmission> {
-        self.inbound.try_admit(subquota)
+        let admitted = self.inbound.try_admit(subquota);
+        if admitted.is_none() {
+            self.observations
+                .quota_failure(ConnectionDirection::Inbound, subquota);
+        }
+        admitted
+    }
+
+    /// Count one finished outbound request and the round trip it took.
+    pub(crate) fn record_request(
+        &self,
+        subquota: RequestSubquota,
+        outcome: RequestOutcome,
+        elapsed: Duration,
+    ) {
+        self.observations
+            .request_completed(subquota, outcome, elapsed);
+    }
+
+    /// Requests admitted and not yet resolved, by direction and reserved subquota.
+    pub(crate) fn pending_operations(
+        &self,
+    ) -> [[usize; RequestSubquota::COUNT]; ConnectionDirection::COUNT] {
+        let mut pending = [[0_usize; RequestSubquota::COUNT]; ConnectionDirection::COUNT];
+        pending[ConnectionDirection::Outbound.index()] = self.outbound.in_flight();
+        pending[ConnectionDirection::Inbound.index()] = self.inbound.in_flight();
+        pending
     }
 }
 
@@ -1379,7 +1485,8 @@ impl Transport {
             }
         };
         let shutdown = self.inner.shutdown_token();
-        tokio::select! {
+        let submitted_at = Instant::now();
+        let result = tokio::select! {
             biased;
             _ = shutdown.cancelled() => Err(Report::new(RequestError::ShuttingDown {
                 node: node.clone(),
@@ -1399,7 +1506,15 @@ impl Transport {
                     timeout: timeout_duration,
                 })),
             },
-        }
+        };
+        let outcome = match &result {
+            Ok(_) => RequestOutcome::Answered,
+            Err(_) => RequestOutcome::Failed,
+        };
+        self.inner
+            .requests()
+            .record_request(M::SUBQUOTA, outcome, submitted_at.elapsed());
+        result
     }
 }
 

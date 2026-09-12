@@ -39,7 +39,8 @@ use crate::{
     replication::append_batch_target_bytes,
     snapshot::{
         KEY_MANIFEST, SealedSnapshot, SectionWriter, SnapshotGenerations, SnapshotManifest,
-        SnapshotSection, StoredRecord, generation_prefix, section_generation, section_key,
+        SnapshotRetention, SnapshotSection, StoredRecord, generation_prefix, section_generation,
+        section_key,
     },
     storage_decode,
     storage_fault::{StorageBoundary, StorageFault},
@@ -637,6 +638,11 @@ impl FjallStore {
     /// What the retained Raft log occupies on disk.
     pub(super) fn retained_log_bytes(&self) -> u64 {
         self.inner.logs.disk_space()
+    }
+
+    /// What this node is keeping in snapshot storage.
+    pub(super) fn snapshot_retention(&self) -> SnapshotRetention {
+        self.inner.shared.snapshots.retention()
     }
 
     /// The highest index that may be purged so the snapshot-covered log stays inside its bounds.

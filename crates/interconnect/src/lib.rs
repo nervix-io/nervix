@@ -32,6 +32,7 @@ use tokio::sync::mpsc;
 
 mod connection;
 mod identity;
+mod observation;
 mod pool;
 mod request;
 mod wire;
@@ -41,6 +42,10 @@ pub use connection::{
     RelayCancellationGuard,
 };
 pub use identity::TlsConfigBundle;
+pub use observation::{
+    ConnectionDirection, ConnectionFailureReason, RelayAdmissionOutcome, RequestOutcome,
+    StreamResetReason, TransferDirection, TransportCounters, TransportSnapshot,
+};
 pub use pool::PoolClass;
 pub use request::{
     ApplicationHealthProbe, HandlerRegistrationError, InterconnectDuplexRequest,
@@ -917,6 +922,15 @@ impl Transport {
 
     pub async fn active_outbound_connections(&self) -> usize {
         self.inner.active_outbound_connections()
+    }
+
+    /// Everything this transport is holding and everything it has counted, in one consistent read.
+    ///
+    /// The node's metric exposition is the only caller. Levels are derived from the state that
+    /// owns them rather than mirrored into a counter, so a series can never disagree with the
+    /// pools it describes.
+    pub fn snapshot(&self) -> TransportSnapshot {
+        self.inner.snapshot()
     }
 
     pub async fn replace_tls(&self, tls: TlsConfigBundle) -> Result<(), TransportError> {
@@ -2012,7 +2026,7 @@ mod tests {
             .expect("cancellation handler should register");
 
         let mut blocked = Vec::new();
-        for _ in 0..connection::MANAGEMENT_SHARED_STREAMS {
+        for _ in 0..connection::stream_slots::MANAGEMENT_SHARED_STREAMS {
             let requester = transport_a.clone();
             let target = node_b.clone();
             blocked.push(tokio::spawn(async move {
@@ -2022,7 +2036,9 @@ mod tests {
         timeout(Duration::from_secs(2), async {
             loop {
                 tokio::task::consume_budget().await;
-                if started.load(Ordering::Acquire) == connection::MANAGEMENT_SHARED_STREAMS {
+                if started.load(Ordering::Acquire)
+                    == connection::stream_slots::MANAGEMENT_SHARED_STREAMS
+                {
                     break;
                 }
                 tokio::task::yield_now().await;

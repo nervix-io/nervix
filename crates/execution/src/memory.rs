@@ -1,6 +1,13 @@
 //! The byte budgets an operation is charged against before it allocates.
 
-use std::{io, ops::Deref, sync::Arc as StdArc};
+use std::{
+    io,
+    ops::Deref,
+    sync::{
+        Arc as StdArc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use arch_into::ArchInto as _;
 use error_stack::Report;
@@ -46,13 +53,20 @@ pub(crate) struct MemoryBudget {
     class: MemoryClass,
     capacity: u32,
     permits: SemaphoreRef,
+    granted: AtomicU64,
+    refused: AtomicU64,
 }
 
-/// What one class of the budget currently holds.
+/// What one class of the budget currently holds, and how much it has admitted and refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryBudgetSnapshot {
     pub capacity_bytes: u64,
     pub reserved_bytes: u64,
+    /// Charges this class has granted since the node started.
+    pub granted: u64,
+    /// Charges refused because the request was larger than the whole class, or because the class
+    /// was closed. A request that waits for room is not refused and is not counted here.
+    pub refused: u64,
 }
 
 impl MemoryBudget {
@@ -61,6 +75,8 @@ impl MemoryBudget {
             class,
             capacity,
             permits: StdArc::new(Semaphore::new(capacity.arch_into())),
+            granted: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
         }
     }
 
@@ -74,6 +90,8 @@ impl MemoryBudget {
             reserved_bytes: capacity_bytes
                 .checked_sub(available)
                 .verified("permits are only returned by the reservations this budget issued"),
+            granted: self.granted.load(Ordering::Acquire),
+            refused: self.refused.load(Ordering::Acquire),
         }
     }
 
@@ -81,11 +99,11 @@ impl MemoryBudget {
         let requested = self.checked_request(bytes)?;
         match StdArc::clone(&self.permits).try_acquire_many_owned(requested) {
             Ok(permit) => Ok(self.reservation(requested, permit)),
-            Err(TryAcquireError::NoPermits) => Err(Report::new(AdmissionError::BudgetExhausted {
+            Err(TryAcquireError::NoPermits) => Err(self.refusal(AdmissionError::BudgetExhausted {
                 class: self.class.as_str(),
                 requested: bytes,
             })),
-            Err(TryAcquireError::Closed) => Err(Report::new(AdmissionError::BudgetClosed {
+            Err(TryAcquireError::Closed) => Err(self.refusal(AdmissionError::BudgetClosed {
                 class: self.class.as_str(),
             })),
         }
@@ -104,7 +122,7 @@ impl MemoryBudget {
         match StdArc::clone(&self.permits).try_acquire_many_owned(requested) {
             Ok(permit) => return Ok(self.reservation(requested, permit)),
             Err(TryAcquireError::Closed) => {
-                return Err(Report::new(AdmissionError::BudgetClosed {
+                return Err(self.refusal(AdmissionError::BudgetClosed {
                     class: self.class.as_str(),
                 }));
             }
@@ -114,7 +132,7 @@ impl MemoryBudget {
             .acquire_many_owned(requested)
             .await
             .map_err(|_| {
-                Report::new(AdmissionError::BudgetClosed {
+                self.refusal(AdmissionError::BudgetClosed {
                     class: self.class.as_str(),
                 })
             })?;
@@ -126,14 +144,14 @@ impl MemoryBudget {
     fn checked_request(&self, bytes: u64) -> Result<u32, Report<AdmissionError>> {
         let capacity = self.capacity.into();
         let requested = u32::try_from(bytes).map_err(|_| {
-            Report::new(AdmissionError::ExceedsBudget {
+            self.refusal(AdmissionError::ExceedsBudget {
                 class: self.class.as_str(),
                 requested: bytes,
                 capacity,
             })
         })?;
         if requested > self.capacity {
-            return Err(Report::new(AdmissionError::ExceedsBudget {
+            return Err(self.refusal(AdmissionError::ExceedsBudget {
                 class: self.class.as_str(),
                 requested: bytes,
                 capacity,
@@ -142,7 +160,15 @@ impl MemoryBudget {
         Ok(requested)
     }
 
+    /// Count one quota failure and carry its cause, so a node exposes how often a class turned
+    /// work away rather than only how full it is at the moment it is scraped.
+    fn refusal(&self, error: AdmissionError) -> Report<AdmissionError> {
+        self.refused.fetch_add(1, Ordering::AcqRel);
+        Report::new(error)
+    }
+
     fn reservation(&self, bytes: u32, permit: OwnedSemaphorePermit) -> Reservation {
+        self.granted.fetch_add(1, Ordering::AcqRel);
         Reservation {
             class: self.class,
             capacity: self.capacity,
