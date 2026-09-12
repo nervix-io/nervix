@@ -80,7 +80,7 @@ pub(crate) enum DomainClockArithmetic {
 pub(in crate::runtime) type DomainClockAccessResult<T> = Result<T, Report<DomainClockAccessError>>;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub(in crate::runtime) enum DomainClockWaitError {
+pub enum DomainClockWaitError {
     #[error("domain '{domain}' clock became unavailable while waiting for a logical deadline")]
     Clock { domain: DomainName },
     #[error("domain '{domain}' logical deadline wait was cancelled")]
@@ -89,7 +89,7 @@ pub(in crate::runtime) enum DomainClockWaitError {
     PhysicalDeadline { domain: DomainName },
 }
 
-pub(in crate::runtime) type DomainClockWaitResult<T> = Result<T, Report<DomainClockWaitError>>;
+pub type DomainClockWaitResult<T> = Result<T, Report<DomainClockWaitError>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DomainClockSource {
@@ -609,7 +609,7 @@ impl LogicalDeadline {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::runtime) struct LogicalDeadlineReached {
+pub struct LogicalDeadlineReached {
     due_at: Timestamp,
     snapshot: DomainExecutionSnapshot,
 }

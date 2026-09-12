@@ -46,6 +46,7 @@ PARSER_EDGES = (
     "crates/nervix-cli/",
     "crates/web-console/",
     "src/application.rs",
+    "src/application/",
 )
 
 # The data plane executes plans. These decision modules are where a Model is still allowed to be
