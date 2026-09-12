@@ -104,6 +104,8 @@ const CUCUMBER_LOG_FILE: &str = "tests/logs/cucumber.log";
 static ONNX_RUNTIME_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<StdMutex<BTreeMap<String, String>>> = OnceLock::new();
+// Every scenario holds a read guard; `@exclusive` scenarios hold the write guard.
+static SCENARIO_EXECUTION_LOCK: OnceLock<StdArc<tokio::sync::RwLock<()>>> = OnceLock::new();
 static WEB_CONSOLE_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> = OnceLock::new();
 const MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS: usize = 2;
 const ZEROMQ_OBSERVER_BIND_ATTEMPTS: usize = 8;
@@ -112,8 +114,19 @@ const WEB_CONSOLE_FEATURE_NAMES: [&str; 2] =
 const DEPENDENCY_LIFECYCLE_HELPER_ENV: &str = "NERVIX_DEPENDENCY_LIFECYCLE_HELPER";
 const DEPENDENCY_LIFECYCLE_STARTED: &str = "NERVIX_DEPENDENCY_LIFECYCLE_STARTED=";
 
+#[derive(Debug)]
+enum ScenarioExecutionPermit {
+    Concurrent {
+        _permit: tokio::sync::OwnedRwLockReadGuard<()>,
+    },
+    Exclusive {
+        _permit: tokio::sync::OwnedRwLockWriteGuard<()>,
+    },
+}
+
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
+    scenario_execution_permit: Option<ScenarioExecutionPermit>,
     cluster: Option<Cluster>,
     active_session: Option<TestSession>,
     active_session_node: Option<String>,
@@ -15932,10 +15945,29 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
     let writer = ScenarioWorld::cucumber()
         .max_concurrent_scenarios(default_max_concurrent_scenarios)
         .retries(1)
-        .before(|feature, _rule, scenario, world| {
+        .before(|feature, rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();
+            let exclusive = scenario
+                .tags
+                .iter()
+                .chain(rule.iter().flat_map(|rule| &rule.tags))
+                .chain(&feature.tags)
+                .any(|tag| tag == "exclusive");
             Box::pin(async move {
+                let execution_lock = SCENARIO_EXECUTION_LOCK
+                    .get_or_init(|| StdArc::new(tokio::sync::RwLock::new(())))
+                    .clone();
+                let execution_permit = if exclusive {
+                    ScenarioExecutionPermit::Exclusive {
+                        _permit: execution_lock.write_owned().await,
+                    }
+                } else {
+                    ScenarioExecutionPermit::Concurrent {
+                        _permit: execution_lock.read_owned().await,
+                    }
+                };
+                world.scenario_execution_permit = Some(execution_permit);
                 append_cucumber_log_line(&format!(
                     "scenario started: feature={feature_name:?} scenario={scenario_name:?}"
                 ));
@@ -15993,6 +16025,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
                         }
                     }
                     world.web_console_scenario_permit = None;
+                    world.scenario_execution_permit = None;
                 }
             })
         })
