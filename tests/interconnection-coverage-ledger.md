@@ -7,8 +7,8 @@ finding the proposal covers, the step that owns it, and the scenario or test tha
 current source. A finding is closed here only when its owning step is complete and the evidence
 named beside it passes through the repository's standard commands.
 
-Run the named Cucumber evidence with `just test-scenarios --input <feature>`, and the whole suite
-with `just test`.
+Run the named Cucumber evidence with `just test-scenarios --input <feature>`, a named crate test
+with `cargo test -p <crate> <name>`, and the whole suite with `just test`.
 
 ## Transport shape
 
@@ -31,7 +31,7 @@ relay or bulk work cannot consume.
 
 | Audit finding or required invariant | Owning steps | Evidence |
 | --- | --- | --- |
-| Partial-frame cancellation and restart | 1, 2, 4 | `cluster/interconnect_lifetime.feature`: *Peer churn and silent handshakes leave the node responsive* |
+| Partial-frame cancellation and restart | 1, 2, 4 | `cluster/interconnect_lifetime.feature`: *Peer churn and silent handshakes leave the node responsive*; `nervix-interconnect`: `confirmed_cancellation_fences_attempt_before_grant_arrives`, `same_epoch_retry_of_admitted_relay_does_not_enqueue_twice` |
 | Global relay FIFO and cross-domain/branch blocking | 4, 5 | `runtime/interconnect_admission.feature`: *A waiting relay admission leaves another domain runnable*, *A waiting relay admission leaves another branch runnable* |
 | Control handler blocks ACKs, gate release, or payload routing | 3, 4, 5 | `runtime/interconnect_admission.feature`: *Evicting a branch cancels its waiting remote admission*; `cluster/interconnect_health.feature`: *A silent peer does not delay peer health or control-plane work* |
 | Sequential fanout and repeated encoding/copies | 3, 5 | `cluster/bounded_execution.feature`: *Occupied bulk execution leaves management work responsive* |
@@ -39,10 +39,10 @@ relay or bulk work cannot consume.
 | Sequential resource reconciliation and ambiguous readiness timeout | 6 | `cluster/resource_describe.feature`: *Readiness deadline returns the published version while a replica is pending*, *Upload retry reports one published version* |
 | Async-worker stalls in Arrow, CBOR, rkyv, filesystem and snapshots | 3, 4, 6, 7, 8 | `cluster/bounded_execution.feature`; `cluster/interconnect_observability.feature`: *Occupied bulk execution leaves the reserved management budget intact* |
 | Unbounded payload queues and item-only transport budgets | 3, 4, 5 | `cluster/interconnect_observability.feature`: *Interconnection series are exposed with bounded dimensions* — `nervix_execution_memory_capacity_bytes` and `nervix_execution_memory_reserved_bytes` per class |
-| Queued admission timeout before progress starts | 5 | `runtime/interconnect_admission.feature`: *A waiting relay admission leaves another domain runnable* |
-| Queue/backpressure blocks ping, writes, or shutdown | 2, 4, 10 | `cluster/interconnect_lifetime.feature`; `cluster/interconnect_health.feature` |
+| Queued admission timeout before progress starts | 5 | `runtime/interconnect_admission.feature`: *A waiting relay admission leaves another domain runnable*; `nervix-interconnect`: `reserved_relay_work_reports_progress_before_runtime_admission` |
+| Queue/backpressure blocks ping, writes, or shutdown | 2, 4, 10 | `cluster/interconnect_lifetime.feature`; `cluster/interconnect_health.feature`; `nervix-interconnect`: `bulk_work_does_not_block_the_management_pool`, `slow_management_work_cannot_consume_cancellation_streams`, `discovery_subquota_cannot_crowd_out_management_requests`, `shutdown_cancels_an_active_request` |
 | Runtime snapshots exceed frame cap; sender/receiver limit mismatch | 3, 4, 7 | `runtime/materialized_stream.feature`: *Concurrent branch updates recover from one consistent columnar snapshot* |
-| Untrusted counts/depth/decoded sizes exceed allocation limits | 3, 4 | `nervix-execution` limit validation tests; `nervix-interconnect` wire decode tests |
+| Untrusted counts/depth/decoded sizes exceed allocation limits | 3, 4 | `nervix-execution`: `default_limits_validate_together`, `a_relay_budget_below_two_maximum_operations_fails_to_start`, `an_operation_limit_stops_a_writer_before_its_class_does`; `nervix-interconnect`: `invalid_rkyv_is_rejected_before_dispatch` |
 | Full snapshot buffers, ignored cancellation, partial-install risk | 7, 9 | `cluster/raft_replication.feature`: *A lagging follower recovers after bounded log compaction* |
 | Materialized snapshot row reconstruction and inconsistent scans | 7 | `runtime/materialized_stream.feature`: *Concurrent branch updates recover from one consistent columnar snapshot* |
 | Whole-state consensus serialization and lock-held persistence | 3, 8 | `cluster/consensus_storage.feature`: *Committed administrative changes recover atomically after storage failure* |
@@ -52,7 +52,7 @@ relay or bulk work cannot consume.
 | Outbound-only connection cap, churn, unbounded handshake and task lifetime | 2, 4 | `cluster/interconnect_lifetime.feature`: *Peer churn and silent handshakes leave the node responsive* |
 | Weak cluster API TLS and static introduction/key trust | 4 | `cluster/internal_tls.feature`: *Interconnect peers connect with certificate identities*, *Invalid interconnect peer credentials are rejected*, *Interconnect certificate authority rotates without restarting the cluster* |
 | Intentional session/branch/Raft ordering and exact schema preservation | 3, 5, 6, 8, 9 | `runtime/interconnect_admission.feature` (interleaved branches); `cluster/raft_replication.feature` |
-| In-memory-only relay attempts, ACKs, and suspended work | 3, 5, 7 | `runtime/interconnect_admission.feature`: *Evicting a branch cancels its waiting remote admission* |
+| In-memory-only relay attempts, ACKs, and suspended work | 3, 5, 7 | `runtime/interconnect_admission.feature`: *Evicting a branch cancels its waiting remote admission*; `nervix-interconnect`: `receiver_process_restart_makes_unresolved_relay_indeterminate`, `terminal_relay_outcome_waits_for_application_queue_capacity` |
 
 ## Observability
 
