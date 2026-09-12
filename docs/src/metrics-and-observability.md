@@ -17,7 +17,7 @@ The observability listener exposes:
 
 - `/livez`: process liveness
 - `/readyz`: readiness once a leader is known
-- `/metrics`: Prometheus text output for graph and allocator metrics
+- `/metrics`: Prometheus text output for graph, interconnection, and allocator metrics
 
 Use the node's observability address, not the data-plane HTTP listener:
 
@@ -107,6 +107,91 @@ Prometheus receives raw values only. The `/metrics` endpoint is encoded by the P
 The four ingestor-quiesce families use `domain`, `ingestor`, and `physical_node_id` labels. Buffer
 families are gauges; dropped and rejected families are monotonic counters. They are process-local:
 quiesce buffers do not migrate during termination or failover.
+
+## Interconnection Metrics
+
+Every node also exposes its own interconnection: the authenticated HTTP/2 pools it carries internal
+traffic over, the execution admission every variable-size operation passes through, its consensus
+retention, and the reactor delay they share. These series describe the exporting node only, so they
+carry no node label, and they are aggregated by dimensions whose value sets are fixed: `class`,
+`direction`, `operation`, `reason`, and `outcome`. None of them carries a branch key, a peer
+identity, a domain, or an operation identifier.
+
+`class` is the traffic class on transport series — `management`, `commands`, `replication`, `relay`,
+or `bulk` — and the execution class on admission series — `management`, `commands`, `relay`, `bulk`
+for memory, and `control_cpu`, `data_cpu`, `bulk_cpu`, `consensus_storage`, `filesystem_storage` for
+workers. `operation` is the reserved request subquota: `shared`, `append`, `resource`, `snapshot`,
+`discovery`, `liveness`, `progress`, `admission`, `cancellation`, or `terminal`.
+
+Transport pools:
+
+- `nervix_interconnect_connections`: physical connections held, by `class` and `direction`
+- `nervix_interconnect_streams`: HTTP/2 stream slots leased on outbound connections, by `class`
+- `nervix_interconnect_pending_operations`: requests admitted and not yet resolved, by `direction`
+  and `operation`
+- `nervix_interconnect_connections_established_total`: connections established, by `class`
+- `nervix_interconnect_connection_failures_total`: connections that failed to establish or ended,
+  by `class` and `reason`, where `reason` is `setup`, `handshake`, `capacity`, or `closed`
+- `nervix_interconnect_stream_resets_total`: streams that ended without a result, by `class` and
+  `reason`, where `reason` is `deadline`, `capacity`, `peer`, `shutdown`, or `malformed`
+- `nervix_interconnect_quota_failures_total`: requests refused because their reserved subquota was
+  full, by `direction` and `operation`
+- `nervix_interconnect_requests_total` and `nervix_interconnect_request_seconds_total`: typed
+  requests completed and the round trip they took, by `operation`. Divide the seconds by the count
+  for average latency; `operation="liveness"` is the peer health probe, so that ratio is health RTT
+- `nervix_interconnect_bulk_bytes_total`: bytes carried by streamed bodies, by `class` and
+  `direction`. This rises while a transfer is running, so it reads as bulk progress
+
+Relay admission:
+
+- `nervix_interconnect_relay_channels`, `nervix_interconnect_relay_attempts`,
+  `nervix_interconnect_relay_grants`: logical channels with unresolved work, attempts whose outcome
+  has not been retired, and transfer grants issued and not yet spent
+- `nervix_interconnect_relay_admissions_total` and
+  `nervix_interconnect_relay_admission_wait_seconds_total`: attempts resolved, by `outcome`
+  (`admitted`, `rejected`, `cancelled`), and the time they spent between an accepted reservation
+  and their resolution
+- `nervix_interconnect_unresolved_outcome_age_seconds`: how long the oldest unacknowledged relay
+  outcome has been waiting. A rising value means acknowledgements are not coming back
+
+Execution admission:
+
+- `nervix_execution_memory_capacity_bytes` and `nervix_execution_memory_reserved_bytes`: the
+  transient interconnection memory reserved for one class, and what it is currently holding
+- `nervix_execution_memory_reservations_total` and `nervix_execution_memory_rejections_total`:
+  charges granted and charges refused outright
+- `nervix_execution_workers`, `nervix_execution_jobs_running`, `nervix_execution_jobs_pending`: how
+  many jobs one class may have on the blocking pool at once, how many it holds, and how many wait
+- `nervix_execution_jobs_total`, `nervix_execution_jobs_completed_total`,
+  `nervix_execution_job_rejections_total`: jobs admitted, jobs that left a worker, and jobs refused
+  because the class already held its whole wait queue
+- `nervix_execution_job_queue_seconds_total` and `nervix_execution_job_work_seconds_total`: time
+  admitted jobs spent waiting for a worker, and time completed jobs spent holding one
+
+Node scheduling:
+
+- `nervix_node_scheduler_delay_seconds_total`, `nervix_node_scheduler_delay_peak_seconds`, and
+  `nervix_node_scheduler_samples_total`: how late the node's reactor has been polling work that was
+  already runnable. A timer asks to be woken every 250 milliseconds; the excess it is woken by is
+  the delay every other task on that worker paid
+
+Consensus retention:
+
+- `nervix_consensus_log_last_index`, `nervix_consensus_log_snapshot_index`,
+  `nervix_consensus_log_purged_index`: the highest Raft index the log holds, the highest the
+  current snapshot covers, and the highest already removed. A position that does not exist yet
+  reports `-1`
+- `nervix_consensus_log_retained_bytes`: what the retained log occupies in node-owned storage
+- `nervix_consensus_snapshot_pinned_generations`, `nervix_consensus_snapshot_pinned_readers`,
+  `nervix_consensus_snapshot_unreferenced_generations`: snapshot generations an outgoing transfer
+  holds against deletion, the readers those pins are held for, and generations waiting to be
+  deleted
+
+These series answer two operational questions directly. A class that is saturated shows a reserved
+byte count at its capacity, or running jobs at its worker count with pending jobs behind them,
+while the other classes stay free — that is the isolation the pools exist for. A control answer
+arriving late while bulk work runs shows up as reactor delay and as request seconds rising for the
+`shared` or `liveness` operation, not as a connection failure.
 
 ## DESCRIBE Metrics
 

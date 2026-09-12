@@ -43,6 +43,11 @@ use strum::{AsRefStr, EnumIter, IntoEnumIterator};
 use tikv_jemalloc_ctl::{epoch, epoch_mib, stats};
 use triomphe::Arc;
 
+mod interconnection;
+
+pub use interconnection::NodeObservations;
+use interconnection::{InterconnectionCollector, InterconnectionCollectorHandle};
+
 /// Why withdrawing a label set discards its outcome. See [`PrometheusMetrics::remove`].
 const WITHDRAWN_SERIES_MAY_NOT_EXIST: &str =
     "an entity torn down before its first observation has no series to withdraw";
@@ -1232,6 +1237,9 @@ struct BranchInstanceReferences {
 #[derive(Debug, Clone)]
 struct PrometheusMetrics {
     registry: Registry,
+    /// Registered empty and filled in once the node's transport, executor and consensus observer
+    /// exist. See [`RuntimeMetrics::install_node_observations`].
+    interconnection: Arc<InterconnectionCollector>,
     messages_total: IntCounterVec,
     batches_total: IntCounterVec,
     bytes_total: IntCounterVec,
@@ -1515,9 +1523,19 @@ impl PrometheusMetrics {
                 "this registry is built here and each metric is registered once under a distinct \
                  name",
             );
+        let interconnection = Arc::new(InterconnectionCollector::new());
+        registry
+            .register(Box::new(InterconnectionCollectorHandle {
+                collector: Arc::clone(&interconnection),
+            }))
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
 
         Self {
             registry,
+            interconnection,
             messages_total,
             batches_total,
             bytes_total,
@@ -2471,6 +2489,12 @@ impl RuntimeMetrics {
 
     pub fn prometheus_text(&self) -> String {
         self.series.prometheus.text()
+    }
+
+    /// Give this node's exposition the transport, execution and consensus state its
+    /// interconnection series are read from. A node installs its own once, during startup.
+    pub fn install_node_observations(&self, observations: NodeObservations) {
+        self.series.prometheus.interconnection.install(observations);
     }
 
     pub fn snapshot_global_target(

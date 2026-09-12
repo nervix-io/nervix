@@ -157,6 +157,21 @@ impl StreamSlotQuotas {
         }
     }
 
+    /// Stream slots currently leased on this connection: its class capacity, less what its
+    /// subquotas still hold free.
+    pub(super) fn leased(&self, class: PoolClass) -> usize {
+        let available = match self {
+            Self::Management(quotas) => quotas.available(),
+            Self::Replication(quotas) => quotas.available(),
+            Self::Bulk(quotas) => quotas.available(),
+            Self::Shared { slots, .. } => slots.available_permits(),
+        };
+        class
+            .stream_slots_per_connection()
+            .checked_sub(available)
+            .verified("stream permits are only taken and returned by this connection's leases")
+    }
+
     pub(super) async fn drain(&self) {
         match self {
             Self::Management(quotas) => quotas.drain().await,
@@ -178,6 +193,18 @@ impl StreamSlotQuotas {
 }
 
 impl ManagementStreamSlotQuotas {
+    fn available(&self) -> usize {
+        available_permits([
+            &self.shared,
+            &self.discovery,
+            &self.liveness,
+            &self.progress,
+            &self.admission,
+            &self.cancellation,
+            &self.terminal,
+        ])
+    }
+
     fn for_subquota(&self, subquota: RequestSubquota) -> Option<&StdArc<Semaphore>> {
         match subquota {
             RequestSubquota::Shared => Some(&self.shared),
@@ -223,6 +250,10 @@ impl ManagementStreamSlotQuotas {
 }
 
 impl ReplicationStreamSlotQuotas {
+    fn available(&self) -> usize {
+        available_permits([&self.shared, &self.append])
+    }
+
     fn for_subquota(&self, subquota: RequestSubquota) -> Option<&StdArc<Semaphore>> {
         match subquota {
             RequestSubquota::Shared => Some(&self.shared),
@@ -262,6 +293,10 @@ impl ReplicationStreamSlotQuotas {
 }
 
 impl BulkStreamSlotQuotas {
+    fn available(&self) -> usize {
+        available_permits([&self.shared, &self.resource, &self.snapshot])
+    }
+
     fn for_subquota(&self, subquota: RequestSubquota) -> Option<&StdArc<Semaphore>> {
         match subquota {
             RequestSubquota::Shared => Some(&self.shared),
@@ -299,4 +334,13 @@ impl BulkStreamSlotQuotas {
             drained.push(permit);
         }
     }
+}
+
+/// Free slots across one connection's whole stream partition.
+fn available_permits<const QUOTAS: usize>(quotas: [&StdArc<Semaphore>; QUOTAS]) -> usize {
+    let mut available = 0;
+    for quota in quotas {
+        available = super::increment(available, quota.available_permits());
+    }
+    available
 }

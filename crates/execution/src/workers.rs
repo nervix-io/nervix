@@ -6,10 +6,11 @@ use std::{
         Arc as StdArc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use error_stack::Report;
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
@@ -40,6 +41,15 @@ pub struct WorkerClassSnapshot {
     /// Jobs this class has admitted since the node started. A caller that must prove it submitted
     /// one job rather than several reads the difference across its own operation.
     pub admitted: u64,
+    /// Jobs refused because the class already held its whole wait queue.
+    pub refused: u64,
+    /// Jobs that have left a worker, whether they produced a value or the caller stopped waiting.
+    pub completed: u64,
+    /// Time admitted jobs spent waiting for a worker of this class. Divided by `admitted` it is
+    /// the queueing an operation of this class currently pays before it starts.
+    pub queued: Duration,
+    /// Time completed jobs spent holding a worker of this class.
+    pub worked: Duration,
 }
 
 /// A fixed number of workers, with a bounded number of jobs allowed to wait for one. Each class
@@ -52,6 +62,12 @@ pub(crate) struct WorkerPool {
     queue_permits: SemaphoreRef,
     pending: StdArc<AtomicUsize>,
     admitted: AtomicU64,
+    refused: AtomicU64,
+    /// Also held by every running job, which records its own service time as it exits.
+    completed: StdArc<AtomicU64>,
+    queued_nanos: AtomicU64,
+    /// Also held by every running job, alongside `completed`.
+    worked_nanos: StdArc<AtomicU64>,
 }
 
 impl WorkerPool {
@@ -67,6 +83,10 @@ impl WorkerPool {
             queue_permits: StdArc::new(Semaphore::new(pending_jobs.get())),
             pending: StdArc::new(AtomicUsize::new(0)),
             admitted: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
+            completed: StdArc::new(AtomicU64::new(0)),
+            queued_nanos: AtomicU64::new(0),
+            worked_nanos: StdArc::new(AtomicU64::new(0)),
         }
     }
 
@@ -80,6 +100,10 @@ impl WorkerPool {
                 .verified("worker permits are only taken and returned by this pool's own jobs"),
             pending: self.pending.load(Ordering::Acquire),
             admitted: self.admitted.load(Ordering::Acquire),
+            refused: self.refused.load(Ordering::Acquire),
+            completed: self.completed.load(Ordering::Acquire),
+            queued: Duration::from_nanos(self.queued_nanos.load(Ordering::Acquire)),
+            worked: Duration::from_nanos(self.worked_nanos.load(Ordering::Acquire)),
         }
     }
 
@@ -100,6 +124,7 @@ impl WorkerPool {
     {
         let queued = self.enter_queue()?;
         self.admitted.fetch_add(1, Ordering::AcqRel);
+        let requested_at = Instant::now();
         let worker = StdArc::clone(&self.worker_permits)
             .acquire_owned()
             .await
@@ -108,13 +133,20 @@ impl WorkerPool {
                     class: self.class.as_str(),
                 })
             })?;
+        self.queued_nanos
+            .fetch_add(elapsed_nanos(requested_at), Ordering::AcqRel);
         drop(queued);
         let cancellation = Cancellation::new();
         let signal = CancelOnDrop::new(cancellation.clone());
+        let completed = StdArc::clone(&self.completed);
+        let worked_nanos = StdArc::clone(&self.worked_nanos);
         let handle = tokio::task::spawn_blocking(move || {
             // The job owns its charge while it runs, so the allocation it made is released when
             // the work actually exits and not when the caller stopped waiting.
+            let started_at = Instant::now();
             let value = job(reservation, &cancellation);
+            worked_nanos.fetch_add(elapsed_nanos(started_at), Ordering::AcqRel);
+            completed.fetch_add(1, Ordering::AcqRel);
             drop(worker);
             value
         });
@@ -136,15 +168,26 @@ impl WorkerPool {
                     permit: Some(permit),
                 })
             }
-            Err(TryAcquireError::NoPermits) => Err(Report::new(ExecutionError::QueueFull {
-                class: self.class.as_str(),
-                pending: self.pending.load(Ordering::Acquire),
-            })),
+            Err(TryAcquireError::NoPermits) => {
+                self.refused.fetch_add(1, Ordering::AcqRel);
+                Err(Report::new(ExecutionError::QueueFull {
+                    class: self.class.as_str(),
+                    pending: self.pending.load(Ordering::Acquire),
+                }))
+            }
             Err(TryAcquireError::Closed) => Err(Report::new(ExecutionError::PoolClosed {
                 class: self.class.as_str(),
             })),
         }
     }
+}
+
+/// Nanoseconds since `started_at`, for the cumulative service counters this pool exposes.
+fn elapsed_nanos(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_nanos()).assured(
+        "a node would have to run for 584 years for one wait or one job to overflow nanosecond \
+         counting",
+    )
 }
 
 /// One job's place in a class's finite wait queue, given up as soon as it holds a worker.
