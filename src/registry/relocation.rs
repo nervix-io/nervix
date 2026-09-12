@@ -13,7 +13,8 @@ use nervix_models::{
 use strum::AsRefStr;
 use thiserror::Error;
 
-use super::{ActiveGraph, ResolvedPlacementPair};
+use super::graph::ActiveGraph;
+use crate::registry::placement::{EffectivePlacementPlan, PlacementPair, ResolvedPlacementPair};
 
 /// Why a runtime node is part of the unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
@@ -293,7 +294,7 @@ impl ActiveGraph {
     /// Repeats capture rounds until the unit stops growing.
     fn capture_preferred_groups(
         &self,
-        placement: &super::EffectivePlacementPlan,
+        placement: &EffectivePlacementPlan,
         hard_group: &impl Fn(&NodeRef) -> Vec<NodeRef>,
         override_by_key: &HashMap<NodeRef, Vec<RelocationPreferenceStrategy>>,
         default_strategy: RelocationPreferenceStrategy,
@@ -373,7 +374,7 @@ impl ActiveGraph {
     /// True when any candidate member is separated from a `FOLLOW PREFERENCES` group already in
     /// the unit.
     fn separated_from_unit(
-        placement: &super::EffectivePlacementPlan,
+        placement: &EffectivePlacementPlan,
         candidate: &[NodeRef],
         groups: &[UnitGroup],
         group_by_member: &HashMap<NodeRef, usize>,
@@ -425,7 +426,7 @@ impl ActiveGraph {
 
     /// Every effective soft preference with at least one endpoint in the unit.
     fn unit_preferences(
-        pairs: &HashMap<super::PlacementPair, ResolvedPlacementPair>,
+        pairs: &HashMap<PlacementPair, ResolvedPlacementPair>,
         group_by_member: &HashMap<NodeRef, usize>,
     ) -> Vec<RelocationPreference> {
         let mut preferences = pairs
