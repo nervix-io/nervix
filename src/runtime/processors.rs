@@ -1004,6 +1004,20 @@ pub(super) struct ReordererOutputBatchFailure {
     pub(super) batches: Vec<RelayRecordBatch>,
 }
 
+impl ReordererOutputBatchFailure {
+    /// Fail a flush while handing every buffered batch back to the caller. The caller resolves the
+    /// ACKs those batches carry, so a failure that dropped one would strand them.
+    fn retaining(
+        error: ReordererOutputBatchError,
+        pending: Vec<ReordererPendingBatch>,
+    ) -> Box<Self> {
+        Box::new(Self {
+            error,
+            batches: pending.into_iter().map(|pending| pending.batch).collect(),
+        })
+    }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct ReordererOutputBuffer {
     pending: Vec<ReordererPendingBatch>,
@@ -1054,60 +1068,30 @@ impl ReordererOutputBuffer {
     pub(super) fn take_ordered_batch(
         &mut self,
     ) -> Result<RelayRecordBatch, Box<ReordererOutputBatchFailure>> {
+        // The buffer empties here whether or not ordering succeeds, so every failure below hands
+        // the drained batches back and their ACKs stay owned by exactly one place.
         self.estimated_bytes = 0;
         let pending = std::mem::take(&mut self.pending);
-        let row_count = pending.iter().try_fold(0_usize, |total, pending| {
-            let batch_rows = pending.batch.batch.batch().num_rows();
-            if pending.row_order.len() != batch_rows {
-                return Err(ReordererOutputBatchError::OrderingKeyCount {
-                    arrow_rows: batch_rows,
-                    ordering_keys: pending.row_order.len(),
-                });
-            }
-            total
-                .checked_add(batch_rows)
-                .ok_or(ReordererOutputBatchError::RowCountOverflow)
-        });
-        let row_count = match row_count {
-            Ok(row_count) if row_count > 0 => row_count,
-            Ok(_) => {
-                return Err(Box::new(ReordererOutputBatchFailure {
-                    error: ReordererOutputBatchError::Empty,
-                    batches: pending.into_iter().map(|pending| pending.batch).collect(),
-                }));
-            }
-            Err(error) => {
-                return Err(Box::new(ReordererOutputBatchFailure {
-                    error,
-                    batches: pending.into_iter().map(|pending| pending.batch).collect(),
-                }));
-            }
+
+        let row_count = match Self::validated_row_count(&pending) {
+            Ok(row_count) => row_count,
+            Err(error) => return Err(ReordererOutputBatchFailure::retaining(error, pending)),
         };
-        let mut rows = Vec::with_capacity(row_count);
-        let mut offset = 0_usize;
-        for pending in &pending {
-            rows.extend(
-                pending
-                    .row_order
-                    .iter()
-                    .enumerate()
-                    .map(|(row, order)| (offset + row, order)),
-            );
-            offset += pending.row_order.len();
+        if row_count == 0 {
+            let error = ReordererOutputBatchError::Empty;
+            return Err(ReordererOutputBatchFailure::retaining(error, pending));
         }
-        rows.sort_by(|(left_row, left), (right_row, right)| {
-            left.key
-                .cmp(&right.key)
-                .then(left.arrival_sequence.cmp(&right.arrival_sequence))
-                .then(left_row.cmp(right_row))
-        });
-        let row_order = rows.into_iter().map(|(row, _)| row).collect::<Vec<_>>();
+
+        // One permutation for the whole flush, expressed in the row space the concatenation below
+        // produces.
+        let permutation = Self::ordering_permutation(&pending, row_count);
+
         let batches = pending
             .into_iter()
             .map(|pending| pending.batch)
             .collect::<Vec<_>>();
-        let batch = match RelayRecordBatch::concat_preserving(batches) {
-            Ok(batch) => batch,
+        let concatenated = match RelayRecordBatch::concat_preserving(batches) {
+            Ok(concatenated) => concatenated,
             Err(failure) => {
                 let (reason, batches) = *failure;
                 return Err(Box::new(ReordererOutputBatchFailure {
@@ -1116,13 +1100,85 @@ impl ReordererOutputBuffer {
                 }));
             }
         };
-        batch.into_reordered(&row_order).map_err(|failure| {
-            let failure = *failure;
-            Box::new(ReordererOutputBatchFailure {
-                error: failure.error.into(),
-                batches: vec![failure.batch],
-            })
-        })
+
+        // Applying the permutation moves the Arrow columns and every sidecar together, so a
+        // failure here returns the single batch that now carries all the buffered ACKs.
+        match concatenated.into_reordered(&permutation) {
+            Ok(ordered) => Ok(ordered),
+            Err(failure) => {
+                let failure = *failure;
+                Err(Box::new(ReordererOutputBatchFailure {
+                    error: failure.error.into(),
+                    batches: vec![failure.batch],
+                }))
+            }
+        }
+    }
+
+    /// The number of rows the ordered output will hold, counted over batches whose ordering keys
+    /// pair with their Arrow rows one for one. Buffer order decides which disagreement the caller
+    /// sees: the first batch that fails stops the count and is the error reported.
+    fn validated_row_count(
+        pending: &[ReordererPendingBatch],
+    ) -> Result<usize, ReordererOutputBatchError> {
+        let mut row_count = 0_usize;
+        for buffered in pending {
+            let arrow_rows = buffered.batch.batch.batch().num_rows();
+            let ordering_keys = buffered.row_order.len();
+            if ordering_keys != arrow_rows {
+                return Err(ReordererOutputBatchError::OrderingKeyCount {
+                    arrow_rows,
+                    ordering_keys,
+                });
+            }
+            let Some(total) = row_count.checked_add(arrow_rows) else {
+                return Err(ReordererOutputBatchError::RowCountOverflow);
+            };
+            row_count = total;
+        }
+        Ok(row_count)
+    }
+
+    /// The permutation the flush applies, given as the concatenated row each ordered row reads
+    /// from. `row_count` is the count `validated_row_count` returned for the same buffer.
+    fn ordering_permutation(pending: &[ReordererPendingBatch], row_count: usize) -> Vec<usize> {
+        /// One buffered row waiting to be placed: the row concatenation gives it, and the key and
+        /// arrival sequence that decide where the ordered output puts it.
+        struct BufferedRow<'a> {
+            row: usize,
+            order: &'a ReordererRowOrder,
+        }
+
+        // Rows are addressed in the concatenated row space, where buffer order decides each
+        // batch's offset exactly as the concatenation lays the batches out. Every offset stays
+        // below `row_count`, which the count above already proved fits in `usize`.
+        let mut rows = Vec::with_capacity(row_count);
+        let mut offset = 0_usize;
+        for buffered in pending {
+            for (row_in_batch, order) in buffered.row_order.iter().enumerate() {
+                rows.push(BufferedRow {
+                    row: offset + row_in_batch,
+                    order,
+                });
+            }
+            offset += buffered.row_order.len();
+        }
+
+        // Ordering key first, then arrival sequence, then the concatenated row itself, so rows
+        // that agree on both keep the order the buffer received them in.
+        rows.sort_by(|left, right| {
+            left.order
+                .key
+                .cmp(&right.order.key)
+                .then(
+                    left.order
+                        .arrival_sequence
+                        .cmp(&right.order.arrival_sequence),
+                )
+                .then(left.row.cmp(&right.row))
+        });
+
+        rows.into_iter().map(|buffered| buffered.row).collect()
     }
 }
 
