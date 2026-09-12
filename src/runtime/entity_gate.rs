@@ -1,5 +1,18 @@
 use super::*;
 
+/// Default deadline for draining one runtime branch during a domain or node transition.
+pub const DEFAULT_DOMAIN_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Includes the grace a branch task receives after its configured drain deadline.
+pub const fn branch_task_stop_timeout(domain_drain_timeout: Duration) -> Duration {
+    // Saturation is the meaning: a drain timeout configured near `Duration::MAX` already asks to
+    // wait for as long as the process runs, and no grace can extend that further.
+    domain_drain_timeout.saturating_add(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
+}
+
+pub(in crate::runtime) const OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL: Duration =
+    Duration::from_millis(25);
+
 /// One in-flight entity-gate hold, identified by the domain it pauses and the operation that took
 /// it, so a retried operation reuses the hold it already owns.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

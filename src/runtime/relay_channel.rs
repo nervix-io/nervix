@@ -1,3 +1,5 @@
+pub(crate) type RelaySubscriptionRecvError = async_broadcast::RecvError;
+
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,

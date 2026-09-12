@@ -1,3 +1,5 @@
+pub(in crate::runtime) type RelayDispatchResult = Result<(), Box<RelayRecordBatch>>;
+
 use std::sync::Arc as StdArc;
 
 use arch_into::ArchInto as _;
