@@ -2334,10 +2334,17 @@ async fn applied_burst_domains(world: &ScenarioWorld, node_id: &str, prefix: &st
         .fault_injection
         .consensus_observer(&crate::common::cluster::node_name(node_id));
     let domains = observer.current_domains().await;
-    domains
-        .keys()
-        .filter(|domain| domain.as_str().starts_with(&format!("{prefix}_")))
-        .count()
+    let burst_prefix = format!("{prefix}_");
+    let mut applied = 0_usize;
+    for domain in domains.keys() {
+        if !domain.as_str().starts_with(&burst_prefix) {
+            continue;
+        }
+        applied = applied
+            .checked_add(1)
+            .assured("a scenario creates a bounded number of burst domains");
+    }
+    applied
 }
 
 #[then(expr = "within {string} node {string} has applied {int} domains named {string}")]
@@ -3710,6 +3717,83 @@ async fn when_silent_peer_starts_interconnect_handshake(
         .await
         .expect("failed to open silent interconnect handshake");
     world.silent_interconnect_peers.push(peer);
+}
+
+#[given(expr = "health requests from node {string} to node {string} pause before responding")]
+async fn given_health_responses_are_paused(
+    world: &mut ScenarioWorld,
+    probing_node_id: String,
+    responding_node_id: String,
+) {
+    let probing_node_id = expand_placeholders(world, &probing_node_id);
+    let responding_node_id = expand_placeholders(world, &responding_node_id);
+    world
+        .cluster()
+        .arm_health_response_pause(&probing_node_id, &responding_node_id);
+}
+
+#[then(expr = "the health response pause from node {string} to node {string} is reached")]
+async fn then_health_response_pause_is_reached(
+    world: &mut ScenarioWorld,
+    probing_node_id: String,
+    responding_node_id: String,
+) {
+    let probing_node_id = expand_placeholders(world, &probing_node_id);
+    let responding_node_id = expand_placeholders(world, &responding_node_id);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        world
+            .cluster()
+            .wait_for_health_response_pause(&probing_node_id, &responding_node_id),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "health response pause from '{probing_node_id}' to '{responding_node_id}' was not \
+             reached: {error}"
+        )
+    });
+}
+
+#[then(
+    expr = "within {string} the health response pause from node {string} to node {string} is \
+            reached"
+)]
+async fn then_health_response_pause_is_reached_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+    probing_node_id: String,
+    responding_node_id: String,
+) {
+    let limit = humantime::parse_duration(&duration).assured("the scenario duration is valid");
+    let probing_node_id = expand_placeholders(world, &probing_node_id);
+    let responding_node_id = expand_placeholders(world, &responding_node_id);
+    tokio::time::timeout(
+        limit,
+        world
+            .cluster()
+            .wait_for_health_response_pause(&probing_node_id, &responding_node_id),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "health response pause from '{probing_node_id}' to '{responding_node_id}' was not \
+             reached within {limit:?}: {error}"
+        )
+    });
+}
+
+#[when(expr = "the health response pause from node {string} to node {string} is released")]
+async fn when_health_response_pause_is_released(
+    world: &mut ScenarioWorld,
+    probing_node_id: String,
+    responding_node_id: String,
+) {
+    let probing_node_id = expand_placeholders(world, &probing_node_id);
+    let responding_node_id = expand_placeholders(world, &responding_node_id);
+    world
+        .cluster()
+        .release_health_response_pause(&probing_node_id, &responding_node_id);
 }
 
 #[when(expr = "node {string} begins stopping")]

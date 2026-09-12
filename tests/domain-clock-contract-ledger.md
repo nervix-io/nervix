@@ -98,7 +98,7 @@ belongs to [14](https://app.clickup.com/t/86bbwct0e).
 | Need | Fixture |
 | --- | --- |
 | Historical paced time | The historical-origin public scenario starts at `2000-01-01T00:00:00Z`. |
-| Slow paced time | `Paced branch expiration follows domain logical time` uses rate `0.01`; task 10 extends that graph for fresh activity and retention. |
+| Slow paced time | `Paced branch expiration follows domain logical time` uses rate `0.01`. Task 10's fresh-activity scenario pairs rates `2.0` and `0.5` with logical TTLs `6s` and `1500ms` so both rates reach the same physical retention. |
 | Fast paced time | `Prometheus ingestor follows paced domain logical time and cadence` and `Domain commands isolate session context and drive a replicated clock` use rate `4.0`. |
 | Time-dependent expressions | The delayed-progress scenario emits `now()` into a schema-backed `DATETIME` field before and after controlled progress delivery. |
 | Delayed progress | `domain clock progress for domain ... is paused before delivery`, its bounded reached assertion, and `... resumes` form a test-only barrier around the next delivery. Teardown releases an armed barrier. |
@@ -146,6 +146,7 @@ just test-scenarios --input tests/features/runtime/mongodb_emission.feature --ta
 just test-scenarios --input tests/features/runtime/iceberg_emission.feature --tags @domain_execution_time
 just test-scenarios --input tests/features/runtime/sentry_emission.feature --tags @domain_execution_time
 just test-scenarios --input tests/features/runtime/otel_emission.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/branch_activity_sampling.feature
 ```
 
 The delayed-progress scenario is part of the ordinary suite after task 02. Task 05 enables the
@@ -155,7 +156,8 @@ duration-window coverage. The untagged
 task 02's F10 public coverage. Task 06 adds `domain_execution_time.feature` and focused tagged
 coverage in the listed runtime feature files for F6 and F7. Task 07 adds
 `domain_buffer_timing.feature` for F5's branch-local collection and flush clock classes. Task 09
-adds the `domain_cadence` cases for recurring HTTP, Prometheus, and generator work.
+adds the `domain_cadence` cases for recurring HTTP, Prometheus, and generator work. Task 10 adds
+`branch_activity_sampling.feature` for F9's accepted-input activity and logical retention.
 
 Physical controls are
 `tests::connection_lifetime::send_queue_admission_is_deadline_bound`,
@@ -310,5 +312,30 @@ Recorded on 10 September 2026 against the task 09 worktree:
 | `just book 0.1.0-dev` | Pass; documentation tests, console screenshots, and the HTML, LLM, and Markdown renderers completed successfully. |
 | `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count remained at or below its checked-in baseline. |
+
+No complete Cucumber-suite or final qualification result is claimed by this record.
+
+## Task 10 validation record
+
+Recorded on 11 September 2026 against the task 10 worktree:
+
+| Probe | Result |
+| --- | --- |
+| Public fresh-activity reproducer before product changes | Expected red in all four one- and three-node, slow- and fast-rate examples; a record accepted after a long wait was recorded at the instant the supervisor began waiting, so both interleaved branches were expired at the following maintenance scan and no correlated output was produced. |
+| Reproducer control with short waits | Pass before product changes; the same graph correlated both branches when no long wait preceded the record, isolating the failure to the pre-wait sample. |
+| `Activity sampled after an awaited record keeps each logical branch alive` | Pass; all four one- and three-node examples at time rates 2.0 and 0.5 and all 68 steps kept two interleaved branches alive for their complete logical TTL and preserved each branch's left and right sequence fields. |
+| Fresh-activity unit coverage | Pass; accepted processor input replaces a stale restored activity timestamp with the domain time of its own acceptance. |
+| Branch retention regressions | Pass; branched expiration, correlator, deduplicator, reorderer, branch lifecycle metrics, and materialized relay scenarios covered TTL expiry, LRU eviction, and branch re-creation across 56 scenarios. |
+| Branch-local timing regressions | Pass; domain buffer timing, window processor, WASM processor, reingestor, reingestor flush, and generator scenarios covered logical collection, flush, window, guest timeout, and cadence deadlines across 121 scenarios. |
+| Clock-contract and metric regressions | Pass; domain clock contract, execution time, ingestion time, domain, junction, and reingestor metric scenarios covered 45 scenarios and 510 steps. |
+| Ownership handoff and scheduling regressions | Pass; relocation and cluster scheduling covered 40 scenarios and 640 steps with the production sticky scheduler where those scenarios select it. |
+| `nervix-server` library suite | Pass; 833 tests passed with no ignored tests, and 838 after merging the current `origin/main`. |
+| `just validate` | Pass before and after merging `origin/main`, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just ratchet` | Pass before and after merging `origin/main`; every architecture-debt count is at or below its checked-in baseline. |
+| Post-merge re-verification | Pass; against the merged `origin/main` the fresh-activity scenario, branched expiration, correlator, domain buffer timing, materialized relay, and window processor features covered 77 scenarios and 965 steps, including the columnar snapshot streaming and shared cadence work that landed on main. |
+
+Emitter delivery-latency observation still reads actual UTC against domain ingestion watermarks.
+That boundary belongs to [08](https://app.clickup.com/t/86bbwcrzd), which owns the emitter's clock
+classes and its clock-binding lifecycle.
 
 No complete Cucumber-suite or final qualification result is claimed by this record.

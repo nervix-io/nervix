@@ -254,32 +254,15 @@ impl RelayProcessorNode {
         branch: &'a mut BranchRuntime,
         incoming_relay: &'a RelayName,
         batch: RelayRecordBatch,
+        snapshot: &'a DomainExecutionSnapshot,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             let domain_clock = branch.domain_clock.clone();
-            let snapshot = match domain_clock.snapshot() {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    branch.runtime.handle_internal_processor_error_for_acks(
-                        &branch.domain,
-                        self.kind,
-                        &self.processor,
-                        &self.error_policies,
-                        batch.acks.iter(),
-                        format!(
-                            "{} '{}' could not read domain execution time: {error}",
-                            self.kind.as_str(),
-                            self.processor.as_str(),
-                        ),
-                    );
-                    return;
-                }
-            };
             let Some(collector) = self.input_collectors.get_mut(incoming_relay) else {
                 self.execute(graph, branch, incoming_relay, batch).await;
                 return;
             };
-            if !collector.push(batch, &domain_clock, &snapshot) {
+            if !collector.push(batch, &domain_clock, snapshot) {
                 return;
             }
             let batches = collector.take_pending();
@@ -294,40 +277,13 @@ impl RelayProcessorNode {
         &'a mut self,
         graph: &'a SharedActiveGraph,
         branch: &'a mut BranchRuntime,
-        _now: Timestamp,
+        snapshot: &'a DomainExecutionSnapshot,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             let domain_clock = branch.domain_clock.clone();
-            let snapshot = match domain_clock.snapshot() {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    for (relay, collector) in &mut self.input_collectors {
-                        let acks = collector.merged_acks();
-                        if acks.is_empty() {
-                            continue;
-                        }
-                        branch.runtime.handle_internal_processor_error_for_acks(
-                            &branch.domain,
-                            self.kind,
-                            &self.processor,
-                            &self.error_policies,
-                            [&acks],
-                            format!(
-                                "{} '{}' could not read the domain clock while releasing \
-                                 collected input from relay '{}': {error}",
-                                self.kind.as_str(),
-                                self.processor.as_str(),
-                                relay.as_str(),
-                            ),
-                        );
-                        collector.take_pending();
-                    }
-                    return;
-                }
-            };
             let mut due_relays = Vec::new();
             for (relay, collector) in &self.input_collectors {
-                match collector.is_due(&domain_clock, &snapshot) {
+                match collector.is_due(&domain_clock, snapshot) {
                     Ok(true) => due_relays.push(relay.clone()),
                     Ok(false) => {}
                     Err(error) => {
@@ -1908,10 +1864,12 @@ impl RelayProcessorNode {
         &'a mut self,
         graph: &'a SharedActiveGraph,
         branch: &'a mut BranchRuntime,
-        now: Timestamp,
+        snapshot: &'a DomainExecutionSnapshot,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            self.flush_due_collected_inputs(graph, branch, now).await;
+            let now = snapshot.now();
+            self.flush_due_collected_inputs(graph, branch, snapshot)
+                .await;
             flush_due_processor_outputs(
                 ProcessorOutputDispatchContext {
                     graph,
@@ -1932,19 +1890,6 @@ impl RelayProcessorNode {
             )
             .await;
             let domain_clock = branch.domain_clock.clone();
-            let flush_snapshot = match domain_clock.snapshot() {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    branch.runtime.events().report_error(format!(
-                        "{} '{}' in domain '{}' could not read the clock while releasing buffered \
-                         output: {error}",
-                        self.kind.as_str(),
-                        self.processor.as_str(),
-                        branch.domain.as_str(),
-                    ));
-                    return;
-                }
-            };
             match &mut self.operation {
                 RelayProcessorOperationNode::Deduplicator { .. } => {}
                 RelayProcessorOperationNode::WindowProcessor {
@@ -2021,7 +1966,7 @@ impl RelayProcessorNode {
                                     checked_add_duration_to_timestamp(received_at, *max_time) <= now
                                 });
                         let flush_due = match output_routes.routes[output_index]
-                            .flush_deadline_due(&domain_clock, &flush_snapshot)
+                            .flush_deadline_due(&domain_clock, snapshot)
                         {
                             Ok(due) => due,
                             Err(error) => {
@@ -2133,7 +2078,7 @@ impl RelayProcessorNode {
                             continue;
                         }
                         match output_routes.routes[output_index]
-                            .flush_deadline_due(&domain_clock, &flush_snapshot)
+                            .flush_deadline_due(&domain_clock, snapshot)
                         {
                             Ok(true) => due_outputs.push(output_index),
                             Ok(false) => {}

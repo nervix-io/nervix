@@ -640,13 +640,3 @@ impl InterconnectRequest for TransferLeadership {
     const CLASS: PoolClass = PoolClass::Management;
     const TIMEOUT: Duration = Duration::from_secs(5);
 }
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct HealthCheck;
-
-impl InterconnectRequest for HealthCheck {
-    type Response = ();
-    const NAME: &'static str = "raft_health";
-    const CLASS: PoolClass = PoolClass::Management;
-    const TIMEOUT: Duration = Duration::from_secs(1);
-}

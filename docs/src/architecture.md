@@ -70,16 +70,32 @@ advertised endpoint, and HTTP/2 ALPN all agree.
 
 Each peer has independent HTTP/2 pools for membership and management events, commands, Raft
 replication, Arrow relay batches, and bulk transfers. Relay progress, cancellation, status, and
-terminal admission acknowledgements use reserved management capacity. Every pool except
-bulk is connected before a peer is reported ready, with capacity reserved in both directions. This
-keeps gossip, heartbeats, elections, administrative operations, and the first remote batch and its
-acknowledgement from waiting behind another traffic class. Consensus log replication uses one ordered
-bidirectional stream per follower on the replication pool, so a leader can keep several batches in
-flight without either side reordering them. Gossip exchanges, Raft records,
+terminal admission acknowledgements use reserved management capacity. Application health probes
+also use management traffic through the reserved per-node liveness capacity. Every pool except bulk
+is connected before a peer is reported ready, with capacity reserved in both directions. This keeps
+gossip, heartbeats, elections, administrative operations, health checks, and the first remote batch
+and its acknowledgement from waiting behind another traffic class. Consensus log replication uses
+one ordered bidirectional stream per follower on the replication pool, so a leader can keep several
+batches in flight without either side reordering them. Gossip exchanges, Raft records,
 resource chunks, and other non-Arrow messages use bounded, validated rkyv records. Relay payloads
 remain Arrow IPC end to end. Resource archives, runtime state snapshots, and Raft snapshots cross
 the bulk pool as bounded chunks rather than one whole in-memory wire message, so a transfer larger
 than a node's transfer-memory budget moves without either side holding it whole.
+
+Application health is observed independently of transport-pool readiness. Each node keeps at most
+one health probe in flight per peer and at most 32 probes in flight across all peers. A probe has a
+one-second total deadline. A silent or slow peer therefore occupies only its own slot while results
+from other peers are published as soon as they arrive; neither transport `PING` nor an established
+pool substitutes for an application response.
+
+Every published observation is bound to the exact target identity and incarnation, its endpoint
+generation, and the observation time. A response is healthy only when its application identity
+agrees with the peer authenticated by the transport and with the targeted incarnation. An endpoint
+or incarnation change supersedes earlier in-flight work, whose eventual result is ignored. For
+availability decisions, a missing, stale, or unscheduled observation is unknown. Probe-capacity
+exhaustion is retained as a distinct outcome. None of those outcomes marks a peer unavailable or
+extends a previous failure run; only current, continuous probe failures may reach the configured
+node-unavailability policy.
 
 Connection setup, request progress, and whole-request deadlines are bounded. Failed pool slots
 reconnect with exponential backoff. When membership removes a peer or changes its advertised

@@ -1682,6 +1682,39 @@ impl Cluster {
         observe_zeromq(addr).await
     }
 
+    pub(crate) fn arm_health_response_pause(
+        &self,
+        probing_node_id: &str,
+        responding_node_id: &str,
+    ) {
+        self.fault_injection
+            .arm_health_response_pause(node_name(probing_node_id), node_name(responding_node_id));
+    }
+
+    pub(crate) async fn wait_for_health_response_pause(
+        &self,
+        probing_node_id: &str,
+        responding_node_id: &str,
+    ) {
+        self.fault_injection
+            .wait_for_health_response_pause(
+                &node_name(probing_node_id),
+                &node_name(responding_node_id),
+            )
+            .await;
+    }
+
+    pub(crate) fn release_health_response_pause(
+        &self,
+        probing_node_id: &str,
+        responding_node_id: &str,
+    ) {
+        self.fault_injection.release_health_response_pause(
+            &node_name(probing_node_id),
+            &node_name(responding_node_id),
+        );
+    }
+
     pub(crate) fn fail_emitter_on_all_nodes(&self, emitter: &str) {
         self.fault_injection.fail_emitter(emitter);
     }

@@ -547,15 +547,13 @@ async fn a_snapshot_is_sealed_as_bounded_sections() -> TestResult {
             "no section exceeds the configured section limit"
         );
     }
-    let records: usize = sections
-        .iter()
-        .map(|bytes| {
-            let section: SnapshotSection = crate::storage_decode(bytes)?;
-            Ok::<usize, io::Error>(section.records.len())
-        })
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .sum();
+    let mut records = 0_usize;
+    for bytes in &sections {
+        let section: SnapshotSection = crate::storage_decode(bytes)?;
+        records = records
+            .checked_add(section.records.len())
+            .ok_or("the sealed sections hold more records than a usize counts")?;
+    }
     assert!(
         records >= 8,
         "every stored record belongs to one section, got {records}"

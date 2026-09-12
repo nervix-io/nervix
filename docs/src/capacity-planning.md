@@ -81,7 +81,9 @@ not pay for a window's state, and a window width does not bound a correlator.
 ## Sizing Knobs
 
 - Branch `TTL` trades branch reuse against how long idle branch-local tasks, buffers, and state
-  remain live. Shorter TTL releases idle branches sooner.
+  remain live. Shorter TTL releases idle branches sooner. Idle time is measured from a branch's
+  last accepted input, and a physical maintenance scan releases expired branches, so peak branch
+  population reflects the TTL plus that scan latency. See [TTL](relay.md#ttl).
 - `MAX INSTANCES <n> EVICT LRU` trades branch coverage against a hard branch-population ceiling.
   Eviction drops the least recently used branch and its suspended or buffered branch-local work.
 - Relay `CAPACITY` trades burst absorption against Arrow batches in the single owner buffer.

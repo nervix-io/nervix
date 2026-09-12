@@ -249,14 +249,17 @@ impl SnapshotGenerations {
         }
         // At most one prior generation may stay pinned. An older transfer past that quota is
         // cancelled rather than allowed to hold a third generation in storage.
-        let prior: Vec<u64> = state
-            .pinned
-            .keys()
-            .copied()
-            .filter(|generation| *generation != active)
-            .collect();
-        for generation in prior.iter().rev().skip(1) {
-            state.obsolete.insert(*generation);
+        let mut prior = Vec::new();
+        for pinned in state.pinned.keys() {
+            if *pinned == active {
+                continue;
+            }
+            prior.push(*pinned);
+        }
+        // `pinned` is ordered, so the last entry is the newest prior generation and keeps its pin.
+        prior.pop();
+        for generation in prior {
+            state.obsolete.insert(generation);
         }
     }
 
@@ -302,9 +305,13 @@ impl SnapshotGenerations {
     pub(crate) fn observe_stored(&self, stored: impl Iterator<Item = u64>) {
         let mut state = self.state.lock();
         let active = state.active.as_ref().map(|manifest| manifest.generation);
-        let orphans: Vec<u64> = stored
-            .filter(|generation| Some(*generation) != active)
-            .collect();
+        let mut orphans = Vec::new();
+        for generation in stored {
+            if Some(generation) == active {
+                continue;
+            }
+            orphans.push(generation);
+        }
         for generation in orphans {
             if state.next_generation <= generation {
                 state.next_generation = generation
