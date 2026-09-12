@@ -46,6 +46,16 @@ Paced time is also important for expiration:
 - branch TTL uses domain logical time in paced domains, including the relay owner's cluster-wide
   branch-presence decision
 - materialized-state cleanup follows the same logical-time rule
+- deduplication expiry, reorder and correlation retention, window completion, and guest-requested
+  WASM timeouts are logical deadlines on the same clock
+- branch activity is the domain time at which a branch's last input was accepted, so an idle relay
+  owner or processor never spends part of a branch's TTL waiting for that input
+
+The maintenance scan that releases expired branches and the snapshot wakeups that persist
+branch-local state run on the physical clock, and so does the WASM executor's own safety timeout.
+Their predicates still compare logical deadlines, so a scan never expires a branch early: its
+interval is release latency measured after the logical boundary, reported separately from the TTL
+itself. See [TTL](relay.md#ttl).
 
 Deterministic Roto UDFs preserve reproducibility when paced input is replayed at an accelerated
 time rate. See the [deterministic-by-default and `VOLATILE` contract](udfs.md#nulls-errors-and-volatility),

@@ -27,9 +27,12 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use triomphe::Arc;
 
+#[cfg(test)]
+use crate::apply_consensus_command;
 use crate::{
-    AppliedConsensusCommand, LogIdOf, SnapshotOf, StateMachineChanges, StateMachineData,
-    StoredMembershipOf, StoredSnapshotData, TypeConfig, VoteOf, apply_consensus_command,
+    AppliedConsensusCommand, AppliedEntryContext, LogIdOf, SnapshotOf, StateMachineChanges,
+    StateMachineData, StoredMembershipOf, StoredSnapshotData, TypeConfig, VoteOf,
+    apply_consensus_command_at,
     durable_batch::{DurableBatch, StorageFailure},
     read_key,
     records::{Records, ResourceRecords, ScheduleRecords},
@@ -271,7 +274,17 @@ impl StoreInner {
         }
         let (operation, applied) = match &entry.payload {
             EntryPayload::Normal(command) => {
-                let applied = apply_consensus_command(&mut state, command);
+                let applied = apply_consensus_command_at(
+                    &mut state,
+                    command,
+                    AppliedEntryContext {
+                        leader_term: entry.log_id.leader_id.term,
+                        input_revision: preceding
+                            .last_applied_log_id
+                            .as_ref()
+                            .map(|log_id| log_id.index),
+                    },
+                );
                 state.record_runtime_revision(entry.log_id.index, &applied);
                 (command.to_string(), applied)
             }

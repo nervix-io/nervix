@@ -129,7 +129,7 @@ pub(super) struct BranchExecutionDispatchContext<'a> {
     pub(super) ingestor: &'a IngestorName,
     pub(super) graph: &'a SharedActiveGraph,
     pub(super) template: &'a BranchInstanceTemplate,
-    pub(super) now: Timestamp,
+    pub(super) domain_clock: &'a DomainClock,
 }
 
 struct BranchDispatchCompletion {
@@ -141,7 +141,6 @@ struct BranchDispatchCompletion {
 type PendingBranchDispatch = BoxFuture<'static, BranchDispatchCompletion>;
 
 struct QueuedBranchDispatch {
-    received_at: Timestamp,
     batch: BranchedEntrypointInput,
 }
 
@@ -157,11 +156,11 @@ impl BranchDispatchLanes {
         self.pending.is_empty()
     }
 
-    fn queue(&mut self, key: Option<BranchKey>, received_at: Timestamp, batch: RelayRecordBatch) {
+    fn queue(&mut self, key: Option<BranchKey>, batch: RelayRecordBatch) {
         self.queued
             .entry(key)
             .or_default()
-            .push_back(QueuedBranchDispatch { received_at, batch });
+            .push_back(QueuedBranchDispatch { batch });
     }
 
     fn take_next(&mut self, key: &Option<BranchKey>) -> Option<QueuedBranchDispatch> {
@@ -518,7 +517,29 @@ impl BranchRuntime {
             }
             return;
         };
-        let delivery_observation = batch.delivery_observation(current_timestamp());
+        // One accepted unit of domain work reads its clock once. Delivery latency compares the
+        // batch's domain ingestion watermarks against this same instant, so it stays inside the
+        // domain's logical coordinate instead of mixing in wall time.
+        let snapshot = match self.domain_clock.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.runtime.handle_internal_processor_error_for_acks(
+                    &self.domain,
+                    processor.kind,
+                    &processor.processor,
+                    &processor.error_policies,
+                    batch.acks.iter(),
+                    format!(
+                        "{} '{}' could not read domain execution time: {error}",
+                        processor.kind.as_str(),
+                        processor.processor.as_str(),
+                    ),
+                );
+                self.processors.insert(processor_id.clone(), processor);
+                return;
+            }
+        };
+        let delivery_observation = batch.delivery_observation(snapshot.now());
         let physical_node_id = self
             .runtime
             .inner
@@ -584,7 +605,7 @@ impl BranchRuntime {
             );
         }
         processor
-            .accept_input(graph, self, incoming_relay, batch)
+            .accept_input(graph, self, incoming_relay, batch, &snapshot)
             .await;
         self.processors.insert(processor_id.clone(), processor);
     }
@@ -652,18 +673,27 @@ impl BranchRuntime {
         self.dispatch_stream(graph, &output.relay, batch).await
     }
 
-    pub(super) async fn tick(&mut self, graph: &SharedActiveGraph, now: Timestamp) {
+    pub(super) async fn tick(
+        &mut self,
+        graph: &SharedActiveGraph,
+        snapshot: &DomainExecutionSnapshot,
+    ) {
         let processor_ids = self.processors.keys().cloned().collect::<Vec<_>>();
         for processor_id in processor_ids {
             let Some(mut processor) = self.processors.remove(&processor_id) else {
                 continue;
             };
-            processor.tick(graph, self, now).await;
+            processor.tick(graph, self, snapshot).await;
             self.processors.insert(processor_id, processor);
         }
     }
 
-    pub(super) async fn force_flush(&mut self, graph: &SharedActiveGraph, now: Timestamp) {
+    pub(super) async fn force_flush(
+        &mut self,
+        graph: &SharedActiveGraph,
+        snapshot: &DomainExecutionSnapshot,
+    ) {
+        let now = snapshot.now();
         let processor_ids = self.processors.keys().cloned().collect::<Vec<_>>();
         for processor_id in processor_ids {
             tokio::task::consume_budget().await;
@@ -679,7 +709,7 @@ impl BranchRuntime {
                 current.as_ref().map(StdArc::clone),
             );
             processor.flush_route_buffers(graph, self, now).await;
-            processor.tick(graph, self, now).await;
+            processor.tick(graph, self, snapshot).await;
             self.processors.insert(processor_id, processor);
         }
     }
@@ -1137,44 +1167,58 @@ impl BranchExecutionRuntime {
             ingestor,
             graph,
             template,
-            now,
+            domain_clock,
         } = context;
         if inputs.is_empty() {
             return;
         }
 
+        // Branch activity is the domain time at which these inputs were accepted. The supervisor
+        // reads it here, after the wait that delivered them, so an idle supervisor never records
+        // the activity of a live branch at the instant it started waiting.
+        let accepted_at = match domain_clock.snapshot() {
+            Ok(snapshot) => snapshot.now(),
+            Err(error) => {
+                let reason = format!(
+                    "branch runtime for '{}' in domain '{}' could not read the domain time of \
+                     accepted input: {error}",
+                    ingestor.as_str(),
+                    domain.as_str(),
+                );
+                for message in inputs {
+                    Self::report_dispatch_error(
+                        runtime_handle,
+                        domain,
+                        ingestor,
+                        template,
+                        message.acks.iter(),
+                        reason.clone(),
+                    );
+                }
+                return;
+            }
+        };
+
         for message in inputs {
             tokio::task::consume_budget().await;
             let key = message.key.clone();
-            let instance = match instances.get_or_try_create_with(key.clone(), now, |key| {
+            let instance = match instances.get_or_try_create_with(key.clone(), accepted_at, |key| {
                 template.instantiate(runtime_handle, domain, key.clone())
             }) {
                 Ok(instance) => instance,
                 Err(error) => {
-                    let reason = format!(
-                        "failed to instantiate branch '{}': {}",
-                        branch_key_display(&key),
-                        error
+                    Self::report_dispatch_error(
+                        runtime_handle,
+                        domain,
+                        ingestor,
+                        template,
+                        message.acks.iter(),
+                        format!(
+                            "failed to instantiate branch '{}': {}",
+                            branch_key_display(&key),
+                            error
+                        ),
                     );
-                    if template.source_kind == ModelKind::Ingestor {
-                        runtime_handle.handle_general_error_for_acks(
-                            domain,
-                            template.source_kind,
-                            ingestor,
-                            &template.error_policies,
-                            message.acks.iter(),
-                            reason,
-                        );
-                    } else {
-                        runtime_handle.handle_internal_processor_error_for_acks(
-                            domain,
-                            template.source_kind,
-                            ingestor,
-                            &template.error_policies,
-                            message.acks.iter(),
-                            reason,
-                        );
-                    }
                     continue;
                 }
             };
@@ -1209,7 +1253,7 @@ impl BranchExecutionRuntime {
                 }
             }
             if !lanes.active.insert(key.clone()) {
-                lanes.queue(key, now, message);
+                lanes.queue(key, message);
                 continue;
             }
             let state = instance.state.clone();
@@ -1251,7 +1295,7 @@ impl BranchExecutionRuntime {
             ingestor,
             graph,
             template,
-            ..
+            domain_clock,
         } = context;
         let key = completion.key.clone();
         Self::handle_dispatch_completion(
@@ -1274,13 +1318,46 @@ impl BranchExecutionRuntime {
                 ingestor,
                 graph,
                 template,
-                now: next.received_at,
+                domain_clock,
             },
             instances,
             vec![next.batch],
             lanes,
         )
         .await;
+    }
+
+    /// Routes one dispatch failure through the entrypoint's own error policy.
+    ///
+    /// Ingestors own a general error policy for their own intake, while every other branch
+    /// entrypoint reports through the internal processor policy.
+    fn report_dispatch_error<'a>(
+        runtime_handle: &Runtime,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        template: &BranchInstanceTemplate,
+        acks: impl IntoIterator<Item = &'a AckSet>,
+        reason: String,
+    ) {
+        if template.source_kind == ModelKind::Ingestor {
+            runtime_handle.handle_general_error_for_acks(
+                domain,
+                template.source_kind,
+                ingestor,
+                &template.error_policies,
+                acks,
+                reason,
+            );
+        } else {
+            runtime_handle.handle_internal_processor_error_for_acks(
+                domain,
+                template.source_kind,
+                ingestor,
+                &template.error_policies,
+                acks,
+                reason,
+            );
+        }
     }
 
     fn handle_dispatch_completion(
@@ -1324,7 +1401,7 @@ impl BranchExecutionRuntime {
             ingestor,
             graph,
             template,
-            now,
+            domain_clock,
         } = context;
         let mut lanes = BranchDispatchLanes::default();
         Self::enqueue_prepared_inputs(
@@ -1334,7 +1411,7 @@ impl BranchExecutionRuntime {
                 ingestor,
                 graph,
                 template,
-                now,
+                domain_clock,
             },
             instances,
             inputs,
@@ -1351,7 +1428,7 @@ impl BranchExecutionRuntime {
                     ingestor,
                     graph,
                     template,
-                    now,
+                    domain_clock,
                 },
                 instances,
                 &mut lanes,
@@ -1432,8 +1509,8 @@ impl BranchExecutionRuntime {
             }
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
             let mut next_lru_snapshot = Instant::now() + runtime_handle.state_snapshot_interval();
-            let now = match domain_clock.snapshot() {
-                Ok(snapshot) => snapshot.now(),
+            let restored_snapshot = match domain_clock.snapshot() {
+                Ok(snapshot) => snapshot,
                 Err(error) => {
                     runtime_handle.events().report_error(format!(
                         "branch runtime for ingestor '{}' in domain '{}' lost its clock: {error}",
@@ -1444,7 +1521,7 @@ impl BranchExecutionRuntime {
                 }
             };
             let mut next_branch_deadline =
-                tick_due_branch_instance_branches(&graph, now, &instances).await;
+                tick_due_branch_instance_branches(&graph, &restored_snapshot, &instances).await;
             let ownership_entity = DomainNodeRef::node_in(
                 domain.clone(),
                 template.source_kind,
@@ -1457,8 +1534,8 @@ impl BranchExecutionRuntime {
                 tokio::task::consume_budget().await;
                 let ownership_frozen =
                     runtime_handle.ownership_handoff_entity_is_frozen(&ownership_entity);
-                let now = match domain_clock.snapshot() {
-                    Ok(snapshot) => snapshot.now(),
+                let snapshot = match domain_clock.snapshot() {
+                    Ok(snapshot) => snapshot,
                     Err(error) => {
                         runtime_handle.events().report_error(format!(
                             "branch runtime for ingestor '{}' in domain '{}' lost its clock: \
@@ -1469,6 +1546,7 @@ impl BranchExecutionRuntime {
                         break;
                     }
                 };
+                let now = snapshot.now();
                 let mut did_scheduled_work = false;
                 if !ownership_frozen && Instant::now() >= next_expiration_scan {
                     if let Some(branch_ttl) = template.branch_ttl {
@@ -1515,50 +1593,31 @@ impl BranchExecutionRuntime {
                     && next_branch_deadline.is_some_and(|deadline| deadline <= now)
                 {
                     next_branch_deadline =
-                        tick_due_branch_instance_branches(&graph, now, &instances).await;
+                        tick_due_branch_instance_branches(&graph, &snapshot, &instances).await;
                     did_scheduled_work = true;
                 }
                 if did_scheduled_work {
                     continue;
                 }
 
-                let sleep_duration = if ownership_frozen {
+                // Maintenance wakeups are physical, so their interval is a plain monotonic sleep.
+                // The branch's own deadline is logical and is awaited on the domain clock below.
+                let maintenance_sleep = if ownership_frozen {
                     OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL
                 } else {
-                    let expiration_sleep = next_expiration_scan
+                    next_expiration_scan
                         .checked_duration_since(Instant::now())
-                        .unwrap_or(Duration::ZERO);
-                    let branch_sleep = match next_branch_deadline {
-                        Some(deadline) => {
-                            match wall_duration_until_domain_deadline(
-                                &runtime_handle,
-                                &domain,
-                                now,
-                                deadline,
-                            ) {
-                                Ok(duration) => Some(duration),
-                                Err(error) => {
-                                    runtime_handle.events().report_error(format!(
-                                        "branch runtime for ingestor '{}' in domain '{}' lost its \
-                                         clock: {error}",
-                                        ingestor.as_str(),
-                                        domain.as_str(),
-                                    ));
-                                    break;
-                                }
-                            }
-                        }
-                        None => None,
-                    };
-                    let until_next_deadline = match branch_sleep {
-                        Some(branch_sleep) => expiration_sleep.min(branch_sleep),
-                        None => expiration_sleep,
-                    };
-                    until_next_deadline.min(
-                        next_lru_snapshot
-                            .checked_duration_since(Instant::now())
-                            .unwrap_or(Duration::ZERO),
-                    )
+                        .unwrap_or(Duration::ZERO)
+                        .min(
+                            next_lru_snapshot
+                                .checked_duration_since(Instant::now())
+                                .unwrap_or(Duration::ZERO),
+                        )
+                };
+                let awaited_branch_deadline = if ownership_frozen {
+                    None
+                } else {
+                    next_branch_deadline.map(|deadline| domain_clock.deadline_at(deadline))
                 };
                 tokio::select! {
                     biased;
@@ -1605,7 +1664,7 @@ impl BranchExecutionRuntime {
                                 ingestor: &ingestor,
                                 graph: &graph,
                                 template: &template,
-                                now,
+                                domain_clock: &domain_clock,
                             },
                             &mut instances,
                             &mut lanes,
@@ -1625,7 +1684,7 @@ impl BranchExecutionRuntime {
                                         ingestor: &ingestor,
                                         graph: &graph,
                                         template: &template,
-                                        now,
+                                        domain_clock: &domain_clock,
                                     },
                                     &mut instances,
                                     &mut lanes,
@@ -1643,7 +1702,7 @@ impl BranchExecutionRuntime {
                                 ingestor: &ingestor,
                                 graph: &graph,
                                 template: &template,
-                                now,
+                                domain_clock: &domain_clock,
                             },
                             &mut instances,
                             vec![message],
@@ -1656,39 +1715,6 @@ impl BranchExecutionRuntime {
                             input.close();
                             while let Some(message) = input.recv().await {
                                 tokio::task::consume_budget().await;
-                                let drain_now = match runtime_handle
-                                    .current_stream_expiration_time(&domain)
-                                {
-                                    Ok(now) => now,
-                                    Err(error) => {
-                                        let reason = format!(
-                                            "branch runtime for ingestor '{}' in domain '{}' lost \
-                                             its clock while draining: {error}",
-                                            ingestor.as_str(),
-                                            domain.as_str(),
-                                        );
-                                        if template.source_kind == ModelKind::Ingestor {
-                                            runtime_handle.handle_general_error_for_acks(
-                                                &domain,
-                                                template.source_kind,
-                                                &ingestor,
-                                                &template.error_policies,
-                                                message.acks.iter(),
-                                                reason,
-                                            );
-                                        } else {
-                                            runtime_handle.handle_internal_processor_error_for_acks(
-                                                &domain,
-                                                template.source_kind,
-                                                &ingestor,
-                                                &template.error_policies,
-                                                message.acks.iter(),
-                                                reason,
-                                            );
-                                        }
-                                        continue;
-                                    }
-                                };
                                 Self::enqueue_prepared_inputs(
                                     BranchExecutionDispatchContext {
                                         runtime_handle: &runtime_handle,
@@ -1696,7 +1722,7 @@ impl BranchExecutionRuntime {
                                         ingestor: &ingestor,
                                         graph: &graph,
                                         template: &template,
-                                        now: drain_now,
+                                        domain_clock: &domain_clock,
                                     },
                                     &mut instances,
                                     vec![message],
@@ -1713,7 +1739,7 @@ impl BranchExecutionRuntime {
                                         ingestor: &ingestor,
                                         graph: &graph,
                                         template: &template,
-                                        now,
+                                        domain_clock: &domain_clock,
                                     },
                                     &mut instances,
                                     &mut lanes,
@@ -1726,7 +1752,21 @@ impl BranchExecutionRuntime {
                         }
                     }
                     _ = runtime_handle.inner.ownership_handoff_freeze_changed.notified(), if ownership_frozen => {}
-                    _ = sleep(sleep_duration) => {}
+                    result = wait_for_branch_deadline(
+                        &domain_clock,
+                        awaited_branch_deadline.clone(),
+                    ), if awaited_branch_deadline.is_some() => {
+                        if let Err(error) = result {
+                            runtime_handle.events().report_error(format!(
+                                "branch runtime for ingestor '{}' in domain '{}' could not wait \
+                                 for a branch deadline: {error}",
+                                ingestor.as_str(),
+                                domain.as_str(),
+                            ));
+                            break;
+                        }
+                    }
+                    _ = sleep(maintenance_sleep) => {}
                 }
             }
 
@@ -1974,7 +2014,7 @@ pub(super) fn persist_branch_instance_lru_snapshot<V>(
 
 pub(super) async fn tick_due_branch_instance_branches(
     graph: &SharedActiveGraph,
-    now: Timestamp,
+    snapshot: &DomainExecutionSnapshot,
     instances: &BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) -> Option<Timestamp> {
     let mut next = None;
@@ -1982,9 +2022,9 @@ pub(super) async fn tick_due_branch_instance_branches(
         let mut branch = instance.lock().await;
         if branch
             .next_deadline()
-            .is_some_and(|deadline| deadline <= now)
+            .is_some_and(|deadline| deadline <= snapshot.now())
         {
-            branch.tick(graph, now).await;
+            branch.tick(graph, snapshot).await;
         }
         record_next_branch_instance_branch_deadline(&mut next, branch.next_deadline());
     }
@@ -2001,17 +2041,6 @@ pub(super) fn record_next_branch_instance_branch_deadline(
             None => candidate,
         });
     }
-}
-
-pub(super) fn wall_duration_until_domain_deadline(
-    runtime: &Runtime,
-    domain: &DomainName,
-    now: Timestamp,
-    deadline: Timestamp,
-) -> DomainClockAccessResult<Duration> {
-    runtime
-        .bind_domain_clock(domain)?
-        .physical_duration_until(now, deadline)
 }
 
 pub(super) async fn flush_branch_junction(

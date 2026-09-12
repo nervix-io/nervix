@@ -511,21 +511,18 @@ fn execute_program_with_selection_in_context_sync(
     for output in &program.outputs {
         columns.push(registers.output_array(output.reg)?);
     }
-    let mut invocations = program
-        .invocations
-        .iter()
-        .map(|invocation| {
-            Ok(FunctionInvocation {
-                function: invocation.function.clone(),
-                arguments: invocation
-                    .inputs
-                    .iter()
-                    .map(|input| registers.output_array(*input))
-                    .collect::<Result<Vec<_>, RuntimeError>>()?,
-                span: invocation.span,
-            })
-        })
-        .collect::<Result<Vec<_>, RuntimeError>>()?;
+    let mut invocations = Vec::with_capacity(program.invocations.len());
+    for invocation in &program.invocations {
+        let mut arguments = Vec::with_capacity(invocation.inputs.len());
+        for input in &invocation.inputs {
+            arguments.push(registers.output_array(*input)?);
+        }
+        invocations.push(FunctionInvocation {
+            function: invocation.function.clone(),
+            arguments,
+            span: invocation.span,
+        });
+    }
 
     let global_predicate = if let Some(filter_reg) = program.filter {
         Some(registers.boolean(filter_reg)?.clone())
@@ -3672,6 +3669,33 @@ mod tests {
         assert_eq!(output.errors().row(1)[0].code, ErrorCode::DivisionByZero);
         assert!(output.errors().row(2).is_empty());
         assert!(output.errors().row(3).is_empty());
+    }
+
+    #[test]
+    fn case_falls_back_to_the_first_statically_true_branch() {
+        let parsed = parse_program(
+            "SET result = CASE WHEN input.number = 0 THEN 1 WHEN TRUE THEN 2 ELSE 3 END",
+        )
+        .expect("conditional expression must parse");
+        let schema = schema(vec![Field::new("number", DataType::Int64, true)]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![Field::new("result", DataType::Int64, true)],
+        );
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![TypedArray::Int64(Int64Array::from(vec![Some(0), Some(7)]))],
+        )
+        .expect("batch must build");
+
+        let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+        let TypedArray::Int64(result) = output_column(&output, "result") else {
+            panic!("result must be Int64");
+        };
+
+        assert_eq!(result.value(0), 1);
+        assert_eq!(result.value(1), 2);
     }
 
     #[test]

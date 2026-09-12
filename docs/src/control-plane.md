@@ -164,6 +164,34 @@ Transaction state changes do not force schedule publication or a runtime barrier
 
 Data-plane records remain outside this control-plane atomicity.
 
+## Node Health, Membership, And Scheduling
+
+Each node publishes application-health observations independently as its probes complete. The
+scheduler reads the current observation snapshot and applies the configured node-unavailability
+policy. A peer leaves the live scheduling set only after a current sequence of application probe
+failures has lasted for that policy's interval. A stale or unscheduled observation is unknown, and
+probe-capacity exhaustion remains distinct from a peer failure, so none of those conditions alone
+makes a healthy node unavailable.
+
+Automatic scheduling runs independently of the health-probe sweep, resource downloads, and Raft
+learner catch-up. It does not wait for any of them to finish. Slow health responses, learner
+admission, and bulk progress can therefore overlap scheduling and unrelated administrative work.
+Scheduling uses only observations that are current when it computes and publishes a candidate; a
+changed topology or effective-health revision causes the candidate to be recomputed. A newer
+observation with the same effective health does not invalidate an otherwise current candidate.
+
+The current leader owns membership changes and serializes them one at a time. Learner admission or
+catch-up and voting-membership changes each have a ten-second wait deadline. When that deadline
+expires, Nervix stops waiting and observes effective committed membership again before a later
+retry. It does not infer that the change was rolled back: an admitted learner may continue catching
+up after the timed wait ends.
+
+An automatic schedule candidate carries the leader identity and term under which it was computed,
+plus the full applied control-plane revision of its inputs. Publication succeeds only during the
+same leader tenure and while that applied revision and the expected current domain schedule still
+match. Any intervening membership, cordon, domain, configuration, or schedule command therefore
+invalidates the candidate and makes the scheduler compute again from a coherent current view.
+
 ## Placement Activation
 
 Placement coverage is derived from the complete candidate execution graph rather than stored as a

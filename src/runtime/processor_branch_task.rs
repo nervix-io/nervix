@@ -361,7 +361,7 @@ pub(super) async fn run_processor_node_runtime(
                         domain: &domain,
                         graph: &graph,
                         template: &template,
-                        now,
+                        domain_clock: &domain_clock,
                     },
                     &mut instances,
                     relay,
@@ -450,7 +450,7 @@ pub(super) struct ProcessorNodeDispatchContext<'a> {
     pub(super) domain: &'a DomainName,
     pub(super) graph: &'a SharedActiveGraph,
     pub(super) template: &'a BranchInstanceTemplate,
-    pub(super) now: Timestamp,
+    pub(super) domain_clock: &'a DomainClock,
 }
 
 pub(super) async fn dispatch_processor_node_input(
@@ -465,10 +465,32 @@ pub(super) async fn dispatch_processor_node_input(
         domain,
         graph,
         template,
-        now,
+        domain_clock,
     } = context;
     let key = batch.key.clone();
-    let instance = match instances.get_or_try_create_with(key.clone(), now, |key| {
+    // Branch activity is the domain time at which this input was accepted. The supervisor reads it
+    // here, after the wait that delivered the batch, so an idle supervisor never records the
+    // activity of a live branch at the instant it started waiting.
+    let accepted_at = match domain_clock.snapshot() {
+        Ok(snapshot) => snapshot.now(),
+        Err(error) => {
+            runtime_handle.handle_internal_processor_error_for_acks(
+                domain,
+                template.source_kind,
+                &template.source,
+                &template.error_policies,
+                batch.acks.iter(),
+                format!(
+                    "processor '{}' could not read the domain time of accepted input for branch \
+                     '{}': {error}",
+                    template.source.as_str(),
+                    branch_key_display(&key),
+                ),
+            );
+            return;
+        }
+    };
+    let instance = match instances.get_or_try_create_with(key.clone(), accepted_at, |key| {
         spawn_processor_branch_task(
             ProcessorRuntimeContext::new(runtime_handle.clone(), domain.clone(), graph.clone()),
             template,
@@ -666,7 +688,7 @@ pub(super) async fn run_processor_branch_task(
     let domain_clock = branch.domain_clock.clone();
     quiesce_gauges.observe(&branch, &processor);
     let stop_mode;
-    let mut handoff_execution_now = None;
+    let mut handoff_execution_snapshot = None;
     loop {
         tokio::task::consume_budget().await;
         let ownership_frozen = runtime_handle.ownership_handoff_entity_is_frozen(&ownership_entity);
@@ -702,35 +724,23 @@ pub(super) async fn run_processor_branch_task(
                     .next_deadline()
                     .is_some_and(|deadline| deadline <= now))
         {
-            branch.tick(&graph, now).await;
+            branch.tick(&graph, &execution_snapshot).await;
             quiesce_gauges.observe(&branch, &processor);
             continue;
         }
-        let sleep_duration = if ownership_frozen {
+        // Freeze rechecks are physical, so they stay a plain monotonic sleep. The branch's own
+        // deadline is logical and is awaited on the domain clock below.
+        let idle_sleep = if ownership_frozen {
             OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL
         } else {
-            match branch.next_deadline() {
-                Some(deadline) => {
-                    match wall_duration_until_domain_deadline(
-                        &runtime_handle,
-                        &domain,
-                        now,
-                        deadline,
-                    ) {
-                        Ok(duration) => duration,
-                        Err(error) => {
-                            runtime_handle.events().report_error(format!(
-                                "processor '{}' in domain '{}' lost its clock: {error}",
-                                processor.as_str(),
-                                domain.as_str(),
-                            ));
-                            stop_mode = Some(ProcessorBranchStopMode::Detach);
-                            break;
-                        }
-                    }
-                }
-                None => PROCESSOR_BRANCH_TASK_IDLE_SLEEP,
-            }
+            PROCESSOR_BRANCH_TASK_IDLE_SLEEP
+        };
+        let awaited_branch_deadline = if ownership_frozen {
+            None
+        } else {
+            branch
+                .next_deadline()
+                .map(|deadline| domain_clock.deadline_at(deadline))
         };
         let buffer_deadlines = if ownership_frozen {
             Vec::new()
@@ -762,8 +772,8 @@ pub(super) async fn run_processor_branch_task(
                     }
                     Some(ProcessorBranchCommand::Stop(mode)) => {
                         if let ProcessorBranchStopMode::Handoff(_) = &mode {
-                            let execution_now = match domain_clock.snapshot() {
-                                Ok(snapshot) => snapshot.now(),
+                            let execution_snapshot = match domain_clock.snapshot() {
+                                Ok(snapshot) => snapshot,
                                 Err(error) => {
                                     runtime_handle.events().report_error(format!(
                                         "processor branch '{}' in domain '{}' lost its clock: \
@@ -775,7 +785,7 @@ pub(super) async fn run_processor_branch_task(
                                     break;
                                 }
                             };
-                            handoff_execution_now = Some(execution_now);
+                            handoff_execution_snapshot = Some(execution_snapshot);
                         }
                         stop_mode = Some(mode);
                         break;
@@ -834,8 +844,8 @@ pub(super) async fn run_processor_branch_task(
                     stop_mode = Some(ProcessorBranchStopMode::Detach);
                     break;
                 };
-                let execution_now = match domain_clock.snapshot() {
-                    Ok(snapshot) => snapshot.now(),
+                let flush_snapshot = match domain_clock.snapshot() {
+                    Ok(snapshot) => snapshot,
                     Err(error) => {
                         runtime_handle.events().report_error(format!(
                             "processor branch '{}' in domain '{}' lost its clock: {error}",
@@ -847,7 +857,7 @@ pub(super) async fn run_processor_branch_task(
                         break;
                     }
                 };
-                branch.force_flush(&graph, execution_now).await;
+                branch.force_flush(&graph, &flush_snapshot).await;
                 quiesce_gauges.observe(&branch, &processor);
                 completion.complete();
             }
@@ -866,7 +876,21 @@ pub(super) async fn run_processor_branch_task(
                     break;
                 }
             }
-            _ = sleep(sleep_duration) => {}
+            result = wait_for_branch_deadline(&domain_clock, awaited_branch_deadline.clone()),
+                if awaited_branch_deadline.is_some() =>
+            {
+                if let Err(error) = result {
+                    runtime_handle.events().report_error(format!(
+                        "processor branch '{}' in domain '{}' could not wait for a branch \
+                         deadline: {error}",
+                        processor.as_str(),
+                        domain.as_str(),
+                    ));
+                    stop_mode = Some(ProcessorBranchStopMode::Detach);
+                    break;
+                }
+            }
+            _ = sleep(idle_sleep) => {}
         }
     }
     while let Ok(ProcessorBranchInput { relay, batch, work }) = input.try_recv() {
@@ -881,11 +905,11 @@ pub(super) async fn run_processor_branch_task(
             branch
                 .flush_processor_collected_inputs(&graph, &processor)
                 .await;
-            let now = handoff_execution_now.verified(
+            let snapshot = handoff_execution_snapshot.verified(
                 "the handoff command arm captures the validated domain time for this stop mode",
             );
-            branch.force_flush(&graph, now).await;
-            Some(now)
+            branch.force_flush(&graph, &snapshot).await;
+            Some(snapshot.now())
         }
         Some(ProcessorBranchStopMode::Detach) | None => {
             branch
@@ -1248,7 +1272,9 @@ mod tests {
             .collect(),
         };
         let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
-        let now = current_timestamp();
+        let domain_clock = runtime
+            .bind_domain_clock(&domain)
+            .expect("the fixture installs a running unpaced clock");
         let dequeued_work = || {
             NodeQuiesceWorkGuard::begin(runtime.node_quiesce_counters(
                 &domain,
@@ -1273,7 +1299,7 @@ mod tests {
                 domain: &domain,
                 graph: &graph,
                 template: &template,
-                now,
+                domain_clock: &domain_clock,
             },
             &mut instances,
             named("orders"),
@@ -1291,7 +1317,7 @@ mod tests {
                 domain: &domain,
                 graph: &graph,
                 template: &template,
-                now,
+                domain_clock: &domain_clock,
             },
             &mut instances,
             named("orders"),
@@ -1312,7 +1338,7 @@ mod tests {
                 domain: &domain,
                 graph: &graph,
                 template: &template,
-                now,
+                domain_clock: &domain_clock,
             },
             &mut instances,
             named("orders"),
@@ -1363,7 +1389,9 @@ mod tests {
                 domain: &domain,
                 graph: &StdArc::new(ArcSwapOption::from(None)),
                 template: &template,
-                now: current_timestamp(),
+                domain_clock: &runtime
+                    .bind_domain_clock(&domain)
+                    .expect("the fixture installs a running unpaced clock"),
             },
             &mut instances,
             input_relay.clone(),
@@ -1392,6 +1420,85 @@ mod tests {
             .expect("test branch task should still be running");
         task.abort();
         let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn accepted_processor_input_records_branch_activity_at_its_own_domain_time() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
+        let processor = named::<ModelName>("route_orders");
+        let input_relay = named::<RelayName>("orders");
+        let template = junction_branch_template(processor.as_str(), input_relay.as_str());
+        let counters =
+            runtime.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Junction, &processor));
+        let (input_tx, mut input_rx) = mpsc::channel(1);
+        let (commands, _command_rx) = mpsc::channel(1);
+        let task = tokio::spawn(std::future::pending::<()>());
+        let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
+        // A supervisor that started waiting long before this batch arrived would hold a sample
+        // this old. Accepting the input must replace it with the domain time of the acceptance.
+        let stale = Timestamp::from_unix_nanos(1_000_000_000);
+        instances.insert_restored(
+            None,
+            stale,
+            ProcessorBranchTask {
+                input: input_tx,
+                commands,
+                task: parking_lot::Mutex::new(Some(task)),
+            },
+        );
+        let domain_clock = runtime
+            .bind_domain_clock(&domain)
+            .expect("the fixture installs a running unpaced clock");
+        let before = domain_clock
+            .snapshot()
+            .expect("the fixture installs a running unpaced clock")
+            .now();
+
+        dispatch_processor_node_input(
+            ProcessorNodeDispatchContext {
+                runtime_handle: &runtime,
+                domain: &domain,
+                graph: &StdArc::new(ArcSwapOption::from(None)),
+                template: &template,
+                domain_clock: &domain_clock,
+            },
+            &mut instances,
+            input_relay.clone(),
+            quiesce_test_batch(),
+            NodeQuiesceWorkGuard::begin(counters.clone()),
+        )
+        .await;
+
+        let mut recorded = None;
+        for (key, activity) in instances.snapshot_entries() {
+            if key.is_none() {
+                recorded = Some(activity);
+            }
+        }
+        let recorded = recorded.expect("the unbranched instance stays registered");
+        assert!(
+            recorded >= before,
+            "accepted input must record activity at or after the acceptance, got {recorded:?}"
+        );
+
+        let queued = input_rx
+            .recv()
+            .await
+            .expect("processor input should remain in the branch mailbox");
+        drop(queued);
+        let entry = instances
+            .remove(&None)
+            .expect("test branch task should remain registered");
+        let task = entry
+            .task
+            .lock()
+            .take()
+            .expect("test branch task should still be running");
+        task.abort();
+        task.await
+            .discarded("an aborted fixture task reports only its own cancellation");
     }
 
     #[tokio::test]

@@ -165,10 +165,19 @@ Expiration semantics:
 
 - paced domains use domain logical time
 - unpaced domains use wall clock time
+- a branch's idle time is measured from the time at which its last input was accepted. A relay
+  owner or processor that spends a long time waiting for input does not spend that wait out of the
+  branch's TTL, so every branch receives its complete declared lifetime from its own last record
 - every relay owner and processor using the branch applies that branch's TTL to its own
   branch-local runtime state
 - relay TTL and `MAX INSTANCES ... EVICT LRU` are enforced once by the relay owner across all
   producers in the cluster
+
+TTL is the expiration boundary; releasing the expired branch is a separate maintenance scan that
+runs on the physical clock. A branch is never released before its TTL has elapsed in the domain's
+clock, and it is released at the first scan after that boundary. The scan interval is therefore
+release latency added on top of the TTL, never early expiry, and accelerating `TIME RATE` shortens
+the TTL in real time without changing the scan interval.
 
 ## Materialized State
 

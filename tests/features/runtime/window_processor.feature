@@ -960,6 +960,158 @@ Feature: Window processor runtime behavior
       | 3            | 0             |
       | 3            | 1             |
 
+  Scenario Outline: Window output routes read the aggregates their own route declared
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA metric (
+        tenant STRING,
+        latency I64
+      );
+        CREATE SCHEMA metric_total (
+        tenant STRING,
+        sample_count I64,
+        first_latency I64,
+        total_latency I64
+      );
+        CREATE SCHEMA metric_extreme (
+        tenant STRING,
+        max_latency I64,
+        min_latency I64
+      );
+        CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
+        tenant string,
+        latency integer
+      );
+        CREATE CODEC metric_codec
+        FROM WIRE JSON SCHEMA metric_wire
+        TO SCHEMA metric;
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
+        CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
+        CREATE RELAY metric_totals SCHEMA metric_total BRANCHED BY by_metric_ingestor;
+        CREATE RELAY metric_extremes SCHEMA metric_extreme BRANCHED BY by_metric_ingestor;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE INGESTOR metric_ingestor
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        TO metrics
+        INHERIT ALL
+        BRANCHED BY by_metric_ingestor
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE WINDOW PROCESSOR route_scoped_latency FROM metrics
+        WIDTH 3 MESSAGES
+        STEP 3 MESSAGES
+        BRANCHED BY by_metric_ingestor
+        TO metric_totals
+        SET tenant = FIRST(input.tenant), sample_count = COUNT(input.latency), first_latency = FIRST(input.latency), total_latency = SUM(input.latency)
+        ON MESSAGE ERROR LOG
+        TO metric_extremes
+        SET tenant = LAST(input.tenant), max_latency = MAX(input.latency), min_latency = MIN(input.latency)
+        ON MESSAGE ERROR LOG;
+        DESCRIBE WINDOW PROCESSOR route_scoped_latency;
+      """
+    Then the last command output contains
+      """
+      aggregate structures: 6
+      """
+    And the last command output contains
+      """
+      structure 0:
+        functions: FIRST
+        storage: sequence
+        references: 1
+        input: input.tenant
+      structure 1:
+        functions: COUNT
+        storage: counter
+        references: 1
+        input: input.latency
+      structure 2:
+        functions: FIRST
+        storage: sequence
+        references: 1
+        input: input.latency
+      structure 3:
+        functions: SUM
+        storage: sum
+        references: 1
+        input: input.latency
+      structure 4:
+        functions: LAST
+        storage: sequence
+        references: 1
+        input: input.tenant
+      structure 5:
+        functions: MAX, MIN
+        storage: sorted_map
+        references: 2
+        input: input.latency
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION metric_extremes_subscription TO metric_extremes;
+        START;
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"acme","latency":30}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"beta","latency":5}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"acme","latency":10}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"beta","latency":50}
+      """
+    Then the relay subscription does not receive a payload within "500ms"
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"acme","latency":20}
+      """
+    Then the relay subscription receives a payload
+      """
+      "max_latency":30
+      """
+    And the last relay subscription payload contains
+      """
+      "min_latency":10
+      """
+    And the last relay subscription payload contains key fragment '{"tenant":"acme"}'
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"beta","latency":15}
+      """
+    Then the relay subscription receives a payload
+      """
+      "max_latency":50
+      """
+    And the last relay subscription payload contains
+      """
+      "min_latency":5
+      """
+    And the last relay subscription payload contains key fragment '{"tenant":"beta"}'
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+      | 3            | 1             |
+
   Scenario Outline: Kafka ACK PARALLEL replays when an attached window branch output fails
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"

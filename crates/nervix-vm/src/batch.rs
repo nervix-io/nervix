@@ -236,35 +236,38 @@ impl TypedBatch {
         self.row_count
     }
 
+    /// Exports the batch at a node boundary, where every required field must finally hold a value.
+    ///
+    /// Fields are checked in schema order and the first failing one ends the export: a required
+    /// field no route ever wrote reports that it is uninitialized, and a required field written
+    /// with a null reports the null. Optional fields materialize their nulls, uninitialized
+    /// included.
     pub fn to_record_batch(&self) -> Result<RecordBatch, RuntimeError> {
-        let columns = self
-            .columns
-            .iter()
-            .zip(self.schema.fields())
-            .map(|(column, field)| {
-                if column.is_uninitialized() && !field.is_nullable() {
-                    return Err(RuntimeError::UninitializedRequiredColumn {
-                        column: field.name().clone(),
-                    });
-                }
-                if !field.is_nullable() && column.null_count() > 0 {
-                    return Err(RuntimeError::NullForRequiredColumn {
-                        column: field.name().clone(),
-                    });
-                }
-                Ok(column.to_array_ref())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let result = if columns.is_empty() {
-            RecordBatch::try_new_with_options(
-                self.schema.clone(),
-                columns,
-                &RecordBatchOptions::new().with_row_count(Some(self.row_count)),
-            )
+        let mut arrays = Vec::with_capacity(self.columns.len());
+        for (column, field) in self.columns.iter().zip(self.schema.fields()) {
+            let field_is_required = !field.is_nullable();
+            if field_is_required && column.is_uninitialized() {
+                return Err(RuntimeError::UninitializedRequiredColumn {
+                    column: field.name().clone(),
+                });
+            }
+            if field_is_required && column.null_count() > 0 {
+                return Err(RuntimeError::NullForRequiredColumn {
+                    column: field.name().clone(),
+                });
+            }
+            arrays.push(column.to_array_ref());
+        }
+
+        let exported = if arrays.is_empty() {
+            // Arrow reads a batch's row count off its columns, so a batch built entirely from
+            // constants has to state the count it carries.
+            let options = RecordBatchOptions::new().with_row_count(Some(self.row_count));
+            RecordBatch::try_new_with_options(self.schema.clone(), arrays, &options)
         } else {
-            RecordBatch::try_new(self.schema.clone(), columns)
+            RecordBatch::try_new(self.schema.clone(), arrays)
         };
-        result.map_err(|error| RuntimeError::InvalidBatch {
+        exported.map_err(|error| RuntimeError::InvalidBatch {
             message: error.to_string(),
         })
     }
@@ -455,6 +458,28 @@ mod tests {
             assert_eq!(column, "value");
         } else {
             panic!("expected required uninitialized column error, got {error:?}");
+        }
+    }
+
+    #[test]
+    fn written_null_in_required_column_fails_materialization() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let columns = vec![TypedArray::Int64(Int64Array::from(vec![Some(1), None]))];
+        let batch = TypedBatch::try_new(schema, columns)
+            .expect("written batch must build before its node boundary");
+
+        let error = batch
+            .to_record_batch()
+            .expect_err("a null written into a required output must fail");
+
+        if let RuntimeError::NullForRequiredColumn { column } = error {
+            assert_eq!(column, "value");
+        } else {
+            panic!("expected null for required column error, got {error:?}");
         }
     }
 

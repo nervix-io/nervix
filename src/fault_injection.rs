@@ -53,6 +53,8 @@ struct FaultInjectionState {
     transaction_binding_drops: DashMap<ClusterNodeName, (), RandomState>,
     consensus_probes: DashMap<ClusterNodeName, ConsensusProbe, RandomState>,
     bulk_executions: DashMap<ClusterNodeName, NodeBulkExecution, RandomState>,
+    /// Application health handlers clone a pause so it remains alive after its map guard drops.
+    health_response_pauses: DashMap<HealthResponsePauseKey, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     command_pauses: DashMap<CommandPausePoint, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
@@ -112,6 +114,12 @@ struct RemoteRelayAdmissionPauseKey {
     branch: Option<String>,
 }
 
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct HealthResponsePauseKey {
+    probing_node: ClusterNodeName,
+    responding_node: ClusterNodeName,
+}
+
 /// The command boundary a test controls without racing an election against a request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
@@ -147,6 +155,7 @@ impl Default for FaultInjection {
                 transaction_binding_drops: DashMap::default(),
                 consensus_probes: DashMap::default(),
                 bulk_executions: DashMap::default(),
+                health_response_pauses: DashMap::default(),
                 command_pauses: DashMap::default(),
                 entity_gate_pauses: DashMap::default(),
                 remote_relay_admission_pauses: DashMap::default(),
@@ -332,6 +341,38 @@ impl FaultInjection {
             .holders
             .lock()
             .clear();
+    }
+
+    pub fn arm_health_response_pause(
+        &self,
+        probing_node: ClusterNodeName,
+        responding_node: ClusterNodeName,
+    ) {
+        self.inner.health_response_pauses.insert(
+            HealthResponsePauseKey {
+                probing_node,
+                responding_node,
+            },
+            Arc::new(TestPause::default()),
+        );
+    }
+
+    pub async fn wait_for_health_response_pause(
+        &self,
+        probing_node: &ClusterNodeName,
+        responding_node: &ClusterNodeName,
+    ) {
+        let pause = self.health_response_pause(probing_node, responding_node);
+        pause.wait_until_reached().await;
+    }
+
+    pub fn release_health_response_pause(
+        &self,
+        probing_node: &ClusterNodeName,
+        responding_node: &ClusterNodeName,
+    ) {
+        let pause = self.health_response_pause(probing_node, responding_node);
+        pause.release();
     }
 
     pub fn pause_command_admission_on(&self, node_id: ClusterNodeName) {
@@ -673,6 +714,28 @@ impl FaultInjection {
             .await;
     }
 
+    pub(crate) async fn pause_health_response_if_armed(
+        &self,
+        probing_node: &ClusterNodeName,
+        responding_node: &ClusterNodeName,
+    ) {
+        let key = HealthResponsePauseKey {
+            probing_node: probing_node.clone(),
+            responding_node: responding_node.clone(),
+        };
+        let Some(pause) = self
+            .inner
+            .health_response_pauses
+            .get(&key)
+            .map(|pause| pause.value().clone())
+        else {
+            return;
+        };
+        pause.reach();
+        pause.wait_until_released().await;
+        self.inner.health_response_pauses.remove(&key);
+    }
+
     pub(crate) async fn pause_entity_gate_if_armed(&self, domain: &DomainName) {
         let key = domain.as_str().to_ascii_lowercase();
         let Some(pause) = self
@@ -876,6 +939,23 @@ impl FaultInjection {
         pause.reach();
         pause.wait_until_released().await;
         self.inner.command_pauses.remove(&point);
+    }
+
+    fn health_response_pause(
+        &self,
+        probing_node: &ClusterNodeName,
+        responding_node: &ClusterNodeName,
+    ) -> Arc<TestPause> {
+        let key = HealthResponsePauseKey {
+            probing_node: probing_node.clone(),
+            responding_node: responding_node.clone(),
+        };
+        let Some(pause) = self.inner.health_response_pauses.get(&key) else {
+            panic!(
+                "health response pause from '{probing_node}' to '{responding_node}' is not armed"
+            );
+        };
+        pause.value().clone()
     }
 
     fn entity_gate_pause(&self, key: &str) -> Arc<TestPause> {

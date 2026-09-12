@@ -739,6 +739,23 @@ impl DomainCadence {
     }
 }
 
+/// Waits for one branch's logical deadline on the branch's own bound clock.
+///
+/// An absent deadline never completes, so a supervisor may write this as one select branch and
+/// let the deadline's presence gate it instead of converting logical instants to physical sleeps.
+pub(super) async fn wait_for_branch_deadline(
+    clock: &DomainClock,
+    deadline: Option<LogicalDeadline>,
+) -> DomainClockWaitResult<()> {
+    let Some(deadline) = deadline else {
+        std::future::pending::<()>().await;
+        return Ok(());
+    };
+    let cancellation = CancellationToken::new();
+    clock.wait_until(deadline, &cancellation).await?;
+    Ok(())
+}
+
 pub(super) fn checked_add_duration_to_timestamp(base: Timestamp, duration: Duration) -> Timestamp {
     // Saturation is the meaning here: a schedule further out than the nanosecond range is already
     // further out than any timestamp this clock will reach.
