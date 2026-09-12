@@ -9,56 +9,46 @@ pub(super) struct EntityGateHoldKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EmitterPublishingDrainState {
+pub(crate) enum EmitterPublishingDrainState {
     AwaitingConfirmation,
     RetryingInfrastructure,
     RetryingIcebergCommit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EmitterPublishingDrainStatus {
-    pub emitter: EmitterName,
-    pub state: EmitterPublishingDrainState,
-    pub pending_messages: usize,
-    pub retry_backoff: Option<Duration>,
-    pub retry_wait: Option<Duration>,
+pub(crate) struct EmitterPublishingDrainStatus {
+    pub(crate) emitter: EmitterName,
+    pub(crate) state: EmitterPublishingDrainState,
+    pub(crate) pending_messages: usize,
+    pub(crate) retry_backoff: Option<Duration>,
+    pub(crate) retry_wait: Option<Duration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DomainDrainStatus {
-    pub active_ingestors: usize,
-    pub active_generators: usize,
-    pub outstanding_acks: usize,
-    pub buffered_emitter_messages: usize,
-    pub emitter_publishing: Vec<EmitterPublishingDrainStatus>,
+pub(crate) struct DomainDrainStatus {
+    pub(crate) active_ingestors: usize,
+    pub(crate) active_generators: usize,
+    pub(crate) outstanding_acks: usize,
+    pub(crate) buffered_emitter_messages: usize,
+    pub(crate) emitter_publishing: Vec<EmitterPublishingDrainStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EntityDrainStatus {
-    pub buffered_relay_batches: usize,
-    pub node_work_items: usize,
-    pub outstanding_acks: usize,
-    pub emitter_publishing: Vec<EmitterPublishingDrainStatus>,
+pub(crate) struct EntityDrainStatus {
+    pub(crate) buffered_relay_batches: usize,
+    pub(crate) node_work_items: usize,
+    pub(crate) outstanding_acks: usize,
+    pub(crate) emitter_publishing: Vec<EmitterPublishingDrainStatus>,
 }
 
 impl EntityDrainStatus {
-    pub fn is_drained(&self) -> bool {
+    #[cfg(test)]
+    pub(in crate::runtime) fn is_drained(&self) -> bool {
         self.buffered_relay_batches == 0 && self.node_work_items == 0 && self.outstanding_acks == 0
-    }
-
-    pub fn outstanding_work(&self) -> usize {
-        [
-            self.buffered_relay_batches,
-            self.node_work_items,
-            self.outstanding_acks,
-        ]
-        .into_iter()
-        .try_fold(0_usize, usize::checked_add)
-        .assured("every count totals work items this node already holds in memory")
     }
 }
 
-pub struct EntityGateHold {
+pub(in crate::runtime) struct EntityGateHold {
     pub(super) gates: Vec<RelayDispatchGateLease>,
 }
 
@@ -271,7 +261,7 @@ impl EntityGateHold {
         true
     }
 
-    pub fn release(mut self) {
+    pub(in crate::runtime) fn release(mut self) {
         self.release_all();
     }
 
@@ -283,27 +273,6 @@ impl EntityGateHold {
 impl Drop for EntityGateHold {
     fn drop(&mut self) {
         self.release_all();
-    }
-}
-
-impl DomainDrainStatus {
-    pub fn is_drained(&self) -> bool {
-        self.active_ingestors == 0
-            && self.active_generators == 0
-            && self.outstanding_acks == 0
-            && self.buffered_emitter_messages == 0
-    }
-
-    pub fn outstanding_work(&self) -> usize {
-        [
-            self.active_ingestors,
-            self.active_generators,
-            self.outstanding_acks,
-            self.buffered_emitter_messages,
-        ]
-        .into_iter()
-        .try_fold(0_usize, usize::checked_add)
-        .assured("every count totals work items this node already holds in memory")
     }
 }
 
@@ -354,7 +323,7 @@ impl Drop for DomainAlterGuard {
 }
 
 impl Runtime {
-    pub fn entity_pause_relays(
+    pub(crate) fn entity_pause_relays(
         &self,
         domain: &DomainName,
         affected_entities: &[NodeRef],
@@ -365,7 +334,7 @@ impl Runtime {
         Self::entity_pause_relays_for_schedule(&execution.schedule, affected_entities)
     }
 
-    pub(crate) fn entity_pause_relays_for_schedule(
+    pub(in crate::runtime) fn entity_pause_relays_for_schedule(
         schedule: &DomainSchedule,
         affected_entities: &[NodeRef],
     ) -> Vec<RelayName> {
@@ -437,7 +406,7 @@ impl Runtime {
         relays
     }
 
-    pub fn engage_entity_gates(
+    pub(in crate::runtime) fn engage_entity_gates(
         &self,
         domain: &DomainName,
         relays: &[RelayName],
@@ -571,7 +540,7 @@ impl Runtime {
         Ok(())
     }
 
-    pub async fn release_entity_gate_operation(
+    pub(crate) async fn release_entity_gate_operation(
         &self,
         operation_id: u64,
         domain: &DomainName,
@@ -655,7 +624,7 @@ impl Runtime {
             })
     }
 
-    pub fn entity_drain_status(
+    pub(crate) fn entity_drain_status(
         &self,
         domain: &DomainName,
         relays: &[RelayName],
@@ -797,19 +766,19 @@ impl Runtime {
         }
     }
 
-    pub fn domain_alter_is_active(&self, domain: &DomainName) -> bool {
+    pub(crate) fn domain_alter_is_active(&self, domain: &DomainName) -> bool {
         self.inner.active_domain_alters.contains_key(domain)
     }
 
     #[cfg(feature = "testing")]
-    pub async fn pause_entity_gate_if_armed(&self, domain: &DomainName) {
+    pub(crate) async fn pause_entity_gate_if_armed(&self, domain: &DomainName) {
         self.inner
             .fault_injection
             .pause_entity_gate_if_armed(domain)
             .await;
     }
 
-    pub fn domain_drain_status(&self, domain: &DomainName) -> DomainDrainStatus {
+    pub(crate) fn domain_drain_status(&self, domain: &DomainName) -> DomainDrainStatus {
         let active_ingestors = self
             .inner
             .ingestors

@@ -12,11 +12,11 @@ use super::*;
 /// Chosen operational bound for how many decoded source rows accumulate before an
 /// ingest group executes and becomes one Arrow batch per (relay, branch key). This is
 /// intentionally independent of an NSPL route's flush policy.
-pub(crate) const INGEST_GROUP_MAX_ROWS: usize = 1024;
+pub(in crate::runtime) const INGEST_GROUP_MAX_ROWS: usize = 1024;
 
 /// Chosen operational bound for how long a partial source group waits when the source
 /// goes quiet. This is intentionally independent of an NSPL route's flush policy.
-pub(crate) const INGEST_GROUP_IDLE_FLUSH: Duration = Duration::from_millis(5);
+pub(in crate::runtime) const INGEST_GROUP_IDLE_FLUSH: Duration = Duration::from_millis(5);
 
 pub(super) struct IngestorDependencies {
     pub(super) output_routes: RelayProcessorOutputsNode,

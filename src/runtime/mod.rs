@@ -232,9 +232,6 @@ mod shared_clients;
 mod state_replication;
 mod state_snapshot_exchange;
 mod state_snapshot_transfer;
-pub(crate) use state_snapshot_transfer::{
-    DescribeStateSnapshot, DescribedStateSnapshot, FetchStateSnapshot,
-};
 mod state_store;
 mod syslog;
 #[cfg(test)]
@@ -258,7 +255,6 @@ use deduplicator::{
 };
 use force_flush::{DomainForceFlush, DomainForceFlushCompletion, DomainForceFlushParticipant};
 use http_client::HttpClientConfig;
-pub(crate) use ingestors::kafka::KafkaIngestor;
 use kafka_offset_state::{
     KafkaOffsetSnapshotInstaller, KafkaOffsetStateAssignment, KafkaOffsetStateOriginator,
     KafkaOffsetStatePersistence, KafkaOffsetStateRead, KafkaTopicPartition,
@@ -268,7 +264,6 @@ use materialized_snapshot::{
     MaterializedGenerationRecord, RestoredMaterializedSnapshot, SealedSource,
     empty_sealed_container, inspect_sealed_container,
 };
-pub use materialized_state::MaterializedRecordReport;
 use materialized_state::{
     MaterializedRelaySnapshotInstaller, MaterializedRelayStateAssignment,
     MaterializedRelayStateOriginator, MaterializedRelayStatePersistence,
@@ -327,8 +322,6 @@ use processors::{
     ReorderKeyPart, ReordererOutputBuffer, ReordererRowOrder, WasmAckContext, WasmAckMap,
     WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds, WindowFlushContext,
 };
-pub use relay_batch::RelayMessage;
-pub(crate) use relay_batch::RelayRecordBatch;
 use relay_batch::build_stream_record_batch_preserving_acks;
 type RelayDispatchResult = Result<(), Box<RelayRecordBatch>>;
 
@@ -338,10 +331,7 @@ type RelayDispatchResult = Result<(), Box<RelayRecordBatch>>;
 /// error policy before returning that summary.
 const INGEST_FLUSH_FAILURES_ARE_HANDLED: &str =
     "the ingestor's error policy already handled every failure this flush produced";
-pub(crate) use relay_channel::{
-    RelayBroadcast, RelayDispatchGate, RelayDispatchGateLease,
-    RelayReceiver as RelaySubscriptionReceiver,
-};
+pub(in crate::runtime) use relay_channel::{RelayDispatchGate, RelayDispatchGateLease};
 use relay_interaction::{
     RelayInteraction, RelayInteractionCommand, RelayInteractionError, RelayInteractionEvent,
     RelayInteractionInput,
@@ -349,7 +339,6 @@ use relay_interaction::{
 pub(crate) type RelaySubscriptionRecvError = async_broadcast::RecvError;
 use std::str::FromStr;
 
-pub(crate) use branch_key::BranchKey;
 use branch_key::branch_key_display;
 use branch_runtime::{
     BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL, BranchRuntime, IngestorRouteRuntime,
@@ -357,7 +346,6 @@ use branch_runtime::{
     flush_branch_junction, internal_processor_error_policies, output_error_policies,
     persist_branch_instance_lru_snapshot,
 };
-pub(crate) use client_config::{ClientResourceMounts, ResolvedClientConfig};
 use client_config::{
     ParsedRetryPolicy, client_config_entries, client_config_value, next_retry_delay,
     optional_bool_client_config_value, optional_client_config_value,
@@ -370,10 +358,9 @@ use correlator::{
 };
 use domain_clock::{
     DomainCadenceOccurrence, DomainCadenceStart, DomainClock, DomainClockAccessResult,
-    DomainClockLifecycle, DomainExecutionSnapshot, LogicalDeadline,
-    checked_add_duration_to_timestamp, current_timestamp, wait_for_branch_deadline,
+    DomainClockLifecycle, LogicalDeadline, checked_add_duration_to_timestamp, current_timestamp,
+    wait_for_branch_deadline,
 };
-pub(crate) use domain_execution::LookupRuntime;
 use domain_execution::{
     DomainExecution, DomainResourceKey, ObservedDomainTick, RuntimeDomainState,
 };
@@ -383,21 +370,14 @@ use emitter_supervision::{
     EmitterRetryKind, EmitterRetryStatus, EmitterTaskCommand, ScheduledEmitterTask,
     clear_emitter_stop_signal,
 };
-pub use endpoint::EndpointDispatchOutcome;
 use endpoint::{
     EndpointIngestBinding, EndpointRoute, HttpRouteKey, RoutedEndpoint, RoutedEndpointsByDomain,
 };
-pub(crate) use entity_gate::EntityGateLease;
 use entity_gate::{
     ActiveDomainAlter, BranchQuiesceGauges, DomainActivityGuard, EntityAlterHold,
     EntityGateHoldKey, NodeQuiesceCounters, NodeQuiesceWorkGuard,
 };
-pub use entity_gate::{
-    DomainDrainStatus, EmitterPublishingDrainState, EmitterPublishingDrainStatus,
-    EntityDrainStatus, EntityGateHold,
-};
 pub(in crate::runtime) use filter_map::evaluate_sqs_fifo_group_program;
-pub(crate) use filter_map::execute_filter_map_on_record;
 use filter_map::{
     FilterMapBatchInputs, FilterMapOutcomeInputs, InferencerFilterMapTensors, VmUninitializedInput,
     append_filter_map_nested_value, evaluate_filter_map_on_batch, evaluate_output_branch_program,
@@ -406,7 +386,7 @@ use filter_map::{
 };
 use generator::{GeneratorTaskRouteSpec, GeneratorTaskSpec};
 use inferencer_output::flush_branch_inferencer_output;
-pub(crate) use ingest_group::INGEST_GROUP_MAX_ROWS;
+pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
 use ingest_group::{
     BranchedEntrypointInput, IngestGroupDispatch, IngestRouteCollector, IngestorDependencies,
     IngestorRouteRuntimes, RawIngestDispatch, branched_branch_filter_blocking,
@@ -417,12 +397,10 @@ use ingest_metadata::{
     BRANCH_NAMESPACE, INGEST_METADATA_NAMESPACE, IngestHeaderFunctionInjector,
     IngestMetadataBuilders, emit_sink_supports_headers, ingest_source_supports_headers,
 };
-pub(crate) use ingest_metadata::{
-    IngestFilterMapMetadata, IngestMessageHeaders, IngestMetadataKind, IngestMetadataRow,
-    NoIngestHeaders, RetainedIngestHeaders,
+pub(in crate::runtime) use ingest_metadata::{
+    IngestMetadataKind, IngestMetadataRow, NoIngestHeaders,
 };
-pub use ingestor_quiesce::IngestorQuiesceCounters;
-pub(crate) use ingestor_quiesce::{
+pub(in crate::runtime) use ingestor_quiesce::{
     BufferedIngestMetadata, BufferedIngestPayload, IngestorQuiesceCause, IngestorQuiesceControl,
     IngestorQuiesceIntake,
 };
@@ -445,10 +423,6 @@ use nervix_models::{
     CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, DeduplicatorName,
     ReingestorName, ResolvedCodecWireFormat, SchemaName, WireSchemaLookup, WireSchemaName,
 };
-pub use observability::{
-    DataflowNodeTransientState, IngestorDescribe, KafkaDomainOffsetDescribe, LocalLookupDescription,
-};
-pub(crate) use ownership_handoff_error::{OwnershipHandoffError, OwnershipHandoffResult};
 use processor_branch_task::{
     PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, ProcessorBranchHandoff, ProcessorNodeCommand,
     SpawnedSnapshotTask, WindowProcessorSnapshotRequest,
@@ -470,7 +444,6 @@ use processor_template::{
 use rdkafka::consumer::StreamConsumer;
 pub(in crate::runtime) use reconnect_backoff::RuntimeReconnectBackoff;
 use reingestor::ReingestorInputSpec;
-pub(crate) use relay_boundary::scheduled_relay_owner_nodes;
 use relay_boundary::{
     ConcreteRelayRuntime, ConcreteRelayRuntimeBuild, ExpiringRelayState, RelayBoundaryBuilder,
     RelayBoundaryFanout, RelayBoundaryFanoutMap, RelayBoundaryServices, RelayOutboundSlot,
@@ -488,16 +461,14 @@ use service_url::ServiceUrl;
 pub(in crate::runtime) use shared_clients::{
     OpenClientError, SharedClientError, SharedClientLease,
 };
-pub(crate) use state_replication::StateSyncAck;
 use state_replication::{
     ActivatedRuntimeStateHandoff, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
     DEFAULT_STATE_SNAPSHOT_INTERVAL, PendingStateCheckpointAnnouncement, PendingStateReplicaSync,
     PreparedForcedRuntimeStateRecovery, PreparedRuntimeStateHandoff, PreparedRuntimeStateSnapshot,
 };
-pub(crate) use state_store::{
-    ForcedRuntimeStateRecoveryTransition, PersistedRuntimeStateEntry, RuntimePersistenceError,
-    RuntimeStateHandoffTransition, RuntimeStateKind, RuntimeStateOperationError,
-    RuntimeStatePlacement, RuntimeStateResult, RuntimeStateStore, StateAssignmentAuthority,
+pub(in crate::runtime) use state_store::{
+    ForcedRuntimeStateRecoveryTransition, RuntimeStateHandoffTransition, RuntimeStateKind,
+    RuntimeStateOperationError, RuntimeStateResult, RuntimeStateStore, StateAssignmentAuthority,
     StateAssignmentToken, StateAuthorityError, StateCapability, StateReplicationRoles,
 };
 #[cfg(test)]
@@ -516,12 +487,10 @@ use test_fixtures::{
     window_aggregate, window_inputs, window_outputs, with_inherit_all,
 };
 use tls::RustlsClientConfigSource;
-pub(crate) use vm_compile::{
-    CompiledBranchProgram, CompiledDomainUdfs, CompiledEmitterFilterMapProgram,
-    CompiledProgramWithMaterializedInterest, EmitterHeaders, MaterializedFieldInterest,
-    MaterializedLookupKeyMode, MaterializedProgramInterest, RuntimeMaterializedRelaySpec,
-    RuntimeVmCompileContext, compile_emitter_filter_map_program, compile_key_projection_program,
-    compile_session_filter_map_program, compile_sqs_fifo_group_program,
+pub(in crate::runtime) use vm_compile::{
+    CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders,
+    MaterializedFieldInterest, MaterializedLookupKeyMode, compile_emitter_filter_map_program,
+    compile_key_projection_program, compile_sqs_fifo_group_program,
 };
 use vm_compile::{
     CompiledMessageErrorSites, GeneratorSetProgramSchemas, OutputNamespaceInput,
@@ -547,10 +516,7 @@ use wasm_output::{
 };
 use wasm_processor::flush_branch_wasm_processor;
 use wasm_state::ReplicatedWasmProcessorState;
-pub use websocket_signaling::CompiledSignalingProtocol;
-pub(crate) use websocket_signaling::{
-    SignalingDataSink, SignalingProtobufDescriptors, WebsocketSignalingSession,
-};
+pub(in crate::runtime) use websocket_signaling::SignalingProtobufDescriptors;
 use window_processor::{
     WindowAggregateInput, WindowProcessorState, evaluate_window_aggregate_inputs,
     flush_ready_window_processor, message_timestamp, snapshot_window_processor_live_state,
@@ -630,7 +596,7 @@ impl ConfiguredFaultInjection {
 }
 
 #[derive(Debug, Error)]
-pub enum RuntimeError {
+pub(crate) enum RuntimeError {
     #[error("ingestor '{ingestor}' in domain '{domain}' is already running")]
     IngestorAlreadyRunning { domain: String, ingestor: String },
     #[error("ingestor '{ingestor}' in domain '{domain}' is not running")]
@@ -673,7 +639,7 @@ pub enum RuntimeError {
 }
 
 #[derive(Debug, Clone)]
-pub enum RuntimeEvent {
+pub(crate) enum RuntimeEvent {
     Error(String),
 }
 
@@ -866,3 +832,40 @@ mod wasm_state;
 mod websocket_signaling;
 mod window_processor;
 mod window_state;
+
+/// What the data plane exposes. Everything else this module and its submodules declare is
+/// `pub(in crate::runtime)` or narrower, so the layers above reach the runtime only through the
+/// names below.
+pub(crate) use branch_key::BranchKey;
+pub(crate) use client_config::{ClientResourceMounts, ResolvedClientConfig};
+pub(crate) use domain_clock::DomainExecutionSnapshot;
+pub(crate) use domain_execution::LookupRuntime;
+pub(crate) use entity_gate::{
+    EmitterPublishingDrainState, EmitterPublishingDrainStatus, EntityGateLease,
+};
+pub(crate) use filter_map::execute_filter_map_on_record;
+pub(crate) use ingest_metadata::{
+    IngestFilterMapMetadata, IngestMessageHeaders, RetainedIngestHeaders,
+};
+pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;
+pub(crate) use ingestors::kafka::KafkaIngestor;
+pub(crate) use materialized_state::MaterializedRecordReport;
+pub(crate) use observability::{IngestorDescribe, KafkaDomainOffsetDescribe};
+pub(crate) use ownership_handoff_error::{OwnershipHandoffError, OwnershipHandoffResult};
+pub(crate) use relay_batch::{RelayMessage, RelayRecordBatch};
+pub(crate) use relay_boundary::scheduled_relay_owner_nodes;
+pub(crate) use relay_channel::{RelayBroadcast, RelayReceiver as RelaySubscriptionReceiver};
+pub(crate) use state_replication::StateSyncAck;
+pub(crate) use state_snapshot_transfer::{
+    DescribeStateSnapshot, DescribedStateSnapshot, FetchStateSnapshot,
+};
+pub(crate) use state_store::{
+    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
+};
+pub(crate) use vm_compile::{
+    CompiledDomainUdfs, CompiledProgramWithMaterializedInterest, MaterializedProgramInterest,
+    RuntimeMaterializedRelaySpec, RuntimeVmCompileContext, compile_session_filter_map_program,
+};
+pub(crate) use websocket_signaling::{
+    CompiledSignalingProtocol, SignalingDataSink, WebsocketSignalingSession,
+};

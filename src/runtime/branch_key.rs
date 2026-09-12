@@ -7,7 +7,7 @@ pub(crate) struct BranchKey {
 }
 
 impl BranchKey {
-    pub(crate) fn field_value(&self, name: &str) -> Option<&RuntimeValue> {
+    pub(in crate::runtime) fn field_value(&self, name: &str) -> Option<&RuntimeValue> {
         self.fields
             .iter()
             .find_map(|(field, value)| (field.as_str() == name).then_some(value))
@@ -47,7 +47,7 @@ impl BranchKey {
         Self::from_fields(values).map(Some)
     }
 
-    pub(crate) fn to_remote_key(key: &Option<Self>) -> Option<Vec<RemoteRuntimeField>> {
+    pub(in crate::runtime) fn to_remote_key(key: &Option<Self>) -> Option<Vec<RemoteRuntimeField>> {
         key.as_ref().map(|key| {
             key.fields
                 .iter()

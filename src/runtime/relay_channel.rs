@@ -20,7 +20,7 @@ use tracing::debug;
 use triomphe::Arc;
 
 #[derive(Debug)]
-pub(crate) struct RelayDispatchGate {
+pub(in crate::runtime) struct RelayDispatchGate {
     closed: AtomicBool,
     state: Mutex<RelayDispatchGateState>,
     changed: Notify,
@@ -51,7 +51,7 @@ enum RelayDispatchGateEngagementPhase {
 /// gate remains closed until this lease is explicitly released or dropped, even when the original
 /// fence deadline passes.
 #[derive(Debug)]
-pub(crate) struct RelayDispatchGateLease {
+pub(in crate::runtime) struct RelayDispatchGateLease {
     gate: Arc<RelayDispatchGate>,
     generation: u64,
 }
@@ -62,12 +62,12 @@ pub(crate) struct RelayDispatchGateLease {
 /// engagement wins that ordering, no later dispatch can acquire a permit until the engagement is
 /// released. Dropping every permit that won before it completes the engagement fence.
 #[derive(Debug)]
-pub(crate) struct RelayDispatchPermit<'gate> {
+pub(in crate::runtime) struct RelayDispatchPermit<'gate> {
     gate: &'gate RelayDispatchGate,
 }
 
 impl RelayDispatchGate {
-    pub(crate) fn new() -> Self {
+    pub(in crate::runtime) fn new() -> Self {
         Self {
             closed: AtomicBool::new(false),
             state: Mutex::new(RelayDispatchGateState::default()),
@@ -111,7 +111,7 @@ impl RelayDispatchGate {
         self.changed.notify_waiters();
     }
 
-    pub(crate) async fn acquire_dispatch(&self) -> RelayDispatchPermit<'_> {
+    pub(in crate::runtime) async fn acquire_dispatch(&self) -> RelayDispatchPermit<'_> {
         loop {
             tokio::task::consume_budget().await;
             self.clear_if_expired();
@@ -178,12 +178,12 @@ impl RelayDispatchGate {
         }
     }
 
-    pub(crate) fn is_closed(&self) -> bool {
+    pub(in crate::runtime) fn is_closed(&self) -> bool {
         self.clear_if_expired();
         self.closed.load(Ordering::Acquire)
     }
 
-    pub(crate) async fn wait_open(&self) {
+    pub(in crate::runtime) async fn wait_open(&self) {
         if !self.closed.load(Ordering::Acquire) {
             return;
         }
@@ -217,7 +217,7 @@ impl RelayDispatchGate {
         }
     }
 
-    pub(crate) async fn wait_closed(&self) {
+    pub(in crate::runtime) async fn wait_closed(&self) {
         loop {
             tokio::task::consume_budget().await;
             if self.is_closed() {
@@ -232,7 +232,7 @@ impl RelayDispatchGate {
     }
 
     #[cfg(test)]
-    pub(crate) fn reason(&self) -> Option<String> {
+    pub(in crate::runtime) fn reason(&self) -> Option<String> {
         self.clear_if_expired();
         self.state
             .lock()
@@ -243,7 +243,7 @@ impl RelayDispatchGate {
     }
 
     #[cfg(test)]
-    pub(crate) fn in_flight_dispatches(&self) -> usize {
+    pub(in crate::runtime) fn in_flight_dispatches(&self) -> usize {
         self.state.lock().in_flight_dispatches
     }
 
@@ -288,7 +288,7 @@ impl RelayDispatchGateEngagement {
 }
 
 impl RelayDispatchGateLease {
-    pub(crate) fn engage(
+    pub(in crate::runtime) fn engage(
         gate: Arc<RelayDispatchGate>,
         deadline: Instant,
         reason: impl Into<String>,
@@ -297,7 +297,7 @@ impl RelayDispatchGateLease {
         Self { gate, generation }
     }
 
-    pub(crate) async fn wait_quiescent(&mut self) -> bool {
+    pub(in crate::runtime) async fn wait_quiescent(&mut self) -> bool {
         self.gate.wait_quiescent(self.generation).await
     }
 }
@@ -614,20 +614,20 @@ impl<T> RelayBroadcast<T> {
         }
     }
 
-    pub(crate) fn receiver_count(&self) -> usize {
+    pub(in crate::runtime) fn receiver_count(&self) -> usize {
         debug_assert!(self.inner.inactive_receiver_count() > 0);
         self.sender.receiver_count()
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub(in crate::runtime) fn len(&self) -> usize {
         self.sender.len()
     }
 
-    pub(crate) fn capacity(&self) -> usize {
+    pub(in crate::runtime) fn capacity(&self) -> usize {
         self.inner.control.lock().target_capacity.get()
     }
 
-    pub(crate) fn set_capacity(&self, capacity: NonZeroUsize) {
+    pub(in crate::runtime) fn set_capacity(&self, capacity: NonZeroUsize) {
         let was_dirty = self.inner.dirty.swap(true, Ordering::Relaxed);
         let is_dirty = {
             let mut control = self.inner.control.lock();
@@ -642,7 +642,7 @@ impl<T> RelayBroadcast<T> {
 }
 
 impl<T: Clone> RelayBroadcast<T> {
-    pub(crate) async fn broadcast(&self, message: T) -> Result<(), SendError<T>> {
+    pub(in crate::runtime) async fn broadcast(&self, message: T) -> Result<(), SendError<T>> {
         if !self.inner.dirty.load(Ordering::Relaxed) {
             return self.broadcast_message(message).await;
         }
@@ -751,7 +751,7 @@ impl<T: Clone> RelayReceiver<T> {
         result
     }
 
-    pub(crate) fn try_recv(&mut self) -> Result<T, TryRecvError> {
+    pub(in crate::runtime) fn try_recv(&mut self) -> Result<T, TryRecvError> {
         let result = self.receiver.try_recv();
         if result.is_ok() {
             self.inner.maintain_dirty_capacity();
@@ -759,7 +759,10 @@ impl<T: Clone> RelayReceiver<T> {
         result
     }
 
-    pub(crate) fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<T, RecvError>>> {
+    pub(in crate::runtime) fn poll_recv(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<T, RecvError>>> {
         let result = Pin::new(&mut self.receiver).poll_recv(cx);
         if let Poll::Ready(Some(Ok(_))) = &result {
             self.inner.maintain_dirty_capacity();
@@ -767,7 +770,7 @@ impl<T: Clone> RelayReceiver<T> {
         result
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub(in crate::runtime) fn len(&self) -> usize {
         self.receiver.len()
     }
 }

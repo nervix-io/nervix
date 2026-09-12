@@ -28,7 +28,7 @@ use tokio::sync::OwnedSemaphorePermit;
 
 /// Why a snapshot could not be staged or read back.
 #[derive(Debug, Error)]
-pub(crate) enum SnapshotStagingError {
+pub(in crate::runtime) enum SnapshotStagingError {
     #[error("the node has no bulk capacity to stage this snapshot")]
     Admission,
     #[error("staging this snapshot could not be admitted for execution")]
@@ -54,11 +54,11 @@ pub(crate) enum SnapshotStagingError {
 
 /// The disk a node will hold incomplete snapshot transfers on at one time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SnapshotStagingLimits {
+pub(in crate::runtime) struct SnapshotStagingLimits {
     /// The staging bytes every concurrent transfer shares.
-    pub(crate) staging_bytes: u64,
+    pub(in crate::runtime) staging_bytes: u64,
     /// The largest sealed snapshot one transfer may stage.
-    pub(crate) snapshot_bytes: u64,
+    pub(in crate::runtime) snapshot_bytes: u64,
 }
 
 impl Default for SnapshotStagingLimits {
@@ -83,7 +83,7 @@ const READ_BLOCK_BYTES: u64 = 64 * 1024;
 
 /// The node's staging area: one directory and the quota every transfer into it shares.
 #[derive(Debug, Clone)]
-pub(crate) struct SnapshotStaging {
+pub(in crate::runtime) struct SnapshotStaging {
     root: PathBuf,
     executor: Executor,
     limits: SnapshotStagingLimits,
@@ -96,7 +96,11 @@ struct StagingQuota {
 }
 
 impl SnapshotStaging {
-    pub(crate) fn new(root: PathBuf, executor: Executor, limits: SnapshotStagingLimits) -> Self {
+    pub(in crate::runtime) fn new(
+        root: PathBuf,
+        executor: Executor,
+        limits: SnapshotStagingLimits,
+    ) -> Self {
         let blocks = limits.staging_bytes.div_ceil(STAGING_PERMIT_BYTES);
         // A configured quota beyond what this platform can count in permits becomes the largest
         // permit count it can express: the cap is the meaning here, not an avoided decision.
@@ -115,7 +119,7 @@ impl SnapshotStaging {
     ///
     /// The quota is taken before the first chunk is written, so a node that cannot hold the
     /// declared snapshot refuses the transfer instead of discovering it when the disk fills.
-    pub(crate) async fn stage(
+    pub(in crate::runtime) async fn stage(
         &self,
         length: u64,
     ) -> Result<StagedSnapshotWriter, Report<SnapshotStagingError>> {
@@ -180,7 +184,7 @@ impl SnapshotStaging {
 }
 
 /// One incomplete transfer, writing into its own staging file under the node's quota.
-pub(crate) struct StagedSnapshotWriter {
+pub(in crate::runtime) struct StagedSnapshotWriter {
     file: Option<tempfile::NamedTempFile>,
     hasher: Option<Hasher>,
     written: u64,
@@ -200,7 +204,7 @@ struct StagedWrite {
 
 impl StagedSnapshotWriter {
     /// Write one already-admitted chunk, refusing bytes past the length the source declared.
-    pub(crate) async fn write_chunk(
+    pub(in crate::runtime) async fn write_chunk(
         &mut self,
         chunk: ChargedBytes,
     ) -> Result<(), Report<SnapshotStagingError>> {
@@ -273,7 +277,7 @@ impl StagedSnapshotWriter {
     ///
     /// A truncated or corrupted transfer fails here, before anything reads it, so a partial
     /// generation never reaches the state it would have replaced.
-    pub(crate) async fn finish(
+    pub(in crate::runtime) async fn finish(
         mut self,
         digest: [u8; 32],
     ) -> Result<StagedSnapshot, Report<SnapshotStagingError>> {
@@ -338,7 +342,7 @@ impl StagedSnapshotWriter {
 }
 
 /// One complete, verified snapshot on disk, read back one bounded section at a time.
-pub(crate) struct StagedSnapshot {
+pub(in crate::runtime) struct StagedSnapshot {
     file: Option<tempfile::NamedTempFile>,
     offset: u64,
     length: u64,
@@ -355,7 +359,7 @@ struct StagedRead {
 impl StagedSnapshot {
     /// Read the next `length` bytes, charged to the bulk budget for as long as the caller holds
     /// them. Reading past the end of the staged snapshot is a truncation, not a short read.
-    pub(crate) async fn read(
+    pub(in crate::runtime) async fn read(
         &mut self,
         length: u64,
     ) -> Result<ChargedBytes, Report<SnapshotStagingError>> {

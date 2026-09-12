@@ -339,7 +339,7 @@ impl Runtime {
         AckSet::tracked_roots(vec![domain_tracker, ingestor_tracker])
     }
 
-    pub fn domain_outstanding_work(&self, domain: &DomainName) -> usize {
+    pub(in crate::runtime) fn domain_outstanding_work(&self, domain: &DomainName) -> usize {
         match self.inner.in_flight_by_domain.get(domain) {
             Some(tracker) => tracker.outstanding(),
             None => 0,
@@ -360,7 +360,7 @@ impl Runtime {
         DomainForceFlush::subscribe(&coordinator, Some(counters))
     }
 
-    pub fn force_flush_domain(&self, domain: &DomainName) -> u64 {
+    pub(in crate::runtime) fn force_flush_domain(&self, domain: &DomainName) -> u64 {
         self.inner
             .force_flush_by_domain
             .entry(domain.clone())
@@ -368,7 +368,7 @@ impl Runtime {
             .request()
     }
 
-    pub fn force_flush_domain_if_idle(&self, domain: &DomainName) -> u64 {
+    pub(crate) fn force_flush_domain_if_idle(&self, domain: &DomainName) -> u64 {
         self.inner
             .force_flush_by_domain
             .entry(domain.clone())

@@ -116,7 +116,7 @@ impl Runtime {
     /// The bytes are staged on disk as they arrive and accepted only when their length and digest
     /// match what the owner declared, so a cancelled, truncated or corrupted transfer leaves the
     /// caller with nothing to install rather than with part of a generation.
-    pub(crate) async fn fetch_sealed_materialized_snapshot(
+    pub(in crate::runtime) async fn fetch_sealed_materialized_snapshot(
         &self,
         target_node_id: &ClusterNodeName,
         placement: &RuntimeStatePlacement,

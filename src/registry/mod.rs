@@ -72,7 +72,6 @@ use parking_lot::{Mutex, RwLock};
 use petgraph::{
     Direction, algo::is_cyclic_directed, graph::DiGraph, prelude::NodeIndex, visit::EdgeRef,
 };
-pub use relocation::{RelocationCoverage, RelocationMemberReason, RelocationUnit};
 use serde::{Deserialize, Serialize};
 use sorted_vec::SortedSet;
 use thiserror::Error;
@@ -100,7 +99,7 @@ fn udf_compile_options(models: &ModelIndex, mut options: CompileOptions) -> Comp
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum RegistryError {
+pub(crate) enum RegistryError {
     #[error("failed to open registry storage")]
     OpenStorage,
     #[cfg(test)]
@@ -219,21 +218,21 @@ impl StoredModelRecord {
     }
 }
 
-pub struct Registry {
+pub(crate) struct Registry {
     storage: ModelStorage,
     state: RwLock<Arc<RegistryState>>,
     commit_lock: Mutex<()>,
 }
 
 #[derive(Debug, Clone)]
-pub struct RuntimeChanges {
-    pub domain: DomainName,
-    pub graph: Option<ActiveGraph>,
-    pub changes: Vec<RuntimeChange>,
+pub(crate) struct RuntimeChanges {
+    pub(crate) domain: DomainName,
+    pub(crate) graph: Option<ActiveGraph>,
+    pub(crate) changes: Vec<RuntimeChange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeChange {
+pub(crate) enum RuntimeChange {
     StartIngestor {
         source_model: Box<Model>,
         ingestor: Box<CreateIngestor>,
@@ -244,17 +243,17 @@ pub enum RuntimeChange {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QuiescePlan {
+pub(crate) struct QuiescePlan {
     level: QuiesceLevel,
     affected_entities: Vec<NodeRef>,
 }
 
 impl QuiescePlan {
-    pub fn level(&self) -> QuiesceLevel {
+    pub(crate) fn level(&self) -> QuiesceLevel {
         self.level
     }
 
-    pub fn affected_entities(&self) -> &[NodeRef] {
+    pub(crate) fn affected_entities(&self) -> &[NodeRef] {
         &self.affected_entities
     }
 }
@@ -269,7 +268,10 @@ impl Registry {
         Self::from_database(db, Some(path))
     }
 
-    pub fn from_database(db: Database, path: Option<&Path>) -> Result<Self, Report<RegistryError>> {
+    pub(crate) fn from_database(
+        db: Database,
+        path: Option<&Path>,
+    ) -> Result<Self, Report<RegistryError>> {
         let storage = ModelStorage::from_database(db).change_context(RegistryError::OpenStorage)?;
         let stored = storage
             .list_all_models()
@@ -339,7 +341,7 @@ impl Registry {
     }
 
     #[cfg(test)]
-    pub fn apply_batch(
+    pub(in crate::registry) fn apply_batch(
         &self,
         domain: &DomainName,
         models: Vec<Model>,
@@ -354,7 +356,7 @@ impl Registry {
     }
 
     #[cfg(test)]
-    pub fn drop_batch(
+    pub(in crate::registry) fn drop_batch(
         &self,
         domain: &DomainName,
         drops: Vec<DropModel>,
@@ -367,7 +369,7 @@ impl Registry {
     }
 
     #[cfg(test)]
-    pub fn alter_relay(
+    pub(in crate::registry) fn alter_relay(
         &self,
         domain: &DomainName,
         alter: AlterRelay,
@@ -380,7 +382,7 @@ impl Registry {
     }
 
     #[cfg(test)]
-    pub fn apply_mutation_batch(
+    pub(in crate::registry) fn apply_mutation_batch(
         &self,
         domain: &DomainName,
         mutations: Vec<RegistryMutation>,
@@ -388,7 +390,9 @@ impl Registry {
         self.apply_mutations(domain, mutations, "mixed mutation batch")
     }
 
-    pub fn startup_runtime_changes(&self) -> Result<Vec<RuntimeChanges>, Report<RegistryError>> {
+    pub(crate) fn startup_runtime_changes(
+        &self,
+    ) -> Result<Vec<RuntimeChanges>, Report<RegistryError>> {
         let state = self.state.read();
         let domains = SortedSet::from_unsorted(state.domains.keys().cloned().collect()).into_vec();
         let mut startup_changes = Vec::new();
@@ -407,7 +411,7 @@ impl Registry {
         Ok(startup_changes)
     }
 
-    pub fn synchronize_cluster_schedule(
+    pub(crate) fn synchronize_cluster_schedule(
         &self,
         schedule: &ClusterSchedule,
     ) -> Result<(), Report<RegistryError>> {
@@ -500,7 +504,7 @@ impl Registry {
         self.commit_planned(planned)
     }
 
-    pub fn plan_mutations(
+    pub(crate) fn plan_mutations(
         &self,
         domain: &DomainName,
         mutations: &[RegistryMutation],
@@ -513,7 +517,7 @@ impl Registry {
     /// run boundary validation too. Missing or incompatible cross-model relationships are treated
     /// as provisionally incomplete because a later statement in the same atomic transaction run
     /// may repair them.
-    pub fn preflight_transaction_mutations(
+    pub(crate) fn preflight_transaction_mutations(
         &self,
         domain: &DomainName,
         mutations: &[RegistryMutation],
@@ -1061,7 +1065,7 @@ impl Registry {
         })
     }
 
-    pub fn commit_planned(
+    pub(crate) fn commit_planned(
         &self,
         planned: PlannedMutations,
     ) -> Result<RuntimeChanges, Report<RegistryError>> {
@@ -1126,7 +1130,7 @@ impl Registry {
         Ok(planned.runtime_changes)
     }
 
-    pub fn rollback_committed(
+    pub(crate) fn rollback_committed(
         &self,
         planned: PlannedMutations,
     ) -> Result<RuntimeChanges, Report<RegistryError>> {
@@ -1190,7 +1194,7 @@ impl Registry {
     /// outcome to answer for. Stored bytes that decode to another kind are corrupt storage rather
     /// than configuration a domain can hold, and they surface here once as
     /// [`RegistryError::StoredModelKindMismatch`].
-    pub fn get<M: UniquelyKindedModel>(
+    pub(crate) fn get<M: UniquelyKindedModel>(
         &self,
         domain: &DomainName,
         identifier: impl Into<ModelName>,
@@ -1216,7 +1220,7 @@ impl Registry {
     /// `SHOW CREATE` takes the kind from the statement it is rendering, so it reads the union and
     /// renders whatever the domain stores. Every read that names its kind in its own source uses
     /// [`Self::get`] instead.
-    pub fn get_of_kind(
+    pub(crate) fn get_of_kind(
         &self,
         domain: &DomainName,
         kind: ModelKind,
@@ -1232,7 +1236,7 @@ impl Registry {
     ///
     /// `CREATE ... IF NOT EXISTS` only asks whether the name is taken, so it never decodes the
     /// stored model to find out.
-    pub fn contains(
+    pub(crate) fn contains(
         &self,
         domain: &DomainName,
         kind: ModelKind,
@@ -1243,7 +1247,7 @@ impl Registry {
             .change_context(RegistryError::LoadStoredModels)
     }
 
-    pub fn list_identifiers(
+    pub(crate) fn list_identifiers(
         &self,
         domain: &DomainName,
         kind: ModelKind,
@@ -1257,7 +1261,7 @@ impl Registry {
     /// Identifiers of `kind` in the configuration `queued` produces when applied to `domain` in
     /// written order. Only the create and drop sequence decides a name, so an intermediate
     /// configuration that does not yet resolve still reports the names it defines.
-    pub fn resulting_identifiers(
+    pub(crate) fn resulting_identifiers(
         &self,
         domain: &DomainName,
         kind: ModelKind,
@@ -1289,7 +1293,7 @@ impl Registry {
     /// The models of `domain` as `queued` leaves them, applied in written order and without
     /// validating the result. An alteration whose target is gone is skipped, because this describes
     /// configuration a client is still writing rather than a plan that will be persisted.
-    pub fn resulting_models(
+    pub(crate) fn resulting_models(
         &self,
         domain: &DomainName,
         queued: &[RegistryMutation],
@@ -1307,12 +1311,12 @@ impl Registry {
         Ok(models.into_iter().map(|(_, model)| model).collect())
     }
 
-    pub fn active_graph(&self, domain: &DomainName) -> Option<ActiveGraph> {
+    pub(crate) fn active_graph(&self, domain: &DomainName) -> Option<ActiveGraph> {
         let state = self.state.read();
         state.domains.get(domain).map(|ns| ns.graph.clone())
     }
 
-    pub fn placement_plan(
+    pub(crate) fn placement_plan(
         &self,
         domain: &DomainName,
         default_policy: PlacementPolicy,
@@ -1324,7 +1328,7 @@ impl Registry {
             .map(|domain_state| domain_state.graph.placement_plan(default_policy))
     }
 
-    pub fn active_graphs(&self) -> Vec<(DomainName, ActiveGraph)> {
+    pub(crate) fn active_graphs(&self) -> Vec<(DomainName, ActiveGraph)> {
         let state = self.state.read();
         let mut graphs = state
             .domains
@@ -1335,7 +1339,7 @@ impl Registry {
         graphs
     }
 
-    pub fn active_domain_entities(&self, domain: &DomainName) -> Vec<NodeRef> {
+    pub(crate) fn active_domain_entities(&self, domain: &DomainName) -> Vec<NodeRef> {
         let state = self.state.read();
         let Some(domain_state) = state.domains.get(domain) else {
             return Vec::new();
@@ -1432,7 +1436,7 @@ fn classify_quiesce_level(base: Option<&Model>, candidate: Option<&Model>) -> Qu
 }
 
 #[derive(Debug, Clone)]
-pub enum RegistryMutation {
+pub(crate) enum RegistryMutation {
     Create(Box<Model>),
     AlterSchema(AlterSchema),
     AlterWireJsonSchema(AlterWireSchema<JsonType>),
@@ -1617,7 +1621,7 @@ enum RegistryPersistMutation {
 }
 
 #[derive(Debug, Clone)]
-pub struct PlannedMutations {
+pub(crate) struct PlannedMutations {
     domain: DomainName,
     batch_size: usize,
     operation_name: String,
@@ -1630,37 +1634,37 @@ pub struct PlannedMutations {
 }
 
 #[derive(Debug, Clone)]
-pub struct TransactionMutationPreflight {
+pub(crate) struct TransactionMutationPreflight {
     planned: Option<PlannedMutations>,
     mutation_quiesce_levels: Vec<QuiesceLevel>,
 }
 
 impl TransactionMutationPreflight {
-    pub fn planned(&self) -> Option<&PlannedMutations> {
+    pub(crate) fn planned(&self) -> Option<&PlannedMutations> {
         self.planned.as_ref()
     }
 
-    pub fn mutation_quiesce_levels(&self) -> &[QuiesceLevel] {
+    pub(crate) fn mutation_quiesce_levels(&self) -> &[QuiesceLevel] {
         &self.mutation_quiesce_levels
     }
 }
 
 impl PlannedMutations {
-    pub fn quiesce(&self) -> &QuiescePlan {
+    pub(crate) fn quiesce(&self) -> &QuiescePlan {
         &self.quiesce
     }
 
-    pub fn is_noop(&self) -> bool {
+    pub(crate) fn is_noop(&self) -> bool {
         self.models_to_persist.is_empty() && self.drops_in_batch.is_empty()
     }
 
-    pub fn candidate_graph(&self) -> Option<ActiveGraph> {
+    pub(crate) fn candidate_graph(&self) -> Option<ActiveGraph> {
         self.runtime_changes.graph.clone()
     }
 
     /// Every model the batch would create or replace, ordered by kind and identifier so boundary
     /// validation reports the same model first for the same batch.
-    pub fn changed_models(&self) -> Vec<&Model> {
+    pub(crate) fn changed_models(&self) -> Vec<&Model> {
         let mut changed = self.models_to_persist.iter().collect::<Vec<_>>();
         changed.sort_by(|(left, _), (right, _)| {
             left.kind
@@ -1680,7 +1684,7 @@ impl PlannedMutations {
     /// Every model of one kind the batch would leave active, including the models it does not
     /// change. Callers that must compile or bind a whole family at once need the candidate set,
     /// not just the mutated members.
-    pub fn candidate_models_of_kind(&self, kind: ModelKind) -> Vec<&Model> {
+    pub(crate) fn candidate_models_of_kind(&self, kind: ModelKind) -> Vec<&Model> {
         let mut candidates = self
             .domain_state
             .models
@@ -3141,60 +3145,60 @@ impl DomainState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlacementPlan {
-    pub rules: Vec<PlacementRulePlan>,
-    pub effective_pairs: Vec<PlacementEffectivePair>,
-    pub require_groups: Vec<PlacementRequireGroupPlan>,
+pub(crate) struct PlacementPlan {
+    pub(crate) rules: Vec<PlacementRulePlan>,
+    pub(in crate::registry) effective_pairs: Vec<PlacementEffectivePair>,
+    pub(crate) require_groups: Vec<PlacementRequireGroupPlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlacementRulePlan {
-    pub name: ModelName,
-    pub from: Vec<ModelName>,
-    pub to: Vec<ModelName>,
-    pub policy: PlacementPolicy,
-    pub rank: Option<NonZeroU64>,
-    pub endpoint_pairs: Vec<PlacementEndpointPairPlan>,
-    pub claims: Vec<PlacementRuleClaimPlan>,
+pub(crate) struct PlacementRulePlan {
+    pub(crate) name: ModelName,
+    pub(in crate::registry) from: Vec<ModelName>,
+    pub(in crate::registry) to: Vec<ModelName>,
+    pub(crate) policy: PlacementPolicy,
+    pub(crate) rank: Option<NonZeroU64>,
+    pub(crate) endpoint_pairs: Vec<PlacementEndpointPairPlan>,
+    pub(crate) claims: Vec<PlacementRuleClaimPlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlacementEndpointPairPlan {
-    pub source: NodeRef,
-    pub destination: NodeRef,
-    pub connected: bool,
-    pub corridor: Vec<NodeRef>,
-    pub witnesses: Vec<PlacementCorridorWitness>,
+pub(crate) struct PlacementEndpointPairPlan {
+    pub(crate) source: NodeRef,
+    pub(crate) destination: NodeRef,
+    pub(crate) connected: bool,
+    pub(crate) corridor: Vec<NodeRef>,
+    pub(crate) witnesses: Vec<PlacementCorridorWitness>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlacementCorridorWitness {
-    pub captured: NodeRef,
-    pub path: Vec<NodeRef>,
+pub(crate) struct PlacementCorridorWitness {
+    pub(in crate::registry) captured: NodeRef,
+    pub(crate) path: Vec<NodeRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlacementRuleClaimPlan {
-    pub left: NodeRef,
-    pub right: NodeRef,
-    pub effective: bool,
-    pub effective_policy: PlacementPolicy,
-    pub winning_rules: Vec<PlacementName>,
+pub(crate) struct PlacementRuleClaimPlan {
+    pub(crate) left: NodeRef,
+    pub(crate) right: NodeRef,
+    pub(crate) effective: bool,
+    pub(crate) effective_policy: PlacementPolicy,
+    pub(crate) winning_rules: Vec<PlacementName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlacementEffectivePair {
-    pub left: NodeRef,
-    pub right: NodeRef,
-    pub policy: PlacementPolicy,
-    pub winning_rules: Vec<PlacementName>,
-    pub from_domain_default: bool,
+pub(crate) struct PlacementEffectivePair {
+    pub(crate) left: NodeRef,
+    pub(crate) right: NodeRef,
+    pub(in crate::registry) policy: PlacementPolicy,
+    pub(crate) winning_rules: Vec<PlacementName>,
+    pub(in crate::registry) from_domain_default: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlacementRequireGroupPlan {
-    pub members: Vec<NodeRef>,
-    pub bonds: Vec<PlacementEffectivePair>,
+pub(crate) struct PlacementRequireGroupPlan {
+    pub(crate) members: Vec<NodeRef>,
+    pub(crate) bonds: Vec<PlacementEffectivePair>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -4012,16 +4016,16 @@ fn placement_union(parent: &mut HashMap<NodeRef, NodeRef>, left: &NodeRef, right
 }
 
 #[derive(Debug, Clone)]
-pub struct ActiveGraph {
+pub(crate) struct ActiveGraph {
     graph: DiGraph<ActiveNode, EdgeKind>,
     indices: HashMap<NodeRef, NodeIndex>,
     placement: PlacementAnalysis,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct DataflowGraphCounts {
-    pub nodes: usize,
-    pub relays: usize,
+pub(crate) struct DataflowGraphCounts {
+    pub(crate) nodes: usize,
+    pub(crate) relays: usize,
 }
 
 #[cfg(feature = "testing")]
@@ -4033,7 +4037,9 @@ pub enum SchedulerMode {
 }
 
 impl ActiveGraph {
-    pub fn from_scheduled_models(schedule: &DomainSchedule) -> Result<Self, Report<RegistryError>> {
+    pub(crate) fn from_scheduled_models(
+        schedule: &DomainSchedule,
+    ) -> Result<Self, Report<RegistryError>> {
         let models = schedule
             .nodes
             .values()
@@ -4042,25 +4048,28 @@ impl ActiveGraph {
         DomainState::build(&schedule.domain, &models).map(|state| state.graph)
     }
 
-    pub fn placement_plan(&self, default_policy: PlacementPolicy) -> PlacementPlan {
+    pub(in crate::registry) fn placement_plan(
+        &self,
+        default_policy: PlacementPolicy,
+    ) -> PlacementPlan {
         self.placement.plan(default_policy)
     }
 
-    pub fn node(&self, kind: ModelKind, identifier: &ModelName) -> Option<&ActiveNode> {
+    pub(crate) fn node(&self, kind: ModelKind, identifier: &ModelName) -> Option<&ActiveNode> {
         self.indices
             .get(&NodeRef::new(kind, identifier.clone()))
             .and_then(|index| self.graph.node_weight(*index))
     }
 
-    pub fn node_count(&self) -> usize {
+    pub(in crate::registry) fn node_count(&self) -> usize {
         self.graph.node_count()
     }
 
-    pub fn edge_count(&self) -> usize {
+    pub(in crate::registry) fn edge_count(&self) -> usize {
         self.graph.edge_count()
     }
 
-    pub fn dataflow_graph_counts(&self) -> DataflowGraphCounts {
+    pub(crate) fn dataflow_graph_counts(&self) -> DataflowGraphCounts {
         let mut nodes = HashSet::<String>::default();
         let mut relays = HashSet::<String>::default();
         for node in self
@@ -4086,7 +4095,7 @@ impl ActiveGraph {
         }
     }
 
-    pub fn edges(&self) -> Vec<ActiveEdge> {
+    pub(crate) fn edges(&self) -> Vec<ActiveEdge> {
         self.graph
             .edge_references()
             .map(|edge| {
@@ -4111,7 +4120,7 @@ impl ActiveGraph {
             .collect()
     }
 
-    pub fn nodes(&self) -> Vec<ActiveNode> {
+    pub(crate) fn nodes(&self) -> Vec<ActiveNode> {
         self.graph.node_weights().cloned().collect()
     }
 
@@ -4211,7 +4220,11 @@ impl ActiveGraph {
         *hasher.finalize().as_bytes()
     }
 
-    pub fn schema_fingerprint(&self, kind: ModelKind, identifier: &ModelName) -> Option<[u8; 32]> {
+    pub(crate) fn schema_fingerprint(
+        &self,
+        kind: ModelKind,
+        identifier: &ModelName,
+    ) -> Option<[u8; 32]> {
         self.indices
             .get(&NodeRef::new(kind, identifier.clone()))
             .map(|index| self.schema_fingerprint_for_index(*index))
@@ -4221,7 +4234,7 @@ impl ActiveGraph {
     /// [`Self::schedule_for_domain_with_mode`] so a scenario can pick the mode, which leaves this
     /// entry point compiled for production builds and for this crate's own tests.
     #[cfg(any(not(feature = "testing"), test))]
-    pub fn schedule_for_domain(
+    pub(crate) fn schedule_for_domain(
         &self,
         domain: &DomainName,
         cluster_nodes: &[ClusterNodeName],
@@ -4421,13 +4434,13 @@ impl ActiveGraph {
         }
     }
 
-    pub fn describe(&self) -> String {
+    pub(in crate::registry) fn describe(&self) -> String {
         self.to_dataflow_graph("").render_ascii()
     }
 
     /// The graph the console draws: every dataflow node, the record flow between them, the
     /// external clients at either end, and the materialized state they read.
-    pub fn to_dataflow_graph(&self, domain: impl Into<String>) -> DataflowGraph {
+    pub(crate) fn to_dataflow_graph(&self, domain: impl Into<String>) -> DataflowGraph {
         let mut schemas = HashMap::default();
         for index in self.graph.node_indices() {
             let node = self
@@ -4597,10 +4610,10 @@ struct PlacementCandidate {
 
 /// One edge of an active graph, named by the models it joins and what the dependency means.
 #[derive(Debug, Clone)]
-pub struct ActiveEdge {
-    pub from: ModelName,
-    pub to: ModelName,
-    pub kind: EdgeKind,
+pub(crate) struct ActiveEdge {
+    pub(crate) from: ModelName,
+    pub(crate) to: ModelName,
+    pub(crate) kind: EdgeKind,
 }
 
 /// An external system drawn beside the node that talks to it: the client's own drawn node,
@@ -4611,17 +4624,17 @@ struct DataflowClient {
 }
 
 #[derive(Debug, Clone)]
-pub struct ActiveNode {
-    pub identifier: ModelName,
-    pub kind: ModelKind,
-    pub config: Arc<Model>,
-    pub effective_branching: Option<Vec<FieldName>>,
-    pub effective_branching_schema: Option<SchemaName>,
+pub(crate) struct ActiveNode {
+    pub(crate) identifier: ModelName,
+    pub(crate) kind: ModelKind,
+    pub(crate) config: Arc<Model>,
+    pub(crate) effective_branching: Option<Vec<FieldName>>,
+    pub(crate) effective_branching_schema: Option<SchemaName>,
 }
 
 impl ActiveNode {
     /// How this node is addressed: the kind it is and the name it carries, together.
-    pub fn node_ref(&self) -> NodeRef {
+    pub(in crate::registry) fn node_ref(&self) -> NodeRef {
         NodeRef::new(self.kind, self.identifier.clone())
     }
 
@@ -5341,7 +5354,7 @@ const fn dataflow_processor_kind(kind: ModelKind) -> Option<DataflowProcessorKin
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum EdgeKind {
+pub(crate) enum EdgeKind {
     RequiredBy,
     SendsTo,
     CorrelationTimeout,
@@ -11554,6 +11567,15 @@ fn ensure_drop_targets_are_not_in_use(
 
     Ok(())
 }
+
+/// What the decisions layer exposes. Everything else this module and its submodules declare is
+/// `pub(in crate::registry)` or narrower, so the control plane reaches the registry only through
+/// the names below.
+///
+/// The models, plans and graph types this module still declares inline carry `pub(crate)` on their
+/// own declarations. Splitting this module by owner moves each of them into the submodule that owns
+/// it, and this block is where they reappear.
+pub(crate) use relocation::{RelocationCoverage, RelocationMemberReason, RelocationUnit};
 
 #[cfg(test)]
 mod tests {

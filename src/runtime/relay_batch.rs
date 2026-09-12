@@ -12,7 +12,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
-pub struct RelayMessage {
+pub(crate) struct RelayMessage {
     pub(crate) key: Option<BranchKey>,
     pub(crate) record: RuntimeRow,
     pub(crate) acks: AckSet,
