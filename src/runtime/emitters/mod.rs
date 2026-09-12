@@ -182,6 +182,11 @@ enum CompiledSqsFifoGroup {
     Expression(CompiledProgramWithMaterializedInterest),
 }
 
+/// Why a row publishes under no `FIFO GROUP FROM BRANCH` group: it arrived unbranched, so there is
+/// no branch key to take the group from. The reason travels with that row alone and the send turns
+/// it into that row's message error.
+const UNBRANCHED_FIFO_GROUP: &str = "SQS FIFO GROUP FROM BRANCH received an unbranched record";
+
 /// The publishing behavior of the one transport family a sink belongs to.
 ///
 /// `MODE` is checked against the sink before anything else, so the family and the settings it
@@ -403,6 +408,16 @@ struct EmitterBatchContext<'a> {
     filter_map: Option<&'a CompiledEmitterFilterMapProgram>,
     sqs_fifo_group: Option<&'a CompiledSqsFifoGroup>,
     materialized_state: &'a [nervix_models::MaterializedStateDependency],
+}
+
+/// A source batch whose node-wide materialized dependencies are resolved.
+///
+/// The dependencies are read once for the batch, so the snapshot and the execution time travel
+/// with it and every emitter program for it reads exactly the same state.
+struct ResolvedEmitterInput {
+    batch: RelayRecordBatch,
+    materialized_values: HashMap<String, RuntimeValue>,
+    execution_now: Timestamp,
 }
 
 #[derive(Clone)]
@@ -4367,14 +4382,7 @@ impl EmitterBatchContext<'_> {
             Ok(messages) => messages,
             Err(error) => {
                 let (message, batch) = *error;
-                self.runtime.handle_general_error_for_acks(
-                    self.domain,
-                    ModelKind::Emitter,
-                    self.emitter,
-                    self.error_policies,
-                    batch.acks.iter(),
-                    format!("{reason}; {message}"),
-                );
+                self.report_general_error(batch.acks.iter(), format!("{reason}; {message}"));
                 return;
             }
         };
@@ -4407,30 +4415,57 @@ impl EmitterBatchContext<'_> {
         }
     }
 
-    async fn process(
+    /// Report a failure that no single message owns, so the node-wide general error policy
+    /// decides what happens to the acknowledgments the failed work was holding.
+    fn report_general_error<'a>(&self, acks: impl IntoIterator<Item = &'a AckSet>, reason: String) {
+        self.runtime.handle_general_error_for_acks(
+            self.domain,
+            ModelKind::Emitter,
+            self.emitter,
+            self.error_policies,
+            acks,
+            reason,
+        );
+    }
+
+    /// Deliver the message errors a plan recorded, one for each row its program rejected.
+    async fn deliver_planned_message_errors(&self, errors: Vec<PlannedMessageError>) {
+        self.runtime
+            .handle_planned_message_errors(
+                self.domain,
+                ModelKind::Emitter,
+                self.emitter,
+                self.error_policies,
+                errors,
+            )
+            .await;
+    }
+
+    /// Resolve the node-wide materialized dependencies of one source batch.
+    ///
+    /// `None` means the batch is no longer this call's to publish: a declaration skipped it, the
+    /// wait for required state ended without it, or resolution failed and its acknowledgments
+    /// have already been reported.
+    async fn resolve_materialized_dependencies(
         &self,
         input_relay: &RelayName,
         batch: RelayRecordBatch,
-        shutdown_rx: &mut watch::Receiver<bool>,
-        wait_for_required_state: bool,
-        quiesce_work: Option<&mut NodeQuiesceWorkGuard>,
-    ) -> Option<EmitterPublishBatch> {
+        wait: MaterializedBatchWaitContext<'_>,
+    ) -> Option<ResolvedEmitterInput> {
+        // Resolution consumes the batch, so the acknowledgments a failure would report are taken
+        // while the batch still holds them.
         let dependency_error_acks = batch.acks.clone();
-        let batch = match self
+        let resolution = self
             .runtime
             .resolve_materialized_dependencies_for_batch(
                 self.domain,
                 input_relay,
                 self.materialized_state,
                 batch,
-                MaterializedBatchWaitContext {
-                    shutdown_rx,
-                    wait_for_required_state,
-                    quiesce_work,
-                },
+                wait,
             )
-            .await
-        {
+            .await;
+        let resolved = match resolution {
             Ok(Some(resolved)) => resolved,
             Ok(None) => return None,
             Err(error) => {
@@ -4450,131 +4485,162 @@ impl EmitterBatchContext<'_> {
         };
         // The node-wide dependencies are resolved once for the batch, so every emitter program
         // reads that snapshot instead of re-reading the state store per program.
-        let (batch, materialized_values, execution_now) = batch;
+        let (batch, materialized_values, execution_now) = resolved;
+        Some(ResolvedEmitterInput {
+            batch,
+            materialized_values,
+            execution_now,
+        })
+    }
+
+    async fn process(
+        &self,
+        input_relay: &RelayName,
+        batch: RelayRecordBatch,
+        shutdown_rx: &mut watch::Receiver<bool>,
+        wait_for_required_state: bool,
+        quiesce_work: Option<&mut NodeQuiesceWorkGuard>,
+    ) -> Option<EmitterPublishBatch> {
+        let resolved = self
+            .resolve_materialized_dependencies(
+                input_relay,
+                batch,
+                MaterializedBatchWaitContext {
+                    shutdown_rx,
+                    wait_for_required_state,
+                    quiesce_work,
+                },
+            )
+            .await?;
+        let ResolvedEmitterInput {
+            batch,
+            materialized_values,
+            execution_now,
+        } = resolved;
+
         let batch = self
             .filter_source_batch(input_relay, batch, &materialized_values, execution_now)
             .await?;
-        let sqs_message_groups = match self.sqs_fifo_group {
+
+        // FIFO groups are evaluated over the filtered source batch and stay indexed by source
+        // row, so the filter map below can hand every published row the group its own input
+        // produced. A row that cannot produce one keeps its reason and is rejected at the send;
+        // only a failure of the whole evaluation drops the batch here.
+        let source_sqs_message_groups = match self.sqs_fifo_group {
             None => vec![Ok(None); batch.batch.batch().num_rows()],
-            Some(CompiledSqsFifoGroup::FromBranch) => batch
-                .keys
-                .iter()
-                .map(|key| match key.as_ref() {
-                    Some(key) => Ok(Some(key.as_str().to_string())),
-                    None => {
-                        Err("SQS FIFO GROUP FROM BRANCH received an unbranched record".to_string())
-                    }
-                })
-                .collect(),
+            Some(CompiledSqsFifoGroup::FromBranch) => {
+                let mut groups = Vec::with_capacity(batch.keys.len());
+                for key in &batch.keys {
+                    let group = match key.as_ref() {
+                        Some(key) => Ok(Some(key.as_str().to_string())),
+                        None => Err(UNBRANCHED_FIFO_GROUP.to_string()),
+                    };
+                    groups.push(group);
+                }
+                groups
+            }
             Some(CompiledSqsFifoGroup::Expression(program)) => {
-                match evaluate_sqs_fifo_group_program(
+                let evaluated = evaluate_sqs_fifo_group_program(
                     self.emitter,
                     program,
                     &batch,
                     execution_now,
                     &materialized_values,
                 )
-                .await
-                {
+                .await;
+                match evaluated {
                     Ok(groups) => groups,
                     Err(error) => {
-                        self.runtime.handle_general_error_for_acks(
-                            self.domain,
-                            ModelKind::Emitter,
-                            self.emitter,
-                            self.error_policies,
-                            error.acks.iter(),
-                            error.reason,
-                        );
+                        self.report_general_error(error.acks.iter(), error.reason);
                         return None;
                     }
                 }
             }
         };
+
         let Some(filter_map) = self.filter_map else {
-            return match EmitterPublishBatch::from_batch(batch, execution_now)
-                .with_sqs_message_groups(sqs_message_groups)
-            {
-                Ok(batch) => Some(batch),
+            // Without a filter map every source row publishes as it arrived, so the groups
+            // already align with the batch row for row.
+            let publish_batch = EmitterPublishBatch::from_batch(batch, execution_now);
+            match publish_batch.with_sqs_message_groups(source_sqs_message_groups) {
+                Ok(batch) => return Some(batch),
                 Err(error) => {
-                    self.runtime.handle_general_error_for_acks(
-                        self.domain,
-                        ModelKind::Emitter,
-                        self.emitter,
-                        self.error_policies,
+                    self.report_general_error(
                         std::iter::empty::<&AckSet>(),
                         format!(
                             "emitter '{}' failed to build SQS FIFO group batch: {error}",
                             self.emitter.as_str()
                         ),
                     );
-                    None
+                    return None;
                 }
-            };
+            }
         };
-        match plan_emitter_filter_map_batch(
+
+        let planned = plan_emitter_filter_map_batch(
             self.emitter,
             filter_map,
             batch,
             execution_now,
             &materialized_values,
         )
-        .await
-        {
-            Ok(plan) => {
-                let selected_sqs_message_groups = plan
-                    .source_rows
-                    .iter()
-                    .map(|row| match sqs_message_groups.get(*row) {
-                        Some(group) => group.clone(),
-                        None => Err(format!(
-                            "SQS FIFO group source row {row} is outside the source batch"
-                        )),
-                    })
-                    .collect::<Vec<_>>();
-                self.runtime
-                    .handle_planned_message_errors(
-                        self.domain,
-                        ModelKind::Emitter,
-                        self.emitter,
-                        self.error_policies,
-                        plan.message_errors,
-                    )
-                    .await;
-                let batch = plan.batch?;
-                match EmitterPublishBatch::new(batch, plan.headers, execution_now)
-                    .and_then(|batch| batch.with_sqs_message_groups(selected_sqs_message_groups))
-                {
-                    Ok(batch) => Some(batch),
-                    Err(error) => {
-                        self.runtime.handle_general_error_for_acks(
-                            self.domain,
-                            ModelKind::Emitter,
-                            self.emitter,
-                            self.error_policies,
-                            std::iter::empty::<&AckSet>(),
-                            format!(
-                                "emitter '{}' failed to build filtered header batch: {}",
-                                self.emitter.as_str(),
-                                error
-                            ),
-                        );
-                        None
-                    }
-                }
-            }
+        .await;
+        let plan = match planned {
+            Ok(plan) => plan,
             Err(error) => {
-                self.runtime.handle_general_error_for_acks(
-                    self.domain,
-                    ModelKind::Emitter,
-                    self.emitter,
-                    self.error_policies,
-                    error.acks.iter(),
-                    error.reason,
-                );
+                self.report_general_error(error.acks.iter(), error.reason);
+                return None;
+            }
+        };
+
+        // The plan reports the source row of every output row in output order, so reading the
+        // source groups through it keeps each published row with the group its own input
+        // produced.
+        let mut selected_sqs_message_groups = Vec::with_capacity(plan.source_rows.len());
+        for source_row in &plan.source_rows {
+            let group = match source_sqs_message_groups.get(*source_row) {
+                Some(group) => group.clone(),
+                None => Err(format!(
+                    "SQS FIFO group source row {source_row} is outside the source batch"
+                )),
+            };
+            selected_sqs_message_groups.push(group);
+        }
+
+        self.deliver_planned_message_errors(plan.message_errors)
+            .await;
+
+        // A plan that kept no row has no batch to publish, and the rows it rejected have just
+        // been reported.
+        let batch = plan.batch?;
+        let publish_batch = match EmitterPublishBatch::new(batch, plan.headers, execution_now) {
+            Ok(publish_batch) => publish_batch,
+            Err(error) => {
+                self.report_filtered_batch_error(error);
+                return None;
+            }
+        };
+        match publish_batch.with_sqs_message_groups(selected_sqs_message_groups) {
+            Ok(batch) => Some(batch),
+            Err(error) => {
+                self.report_filtered_batch_error(error);
                 None
             }
         }
+    }
+
+    /// Report a filtered batch whose rows, headers, and FIFO groups stopped agreeing in count.
+    /// Both counts are checked while building the same batch, so either one failing is the same
+    /// failure to report.
+    fn report_filtered_batch_error(&self, error: String) {
+        self.report_general_error(
+            std::iter::empty::<&AckSet>(),
+            format!(
+                "emitter '{}' failed to build filtered header batch: {}",
+                self.emitter.as_str(),
+                error
+            ),
+        );
     }
 
     async fn filter_source_batch(
@@ -4600,25 +4666,14 @@ impl EmitterBatchContext<'_> {
         {
             Ok(plan) => plan,
             Err(error) => {
-                self.runtime.handle_general_error_for_acks(
-                    self.domain,
-                    ModelKind::Emitter,
-                    self.emitter,
-                    self.error_policies,
+                self.report_general_error(
                     error.acks.iter(),
                     format!("input relay '{}': {}", input_relay.as_str(), error.reason),
                 );
                 return None;
             }
         };
-        self.runtime
-            .handle_planned_message_errors(
-                self.domain,
-                ModelKind::Emitter,
-                self.emitter,
-                self.error_policies,
-                plan.message_errors,
-            )
+        self.deliver_planned_message_errors(plan.message_errors)
             .await;
         plan.batch
     }
