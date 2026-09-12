@@ -261,6 +261,7 @@ impl TransportState {
                 reason: "request deadline exceeds the monotonic clock range".to_string(),
             })?;
         let lease = self.lease(node_id, class, subquota, deadline).await?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
         let (body, content_length) = lease
             .connection
             .request_stream_raw(
@@ -270,7 +271,7 @@ impl TransportState {
                     body: Some(body),
                     response_class: class,
                     response_limit: class.control_body_limit(&self.executor),
-                    timeout: timeout_duration,
+                    timeout: remaining,
                     headers: &[],
                 },
             )

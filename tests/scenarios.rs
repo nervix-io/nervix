@@ -644,6 +644,101 @@ async fn then_clock_source_recorder_records_requests(
     }
 }
 
+#[then(expr = "within {string} clock source recorder {string} records at least {int} requests")]
+async fn then_clock_source_recorder_records_at_least_requests(
+    world: &mut ScenarioWorld,
+    duration: String,
+    name: String,
+    expected_count: u64,
+) {
+    let duration = humantime::parse_duration(&duration)
+        .assured("the Cucumber expression supplies a valid step duration");
+    let name = expand_placeholders(world, &name);
+    let deadline = Instant::now()
+        .checked_add(duration)
+        .assured("the Cucumber fixture duration fits the monotonic clock range");
+    loop {
+        tokio::task::consume_budget().await;
+        let observations = world
+            .dependencies
+            .clock_source_observations(&name)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("failed to read clock source recorder '{name}': {error}")
+            });
+        let Some(count) = observations.get("count") else {
+            panic!("clock source recorder '{name}' returned no count: {observations}");
+        };
+        let Some(observed_count) = count.as_u64() else {
+            panic!("clock source recorder '{name}' returned a nonnumeric count: {observations}");
+        };
+        if observed_count >= expected_count {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "clock source recorder '{name}' expected at least {expected_count} requests, observed \
+             {observed_count}: {observations}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[then(
+    expr = "the first {int} requests recorded by clock source recorder {string} are separated by \
+            at least {string}"
+)]
+async fn then_clock_source_requests_have_minimum_physical_gap(
+    world: &mut ScenarioWorld,
+    count: usize,
+    name: String,
+    minimum_gap: String,
+) {
+    let minimum_gap = humantime::parse_duration(&minimum_gap)
+        .assured("the Cucumber expression supplies a valid minimum gap duration");
+    let name = expand_placeholders(world, &name);
+    let observations = world
+        .dependencies
+        .clock_source_observations(&name)
+        .await
+        .unwrap_or_else(|error| panic!("failed to read clock source recorder '{name}': {error}"));
+    let Some(requests) = observations
+        .get("requests")
+        .and_then(serde_json::Value::as_array)
+    else {
+        panic!("clock source recorder '{name}' returned no request list: {observations}");
+    };
+    assert!(
+        requests.len() >= count,
+        "clock source recorder '{name}' expected at least {count} requests, observed {}: \
+         {observations}",
+        requests.len()
+    );
+    let mut received_at = Vec::with_capacity(count);
+    for (index, request) in requests.iter().take(count).enumerate() {
+        let Some(received_at_monotonic_nanos) = request
+            .get("received_at_monotonic_nanos")
+            .and_then(serde_json::Value::as_u64)
+        else {
+            panic!(
+                "clock source recorder '{name}' request {index} has no monotonic timestamp: \
+                 {request}"
+            );
+        };
+        received_at.push(received_at_monotonic_nanos);
+    }
+    for pair in received_at.windows(2) {
+        let gap = pair[1]
+            .checked_sub(pair[0])
+            .verified("the recorder returns requests in monotonic receipt order");
+        assert!(
+            u128::from(gap) >= minimum_gap.as_nanos(),
+            "clock source recorder '{name}' expected its first {count} requests to be at least \
+             {minimum_gap:?} apart, observed a {gap}ns gap in {received_at:?}"
+        );
+    }
+}
+
 fn decimal_seconds_to_unix_nanos(value: &str) -> i128 {
     let value = value.trim();
     let (negative, magnitude) = if let Some(magnitude) = value.strip_prefix('-') {
@@ -6465,6 +6560,17 @@ async fn then_nspl_commands_complete_within(
     world.active_session = Some(session);
     world.active_session_node = Some(node_id);
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
+}
+
+#[then(expr = "within {string} these NSPL commands complete on the leader node")]
+#[when(expr = "within {string} these NSPL commands complete on the leader node")]
+async fn then_nspl_commands_complete_on_leader_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+    #[step] step: &Step,
+) {
+    let leader = current_leader_node(world).await;
+    then_nspl_commands_complete_within(world, duration, leader, step).await;
 }
 
 #[given("the leader node is configured with these NSPL commands")]

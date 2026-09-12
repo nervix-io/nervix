@@ -1355,6 +1355,17 @@ mod tests {
         const TIMEOUT: Duration = Duration::from_secs(2);
     }
 
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct DeadlineStreamRequest {
+        response_delay_ms: u64,
+    }
+
+    impl InterconnectStreamRequest for DeadlineStreamRequest {
+        const NAME: &'static str = "test_deadline_stream";
+        const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
+        const TIMEOUT: Duration = Duration::from_millis(200);
+    }
+
     struct ConnectedTransports {
         _authority: TestCertificateAuthority,
         transport_a: Transport,
@@ -1750,6 +1761,77 @@ mod tests {
         assert!(matches!(
             error.current_context(),
             RequestError::Stream { .. }
+        ));
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stream_slot_queueing_consumes_the_request_deadline() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_b,
+            ..
+        } = connected_transports().await;
+        transport_b
+            .register_stream_handler::<DeadlineStreamRequest, _, _>(
+                |_context, request| async move {
+                    if request.response_delay_ms != 0 {
+                        tokio::time::sleep(Duration::from_millis(request.response_delay_ms)).await;
+                    }
+                    Ok(StreamingResponse::new(
+                        1,
+                        futures_util::stream::pending::<Result<ChargedBytes, StreamHandlerError>>(),
+                    ))
+                },
+            )
+            .assured("the deadline stream handler has a unique test name");
+        timeout(Duration::from_secs(5), async {
+            while !transport_a.is_connected_to(&node_b) {
+                tokio::task::consume_budget().await;
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .assured("the connected test transports become ready");
+
+        let held_stream = transport_a
+            .request_stream(
+                &node_b,
+                DeadlineStreamRequest {
+                    response_delay_ms: 0,
+                },
+            )
+            .await
+            .assured("the first request holds the reserved snapshot stream slot");
+
+        let queued_transport = transport_a.clone();
+        let queued_node = node_b.clone();
+        let queued = tokio::spawn(async move {
+            queued_transport
+                .request_stream(
+                    &queued_node,
+                    DeadlineStreamRequest {
+                        response_delay_ms: 150,
+                    },
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        drop(held_stream);
+
+        let result = queued
+            .await
+            .assured("the queued stream request task remains attached");
+        let error = match result {
+            Ok(_) => panic!("queueing must consume the stream setup deadline"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.current_context(),
+            RequestError::Stream { reason, .. } if reason.contains("timed out")
         ));
 
         transport_a.shutdown().await;

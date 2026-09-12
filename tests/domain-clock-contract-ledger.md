@@ -109,6 +109,44 @@ belongs to [14](https://app.clickup.com/t/86bbwct0e).
 The fixture endpoints do not provision product-owned external objects. A scenario starts the mock
 dependency explicitly and scopes recorder names with `{{test_id}}`.
 
+## Physical infrastructure deadline audit
+
+Task 11 audited physical waits at their semantic owner. A `Duration` is configuration, not a clock
+coordinate; it becomes physical only when the owner starts a monotonic timer. A domain clock is
+introduced only for an explicit NSPL cadence or semantic lifetime. The resulting ownership is:
+
+| Semantic owner | Physical operations retained by that owner | Bound and evidence |
+| --- | --- | --- |
+| Connector HTTP client | DNS, socket connection, TLS, request, response headers, and response-body transfer | The client's request timeout spans the request future and is separate from an ingestor's domain-bound `EVERY`. `HTTP request timeout stays physical while logical polling cadence scales` observes one timed-out request at rate `0.0001`, at least three at rate `100`, and at least 200 milliseconds between starts under a 250 millisecond timeout. |
+| Polling ingestor lifecycle | Quiesce and shutdown cancellation of an in-flight HTTP or Prometheus operation | The HTTP request, HTTP response body, and complete Prometheus query futures now race their task's shutdown and quiesce signals. `Cancelling an external poll stays physical across extreme clock generations` bounds `STOP` by 1500 milliseconds while a 30-second request is in flight, before and after replacing the historical clock generation. |
+| Broker and connector runtime | Reconnect backoff, broker RPC/confirmation timeout, ACK timeout, and ACK-alive refresh | `RuntimeReconnectBackoff` and sink confirmation waits use monotonic timers. `EmitterRetrySchedule` holds physical retry and ACK-alive deadlines separately from its still-armed logical flush or commit cadence. `Delayed acknowledgements stay alive on physical time at extreme domain rates` holds a Kafka delivery for 1200 milliseconds without replay at both extreme rates and both topologies. |
+| Interconnect connection | TCP and TLS setup, certificate lifetime, reconnect, stream progress, request completion, idle retirement, and drain | Setup and progress waits use monotonic time. Certificate validity is read in actual UTC once and its remaining lifetime becomes a monotonic expiration deadline. A request constructs one deadline before acquiring its local queue lease and passes only the remaining duration to transfer, so queueing consumes the operation's bound. `stream_slot_queueing_consumes_the_request_deadline`, `membership_removal_cancels_an_active_request`, and `shutdown_cancels_an_active_request` are the direct unit controls. |
+| Cluster liveness | Gossip probing, health RPCs, node-unavailability detection, TLS reload, and peer retirement | These are process and node liveness operations driven by monotonic intervals and cancellation tokens. `Silent peers obey the same shutdown bound without and after a domain clock` applies the same 12-second node-shutdown bound with no installed clock and after a `0.0001` to `100` generation change. |
+| Raft | Election, heartbeat, membership mutation, replication RPC, snapshot transfer, and retained-log admission | OpenRaft receives physical heartbeat and election durations. RPC options become interconnect request deadlines; heartbeat traffic has a dedicated management connection, while snapshot chunks carry the remaining monotonic transfer deadline. Retention admission is bounded by one physical timeout around its queueing loop. |
+| Source grouping and route buffers | Five-millisecond source-idle collection and the 100-microsecond `FLUSH IMMEDIATE` coalescing minimum | Source idle records a Tokio instant at accepted input. `FLUSH IMMEDIATE` constructs an opaque physical deadline; `COLLECT FOR` and `FLUSH EACH` construct logical deadlines. The task 07 branch-buffering scenarios and the `each_and_immediate_keep_distinct_deadline_coordinates` unit control cover the split. |
+| Snapshot and maintenance owners | Runtime-state snapshot ticks, Raft snapshot and log-retention scans, branch maintenance scans, metrics maintenance, and connector maintenance | Each owner uses a Tokio interval or monotonic deadline and applies missed-tick policy locally. None binds a domain clock. Snapshot data and ACK state keep their existing persistence classifications. |
+| Execution and memory admission | Worker admission, bounded queue capacity, cancellation, blocking-job completion, and shutdown join or abort grace | The executor owns its queue bounds and cancellation handles. Dropping queued work releases its reservation; running work observes cancellation while retaining its charge until exit. Runtime lifecycle owners impose physical grace periods on task joins and drains. |
+| Materialized dependency owner | `REQUIRED WAIT` retention and explicit cancellation | There is no total-lifetime timer. Missing state retains the admitted Arrow batch and its ACK guard, wakes on state change or a physical availability poll, and restarts dependency resolution from the first declaration. Shutdown and terminal drain explicitly no-ACK the retained work. The public scenario retains two interleaved branches beyond 1200 milliseconds, preserves their keys and fields when state arrives, and then bounds cancellation of a third branch. |
+
+Task 12 owns HTTP/2 pool partitioning and the relay-admission protocol. Task 11 changes only the
+generic remaining-time propagation after an existing connection lease; it does not change pool or
+admission semantics.
+
+### Permitted actual-UTC observations
+
+Actual UTC has these semantic owners. None of these observations waits directly on wall time.
+
+| Semantic owner | Permitted observation |
+| --- | --- |
+| Domain-clock mapping | An unpaced read and the physical anchor of a new paced mapping observe actual UTC through the runtime physical-time boundary. Once created, the mapping projects logical time with a process-local monotonic instant. |
+| External telemetry connectors | OTEL observation timestamps and omitted external observation fields use actual UTC. Sentry and OTEL interpret an HTTP-date `Retry-After` against actual UTC, convert the result to a duration, and hand it to the emitter's monotonic retry schedule. User-authored event timestamps and domain `VALUES` keep their declared logical or preserved-source classes. |
+| Interconnect security | Certificate `not before` and `not after` values are compared with actual UTC. A valid certificate's remaining lifetime is converted immediately to a monotonic connection deadline. |
+| Edge decoding | RFC 3164 syslog, whose wire form omits a year, supplies the current UTC year while decoding the external source timestamp. |
+| Control-plane records | Transaction, resource, credential-verification, administrative event, and observation metadata use actual UTC because they describe real control-plane events rather than domain execution. |
+| Cluster incarnation | A process start uses Unix-epoch nanoseconds as the restart generation that distinguishes gossip incarnations. It is identity metadata and never schedules a wait. |
+| Metrics | Monotonic instants age live wall series. Actual UTC stamps persisted wall snapshots so restart downtime can be observed and supplies external scrape and latency-observation timestamps. Domain-series windows and event watermarks retain domain timestamps. |
+| Context-free engine boundary | The generic UDF injector's context-free entry point supplies actual UTC for callers outside a Nervix domain. Every Nervix data-plane invocation uses the context-bearing entry point and supplies its domain execution snapshot. |
+
 ## Baseline probes and controls
 
 The desired-behavior unit probes established by task 01 are:
@@ -148,6 +186,11 @@ just test-scenarios --input tests/features/runtime/iceberg_emission.feature --ta
 just test-scenarios --input tests/features/runtime/sentry_emission.feature --tags @domain_execution_time
 just test-scenarios --input tests/features/runtime/otel_emission.feature --tags @domain_execution_time
 just test-scenarios --input tests/features/runtime/branch_activity_sampling.feature
+just test-scenarios --input tests/features/runtime/physical_infrastructure_deadlines.feature --tags @physical_poll_cancellation
+just test-scenarios --input tests/features/runtime/physical_infrastructure_deadlines.feature --tags @physical_request_timeout
+just test-scenarios --input tests/features/runtime/physical_infrastructure_deadlines.feature --tags @physical_required_wait
+just test-scenarios --input tests/features/runtime/physical_infrastructure_deadlines.feature --tags @physical_ack_keepalive
+just test-scenarios --input tests/features/runtime/physical_infrastructure_deadlines.feature --tags @physical_silent_peer
 ```
 
 The delayed-progress scenario is part of the ordinary suite after task 02. Task 05 enables the
@@ -162,13 +205,17 @@ emitter and Iceberg cadence, the physical `FLUSH IMMEDIATE` minimum across sink 
 physical retry and acknowledgement keepalive, and force-flush drain. Task 09
 adds the `domain_cadence` cases for recurring HTTP, Prometheus, and generator work. Task 10 adds
 `branch_activity_sampling.feature` for F9's accepted-input activity and logical retention.
+Task 11 adds `physical_infrastructure_deadlines.feature` for the cross-cutting physical boundary:
+poll cancellation, request timeout versus logical cadence, materialized `REQUIRED WAIT`, delayed
+ACK keepalive, and silent-peer shutdown before and after a clock-generation change.
 
-Physical controls are
-`tests::connection_lifetime::send_queue_admission_is_deadline_bound`,
-`tests::connection_lifetime::silent_outbound_tls_handshake_reaches_the_setup_deadline`, and the
-public scenario `Peer churn and silent handshakes leave the node responsive`. Source-time controls
-are `Unpaced HTTP ingestors accept explicit timestamp fields without a domain clock` and `Unpaced
-Kafka ingestors accept explicit timestamp fields without a domain clock`.
+Physical controls are `tests::stream_slot_queueing_consumes_the_request_deadline`,
+`tests::membership_removal_cancels_an_active_request`,
+`tests::shutdown_cancels_an_active_request`, and the public scenarios `Silent peers obey the same
+shutdown bound without and after a domain clock` and `Peer churn and silent handshakes leave the
+node responsive`. Source-time controls are `Unpaced HTTP ingestors accept explicit timestamp
+fields without a domain clock` and `Unpaced Kafka ingestors accept explicit timestamp fields
+without a domain clock`.
 
 The evidence recorded for this task consists only of the focused commands listed in the task's
 validation record. It does not assert that the complete Cucumber suite or final domain-clock
@@ -367,5 +414,29 @@ Recorded on 11 September 2026 against the task 10 worktree:
 Emitter delivery-latency observation still reads actual UTC against domain ingestion watermarks.
 That boundary belongs to [08](https://app.clickup.com/t/86bbwcrzd), which owns the emitter's clock
 classes and its clock-binding lifecycle.
+
+No complete Cucumber-suite or final qualification result is claimed by this record.
+
+## Task 11 validation record
+
+Recorded on 11 September 2026 against the task 11 worktree:
+
+| Probe | Result |
+| --- | --- |
+| HTTP poll cancellation before product changes | Expected red; with a mock source holding the response for 10 seconds, the one-node `STOP` did not complete within the 1500-millisecond physical bound. |
+| Interconnect stream-slot queue before product changes | Expected red; after spending about 150 milliseconds of a 200-millisecond setup bound in the local snapshot-stream queue, the second request received a fresh 200-millisecond transfer timeout and incorrectly succeeded. |
+| Poll cancellation | Pass; all four HTTP and Prometheus one- and three-node scenarios and all 38 steps cancelled 30-second in-flight operations within 1500 milliseconds across historical slow and replacement fast clock generations. |
+| Request timeout and cadence separation | Pass; both one- and three-node scenarios and all 30 steps kept the 250-millisecond request timeout physical while `EVERY 1s` followed domain rate, with request starts at least 200 milliseconds apart. |
+| Materialized `REQUIRED WAIT` | Pass; all four one- and three-node slow- and fast-rate scenarios and all 52 steps retained two interleaved branches beyond 1200 milliseconds, resumed them independently with the correct keys and fields, and cancelled a third pending branch on `STOP`. |
+| Delayed acknowledgement keepalive | Pass; all four one- and three-node slow- and fast-rate scenarios and all 48 steps held an attached Kafka acknowledgement beyond its 500-millisecond timeout and emitted exactly once after a 1200-millisecond stall. |
+| Silent-peer lifecycle | Pass; the three-node scenario and all 15 steps applied the same physical shutdown bound with an uninstalled paced clock and after historical slow and future fast generations. |
+| Complete task 11 public matrix | Pass; all 15 scenarios and all 183 steps in `physical_infrastructure_deadlines.feature` passed together. This is the task 11 matrix, not the complete repository Cucumber qualification owned by task 14. |
+| Interconnect suite | Pass; all 34 tests covered queued stream deadlines, streaming progress timeouts, membership cancellation, shutdown cancellation, management isolation, relay admission, and duplex streams. |
+| Server, consensus, and executor unit suites | Pass; all 837 `nervix-server` library tests, all 43 consensus unit tests and 12 consensus documentation tests, and all 16 executor tests passed. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just ratchet` | Pass; every architecture-debt count remained at or below its checked-in baseline. |
+
+The actual-UTC source audit found only the observation owners enumerated above. None of the
+physical infrastructure owners imports or reads a domain clock to schedule its deadlines.
 
 No complete Cucumber-suite or final qualification result is claimed by this record.

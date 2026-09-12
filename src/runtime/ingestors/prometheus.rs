@@ -200,14 +200,25 @@ impl PrometheusIngestor {
                         if task_quiesce.should_skip_poll() {
                             continue;
                         }
-                        match Self::query_vector(
+                        let query = Self::query_vector(
                             &http_client,
                             &addr,
                             &query,
                             Some(occurrence.due_at()),
-                        )
-                        .await
-                        {
+                        );
+                        tokio::pin!(query);
+                        let result = tokio::select! {
+                            biased;
+                            changed = shutdown_rx.changed() => {
+                                if changed.is_err() || *shutdown_rx.borrow() {
+                                    break;
+                                }
+                                continue;
+                            }
+                            _ = task_quiesce.wait_for_change() => continue,
+                            result = &mut query => result,
+                        };
+                        match result {
                             Ok(samples) => {
                                 task_runtime
                                     .clear_ingestor_transient_error(&task_domain, &task_ingestor);
