@@ -1073,10 +1073,27 @@ impl ReordererOutputBuffer {
         self.estimated_bytes = 0;
         let pending = std::mem::take(&mut self.pending);
 
-        let row_count = match Self::validated_row_count(&pending) {
-            Ok(row_count) => row_count,
-            Err(error) => return Err(ReordererOutputBatchFailure::retaining(error, pending)),
-        };
+        // Every buffered batch must carry one ordering key per Arrow row. Walking the buffer in
+        // order makes the first batch that disagrees the failure the caller reports, and counts
+        // the rows the ordered output will hold on the way.
+        let mut row_count = 0_usize;
+        for index in 0..pending.len() {
+            let buffered = &pending[index];
+            let arrow_rows = buffered.batch.batch.batch().num_rows();
+            let ordering_keys = buffered.row_order.len();
+            if ordering_keys != arrow_rows {
+                let error = ReordererOutputBatchError::OrderingKeyCount {
+                    arrow_rows,
+                    ordering_keys,
+                };
+                return Err(ReordererOutputBatchFailure::retaining(error, pending));
+            }
+            let Some(total) = row_count.checked_add(arrow_rows) else {
+                let error = ReordererOutputBatchError::RowCountOverflow;
+                return Err(ReordererOutputBatchFailure::retaining(error, pending));
+            };
+            row_count = total;
+        }
         if row_count == 0 {
             let error = ReordererOutputBatchError::Empty;
             return Err(ReordererOutputBatchFailure::retaining(error, pending));
@@ -1115,32 +1132,8 @@ impl ReordererOutputBuffer {
         }
     }
 
-    /// The number of rows the ordered output will hold, counted over batches whose ordering keys
-    /// pair with their Arrow rows one for one. Buffer order decides which disagreement the caller
-    /// sees: the first batch that fails stops the count and is the error reported.
-    fn validated_row_count(
-        pending: &[ReordererPendingBatch],
-    ) -> Result<usize, ReordererOutputBatchError> {
-        let mut row_count = 0_usize;
-        for buffered in pending {
-            let arrow_rows = buffered.batch.batch.batch().num_rows();
-            let ordering_keys = buffered.row_order.len();
-            if ordering_keys != arrow_rows {
-                return Err(ReordererOutputBatchError::OrderingKeyCount {
-                    arrow_rows,
-                    ordering_keys,
-                });
-            }
-            let Some(total) = row_count.checked_add(arrow_rows) else {
-                return Err(ReordererOutputBatchError::RowCountOverflow);
-            };
-            row_count = total;
-        }
-        Ok(row_count)
-    }
-
     /// The permutation the flush applies, given as the concatenated row each ordered row reads
-    /// from. `row_count` is the count `validated_row_count` returned for the same buffer.
+    /// from. `row_count` is the row total the validation above counted for the same buffer.
     fn ordering_permutation(pending: &[ReordererPendingBatch], row_count: usize) -> Vec<usize> {
         /// One buffered row waiting to be placed: the row concatenation gives it, and the key and
         /// arrival sequence that decide where the ordered output puts it.

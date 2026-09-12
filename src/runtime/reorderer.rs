@@ -183,6 +183,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        runtime::processors::ReordererOutputBatchError,
         runtime_ack::{AckOutcome, AckSet},
         runtime_schema::{RuntimeRecordMetadata, RuntimeValue, test_runtime_row},
     };
@@ -314,6 +315,87 @@ mod tests {
         );
         assert!(buffer.is_empty());
         assert_eq!(buffer.estimated_bytes(), 0);
+    }
+
+    /// Ordering keys that do not pair with a batch's Arrow rows can only come from a defect above
+    /// the buffer. The flush must name the first batch that disagrees and hand every buffered
+    /// batch back, because the caller resolves the ACKs those batches carry.
+    #[tokio::test]
+    async fn reorderer_buffer_reports_the_first_ordering_key_mismatch_and_returns_every_batch() {
+        let schema = test_schema(&[("sequence", ParseAsType::U32)]);
+        let batch = |sequence: u32, acks: AckSet| {
+            RelayRecordBatch::from_messages(
+                schema.clone(),
+                vec![RelayMessage {
+                    key: None,
+                    record: test_runtime_row([(
+                        "sequence".to_string(),
+                        RuntimeValue::U32(sequence),
+                    )])
+                    .with_ingested_at_watermarks(Timestamp::from_unix_nanos(sequence.into())),
+                    acks,
+                }],
+            )
+            .expect("test relay batch should build")
+        };
+        let ordering_keys = |count: u64| {
+            Arc::new(
+                (0..count)
+                    .map(|sequence| ReordererRowOrder {
+                        key: vec![ReorderKeyPart::UInt64(sequence)],
+                        arrival_sequence: sequence,
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let (first_acks, first_completion) = AckSet::root();
+        let (second_acks, second_completion) = AckSet::root();
+        let mut buffer = ReordererOutputBuffer::default();
+        // One Arrow row against two ordering keys: the first disagreement in buffer order.
+        buffer.push(
+            batch(1, first_acks),
+            ordering_keys(2),
+            Timestamp::from_unix_nanos(10),
+        );
+        // A second disagreement, which the flush must not report over the one buffered before it.
+        buffer.push(
+            batch(2, second_acks),
+            ordering_keys(3),
+            Timestamp::from_unix_nanos(20),
+        );
+
+        let failure = *buffer
+            .take_ordered_batch()
+            .expect_err("ordering keys that do not pair with the Arrow rows must not order");
+
+        assert!(matches!(
+            failure.error,
+            ReordererOutputBatchError::OrderingKeyCount {
+                arrow_rows: 1,
+                ordering_keys: 2,
+            }
+        ));
+        assert_eq!(failure.batches.len(), 2);
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.estimated_bytes(), 0);
+
+        for returned in &failure.batches {
+            for ack in &returned.acks {
+                ack.ack_success();
+            }
+        }
+        assert_eq!(
+            timeout(Duration::from_secs(1), first_completion.wait())
+                .await
+                .expect("the first buffered batch should come back carrying its ACK"),
+            AckOutcome::Ack
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(1), second_completion.wait())
+                .await
+                .expect("the second buffered batch should come back carrying its ACK"),
+            AckOutcome::Ack
+        );
     }
 
     #[tokio::test]
