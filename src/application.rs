@@ -3029,22 +3029,75 @@ enum AssignmentRelocation {
 }
 
 impl AssignmentRelocation {
-    fn target(
+    fn preferred_target(
         self,
         desired_target: Option<ClusterNodeName>,
         existing_replica: Option<ClusterNodeName>,
     ) -> Option<ClusterNodeName> {
         match self {
-            Self::Planned => desired_target.or(existing_replica),
-            Self::Failure => existing_replica.or(desired_target),
+            Self::Planned => {
+                if let Some(desired_target) = desired_target {
+                    Some(desired_target)
+                } else {
+                    existing_replica
+                }
+            }
+            Self::Failure => {
+                if let Some(existing_replica) = existing_replica {
+                    Some(existing_replica)
+                } else {
+                    desired_target
+                }
+            }
         }
     }
 
-    fn retains_former_replica(self) -> bool {
+    fn retains_former_owner_as_replica(self) -> bool {
         match self {
             Self::Planned => true,
             Self::Failure => false,
         }
+    }
+
+    fn ordered_assignment<'a>(
+        self,
+        target: &ClusterNodeName,
+        unavailable_node_id: &ClusterNodeName,
+        live_nodes: &BTreeSet<ClusterNodeName>,
+        target_nodes: &BTreeSet<ClusterNodeName>,
+        assignment_slots: usize,
+        ordered_candidates: impl IntoIterator<Item = &'a ClusterNodeName>,
+    ) -> Vec<ClusterNodeName> {
+        let former_owner_is_live = live_nodes.contains(unavailable_node_id);
+        let former_owner_differs_from_target = unavailable_node_id != target;
+        let retain_former_owner = self.retains_former_owner_as_replica()
+            && former_owner_is_live
+            && former_owner_differs_from_target;
+
+        let mut assigned_nodes = vec![target.clone()];
+        if retain_former_owner {
+            assigned_nodes.push(unavailable_node_id.clone());
+        }
+
+        for candidate in ordered_candidates {
+            let candidate_is_target_eligible = target_nodes.contains(candidate);
+            let candidate_is_retained_former_owner =
+                retain_former_owner && candidate == unavailable_node_id;
+            let candidate_is_eligible =
+                candidate_is_target_eligible || candidate_is_retained_former_owner;
+            if !candidate_is_eligible {
+                continue;
+            }
+
+            let candidate_is_already_assigned = assigned_nodes.contains(candidate);
+            if candidate_is_already_assigned {
+                continue;
+            }
+            assigned_nodes.push(candidate.clone());
+        }
+
+        assigned_nodes.truncate(assignment_slots);
+        assigned_nodes
     }
 
     fn ownership_transition(
@@ -13687,7 +13740,6 @@ impl SessionServiceImpl {
         target_nodes: &BTreeSet<ClusterNodeName>,
         relocation: AssignmentRelocation,
     ) -> Option<DrainMove> {
-        let retain_former_replica = relocation.retains_former_replica();
         let current_nodes = group
             .members
             .iter()
@@ -13698,114 +13750,140 @@ impl SessionServiceImpl {
             .iter()
             .map(|member| desired.nodes.get(member).cloned())
             .collect::<Option<Vec<_>>>()?;
-        let old_primary = if let Some(candidate) = schedule
+        let current_group = schedule
             .placement_groups
             .iter()
-            .find(|candidate| placement_group_members_equal(&candidate.members, &group.members))
-            && let Some(primary) = candidate.primary_node.as_ref()
-        {
-            Some(primary.clone())
+            .find(|candidate| placement_group_members_equal(&candidate.members, &group.members));
+        let current_group_primary = if let Some(current_group) = current_group {
+            current_group.primary_node.clone()
+        } else {
+            None
+        };
+        let old_primary = if let Some(current_group_primary) = current_group_primary {
+            Some(current_group_primary)
         } else if let Some(node) = current_nodes.first() {
             node.primary_node.clone()
         } else {
             None
         };
-        let preserved_primary = old_primary.as_ref().filter(|primary| {
-            *primary != unavailable_node_id
-                && live_nodes.contains(*primary)
-                && current_nodes.iter().all(|node| {
-                    node.primary_node.as_ref() == Some(*primary)
-                        && node.assigned_nodes.contains(*primary)
-                })
-        });
-        let desired_target = if let Some(node_id) = group.primary_node.as_ref()
-            && target_nodes.contains(node_id)
+
+        let mut preserved_live_primary = None;
+        if let Some(primary) = old_primary.as_ref() {
+            let primary_is_available =
+                primary != unavailable_node_id && live_nodes.contains(primary);
+            let primary_owns_every_member = current_nodes.iter().all(|node| {
+                node.primary_node.as_ref() == Some(primary) && node.assigned_nodes.contains(primary)
+            });
+            if primary_is_available && primary_owns_every_member {
+                preserved_live_primary = Some(primary.clone());
+            }
+        }
+
+        let mut desired_target = None;
+        if let Some(candidate) = group.primary_node.as_ref() {
+            let candidate_is_eligible = target_nodes.contains(candidate);
+            if candidate_is_eligible {
+                desired_target = Some(candidate.clone());
+            }
+        }
+        if desired_target.is_none()
+            && let Some(desired_node) = desired_nodes.first()
+            && let Some(candidate) = desired_node.primary_node.as_ref()
         {
-            Some(node_id.clone())
-        } else if let Some(node) = desired_nodes.first()
-            && let Some(node_id) = node.primary_node.as_ref()
-            && target_nodes.contains(node_id)
+            let candidate_is_eligible = target_nodes.contains(candidate);
+            if candidate_is_eligible {
+                desired_target = Some(candidate.clone());
+            }
+        }
+        if desired_target.is_none()
+            && let Some(desired_node) = desired_nodes.first()
         {
-            Some(node_id.clone())
-        } else if let Some(node) = desired_nodes.first() {
-            node.assigned_nodes
+            for candidate in &desired_node.assigned_nodes {
+                let candidate_is_eligible = target_nodes.contains(candidate);
+                if candidate_is_eligible {
+                    desired_target = Some(candidate.clone());
+                    break;
+                }
+            }
+        }
+
+        let first_current_node = current_nodes.first()?;
+        let mut common_replicas = Vec::new();
+        for candidate in &first_current_node.assigned_nodes {
+            let candidate_is_available = candidate != unavailable_node_id;
+            let candidate_is_target_eligible = target_nodes.contains(candidate);
+            if !candidate_is_available || !candidate_is_target_eligible {
+                continue;
+            }
+
+            let candidate_is_assigned_to_every_member = current_nodes
                 .iter()
-                .find(|node_id| target_nodes.contains(*node_id))
-                .cloned()
+                .all(|node| node.assigned_nodes.contains(candidate));
+            if candidate_is_assigned_to_every_member {
+                common_replicas.push(candidate.clone());
+            }
+        }
+
+        let target = if let Some(primary) = preserved_live_primary {
+            primary
+        } else {
+            let existing_common_replica = common_replicas.first().cloned();
+            let preferred_target =
+                relocation.preferred_target(desired_target, existing_common_replica);
+            if let Some(preferred_target) = preferred_target {
+                preferred_target
+            } else {
+                target_nodes.first()?.clone()
+            }
+        };
+        let primary_changed = old_primary.as_ref() != Some(&target);
+        let target_was_assigned_to_every_member = current_nodes
+            .iter()
+            .all(|node| node.assigned_nodes.contains(&target));
+        let promotes_common_replica = primary_changed && target_was_assigned_to_every_member;
+        let promoted_replica = if promotes_common_replica {
+            Some(target.clone())
         } else {
             None
         };
-        let mut common_replicas = current_nodes
-            .first()?
-            .assigned_nodes
-            .iter()
-            .filter(|node_id| *node_id != unavailable_node_id)
-            .filter(|node_id| target_nodes.contains(*node_id))
-            .cloned()
-            .collect::<Vec<_>>();
-        common_replicas.retain(|candidate| {
-            current_nodes
-                .iter()
-                .all(|node| node.assigned_nodes.contains(candidate))
-        });
-        let target = if let Some(primary) = preserved_primary {
-            primary.clone()
-        } else if let Some(target) =
-            relocation.target(desired_target, common_replicas.first().cloned())
-        {
-            target
-        } else {
-            target_nodes.first()?.clone()
-        };
-        let primary_changed = old_primary.as_ref() != Some(&target);
-        let promoted_replica = (primary_changed
-            && current_nodes
-                .iter()
-                .all(|node| node.assigned_nodes.contains(&target)))
-        .then_some(target.clone());
 
         for ((member, current_node), desired_node) in
             group.members.iter().zip(current_nodes).zip(desired_nodes)
         {
-            let replica_slots = current_node
-                .assigned_nodes
-                .len()
-                .max(desired_node.assigned_nodes.len())
+            let current_assignment_slots = current_node.assigned_nodes.len();
+            let desired_assignment_slots = desired_node.assigned_nodes.len();
+            let assignment_slots = current_assignment_slots
+                .max(desired_assignment_slots)
                 .max(1);
-            let mut assigned_nodes = vec![target.clone()];
-            if retain_former_replica
-                && live_nodes.contains(unavailable_node_id)
-                && unavailable_node_id != &target
-            {
-                assigned_nodes.push(unavailable_node_id.clone());
-            }
-            for assigned in desired_node
+            let ordered_candidates = desired_node
                 .assigned_nodes
                 .iter()
                 .chain(&current_node.assigned_nodes)
-                .chain(target_nodes)
-            {
-                if (target_nodes.contains(assigned)
-                    || retain_former_replica
-                        && assigned == unavailable_node_id
-                        && live_nodes.contains(assigned))
-                    && !assigned_nodes.contains(assigned)
-                {
-                    assigned_nodes.push(assigned.clone());
-                }
+                .chain(target_nodes);
+            let assigned_nodes = relocation.ordered_assignment(
+                &target,
+                unavailable_node_id,
+                live_nodes,
+                target_nodes,
+                assignment_slots,
+                ordered_candidates,
+            );
+            let mut ownership_transition = None;
+            if primary_changed && let Some(former_owner) = old_primary.as_ref() {
+                ownership_transition = Some(relocation.ownership_transition(
+                    former_owner.clone(),
+                    target.clone(),
+                    &current_node,
+                    promoted_replica.is_some(),
+                ));
             }
-            assigned_nodes.truncate(replica_slots);
+
             let node = schedule.nodes.get_mut(member).verified(
                 "the early return above required every group member to resolve in this same \
                  schedule",
             );
-            if primary_changed && let Some(source) = old_primary.as_ref() {
-                node.ownership_transition = Some(relocation.ownership_transition(
-                    source.clone(),
-                    target.clone(),
-                    node,
-                    promoted_replica.is_some(),
-                ));
+            if let Some(ownership_transition) = ownership_transition {
+                node.ownership_transition = Some(ownership_transition);
             }
             node.primary_node = Some(target.clone());
             node.assigned_nodes = assigned_nodes;
@@ -13817,13 +13895,19 @@ impl SessionServiceImpl {
         {
             current_group.primary_node = Some(target.clone());
         }
+
+        let fallback_node = if primary_changed && promoted_replica.is_none() {
+            Some(target)
+        } else {
+            None
+        };
         Some(DrainMove {
             label: format!(
                 "placement group [{}]",
                 format_placement_runtime_nodes(&group.members)
             ),
-            promoted_replica: promoted_replica.clone(),
-            fallback_node: (primary_changed && promoted_replica.is_none()).then_some(target),
+            promoted_replica,
+            fallback_node,
         })
     }
 
@@ -13835,86 +13919,112 @@ impl SessionServiceImpl {
         target_nodes: &BTreeSet<ClusterNodeName>,
         relocation: AssignmentRelocation,
     ) -> Option<DrainMove> {
-        let retain_former_replica = relocation.retains_former_replica();
         if !node.is_assigned_to(unavailable_node_id) {
             return None;
         }
 
         let label = format!("{} {}", node.kind().as_ref(), node.identifier.as_str());
         let old_primary = node.primary_node.clone();
-        let preserved_primary = old_primary
-            .as_ref()
-            .filter(|primary| *primary != unavailable_node_id && live_nodes.contains(*primary))
-            .cloned();
-        let desired_target = if let Some(node_id) = desired_node.primary_node.as_ref()
-            && target_nodes.contains(node_id)
-        {
-            Some(node_id.clone())
+        let preserved_live_primary = if let Some(primary) = old_primary.as_ref() {
+            let primary_is_available =
+                primary != unavailable_node_id && live_nodes.contains(primary);
+            if primary_is_available {
+                Some(primary.clone())
+            } else {
+                None
+            }
         } else {
-            desired_node
-                .assigned_nodes
-                .iter()
-                .find(|node_id| target_nodes.contains(*node_id))
-                .cloned()
+            None
         };
-        let existing_replica = node
-            .assigned_nodes
-            .iter()
-            .filter(|assigned| *assigned != unavailable_node_id)
-            .find(|assigned| target_nodes.contains(*assigned))
-            .cloned();
-        let target = if let Some(primary) = preserved_primary {
-            primary
-        } else if let Some(target) = relocation.target(desired_target, existing_replica) {
-            target
-        } else {
-            target_nodes.first()?.clone()
-        };
-        let replica_slots = node
-            .assigned_nodes
-            .len()
-            .max(desired_node.assigned_nodes.len())
-            .max(1);
-        let mut assigned_nodes = vec![target.clone()];
-        if retain_former_replica
-            && live_nodes.contains(unavailable_node_id)
-            && unavailable_node_id != &target
-        {
-            assigned_nodes.push(unavailable_node_id.clone());
+
+        let mut desired_target = None;
+        if let Some(candidate) = desired_node.primary_node.as_ref() {
+            let candidate_is_eligible = target_nodes.contains(candidate);
+            if candidate_is_eligible {
+                desired_target = Some(candidate.clone());
+            }
         }
-        for assigned in desired_node
+        if desired_target.is_none() {
+            for candidate in &desired_node.assigned_nodes {
+                let candidate_is_eligible = target_nodes.contains(candidate);
+                if candidate_is_eligible {
+                    desired_target = Some(candidate.clone());
+                    break;
+                }
+            }
+        }
+
+        let mut existing_replica = None;
+        for candidate in &node.assigned_nodes {
+            let candidate_is_available = candidate != unavailable_node_id;
+            let candidate_is_target_eligible = target_nodes.contains(candidate);
+            if candidate_is_available && candidate_is_target_eligible {
+                existing_replica = Some(candidate.clone());
+                break;
+            }
+        }
+
+        let target = if let Some(primary) = preserved_live_primary {
+            primary
+        } else {
+            let preferred_target = relocation.preferred_target(desired_target, existing_replica);
+            if let Some(preferred_target) = preferred_target {
+                preferred_target
+            } else {
+                target_nodes.first()?.clone()
+            }
+        };
+        let current_assignment_slots = node.assigned_nodes.len();
+        let desired_assignment_slots = desired_node.assigned_nodes.len();
+        let assignment_slots = current_assignment_slots
+            .max(desired_assignment_slots)
+            .max(1);
+        let ordered_candidates = desired_node
             .assigned_nodes
             .iter()
             .chain(&node.assigned_nodes)
-            .chain(target_nodes)
-        {
-            if (target_nodes.contains(assigned)
-                || retain_former_replica
-                    && assigned == unavailable_node_id
-                    && live_nodes.contains(assigned))
-                && !assigned_nodes.contains(assigned)
-            {
-                assigned_nodes.push(assigned.clone());
-            }
-        }
-        assigned_nodes.truncate(replica_slots);
+            .chain(target_nodes);
+        let assigned_nodes = relocation.ordered_assignment(
+            &target,
+            unavailable_node_id,
+            live_nodes,
+            target_nodes,
+            assignment_slots,
+            ordered_candidates,
+        );
         let primary_changed = old_primary.as_ref() != Some(&target);
-        let promoted_replica =
-            (primary_changed && node.assigned_nodes.contains(&target)).then_some(target.clone());
-        if primary_changed && let Some(source) = old_primary {
-            node.ownership_transition = Some(relocation.ownership_transition(
-                source,
+        let target_was_already_assigned = node.assigned_nodes.contains(&target);
+        let promotes_existing_replica = primary_changed && target_was_already_assigned;
+        let promoted_replica = if promotes_existing_replica {
+            Some(target.clone())
+        } else {
+            None
+        };
+        let mut ownership_transition = None;
+        if primary_changed && let Some(former_owner) = old_primary {
+            ownership_transition = Some(relocation.ownership_transition(
+                former_owner,
                 target.clone(),
                 node,
                 promoted_replica.is_some(),
             ));
         }
+
+        if let Some(ownership_transition) = ownership_transition {
+            node.ownership_transition = Some(ownership_transition);
+        }
         node.primary_node = Some(target.clone());
         node.assigned_nodes = assigned_nodes;
+
+        let fallback_node = if primary_changed && promoted_replica.is_none() {
+            Some(target)
+        } else {
+            None
+        };
         Some(DrainMove {
             label,
-            promoted_replica: promoted_replica.clone(),
-            fallback_node: (primary_changed && promoted_replica.is_none()).then_some(target),
+            promoted_replica,
+            fallback_node,
         })
     }
 
