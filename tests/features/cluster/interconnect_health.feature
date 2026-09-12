@@ -20,7 +20,13 @@ Feature: Interconnect health coordination
     And within "750ms" these NSPL commands complete on node "node-1"
       """
       CREATE USER health_probe_admin WITH PASSWORD 'created-password';
+      """
+    And within "750ms" these NSPL commands complete on node "node-1"
+      """
       CREATE RELAY independent_health_events SCHEMA health_event UNBRANCHED;
+      """
+    And within "750ms" these NSPL commands complete on node "node-1"
+      """
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "relay" "independent_health_events" is saved as placeholder "independent_health_owner"
