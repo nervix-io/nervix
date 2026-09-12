@@ -4217,6 +4217,10 @@ impl ActiveGraph {
             .map(|index| self.schema_fingerprint_for_index(*index))
     }
 
+    /// Product code reaches the scheduler here. A `testing` build routes its own callers through
+    /// [`Self::schedule_for_domain_with_mode`] so a scenario can pick the mode, which leaves this
+    /// entry point compiled for production builds and for this crate's own tests.
+    #[cfg(any(not(feature = "testing"), test))]
     pub fn schedule_for_domain(
         &self,
         domain: &DomainName,
