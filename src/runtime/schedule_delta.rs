@@ -117,13 +117,35 @@ impl ScheduleDelta {
             return true;
         }
 
-        (allow_model_derived_residue_change
-            || (existing_effective_branching == desired_effective_branching
-                && existing_effective_branching_schema == desired_effective_branching_schema))
-            && (allow_schema_fingerprint_change
-                || allow_model_derived_residue_change
-                || existing_schema_fingerprint == desired_schema_fingerprint)
-            && existing_kafka_partition_schedule == desired_kafka_partition_schedule
+        if !allow_model_derived_residue_change {
+            let effective_branching_matches =
+                existing_effective_branching == desired_effective_branching;
+            if !effective_branching_matches {
+                return false;
+            }
+
+            let effective_branching_schema_matches =
+                existing_effective_branching_schema == desired_effective_branching_schema;
+            if !effective_branching_schema_matches {
+                return false;
+            }
+
+            if !allow_schema_fingerprint_change {
+                let schema_fingerprint_matches =
+                    existing_schema_fingerprint == desired_schema_fingerprint;
+                if !schema_fingerprint_matches {
+                    return false;
+                }
+            }
+        }
+
+        let kafka_partition_schedule_matches =
+            existing_kafka_partition_schedule == desired_kafka_partition_schedule;
+        if !kafka_partition_schedule_matches {
+            return false;
+        }
+
+        true
     }
 }
 
