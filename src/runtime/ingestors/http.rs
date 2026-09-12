@@ -172,7 +172,20 @@ impl HttpIngestor {
                         if task_quiesce.should_skip_poll() {
                             continue;
                         }
-                        match http_client.request(method.clone(), endpoint.as_str()).send().await {
+                        let request = http_client.request(method.clone(), endpoint.as_str()).send();
+                        tokio::pin!(request);
+                        let response = tokio::select! {
+                            biased;
+                            changed = shutdown_rx.changed() => {
+                                if changed.is_err() || *shutdown_rx.borrow() {
+                                    break;
+                                }
+                                continue;
+                            }
+                            _ = task_quiesce.wait_for_change() => continue,
+                            response = &mut request => response,
+                        };
+                        match response {
                             Ok(response) => {
                                 if response.status() == reqwest::StatusCode::NO_CONTENT {
                                     task_runtime
@@ -205,7 +218,20 @@ impl HttpIngestor {
                                 let headers = RetainedIngestHeaders::capture(
                                     &HttpResponseHeaders(response.headers()),
                                 );
-                                match response.bytes().await {
+                                let body = response.bytes();
+                                tokio::pin!(body);
+                                let payload = tokio::select! {
+                                    biased;
+                                    changed = shutdown_rx.changed() => {
+                                        if changed.is_err() || *shutdown_rx.borrow() {
+                                            break;
+                                        }
+                                        continue;
+                                    }
+                                    _ = task_quiesce.wait_for_change() => continue,
+                                    payload = &mut body => payload,
+                                };
+                                match payload {
                                     Ok(payload) => {
                                         task_runtime.clear_ingestor_transient_error(
                                             &task_domain,

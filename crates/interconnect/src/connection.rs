@@ -1683,7 +1683,7 @@ impl TransportState {
                     body: Some(bytes),
                     response_class: class,
                     response_limit: class.control_body_limit(&self.executor),
-                    timeout: timeout_duration,
+                    timeout: deadline.saturating_duration_since(Instant::now()),
                     headers: &[],
                 },
             )
