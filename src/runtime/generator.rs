@@ -900,12 +900,15 @@ impl Runtime {
                     continue;
                 }
 
-                let buffer_deadlines = branch_states
+                let route_buffer_flush_deadlines = branch_states
                     .values()
                     .flat_map(|state| &state.routes)
                     .filter_map(|route| route.flush_timer.deadline())
                     .collect::<Vec<_>>();
-                let has_buffer_deadlines = !buffer_deadlines.is_empty();
+                let has_route_buffer_flush_deadlines = !route_buffer_flush_deadlines.is_empty();
+                let logical_occurrence_wake = cadence.next(&cadence_cancellation);
+                let route_buffer_flush_wait =
+                    wait_for_branch_buffer_deadlines(&domain_clock, route_buffer_flush_deadlines);
 
                 tokio::select! {
                     changed = shutdown_rx.changed() => {
@@ -913,7 +916,7 @@ impl Runtime {
                             break;
                         }
                     }
-                    occurrence = cadence.next(&cadence_cancellation) => {
+                    occurrence = logical_occurrence_wake => {
                         match occurrence {
                             Ok(occurrence) => pending_occurrence = Some(occurrence),
                             Err(error) => {
@@ -927,8 +930,8 @@ impl Runtime {
                             }
                         }
                     }
-                    result = wait_for_branch_buffer_deadlines(&domain_clock, buffer_deadlines),
-                        if has_buffer_deadlines =>
+                    result = route_buffer_flush_wait,
+                        if has_route_buffer_flush_deadlines =>
                     {
                         if let Err(error) = result {
                             task_events.report_error(format!(
