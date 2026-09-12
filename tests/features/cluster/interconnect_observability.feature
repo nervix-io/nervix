@@ -103,3 +103,50 @@ Feature: Interconnection observability
       """
       class="data_cpu"
       """
+
+  Scenario: A bulk transfer reports its progress without spending management capacity
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And node "node-1" has resource directory "large_resource" with file "model.bin" of 48 MiB
+    And node "node-1" eventually reports leader "node-1"
+    And node "node-3" is stopped
+    When these NSPL commands are executed on node "node-1"
+      """
+      CREATE DOMAIN {{domain}};
+      CREATE RESOURCE large_model;
+      UPLOAD RESOURCE large_model VERSION '{{large_resource}}';
+      """
+    Then the last command output contains
+      """
+      published resource version 1
+      """
+    When node "node-3" is started
+    Then within "30s" node "node-1" eventually reports describe resource as "- node-3 topology=alive state=ready"
+      """
+      DESCRIBE RESOURCE large_model VERSION 1;
+      """
+    And node "node-1" observability metric "nervix_interconnect_bulk_bytes_total" with labels eventually reaches at least 1048576
+      """
+      class="bulk"
+      direction="sent"
+      """
+    And node "node-3" observability metric "nervix_interconnect_bulk_bytes_total" with labels eventually reaches at least 1048576
+      """
+      class="bulk"
+      direction="received"
+      """
+    And node "node-1" observability metric "nervix_interconnect_connection_failures_total" with labels eventually equals 0
+      """
+      class="management"
+      reason="capacity"
+      """
+    And node "node-1" observability metric "nervix_interconnect_quota_failures_total" with labels eventually equals 0
+      """
+      direction="outbound"
+      operation="liveness"
+      """
+    And node "node-1" observability metric "nervix_interconnect_connections" with labels eventually reaches at least 2
+      """
+      class="management"
+      direction="outbound"
+      """

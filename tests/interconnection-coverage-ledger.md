@@ -35,7 +35,7 @@ relay or bulk work cannot consume.
 | Global relay FIFO and cross-domain/branch blocking | 4, 5 | `runtime/interconnect_admission.feature`: *A waiting relay admission leaves another domain runnable*, *A waiting relay admission leaves another branch runnable* |
 | Control handler blocks ACKs, gate release, or payload routing | 3, 4, 5 | `runtime/interconnect_admission.feature`: *Evicting a branch cancels its waiting remote admission*; `cluster/interconnect_health.feature`: *A silent peer does not delay peer health or control-plane work* |
 | Sequential fanout and repeated encoding/copies | 3, 5 | `cluster/bounded_execution.feature`: *Occupied bulk execution leaves management work responsive* |
-| Full-archive synchronous serving and memory amplification | 3, 6 | `cluster/resource_describe.feature`: *Large resource replication preserves control responsiveness* |
+| Full-archive synchronous serving and memory amplification | 3, 6 | `cluster/resource_describe.feature`: *Large resource replication preserves control responsiveness*; `cluster/interconnect_observability.feature`: *A bulk transfer reports its progress without spending management capacity* |
 | Sequential resource reconciliation and ambiguous readiness timeout | 6 | `cluster/resource_describe.feature`: *Readiness deadline returns the published version while a replica is pending*, *Upload retry reports one published version* |
 | Async-worker stalls in Arrow, CBOR, rkyv, filesystem and snapshots | 3, 4, 6, 7, 8 | `cluster/bounded_execution.feature`; `cluster/interconnect_observability.feature`: *Occupied bulk execution leaves the reserved management budget intact* |
 | Unbounded payload queues and item-only transport budgets | 3, 4, 5 | `cluster/interconnect_observability.feature`: *Interconnection series are exposed with bounded dimensions* — `nervix_execution_memory_capacity_bytes` and `nervix_execution_memory_reserved_bytes` per class |
@@ -79,8 +79,13 @@ carries a payload value.
 | Log retention | `nervix_consensus_log_last_index`, `nervix_consensus_log_snapshot_index`, `nervix_consensus_log_purged_index`, `nervix_consensus_log_retained_bytes` |
 | Quota failures | `nervix_interconnect_quota_failures_total`, `nervix_execution_memory_rejections_total`, `nervix_execution_job_rejections_total` |
 
-Evidence: `cluster/interconnect_observability.feature`, whose bounded-dimension step reads the whole
-exposition and fails on any interconnection sample carrying a label outside that closed set.
+Evidence: `cluster/interconnect_observability.feature`. Its bounded-dimension step reads the whole
+exposition and fails on any interconnection sample carrying a label outside that closed set;
+*Cross-node relay delivery advances transport and admission series* proves the transport and
+admission series move under real cross-node traffic; and *A bulk transfer reports its progress
+without spending management capacity* proves a 48 MiB archive replication is visible as it runs
+while the management pool keeps its connections, refuses no liveness request, and records no
+capacity failure.
 
 ## User-visible resource status
 
@@ -105,11 +110,23 @@ p99 no worse than the greater of 100 ms or twice the idle baseline, no false man
 disconnects, bounded configured allocations, and progress on every eligible unsaturated relay
 channel — needs a three-node benchmark environment with link shaping. The repository's benchmark
 harness drives a single node through Kafka and has no shaping, so those numbers cannot be produced
-from it yet. The isolation the criteria are about is covered here by deterministic barriers rather
-than by timing: *Occupied bulk execution leaves management work responsive*, *Occupied bulk
-execution leaves the reserved management budget intact*, *Large resource replication preserves
-control responsiveness*, and *A silent peer does not delay peer health or control-plane work*. The
-series above are what such a run would read.
+from it yet.
+
+Two of the four criteria are already proven here without timing, by deterministic barriers rather
+than by measurement. *No false management disconnects*: during a 48 MiB bulk replication, node-1
+keeps its management connections, refuses no liveness request, and records no management capacity
+failure. *Bounded configured allocations*: each class reports its ceiling and what it holds, and
+the reserved management budget stays at its configured capacity while every bulk worker is
+occupied. Control responsiveness under bulk load is bounded rather than measured: *Occupied bulk
+execution leaves management work responsive*, *Occupied bulk execution leaves the reserved
+management budget intact*, *Large resource replication preserves control responsiveness*, and *A
+silent peer does not delay peer health or control-plane work* each complete control work inside an
+explicit bound while the competing class is saturated.
+
+What the shaped environment adds is the distribution rather than the bound: a control p99 against
+a measured idle baseline, per-relay-channel progress under a sustained offered load, and the
+transport throughput comparison at identical record, admission and durability settings. The series
+above are what such a run would read.
 
 **Domain-clock evidence.** [Domain clocks 12](https://app.clickup.com/t/86bbwct04) owns committed
 clock installation on join and restart, one fenced authority across owner and leader changes,
