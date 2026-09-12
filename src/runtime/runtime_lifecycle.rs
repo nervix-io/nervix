@@ -1,12 +1,12 @@
 use super::*;
 
 impl Runtime {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::with_persistence(None, DEFAULT_STATE_SNAPSHOT_INTERVAL)
             .verified("the None persistence path has no fallible step")
     }
 
-    pub fn with_persistence(
+    pub(in crate::runtime) fn with_persistence(
         db: Option<Database>,
         state_snapshot_interval: Duration,
     ) -> Result<Self, RuntimePersistenceError> {
@@ -16,17 +16,6 @@ impl Runtime {
             ConfiguredFaultInjection::default(),
             PathBuf::from(DEFAULT_TEMP_DIR),
         )
-    }
-
-    #[cfg(feature = "testing")]
-    pub fn with_fault_injection(fault_injection: ConfiguredFaultInjection) -> Self {
-        Self::with_persistence_and_temp_dir(
-            None,
-            DEFAULT_STATE_SNAPSHOT_INTERVAL,
-            fault_injection,
-            PathBuf::from(DEFAULT_TEMP_DIR),
-        )
-        .verified("the None persistence path has no fallible step")
     }
 
     pub(crate) fn with_persistence_and_temp_dir(
@@ -175,12 +164,12 @@ impl Runtime {
         })
     }
 
-    pub fn metrics(&self) -> RuntimeMetrics {
+    pub(crate) fn metrics(&self) -> RuntimeMetrics {
         self.inner.metrics.clone()
     }
 
     /// The node's bounded execution and transient-memory admission.
-    pub fn executor(&self) -> &Executor {
+    pub(crate) fn executor(&self) -> &Executor {
         &self.inner.executor
     }
 
@@ -194,7 +183,7 @@ impl Runtime {
         &self.inner.events
     }
 
-    pub fn domain_drain_timeout(&self) -> Duration {
+    pub(crate) fn domain_drain_timeout(&self) -> Duration {
         self.inner.domain_drain_timeout
     }
 
@@ -204,33 +193,33 @@ impl Runtime {
         super::branch_task_stop_timeout(self.inner.domain_drain_timeout)
     }
 
-    pub fn entity_gate_deadline(&self) -> Duration {
+    pub(crate) fn entity_gate_deadline(&self) -> Duration {
         self.inner.entity_gate_deadline
     }
 
     #[cfg(feature = "testing")]
-    pub fn take_forced_entity_drain_timeout(&self, domain: &DomainName) -> bool {
+    pub(crate) fn take_forced_entity_drain_timeout(&self, domain: &DomainName) -> bool {
         self.inner
             .fault_injection
             .take_forced_entity_drain_timeout(domain)
     }
 
     #[cfg(feature = "testing")]
-    pub fn take_armed_schedule_publication_fault(&self, domain: &DomainName) -> bool {
+    pub(crate) fn take_armed_schedule_publication_fault(&self, domain: &DomainName) -> bool {
         self.inner
             .fault_injection
             .take_armed_schedule_publication_fault(domain)
     }
 
     #[cfg(feature = "testing")]
-    pub fn take_armed_transaction_binding_drop(&self, node_id: &ClusterNodeName) -> bool {
+    pub(crate) fn take_armed_transaction_binding_drop(&self, node_id: &ClusterNodeName) -> bool {
         self.inner
             .fault_injection
             .take_armed_transaction_binding_drop(node_id)
     }
 
     #[cfg(feature = "testing")]
-    pub async fn pause_transaction_commit_after_progress_if_armed(
+    pub(crate) async fn pause_transaction_commit_after_progress_if_armed(
         &self,
         node_id: &ClusterNodeName,
         completed_statements: usize,
@@ -242,7 +231,7 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
-    pub async fn pause_command_admission_if_armed(&self, node_id: &ClusterNodeName) {
+    pub(crate) async fn pause_command_admission_if_armed(&self, node_id: &ClusterNodeName) {
         self.inner
             .fault_injection
             .pause_command_admission_if_armed(node_id)
@@ -250,7 +239,10 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
-    pub async fn pause_ownership_handoff_after_preparation_if_armed(&self, domain: &DomainName) {
+    pub(crate) async fn pause_ownership_handoff_after_preparation_if_armed(
+        &self,
+        domain: &DomainName,
+    ) {
         self.inner
             .fault_injection
             .pause_ownership_handoff_after_preparation_if_armed(domain)
@@ -269,7 +261,7 @@ impl Runtime {
         self.inner.fault_injection.subscribe_leadership_transfers()
     }
 
-    pub fn subscribe_events(&self) -> broadcast::Receiver<RuntimeEvent> {
+    pub(crate) fn subscribe_events(&self) -> broadcast::Receiver<RuntimeEvent> {
         self.inner.events.subscribe()
     }
 
@@ -417,7 +409,7 @@ impl Runtime {
         }
     }
 
-    pub async fn shutdown(&self) {
+    pub(crate) async fn shutdown(&self) {
         let domains = self
             .inner
             .executions

@@ -42,7 +42,7 @@ impl Runtime {
         Ok(())
     }
 
-    pub async fn start_running_domain_ingestors(&self) -> Result<(), RuntimeError> {
+    pub(crate) async fn start_running_domain_ingestors(&self) -> Result<(), RuntimeError> {
         let _lock = self.inner.schedule_apply_lock.lock().await;
         loop {
             tokio::task::consume_budget().await;

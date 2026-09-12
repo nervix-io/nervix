@@ -24,7 +24,7 @@ use crate::{
 const MAX_REJECTION_REASON_BYTES: usize = 512;
 
 #[derive(Debug, Error)]
-pub enum SignalingProtocolCompileError {
+pub(in crate::runtime) enum SignalingProtocolCompileError {
     #[error("signaling protocol '{protocol}' {clause} program #{index} is invalid: {reason}")]
     InvalidJaqProgram {
         protocol: String,
@@ -73,9 +73,9 @@ pub(crate) enum WebsocketSignalingError {
 }
 
 /// The protobuf message types a signaling protocol speaks in each direction.
-pub struct SignalingProtobufDescriptors {
-    pub(crate) send: MessageDescriptor,
-    pub(crate) wait: MessageDescriptor,
+pub(in crate::runtime) struct SignalingProtobufDescriptors {
+    pub(in crate::runtime) send: MessageDescriptor,
+    pub(in crate::runtime) wait: MessageDescriptor,
 }
 
 #[derive(Debug)]
@@ -124,7 +124,7 @@ struct CompiledWaitStep {
 
 /// A signaling protocol with its jaq programs compiled and its wire format resolved.
 #[derive(Debug)]
-pub struct CompiledSignalingProtocol {
+pub(crate) struct CompiledSignalingProtocol {
     wire: CompiledSignalingWire,
     accept_data: bool,
     steps: Vec<CompiledSignalingStep>,
@@ -133,7 +133,7 @@ pub struct CompiledSignalingProtocol {
 }
 
 impl CompiledSignalingProtocol {
-    pub fn compile(
+    pub(in crate::runtime) fn compile(
         protocol: &CreateSignalingProtocol,
         protobuf: Option<SignalingProtobufDescriptors>,
     ) -> Result<Self, SignalingProtocolCompileError> {

@@ -13,12 +13,13 @@ use nervix_models::{
 use strum::AsRefStr;
 use thiserror::Error;
 
-use super::{ActiveGraph, ResolvedPlacementPair};
+use super::graph::ActiveGraph;
+use crate::registry::placement::{EffectivePlacementPlan, PlacementPair, ResolvedPlacementPair};
 
 /// Why a runtime node is part of the unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
 #[strum(serialize_all = "lowercase")]
-pub enum RelocationMemberReason {
+pub(crate) enum RelocationMemberReason {
     /// Named by the selection, directly or through corridor coverage.
     Selected,
     /// A hard-group mate of a selected runtime node.
@@ -29,48 +30,48 @@ pub enum RelocationMemberReason {
 
 /// One `FROM`/`TO` endpoint pair of a corridor selection and what it covered.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RelocationCoverage {
-    pub source: NodeRef,
-    pub destination: NodeRef,
-    pub connected: bool,
-    pub covered: usize,
+pub(crate) struct RelocationCoverage {
+    pub(crate) source: NodeRef,
+    pub(crate) destination: NodeRef,
+    pub(crate) connected: bool,
+    pub(crate) covered: usize,
 }
 
 /// One runtime node in the unit, with the hard group it belongs to and the strategy that group
 /// carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RelocationUnitMember {
-    pub runtime_node: NodeRef,
-    pub group: usize,
-    pub strategy: RelocationPreferenceStrategy,
-    pub reason: RelocationMemberReason,
+pub(crate) struct RelocationUnitMember {
+    pub(crate) runtime_node: NodeRef,
+    pub(crate) group: usize,
+    pub(crate) strategy: RelocationPreferenceStrategy,
+    pub(crate) reason: RelocationMemberReason,
 }
 
 /// An effective soft preference with at least one endpoint in the unit. The relocation reports it
 /// as unsatisfied when the owners after the move disagree with the policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RelocationPreference {
-    pub policy: PlacementPolicy,
-    pub left: NodeRef,
-    pub right: NodeRef,
-    pub winning_rules: Vec<PlacementName>,
-    pub from_domain_default: bool,
+pub(crate) struct RelocationPreference {
+    pub(crate) policy: PlacementPolicy,
+    pub(crate) left: NodeRef,
+    pub(crate) right: NodeRef,
+    pub(crate) winning_rules: Vec<PlacementName>,
+    pub(in crate::registry) from_domain_default: bool,
 }
 
 /// The graph-side result of planning a relocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RelocationUnit {
+pub(crate) struct RelocationUnit {
     /// One entry per `FROM`/`TO` pair; empty for the list selection form.
-    pub coverage: Vec<RelocationCoverage>,
+    pub(crate) coverage: Vec<RelocationCoverage>,
     /// Unit members ordered by hard group, selected groups before captured ones.
-    pub members: Vec<RelocationUnitMember>,
+    pub(crate) members: Vec<RelocationUnitMember>,
     /// Every effective `PREFER COLOCATION` and `SUGGEST SEPARATION` relationship touching the
     /// unit, in canonical order.
-    pub preferences: Vec<RelocationPreference>,
+    pub(crate) preferences: Vec<RelocationPreference>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum RelocationPlanError {
+pub(crate) enum RelocationPlanError {
     #[error("{kind} '{name}' does not exist in domain '{domain}'")]
     UnknownRuntimeNode {
         domain: String,
@@ -101,7 +102,7 @@ struct UnitGroup {
 impl ActiveGraph {
     /// Computes the unit a relocation moves from the domain's effective placement plan and the
     /// currently active graph.
-    pub fn relocation_unit(
+    pub(crate) fn relocation_unit(
         &self,
         domain: &nervix_models::DomainName,
         default_policy: PlacementPolicy,
@@ -293,7 +294,7 @@ impl ActiveGraph {
     /// Repeats capture rounds until the unit stops growing.
     fn capture_preferred_groups(
         &self,
-        placement: &super::EffectivePlacementPlan,
+        placement: &EffectivePlacementPlan,
         hard_group: &impl Fn(&NodeRef) -> Vec<NodeRef>,
         override_by_key: &HashMap<NodeRef, Vec<RelocationPreferenceStrategy>>,
         default_strategy: RelocationPreferenceStrategy,
@@ -373,7 +374,7 @@ impl ActiveGraph {
     /// True when any candidate member is separated from a `FOLLOW PREFERENCES` group already in
     /// the unit.
     fn separated_from_unit(
-        placement: &super::EffectivePlacementPlan,
+        placement: &EffectivePlacementPlan,
         candidate: &[NodeRef],
         groups: &[UnitGroup],
         group_by_member: &HashMap<NodeRef, usize>,
@@ -425,7 +426,7 @@ impl ActiveGraph {
 
     /// Every effective soft preference with at least one endpoint in the unit.
     fn unit_preferences(
-        pairs: &HashMap<super::PlacementPair, ResolvedPlacementPair>,
+        pairs: &HashMap<PlacementPair, ResolvedPlacementPair>,
         group_by_member: &HashMap<NodeRef, usize>,
     ) -> Vec<RelocationPreference> {
         let mut preferences = pairs

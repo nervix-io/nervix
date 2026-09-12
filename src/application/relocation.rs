@@ -14,11 +14,16 @@ use nervix_models::{
 };
 
 use super::{
-    CommandResult, DomainAlterError, SessionServiceImpl, command_error, command_ok,
-    format_millis_duration, format_placement_runtime_node, mark_complete_ownership_transitions,
-    placement_claim_owner, quiesce_level_message,
+    describe_output::{
+        format_millis_duration, format_placement_runtime_node, placement_claim_owner,
+    },
+    domain_lifecycle::DomainAlterError,
+    model_mutation::{command_error, command_ok, quiesce_level_message},
+    ownership_handoff::mark_complete_ownership_transitions,
+    session_service::SessionServiceImpl,
 };
 use crate::{
+    proto::CommandResult,
     registry::{ActiveGraph, RelocationCoverage, RelocationMemberReason, RelocationUnit},
     runtime::Runtime,
 };

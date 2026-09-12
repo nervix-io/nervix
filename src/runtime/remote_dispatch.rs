@@ -491,7 +491,7 @@ pub(in crate::runtime) struct RemoteRelayTarget {
 }
 
 impl Runtime {
-    pub fn attach_remote_dispatcher(
+    pub(crate) fn attach_remote_dispatcher(
         &self,
         local_node_id: ClusterNodeName,
         cluster: Arc<cluster::ClusterHandle>,
@@ -516,7 +516,7 @@ impl Runtime {
         services.inject_remote_message(batch).await
     }
 
-    pub async fn handle_remote_stream(
+    pub(crate) async fn handle_remote_stream(
         &self,
         payload: RelayPayload,
         transport_admission: RelayAdmission,

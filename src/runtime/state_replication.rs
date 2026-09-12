@@ -2156,7 +2156,7 @@ impl Runtime {
         Ok(())
     }
 
-    pub(crate) fn verify_ownership_handoff_activation(
+    pub(in crate::runtime) fn verify_ownership_handoff_activation(
         &self,
         request: &nervix_interconnect::ActivateOwnershipHandoffStateRequest,
     ) -> OwnershipHandoffResult<()> {
@@ -2405,11 +2405,11 @@ impl Runtime {
         Ok(())
     }
 
-    pub fn has_state_store(&self) -> bool {
+    pub(crate) fn has_state_store(&self) -> bool {
         self.inner.state_store.is_some()
     }
 
-    pub fn state_snapshot_interval(&self) -> Duration {
+    pub(crate) fn state_snapshot_interval(&self) -> Duration {
         self.inner.state_snapshot_interval
     }
 

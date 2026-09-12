@@ -7,6 +7,8 @@
 
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc as StdArc};
 
+pub(in crate::runtime) const STUPID_CHANNEL_CAPACITY_REMOVE_ME: NonZeroUsize = NonZeroUsize::MIN;
+
 use ahash::HashMap;
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_ipc::writer::StreamWriter;

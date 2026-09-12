@@ -14,12 +14,12 @@ use thiserror::Error;
 use tokio::time::{Instant, sleep_until};
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub enum PhysicalDeadlineError {
+pub(in crate::runtime) enum PhysicalDeadlineError {
     #[error("physical deadline exceeds the monotonic clock range")]
     OutOfRange,
 }
 
-pub type PhysicalDeadlineResult<T> = Result<T, Report<PhysicalDeadlineError>>;
+pub(in crate::runtime) type PhysicalDeadlineResult<T> = Result<T, Report<PhysicalDeadlineError>>;
 
 /// A deadline in the process-local monotonic time coordinate.
 ///
@@ -41,7 +41,10 @@ impl PhysicalDeadlineCapability {
         Self { _private: () }
     }
 
-    pub fn after(self, timeout: Duration) -> PhysicalDeadlineResult<PhysicalDeadline> {
+    pub(in crate::runtime) fn after(
+        self,
+        timeout: Duration,
+    ) -> PhysicalDeadlineResult<PhysicalDeadline> {
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| Report::new(PhysicalDeadlineError::OutOfRange))?;

@@ -329,7 +329,7 @@ impl Runtime {
             .map(|error| error.value().clone())
     }
 
-    pub fn emitter_reconnect_backoff(
+    pub(in crate::runtime) fn emitter_reconnect_backoff(
         &self,
         domain: &DomainName,
         emitter: &EmitterName,
