@@ -4073,11 +4073,11 @@ impl ActiveGraph {
             } else {
                 nodes.insert(node.dataflow_id());
             }
-            if let Some(client) = node.dataflow_source_client_node() {
-                nodes.insert(client.id);
+            if let Some(client) = node.dataflow_source_client() {
+                nodes.insert(client.node.id);
             }
-            if let Some(client) = node.dataflow_sink_client_node() {
-                nodes.insert(client.id);
+            if let Some(client) = node.dataflow_sink_client() {
+                nodes.insert(client.node.id);
             }
         }
         DataflowGraphCounts {
@@ -4421,37 +4421,9 @@ impl ActiveGraph {
         self.to_dataflow_graph("").render_ascii()
     }
 
+    /// The graph the console draws: every dataflow node, the record flow between them, the
+    /// external clients at either end, and the materialized state they read.
     pub fn to_dataflow_graph(&self, domain: impl Into<String>) -> DataflowGraph {
-        let mut included_nodes = HashSet::new();
-        let mut edges = self
-            .graph
-            .node_indices()
-            .filter(|index| {
-                self.graph
-                    .node_weight(*index)
-                    .verified("this index came from the same graph, which is not modified here")
-                    .is_dataflow_node()
-            })
-            .flat_map(|source_index| {
-                let source = self
-                    .graph
-                    .node_weight(source_index)
-                    .verified("this endpoint comes from an edge of the same graph");
-                included_nodes.insert(source_index);
-                visible_dataflow_targets(&self.graph, source_index)
-                    .into_iter()
-                    .map(|(target_index, edge_kind)| {
-                        let target = self
-                            .graph
-                            .node_weight(target_index)
-                            .verified("this endpoint comes from an edge of the same graph");
-                        included_nodes.insert(target_index);
-                        source.dataflow_edge_to(target, dataflow_edge_kind(edge_kind))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-
         let mut schemas = HashMap::default();
         for index in self.graph.node_indices() {
             let node = self
@@ -4464,47 +4436,58 @@ impl ActiveGraph {
             schemas.insert(node.identifier.clone(), schema.clone());
         }
 
-        let mut nodes = included_nodes
-            .iter()
-            .map(|index| {
-                self.graph
-                    .node_weight(*index)
-                    .verified("this index came from the same graph, which is not modified here")
-                    .to_dataflow_node(&schemas)
-            })
-            .collect::<Vec<_>>();
-        for index in &included_nodes {
-            let node = self
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        // Every dataflow node is walked, whether or not an edge reaches it, so a node nothing
+        // sends to or reads from is still drawn. A flow target is itself a dataflow node and so
+        // is walked in its own turn, which is why the traversal below never has to remember one.
+        for source_index in self.graph.node_indices() {
+            let source = self
                 .graph
-                .node_weight(*index)
+                .node_weight(source_index)
                 .verified("this index came from the same graph, which is not modified here");
-            if let Some(client_node) = node.dataflow_source_client_node() {
-                edges.push(
-                    DataflowEdge::data(
-                        client_node.id.clone(),
-                        node.dataflow_id(),
-                        DataflowEdgeKind::Data,
-                    )
-                    .with_metric(node.dataflow_source_client_metric()),
-                );
-                nodes.push(client_node);
+            if !source.is_dataflow_node() {
+                continue;
             }
-            if let Some(client_node) = node.dataflow_sink_client_node() {
-                if let Some(metric) = node.dataflow_sink_client_metric() {
-                    edges.push(
-                        DataflowEdge::data(
-                            node.dataflow_id(),
-                            client_node.id.clone(),
-                            DataflowEdgeKind::Data,
-                        )
-                        .with_metric(metric),
-                    );
-                }
-                nodes.push(client_node);
+            nodes.push(source.to_dataflow_node(&schemas));
+
+            for visible_target in visible_dataflow_targets(&self.graph, source_index) {
+                let target = self
+                    .graph
+                    .node_weight(visible_target.index)
+                    .verified("this index came from the same graph, which is not modified here");
+                let flow_edge =
+                    source.dataflow_edge_to(target, dataflow_edge_kind(visible_target.edge_kind));
+                edges.push(flow_edge);
             }
-            edges.extend(node.dataflow_state_link_edges());
+
+            if let Some(client) = source.dataflow_source_client() {
+                let ingest_edge = DataflowEdge::data(
+                    client.node.id.clone(),
+                    source.dataflow_id(),
+                    DataflowEdgeKind::Data,
+                )
+                .with_metric(client.metric);
+                edges.push(ingest_edge);
+                nodes.push(client.node);
+            }
+            if let Some(client) = source.dataflow_sink_client() {
+                let emit_edge = DataflowEdge::data(
+                    source.dataflow_id(),
+                    client.node.id.clone(),
+                    DataflowEdgeKind::Data,
+                )
+                .with_metric(client.metric);
+                edges.push(emit_edge);
+                nodes.push(client.node);
+            }
+
+            edges.extend(source.dataflow_state_link_edges());
         }
 
+        // One drawn node and one drawn edge per identity. A client several nodes name is drawn
+        // once, and a generator's source relay, which arrives both as converted record flow and
+        // as a state-link declaration, keeps a single state link.
         nodes.sort_by(|left, right| left.id.cmp(&right.id));
         nodes.dedup_by(|left, right| left.id == right.id);
         edges.sort_by(|left, right| {
@@ -4526,35 +4509,54 @@ impl ActiveGraph {
     }
 }
 
+/// One node reached by following visible edges, named by the edge kind that leads to it. A node
+/// the console does not draw is walked through rather than drawn, so what arrives at the far side
+/// keeps the kind the first visible edge carried.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct VisibleDataflowTarget {
+    index: NodeIndex,
+    edge_kind: EdgeKind,
+}
+
+/// The drawn nodes `source_index` reaches, walking through everything the console does not draw.
+/// Every returned index is a dataflow node, so a caller already visiting every dataflow node
+/// learns of no further node here.
 fn visible_dataflow_targets(
     graph: &DiGraph<ActiveNode, EdgeKind>,
     source_index: NodeIndex,
-) -> Vec<(NodeIndex, EdgeKind)> {
+) -> Vec<VisibleDataflowTarget> {
+    let mut pending = Vec::new();
+    for edge in graph.edges_directed(source_index, Direction::Outgoing) {
+        let edge_kind = *edge.weight();
+        if edge_kind.is_visible_dataflow_edge() {
+            pending.push(VisibleDataflowTarget {
+                index: edge.target(),
+                edge_kind,
+            });
+        }
+    }
+
     let mut targets = Vec::new();
     let mut visited = HashSet::new();
-    let mut pending = graph
-        .edges_directed(source_index, Direction::Outgoing)
-        .filter(|edge| edge.weight().is_visible_dataflow_edge())
-        .map(|edge| (edge.target(), *edge.weight()))
-        .collect::<Vec<_>>();
-
-    while let Some((index, edge_kind)) = pending.pop() {
-        if !visited.insert((index, edge_kind)) {
+    while let Some(step) = pending.pop() {
+        if !visited.insert(step) {
             continue;
         }
         let node = graph
-            .node_weight(index)
+            .node_weight(step.index)
             .verified("this index came from the same graph, which is not modified here");
         if node.is_dataflow_node() {
-            targets.push((index, edge_kind));
+            targets.push(step);
             continue;
         }
-        pending.extend(
-            graph
-                .edges_directed(index, Direction::Outgoing)
-                .filter(|edge| edge.weight().is_visible_dataflow_edge())
-                .map(|edge| (edge.target(), edge_kind)),
-        );
+        for edge in graph.edges_directed(step.index, Direction::Outgoing) {
+            if edge.weight().is_visible_dataflow_edge() {
+                pending.push(VisibleDataflowTarget {
+                    index: edge.target(),
+                    edge_kind: step.edge_kind,
+                });
+            }
+        }
     }
 
     targets
@@ -4597,6 +4599,13 @@ pub struct ActiveEdge {
     pub kind: EdgeKind,
 }
 
+/// An external system drawn beside the node that talks to it: the client's own drawn node,
+/// together with the metric counting what crosses that boundary.
+struct DataflowClient {
+    node: DataflowNode,
+    metric: DataflowMetricRef,
+}
+
 #[derive(Debug, Clone)]
 pub struct ActiveNode {
     pub identifier: ModelName,
@@ -4616,33 +4625,56 @@ impl ActiveNode {
         format!("{}:{}", self.kind.as_str(), self.identifier.as_str())
     }
 
-    fn dataflow_source_client_node(&self) -> Option<DataflowNode> {
+    /// The external system an ingestor reads from. The ingest and emit sides of one named client
+    /// are separate identities, so a client both ingested from and emitted to is drawn twice.
+    fn dataflow_source_client(&self) -> Option<DataflowClient> {
         let Model::Ingestor(ingestor) = self.config.as_ref() else {
             return None;
         };
         let source = ingestor.source.source_ref();
         let source_kind = ingestor.source.source_kind().as_str();
-        Some(DataflowNode::new(
+        let node = DataflowNode::new(
             format!("{}_source:{}", source_kind, source.as_str()),
             source.as_str(),
             DataflowNodeRole::Client {
                 transport: ingestor.source.transport_label().to_string(),
             },
-        ))
+        );
+        let metric = DataflowMetricRef::new(
+            self.kind.as_str().to_ascii_uppercase(),
+            self.identifier.as_str(),
+            "received",
+            None::<String>,
+        );
+        Some(DataflowClient { node, metric })
     }
 
-    fn dataflow_sink_client_node(&self) -> Option<DataflowNode> {
+    /// The external system an emitter writes to. The metric names the input relay only when the
+    /// emitter has exactly one, since that is what makes the count attributable to a relay.
+    fn dataflow_sink_client(&self) -> Option<DataflowClient> {
         let Model::Emitter(emitter) = self.config.as_ref() else {
             return None;
         };
         let client = emitter.sink.client();
-        Some(DataflowNode::new(
+        let node = DataflowNode::new(
             format!("client_sink:{}", client.as_str()),
             client.as_str(),
             DataflowNodeRole::Client {
                 transport: emitter.sink.transport_label().to_string(),
             },
-        ))
+        );
+        let sole_input_relay = if emitter.from.relays().len() == 1 {
+            emitter.from.first().map(|relay| relay.as_str().to_string())
+        } else {
+            None
+        };
+        let metric = DataflowMetricRef::new(
+            self.kind.as_str().to_ascii_uppercase(),
+            self.identifier.as_str(),
+            "sent",
+            sole_input_relay,
+        );
+        Some(DataflowClient { node, metric })
     }
 
     /// The drawn edge from this node to `target`. A generator reads its source relay as
@@ -4721,31 +4753,6 @@ impl ActiveNode {
             .filter(|route| route.relay == RelayName::from(&target.identifier))
             .count();
         u32::try_from(routes).unwrap_or(u32::MAX).max(1)
-    }
-
-    fn dataflow_source_client_metric(&self) -> DataflowMetricRef {
-        DataflowMetricRef::new(
-            self.kind.as_str().to_ascii_uppercase(),
-            self.identifier.as_str(),
-            "received",
-            None::<String>,
-        )
-    }
-
-    fn dataflow_sink_client_metric(&self) -> Option<DataflowMetricRef> {
-        let Model::Emitter(emitter) = self.config.as_ref() else {
-            return None;
-        };
-        Some(DataflowMetricRef::new(
-            self.kind.as_str().to_ascii_uppercase(),
-            self.identifier.as_str(),
-            "sent",
-            if emitter.from.relays().len() == 1 {
-                emitter.from.first().map(|relay| relay.as_str().to_string())
-            } else {
-                None
-            },
-        ))
     }
 
     fn dataflow_metric_for_target(&self, target: &ActiveNode) -> DataflowMetricRef {
@@ -19400,6 +19407,47 @@ mod tests {
                 ("client_source:broker_in", "ingestor:state_txns_ingestor"),
                 ("ingestor:state_txns_ingestor", "relay:state_txns")
             ])
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn dataflow_graph_draws_a_relay_nothing_reads_or_writes() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = DomainName::parse("default").expect("valid domain");
+
+        registry
+            .apply_batch(
+                &domain,
+                vec![
+                    schema("event_schema"),
+                    explicitly_unbranched_relay("raw_events", "event_schema"),
+                ],
+            )
+            .expect("isolated relay graph should succeed");
+
+        let dataflow_graph = registry
+            .active_graph(&domain)
+            .expect("graph should be installed")
+            .to_dataflow_graph(domain.as_str());
+
+        let node_ids = dataflow_graph
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(node_ids, vec!["relay:raw_events"]);
+        let relay_node = dataflow_graph
+            .nodes
+            .first()
+            .expect("the relay is the one drawn node");
+        assert_eq!(relay_node.schema.as_deref(), Some("event_schema"));
+        assert!(
+            dataflow_graph.edges.is_empty(),
+            "a relay nothing reads or writes has no edges, found {:?}",
+            dataflow_graph.edges
         );
 
         let _ = fs::remove_dir_all(path);
