@@ -598,6 +598,12 @@ pub struct LogicalDeadline {
     due_at: Timestamp,
 }
 
+impl LogicalDeadline {
+    pub(super) const fn due_at(&self) -> Timestamp {
+        self.due_at
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogicalDeadlineReached {
     due_at: Timestamp,

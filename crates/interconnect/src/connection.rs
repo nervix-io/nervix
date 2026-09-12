@@ -51,21 +51,26 @@ use super::{
 };
 use crate::{
     identity::CertificateIdentity,
+    request::RequestAdmission,
     wire::{
         ConnectionAccepted, ConnectionHello, RelayAdmissionRequest, RelayAdmissionResponse,
         RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse, WIRE_CONTRACT_FINGERPRINT,
     },
 };
 
+mod duplex;
 mod relay;
 mod stream;
 
+pub(crate) use duplex::FrameReader;
+pub use duplex::{DuplexItems, DuplexReceiver, DuplexResponses, DuplexSender};
 pub use stream::IncomingByteStream;
 pub(crate) use stream::OutboundByteStreamRequest;
 
 const CONNECT_PATH: &str = "/v1/connect";
 const CONTROL_PATH: &str = "/v1/control";
 const STREAM_PATH: &str = "/v1/stream";
+const DUPLEX_PATH: &str = "/v1/duplex";
 const ACK_PATH: &str = "/v1/ack";
 const RELAY_GRANT_PATH: &str = "/v1/relay-grants";
 const RELAY_CANCEL_PATH: &str = "/v1/relay-admissions/cancel";
@@ -164,9 +169,17 @@ struct BulkStreamSlotQuotas {
     snapshot: StdArc<Semaphore>,
 }
 
+/// The one ordered append stream a leader keeps open to a follower reserves its own slot, so the
+/// ownership handoff requests that share this pool are never held behind it.
+struct ReplicationStreamSlotQuotas {
+    shared: StdArc<Semaphore>,
+    append: StdArc<Semaphore>,
+}
+
 #[derive(Clone)]
 enum StreamSlotQuotas {
     Management(Arc<ManagementStreamSlotQuotas>),
+    Replication(Arc<ReplicationStreamSlotQuotas>),
     Bulk(Arc<BulkStreamSlotQuotas>),
     Shared {
         class: PoolClass,
@@ -206,6 +219,19 @@ const _: () = assert!(
         && MANAGEMENT_TERMINAL_STREAMS > 0,
     "every reserved management stream class must have capacity",
 );
+const REPLICATION_TOTAL_STREAMS: usize = PoolClass::Replication.stream_slots_per_connection();
+/// One live append stream per follower, and room for its replacement while the live one is still
+/// being torn down.
+const REPLICATION_APPEND_STREAMS: usize = 2;
+const _: () = assert!(
+    REPLICATION_APPEND_STREAMS > 0 && REPLICATION_APPEND_STREAMS < REPLICATION_TOTAL_STREAMS,
+    "the reserved append stream quota must leave shared replication capacity",
+);
+const REPLICATION_SHARED_STREAMS: usize = REPLICATION_TOTAL_STREAMS - REPLICATION_APPEND_STREAMS;
+const _: () = assert!(
+    REPLICATION_SHARED_STREAMS + REPLICATION_APPEND_STREAMS == REPLICATION_TOTAL_STREAMS,
+    "replication stream subquotas must exactly partition the HTTP/2 stream capacity",
+);
 const BULK_TOTAL_STREAMS: usize = PoolClass::Bulk.stream_slots_per_connection();
 const BULK_RESOURCE_STREAMS: usize = 2;
 const BULK_SNAPSHOT_STREAMS: usize = 1;
@@ -233,6 +259,12 @@ impl StreamSlotQuotas {
                 terminal: StdArc::new(Semaphore::new(MANAGEMENT_TERMINAL_STREAMS)),
             }));
         }
+        if class == PoolClass::Replication {
+            return Self::Replication(Arc::new(ReplicationStreamSlotQuotas {
+                shared: StdArc::new(Semaphore::new(REPLICATION_SHARED_STREAMS)),
+                append: StdArc::new(Semaphore::new(REPLICATION_APPEND_STREAMS)),
+            }));
+        }
         if class == PoolClass::Bulk {
             return Self::Bulk(Arc::new(BulkStreamSlotQuotas {
                 shared: StdArc::new(Semaphore::new(BULK_SHARED_STREAMS)),
@@ -249,6 +281,7 @@ impl StreamSlotQuotas {
     fn for_subquota(&self, subquota: RequestSubquota) -> Option<&StdArc<Semaphore>> {
         match self {
             Self::Management(quotas) => quotas.for_subquota(subquota),
+            Self::Replication(quotas) => quotas.for_subquota(subquota),
             Self::Bulk(quotas) => quotas.for_subquota(subquota),
             Self::Shared { slots, .. } => {
                 if let RequestSubquota::Shared = subquota {
@@ -263,6 +296,7 @@ impl StreamSlotQuotas {
     async fn drain(&self) {
         match self {
             Self::Management(quotas) => quotas.drain().await,
+            Self::Replication(quotas) => quotas.drain().await,
             Self::Bulk(quotas) => quotas.drain().await,
             Self::Shared { class, slots } => {
                 let permits: u32 = class
@@ -289,7 +323,7 @@ impl ManagementStreamSlotQuotas {
             RequestSubquota::Admission => Some(&self.admission),
             RequestSubquota::Cancellation => Some(&self.cancellation),
             RequestSubquota::Terminal => Some(&self.terminal),
-            RequestSubquota::Resource | RequestSubquota::Snapshot => None,
+            RequestSubquota::Append | RequestSubquota::Resource | RequestSubquota::Snapshot => None,
         }
     }
 
@@ -324,13 +358,53 @@ impl ManagementStreamSlotQuotas {
     }
 }
 
+impl ReplicationStreamSlotQuotas {
+    fn for_subquota(&self, subquota: RequestSubquota) -> Option<&StdArc<Semaphore>> {
+        match subquota {
+            RequestSubquota::Shared => Some(&self.shared),
+            RequestSubquota::Append => Some(&self.append),
+            RequestSubquota::Resource
+            | RequestSubquota::Snapshot
+            | RequestSubquota::Discovery
+            | RequestSubquota::Liveness
+            | RequestSubquota::Progress
+            | RequestSubquota::Admission
+            | RequestSubquota::Cancellation
+            | RequestSubquota::Terminal => None,
+        }
+    }
+
+    async fn drain(&self) {
+        let quotas = [
+            (RequestSubquota::Shared, REPLICATION_SHARED_STREAMS),
+            (RequestSubquota::Append, REPLICATION_APPEND_STREAMS),
+        ];
+        let mut drained = Vec::with_capacity(quotas.len());
+        for (subquota, permits) in quotas {
+            tokio::task::consume_budget().await;
+            let permits: u32 = permits
+                .try_into()
+                .assured("replication stream subquotas are much smaller than u32::MAX");
+            let quota = self
+                .for_subquota(subquota)
+                .assured("the replication drain list names only replication subquotas");
+            let permit = StdArc::clone(quota)
+                .acquire_many_owned(permits)
+                .await
+                .assured("interconnect stream-slot semaphores are never closed");
+            drained.push(permit);
+        }
+    }
+}
+
 impl BulkStreamSlotQuotas {
     fn for_subquota(&self, subquota: RequestSubquota) -> Option<&StdArc<Semaphore>> {
         match subquota {
             RequestSubquota::Shared => Some(&self.shared),
             RequestSubquota::Resource => Some(&self.resource),
             RequestSubquota::Snapshot => Some(&self.snapshot),
-            RequestSubquota::Discovery
+            RequestSubquota::Append
+            | RequestSubquota::Discovery
             | RequestSubquota::Liveness
             | RequestSubquota::Progress
             | RequestSubquota::Admission
@@ -383,6 +457,14 @@ struct RawRequest<'a> {
     response_limit: u64,
     timeout: Duration,
     headers: &'a [(&'a str, &'a str)],
+}
+
+pub(crate) struct RawDuplexRequest {
+    pub(crate) class: PoolClass,
+    pub(crate) subquota: RequestSubquota,
+    pub(crate) body: ChargedBytes,
+    pub(crate) timeout: Duration,
+    pub(crate) admission: RequestAdmission,
 }
 
 struct ConnectionPermits {
@@ -2020,6 +2102,17 @@ impl TransportState {
         let path = request.uri().path().to_string();
         if path == STREAM_PATH {
             self.handle_stream_request(
+                peer.node_id,
+                peer.advertised_host,
+                peer.class,
+                request.into_body(),
+                respond,
+            )
+            .await?;
+            return Ok(());
+        }
+        if path == DUPLEX_PATH {
+            self.handle_duplex_request(
                 peer.node_id,
                 peer.advertised_host,
                 peer.class,

@@ -68,7 +68,10 @@ named branches cannot configure one branch-bound dependency or error relay acros
 
 All emitters declare `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE`, and
 `DESCRIBE EMITTER` reports the declared policy on its `flush:` line. `FLUSH`
-means Nervix collects an in-memory Arrow batch before handing it to the external sink. The
+means Nervix collects an in-memory Arrow batch before handing it to the external sink. `FLUSH EACH`
+is a domain-logical duration, so a paced domain's `TIME RATE` accelerates or slows it; retry
+backoff, acknowledgement keepalive, and sink acknowledgement timeouts stay on the physical clock.
+See [Domains And Time](domains-and-time.md) for the full clock split. The
 [NSPL Overview](nspl-overview.md) defines the `FLUSH IMMEDIATE` 100 µs minimum batching window.
 For most emitters the collected batch is encoded and published on the flush boundary. Iceberg
 additionally requires `COMMIT EACH <duration> MAX SIZE <bytes>` as part of its sink clause: flush
@@ -916,8 +919,10 @@ The REST catalog is the authority for namespace and table metadata. Nervix does 
 Iceberg uses two explicit boundaries. `FLUSH` collects typed in-memory batches and writes them to
 local Arrow IPC files under the runtime temporary-file root. `COMMIT EACH <duration> MAX SIZE
 <bytes>` reads the staged Arrow IPC batches, concatenates them into one Arrow batch, appends that
-batch to the Iceberg table, and commits the catalog update. The temporary-file root defaults to
-`/tmp` and can be changed with `--temp-dir` or `NERVIX_TEMP_DIR`.
+batch to the Iceberg table, and commits the catalog update. Both durations are domain-logical, so a
+paced domain's `TIME RATE` moves the flush and commit boundaries together; the maximum batch and
+commit sizes, the catalog retry backoff, and a drain remain independent of domain pace. The
+temporary-file root defaults to `/tmp` and can be changed with `--temp-dir` or `NERVIX_TEMP_DIR`.
 
 The sink completion point for `MODE ACK` is the successful catalog commit. Local staging is not an
 ACK boundary. Commit conflicts, incompatible table evolution, a dropped table, and unavailable
