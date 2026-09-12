@@ -69,29 +69,34 @@ impl PreparedSqsRecord {
         if let Some(group_id) = group_id.as_deref() {
             SqsEmitter::validate_group_id(group_id)?;
         }
-        let group_id_len = match group_id.as_ref() {
+        let body_bytes = body.len();
+        let mut attribute_bytes = 0_usize;
+        for (name, attribute) in &attributes {
+            let name_bytes = name.len();
+            let data_type_bytes = attribute.data_type().len();
+            let value_bytes = match attribute.string_value() {
+                Some(value) => value.len(),
+                None => 0,
+            };
+            let name_and_type_bytes = name_bytes
+                .checked_add(data_type_bytes)
+                .assured(ENCODED_IN_MEMORY);
+            let attribute_total_bytes = name_and_type_bytes
+                .checked_add(value_bytes)
+                .assured(ENCODED_IN_MEMORY);
+            attribute_bytes = attribute_bytes
+                .checked_add(attribute_total_bytes)
+                .assured(ENCODED_IN_MEMORY);
+        }
+        let group_bytes = match group_id.as_ref() {
             Some(group_id) => group_id.len(),
             None => 0,
         };
-        let encoded_bytes = body
-            .len()
-            .checked_add(
-                attributes
-                    .iter()
-                    .map(|(name, value)| {
-                        let value_len = match value.string_value() {
-                            Some(value) => value.len(),
-                            None => 0,
-                        };
-                        name.len()
-                            .checked_add(value.data_type().len())
-                            .and_then(|size| size.checked_add(value_len))
-                            .assured(ENCODED_IN_MEMORY)
-                    })
-                    .try_fold(0_usize, usize::checked_add)
-                    .assured(ENCODED_IN_MEMORY),
-            )
-            .and_then(|size| size.checked_add(group_id_len))
+        let body_and_attribute_bytes = body_bytes
+            .checked_add(attribute_bytes)
+            .assured(ENCODED_IN_MEMORY);
+        let encoded_bytes = body_and_attribute_bytes
+            .checked_add(group_bytes)
             .assured(ENCODED_IN_MEMORY);
         if encoded_bytes > SQS_MAX_REQUEST_BYTES {
             return Err(format!(
@@ -597,6 +602,44 @@ mod tests {
         .expect_err("oversized SQS record should be rejected");
 
         assert!(error.contains("256 KiB"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn request_size_counts_attribute_names_types_values_and_the_fifo_group() {
+        const ATTRIBUTE_NAME: &str = "tenant";
+        const ATTRIBUTE_VALUE: &str = "acme";
+        const GROUP_ID: &str = "orders";
+
+        // Every attribute the emitter builds declares the "String" data type, so those bytes
+        // count against the protocol limit alongside the attribute name and value.
+        let attribute_bytes = ATTRIBUTE_NAME.len() + "String".len() + ATTRIBUTE_VALUE.len();
+        let body_bytes = SQS_MAX_REQUEST_BYTES - attribute_bytes - GROUP_ID.len();
+        let headers = vec![(ATTRIBUTE_NAME.to_string(), ATTRIBUTE_VALUE.to_string())];
+
+        let record = PreparedSqsRecord::new(
+            (0, 0),
+            vec![b'x'; body_bytes],
+            headers.clone(),
+            Ok(Some(GROUP_ID.to_string())),
+            AckSet::empty(),
+        )
+        .expect("a record that exactly fills the protocol limit should be accepted");
+
+        assert_eq!(record.encoded_bytes, SQS_MAX_REQUEST_BYTES);
+
+        let error = PreparedSqsRecord::new(
+            (0, 0),
+            vec![b'x'; body_bytes + 1],
+            headers,
+            Ok(Some(GROUP_ID.to_string())),
+            AckSet::empty(),
+        )
+        .expect_err("one byte past the protocol limit should be rejected");
+
+        assert!(
+            error.contains(&format!("{} bytes", SQS_MAX_REQUEST_BYTES + 1)),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
