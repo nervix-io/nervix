@@ -617,7 +617,10 @@ mod tests {
         let headers = vec![(ATTRIBUTE_NAME.to_string(), ATTRIBUTE_VALUE.to_string())];
 
         let record = PreparedSqsRecord::new(
-            (0, 0),
+            BrokerRecordPosition {
+                batch_index: 0,
+                row_index: 0,
+            },
             vec![b'x'; body_bytes],
             headers.clone(),
             Ok(Some(GROUP_ID.to_string())),
@@ -628,7 +631,10 @@ mod tests {
         assert_eq!(record.encoded_bytes, SQS_MAX_REQUEST_BYTES);
 
         let error = PreparedSqsRecord::new(
-            (0, 0),
+            BrokerRecordPosition {
+                batch_index: 0,
+                row_index: 0,
+            },
             vec![b'x'; body_bytes + 1],
             headers,
             Ok(Some(GROUP_ID.to_string())),
