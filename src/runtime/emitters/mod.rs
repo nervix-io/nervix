@@ -175,6 +175,11 @@ enum CompiledSqsFifoGroup {
     Expression(CompiledProgramWithMaterializedInterest),
 }
 
+/// Why a row publishes under no `FIFO GROUP FROM BRANCH` group: it arrived unbranched, so there is
+/// no branch key to take the group from. The reason travels with that row alone and the send turns
+/// it into that row's message error.
+const UNBRANCHED_FIFO_GROUP: &str = "SQS FIFO GROUP FROM BRANCH received an unbranched record";
+
 /// The publishing behavior of the one transport family a sink belongs to.
 ///
 /// `MODE` is checked against the sink before anything else, so the family and the settings it
@@ -4362,9 +4367,7 @@ impl EmitterBatchContext<'_> {
                 for key in &batch.keys {
                     let group = match key.as_ref() {
                         Some(key) => Ok(Some(key.as_str().to_string())),
-                        None => Err(
-                            "SQS FIFO GROUP FROM BRANCH received an unbranched record".to_string()
-                        ),
+                        None => Err(UNBRANCHED_FIFO_GROUP.to_string()),
                     };
                     groups.push(group);
                 }
@@ -4504,7 +4507,8 @@ impl EmitterBatchContext<'_> {
                 return None;
             }
         };
-        self.deliver_planned_message_errors(plan.message_errors).await;
+        self.deliver_planned_message_errors(plan.message_errors)
+            .await;
         plan.batch
     }
 }
