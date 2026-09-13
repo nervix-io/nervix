@@ -236,6 +236,50 @@ pub struct CompiledProgram {
     pub injector: Option<triomphe::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
 }
 
+/// An executable expression that can only select input rows.
+///
+/// The contained program is deliberately private. Callers can obtain this handle only from the
+/// predicate compiler and can execute it only through the predicate runtime entry point, so a
+/// construction-capable [`CompiledProgram`] cannot be substituted at either boundary.
+///
+/// A general compiled program cannot be converted into this capability:
+///
+/// ```compile_fail
+/// use nervix_vm::{CompiledPredicate, CompiledProgram};
+///
+/// fn elevate(program: CompiledProgram) -> CompiledPredicate {
+///     program.into()
+/// }
+/// ```
+///
+/// The general program behind the capability is not exposed:
+///
+/// ```compile_fail
+/// use nervix_vm::CompiledPredicate;
+///
+/// fn unwrap(predicate: CompiledPredicate) {
+///     let _ = predicate.program;
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct CompiledPredicate {
+    program: triomphe::Arc<CompiledProgram>,
+}
+
+impl CompiledPredicate {
+    pub(crate) fn new(program: triomphe::Arc<CompiledProgram>) -> Self {
+        Self { program }
+    }
+
+    pub fn input_schema(&self) -> &Arc<Schema> {
+        &self.program.input_schema
+    }
+
+    pub(crate) fn program(&self) -> &triomphe::Arc<CompiledProgram> {
+        &self.program
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{RegisterLayouts, RegisterSpace, RegisterType};

@@ -94,7 +94,10 @@ Feature: Branched session subscriptions
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_tenant_branch ( user_id I64, tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_tenant_branch TTL 5m;
-        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
+        CREATE RELAY notifications
+        SCHEMA notification
+        BRANCHED BY by_mqtt_notifications
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
         CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
@@ -114,9 +117,38 @@ Feature: Branched session subscriptions
           FLUSH EACH 100ms MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE SUBSCRIPTION notifications_subscription TO notifications
-        WHERE tenant = 'acme' AND active;
-        START;
+      """
+    When these NSPL commands fail with "targets namespace 'branch'"
+      """
+      CREATE SUBSCRIPTION branch_scope_subscription TO notifications
+      WHERE branch.tenant = 'acme';
+      """
+    When these NSPL commands fail with "targets namespace 'relay_state.notifications'"
+      """
+      CREATE SUBSCRIPTION materialized_scope_subscription TO notifications
+      WHERE relay_state.notifications.tenant = 'acme';
+      """
+    When these NSPL commands fail with "targets namespace 'output'"
+      """
+      CREATE SUBSCRIPTION output_scope_subscription TO notifications
+      WHERE output.tenant = 'acme';
+      """
+    When these NSPL commands fail
+      """
+      CREATE SUBSCRIPTION construction_subscription TO notifications
+      SET normalized = lower(input.raw);
+      """
+    When these NSPL commands fail
+      """
+      CREATE SUBSCRIPTION side_effect_subscription TO notifications
+      WHERE input.active
+      INVOKE write_header('tenant', input.tenant);
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SUBSCRIPTION notifications_subscription TO notifications
+      WHERE tenant = 'acme' AND message.active AND input.user_id = 42;
+      START;
       """
     When MQTT message is published to topic "notifications_{{test_id}}"
       """

@@ -42,6 +42,7 @@ use arrow_string::like::{
     contains as string_contains, ends_with as string_ends_with, starts_with as string_starts_with,
 };
 use chrono::DateTime;
+use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
 use nervix_models::Timestamp;
@@ -53,8 +54,8 @@ use crate::{
     batch::{TypedArray, TypedBatch},
     error::{ErrorCode, RowErrorMask, RowErrors, RuntimeError, SideError},
     ir::{
-        CompiledProgram, InputBinding, Instruction, InstructionKind, RegisterLayout,
-        RegisterLayouts, RegisterRef, RegisterSpace, RegisterType, ScalarValue,
+        CompiledPredicate, CompiledProgram, InputBinding, Instruction, InstructionKind,
+        RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace, RegisterType, ScalarValue,
     },
     program::{BinaryOp, FunctionName, Span, UnaryOp},
     semantics::BuiltinLowering,
@@ -291,6 +292,23 @@ pub struct ExecutionResult {
     pub invocations: Vec<FunctionInvocation>,
 }
 
+/// The only execution result exposed by a compiled predicate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PredicateExecutionResult {
+    selected_rows: RowSelection,
+    errors: RowErrors,
+}
+
+impl PredicateExecutionResult {
+    pub fn selected_rows(&self) -> &RowSelection {
+        &self.selected_rows
+    }
+
+    pub fn errors(&self) -> &RowErrors {
+        &self.errors
+    }
+}
+
 /// Maps output rows back to input rows without allocating for the identity case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowSelection {
@@ -405,6 +423,30 @@ impl ExecutionContext {
             injector: None,
         }
     }
+}
+
+/// Executes a predicate without exposing constructed columns or invocations.
+///
+/// A construction-capable program cannot be passed through this entry point:
+///
+/// ```compile_fail
+/// use nervix_vm::{CompiledProgram, ExecutionContext, TypedBatch, execute_predicate_in_context};
+///
+/// async fn execute(program: &CompiledProgram, batch: &TypedBatch, context: &ExecutionContext) {
+///     let _ = execute_predicate_in_context(program, batch, context).await;
+/// }
+/// ```
+pub async fn execute_predicate_in_context(
+    predicate: &CompiledPredicate,
+    batch: &TypedBatch,
+    context: &ExecutionContext,
+) -> Result<PredicateExecutionResult, Report<RuntimeError>> {
+    let result =
+        execute_program_with_selection_in_context(predicate.program(), batch, context).await?;
+    Ok(PredicateExecutionResult {
+        selected_rows: result.selected_rows,
+        errors: result.batch.errors().clone(),
+    })
 }
 
 pub async fn execute_program_in_context(

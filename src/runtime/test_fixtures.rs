@@ -119,8 +119,8 @@ pub(super) async fn execute_filter_map_for_test(
     metadata: Option<&super::IngestFilterMapMetadata>,
     now: Timestamp,
 ) -> Result<Option<RuntimeRow>, String> {
-    super::execute_filter_map_on_record(
-        &named("test_filter_map"),
+    super::filter_map::execute_filter_map_on_record(
+        &named::<ModelName>("test_filter_map"),
         program,
         record,
         branch_key,

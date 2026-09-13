@@ -144,7 +144,6 @@ impl CorrelatorOutputCompileContext<'_> {
         Ok(CompiledCorrelatorOutputProgram {
             program: CompiledProgramWithMaterializedInterest {
                 compiled: Arc::new(compiled),
-                output_sensitivity: self.output_sensitivity,
                 materialized_interest,
                 output_namespace_input: OutputNamespaceInput::Uninitialized,
                 lookup_hash_maps,

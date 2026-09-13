@@ -44,9 +44,10 @@ pub mod window;
 pub use batch::{TypedArray, TypedBatch};
 pub use compiler::{
     CompileBinding, CompileNamespace, CompileOptions, InferredSetField, OutputMode,
-    SchemaSensitivity, UdfParameter, UdfSignature, UdfSignatures, compile_program,
-    compile_program_for_bindings, compile_program_for_bindings_with_sensitivity,
-    compile_program_for_relay, compile_program_for_relays, compile_program_with_options,
+    PredicateCompileOptions, SchemaSensitivity, UdfParameter, UdfSignature, UdfSignatures,
+    compile_predicate_with_options_for_bindings, compile_program, compile_program_for_bindings,
+    compile_program_for_bindings_with_sensitivity, compile_program_for_relay,
+    compile_program_for_relays, compile_program_with_options,
     compile_program_with_options_for_bindings,
     compile_program_with_options_for_bindings_with_sensitivity,
     compile_program_with_options_for_relay, compile_program_with_options_for_relays,
@@ -61,13 +62,15 @@ pub use frontend::{
     lower_transforming_route,
 };
 pub use ir::{
-    CompiledProgram, InputBinding, Instruction, InstructionKind, InvocationBinding, OutputBinding,
-    RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace, RegisterType, ScalarValue,
+    CompiledPredicate, CompiledProgram, InputBinding, Instruction, InstructionKind,
+    InvocationBinding, OutputBinding, RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace,
+    RegisterType, ScalarValue,
 };
 pub use runtime::{
     ExecutionContext, ExecutionResult, FunctionExecutionPolicy, FunctionInjector,
-    FunctionInvocation, InjectedResult, RowSelection, SPAWN_BLOCKING_ROW_THRESHOLD,
-    execute_program_in_context, execute_program_with_selection_in_context,
+    FunctionInvocation, InjectedResult, PredicateExecutionResult, RowSelection,
+    SPAWN_BLOCKING_ROW_THRESHOLD, execute_predicate_in_context, execute_program_in_context,
+    execute_program_with_selection_in_context,
 };
 pub use semantics::{
     BinaryDescriptor, BuiltinDescriptor, BuiltinLowering, CastDescriptor, DependencyScope,
