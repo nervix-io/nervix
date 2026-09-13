@@ -390,31 +390,46 @@ impl Runtime {
         let affected = affected_entities.iter().cloned().collect::<HashSet<_>>();
         let processor_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
         relays.retain(|relay| {
-            let producers = schedule.nodes.values().filter(|node| {
-                if let Some(processor) = processor_specs.processor(node.kind(), &node.identifier) {
-                    return processor.spec.output_relays().contains(relay);
-                }
-                match node.config.as_ref() {
-                    Model::Ingestor(ingestor) => {
-                        ingestor.output_routes.relays().any(|out| out == relay)
-                    }
-                    Model::Reingestor(reingestor) => {
-                        reingestor.output_routes.relays().any(|out| out == relay)
-                    }
-                    Model::Generator(generator) => {
-                        generator.output_routes.relays().any(|out| out == relay)
-                    }
-                    _ => false,
-                }
-            });
             let mut producer_count = 0usize;
-            let all_producers_move = producers.fold(true, |all_move, node| {
+            let mut all_producers_move = true;
+            for node in schedule.nodes.values() {
+                let produces_to_relay = if let Some(processor) =
+                    processor_specs.processor(node.kind(), &node.identifier)
+                {
+                    processor.spec.output_relays().contains(relay)
+                } else {
+                    match node.config.as_ref() {
+                        Model::Ingestor(ingestor) => {
+                            ingestor.output_routes.relays().any(|out| out == relay)
+                        }
+                        Model::Reingestor(reingestor) => {
+                            reingestor.output_routes.relays().any(|out| out == relay)
+                        }
+                        Model::Generator(generator) => {
+                            generator.output_routes.relays().any(|out| out == relay)
+                        }
+                        _ => false,
+                    }
+                };
+                if !produces_to_relay {
+                    continue;
+                }
+
                 producer_count = producer_count
                     .checked_add(1)
                     .assured("the producers counted here are graph nodes held in memory");
-                all_move && affected.contains(&node.identity())
-            });
-            producer_count == 0 || !all_producers_move
+                if all_producers_move {
+                    let producer_moves = affected.contains(&node.identity());
+                    if !producer_moves {
+                        all_producers_move = false;
+                    }
+                }
+            }
+
+            if producer_count == 0 {
+                return true;
+            }
+            !all_producers_move
         });
         relays
     }
