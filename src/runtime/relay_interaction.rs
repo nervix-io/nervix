@@ -1,5 +1,11 @@
 //! Shared relay-consumer scheduling.
 //!
+//! Layer: data plane.
+//!
+//! - **Owns.** Fair relay fan-in, branch-local input collection and control-event arbitration.
+//! - **Depends on.** Bound domain clocks, relay batches and node quiescence accounting.
+//! - **Must not know.** Node processing logic, connector I/O or domain-clock installation.
+//!
 //! This module owns the mechanics that are independent of a concrete runtime node: named relay
 //! fan-in, source-local and branch-local collection, wake/force-flush arbitration, receiver-local
 //! input draining, and quiesce work accounting. Nodes retain their processing and output behavior.
@@ -125,28 +131,42 @@ impl<C> RelayInteractionWork<C> {
 pub(super) struct RelayInteractionInput {
     relay: RelayName,
     receiver: RelayRuntimeFanIn,
-    collect_policy: Option<RuntimeInputCollectPolicy>,
-    domain_clock: Option<DomainClock>,
+    collection_mode: RelayInputCollectionMode,
 }
 
 impl RelayInteractionInput {
-    pub(super) fn new(
+    pub(super) fn immediate(relay: RelayName, receiver: RelayRuntimeFanIn) -> Self {
+        Self {
+            relay,
+            receiver,
+            collection_mode: RelayInputCollectionMode::Immediate,
+        }
+    }
+
+    pub(super) fn collecting(
         relay: RelayName,
         receiver: RelayRuntimeFanIn,
-        collect_policy: Option<RuntimeInputCollectPolicy>,
+        policy: RuntimeInputCollectPolicy,
+        domain_clock: DomainClock,
     ) -> Self {
         Self {
             relay,
             receiver,
-            collect_policy,
-            domain_clock: None,
+            collection_mode: RelayInputCollectionMode::Collect {
+                policy,
+                domain_clock,
+            },
         }
     }
+}
 
-    pub(super) fn with_domain_clock(mut self, domain_clock: DomainClock) -> Self {
-        self.domain_clock = Some(domain_clock);
-        self
-    }
+#[derive(Debug)]
+enum RelayInputCollectionMode {
+    Immediate,
+    Collect {
+        policy: RuntimeInputCollectPolicy,
+        domain_clock: DomainClock,
+    },
 }
 
 #[derive(Debug)]
@@ -157,8 +177,7 @@ struct RelayInputCollectionError {
 
 #[derive(Debug)]
 struct RelayInputCollection {
-    policy: Option<RuntimeInputCollectPolicy>,
-    domain_clock: Option<DomainClock>,
+    mode: RelayInputCollectionMode,
     /// Collected batches keyed by branch, in the order the branches first collected. Arrival order
     /// decides which branch flushes next, and the key resolves the branch a batch belongs to, so
     /// this is one ordered map instead of a map plus a separate order sequence to scan.
@@ -169,13 +188,11 @@ struct RelayInputCollection {
 
 impl RelayInputCollection {
     fn new(
-        policy: Option<RuntimeInputCollectPolicy>,
-        domain_clock: Option<DomainClock>,
+        mode: RelayInputCollectionMode,
         quiesce_counters: Option<Arc<NodeQuiesceCounters>>,
     ) -> Self {
         Self {
-            policy,
-            domain_clock,
+            mode,
             pending: IndexMap::new(),
             quiesce_counters,
             pending_batches: 0,
@@ -186,14 +203,12 @@ impl RelayInputCollection {
         &mut self,
         batch: RelayRecordBatch,
     ) -> Result<Option<RelayRecordBatch>, RelayInputCollectionError> {
-        let Some(policy) = self.policy else {
-            return Ok(Some(batch));
-        };
-        let Some(domain_clock) = &self.domain_clock else {
-            return Err(RelayInputCollectionError {
-                reason: "collected relay input has no bound domain clock".to_string(),
-                acks: batch.merged_acks(),
-            });
+        let (policy, domain_clock) = match &self.mode {
+            RelayInputCollectionMode::Immediate => return Ok(Some(batch)),
+            RelayInputCollectionMode::Collect {
+                policy,
+                domain_clock,
+            } => (*policy, domain_clock),
         };
         let snapshot = domain_clock
             .snapshot()
@@ -223,8 +238,9 @@ impl RelayInputCollection {
     }
 
     fn deadlines(&self) -> Vec<(DomainClock, BranchBufferDeadline)> {
-        let Some(domain_clock) = &self.domain_clock else {
-            return Vec::new();
+        let domain_clock = match &self.mode {
+            RelayInputCollectionMode::Immediate => return Vec::new(),
+            RelayInputCollectionMode::Collect { domain_clock, .. } => domain_clock,
         };
         self.pending
             .values()
@@ -234,8 +250,9 @@ impl RelayInputCollection {
     }
 
     fn take_due(&mut self) -> Result<Option<RelayRecordBatch>, RelayInputCollectionError> {
-        let Some(domain_clock) = &self.domain_clock else {
-            return Ok(None);
+        let domain_clock = match &self.mode {
+            RelayInputCollectionMode::Immediate => return Ok(None),
+            RelayInputCollectionMode::Collect { domain_clock, .. } => domain_clock.clone(),
         };
         let snapshot = domain_clock
             .snapshot()
@@ -246,7 +263,7 @@ impl RelayInputCollection {
         let mut due_key = None;
         for (key, collection) in &self.pending {
             let is_due = collection
-                .is_due(domain_clock, &snapshot)
+                .is_due(&domain_clock, &snapshot)
                 .map_err(|error| RelayInputCollectionError {
                     reason: format!("could not inspect a collected-input deadline: {error}"),
                     acks: self.pending_acks(),
@@ -373,8 +390,7 @@ impl RelayInteractionInputs {
                 relay: input.relay,
                 receiver: input.receiver,
                 collection: RelayInputCollection::new(
-                    input.collect_policy,
-                    input.domain_clock,
+                    input.collection_mode,
                     quiesce_counters.clone(),
                 ),
                 closed: false,
@@ -1048,11 +1064,14 @@ mod tests {
             NonZeroUsize::new(capacity).expect("nonzero test capacity"),
         );
         let receiver = RelayRuntimeFanIn::new(broadcast.new_receiver());
-        let input = RelayInteractionInput::new(relay, receiver, policy);
-        let input = if policy.is_some() {
-            input.with_domain_clock(test_domain_clock(&domain("relay_interaction")))
-        } else {
-            input
+        let input = match policy {
+            Some(policy) => RelayInteractionInput::collecting(
+                relay,
+                receiver,
+                policy,
+                test_domain_clock(&domain("relay_interaction")),
+            ),
+            None => RelayInteractionInput::immediate(relay, receiver),
         };
         (input, broadcast)
     }
@@ -2246,11 +2265,13 @@ mod tests {
             .checked_add(1)
             .assured("a test batch is far smaller than the u64 byte range");
         let mut collection = RelayInputCollection::new(
-            Some(RuntimeInputCollectPolicy {
-                interval: tokio::time::Duration::from_secs(60),
-                max_batch_size: Some(max_batch_size),
-            }),
-            Some(test_domain_clock(&domain("relay_interaction"))),
+            RelayInputCollectionMode::Collect {
+                policy: RuntimeInputCollectPolicy {
+                    interval: tokio::time::Duration::from_secs(60),
+                    max_batch_size: Some(max_batch_size),
+                },
+                domain_clock: test_domain_clock(&domain("relay_interaction")),
+            },
             None,
         );
         assert!(

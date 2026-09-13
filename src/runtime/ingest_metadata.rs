@@ -1,3 +1,10 @@
+//! Typed ingestion metadata projection.
+//!
+//! Layer: data plane.
+//! - **Owns.** Connector metadata columns and VM namespaces for accepted input batches.
+//! - **Depends on.** Arrow arrays, connector metadata and explicit execution timestamps.
+//! - **Must not know.** NSPL parsing, source-client lifecycle or persisted control state.
+
 use super::*;
 
 pub(super) const INGEST_METADATA_NAMESPACE: &str = "metadata";
@@ -448,13 +455,15 @@ impl IngestHeaderFunctionInjector {
 }
 
 impl VmFunctionInjector for IngestHeaderFunctionInjector {
-    fn inject(
+    fn inject_with_context(
         &self,
         function: &FunctionName,
         arguments: &[VmTypedArray],
         row_count: usize,
         _span: nervix_vm::program::Span,
-    ) -> Result<VmTypedArray, nervix_vm::RuntimeError> {
+        _now: Timestamp,
+        _prior_error_rows: nervix_vm::RowErrorMask<'_>,
+    ) -> Result<nervix_vm::InjectedResult, nervix_vm::RuntimeError> {
         let [VmTypedArray::Utf8(names)] = arguments else {
             return Err(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
@@ -488,7 +497,9 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
                 };
                 values.push(value);
             }
-            return Ok(VmTypedArray::Utf8(arrow_array::StringArray::from(values)));
+            return Ok(nervix_vm::InjectedResult::success(VmTypedArray::Utf8(
+                arrow_array::StringArray::from(values),
+            )));
         }
         if let FunctionName::ReadHeaders = function {
             let field = StdArc::new(arrow_schema::Field::new("item", ArrowDataType::Utf8, false));
@@ -503,7 +514,9 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
                 }
                 builder.append(true);
             }
-            return Ok(VmTypedArray::Generic(StdArc::new(builder.finish())));
+            return Ok(nervix_vm::InjectedResult::success(VmTypedArray::Generic(
+                StdArc::new(builder.finish()),
+            )));
         }
         Err(nervix_vm::RuntimeError::InvalidBatch {
             message: format!("function '{}' is not injectable", function.as_str()),

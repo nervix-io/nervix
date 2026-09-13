@@ -1,3 +1,10 @@
+//! Columnar filter-map execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** VM input projection, filter evaluation and route-local output construction.
+//! - **Depends on.** Compiled programs, Arrow batches and explicit execution timestamps.
+//! - **Must not know.** NSPL source, scheduling decisions or connector I/O.
+
 use super::*;
 
 #[cfg(test)]
@@ -1472,7 +1479,7 @@ mod tests {
             "FILTER-MAP",
             &program,
             batch,
-            current_timestamp(),
+            Timestamp::now(),
             &HashMap::default(),
         )
         .await
@@ -1571,7 +1578,7 @@ mod tests {
             "FILTER-MAP",
             &program,
             batch,
-            current_timestamp(),
+            Timestamp::now(),
             &HashMap::default(),
         )
         .await
@@ -1662,7 +1669,7 @@ mod tests {
             "FILTER-MAP",
             &program,
             batch,
-            current_timestamp(),
+            Timestamp::now(),
             &HashMap::default(),
         )
         .await
@@ -1738,7 +1745,7 @@ mod tests {
             "FILTER-MAP",
             &program,
             batch,
-            current_timestamp(),
+            Timestamp::now(),
             &HashMap::default(),
         )
         .await

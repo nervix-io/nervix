@@ -22,6 +22,8 @@ Current session behavior:
 - bare fields, `message.<field>`, and `input.<field>` all read the subscribed relay record; the
   compiler rejects `output`, `branch`, and `relay_state` scopes when the subscription is created
 - subscription syntax does not accept `INHERIT`, `SET`, `VALUES`, `INVOKE`, or other side effects
+- each admitted subscription batch receives one snapshot from its relay's bound domain clock;
+  every predicate expression and volatile UDF call for that batch sees the same instant
 - optional `BATCH SAMPLE RATE <rate>` samples arrivals after `WHERE` has been evaluated
 - `BLOCKING` delivery waits for the connected session transport queue, while `DROPPING` discards delivered events when that queue is full
 - subscription events are delivered asynchronously to the connected client session

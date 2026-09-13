@@ -49,6 +49,16 @@ The runtime then instantiates that schedule:
 - junctions, deduplicators, and reingestors transform or route records between relays
 - emitters encode records and publish them externally
 
+Clock ownership follows the same one-way conversion. NSPL parsing turns `PERIOD`, `SKEW`, start
+timestamps, and rates into validated vocabulary values. The control plane commits one mapping and
+fenced authority for a paced `START`. Each data-plane execution binds a capability for the exact
+domain and generation and obtains one timestamp snapshot before calling an expression engine or a
+WASM guest. Engines accept that timestamp as input and cannot read actual UTC. Logical deadlines
+carry their domain and generation; operational deadlines are a separate process-monotonic type
+whose construction is limited to timeout, retry, and external-I/O owners. Actual UTC enters the
+data plane through one physical-time owner and is projected into logical time or used by an
+explicit external observation contract.
+
 Runtime execution has its own persistence boundary. Selected execution-node state is persisted
 through periodic snapshots and replication, but in-flight message batches and ACK state are
 hot-path memory only. Relay buffers, concrete presence, fan-out, and metrics are owner-local and

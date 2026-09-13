@@ -1,9 +1,17 @@
+//! Prometheus polling ingestor execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** Prometheus queries, response capture and source-boundary timestamp observation.
+//! - **Depends on.** Typed Prometheus plans, HTTP clients and installed domain cadence.
+//! - **Must not know.** NSPL parsing, registry validation or placement computation.
+
 use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::super::*;
+use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct PrometheusIngestor;
 
@@ -71,7 +79,7 @@ impl PrometheusIngestor {
             }
         })?;
         let cadence = runtime
-            .bind_domain_cadence(domain, &every, DomainCadenceStart::AfterInterval)
+            .bind_domain_cadence(domain, every, DomainCadenceStart::AfterInterval)
             .map_err(|source| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
@@ -109,7 +117,7 @@ impl PrometheusIngestor {
                 domain = task_domain.as_str(),
                 ingestor = task_ingestor.as_str(),
                 query = query.as_str(),
-                every = every.as_str(),
+                every = %every,
                 "started prometheus ingestor"
             );
 
@@ -251,7 +259,8 @@ impl PrometheusIngestor {
                                 if entries.is_empty() {
                                     continue;
                                 }
-                                let payload = BufferedIngestPayload::batch(entries);
+                                let payload =
+                                    BufferedIngestPayload::batch(entries, actual_utc_now());
                                 if let IngestorQuiesceIntake::Dispatch(payload) =
                                     task_quiesce.intake(0, payload, false)
                                 {

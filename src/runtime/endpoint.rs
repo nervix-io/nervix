@@ -1,6 +1,14 @@
+//! HTTP endpoint ingestion boundary.
+//!
+//! Layer: data plane.
+//! - **Owns.** Endpoint route bindings, external request admission and response disposition.
+//! - **Depends on.** Installed ingestor plans, Arrow decoding and actual-UTC observation.
+//! - **Must not know.** NSPL parsing, placement policy or consensus storage.
+
 use std::borrow::Cow;
 
 use super::*;
+use crate::runtime::physical_time::actual_utc_now;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct HttpRouteKey {
@@ -208,6 +216,7 @@ impl Runtime {
             let payload = BufferedIngestPayload::new(
                 payload,
                 BufferedIngestMetadata::Headers(RetainedIngestHeaders::capture(headers)),
+                actual_utc_now(),
             );
             match binding.quiesce.intake(0, payload, true) {
                 IngestorQuiesceIntake::Dispatch(payload) => {
@@ -275,7 +284,7 @@ impl Runtime {
                         output_routes: &binding.output_routes,
                         filter_where: binding.filter_where.as_ref(),
                         metadata: &metadata,
-                        ingested_at: current_timestamp(),
+                        ingested_at: payload.observed_at(),
                         acks: vec![AckSet::empty()],
                     })
                     .await;

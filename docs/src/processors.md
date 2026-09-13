@@ -28,6 +28,12 @@ WASM processors, and reingestors. Correlators configure it independently after e
 `LEFT FROM` or `RIGHT FROM` relay list. Ingestors cannot use it because they do not consume relays;
 generators are scheduled from materialized state and have no `FROM` relay list.
 
+Each accepted input batch receives one domain execution snapshot. Source predicates, the node
+filter, construction, keys, aggregate expressions, route predicates, message-error construction,
+and any Roto or WASM call made for that execution all see that same instant. A batch released from
+`COLLECT FOR` starts a new execution with a fresh snapshot; the collection deadline itself remains
+bound to the source relay, concrete branch, domain, and `START` generation.
+
 Branch-preserving processors declare one node-wide contract:
 
 ```nspl,ignore
@@ -305,6 +311,13 @@ Aggregate calls may participate in larger scalar expressions and may combine wit
 initialized `output`, `branch`, and declared `relay_state` values. Route `WHERE` cannot read live
 input rows. Windows use `WIDTH` and `STEP`, never `FLUSH`.
 
+A duration width begins at the first retained record's low watermark and becomes due when an input
+watermark or the bound domain clock reaches that logical target. A paced `TIME RATE` therefore
+changes how soon a partially filled window becomes due in real time without changing its source
+event timestamps. Each concrete branch owns independent entries, aggregate state, and deadlines.
+The emitted record keeps the minimum input low watermark and uses the emission execution snapshot
+as its high watermark.
+
 ## Inferencer
 
 Inferencers keep the explicit tensor mapping surface. `INPUTS` expressions may read `input`; route
@@ -358,6 +371,10 @@ required, in that order immediately after `FILE`. Fuel bounds one logical guest 
 memory bounds the branch instance's Wasmtime linear memory. See
 [WASM Processor Guests](wasm-processor-guests.md#execution-limits) for exact accounting and
 failure behavior.
+
+Guest initialization, input processing, requested-timeout callbacks, quiesce flushes, and state
+save, load, or reset each receive the snapshot selected for that operation. The guest cannot ask
+the engine for wall time or execute without an explicit snapshot.
 
 ## Correlator
 

@@ -1,3 +1,10 @@
+//! Branch-local WASM processor execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** WASM invocation, guest output routing and branch-local timeout handling.
+//! - **Depends on.** Compiled WASM processors, Arrow batches and explicit execution contexts.
+//! - **Must not know.** NSPL parsing, placement policy or external connector clients.
+
 use super::*;
 
 pub(super) async fn flush_branch_wasm_processor(
@@ -393,7 +400,7 @@ pub(super) async fn ensure_wasm_processor_instance(
                 .instantiate_branch(
                     limits,
                     init,
-                    Box::new(nervix_wasm::FixedDomainClock::new(execution_now)),
+                    nervix_wasm::WasmExecutionContext::new(execution_now),
                     restored_guest_state.as_deref(),
                 )
                 .await

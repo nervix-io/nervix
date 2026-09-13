@@ -1,6 +1,14 @@
+//! Redis Pub/Sub ingestor execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** Redis subscription consumption and source-boundary timestamp observation.
+//! - **Depends on.** Typed Redis plans, connector clients and ingestor runtime admission.
+//! - **Must not know.** NSPL parsing, registry validation or placement computation.
+
 use redis::{Client as RedisClient, ClientTlsConfig, TlsCertificates as RedisTlsCertificates};
 
 use super::super::*;
+use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct RedisPubSubIngestor;
 
@@ -271,6 +279,7 @@ impl RedisPubSubIngestor {
                                     let payload = BufferedIngestPayload::new(
                                         payload,
                                         BufferedIngestMetadata::without_headers(),
+                                        actual_utc_now(),
                                     );
                                     if let IngestorQuiesceIntake::Dispatch(payload) =
                                         task_quiesce.intake(0, payload, false)

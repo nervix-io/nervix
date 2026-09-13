@@ -1,3 +1,10 @@
+//! Canonical NSPL rendering for vocabulary models.
+//!
+//! Layer: vocabulary.
+//! - **Owns.** Stable textual rendering of current semantic models.
+//! - **Depends on.** Vocabulary types and their declared semantic order.
+//! - **Must not know.** Parser recovery, registry state or runtime execution.
+
 use std::{
     fmt::{Display, Formatter},
     num::NonZeroU64,
@@ -588,11 +595,11 @@ impl Statement {
                 };
                 let config = &create.body.config;
                 let pacing = match config.pace {
-                    DomainPace::Paced => format!(
+                    DomainPace::Paced { period, skew } => format!(
                         "PACED DOMAIN {} WITH PERIOD {} SKEW {}",
                         create.body.id.as_str(),
-                        config.period,
-                        config.skew
+                        period,
+                        skew
                     ),
                     DomainPace::Unpaced => {
                         format!("UNPACED DOMAIN {}", create.body.id.as_str())
@@ -3556,6 +3563,7 @@ where
 mod tests {
     use std::num::NonZeroU32;
 
+    use meticulous::ResultExt as _;
     use nonzero_ext::nonzero;
 
     use crate::{
@@ -3973,7 +3981,10 @@ mod tests {
                     pool: pool_bounds(0, 1),
                     mount: Some(named("dev_tls")),
                     config: vec![
-                        config_entry("addr", "postgresql://db.example.com/nervix?sslmode=verify-full"),
+                        config_entry(
+                            "addr",
+                            "postgresql://db.example.com/nervix?sslmode=verify-full",
+                        ),
                         config_entry("tls_ca_file", "{{ dev_tls }}/ca.pem"),
                     ],
                 }
@@ -4735,7 +4746,9 @@ mod tests {
                     timestamp_source: None,
                     source: IngestSource::Http {
                         client: named("http_main"),
-                        every: "30s".to_string(),
+                        every: "30s"
+                            .parse()
+                            .assured("the fixture cadence is a positive duration"),
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
@@ -4891,7 +4904,9 @@ mod tests {
                     source: IngestSource::Prometheus {
                         client: named("prom_main"),
                         query: "sum(rate(http_requests_total[5m]))".to_string(),
-                        every: "15s".to_string(),
+                        every: "15s"
+                            .parse()
+                            .assured("the fixture cadence is a positive duration"),
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     },
                     general_error_policy: GeneralErrorPolicy::Log,

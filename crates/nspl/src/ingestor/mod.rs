@@ -1,3 +1,10 @@
+//! Ingestor statement grammar.
+//!
+//! Layer: language.
+//! - **Owns.** Parsing ingestor sources, routes, timestamps and lifecycle alterations.
+//! - **Depends on.** Shared NSPL grammar primitives and connector vocabulary models.
+//! - **Must not know.** Connector clients, runtime polling or broker state.
+
 use std::num::NonZeroU64;
 
 use chumsky::prelude::*;
@@ -15,12 +22,12 @@ use crate::{
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_timeout, alter_ingestor_route_body,
         alter_op_separator, boxed_choice, byte_size_lit, channel_ref, client_ref, codec_ref,
-        consumer_group_ref, duration_lit, endpoint_ref, field_ref, filter_where_clause,
-        flushed_ingestor_outputs, general_error_policy, if_not_exists_clause, ingestor_name,
-        into_parse_error, kw, kw_phrase2, lex_input, mqtt_topic_filter, nats_queue_group_ref,
-        nonzero_u64_value, parallel_ack_window, queue_ref, relay_ref, retry_policy,
-        sequential_ack_window, string_lit, subject_ref, subscription_ref, suggest_from, tok,
-        topic_ref, where_expression,
+        consumer_group_ref, domain_clock_period_lit, duration_lit, endpoint_ref, field_ref,
+        filter_where_clause, flushed_ingestor_outputs, general_error_policy, if_not_exists_clause,
+        ingestor_name, into_parse_error, kw, kw_phrase2, lex_input, mqtt_topic_filter,
+        nats_queue_group_ref, nonzero_u64_value, parallel_ack_window, queue_ref, relay_ref,
+        retry_policy, sequential_ack_window, string_lit, subject_ref, subscription_ref,
+        suggest_from, tok, topic_ref, where_expression,
     },
 };
 
@@ -561,11 +568,7 @@ fn prometheus_ingest_source_parser<'src>()
         .then_ignore(kw(Identifier::Query))
         .then(string_lit())
         .then_ignore(kw(Identifier::Every))
-        .then(duration_lit().try_map(|every, span| {
-            humantime::parse_duration(&every)
-                .map(|_| every.clone())
-                .map_err(|err| Rich::custom(span, format!("invalid duration '{every}': {err}")))
-        }))
+        .then(domain_clock_period_lit())
         .then(polling_quiesce_clause())
         .map(
             |(((client, query), every), quiesce)| IngestSource::Prometheus {
@@ -582,11 +585,7 @@ fn http_ingest_source_parser<'src>()
     kw(Identifier::Http)
         .ignore_then(client_ref())
         .then_ignore(kw(Identifier::Every))
-        .then(duration_lit().try_map(|every, span| {
-            humantime::parse_duration(&every)
-                .map(|_| every.clone())
-                .map_err(|err| Rich::custom(span, format!("invalid duration '{every}': {err}")))
-        }))
+        .then(domain_clock_period_lit())
         .then(polling_quiesce_clause())
         .map(|((client, every), quiesce)| IngestSource::Http {
             client,
@@ -2051,7 +2050,9 @@ mod tests {
                 client: nervix_models::ClientName::try_from("prom_main")
                     .expect("valid client identifier"),
                 query: r#"label_replace(vector(42.5), "source", "local", "", "")"#.to_string(),
-                every: "15s".to_string(),
+                every: "15s"
+                    .parse()
+                    .assured("the fixture cadence is a positive duration"),
                 quiesce: IngestQuiesceMode::Suspend,
             }
         );
@@ -2076,7 +2077,9 @@ mod tests {
             IngestSource::Http {
                 client: nervix_models::ClientName::try_from("http_main")
                     .expect("valid client identifier"),
-                every: "1s".to_string(),
+                every: "1s"
+                    .parse()
+                    .assured("the fixture cadence is a positive duration"),
                 quiesce: IngestQuiesceMode::Suspend,
             }
         );

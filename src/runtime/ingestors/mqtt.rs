@@ -1,3 +1,10 @@
+//! MQTT ingestor execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** MQTT session consumption, acknowledgement and source-boundary observation.
+//! - **Depends on.** Typed MQTT plans, broker clients and ingestor runtime admission.
+//! - **Must not know.** NSPL parsing, registry validation or placement computation.
+
 use std::{borrow::Cow, num::NonZeroU64};
 
 use rumqttc::{
@@ -7,6 +14,7 @@ use rumqttc::{
 use url::{Host, Url};
 
 use super::super::*;
+use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct MqttIngestor;
 
@@ -740,6 +748,7 @@ impl MqttIngestor {
         let payload = BufferedIngestPayload::new(
             publish.payload.as_ref(),
             BufferedIngestMetadata::without_headers(),
+            actual_utc_now(),
         );
         match context.quiesce.intake(instance_idx, payload, false) {
             IngestorQuiesceIntake::Dispatch(_) => Some(publish),
@@ -1090,7 +1099,7 @@ impl MqttIngestor {
                 metadata: &[IngestMetadataRow::Headers {
                     headers: &NoIngestHeaders,
                 }],
-                ingested_at: current_timestamp(),
+                ingested_at: actual_utc_now(),
                 acks: vec![acks],
             })
             .await

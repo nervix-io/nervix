@@ -73,8 +73,6 @@ impl Harness {
             id: DomainName::try_from(name).assured("the fixture generates identifier-shaped names"),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
-                period: "1s".into(),
-                skew: "0s".into(),
                 placement: Default::default(),
             },
             status: DomainStatus::Stopped,

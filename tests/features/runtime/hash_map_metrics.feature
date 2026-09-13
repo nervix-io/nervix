@@ -79,6 +79,7 @@ Feature: Hash map metrics
     And the last command output metric "messages_total" "received" relay "-" physical node "{{hash_map_metrics_owner}}" has values
       """
       total=2
+      domain_rate_per_sec=-
       """
     And the last command output does not contain
       """

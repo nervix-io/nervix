@@ -13,7 +13,7 @@ The runtime creates one guest instance per concrete branch. Guest state must the
 
 The runtime compiles a WASM processor module once for the scheduled processor and reuses that
 compiled module to instantiate branches. Each branch instance still has its own Wasmtime store,
-linear memory, guest state, clock, and timeout handles. Compiled code is shared. Mutable guest
+linear memory, guest state, and timeout handles. Compiled code is shared. Mutable guest
 memory is not.
 
 Capacity therefore grows with the linear-memory pages dirtied by each live branch, not with a full
@@ -49,6 +49,14 @@ Fuel or memory exhaustion is handled by the processor's node-wide `ON GLOBAL ERR
 discards that concrete branch's trapped guest instance; later work may instantiate a replacement
 from the last replicated guest snapshot. Other branch instances are independent and continue
 running. There is no separate WASM wall-clock timeout clause.
+
+Before every guest operation, Nervix supplies one explicit domain execution snapshot to the WASM
+host. Initialization, input processing, a timeout callback, quiesce flush, and state save, load, or
+reset each receive the snapshot of their owning execution. Every call to
+`nervix_domain_time_nanos()` during that operation returns exactly that value. The host exposes no
+context-free guest invocation and the module cannot choose or read host wall time. Wasmtime epoch
+yielding and fuel enforcement remain physical execution safeguards and do not change guest-visible
+domain time.
 
 ## Contract Summary
 
@@ -351,7 +359,10 @@ rather than silently reset the snapshot.
 
 ## Timeouts
 
-A guest can call `nervix_timeout_after_nanos(delay)` while processing. The host returns a monotonically increasing handle for that branch instance. When the domain clock reaches the requested time, the host calls:
+A guest can call `nervix_timeout_after_nanos(delay)` while processing. The request is anchored at
+that operation's supplied domain snapshot, and `delay` is a logical duration. The host returns a
+monotonically increasing handle for that branch instance. When the same bound domain and `START`
+generation reach the requested instant, the host calls:
 
 ```text
 nervix_on_timeout(handle)

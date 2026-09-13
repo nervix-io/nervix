@@ -17,9 +17,9 @@ use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use meticulous::ResultExt as _;
 use nervix_models::{Timestamp, WasmProcessorLimits};
 use nervix_wasm::{
-    DomainClock, WasmAckSidecar, WasmAckToken, WasmBranchInit, WasmEnvelope, WasmOutputColumnRef,
-    WasmOutputRow, WasmProcessorField, WasmProcessorSchema, WasmProcessorType, WasmRuntime,
-    WasmRuntimeConfig,
+    WasmAckSidecar, WasmAckToken, WasmBranchInit, WasmEnvelope, WasmExecutionContext,
+    WasmOutputColumnRef, WasmOutputRow, WasmProcessorField, WasmProcessorSchema, WasmProcessorType,
+    WasmRuntime, WasmRuntimeConfig,
 };
 use nonzero_ext::nonzero;
 
@@ -30,15 +30,6 @@ fn limits() -> WasmProcessorLimits {
     WasmProcessorLimits {
         max_fuel: nonzero!(1_000_000_000u64),
         max_memory_bytes: nonzero!(134_217_728u64),
-    }
-}
-
-#[derive(Debug)]
-struct FixedClock(Timestamp);
-
-impl DomainClock for FixedClock {
-    fn now(&self) -> Timestamp {
-        self.0
     }
 }
 
@@ -179,25 +170,26 @@ async fn the_geo_guest_enriches_every_declared_route() {
         .instantiate_branch(
             limits(),
             init(),
-            Box::new(FixedClock(Timestamp::from_unix_nanos(
-                1_700_000_000_000_000_000,
-            ))),
+            WasmExecutionContext::new(Timestamp::from_unix_nanos(1_700_000_000_000_000_000)),
             None,
         )
         .await
         .expect("geo guest must instantiate");
 
     let outputs = branch
-        .process_envelope(&WasmEnvelope::input(
-            input_arrow("8.8.8.8"),
-            WasmAckSidecar {
-                rows: vec![WasmOutputRow {
-                    tokens: vec![WasmAckToken(1)],
-                    source_token: Some(WasmAckToken(1)),
-                }],
-                ..WasmAckSidecar::default()
-            },
-        ))
+        .process_envelope_in_context(
+            &WasmEnvelope::input(
+                input_arrow("8.8.8.8"),
+                WasmAckSidecar {
+                    rows: vec![WasmOutputRow {
+                        tokens: vec![WasmAckToken(1)],
+                        source_token: Some(WasmAckToken(1)),
+                    }],
+                    ..WasmAckSidecar::default()
+                },
+            ),
+            WasmExecutionContext::new(Timestamp::from_unix_nanos(1_700_000_000_000_000_000)),
+        )
         .await
         .expect("geo guest must enrich the batch");
 
@@ -316,7 +308,7 @@ async fn the_geo_guest_rejects_a_destination_schema_it_cannot_fill() {
         .instantiate_branch(
             limits(),
             broken,
-            Box::new(FixedClock(Timestamp::from_unix_nanos(0))),
+            WasmExecutionContext::new(Timestamp::from_unix_nanos(0)),
             None,
         )
         .await

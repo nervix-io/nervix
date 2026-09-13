@@ -1,16 +1,24 @@
+//! Domain lifecycle grammar.
+//!
+//! Layer: language.
+//!
+//! - **Owns.** Parsing domain creation, placement changes, starts, pauses, resumes and stops.
+//! - **Depends on.** Shared NSPL tokens and validated domain vocabulary models.
+//! - **Must not know.** Registry state, consensus, runtime clocks or execution tasks.
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    AlterDomain, CreateDomain, CreateStatement, DomainConfig, DomainPace, DomainStartPoint,
-    DomainTimeRate, PlacementPolicy, StartDomain, StopDomain, Timestamp,
+    AlterDomain, CreateDomain, CreateStatement, DomainClockSkew, DomainConfig, DomainPace,
+    DomainStartPoint, DomainTimeRate, PlacementPolicy, StartDomain, StopDomain, Timestamp,
 };
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, completion_context, completion_tokens,
-        domain_name, duration_lit, if_not_exists_clause, into_parse_error, kw, kw_phrase2,
-        lex_input, string_lit, suggestions_from_errors, tok, word_raw,
+        domain_clock_period_lit, domain_name, duration_lit, if_not_exists_clause, into_parse_error,
+        kw, kw_phrase2, lex_input, string_lit, suggestions_from_errors, tok, word_raw,
     },
 };
 
@@ -35,6 +43,14 @@ fn timestamp_lit<'src>()
         })
 }
 
+fn clock_skew_lit<'src>()
+-> impl Parser<'src, &'src [Token], DomainClockSkew, extra::Err<ParseError<'src>>> + Clone {
+    duration_lit().try_map(|raw, span| {
+        raw.parse::<DomainClockSkew>()
+            .map_err(|error| Rich::custom(span, error.to_string()))
+    })
+}
+
 pub fn create_domain_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateDomain>, extra::Err<ParseError<'src>>> + Clone
 {
@@ -49,8 +65,6 @@ pub fn create_domain_parser<'src>()
             id,
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
-                period: "0ms".to_string(),
-                skew: "0ms".to_string(),
                 placement,
             },
         });
@@ -59,16 +73,14 @@ pub fn create_domain_parser<'src>()
         .ignore_then(domain_name())
         .then_ignore(kw(Identifier::With))
         .then_ignore(kw(Identifier::Period))
-        .then(duration_lit())
+        .then(domain_clock_period_lit())
         .then_ignore(kw(Identifier::Skew))
-        .then(duration_lit())
+        .then(clock_skew_lit())
         .then(placement.clone())
         .map(|(((id, period), skew), placement)| CreateDomain {
             id,
             config: DomainConfig {
-                pace: DomainPace::Paced,
-                period,
-                skew,
+                pace: DomainPace::Paced { period, skew },
                 placement,
             },
         });
@@ -80,8 +92,6 @@ pub fn create_domain_parser<'src>()
             id,
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
-                period: "0ms".to_string(),
-                skew: "0ms".to_string(),
                 placement,
             },
         });
@@ -185,8 +195,10 @@ pub fn suggest_domain_statement(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
     use nervix_models::{
-        DomainPace, DomainStartPoint, DomainTimeRate, PlacementPolicy, Statement, Timestamp,
+        DomainClockPeriod, DomainClockSkew, DomainPace, DomainStartPoint, DomainTimeRate,
+        PlacementPolicy, Statement, Timestamp,
     };
 
     use crate::statement::{parse_statement, suggest_statement};
@@ -199,9 +211,17 @@ mod tests {
             panic!("expected create domain");
         };
         assert_eq!(domain.id.as_str(), "prod");
-        assert_eq!(domain.config.pace, DomainPace::Paced);
-        assert_eq!(domain.config.period, "30s");
-        assert_eq!(domain.config.skew, "1s");
+        assert_eq!(
+            domain.config.pace,
+            DomainPace::Paced {
+                period: "30s"
+                    .parse::<DomainClockPeriod>()
+                    .assured("the fixture period is a positive duration"),
+                skew: "1s"
+                    .parse::<DomainClockSkew>()
+                    .assured("the fixture skew fits the domain clock representation"),
+            }
+        );
         assert_eq!(domain.config.placement, PlacementPolicy::Neutral);
     }
 
@@ -270,8 +290,6 @@ mod tests {
             panic!("expected create domain");
         };
         assert_eq!(domain.config.pace, DomainPace::Unpaced);
-        assert_eq!(domain.config.period, "0ms");
-        assert_eq!(domain.config.skew, "0ms");
     }
 
     #[test]
@@ -282,8 +300,6 @@ mod tests {
         };
         assert_eq!(domain.id.as_str(), "prod");
         assert_eq!(domain.config.pace, DomainPace::Unpaced);
-        assert_eq!(domain.config.period, "0ms");
-        assert_eq!(domain.config.skew, "0ms");
     }
 
     #[test]

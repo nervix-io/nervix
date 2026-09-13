@@ -1,7 +1,15 @@
+//! WebSocket ingestor execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** WebSocket connection consumption and source-boundary timestamp observation.
+//! - **Depends on.** Typed WebSocket plans, connector clients and ingestor runtime admission.
+//! - **Must not know.** NSPL parsing, registry validation or placement computation.
+
 use nervix_models::{DomainName, IngestorName};
 use tokio_tungstenite::{Connector, connect_async, connect_async_tls_with_config};
 
 use super::super::*;
+use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct WebsocketsIngestor;
 
@@ -360,8 +368,11 @@ impl WebsocketsIngestor {
     }
 
     async fn accept_payload(context: &WebsocketDispatchContext<'_>, payload: &[u8]) {
-        let payload =
-            BufferedIngestPayload::new(payload, BufferedIngestMetadata::without_headers());
+        let payload = BufferedIngestPayload::new(
+            payload,
+            BufferedIngestMetadata::without_headers(),
+            actual_utc_now(),
+        );
         if let IngestorQuiesceIntake::Dispatch(payload) = context.quiesce.intake(0, payload, false)
         {
             Self::dispatch_payload(context, &payload).await;

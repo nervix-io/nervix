@@ -1758,7 +1758,7 @@ impl Runtime {
             self.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Relay, &relay));
         let force_flush = self.force_flush_participant(&domain, quiesce_counters.clone());
         let task = tokio::spawn(async move {
-            let interaction_input = RelayInteractionInput::new(relay.clone(), receiver, None);
+            let interaction_input = RelayInteractionInput::immediate(relay.clone(), receiver);
             let mut interaction = RelayInteraction::new(
                 vec![interaction_input],
                 shutdown_rx,

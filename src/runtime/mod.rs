@@ -281,7 +281,7 @@ use deduplicator::{
 };
 use domain_clock::{
     DomainCadenceOccurrence, DomainCadenceStart, DomainClock, DomainClockAccessResult,
-    DomainClockLifecycle, LogicalDeadline, checked_add_duration_to_timestamp, current_timestamp,
+    DomainClockLifecycle, LogicalDeadline, checked_add_duration_to_timestamp,
     wait_for_branch_deadline,
 };
 use domain_execution::{

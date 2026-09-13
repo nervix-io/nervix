@@ -1412,7 +1412,7 @@ impl Runtime {
         {
             (domain_state.start_version, domain_state.last_start.clone())
         } else {
-            (0, nervix_models::DomainStartPoint::Resume)
+            return Err(format!("domain '{}' is not installed", domain.as_str()));
         };
         let scheduled_partition_schedule = if let Some(execution) =
             self.inner.executions.get(domain)
@@ -1437,7 +1437,12 @@ impl Runtime {
             )?
         } else {
             let timestamp = match &last_start {
-                nervix_models::DomainStartPoint::Now { .. } => current_timestamp(),
+                nervix_models::DomainStartPoint::Now { .. } => {
+                    return Err(format!(
+                        "domain '{}' has an unresolved START AT NOW",
+                        domain.as_str()
+                    ));
+                }
                 nervix_models::DomainStartPoint::At { timestamp, .. } => *timestamp,
                 nervix_models::DomainStartPoint::Resume => unreachable!("handled above"),
             };
@@ -1501,7 +1506,7 @@ impl Runtime {
             output_routes,
             filter_where,
             metadata: &metadata,
-            ingested_at: current_timestamp(),
+            ingested_at: payload.observed_at(),
             acks: vec![AckSet::empty(); row_count],
         })
         .await

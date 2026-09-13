@@ -1,3 +1,10 @@
+//! Branch-boundary reingestor execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** Reingestor input evaluation, branch construction and route-local buffering.
+//! - **Depends on.** Validated plans, Arrow batches, materialized state and bound clocks.
+//! - **Must not know.** NSPL parsing, placement selection or source transport lifecycle.
+
 use indexmap::IndexMap;
 
 use super::*;
@@ -1305,9 +1312,15 @@ impl Runtime {
                 branched_senders: &task_branched_senders,
                 domain_clock: &domain_clock,
             };
-            let interaction_input =
-                RelayInteractionInput::new(task_from_relay.clone(), receiver, input_collect_policy)
-                    .with_domain_clock(domain_clock.clone());
+            let interaction_input = match input_collect_policy {
+                Some(policy) => RelayInteractionInput::collecting(
+                    task_from_relay.clone(),
+                    receiver,
+                    policy,
+                    domain_clock.clone(),
+                ),
+                None => RelayInteractionInput::immediate(task_from_relay.clone(), receiver),
+            };
             let mut interaction = RelayInteraction::new(
                 vec![interaction_input],
                 shutdown_rx,

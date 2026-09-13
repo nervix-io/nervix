@@ -267,9 +267,12 @@ audit:
 ratchet *args:
     python3 scripts/ratchet.py {{ args }}
 
-validate: fmt lint validate-skill validate-nspl-docs
+validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries
 
-validate-ci: fmt-check lint validate-skill validate-nspl-docs
+validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries
+
+validate-clock-boundaries:
+    python3 scripts/check_clock_boundaries.py
 
 # Parse every runnable NSPL block in the documentation directly through the parser crate. Syntax
 # synopses and statement fragments remain NSPL-labelled but opt out explicitly with `nspl,ignore`.
