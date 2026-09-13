@@ -515,6 +515,22 @@ build and the existing tests, and nothing in it changes behavior.
 - Tests must explicitly provision required external entities.
 - Avoid blind sleeps. Wait for explicit conditions with bounded timeouts and useful failure
   messages. Short polling intervals are acceptable only inside such a condition-based wait.
+- Scenarios run many at a time on one machine, so a loaded box delays every step. A bound that
+  only holds on an idle machine is a defect in the test, not a flake to retry. Waiting for
+  something to happen is therefore bounded generously: raising that bound costs nothing under
+  parallelism, because the wait ends when the condition holds.
+- An assertion that something has **not** happened yet is the opposite: its window is bounded by
+  the cadence the scenario configured, and load can carry the cadence into the window before the
+  step even starts. Give the configured cadence at least a second of margin over the window, and
+  keep the window a small fraction of the cadence — a shorter window is both faster and safer,
+  because the assertion's job is to show that the output is not immediate, not to measure the
+  timer. Never widen the window to make such a step more patient; widen the cadence it races.
+- An assertion on an exact batch count needs a flush window wider than the spread between the
+  messages it groups, not one comparable to it. Concurrently published messages arrive spread by
+  whatever the machine is doing.
+- A unit test that compares wall-clock instants anchors its bound to an instant observed after the
+  value under test was computed, so scheduling delay moves both sides. A fixed tolerance added to
+  an instant captured earlier only holds on an idle machine.
 - Browser behavior is tested through the standard web-console cucumber suite and Playwright-facing
   steps, not by bypassing the public browser flow.
 

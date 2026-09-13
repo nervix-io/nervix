@@ -38,7 +38,7 @@ Feature: Window processor metrics
         INHERIT ALL
         BRANCHED BY by_window_metrics_source
         SET tenant = message.tenant
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        FLUSH EACH 2s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         CREATE WINDOW PROCESSOR window_metrics_node FROM metrics_input
@@ -57,7 +57,7 @@ Feature: Window processor metrics
       {"tenant":"acme","latency":20}
       {"tenant":"acme","latency":30}
       """
-    Then within "5s" the relay subscription receives a payload
+    Then within "20s" the relay subscription receives a payload
       """
       "adjusted_total":120
       """
@@ -71,7 +71,7 @@ Feature: Window processor metrics
       {"tenant":"acme","latency":50}
       {"tenant":"acme","latency":60}
       """
-    Then within "5s" the relay subscription receives a payload
+    Then within "20s" the relay subscription receives a payload
       """
       "adjusted_total":300
       """

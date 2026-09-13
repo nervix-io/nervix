@@ -399,8 +399,13 @@ mod tests {
             else {
                 panic!("expected the first emitter stop command");
             };
+            // `stop` reads the clock before it sends, so its deadline cannot be later than the
+            // grace measured from the instant this receiver observed the command. Anchoring the
+            // bound to an observation taken after the deadline was computed keeps it exact under
+            // any scheduling delay, where a fixed tolerance would only hold on an idle machine.
+            let observed = Instant::now();
             assert!(deadline > started);
-            assert!(deadline <= started + grace + Duration::from_millis(10));
+            assert!(deadline <= observed + grace);
             let _ = response.send(Err("transport drain failed".to_string()));
 
             let Some(EmitterTaskCommand::Stop { response, .. }) = command_rx.recv().await else {
