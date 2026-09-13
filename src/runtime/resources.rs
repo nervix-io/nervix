@@ -215,11 +215,11 @@ impl Runtime {
         ProtobufDescriptorPool::from_file_descriptor_set(file_descriptor_set)
     }
 
-    pub fn attach_resource_store(&self, resource_store: Arc<ResourceStore>) {
+    pub(crate) fn attach_resource_store(&self, resource_store: Arc<ResourceStore>) {
         *self.inner.resource_store.write() = Some(resource_store);
     }
 
-    pub fn sync_resource_versions(&self, resources: &nervix_models::ResourceVersionStatus) {
+    pub(crate) fn sync_resource_versions(&self, resources: &nervix_models::ResourceVersionStatus) {
         self.inner.latest_resource_versions.clear();
         for resource in &resources.versions {
             let key = DomainResourceKey {
@@ -238,7 +238,7 @@ impl Runtime {
         }
     }
 
-    pub fn attach_resources(
+    pub(crate) fn attach_resources(
         &self,
         resource_store: Arc<ResourceStore>,
         resource_versions: ResourceVersionStatus,
@@ -248,7 +248,7 @@ impl Runtime {
         *self.inner.resource_versions.write() = resource_versions;
     }
 
-    pub fn update_resource_versions(&self, resource_versions: ResourceVersionStatus) {
+    pub(crate) fn update_resource_versions(&self, resource_versions: ResourceVersionStatus) {
         self.sync_resource_versions(&resource_versions);
         *self.inner.resource_versions.write() = resource_versions;
     }

@@ -42,14 +42,14 @@ pub(super) struct EndpointIngestBinding {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct EndpointDispatchOutcome {
-    pub accepted: usize,
-    pub rejected: usize,
-    pub retry_after: Option<Duration>,
+pub(crate) struct EndpointDispatchOutcome {
+    pub(in crate::runtime) accepted: usize,
+    pub(in crate::runtime) rejected: usize,
+    pub(crate) retry_after: Option<Duration>,
 }
 
 impl EndpointDispatchOutcome {
-    pub fn is_accepted(self) -> bool {
+    pub(crate) fn is_accepted(self) -> bool {
         self.accepted > 0
     }
 }
@@ -63,12 +63,12 @@ pub(super) fn normalize_http_host(host: &str) -> String {
 }
 
 impl Runtime {
-    pub async fn has_websocket_endpoint(&self, host: &str, path: &str) -> bool {
+    pub(crate) async fn has_websocket_endpoint(&self, host: &str, path: &str) -> bool {
         self.has_endpoint(host, path, EndpointType::Websockets)
             .await
     }
 
-    pub async fn websocket_endpoint_signaling_protocol(
+    pub(crate) async fn websocket_endpoint_signaling_protocol(
         &self,
         host: &str,
         path: &str,
@@ -96,7 +96,7 @@ impl Runtime {
             .cloned()
     }
 
-    pub async fn has_http_endpoint(&self, host: &str, path: &str) -> bool {
+    pub(crate) async fn has_http_endpoint(&self, host: &str, path: &str) -> bool {
         self.has_endpoint(host, path, EndpointType::Http).await
     }
 
@@ -131,7 +131,7 @@ impl Runtime {
             .await
     }
 
-    pub async fn websocket_endpoint_admission(
+    pub(crate) async fn websocket_endpoint_admission(
         &self,
         host: &str,
         path: &str,

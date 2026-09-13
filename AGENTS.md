@@ -515,6 +515,26 @@ build and the existing tests, and nothing in it changes behavior.
 - Tests must explicitly provision required external entities.
 - Avoid blind sleeps. Wait for explicit conditions with bounded timeouts and useful failure
   messages. Short polling intervals are acceptable only inside such a condition-based wait.
+- Scenarios run many at a time on one machine, so a loaded box delays every step. A bound that
+  only holds on an idle machine is a defect in the test, not a flake to retry. Waiting for
+  something to happen is therefore bounded generously: raising that bound costs nothing under
+  parallelism, because the wait ends when the condition holds.
+- An assertion that something has **not** happened yet is the opposite, and no choice of window
+  makes it reliable. Its window opens when the step starts, while the cadence it races started at
+  the event before it, so the margin between them is consumed by whatever delayed the step
+  boundary — which under this suite's parallelism is seconds, not milliseconds. Measured on the
+  Kafka partial-batch scenario: a window two seconds inside the cadence still failed under load,
+  and the same scenario passed repeatedly once the assertion measured instead of gated. So assert
+  the delay, not the silence: record when the triggering event happened and require that the
+  output arrived at least the cadence later. Load moves the event and the arrival together, so a
+  measured delay only grows. Reserve a "does not arrive" window for output that must never arrive
+  at all, where a longer window strengthens the assertion.
+- An assertion on an exact batch count needs a flush window wider than the spread between the
+  messages it groups, not one comparable to it. Concurrently published messages arrive spread by
+  whatever the machine is doing.
+- A unit test that compares wall-clock instants anchors its bound to an instant observed after the
+  value under test was computed, so scheduling delay moves both sides. A fixed tolerance added to
+  an instant captured earlier only holds on an idle machine.
 - Browser behavior is tested through the standard web-console cucumber suite and Playwright-facing
   steps, not by bypassing the public browser flow.
 

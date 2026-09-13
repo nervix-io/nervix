@@ -173,7 +173,7 @@ Feature: Ingestor metrics
         TO notifications
         INHERIT ALL
         UNBRANCHED
-        FLUSH EACH 1s MAX BATCH SIZE 64B
+        FLUSH EACH 3s MAX BATCH SIZE 64B
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION notifications_subscription TO notifications;
@@ -183,8 +183,7 @@ Feature: Ingestor metrics
       """
       {"user_id":42}
       """
-    Then the relay subscription does not receive a payload within "300ms"
-    And within "3s" the relay subscription receives a payload
+    Then the relay subscription receives a payload no sooner than "3s" after it was published
       """
       "user_id":42
       """

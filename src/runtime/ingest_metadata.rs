@@ -50,7 +50,7 @@ pub(crate) struct IngestFilterMapMetadata {
 /// Every source kind maps to exactly one variant, so a builder set is never chosen from
 /// the contents of a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum IngestMetadataKind {
+pub(in crate::runtime) enum IngestMetadataKind {
     Kafka,
     Syslog,
     Headers,
@@ -92,7 +92,7 @@ pub(crate) trait IngestMessageHeaders: Send + Sync {
 }
 
 /// A source message that carries no transport headers.
-pub(crate) struct NoIngestHeaders;
+pub(in crate::runtime) struct NoIngestHeaders;
 
 impl IngestMessageHeaders for NoIngestHeaders {
     fn visit(&self, _visit: &mut dyn FnMut(&str, &str)) {}
@@ -116,7 +116,7 @@ impl RetainedIngestHeaders {
     }
 
     /// The headers of a source that carries none.
-    pub(crate) fn none() -> Self {
+    pub(in crate::runtime) fn none() -> Self {
         Self(Vec::new())
     }
 }
@@ -133,7 +133,7 @@ impl IngestMessageHeaders for RetainedIngestHeaders {
 ///
 /// The variant must match the kind the ingestor started with; the fields borrow the source
 /// message so appending a row copies bytes into Arrow buffers and nothing else.
-pub(crate) enum IngestMetadataRow<'a> {
+pub(in crate::runtime) enum IngestMetadataRow<'a> {
     Kafka {
         topic: &'a str,
         partition: i32,

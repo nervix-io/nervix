@@ -30,7 +30,7 @@ use super::{ObservedDomainTick, Runtime};
 use crate::runtime::physical_time::{PhysicalDeadlineCapability, actual_utc_now};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum DomainClockAccessError {
+pub(crate) enum DomainClockAccessError {
     #[error("domain '{domain}' is missing from this runtime")]
     Missing { domain: DomainName },
     #[error("domain '{domain}' clock generation {generation} is stopped")]
@@ -68,7 +68,7 @@ pub enum DomainClockAccessError {
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub enum DomainClockArithmetic {
+pub(crate) enum DomainClockArithmetic {
     #[error("logical-time projection")]
     Projection,
     #[error("logical-deadline conversion")]
@@ -77,7 +77,7 @@ pub enum DomainClockArithmetic {
     CadenceScheduling,
 }
 
-pub type DomainClockAccessResult<T> = Result<T, Report<DomainClockAccessError>>;
+pub(in crate::runtime) type DomainClockAccessResult<T> = Result<T, Report<DomainClockAccessError>>;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum DomainClockWaitError {
@@ -179,12 +179,12 @@ struct DomainClockInner {
 /// Bound execution capabilities and lifecycle updates share this one allocation. Updating the
 /// installation therefore wakes every waiter without copying a mapping into task-local state.
 #[derive(Debug, Clone)]
-pub struct DomainClockLifecycle {
+pub(in crate::runtime) struct DomainClockLifecycle {
     inner: Arc<DomainClockInner>,
 }
 
 impl DomainClockLifecycle {
-    pub fn new(domain: DomainName) -> Self {
+    pub(in crate::runtime) fn new(domain: DomainName) -> Self {
         let (changes, _) = watch::channel(0);
         Self {
             inner: Arc::new(DomainClockInner {
@@ -199,7 +199,11 @@ impl DomainClockLifecycle {
         }
     }
 
-    pub fn synchronize(&self, state: &DomainState, authority: &DomainClockAuthority) {
+    pub(in crate::runtime) fn synchronize(
+        &self,
+        state: &DomainState,
+        authority: &DomainClockAuthority,
+    ) {
         if let nervix_models::DomainStatus::Paused = state.status
             && let DomainPace::Paced = state.config.pace
             && state.clock.is_none()
@@ -243,7 +247,7 @@ impl DomainClockLifecycle {
     }
 
     #[cfg(test)]
-    pub fn install_paced(&self, generation: u64, mapping: DomainClockState) {
+    pub(in crate::runtime) fn install_paced(&self, generation: u64, mapping: DomainClockState) {
         self.replace(DomainClockInstallation::Installed {
             generation,
             source: DomainClockSource::Paced(mapping),
@@ -251,15 +255,15 @@ impl DomainClockLifecycle {
     }
 
     #[cfg(test)]
-    pub fn stop(&self, generation: u64) {
+    pub(in crate::runtime) fn stop(&self, generation: u64) {
         self.replace(DomainClockInstallation::Stopped { generation });
     }
 
-    pub fn mark_missing(&self) {
+    pub(in crate::runtime) fn mark_missing(&self) {
         self.replace(DomainClockInstallation::Missing);
     }
 
-    pub fn bind(&self) -> DomainClockAccessResult<DomainClock> {
+    pub(in crate::runtime) fn bind(&self) -> DomainClockAccessResult<DomainClock> {
         self.bind_for(DomainClockBinding::Active)
     }
 
@@ -334,7 +338,7 @@ pub struct DomainClock {
 }
 
 impl DomainClock {
-    pub fn snapshot(&self) -> DomainClockAccessResult<DomainExecutionSnapshot> {
+    pub(in crate::runtime) fn snapshot(&self) -> DomainClockAccessResult<DomainExecutionSnapshot> {
         let mut shared = self.inner.state.lock();
         self.read(&mut shared)
     }
@@ -396,7 +400,7 @@ impl DomainClock {
         Ok(DomainIngestionSnapshot { snapshot, window })
     }
 
-    pub fn deadline_at(&self, due_at: Timestamp) -> LogicalDeadline {
+    pub(in crate::runtime) fn deadline_at(&self, due_at: Timestamp) -> LogicalDeadline {
         LogicalDeadline {
             domain: self.inner.domain.clone(),
             generation: self.generation,
@@ -435,7 +439,7 @@ impl DomainClock {
         Ok(snapshot.now >= deadline.due_at)
     }
 
-    pub fn physical_duration_until(
+    pub(in crate::runtime) fn physical_duration_until(
         &self,
         current: Timestamp,
         target: Timestamp,
@@ -562,23 +566,23 @@ pub(super) struct DomainIngestionSnapshot {
 
 /// The time value handed to one VM or WASM invocation after its clock generation is validated.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DomainExecutionSnapshot {
+pub(crate) struct DomainExecutionSnapshot {
     generation: u64,
     now: Timestamp,
 }
 
 impl DomainExecutionSnapshot {
     #[cfg(test)]
-    pub const fn generation(&self) -> u64 {
+    pub(in crate::runtime) const fn generation(&self) -> u64 {
         self.generation
     }
 
-    pub const fn now(&self) -> Timestamp {
+    pub(crate) const fn now(&self) -> Timestamp {
         self.now
     }
 
     #[cfg(test)]
-    pub fn vm_context(&self) -> VmExecutionContext {
+    pub(in crate::runtime) fn vm_context(&self) -> VmExecutionContext {
         VmExecutionContext {
             now: self.now,
             injector: None,
@@ -586,7 +590,7 @@ impl DomainExecutionSnapshot {
     }
 
     #[cfg(test)]
-    pub const fn wasm_context(&self) -> WasmExecutionContext {
+    pub(in crate::runtime) const fn wasm_context(&self) -> WasmExecutionContext {
         WasmExecutionContext::new(self.now)
     }
 }
@@ -612,11 +616,11 @@ pub struct LogicalDeadlineReached {
 
 #[cfg(test)]
 impl LogicalDeadlineReached {
-    pub const fn due_at(&self) -> Timestamp {
+    pub(in crate::runtime) const fn due_at(&self) -> Timestamp {
         self.due_at
     }
 
-    pub const fn snapshot(&self) -> &DomainExecutionSnapshot {
+    pub(in crate::runtime) const fn snapshot(&self) -> &DomainExecutionSnapshot {
         &self.snapshot
     }
 }

@@ -20,25 +20,25 @@ pub(super) fn kafka_domain_offset_describe_from_schedule(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KafkaDomainOffsetDescribe {
-    pub topic: String,
-    pub instances: u64,
-    pub observed_partitions: Vec<i32>,
-    pub rebalance_epoch: u64,
-    pub instance_assignments: Vec<Vec<i32>>,
+pub(crate) struct KafkaDomainOffsetDescribe {
+    pub(crate) topic: String,
+    pub(crate) instances: u64,
+    pub(crate) observed_partitions: Vec<i32>,
+    pub(crate) rebalance_epoch: u64,
+    pub(crate) instance_assignments: Vec<Vec<i32>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IngestorDescribe {
-    pub running: bool,
-    pub ready: bool,
-    pub quiesce_state: Option<String>,
-    pub quiesce_counters: IngestorQuiesceCounters,
-    pub memory_backpressure_paused: bool,
-    pub transient_error: Option<String>,
-    pub reconnect_backoff: Option<String>,
-    pub reconnect_wait_millis: Option<u64>,
-    pub kafka_domain_offsets: Option<KafkaDomainOffsetDescribe>,
+pub(crate) struct IngestorDescribe {
+    pub(crate) running: bool,
+    pub(crate) ready: bool,
+    pub(crate) quiesce_state: Option<String>,
+    pub(crate) quiesce_counters: IngestorQuiesceCounters,
+    pub(crate) memory_backpressure_paused: bool,
+    pub(crate) transient_error: Option<String>,
+    pub(crate) reconnect_backoff: Option<String>,
+    pub(crate) reconnect_wait_millis: Option<u64>,
+    pub(crate) kafka_domain_offsets: Option<KafkaDomainOffsetDescribe>,
 }
 
 impl Runtime {
@@ -104,18 +104,18 @@ impl Runtime {
 
 /// One instantiated lookup as this node sees it: the model it was built from, the resource
 /// version it loaded, and how many entries that version produced.
-pub struct LocalLookupDescription {
-    pub model: CreateLookup,
-    pub resource_version: u64,
-    pub entry_count: usize,
+pub(crate) struct LocalLookupDescription {
+    pub(crate) model: CreateLookup,
+    pub(crate) resource_version: u64,
+    pub(crate) entry_count: usize,
 }
 
 /// A connector's reconnect state, reported alongside its dataflow node status.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DataflowNodeTransientState {
-    pub error: Option<String>,
-    pub reconnect_backoff: Option<String>,
-    pub reconnect_wait_millis: Option<u64>,
+pub(crate) struct DataflowNodeTransientState {
+    pub(crate) error: Option<String>,
+    pub(crate) reconnect_backoff: Option<String>,
+    pub(crate) reconnect_wait_millis: Option<u64>,
 }
 
 impl Runtime {
@@ -170,7 +170,7 @@ impl Runtime {
         Ok(relay_registry.contains_key(key))
     }
 
-    pub fn describe_metrics_for(
+    pub(crate) fn describe_metrics_for(
         &self,
         domain: &DomainName,
         kind: &str,
@@ -193,7 +193,7 @@ impl Runtime {
             .describe_global_target(domain, kind, identifier)
     }
 
-    pub fn describe_wasm_processor_state_for(
+    pub(crate) fn describe_wasm_processor_state_for(
         &self,
         domain: &DomainName,
         processor: impl Into<ModelName>,
@@ -226,29 +226,18 @@ impl Runtime {
         ]
     }
 
-    pub fn describe_domain_statistics(&self, domain: &DomainName) -> Vec<String> {
+    pub(crate) fn describe_domain_statistics(&self, domain: &DomainName) -> Vec<String> {
         self.inner.metrics.describe_domain_statistics(domain)
     }
 
-    pub fn dataflow_domain_statistics(
+    pub(crate) fn dataflow_domain_statistics(
         &self,
         domain: &DomainName,
     ) -> nervix_dataflow_graph::DataflowStatistics {
         self.inner.metrics.dataflow_domain_statistics(domain)
     }
 
-    pub fn dataflow_node_statistics(
-        &self,
-        domain: &DomainName,
-        kind: &str,
-        identifier: &ModelName,
-    ) -> nervix_dataflow_graph::DataflowStatistics {
-        self.inner
-            .metrics
-            .dataflow_node_statistics(domain, kind, identifier)
-    }
-
-    pub fn dataflow_edge_statistics(
+    pub(crate) fn dataflow_edge_statistics(
         &self,
         domain: &DomainName,
         metric: &nervix_dataflow_graph::DataflowMetricRef,
@@ -256,7 +245,7 @@ impl Runtime {
         self.inner.metrics.dataflow_edge_statistics(domain, metric)
     }
 
-    pub fn dataflow_relay_buffer_statistics(
+    pub(crate) fn dataflow_relay_buffer_statistics(
         &self,
         domain: &DomainName,
         relay: &RelayName,
@@ -266,18 +255,7 @@ impl Runtime {
             .dataflow_relay_buffer_statistics(domain, relay)
     }
 
-    pub fn dataflow_branch_statistics(
-        &self,
-        domain: &DomainName,
-        kind: &str,
-        identifier: &ModelName,
-    ) -> Vec<nervix_dataflow_graph::DataflowBranchStatistics> {
-        self.inner
-            .metrics
-            .dataflow_branch_statistics(domain, kind, identifier)
-    }
-
-    pub fn dataflow_edge_branch_statistics(
+    pub(crate) fn dataflow_edge_branch_statistics(
         &self,
         domain: &DomainName,
         metric: &nervix_dataflow_graph::DataflowMetricRef,
@@ -287,7 +265,7 @@ impl Runtime {
             .dataflow_edge_branch_statistics(domain, metric)
     }
 
-    pub fn dataflow_relay_branch_statistics(
+    pub(crate) fn dataflow_relay_branch_statistics(
         &self,
         domain: &DomainName,
         relay: &RelayName,
@@ -308,7 +286,7 @@ impl Runtime {
             .collect()
     }
 
-    pub fn dataflow_node_status(
+    pub(crate) fn dataflow_node_status(
         &self,
         domain: &DomainName,
         kind: &str,
@@ -398,7 +376,7 @@ impl Runtime {
     /// A connector's reconnect state: the transient error it last hit, the backoff it is waiting
     /// out, and how much of that wait is left. A node that is neither an ingestor nor an emitter
     /// has none of the three.
-    pub fn dataflow_node_transient_state(
+    pub(crate) fn dataflow_node_transient_state(
         &self,
         domain: &DomainName,
         kind: &str,
@@ -483,7 +461,7 @@ impl Runtime {
         Ok(())
     }
 
-    pub fn describe_local_ingestor(
+    pub(crate) fn describe_local_ingestor(
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
@@ -597,7 +575,7 @@ impl Runtime {
         })
     }
 
-    pub fn describe_local_lookup(
+    pub(crate) fn describe_local_lookup(
         &self,
         domain: &DomainName,
         name: &LookupName,
@@ -622,7 +600,7 @@ impl Runtime {
         })
     }
 
-    pub fn query_local_lookup(
+    pub(crate) fn query_local_lookup(
         &self,
         domain: &DomainName,
         name: &LookupName,

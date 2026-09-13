@@ -703,7 +703,7 @@ Feature: Kafka ingestion
           'auto.offset.reset' = 'earliest'
         };
         CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 500ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
+        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 3s ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -719,8 +719,7 @@ Feature: Kafka ingestion
       """
       {"user_id":61}
       """
-    Then the relay subscription does not receive a payload within "300ms"
-    And the relay subscription receives a payload
+    Then the relay subscription receives a payload no sooner than "3s" after it was published
       """
       "user_id":61
       """

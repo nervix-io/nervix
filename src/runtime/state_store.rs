@@ -16,26 +16,26 @@ use super::BranchKey;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RuntimeStatePlacement {
-    pub(crate) domain: DomainName,
+    pub(in crate::runtime) domain: DomainName,
     pub(crate) state: RuntimeStateKind,
     pub(crate) kind: ModelKind,
     pub(crate) identifier: ModelName,
-    pub(crate) schema_fingerprint: [u8; 32],
-    pub(crate) branch_key: Option<BranchKey>,
+    pub(in crate::runtime) schema_fingerprint: [u8; 32],
+    pub(in crate::runtime) branch_key: Option<BranchKey>,
 }
 
 /// Which cluster nodes currently own and replicate one runtime state. Ownership moves while the
 /// state itself lives on, so a replicated state keeps its roles as rebindable configuration rather
 /// than as a construction-time constant.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct StateReplicationRoles {
-    pub(crate) primary_node: Option<ClusterNodeName>,
-    pub(crate) replica_nodes: BTreeSet<ClusterNodeName>,
-    pub(crate) required_replica_acks: usize,
+pub(in crate::runtime) struct StateReplicationRoles {
+    pub(in crate::runtime) primary_node: Option<ClusterNodeName>,
+    pub(in crate::runtime) replica_nodes: BTreeSet<ClusterNodeName>,
+    pub(in crate::runtime) required_replica_acks: usize,
 }
 
 impl StateReplicationRoles {
-    pub(crate) fn new(
+    pub(in crate::runtime) fn new(
         primary_node: Option<ClusterNodeName>,
         replica_nodes: Vec<ClusterNodeName>,
         required_replica_acks: usize,
@@ -47,7 +47,7 @@ impl StateReplicationRoles {
         }
     }
 
-    pub(crate) fn owned_by(primary_node: Option<ClusterNodeName>) -> Self {
+    pub(in crate::runtime) fn owned_by(primary_node: Option<ClusterNodeName>) -> Self {
         Self {
             primary_node,
             replica_nodes: BTreeSet::new(),
@@ -74,26 +74,29 @@ impl StateReplicationRoles {
 /// authorizes an operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr)]
 #[strum(serialize_all = "snake_case")]
-pub(crate) enum StateCapability {
+pub(in crate::runtime) enum StateCapability {
     Read,
     Originate,
     InstallSnapshot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct StateAssignmentToken {
+pub(in crate::runtime) struct StateAssignmentToken {
     generation: u64,
     capability: StateCapability,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct StateAssignmentBinding {
+pub(in crate::runtime) struct StateAssignmentBinding {
     generation: u64,
     capability: StateCapability,
 }
 
 impl StateAssignmentBinding {
-    pub(crate) fn token_for(self, capability: StateCapability) -> Option<StateAssignmentToken> {
+    pub(in crate::runtime) fn token_for(
+        self,
+        capability: StateCapability,
+    ) -> Option<StateAssignmentToken> {
         (self.capability == capability).then_some(StateAssignmentToken {
             generation: self.generation,
             capability,
@@ -102,7 +105,7 @@ impl StateAssignmentBinding {
 
     /// The ownership fence this binding acts under. A capture records it so a snapshot sealed
     /// under a superseded assignment is refused instead of installed.
-    pub(crate) fn fence(self) -> u64 {
+    pub(in crate::runtime) fn fence(self) -> u64 {
         self.generation
     }
 }
@@ -118,7 +121,7 @@ struct StateAssignment {
 /// The state value outlives individual assignments; short-lived capability handles carry the
 /// token returned by `rebind` and must validate it inside this lock at the operation boundary.
 #[derive(Debug)]
-pub(crate) struct StateAssignmentAuthority {
+pub(in crate::runtime) struct StateAssignmentAuthority {
     assignment: parking_lot::Mutex<StateAssignment>,
 }
 
@@ -135,7 +138,7 @@ impl Default for StateAssignmentAuthority {
 }
 
 impl StateAssignmentAuthority {
-    pub(crate) fn rebind(
+    pub(in crate::runtime) fn rebind(
         &self,
         roles: StateReplicationRoles,
         local_node: Option<&ClusterNodeName>,
@@ -153,7 +156,7 @@ impl StateAssignmentAuthority {
         }
     }
 
-    pub(crate) fn current_binding(&self) -> StateAssignmentBinding {
+    pub(in crate::runtime) fn current_binding(&self) -> StateAssignmentBinding {
         let assignment = self.assignment.lock();
         StateAssignmentBinding {
             generation: assignment.generation,
@@ -161,11 +164,11 @@ impl StateAssignmentAuthority {
         }
     }
 
-    pub(crate) fn roles(&self) -> StateReplicationRoles {
+    pub(in crate::runtime) fn roles(&self) -> StateReplicationRoles {
         self.assignment.lock().roles.clone()
     }
 
-    pub(crate) fn serialize<T>(&self, action: impl FnOnce() -> T) -> T {
+    pub(in crate::runtime) fn serialize<T>(&self, action: impl FnOnce() -> T) -> T {
         self.serialize_with(|_| action())
     }
 
@@ -173,7 +176,10 @@ impl StateAssignmentAuthority {
     ///
     /// A capture that must record which assignment it observed reads the fence in the same
     /// critical section as the contents, so the two cannot describe different moments.
-    pub(crate) fn serialize_with<T>(&self, action: impl FnOnce(StateAssignmentBinding) -> T) -> T {
+    pub(in crate::runtime) fn serialize_with<T>(
+        &self,
+        action: impl FnOnce(StateAssignmentBinding) -> T,
+    ) -> T {
         let assignment = self.assignment.lock();
         action(StateAssignmentBinding {
             generation: assignment.generation,
@@ -181,7 +187,7 @@ impl StateAssignmentAuthority {
         })
     }
 
-    pub(crate) fn authorize<T>(
+    pub(in crate::runtime) fn authorize<T>(
         &self,
         token: StateAssignmentToken,
         required: StateCapability,
@@ -202,12 +208,12 @@ impl StateAssignmentAuthority {
 
 #[derive(Debug, Clone, Copy, Error)]
 #[error("runtime state assignment no longer grants {} authority", operation.as_ref())]
-pub(crate) struct StateAuthorityError {
+pub(in crate::runtime) struct StateAuthorityError {
     operation: StateCapability,
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum RuntimeStateOperationError {
+pub(in crate::runtime) enum RuntimeStateOperationError {
     #[error(transparent)]
     Authority(#[from] StateAuthorityError),
     #[error(transparent)]
@@ -218,18 +224,18 @@ pub(crate) enum RuntimeStateOperationError {
     Replication(String),
 }
 
-pub(crate) type RuntimeStateResult<T> = Result<T, Report<RuntimeStateOperationError>>;
+pub(in crate::runtime) type RuntimeStateResult<T> = Result<T, Report<RuntimeStateOperationError>>;
 
 impl RuntimeStateOperationError {
-    pub(crate) fn checkpoint(reason: impl Into<String>) -> Report<Self> {
+    pub(in crate::runtime) fn checkpoint(reason: impl Into<String>) -> Report<Self> {
         Report::new(Self::Checkpoint(reason.into()))
     }
 
-    pub(crate) fn replication(reason: impl Into<String>) -> Report<Self> {
+    pub(in crate::runtime) fn replication(reason: impl Into<String>) -> Report<Self> {
         Report::new(Self::Replication(reason.into()))
     }
 
-    pub(crate) fn persistence(error: RuntimePersistenceError) -> Report<Self> {
+    pub(in crate::runtime) fn persistence(error: RuntimePersistenceError) -> Report<Self> {
         Report::new(Self::Persistence(error))
     }
 }
@@ -241,14 +247,14 @@ impl From<Report<StateAuthorityError>> for RuntimeStateOperationError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct PersistedRuntimeStateEntry {
-    pub lsm: u64,
-    pub schema_fingerprint: [u8; 32],
-    pub payload: Vec<u8>,
+pub(crate) struct PersistedRuntimeStateEntry {
+    pub(crate) lsm: u64,
+    pub(crate) schema_fingerprint: [u8; 32],
+    pub(crate) payload: Vec<u8>,
 }
 
 impl PersistedRuntimeStateEntry {
-    pub(crate) fn is_after(&self, after_lsm: Option<u64>) -> bool {
+    pub(in crate::runtime) fn is_after(&self, after_lsm: Option<u64>) -> bool {
         match after_lsm {
             Some(after_lsm) => self.lsm > after_lsm,
             None => true,
@@ -257,7 +263,7 @@ impl PersistedRuntimeStateEntry {
 }
 
 #[derive(Debug, Clone, Error)]
-pub enum RuntimePersistenceError {
+pub(crate) enum RuntimePersistenceError {
     #[error("failed to open runtime state keyspace")]
     OpenKeyspace,
     #[error("failed to read runtime state value")]
@@ -281,7 +287,7 @@ pub enum RuntimePersistenceError {
     MissingNodeIncarnation,
 }
 
-pub struct RuntimeStateStore {
+pub(in crate::runtime) struct RuntimeStateStore {
     db: Database,
     latest: Keyspace,
     lsm_index: Keyspace,
@@ -353,47 +359,47 @@ impl PersistedForcedRecoveryPreparation {
 }
 
 #[derive(Debug)]
-pub(crate) struct PersistedRuntimeStateHandoffPreparation {
-    pub(crate) operation_id: String,
-    pub(crate) source: ClusterNodeName,
-    pub(crate) destination: ClusterNodeName,
-    pub(crate) source_incarnation: ClusterNodeIncarnation,
-    pub(crate) destination_incarnation: ClusterNodeIncarnation,
-    pub(crate) domain: DomainName,
-    pub(crate) kind: ModelKind,
-    pub(crate) identifier: ModelName,
-    pub(crate) base_schedule_fingerprint: [u8; 32],
-    pub(crate) target_schedule_fingerprint: [u8; 32],
-    pub(crate) checkpoints: Vec<(
+pub(in crate::runtime) struct PersistedRuntimeStateHandoffPreparation {
+    pub(in crate::runtime) operation_id: String,
+    pub(in crate::runtime) source: ClusterNodeName,
+    pub(in crate::runtime) destination: ClusterNodeName,
+    pub(in crate::runtime) source_incarnation: ClusterNodeIncarnation,
+    pub(in crate::runtime) destination_incarnation: ClusterNodeIncarnation,
+    pub(in crate::runtime) domain: DomainName,
+    pub(in crate::runtime) kind: ModelKind,
+    pub(in crate::runtime) identifier: ModelName,
+    pub(in crate::runtime) base_schedule_fingerprint: [u8; 32],
+    pub(in crate::runtime) target_schedule_fingerprint: [u8; 32],
+    pub(in crate::runtime) checkpoints: Vec<(
         nervix_interconnect::StatePlacementEnvelope,
         PersistedRuntimeStateEntry,
     )>,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct RuntimeStateHandoffTransition<'a> {
-    pub(crate) operation_id: &'a str,
-    pub(crate) source: &'a ClusterNodeName,
-    pub(crate) destination: &'a ClusterNodeName,
-    pub(crate) source_incarnation: ClusterNodeIncarnation,
-    pub(crate) destination_incarnation: ClusterNodeIncarnation,
-    pub(crate) entity: &'a DomainNodeRef,
-    pub(crate) base_schedule_fingerprint: [u8; 32],
-    pub(crate) target_schedule_fingerprint: [u8; 32],
+pub(in crate::runtime) struct RuntimeStateHandoffTransition<'a> {
+    pub(in crate::runtime) operation_id: &'a str,
+    pub(in crate::runtime) source: &'a ClusterNodeName,
+    pub(in crate::runtime) destination: &'a ClusterNodeName,
+    pub(in crate::runtime) source_incarnation: ClusterNodeIncarnation,
+    pub(in crate::runtime) destination_incarnation: ClusterNodeIncarnation,
+    pub(in crate::runtime) entity: &'a DomainNodeRef,
+    pub(in crate::runtime) base_schedule_fingerprint: [u8; 32],
+    pub(in crate::runtime) target_schedule_fingerprint: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ForcedRuntimeStateRecoveryTransition<'a> {
-    pub(crate) operation_id: &'a str,
-    pub(crate) source: &'a ClusterNodeName,
-    pub(crate) destination: &'a ClusterNodeName,
-    pub(crate) destination_incarnation: ClusterNodeIncarnation,
-    pub(crate) entity: &'a DomainNodeRef,
-    pub(crate) target_schedule_fingerprint: [u8; 32],
+pub(in crate::runtime) struct ForcedRuntimeStateRecoveryTransition<'a> {
+    pub(in crate::runtime) operation_id: &'a str,
+    pub(in crate::runtime) source: &'a ClusterNodeName,
+    pub(in crate::runtime) destination: &'a ClusterNodeName,
+    pub(in crate::runtime) destination_incarnation: ClusterNodeIncarnation,
+    pub(in crate::runtime) entity: &'a DomainNodeRef,
+    pub(in crate::runtime) target_schedule_fingerprint: [u8; 32],
 }
 
 impl RuntimeStatePlacement {
-    pub fn as_storage_key(&self) -> Vec<u8> {
+    pub(in crate::runtime) fn as_storage_key(&self) -> Vec<u8> {
         let mut key = Vec::new();
         key.extend_from_slice(self.domain.as_str().as_bytes());
         key.push(0);
@@ -422,7 +428,7 @@ impl RuntimeStatePlacement {
         key
     }
 
-    pub(crate) fn to_remote(&self) -> nervix_interconnect::StatePlacementEnvelope {
+    pub(in crate::runtime) fn to_remote(&self) -> nervix_interconnect::StatePlacementEnvelope {
         nervix_interconnect::StatePlacementEnvelope {
             domain: self.domain.clone(),
             state: self.state,
@@ -455,7 +461,7 @@ impl RuntimeStatePlacement {
 }
 
 impl RuntimeStateStore {
-    pub fn from_database(db: Database) -> Result<Self, RuntimePersistenceError> {
+    pub(in crate::runtime) fn from_database(db: Database) -> Result<Self, RuntimePersistenceError> {
         let latest = db
             .keyspace("runtime_state_latest", KeyspaceCreateOptions::default)
             .map_err(|_| RuntimePersistenceError::OpenKeyspace)?;
@@ -637,7 +643,7 @@ impl RuntimeStateStore {
         })
     }
 
-    pub(crate) fn persist_handoff_preparation(
+    pub(in crate::runtime) fn persist_handoff_preparation(
         &self,
         transition: &RuntimeStateHandoffTransition<'_>,
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
@@ -658,7 +664,7 @@ impl RuntimeStateStore {
         Ok(())
     }
 
-    pub(crate) fn persist_forced_recovery_preparation(
+    pub(in crate::runtime) fn persist_forced_recovery_preparation(
         &self,
         transition: &ForcedRuntimeStateRecoveryTransition<'_>,
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
@@ -691,7 +697,7 @@ impl RuntimeStateStore {
         Ok(())
     }
 
-    pub(crate) fn activate_forced_recovery(
+    pub(in crate::runtime) fn activate_forced_recovery(
         &self,
         transition: &ForcedRuntimeStateRecoveryTransition<'_>,
     ) -> Result<
@@ -745,7 +751,7 @@ impl RuntimeStateStore {
         Ok(Some(checkpoints))
     }
 
-    pub(crate) fn discard_handoff_preparation(
+    pub(in crate::runtime) fn discard_handoff_preparation(
         &self,
         operation_id: &str,
         domain: &DomainName,
@@ -765,7 +771,7 @@ impl RuntimeStateStore {
         Ok(())
     }
 
-    pub(crate) fn handoff_preparations(
+    pub(in crate::runtime) fn handoff_preparations(
         &self,
     ) -> Result<Vec<PersistedRuntimeStateHandoffPreparation>, Report<RuntimePersistenceError>> {
         let preparations = self
@@ -781,7 +787,7 @@ impl RuntimeStateStore {
         Ok(preparations)
     }
 
-    pub(crate) fn handoff_activation(
+    pub(in crate::runtime) fn handoff_activation(
         &self,
         operation_id: &str,
         domain: &DomainName,
@@ -801,7 +807,7 @@ impl RuntimeStateStore {
         Ok(Some(preparation))
     }
 
-    pub(crate) fn activate_handoff_preparation(
+    pub(in crate::runtime) fn activate_handoff_preparation(
         &self,
         transition: &RuntimeStateHandoffTransition<'_>,
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
@@ -904,7 +910,7 @@ impl RuntimeStateStore {
     /// the whole generation or the one before it. Returning only after the durability barrier is
     /// what makes that true across a restart: a generation this call reported as published is on
     /// disk, and one it did not is not referenced by anything.
-    pub fn publish_sealed_snapshot(
+    pub(in crate::runtime) fn publish_sealed_snapshot(
         &self,
         placement: &RuntimeStatePlacement,
         revision: u64,
@@ -916,7 +922,7 @@ impl RuntimeStateStore {
             .map_err(|_| RuntimePersistenceError::WriteValue)
     }
 
-    pub fn persist_latest_snapshot(
+    pub(in crate::runtime) fn persist_latest_snapshot(
         &self,
         placement: &RuntimeStatePlacement,
         lsm: u64,
@@ -951,7 +957,7 @@ impl RuntimeStateStore {
         Ok(())
     }
 
-    pub(crate) fn replace_entity_snapshots(
+    pub(in crate::runtime) fn replace_entity_snapshots(
         &self,
         domain: &DomainName,
         kind: ModelKind,
@@ -1018,7 +1024,7 @@ impl RuntimeStateStore {
         Ok(())
     }
 
-    pub(crate) fn persist_replica_snapshot_if_newer(
+    pub(in crate::runtime) fn persist_replica_snapshot_if_newer(
         &self,
         placement: &RuntimeStatePlacement,
         snapshot: &PersistedRuntimeStateEntry,
@@ -1034,7 +1040,7 @@ impl RuntimeStateStore {
         Ok(true)
     }
 
-    pub fn latest_snapshot(
+    pub(in crate::runtime) fn latest_snapshot(
         &self,
         placement: &RuntimeStatePlacement,
     ) -> Result<Option<PersistedRuntimeStateEntry>, RuntimePersistenceError> {
@@ -1064,7 +1070,10 @@ impl RuntimeStateStore {
     }
 
     #[cfg(test)]
-    pub fn purge_domain(&self, domain: &DomainName) -> Result<(), RuntimePersistenceError> {
+    pub(in crate::runtime) fn purge_domain(
+        &self,
+        domain: &DomainName,
+    ) -> Result<(), RuntimePersistenceError> {
         let mut domain_prefix = domain.as_str().as_bytes().to_vec();
         domain_prefix.push(0);
         let latest_keys = self
@@ -1101,7 +1110,7 @@ impl RuntimeStateStore {
             .map_err(|_| RuntimePersistenceError::WriteValue)
     }
 
-    pub fn purge_entity(
+    pub(in crate::runtime) fn purge_entity(
         &self,
         domain: &DomainName,
         state: RuntimeStateKind,
@@ -1156,7 +1165,7 @@ impl RuntimeStateStore {
             .map_err(|_| RuntimePersistenceError::WriteValue)
     }
 
-    pub fn purge_stale_schema_fingerprints(
+    pub(in crate::runtime) fn purge_stale_schema_fingerprints(
         &self,
         domain: &DomainName,
         current: &HashMap<NodeRef, [u8; 32]>,

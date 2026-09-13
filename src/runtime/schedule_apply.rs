@@ -14,7 +14,8 @@ impl Runtime {
         specs_by_identifier
     }
 
-    pub async fn apply_cluster_schedule(
+    #[cfg(test)]
+    pub(in crate::runtime) async fn apply_cluster_schedule(
         &self,
         local_node_id: &ClusterNodeName,
         schedule: &ClusterSchedule,
@@ -24,7 +25,7 @@ impl Runtime {
             .await
     }
 
-    pub async fn apply_cluster_state(
+    pub(crate) async fn apply_cluster_state(
         &self,
         local_node_id: &ClusterNodeName,
         revision: u64,
@@ -1881,7 +1882,7 @@ impl Runtime {
         Ok(placement)
     }
 
-    pub async fn apply_changes(&self, changes: RuntimeChanges) -> Result<(), RuntimeError> {
+    pub(crate) async fn apply_changes(&self, changes: RuntimeChanges) -> Result<(), RuntimeError> {
         let domain = changes.domain.clone();
         let graph = changes.graph;
         let starts_are_scheduled_by_graph = graph.is_some();

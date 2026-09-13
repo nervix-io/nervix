@@ -83,11 +83,11 @@ pub(super) struct MaterializedRelayStateAssignment {
 /// One materialized record as it is reported through the public interface: its branch key, the
 /// columns of that record rendered for display, and the watermarks it was materialized with.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MaterializedRecordReport {
-    pub branch: String,
-    pub payload: String,
-    pub ingested_at_low_watermark: nervix_models::Timestamp,
-    pub ingested_at_high_watermark: nervix_models::Timestamp,
+pub(crate) struct MaterializedRecordReport {
+    pub(crate) branch: String,
+    pub(crate) payload: String,
+    pub(crate) ingested_at_low_watermark: nervix_models::Timestamp,
+    pub(crate) ingested_at_high_watermark: nervix_models::Timestamp,
 }
 
 impl ReplicatedMaterializedRelayState {

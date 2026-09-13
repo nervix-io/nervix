@@ -50,12 +50,12 @@ pub(crate) enum DescribedStateSnapshot {
 /// Everything a receiver checks a transfer against before it accepts one byte of it.
 #[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct SealedSnapshotEnvelope {
-    pub(crate) length: u64,
-    pub(crate) digest: [u8; 32],
-    pub(crate) schema_fingerprint: [u8; 32],
-    pub(crate) revision: u64,
-    pub(crate) fence: u64,
-    pub(crate) branch_generation: u64,
+    pub(in crate::runtime) length: u64,
+    pub(in crate::runtime) digest: [u8; 32],
+    pub(in crate::runtime) schema_fingerprint: [u8; 32],
+    pub(in crate::runtime) revision: u64,
+    pub(in crate::runtime) fence: u64,
+    pub(in crate::runtime) branch_generation: u64,
 }
 
 /// Open a bounded stream of one sealed generation's bytes.
@@ -64,8 +64,8 @@ pub(crate) struct SealedSnapshotEnvelope {
 /// refuses rather than substituting a different one.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub(crate) struct FetchStateSnapshot {
-    pub(crate) placement: StatePlacementEnvelope,
-    pub(crate) revision: u64,
+    pub(in crate::runtime) placement: StatePlacementEnvelope,
+    pub(in crate::runtime) revision: u64,
 }
 
 impl InterconnectStreamRequest for FetchStateSnapshot {

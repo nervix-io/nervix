@@ -1,19 +1,19 @@
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MaterializedLookupKeyMode {
+pub(in crate::runtime) enum MaterializedLookupKeyMode {
     CurrentBranch,
     Root,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MaterializedFieldInterest {
+pub(in crate::runtime) struct MaterializedFieldInterest {
     pub(super) name: String,
     pub(super) column_index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MaterializedRelayInterest {
+pub(in crate::runtime) struct MaterializedRelayInterest {
     pub(super) relay: RelayName,
     pub(super) schema: StdArc<arrow_schema::Schema>,
     pub(super) fields: Vec<MaterializedFieldInterest>,
@@ -27,9 +27,9 @@ pub(crate) struct MaterializedProgramInterest {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeMaterializedRelaySpec {
-    pub(crate) schema: StdArc<arrow_schema::Schema>,
-    pub(crate) sensitivity: VmSchemaSensitivity,
-    pub(crate) branching: Vec<FieldName>,
+    pub(in crate::runtime) schema: StdArc<arrow_schema::Schema>,
+    pub(in crate::runtime) sensitivity: VmSchemaSensitivity,
+    pub(in crate::runtime) branching: Vec<FieldName>,
     pub(super) fields: Arc<Vec<MaterializedFieldInterest>>,
 }
 
@@ -61,7 +61,7 @@ impl RuntimeMaterializedRelaySpec {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledProgramWithMaterializedInterest {
-    pub(crate) compiled: Arc<VmCompiledProgram>,
+    pub(in crate::runtime) compiled: Arc<VmCompiledProgram>,
     pub(crate) output_sensitivity: VmSchemaSensitivity,
     pub(crate) materialized_interest: MaterializedProgramInterest,
     pub(super) output_namespace_input: OutputNamespaceInput,
@@ -70,7 +70,7 @@ pub(crate) struct CompiledProgramWithMaterializedInterest {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CompiledBranchProgram {
+pub(in crate::runtime) struct CompiledBranchProgram {
     pub(super) program: CompiledProgramWithMaterializedInterest,
 }
 
@@ -128,12 +128,12 @@ impl CompiledProgramWithMaterializedInterest {
     }
 }
 
-pub(crate) type EmitterHeaders = Vec<(String, String)>;
+pub(in crate::runtime) type EmitterHeaders = Vec<(String, String)>;
 
 #[derive(Debug, Clone)]
-pub(crate) struct CompiledEmitterFilterMapProgram {
-    pub(crate) body: CompiledProgramWithMaterializedInterest,
-    pub(crate) codec_route: bool,
+pub(in crate::runtime) struct CompiledEmitterFilterMapProgram {
+    pub(in crate::runtime) body: CompiledProgramWithMaterializedInterest,
+    pub(in crate::runtime) codec_route: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1163,7 +1163,7 @@ pub(super) fn compile_wasm_output_filter_map_program(
     }))
 }
 
-pub(crate) fn compile_emitter_filter_map_program(
+pub(in crate::runtime) fn compile_emitter_filter_map_program(
     domain: &DomainName,
     emitter: &CreateEmitter,
     input_schema: StdArc<arrow_schema::Schema>,
@@ -1274,7 +1274,7 @@ pub(crate) fn compile_emitter_filter_map_program(
     Ok(Some(CompiledEmitterFilterMapProgram { body, codec_route }))
 }
 
-pub(crate) fn compile_sqs_fifo_group_program(
+pub(in crate::runtime) fn compile_sqs_fifo_group_program(
     domain: &DomainName,
     emitter: &CreateEmitter,
     input_schema: StdArc<arrow_schema::Schema>,
@@ -1470,7 +1470,7 @@ pub(crate) fn compile_session_filter_map_program(
     )
 }
 
-pub(crate) fn compile_key_projection_program(
+pub(in crate::runtime) fn compile_key_projection_program(
     processor_kind: &str,
     processor: &ModelName,
     clause: &str,

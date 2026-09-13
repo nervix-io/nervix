@@ -49,7 +49,7 @@ const IDENTITY_OVERHEAD_BYTES: u64 = 96;
 
 /// Why a materialized relay snapshot could not be sealed or opened.
 #[derive(Debug, Error)]
-pub(crate) enum MaterializedSnapshotError {
+pub(in crate::runtime) enum MaterializedSnapshotError {
     #[error("the node has no bulk capacity to seal or open this snapshot")]
     Admission,
     #[error("the snapshot could not be admitted for execution")]
@@ -166,7 +166,7 @@ struct SealedRecordIdentity {
 /// generation holds only long enough to clone row views and read the revision, fence and branch
 /// generation together. Everything after that reads an immutable value.
 #[derive(Debug, Clone)]
-pub(crate) struct MaterializedGeneration {
+pub(in crate::runtime) struct MaterializedGeneration {
     revision: u64,
     fence: u64,
     branch_generation: u64,
@@ -177,27 +177,27 @@ pub(crate) struct MaterializedGeneration {
 
 /// One captured record: its branch identity and the shared row view holding its columns.
 #[derive(Debug, Clone)]
-pub(crate) struct MaterializedGenerationRecord {
-    pub(crate) branch: Option<BranchKey>,
-    pub(crate) row: RuntimeRow,
+pub(in crate::runtime) struct MaterializedGenerationRecord {
+    pub(in crate::runtime) branch: Option<BranchKey>,
+    pub(in crate::runtime) row: RuntimeRow,
 }
 
 /// One sealed snapshot's bytes together with what a receiver checks them against.
 #[derive(Debug, Clone)]
-pub(crate) struct SealedMaterializedSnapshot {
-    pub(crate) descriptor: SealedSnapshotDescriptor,
-    pub(crate) bytes: ChargedBytes,
+pub(in crate::runtime) struct SealedMaterializedSnapshot {
+    pub(in crate::runtime) descriptor: SealedSnapshotDescriptor,
+    pub(in crate::runtime) bytes: ChargedBytes,
 }
 
 /// What a sealed snapshot supplies about itself before a byte of it is transferred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct SealedSnapshotDescriptor {
-    pub length: u64,
-    pub digest: [u8; 32],
-    pub schema_fingerprint: [u8; 32],
-    pub revision: u64,
-    pub fence: u64,
-    pub branch_generation: u64,
+pub(in crate::runtime) struct SealedSnapshotDescriptor {
+    pub(in crate::runtime) length: u64,
+    pub(in crate::runtime) digest: [u8; 32],
+    pub(in crate::runtime) schema_fingerprint: [u8; 32],
+    pub(in crate::runtime) revision: u64,
+    pub(in crate::runtime) fence: u64,
+    pub(in crate::runtime) branch_generation: u64,
 }
 
 /// What a sealed container states about itself, read without decoding a single column.
@@ -206,19 +206,19 @@ pub struct SealedSnapshotDescriptor {
 /// consistent and within their limits. Turning sections into rows is a separate step that needs
 /// the schema and the bulk budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SealedSnapshotSummary {
-    pub(crate) revision: u64,
-    pub(crate) fence: u64,
-    pub(crate) branch_generation: u64,
-    pub(crate) schema_fingerprint: [u8; 32],
-    pub(crate) records: u64,
+pub(in crate::runtime) struct SealedSnapshotSummary {
+    pub(in crate::runtime) revision: u64,
+    pub(in crate::runtime) fence: u64,
+    pub(in crate::runtime) branch_generation: u64,
+    pub(in crate::runtime) schema_fingerprint: [u8; 32],
+    pub(in crate::runtime) records: u64,
 }
 
 /// The container an empty generation seals into: one header and no sections.
 ///
 /// It carries no columns, so it needs no schema. This is what a destination is handed when an
 /// entity moves with no materialized records behind it.
-pub(crate) fn empty_sealed_container(
+pub(in crate::runtime) fn empty_sealed_container(
     schema_fingerprint: [u8; 32],
 ) -> Result<Vec<u8>, Report<MaterializedSnapshotError>> {
     let header = rkyv::to_bytes::<rkyv::rancor::Error>(&SealedSnapshotHeader {
@@ -247,7 +247,7 @@ pub(crate) fn empty_sealed_container(
 /// The header is bounded by its own limit and every section frame is checked against the bytes
 /// that remain, so a truncated, overstated or foreign payload is refused here rather than by the
 /// decoder that would otherwise allocate for it.
-pub(crate) fn inspect_sealed_container(
+pub(in crate::runtime) fn inspect_sealed_container(
     payload: &[u8],
     header_limit: u64,
 ) -> Result<SealedSnapshotSummary, Report<MaterializedSnapshotError>> {
@@ -339,7 +339,7 @@ impl<'a> SliceCursor<'a> {
 impl SealedMaterializedSnapshot {
     /// The entry this sealed snapshot is stored and carried as. The payload is the sealed
     /// container itself: header, identity records and Arrow sections, exactly as it was written.
-    pub(crate) fn into_persisted_entry(self) -> super::PersistedRuntimeStateEntry {
+    pub(in crate::runtime) fn into_persisted_entry(self) -> super::PersistedRuntimeStateEntry {
         super::PersistedRuntimeStateEntry {
             lsm: self.descriptor.revision,
             schema_fingerprint: self.descriptor.schema_fingerprint,
@@ -349,7 +349,7 @@ impl SealedMaterializedSnapshot {
 }
 
 impl MaterializedGeneration {
-    pub(crate) fn new(
+    pub(in crate::runtime) fn new(
         revision: u64,
         fence: u64,
         branch_generation: u64,
@@ -367,15 +367,15 @@ impl MaterializedGeneration {
         }
     }
 
-    pub(crate) fn revision(&self) -> u64 {
+    pub(in crate::runtime) fn revision(&self) -> u64 {
         self.revision
     }
 
-    pub(crate) fn fence(&self) -> u64 {
+    pub(in crate::runtime) fn fence(&self) -> u64 {
         self.fence
     }
 
-    pub(crate) fn records(&self) -> &[MaterializedGenerationRecord] {
+    pub(in crate::runtime) fn records(&self) -> &[MaterializedGenerationRecord] {
         &self.records
     }
 
@@ -384,7 +384,7 @@ impl MaterializedGeneration {
     ///
     /// The encoding runs on the bulk workers and holds no mutation lock, so updates and deletions
     /// continue against the live state while this immutable generation is written out.
-    pub(crate) async fn seal(
+    pub(in crate::runtime) async fn seal(
         &self,
         executor: &Executor,
     ) -> Result<SealedMaterializedSnapshot, Report<MaterializedSnapshotError>> {
@@ -516,19 +516,19 @@ struct SealedSection {
 
 /// One record restored from a sealed snapshot, ready to be installed under the ownership barrier.
 #[derive(Debug, Clone)]
-pub(crate) struct RestoredMaterializedRecord {
-    pub(crate) branch: Option<BranchKey>,
-    pub(crate) row: RuntimeRow,
+pub(in crate::runtime) struct RestoredMaterializedRecord {
+    pub(in crate::runtime) branch: Option<BranchKey>,
+    pub(in crate::runtime) row: RuntimeRow,
 }
 
 /// Everything a sealed snapshot restores into: the records, and the revision, fence and branch
 /// generation they belong to.
 #[derive(Debug, Clone)]
-pub(crate) struct RestoredMaterializedSnapshot {
-    pub(crate) revision: u64,
-    pub(crate) fence: u64,
-    pub(crate) branch_generation: u64,
-    pub(crate) records: Vec<RestoredMaterializedRecord>,
+pub(in crate::runtime) struct RestoredMaterializedSnapshot {
+    pub(in crate::runtime) revision: u64,
+    pub(in crate::runtime) fence: u64,
+    pub(in crate::runtime) branch_generation: u64,
+    pub(in crate::runtime) records: Vec<RestoredMaterializedRecord>,
 }
 
 impl RestoredMaterializedSnapshot {
@@ -537,7 +537,7 @@ impl RestoredMaterializedSnapshot {
     /// Every length the container declares is checked against the limit for the section it names
     /// and against the bytes that actually remain, so a truncated or overstated snapshot is
     /// refused before it allocates anything.
-    pub(crate) async fn open(
+    pub(in crate::runtime) async fn open(
         executor: &Executor,
         schema: &StdArc<ArrowSchema>,
         schema_fingerprint: [u8; 32],
@@ -628,17 +628,17 @@ impl RestoredMaterializedSnapshot {
 /// arrived over the interconnect is read from the file it was staged into, one bounded section at
 /// a time, so a snapshot larger than the node's transfer-memory budget opens without ever being
 /// held whole.
-pub(crate) enum SealedSource {
+pub(in crate::runtime) enum SealedSource {
     Memory { sealed: ChargedBytes, offset: usize },
     Staged(StagedSnapshot),
 }
 
 impl SealedSource {
-    pub(crate) fn memory(sealed: ChargedBytes) -> Self {
+    pub(in crate::runtime) fn memory(sealed: ChargedBytes) -> Self {
         Self::Memory { sealed, offset: 0 }
     }
 
-    pub(crate) fn staged(staged: StagedSnapshot) -> Self {
+    pub(in crate::runtime) fn staged(staged: StagedSnapshot) -> Self {
         Self::Staged(staged)
     }
 

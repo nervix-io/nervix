@@ -31,7 +31,7 @@ pub(crate) enum OwnershipHandoffError {
 }
 
 impl OwnershipHandoffError {
-    pub(crate) fn checkpoint(reason: impl Into<String>) -> Report<Self> {
+    pub(in crate::runtime) fn checkpoint(reason: impl Into<String>) -> Report<Self> {
         Report::new(Self::Checkpoint(reason.into()))
     }
 
@@ -43,7 +43,7 @@ impl OwnershipHandoffError {
         Report::new(Self::Schedule(reason.into()))
     }
 
-    pub(crate) fn state(reason: impl Into<String>) -> Report<Self> {
+    pub(in crate::runtime) fn state(reason: impl Into<String>) -> Report<Self> {
         Report::new(Self::State(reason.into()))
     }
 
@@ -55,11 +55,11 @@ impl OwnershipHandoffError {
         Report::new(Self::Deadline(reason.into()))
     }
 
-    pub(crate) fn wasm_restore(reason: impl Into<String>) -> Report<Self> {
+    pub(in crate::runtime) fn wasm_restore(reason: impl Into<String>) -> Report<Self> {
         Report::new(Self::WasmRestore(reason.into()))
     }
 
-    pub(crate) fn persistence(error: RuntimePersistenceError) -> Report<Self> {
+    pub(in crate::runtime) fn persistence(error: RuntimePersistenceError) -> Report<Self> {
         Report::new(Self::Persistence(error))
     }
 }

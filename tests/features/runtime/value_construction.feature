@@ -118,7 +118,7 @@ Feature: Route-local value construction
           SET id = input.id,
               result = input.numerator / input.denominator
           UNBRANCHED
-          FLUSH EACH 1s MAX BATCH SIZE 1MiB
+          FLUSH EACH 3s MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR SEND TO header_calculation_errors
           SET input_id = input.id,
               source_route = read_header('route'),
@@ -131,8 +131,7 @@ Feature: Route-local value construction
       """
       {"id":"header-division-by-zero","numerator":10,"denominator":0}
       """
-    Then the relay subscription does not receive a payload within "300ms"
-    And within "5s" the relay subscription receives a payload
+    Then the relay subscription receives a payload no sooner than "3s" after it was published
       """
       "input_id":"header-division-by-zero","operation":"set","source_route":"error-route-header"
       """

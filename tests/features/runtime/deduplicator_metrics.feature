@@ -35,7 +35,7 @@ Feature: Deduplicator metrics
         INHERIT ALL
         BRANCHED BY by_dedup_metrics_source
         SET tenant = message.tenant
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        FLUSH EACH 2s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         CREATE DEDUPLICATOR dedup_metrics_node FROM raw_txns
@@ -44,7 +44,7 @@ Feature: Deduplicator metrics
         BRANCHED BY by_dedup_metrics_source
         TO deduped_txns
         INHERIT ALL
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        FLUSH EACH 2s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
         CREATE SUBSCRIPTION deduped_txns_subscription TO deduped_txns;
         START;
@@ -55,7 +55,7 @@ Feature: Deduplicator metrics
       {"tenant":"acme","transaction_id":"txn-1","amount":10}
       {"tenant":"acme","transaction_id":"txn-2","amount":30}
       """
-    Then within "5s" the relay subscription receives payloads
+    Then within "20s" the relay subscription receives payloads
       """
       {"amount":10,"tenant":"acme","transaction_id":"txn-1"}
       {"amount":30,"tenant":"acme","transaction_id":"txn-2"}

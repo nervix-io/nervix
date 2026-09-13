@@ -143,8 +143,7 @@ Feature: Processor output routing
       """
       "id":"event-1","route":"immediate"
       """
-    And the relay subscription does not receive a payload within "500ms"
-    And within "3s" the relay subscription receives a payload
+    And the relay subscription receives a payload no sooner than "2s" after it was published
       """
       "id":"event-1","route":"delayed"
       """

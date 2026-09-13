@@ -25,7 +25,7 @@ impl IngestorRuntime {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
-pub(crate) enum IngestorQuiesceCause {
+pub(in crate::runtime) enum IngestorQuiesceCause {
     #[strum(serialize = "entity hold")]
     EntityHold,
     #[strum(serialize = "ownership handoff")]
@@ -78,14 +78,14 @@ pub(super) struct IngestorQuiesceModes {
 /// A quiesced ingestor replays its payloads after the source messages are gone, so the
 /// buffer owns these values and appends them into the group's builders on replay.
 #[derive(Debug, Clone)]
-pub(crate) enum BufferedIngestMetadata {
+pub(in crate::runtime) enum BufferedIngestMetadata {
     Syslog { peer_addr: std::net::SocketAddr },
     Headers(RetainedIngestHeaders),
 }
 
 impl BufferedIngestMetadata {
     /// The metadata of a buffered message whose source carries no transport headers.
-    pub(crate) fn without_headers() -> Self {
+    pub(in crate::runtime) fn without_headers() -> Self {
         Self::Headers(RetainedIngestHeaders::none())
     }
 
@@ -100,26 +100,26 @@ impl BufferedIngestMetadata {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct BufferedIngestPayload {
+pub(in crate::runtime) struct BufferedIngestPayload {
     pub(super) payloads: Vec<Vec<u8>>,
     /// Row-aligned with `payloads`.
     pub(super) metadata: Vec<BufferedIngestMetadata>,
 }
 
 impl BufferedIngestPayload {
-    pub(crate) fn new(payload: &[u8], metadata: BufferedIngestMetadata) -> Self {
+    pub(in crate::runtime) fn new(payload: &[u8], metadata: BufferedIngestMetadata) -> Self {
         Self {
             payloads: vec![payload.to_vec()],
             metadata: vec![metadata],
         }
     }
 
-    pub(crate) fn batch(entries: Vec<(Vec<u8>, BufferedIngestMetadata)>) -> Self {
+    pub(in crate::runtime) fn batch(entries: Vec<(Vec<u8>, BufferedIngestMetadata)>) -> Self {
         let (payloads, metadata) = entries.into_iter().unzip();
         Self { payloads, metadata }
     }
 
-    pub(crate) fn payload(&self) -> &[u8] {
+    pub(in crate::runtime) fn payload(&self) -> &[u8] {
         self.payloads.first().verified(
             "both constructors take at least one payload with its metadata, and the batching \
              caller skips an empty set",
@@ -127,7 +127,7 @@ impl BufferedIngestPayload {
     }
 
     /// The number of source payloads, which is the row count of the group this buffer opens.
-    pub(crate) fn len(&self) -> usize {
+    pub(in crate::runtime) fn len(&self) -> usize {
         self.payloads.len()
     }
 
@@ -192,7 +192,7 @@ impl IngestorQuiesceBuffer {
 }
 
 #[derive(Debug)]
-pub(crate) enum IngestorQuiesceIntake {
+pub(in crate::runtime) enum IngestorQuiesceIntake {
     Dispatch(BufferedIngestPayload),
     Buffered,
     Dropped,
@@ -200,7 +200,7 @@ pub(crate) enum IngestorQuiesceIntake {
 }
 
 #[derive(Debug)]
-pub(crate) struct IngestorQuiesceControl {
+pub(in crate::runtime) struct IngestorQuiesceControl {
     pub(super) modes: RwLock<IngestorQuiesceModes>,
     pub(super) reasons: RwLock<IngestorQuiesceReasons>,
     pub(super) buffers: parking_lot::Mutex<HashMap<u64, IngestorQuiesceBuffer>>,
@@ -330,15 +330,15 @@ impl IngestorQuiesceControl {
         self.changed.notify_waiters();
     }
 
-    pub(crate) fn cause(&self) -> Option<IngestorQuiesceCause> {
+    pub(in crate::runtime) fn cause(&self) -> Option<IngestorQuiesceCause> {
         self.reasons.read().active()
     }
 
-    pub(crate) fn is_quiesced(&self) -> bool {
+    pub(in crate::runtime) fn is_quiesced(&self) -> bool {
         self.cause().is_some()
     }
 
-    pub(crate) fn mode(&self) -> IngestQuiesceMode {
+    pub(in crate::runtime) fn mode(&self) -> IngestQuiesceMode {
         self.modes.read().active.clone()
     }
 
@@ -346,7 +346,7 @@ impl IngestorQuiesceControl {
         self.modes.read().active_supported_by_source
     }
 
-    pub(crate) fn should_suspend_intake(&self) -> bool {
+    pub(in crate::runtime) fn should_suspend_intake(&self) -> bool {
         if self.cause() == Some(IngestorQuiesceCause::OwnershipHandoff) {
             true
         } else {
@@ -356,7 +356,7 @@ impl IngestorQuiesceControl {
         }
     }
 
-    pub(crate) fn should_skip_poll(&self) -> bool {
+    pub(in crate::runtime) fn should_skip_poll(&self) -> bool {
         match self.cause() {
             Some(IngestorQuiesceCause::OwnershipHandoff) => true,
             Some(IngestorQuiesceCause::MemoryPressure) => true,
@@ -366,7 +366,7 @@ impl IngestorQuiesceControl {
         }
     }
 
-    pub(crate) async fn wait_until_not_suspended(&self) {
+    pub(in crate::runtime) async fn wait_until_not_suspended(&self) {
         loop {
             if !self.should_suspend_intake() {
                 return;
@@ -379,11 +379,11 @@ impl IngestorQuiesceControl {
         }
     }
 
-    pub(crate) async fn wait_for_change(&self) {
+    pub(in crate::runtime) async fn wait_for_change(&self) {
         self.changed.notified().await;
     }
 
-    pub(crate) fn intake(
+    pub(in crate::runtime) fn intake(
         &self,
         instance: u64,
         payload: BufferedIngestPayload,
@@ -510,7 +510,7 @@ impl IngestorQuiesceControl {
         })
     }
 
-    pub(crate) fn pop_buffered(&self, instance: u64) -> Option<BufferedIngestPayload> {
+    pub(in crate::runtime) fn pop_buffered(&self, instance: u64) -> Option<BufferedIngestPayload> {
         if self.is_quiesced() {
             return None;
         }
@@ -559,11 +559,11 @@ pub(super) fn quiesce_max_size_bytes(value: &str) -> usize {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct IngestorQuiesceCounters {
-    pub buffered_records: usize,
-    pub buffered_bytes: usize,
-    pub dropped_total: u64,
-    pub rejected_total: u64,
+pub(crate) struct IngestorQuiesceCounters {
+    pub(crate) buffered_records: usize,
+    pub(crate) buffered_bytes: usize,
+    pub(crate) dropped_total: u64,
+    pub(crate) rejected_total: u64,
 }
 
 #[derive(Debug)]
@@ -918,7 +918,7 @@ impl Runtime {
         }
     }
 
-    pub async fn pause_ingestors_for_memory_pressure(&self) -> usize {
+    pub(crate) async fn pause_ingestors_for_memory_pressure(&self) -> usize {
         self.inner
             .ingestors_paused_for_memory_pressure
             .store(true, Ordering::SeqCst);
@@ -946,7 +946,9 @@ impl Runtime {
         quiesced
     }
 
-    pub async fn resume_one_ingestor_after_memory_pressure(&self) -> Result<bool, RuntimeError> {
+    pub(crate) async fn resume_one_ingestor_after_memory_pressure(
+        &self,
+    ) -> Result<bool, RuntimeError> {
         let mut keys = self
             .inner
             .ingestor_quiescence
@@ -976,7 +978,7 @@ impl Runtime {
         Ok(true)
     }
 
-    pub fn ingestors_paused_for_memory_pressure(&self) -> bool {
+    pub(crate) fn ingestors_paused_for_memory_pressure(&self) -> bool {
         self.inner
             .ingestors_paused_for_memory_pressure
             .load(Ordering::SeqCst)

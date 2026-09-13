@@ -9,14 +9,21 @@ use std::borrow::Cow;
 
 use super::*;
 
+/// Why an ingestor that keeps running discards the summary a flush returns.
+///
+/// See [`Runtime::flush_ingest_collector`], which routes every failure through the ingestor's
+/// error policy before returning that summary.
+pub(in crate::runtime) const INGEST_FLUSH_FAILURES_ARE_HANDLED: &str =
+    "the ingestor's error policy already handled every failure this flush produced";
+
 /// Chosen operational bound for how many decoded source rows accumulate before an
 /// ingest group executes and becomes one Arrow batch per (relay, branch key). This is
 /// intentionally independent of an NSPL route's flush policy.
-pub(crate) const INGEST_GROUP_MAX_ROWS: usize = 1024;
+pub(in crate::runtime) const INGEST_GROUP_MAX_ROWS: usize = 1024;
 
 /// Chosen operational bound for how long a partial source group waits when the source
 /// goes quiet. This is intentionally independent of an NSPL route's flush policy.
-pub(crate) const INGEST_GROUP_IDLE_FLUSH: Duration = Duration::from_millis(5);
+pub(in crate::runtime) const INGEST_GROUP_IDLE_FLUSH: Duration = Duration::from_millis(5);
 
 pub(super) struct IngestorDependencies {
     pub(super) output_routes: RelayProcessorOutputsNode,

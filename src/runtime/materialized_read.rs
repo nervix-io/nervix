@@ -13,7 +13,7 @@ impl Runtime {
     ///
     /// This is the relay-scoped report, and it says so. Reading one branch is a different
     /// operation that names that branch.
-    pub async fn local_materialized_stream_state(
+    pub(crate) async fn local_materialized_stream_state(
         &self,
         domain: &DomainName,
         relay: &RelayName,
@@ -321,7 +321,7 @@ impl Runtime {
 
     /// Every materialized record one relay holds on another node, reported the same way as the
     /// local relay-scoped view.
-    pub async fn remote_materialized_stream_state(
+    pub(crate) async fn remote_materialized_stream_state(
         &self,
         target_node_id: &ClusterNodeName,
         domain: &DomainName,
@@ -523,7 +523,7 @@ impl Runtime {
         Ok(values)
     }
 
-    pub(crate) async fn load_materialized_dependency_values(
+    pub(in crate::runtime) async fn load_materialized_dependency_values(
         &self,
         domain: &DomainName,
         branch_key: &Option<BranchKey>,

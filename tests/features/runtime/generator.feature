@@ -371,7 +371,7 @@ Feature: Generator node
         TO generated_notifications
           SET user_id = relay_state.notifications.user_id,
               amount = relay_state.notifications.amount
-          FLUSH EACH 1s MAX BATCH SIZE 1MiB
+          FLUSH EACH 3s MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG;
 
       CREATE SUBSCRIPTION generated_notifications_subscription TO generated_notifications;
@@ -381,8 +381,7 @@ Feature: Generator node
       """
       {"user_id":42,"amount":7}
       """
-    Then the relay subscription does not receive a payload within "500ms"
-    And within "5s" the relay subscription receives a payload
+    Then the relay subscription receives a payload no sooner than "3s" after it was published
       """
       {"amount":7,"user_id":42}
       """
