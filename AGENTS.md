@@ -526,9 +526,11 @@ build and the existing tests, and nothing in it changes behavior.
   Kafka partial-batch scenario: a window two seconds inside the cadence still failed under load,
   and the same scenario passed repeatedly once the assertion measured instead of gated. So assert
   the delay, not the silence: record when the triggering event happened and require that the
-  output arrived at least the cadence later. Load moves the event and the arrival together, so a
-  measured delay only grows. Reserve a "does not arrive" window for output that must never arrive
-  at all, where a longer window strengthens the assertion.
+  output arrived at least the cadence later. Take that instant before the triggering call rather
+  than after it returns, because the cadence starts when the server accepts the message and not
+  when the client hears back. Load moves the event and the arrival together, so a measured delay
+  only grows. Reserve a "does not arrive" window for output that must never arrive at all, where a
+  longer window strengthens the assertion.
 - An assertion on an exact batch count needs a flush window wider than the spread between the
   messages it groups, not one comparable to it. Concurrently published messages arrive spread by
   whatever the machine is doing.
