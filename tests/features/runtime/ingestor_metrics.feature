@@ -183,8 +183,7 @@ Feature: Ingestor metrics
       """
       {"user_id":42}
       """
-    Then the relay subscription does not receive a payload within "300ms"
-    And within "15s" the relay subscription receives a payload
+    Then the relay subscription receives a payload no sooner than "3s" after it was published
       """
       "user_id":42
       """

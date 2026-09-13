@@ -133,6 +133,10 @@ struct ScenarioWorld {
     active_session_has_subscription: bool,
     transaction_clients: BTreeMap<String, Client>,
     last_subscription_payload: Option<String>,
+    /// When the message a delivery-delay assertion is about was published. Load moves this
+    /// instant and the arrival together, which is what makes such an assertion hold on a
+    /// busy machine where a fixed wall-clock window does not.
+    last_publish_at: Option<Instant>,
     last_command_error: Option<String>,
     last_command_output: Option<String>,
     /// The plan block `DESCRIBE RELOCATION` returned, so the executing `RELOCATE` can be compared
@@ -4172,6 +4176,9 @@ async fn given_ownership_handoff_preparation_pause(world: &mut ScenarioWorld, do
 /// deadline, which is why it is generous: engaging a gate on a three-node cluster runs a schedule
 /// through consensus while the rest of the suite competes for the machine.
 const ENTITY_GATE_PAUSE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a delivery-delay assertion waits beyond the delay it requires. The delay itself
+/// is the cadence under test; this is the liveness budget on top of it.
+const SUBSCRIPTION_DELIVERY_BUDGET: Duration = Duration::from_secs(30);
 
 #[then(expr = "the entity gate pause for domain {string} is reached")]
 async fn then_entity_gate_pause_is_reached(world: &mut ScenarioWorld, domain: String) {
@@ -11687,6 +11694,7 @@ async fn when_kafka_message_is_published(
 ) {
     let topic = expand_placeholders(world, &topic);
     let payload = expand_placeholders(world, docstring(step));
+    world.last_publish_at = Some(Instant::now());
     world
         .cluster()
         .publish_kafka(&topic, &payload)
@@ -12434,6 +12442,7 @@ async fn when_http_payload_is_posted(
     append_cucumber_log_line(&format!(
         "http publish: node=node-1 host={host} path={path} payload={payload}"
     ));
+    world.last_publish_at = Some(Instant::now());
     world
         .cluster()
         .publish_http("node-1", &host, &path, &payload)
@@ -12672,6 +12681,7 @@ async fn when_http_payload_is_posted_to_node(
     append_cucumber_log_line(&format!(
         "http publish: node={node_id} host={host} path={path} payload={payload}"
     ));
+    world.last_publish_at = Some(Instant::now());
     world
         .cluster()
         .publish_http(&node_id, &host, &path, &payload)
@@ -12739,6 +12749,7 @@ async fn when_http_payload_is_posted_to_node_with_header(
         "http publish: node={node_id} host={host} path={path} header={header_name} \
          payload={payload}"
     ));
+    world.last_publish_at = Some(Instant::now());
     world
         .cluster()
         .publish_http_with_headers(
@@ -15998,6 +16009,68 @@ async fn capture_and_assert_subscription_payload(
         if payload.contains(&expected_payload) {
             break;
         }
+    }
+}
+
+#[then(
+    expr = "the relay subscription receives a payload no sooner than {string} after it was \
+            published"
+)]
+async fn then_stream_subscription_receives_payload_no_sooner_than(
+    world: &mut ScenarioWorld,
+    delay: String,
+    #[step] step: &Step,
+) {
+    let expected_delay =
+        humantime::parse_duration(&delay).expect("step duration must be a valid duration");
+    let published_at = world
+        .last_publish_at
+        .expect("a delivery-delay assertion must follow a publishing step");
+    let expected_payload = expand_placeholders(world, docstring(step))
+        .trim()
+        .to_string();
+    append_cucumber_log_line(&format!(
+        "awaiting subscription payload containing {} at least {:?} after publishing",
+        expected_payload.replace('\n', "\\n"),
+        expected_delay
+    ));
+
+    let deadline = Instant::now() + expected_delay + SUBSCRIPTION_DELIVERY_BUDGET;
+    let mut observed = Vec::new();
+    loop {
+        tokio::task::consume_budget().await;
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out waiting for subscription payload containing {expected_payload}. observed \
+             {observed:?}"
+        );
+        let event = world
+            .active_session
+            .as_mut()
+            .expect("an active session with subscription must exist")
+            .try_next_subscription(deadline.saturating_duration_since(now))
+            .await
+            .expect("failed to receive subscription event");
+        let Some(event) = event else {
+            panic!(
+                "timed out waiting for subscription payload containing {expected_payload}. \
+                 observed {observed:?}"
+            );
+        };
+        let arrived_after = published_at.elapsed();
+        let payload = event.payload;
+        observed.push(payload.clone());
+        world.last_subscription_payload = Some(payload.clone());
+        if !payload.contains(&expected_payload) {
+            continue;
+        }
+        assert!(
+            arrived_after >= expected_delay,
+            "expected the payload no sooner than {expected_delay:?} after publishing, but it \
+             arrived after {arrived_after:?}"
+        );
+        break;
     }
 }
 

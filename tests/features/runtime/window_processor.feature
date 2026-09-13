@@ -743,8 +743,7 @@ Feature: Window processor runtime behavior
       """
       {"tenant":"acme","latency":10}
       """
-    Then the relay subscription does not receive a payload within "100ms"
-    Then the relay subscription receives a payload
+    Then the relay subscription receives a payload no sooner than "2s" after it was published
       """
       "total_latency":10
       """

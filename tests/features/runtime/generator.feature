@@ -381,8 +381,7 @@ Feature: Generator node
       """
       {"user_id":42,"amount":7}
       """
-    Then the relay subscription does not receive a payload within "500ms"
-    And within "15s" the relay subscription receives a payload
+    Then the relay subscription receives a payload no sooner than "3s" after it was published
       """
       {"amount":7,"user_id":42}
       """

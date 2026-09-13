@@ -719,8 +719,7 @@ Feature: Kafka ingestion
       """
       {"user_id":61}
       """
-    Then the relay subscription does not receive a payload within "1s"
-    And the relay subscription receives a payload
+    Then the relay subscription receives a payload no sooner than "3s" after it was published
       """
       "user_id":61
       """

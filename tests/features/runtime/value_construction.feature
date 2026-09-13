@@ -131,8 +131,7 @@ Feature: Route-local value construction
       """
       {"id":"header-division-by-zero","numerator":10,"denominator":0}
       """
-    Then the relay subscription does not receive a payload within "300ms"
-    And within "15s" the relay subscription receives a payload
+    Then the relay subscription receives a payload no sooner than "3s" after it was published
       """
       "input_id":"header-division-by-zero","operation":"set","source_route":"error-route-header"
       """

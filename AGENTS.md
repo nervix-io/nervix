@@ -519,12 +519,16 @@ build and the existing tests, and nothing in it changes behavior.
   only holds on an idle machine is a defect in the test, not a flake to retry. Waiting for
   something to happen is therefore bounded generously: raising that bound costs nothing under
   parallelism, because the wait ends when the condition holds.
-- An assertion that something has **not** happened yet is the opposite: its window is bounded by
-  the cadence the scenario configured, and load can carry the cadence into the window before the
-  step even starts. Give the configured cadence at least a second of margin over the window, and
-  keep the window a small fraction of the cadence — a shorter window is both faster and safer,
-  because the assertion's job is to show that the output is not immediate, not to measure the
-  timer. Never widen the window to make such a step more patient; widen the cadence it races.
+- An assertion that something has **not** happened yet is the opposite, and no choice of window
+  makes it reliable. Its window opens when the step starts, while the cadence it races started at
+  the event before it, so the margin between them is consumed by whatever delayed the step
+  boundary — which under this suite's parallelism is seconds, not milliseconds. Measured on the
+  Kafka partial-batch scenario: a window two seconds inside the cadence still failed under load,
+  and the same scenario passed repeatedly once the assertion measured instead of gated. So assert
+  the delay, not the silence: record when the triggering event happened and require that the
+  output arrived at least the cadence later. Load moves the event and the arrival together, so a
+  measured delay only grows. Reserve a "does not arrive" window for output that must never arrive
+  at all, where a longer window strengthens the assertion.
 - An assertion on an exact batch count needs a flush window wider than the spread between the
   messages it groups, not one comparable to it. Concurrently published messages arrive spread by
   whatever the machine is doing.
