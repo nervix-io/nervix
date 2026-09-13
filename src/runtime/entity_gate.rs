@@ -390,10 +390,10 @@ impl Runtime {
         let affected = affected_entities.iter().cloned().collect::<HashSet<_>>();
         let processor_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
         relays.retain(|relay| {
-            let mut producer_count = 0usize;
-            let mut all_producers_move = true;
+            let mut has_producer = false;
+            let mut has_unaffected_producer = false;
             for node in schedule.nodes.values() {
-                let produces_to_relay = if let Some(processor) =
+                let produces_relay = if let Some(processor) =
                     processor_specs.processor(node.kind(), &node.identifier)
                 {
                     processor.spec.output_relays().contains(relay)
@@ -411,25 +411,23 @@ impl Runtime {
                         _ => false,
                     }
                 };
-                if !produces_to_relay {
+                if !produces_relay {
                     continue;
                 }
 
-                producer_count = producer_count
-                    .checked_add(1)
-                    .assured("the producers counted here are graph nodes held in memory");
-                if all_producers_move {
-                    let producer_moves = affected.contains(&node.identity());
-                    if !producer_moves {
-                        all_producers_move = false;
-                    }
+                has_producer = true;
+                if !has_unaffected_producer {
+                    has_unaffected_producer = !affected.contains(&node.identity());
                 }
             }
 
-            if producer_count == 0 {
+            if !has_producer {
                 return true;
             }
-            !all_producers_move
+            if has_unaffected_producer {
+                return true;
+            }
+            false
         });
         relays
     }

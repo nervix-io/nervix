@@ -1,0 +1,5 @@
+error[E0616]: field `predicate` of struct `nervix_server::runtime::subscription_predicate_capability_compile_tests::CompiledSubscriptionPredicate` is private
+ --> $DIR/subscription_predicate_inner_is_private.rs:4:23
+  |
+4 |     let _ = predicate.predicate;
+  |                       ^^^^^^^^^ private field

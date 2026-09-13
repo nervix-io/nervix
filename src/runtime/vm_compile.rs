@@ -62,7 +62,6 @@ impl RuntimeMaterializedRelaySpec {
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledProgramWithMaterializedInterest {
     pub(in crate::runtime) compiled: Arc<VmCompiledProgram>,
-    pub(crate) output_sensitivity: VmSchemaSensitivity,
     pub(crate) materialized_interest: MaterializedProgramInterest,
     pub(super) output_namespace_input: OutputNamespaceInput,
     pub(super) lookup_hash_maps: Vec<LookupHashMapCall>,
@@ -551,7 +550,6 @@ pub(super) fn compile_message_error_set_program(
     })?;
     Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
-        output_sensitivity,
         materialized_interest,
         output_namespace_input: OutputNamespaceInput::Uninitialized,
         lookup_hash_maps,
@@ -743,7 +741,6 @@ pub(super) fn compile_scoped_filter_program(
     })?;
     Ok(Some(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
-        output_sensitivity: sensitivity,
         materialized_interest,
         output_namespace_input: match scope {
             RuntimeFilterScope::Source { .. } => OutputNamespaceInput::Uninitialized,
@@ -909,7 +906,6 @@ pub(super) fn compile_processor_output_filter_map_program(
     })?;
     Ok(Some(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
-        output_sensitivity,
         materialized_interest,
         output_namespace_input: OutputNamespaceInput::Uninitialized,
         lookup_hash_maps,
@@ -1038,7 +1034,6 @@ pub(super) fn compile_output_branch_program(
     Ok(Some(CompiledBranchProgram {
         program: CompiledProgramWithMaterializedInterest {
             compiled: Arc::new(compiled),
-            output_sensitivity: sensitivity,
             materialized_interest,
             output_namespace_input: OutputNamespaceInput::Uninitialized,
             lookup_hash_maps,
@@ -1155,7 +1150,6 @@ pub(super) fn compile_wasm_output_filter_map_program(
     })?;
     Ok(Some(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
-        output_sensitivity,
         materialized_interest,
         output_namespace_input: OutputNamespaceInput::Uninitialized,
         lookup_hash_maps,
@@ -1437,37 +1431,11 @@ pub(super) fn compile_emitter_filter_map_part(
     })?;
     Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
-        output_sensitivity,
         materialized_interest,
         output_namespace_input: OutputNamespaceInput::Uninitialized,
         lookup_hash_maps,
         error_sites,
     })
-}
-
-pub(crate) fn compile_session_filter_map_program(
-    domain: &DomainName,
-    identifier: impl Into<ModelName>,
-    where_clause: Option<&nervix_models::Expression>,
-    input_schema: StdArc<arrow_schema::Schema>,
-    input_sensitivity: VmSchemaSensitivity,
-    context: RuntimeVmCompileContext<'_>,
-) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
-    let identifier = identifier.into();
-    compile_expression_filter_program(
-        RuntimeCompileTarget {
-            domain,
-            identifier: &identifier,
-        },
-        where_clause,
-        RuntimeVmSchema {
-            schema: input_schema,
-            sensitivity: input_sensitivity,
-        },
-        false,
-        MessageErrorOperation::SourceWhere,
-        context,
-    )
 }
 
 pub(in crate::runtime) fn compile_key_projection_program(
@@ -1812,7 +1780,6 @@ pub(super) fn compile_ingestor_filter_map_program(
     })?;
     Ok(Some(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
-        output_sensitivity: schemas.output_sensitivity,
         materialized_interest,
         output_namespace_input: OutputNamespaceInput::Uninitialized,
         lookup_hash_maps,
@@ -1894,7 +1861,6 @@ pub(super) fn compile_generator_set_program(
     })?;
     Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
-        output_sensitivity,
         materialized_interest: MaterializedProgramInterest::default(),
         output_namespace_input: OutputNamespaceInput::Uninitialized,
         lookup_hash_maps: Vec::new(),

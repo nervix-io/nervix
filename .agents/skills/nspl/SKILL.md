@@ -123,6 +123,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   source-token WASM output preserves source metadata. Omitted Sentry timestamps use domain time;
   explicit Sentry timestamps are preserved; OTEL `observed_time_unix_nano` and HTTP-date
   `Retry-After` interpretation use actual UTC.
+- Treat a session subscription `WHERE` clause as a predicate over the subscribed relay record.
+  Bare fields, `message.<field>`, and `input.<field>` are equivalent there. Do not use `output`,
+  `branch`, materialized `relay_state`, construction clauses, or side effects; subscription
+  creation rejects them, and a selected record is delivered unchanged before sampling.
 - Declare exact schema types and nullability. Use explicit conversions; never invent implicit
   casts between wire, internal, branch, processor, lookup, state, and sink values.
 - Use `IF ... THEN ... ELSE ... END` or searched/simple `CASE` for conditional values. Keep every

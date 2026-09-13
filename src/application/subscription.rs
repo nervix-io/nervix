@@ -9,10 +9,7 @@
 //! - **Must not know.** Construction, inheritance, values or any other side effect a processor has.
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use ahash::{HashMap, HashMapExt};
@@ -23,10 +20,9 @@ use nervix_approx_into::ApproxInto;
 use nervix_consensus::ReplicatedTransaction;
 use nervix_interconnect::SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest;
 use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeName, CreateBranch, CreateRelay, CreateSchema, DomainName,
-    FieldName, Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayName, ScheduledModel,
-    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName,
-    UserName,
+    ClusterNodeIdentity, ClusterNodeName, CreateRelay, CreateSchema, DomainName, FieldName,
+    ModelKind, ParseAsType, RelayName, ScheduledModel, SubscriptionBinding,
+    SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName, UserName,
 };
 use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
 use nervix_recovery::NoReceiver;
@@ -56,10 +52,10 @@ use crate::{
         SessionResponse,
     },
     runtime::{
-        CompiledProgramWithMaterializedInterest, RelayMessage, RelayRecordBatch,
-        RelaySubscriptionReceiver, RelaySubscriptionRecvError, Runtime,
-        RuntimeMaterializedRelaySpec, RuntimeVmCompileContext, compile_session_filter_map_program,
-        execute_filter_map_on_record, scheduled_relay_owner_nodes,
+        CompiledSubscriptionPredicate, RelayMessage, RelayRecordBatch, RelaySubscriptionReceiver,
+        RelaySubscriptionRecvError, Runtime, SubscriptionPredicateCompileContext,
+        compile_subscription_predicate, execute_subscription_predicate_on_record,
+        scheduled_relay_owner_nodes,
     },
     runtime_schema,
     task_shutdown::JoinShutdown,
@@ -110,12 +106,11 @@ pub(in crate::application) enum SessionCommandOperation {
 }
 
 struct SessionSubscriptionTaskConfig {
-    filter_map: Option<CompiledProgramWithMaterializedInterest>,
+    predicate: Option<CompiledSubscriptionPredicate>,
     sensitivity: nervix_vm::SchemaSensitivity,
     delivery_behavior: SubscriptionDeliveryBehavior,
     batch_sample_rate: Option<f64>,
     runtime: Runtime,
-    materialized_stream_owner_nodes: HashMap<RelayName, Option<ClusterNodeName>>,
     receiver: RelaySubscriptionReceiver<RelayRecordBatch>,
     tx: mpsc::Sender<Result<SessionResponse, Status>>,
 }
@@ -217,12 +212,11 @@ impl SessionSubscriptions {
         config: SessionSubscriptionTaskConfig,
     ) {
         let SessionSubscriptionTaskConfig {
-            filter_map,
+            predicate,
             sensitivity,
             delivery_behavior,
             batch_sample_rate,
             runtime,
-            materialized_stream_owner_nodes,
             receiver,
             tx,
         } = config;
@@ -263,82 +257,18 @@ impl SessionSubscriptions {
                                 };
                                 for message in messages {
                                     tokio::task::consume_budget().await;
-                                    let Some(message) = (match filter_map.as_ref() {
-                                        Some(filter_map) => {
-                                            let execution_snapshot = match runtime
-                                                .domain_execution_snapshot(&task_domain)
-                                            {
-                                                Ok(snapshot) => snapshot,
-                                                Err(error) => {
-                                                    let event = SessionResponse {
-                                                        event: Some(proto::session_response::Event::Server(
-                                                            ServerEvent {
-                                                                level: i32::from(ServerEventLevel::Error),
-                                                                message: format!(
-                                                                    "session subscription '{}' could not read domain execution time: {}",
-                                                                    event_name, error
-                                                                ),
-                                                            },
-                                                        )),
-                                                    };
-                                                    if tx.send(Ok(event)).await.is_err() {
-                                                        break 'subscription_loop;
-                                                    }
-                                                    continue;
-                                                }
-                                            };
-                                            let side_inputs = match runtime
-                                                .load_materialized_side_inputs(
-                                                    &task_domain,
-                                                    &message.key,
-                                                    &filter_map.materialized_interest,
-                                                    &materialized_stream_owner_nodes,
-                                                )
-                                                .await
-                                            {
-                                                Ok(values) => values,
-                                                Err(error) => {
-                                                    let event = SessionResponse {
-                                                        event: Some(proto::session_response::Event::Server(
-                                                            ServerEvent {
-                                                                level: i32::from(ServerEventLevel::Error),
-                                                                message: format!(
-                                                                    "session subscription '{}' failed to load materialized side inputs: {}",
-                                                                    event_name, error
-                                                                ),
-                                                            },
-                                                        )),
-                                                    };
-                                                    if tx.send(Ok(event)).await.is_err() {
-                                                        break 'subscription_loop;
-                                                    }
-                                                    continue;
-                                                }
-                                            };
-                                            match execute_filter_map_on_record(
-                                                &event_name,
-                                                filter_map,
-                                                message.record.clone(),
-                                                message.key.as_ref(),
-                                                None,
-                                                &side_inputs,
-                                                execution_snapshot.now(),
-                                            )
-                                            .await
-                                            {
-                                            Ok(Some(record)) => Some(RelayMessage {
-                                                key: message.key,
-                                                record,
-                                                acks: message.acks,
-                                            }),
-                                            Ok(None) => None,
+                                    if let Some(predicate) = predicate.as_ref() {
+                                        let execution_snapshot = match runtime
+                                            .domain_execution_snapshot(&task_domain)
+                                        {
+                                            Ok(snapshot) => snapshot,
                                             Err(error) => {
                                                 let event = SessionResponse {
                                                     event: Some(proto::session_response::Event::Server(
                                                         ServerEvent {
                                                             level: i32::from(ServerEventLevel::Error),
                                                             message: format!(
-                                                                "session subscription '{}' FILTER-MAP failed: {}",
+                                                                "session subscription '{}' could not read domain execution time: {}",
                                                                 event_name, error
                                                             ),
                                                         },
@@ -349,12 +279,35 @@ impl SessionSubscriptions {
                                                 }
                                                 continue;
                                             }
+                                        };
+                                        match execute_subscription_predicate_on_record(
+                                            predicate,
+                                            &message.record,
+                                            execution_snapshot.now(),
+                                        )
+                                        .await
+                                        {
+                                            Ok(true) => {}
+                                            Ok(false) => continue,
+                                            Err(error) => {
+                                                let event = SessionResponse {
+                                                    event: Some(proto::session_response::Event::Server(
+                                                        ServerEvent {
+                                                            level: i32::from(ServerEventLevel::Error),
+                                                            message: format!(
+                                                                "session subscription '{}' predicate failed: {}",
+                                                                event_name, error
+                                                            ),
+                                                        },
+                                                    )),
+                                                };
+                                                if tx.send(Ok(event)).await.is_err() {
+                                                    break 'subscription_loop;
+                                                }
+                                                continue;
                                             }
                                         }
-                                        None => Some(message),
-                                    }) else {
-                                        continue;
-                                    };
+                                    }
                                     if !subscription_sample_passes(batch_sample_rate, &message) {
                                         continue;
                                     }
@@ -1027,194 +980,6 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn subscription_branch_schema(
-        &self,
-        domain: &DomainName,
-        relay: &RelayName,
-    ) -> Result<Option<StdArc<arrow_schema::Schema>>, String> {
-        match self.inner.registry.get::<CreateRelay>(domain, relay) {
-            Ok(Some(relay_model)) => {
-                let Some(branch_ref) = relay_model.branching.branch() else {
-                    return Ok(None);
-                };
-                let branch = match self.inner.registry.get::<CreateBranch>(domain, branch_ref) {
-                    Ok(Some(branch)) => branch,
-                    Ok(None) => {
-                        return Err(format!(
-                            "stream '{}' references missing branch '{}'",
-                            relay.as_str(),
-                            branch_ref.as_str()
-                        ));
-                    }
-                    Err(err) => {
-                        return Err(format!(
-                            "failed to resolve branch '{}' for relay '{}': {err}",
-                            branch_ref.as_str(),
-                            relay.as_str()
-                        ));
-                    }
-                };
-                match self
-                    .inner
-                    .registry
-                    .get::<CreateSchema>(domain, &branch.schema)
-                {
-                    Ok(Some(schema)) => {
-                        Ok(Some(runtime_schema::compile_schema(&schema).arrow_schema()))
-                    }
-                    Ok(None) => Err(format!(
-                        "stream '{}' references missing branch schema '{}'",
-                        relay.as_str(),
-                        branch.schema.as_str()
-                    )),
-                    Err(err) => Err(format!(
-                        "failed to resolve branch schema '{}' for relay '{}': {err}",
-                        branch.schema.as_str(),
-                        relay.as_str()
-                    )),
-                }
-            }
-            Ok(None) => {
-                self.subscription_branch_schema_from_schedule(domain, relay)
-                    .await
-            }
-            Err(err) => Err(format!(
-                "failed to resolve relay '{}' for subscription: {err}",
-                relay.as_str()
-            )),
-        }
-    }
-
-    async fn subscription_branch_schema_from_schedule(
-        &self,
-        domain: &DomainName,
-        relay: &RelayName,
-    ) -> Result<Option<StdArc<arrow_schema::Schema>>, String> {
-        let schedule = self.inner.consensus.current_schedule().await;
-        let Some(domain_schedule) = schedule.domain(domain) else {
-            return Ok(None);
-        };
-        let Some(ScheduledModel {
-            config: relay_model,
-            node: relay_node,
-        }) = domain_schedule.scheduled::<CreateRelay>(relay)
-        else {
-            return Ok(None);
-        };
-        if let Some(branch_ref) = relay_model.branching.branch() {
-            let Some(branch) = domain_schedule.configured::<CreateBranch>(branch_ref) else {
-                return Err(format!(
-                    "stream '{}' references missing scheduled branch '{}'",
-                    relay.as_str(),
-                    branch_ref.as_str()
-                ));
-            };
-            let Some(schema) = domain_schedule.configured::<CreateSchema>(&branch.schema) else {
-                return Err(format!(
-                    "stream '{}' references missing scheduled branch schema '{}'",
-                    relay.as_str(),
-                    branch.schema.as_str()
-                ));
-            };
-            return Ok(Some(runtime_schema::compile_schema(schema).arrow_schema()));
-        }
-
-        let branching = relay_node
-            .effective_branching
-            .as_deref()
-            .unwrap_or_default();
-        if branching.is_empty() {
-            return Ok(None);
-        }
-        let Some(schema) = domain_schedule.configured::<CreateSchema>(&relay_model.schema) else {
-            return Err(format!(
-                "stream '{}' references missing scheduled schema '{}'",
-                relay.as_str(),
-                relay_model.schema.as_str()
-            ));
-        };
-        let mut fields = Vec::with_capacity(branching.len());
-        for branch_field in branching {
-            let Some(field) = schema
-                .fields
-                .iter()
-                .find(|field| field.name == *branch_field)
-            else {
-                return Err(format!(
-                    "stream '{}' inferred branch field '{}' from its branching, but the field is \
-                     missing from schema '{}'",
-                    relay.as_str(),
-                    branch_field.as_str(),
-                    schema.name.as_str()
-                ));
-            };
-            fields.push(field.clone());
-        }
-        Ok(Some(
-            runtime_schema::compile_schema(&nervix_models::CreateSchema {
-                name: schema.name.clone(),
-                fields,
-            })
-            .arrow_schema(),
-        ))
-    }
-
-    async fn subscription_materialized_context(
-        &self,
-        domain: &DomainName,
-    ) -> Result<
-        (
-            HashMap<RelayName, RuntimeMaterializedRelaySpec>,
-            HashMap<RelayName, Option<ClusterNodeName>>,
-        ),
-        String,
-    > {
-        let schedule = self.inner.consensus.current_schedule().await;
-        let Some(domain_schedule) = schedule.domain(domain) else {
-            return Ok((HashMap::default(), HashMap::default()));
-        };
-
-        let mut specs = HashMap::default();
-        let mut owners = HashMap::default();
-        for relay_node in domain_schedule
-            .nodes
-            .values()
-            .filter(|node| node.kind() == ModelKind::Relay)
-        {
-            let Model::Relay(ack_model) = relay_node.config.as_ref() else {
-                continue;
-            };
-            if ack_model.materialized_state.is_none() {
-                continue;
-            }
-            let Some(schema_node) = domain_schedule.nodes.get(&NodeRef::new(
-                ModelKind::Schema,
-                ModelName::from(&ack_model.schema),
-            )) else {
-                return Err(format!(
-                    "stream '{}' references missing scheduled schema '{}'",
-                    ack_model.name.as_str(),
-                    ack_model.schema.as_str()
-                ));
-            };
-            let Model::Schema(schema) = schema_node.config.as_ref() else {
-                return Err("scheduled schema node has invalid model kind".to_string());
-            };
-            let schema = runtime_schema::compile_schema(schema);
-            specs.insert(
-                ack_model.name.clone(),
-                RuntimeMaterializedRelaySpec::new(
-                    schema.arrow_schema(),
-                    schema.vm_sensitivity(),
-                    relay_node.effective_branching.clone().unwrap_or_default(),
-                ),
-            );
-            owners.insert(ack_model.name.clone(), relay_node.primary_node().cloned());
-        }
-
-        Ok((specs, owners))
-    }
-
     pub(in crate::application) async fn create_subscription(
         &self,
         domain: &DomainName,
@@ -1320,58 +1085,7 @@ impl SessionServiceImpl {
             }
         }
 
-        let relay_target = self
-            .subscription_target_from_schedule(domain, &subscription.relay)
-            .await;
-        let relay_branching = match relay_target {
-            Ok(Some(target)) => target.branching,
-            Ok(None) | Err(_) => Vec::new(),
-        };
-        let relay_branch_schema = match self
-            .subscription_branch_schema(domain, &subscription.relay)
-            .await
-        {
-            Ok(schema) => schema,
-            Err(err) => {
-                return CommandResult {
-                    success: false,
-                    message: format!(
-                        "failed to resolve relay branch schema for subscription: {err}"
-                    ),
-                    diagnostics: vec![Diagnostic {
-                        message: format!(
-                            "failed to resolve relay branch schema for subscription: {err}"
-                        ),
-                        span_start: 0,
-                        span_end: 0,
-                    }],
-                    kind: i32::from(CommandResultKind::Error),
-                    ..Default::default()
-                };
-            }
-        };
-        let (materialized_stream_specs, materialized_stream_owner_nodes) =
-            match self.subscription_materialized_context(domain).await {
-                Ok(context) => context,
-                Err(err) => {
-                    return CommandResult {
-                        success: false,
-                        message: format!(
-                            "failed to resolve materialized relays for subscription: {err}"
-                        ),
-                        diagnostics: vec![Diagnostic {
-                            message: format!(
-                                "failed to resolve materialized relays for subscription: {err}"
-                            ),
-                            span_start: 0,
-                            span_end: 0,
-                        }],
-                        kind: i32::from(CommandResultKind::Error),
-                        ..Default::default()
-                    };
-                }
-            };
-        let (filter_map, subscription_sensitivity) = match self
+        let (predicate, subscription_sensitivity) = match self
             .subscription_stream_schema(domain, &subscription.relay)
             .await
         {
@@ -1379,47 +1093,41 @@ impl SessionServiceImpl {
                 let udfs = self.inner.runtime.udf_executor(domain);
                 let schema = runtime_schema::compile_schema(&schema);
                 let input_sensitivity = schema.vm_sensitivity();
-                let filter_map = match compile_session_filter_map_program(
-                    domain,
-                    &subscription.relay,
-                    subscription.where_clause.as_ref(),
-                    schema.arrow_schema(),
-                    input_sensitivity.clone(),
-                    RuntimeVmCompileContext {
-                        available_materialized_streams: &materialized_stream_specs,
-                        available_lookups: &HashMap::default(),
-                        current_branching: &relay_branching,
-                        current_branch_schema: relay_branch_schema.as_ref(),
-                        current_branch_sensitivity: None,
-                        udfs: udfs.as_ref(),
-                    },
-                ) {
-                    Ok(filter_map) => filter_map,
-                    Err(err) => {
-                        return CommandResult {
-                            success: false,
-                            message: format!(
-                                "failed to compile session subscription '{}': {err}",
-                                subscription.name
-                            ),
-                            diagnostics: vec![Diagnostic {
+                let predicate = match subscription.where_clause.as_ref() {
+                    Some(expression) => match compile_subscription_predicate(
+                        domain,
+                        &subscription.name,
+                        expression,
+                        SubscriptionPredicateCompileContext::new(
+                            schema.arrow_schema(),
+                            input_sensitivity.clone(),
+                            udfs.as_ref(),
+                        ),
+                    ) {
+                        Ok(predicate) => Some(predicate),
+                        Err(err) => {
+                            return CommandResult {
+                                success: false,
                                 message: format!(
                                     "failed to compile session subscription '{}': {err}",
                                     subscription.name
                                 ),
-                                span_start: 0,
-                                span_end: 0,
-                            }],
-                            kind: i32::from(CommandResultKind::Error),
-                            ..Default::default()
-                        };
-                    }
+                                diagnostics: vec![Diagnostic {
+                                    message: format!(
+                                        "failed to compile session subscription '{}': {err}",
+                                        subscription.name
+                                    ),
+                                    span_start: 0,
+                                    span_end: 0,
+                                }],
+                                kind: i32::from(CommandResultKind::Error),
+                                ..Default::default()
+                            };
+                        }
+                    },
+                    None => None,
                 };
-                let sensitivity = match filter_map.as_ref() {
-                    Some(filter_map) => filter_map.output_sensitivity.clone(),
-                    None => input_sensitivity,
-                };
-                (filter_map, sensitivity)
+                (predicate, input_sensitivity)
             }
             Ok(None) => {
                 return CommandResult {
@@ -1486,12 +1194,11 @@ impl SessionServiceImpl {
             domain.clone(),
             relay.clone(),
             SessionSubscriptionTaskConfig {
-                filter_map,
+                predicate,
                 sensitivity: subscription_sensitivity,
                 delivery_behavior: subscription.delivery_behavior,
                 batch_sample_rate,
                 runtime: self.inner.runtime.clone(),
-                materialized_stream_owner_nodes,
                 receiver,
                 tx: tx.clone(),
             },
@@ -1648,7 +1355,6 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
-    use ahash::HashMap;
     use nervix_models::{DomainName, SubscriptionDeliveryBehavior};
     use tokio::{sync::mpsc, time::Duration};
 
@@ -1722,12 +1428,11 @@ mod tests {
             DomainName::parse("default").expect("valid domain"),
             named("events"),
             SessionSubscriptionTaskConfig {
-                filter_map: None,
+                predicate: None,
                 sensitivity: nervix_vm::SchemaSensitivity::default(),
                 delivery_behavior: SubscriptionDeliveryBehavior::Blocking,
                 batch_sample_rate: None,
                 runtime: Runtime::default(),
-                materialized_stream_owner_nodes: HashMap::default(),
                 receiver: events_rx,
                 tx,
             },
@@ -1764,12 +1469,11 @@ mod tests {
             DomainName::parse("default").expect("valid domain"),
             named("events"),
             SessionSubscriptionTaskConfig {
-                filter_map: None,
+                predicate: None,
                 sensitivity: nervix_vm::SchemaSensitivity::default(),
                 delivery_behavior: SubscriptionDeliveryBehavior::Blocking,
                 batch_sample_rate: None,
                 runtime: Runtime::default(),
-                materialized_stream_owner_nodes: HashMap::default(),
                 receiver: events.new_receiver(),
                 tx,
             },
