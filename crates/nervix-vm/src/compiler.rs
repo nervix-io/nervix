@@ -6,14 +6,15 @@ use std::{
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use arrow_schema::{DataType, Field, Schema};
+use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 
 use crate::{
     error::CompileError,
     ir::{
-        AssignmentFallback, CompiledProgram, InputBinding, Instruction, InstructionKind,
-        InvocationBinding, OutputBinding, RegisterLayouts, RegisterRef, RegisterSpace,
-        RegisterType, ScalarValue, SelectArm,
+        AssignmentFallback, CompiledPredicate, CompiledProgram, InputBinding, Instruction,
+        InstructionKind, InvocationBinding, OutputBinding, RegisterLayouts, RegisterRef,
+        RegisterSpace, RegisterType, ScalarValue, SelectArm,
     },
     program::{
         BinaryOp, CaseArm, Expr, FieldRef, FunctionName, InternalFieldNamespace, InternalFieldRef,
@@ -306,6 +307,29 @@ impl Default for CompileOptions {
             allow_sensitive_output: false,
             allow_header_reads: false,
             allow_header_writes: false,
+            udf_signatures: UdfSignatures::default(),
+            injector: None,
+        }
+    }
+}
+
+/// Compiler options available to predicate-only callers.
+///
+/// Output construction, header writes, and invocation emission are absent from this surface by
+/// construction. Predicate callers may configure only expression evaluation behavior.
+#[derive(Debug, Clone)]
+pub struct PredicateCompileOptions {
+    pub optimize_temp_registers: bool,
+    pub allow_header_reads: bool,
+    pub udf_signatures: UdfSignatures,
+    pub injector: Option<triomphe::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
+}
+
+impl Default for PredicateCompileOptions {
+    fn default() -> Self {
+        Self {
+            optimize_temp_registers: true,
+            allow_header_reads: false,
             udf_signatures: UdfSignatures::default(),
             injector: None,
         }
@@ -2530,6 +2554,81 @@ pub fn compile_program_for_bindings_with_sensitivity(
     )
 }
 
+/// Compiles one Boolean expression into an opaque predicate capability.
+///
+/// Every supplied binding must be read-only. The returned handle exposes neither the general
+/// program nor a construction result, so callers cannot add assignments or invocations and cannot
+/// substitute a general [`CompiledProgram`] at execution time.
+pub fn compile_predicate_with_options_for_bindings(
+    predicate: &SpannedExpr,
+    bindings: impl IntoIterator<Item = CompileBinding>,
+    options: PredicateCompileOptions,
+) -> Result<CompiledPredicate, Report<CompileError>> {
+    let mut bindings = bindings.into_iter().collect::<Vec<_>>();
+    if bindings.is_empty() {
+        return Err(Report::new(CompileError {
+            code: "missing_predicate_binding",
+            message: "at least one read-only predicate input namespace is required".to_string(),
+            span: predicate.span,
+        }));
+    }
+    for binding in &bindings {
+        if !binding.readable || binding.writable {
+            return Err(Report::new(CompileError {
+                code: "invalid_predicate_binding",
+                message: format!(
+                    "predicate namespace '{}' must be read-only",
+                    binding.namespace.label()
+                ),
+                span: predicate.span,
+            }));
+        }
+    }
+
+    let Some(primary_binding) = bindings
+        .iter_mut()
+        .find(|binding| matches!(binding.namespace, CompileNamespace::User(_)))
+    else {
+        return Err(Report::new(CompileError {
+            code: "missing_predicate_input_namespace",
+            message: "a predicate requires a user input namespace".to_string(),
+            span: predicate.span,
+        }));
+    };
+    let output_schema = primary_binding.schema.clone();
+    let output_sensitivity = primary_binding.sensitivity.clone();
+
+    // The shared compiler represents filtering as one phase of a construction program and
+    // therefore requires an internal output binding. This writable bit never crosses the
+    // predicate API: callers supplied only read-only bindings, and the opaque result exposes only
+    // row selection and predicate errors.
+    primary_binding.writable = true;
+    let program = SpannedNode {
+        inner: Program {
+            filter: Some(predicate.clone()),
+            set: Vec::new(),
+            invoke: Vec::new(),
+        },
+        span: predicate.span,
+    };
+    let compiled = compile_program_with_options_for_bindings_with_sensitivity(
+        &program,
+        output_schema,
+        output_sensitivity,
+        bindings,
+        CompileOptions {
+            optimize_temp_registers: options.optimize_temp_registers,
+            output_mode: OutputMode::PassthroughByName,
+            allow_sensitive_output: false,
+            allow_header_reads: options.allow_header_reads,
+            allow_header_writes: false,
+            udf_signatures: options.udf_signatures,
+            injector: options.injector,
+        },
+    )?;
+    Ok(CompiledPredicate::new(triomphe::Arc::new(compiled)))
+}
+
 /// One field a program's `SET` list writes, as inferred without compiling the program: the field
 /// the assignment targets and the type that assignment produces.
 #[derive(Debug, Clone, PartialEq)]
@@ -3299,6 +3398,51 @@ mod tests {
 
     fn schema(fields: Vec<Field>) -> Arc<Schema> {
         Arc::new(Schema::new(fields))
+    }
+
+    #[test]
+    fn predicate_compilation_accepts_only_a_boolean_expression_and_readonly_bindings() {
+        let schema = schema(vec![Field::new("active", DataType::Boolean, false)]);
+        let parsed = parse_program("WHERE input.active").expect("predicate must parse");
+        let predicate = parsed
+            .inner
+            .filter
+            .as_ref()
+            .expect("WHERE must lower to one predicate expression");
+        let compiled = compile_predicate_with_options_for_bindings(
+            predicate,
+            [CompileBinding::readonly("input", schema.clone())],
+            PredicateCompileOptions::default(),
+        )
+        .expect("Boolean predicate over a read-only input must compile");
+        assert!(compiled.program().filter.is_some());
+        assert!(compiled.program().invocations.is_empty());
+
+        let error = compile_predicate_with_options_for_bindings(
+            predicate,
+            [CompileBinding::writable("input", schema)],
+            PredicateCompileOptions::default(),
+        )
+        .expect_err("predicate callers must not supply a writable input");
+        assert_eq!(error.current_context().code, "invalid_predicate_binding");
+    }
+
+    #[test]
+    fn predicate_compilation_rejects_non_boolean_expressions() {
+        let schema = schema(vec![Field::new("value", DataType::Int64, false)]);
+        let parsed = parse_program("WHERE input.value").expect("expression must parse");
+        let predicate = parsed
+            .inner
+            .filter
+            .as_ref()
+            .expect("WHERE must lower to one predicate expression");
+        let error = compile_predicate_with_options_for_bindings(
+            predicate,
+            [CompileBinding::readonly("input", schema)],
+            PredicateCompileOptions::default(),
+        )
+        .expect_err("a predicate must evaluate to Boolean");
+        assert_eq!(error.current_context().code, "invalid_filter");
     }
 
     fn sensitivity(fields: &[&str]) -> SchemaSensitivity {
