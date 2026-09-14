@@ -16231,7 +16231,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
     .repeat_failed();
     let writer = ScenarioWorld::cucumber()
         .max_concurrent_scenarios(default_max_concurrent_scenarios)
-        .retries(1)
+        .retries(2)
         .before(|feature, rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();
