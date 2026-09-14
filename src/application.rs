@@ -89,7 +89,7 @@ use scheduling::{
 };
 use session_service::{
     SESSION_EVENT_CAPACITY, SessionEvents, SessionServiceImpl, SessionServiceInner,
-    apply_cluster_runtime_state,
+    apply_current_cluster_runtime_state,
 };
 use startup::ApplicationStartup;
 use tls::{
@@ -137,6 +137,7 @@ mod ownership_handoff;
 mod peer_grpc;
 mod relocation;
 mod resource;
+mod runtime_admission;
 mod scheduling;
 mod session_service;
 mod startup;
@@ -882,14 +883,6 @@ impl Application {
             .consensus
             .as_ref()
             .verified("startup assigns this handle before it reaches this point");
-        if let Err(error) = startup
-            .registry
-            .synchronize_cluster_schedule(&consensus.observer().current_schedule().await)
-        {
-            let error = Report::new(AppError::SynchronizeRegistry(error.to_string()));
-            startup.terminate().await;
-            return Err(error);
-        }
         startup.runtime.attach_resources(
             startup.resource_store.clone(),
             consensus.observer().current_resources().await,
@@ -962,6 +955,7 @@ impl Application {
         let interconnect =
             interconnect.verified("startup assigns this handle before it reaches this point");
         let mut interconnect_rx = interconnect_rx;
+        let runtime_admission = Arc::new(runtime_admission::RuntimeAdmission::new());
         runtime.attach_remote_dispatcher(node_id.clone(), cluster.clone(), interconnect.clone());
         let node_observations = NodeObservations::new(
             runtime.executor().clone(),
@@ -1594,26 +1588,17 @@ impl Application {
         let consensus_for_schedule = consensus.observer();
         let cluster_for_schedule = cluster.clone();
         let interconnect_for_schedule = interconnect.clone();
-        let schedule_local_node_id = consensus.observer().local_node_id().clone();
         let schedule_shutdown = shutdown.clone();
+        let schedule_runtime_admission = runtime_admission.clone();
         background_tasks.push(tokio::spawn(async move {
-            let initial_state = consensus_for_schedule.current_runtime_state().await;
-            if consensus_for_schedule.current_leader().await.as_ref()
-                != Some(&schedule_local_node_id)
-                && let Err(error) =
-                    registry_for_schedule.synchronize_cluster_schedule(&initial_state.schedule)
-            {
-                warn!(
-                    error = %error,
-                    "failed to synchronize registry from initial cluster schedule"
-                );
-            }
-            if let Err(error) = apply_cluster_runtime_state(
+            if let Err(error) = apply_current_cluster_runtime_state(
                 &runtime_for_schedule,
                 &cluster_for_schedule,
                 &interconnect_for_schedule,
-                &schedule_local_node_id,
-                initial_state,
+                &registry_for_schedule,
+                &consensus_for_schedule,
+                &schedule_runtime_admission,
+                &schedule_shutdown,
             )
             .await
             {
@@ -1627,23 +1612,14 @@ impl Application {
                         if changed.is_err() {
                             break;
                         }
-                        let state = consensus_for_schedule.current_runtime_state().await;
-                        if consensus_for_schedule.current_leader().await.as_ref()
-                            != Some(&schedule_local_node_id)
-                            && let Err(error) =
-                                registry_for_schedule.synchronize_cluster_schedule(&state.schedule)
-                        {
-                            warn!(
-                                error = %error,
-                                "failed to synchronize registry from updated cluster schedule"
-                            );
-                        }
-                        if let Err(error) = apply_cluster_runtime_state(
+                        if let Err(error) = apply_current_cluster_runtime_state(
                             &runtime_for_schedule,
                             &cluster_for_schedule,
                             &interconnect_for_schedule,
-                            &schedule_local_node_id,
-                            state,
+                            &registry_for_schedule,
+                            &consensus_for_schedule,
+                            &schedule_runtime_admission,
+                            &schedule_shutdown,
                         )
                         .await
                         {
@@ -1683,6 +1659,7 @@ impl Application {
                 resource_store,
                 http_tls_server_config: Arc::new(RwLock::new(None)),
                 runtime: runtime.clone(),
+                runtime_admission: runtime_admission.clone(),
                 replica_count,
                 shutdown: shutdown.clone(),
                 events: events.clone(),

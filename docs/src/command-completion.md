@@ -74,6 +74,12 @@ models, schedules, clocks, resource bindings, and stopped or running lifecycle s
 listeners start. Each node then reports `ready`, and success waits for the readiness barrier. This
 prevents a source from publishing into a peer that still has the preceding graph.
 
+Revision progress is cumulative. If a newer runtime revision arrives while a node is waiting at
+either barrier, that node applies the newer coherent state instead of waiting to finish the older
+revision first. Preparing or becoming ready at the newer revision also completes every earlier
+revision for that process incarnation. This lets a newly admitted process catch up to the current
+state without forming a cycle with peers that entered adjacent revision barriers before it joined.
+
 ```mermaid
 sequenceDiagram
     participant C as Client
