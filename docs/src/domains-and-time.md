@@ -2,6 +2,9 @@
 
 Every runtime graph in Nervix runs inside a domain.
 
+This chapter describes the public language and runtime behavior. See
+[Domain Clock](./domain-clock.md) for the internal clock architecture.
+
 Nervix currently supports:
 
 - `CREATE PACED DOMAIN <id> WITH PERIOD <duration> SKEW <duration> [PLACEMENT <policy>];`
