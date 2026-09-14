@@ -45,7 +45,7 @@ use futures_util::{
 use http_endpoint::{serve_http, serve_https};
 use interconnect_relay::InterconnectRelayPayloadLane;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_consensus::{Consensus, ConsensusSettings, RaftRetentionPolicy, TransactionState};
+use nervix_consensus::{ConsensusSettings, RaftRetentionPolicy, TransactionState};
 use nervix_interconnect::{
     ActivateOwnershipHandoffStateRequest as RemoteActivateOwnershipHandoffStateRequest,
     ApplicationHealthProbe,
@@ -80,7 +80,7 @@ use nervix_interconnect::{
     Transport,
 };
 use nervix_models::{ClusterNodeName, DomainName, DomainStatus, ModelKind, UserName};
-use nervix_recovery::{Discarded as _, Reported as _};
+use nervix_recovery::Reported as _;
 use observability_http::serve_observability_http;
 use ownership_handoff::{FORCED_OWNERSHIP_RECOVERY_BUDGET, ForcedOwnershipRecoveryCoordinator};
 use parking_lot::RwLock;
@@ -99,7 +99,7 @@ use tls::{
 };
 use tokio::{
     net::TcpListener,
-    sync::{Mutex as AsyncMutex, broadcast},
+    sync::broadcast,
     time::{Duration, sleep},
 };
 use transaction::{
@@ -121,6 +121,8 @@ use crate::{
 mod authentication;
 mod background_task;
 mod cluster_status;
+mod command_execution;
+mod completion;
 mod describe_output;
 mod domain_clock;
 mod domain_lifecycle;
@@ -866,17 +868,9 @@ impl Application {
             raft_election_timeout_max,
             raft_retention,
         };
-        #[cfg(feature = "testing")]
-        let consensus_result = Consensus::from_database_with_test_probe(
-            startup.db.clone(),
-            consensus_settings,
-            fault_injection.consensus_test_probe(&node_id),
-        )
-        .await;
-        #[cfg(not(feature = "testing"))]
-        let consensus_result =
-            Consensus::from_database(startup.db.clone(), consensus_settings).await;
-        let consensus_result = consensus_result.change_context(AppError::StartConsensus);
+        let consensus_result = startup
+            .open_consensus(consensus_settings, &fault_injection)
+            .await;
         let consensus = match consensus_result {
             Ok(consensus) => consensus,
             Err(error) => {
@@ -884,8 +878,6 @@ impl Application {
                 return Err(error);
             }
         };
-        #[cfg(feature = "testing")]
-        fault_injection.register_consensus(node_id.clone(), &consensus);
         startup.consensus = Some(consensus);
         let consensus = startup
             .consensus
@@ -924,6 +916,7 @@ impl Application {
                 return Err(error);
             }
         };
+        let cluster = Arc::new(cluster);
         let local_health_identity = cluster.local_node_identity().await;
         #[cfg(feature = "testing")]
         let health_fault_injection = fault_injection.clone();
@@ -942,19 +935,21 @@ impl Application {
                         .await;
                     #[cfg(not(feature = "testing"))]
                     drop(context);
+                    #[cfg(feature = "testing")]
+                    let local_health_identity =
+                        health_fault_injection.health_response_identity(local_health_identity);
                     local_health_identity
                 }
             }
         });
-        if let Err(error) = health_handler {
-            cluster
-                .shutdown()
-                .await
-                .discarded("the handler-registration error remains the startup failure");
-            startup.terminate().await;
-            return Err(error.change_context(AppError::StartInterconnect));
-        }
-        let cluster = Arc::new(cluster);
+        let startup = startup
+            .require_handler_registration(&cluster, health_handler)
+            .await?;
+        let application_revision_handler =
+            completion::register_application_revision_handler(cluster.clone(), &interconnect);
+        let startup = startup
+            .require_handler_registration(&cluster, application_revision_handler)
+            .await?;
         let ApplicationStartup {
             db,
             resource_store,
@@ -1038,9 +1033,8 @@ impl Application {
                         }
                     }
                 }
-                let gossip = cluster_for_membership_reconcile.gossip_state().await;
                 if let Err(error) = administrator_for_membership_reconcile
-                    .reconcile_nodes(gossip)
+                    .reconcile_nodes(cluster_for_membership_reconcile.gossip_state())
                     .await
                 {
                     warn!(%error, "raft membership reconciliation failed");
@@ -1585,11 +1579,18 @@ impl Application {
                 }
             }
         }));
+        background_tasks.push(completion::spawn_authoritative_revision_reporting(
+            cluster.clone(),
+            consensus.observer(),
+            shutdown.clone(),
+        ));
+
         let runtime_for_schedule = runtime.clone();
         let registry_for_schedule = registry.clone();
         let mut schedule_rx = consensus.observer().subscribe_schedule();
         let consensus_for_schedule = consensus.observer();
         let cluster_for_schedule = cluster.clone();
+        let interconnect_for_schedule = interconnect.clone();
         let schedule_local_node_id = consensus.observer().local_node_id().clone();
         let schedule_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
@@ -1607,6 +1608,7 @@ impl Application {
             if let Err(error) = apply_cluster_runtime_state(
                 &runtime_for_schedule,
                 &cluster_for_schedule,
+                &interconnect_for_schedule,
                 &schedule_local_node_id,
                 initial_state,
             )
@@ -1636,6 +1638,7 @@ impl Application {
                         if let Err(error) = apply_cluster_runtime_state(
                             &runtime_for_schedule,
                             &cluster_for_schedule,
+                            &interconnect_for_schedule,
                             &schedule_local_node_id,
                             state,
                         )
@@ -1693,8 +1696,9 @@ impl Application {
                 transaction_max_source_bytes,
                 transaction_max_open,
                 transaction_bindings: DashMap::with_hasher(RandomState::new()),
-                transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
-                transaction_commit_execution: AsyncMutex::new(()),
+                command_executions: DashMap::with_hasher(RandomState::new()),
+                transaction_executions: DashMap::with_hasher(RandomState::new()),
+                transaction_domain_executions: DashMap::with_hasher(RandomState::new()),
                 resource_upload_executions: DashMap::with_hasher(RandomState::new()),
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),
             }),
@@ -1739,10 +1743,10 @@ impl Application {
             .register_handler::<PublishResourceReplica, _, _>(move |context, request| {
                 let service = resource_replica_service.clone();
                 async move {
-                    if &request.replica.key.node_id != context.peer_node_id() {
+                    if request.replica.key.node.node_id() != context.peer_node_id() {
                         return Err(ResourceInterconnectError::ReplicaOrigin {
                             authenticated: context.peer_node_id().clone(),
-                            declared: request.replica.key.node_id.clone(),
+                            declared: request.replica.key.node.node_id().clone(),
                         });
                     }
                     service
@@ -2155,7 +2159,7 @@ impl Application {
                                         request.entity.identifier.as_str()
                                     ))
                                 })?;
-                            if scheduled.execution_node() != Some(&request.source) {
+                            if scheduled.primary_node() != Some(&request.source) {
                                 return Err(OwnershipHandoffError::participant(format!(
                                     "{} '{}' is no longer owned by source node '{}'",
                                     request.entity.kind.as_str(),

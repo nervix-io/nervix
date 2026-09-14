@@ -11,13 +11,14 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use error_stack::{Report, ResultExt};
 use fjall::Database;
-use nervix_consensus::{Consensus, RaftRetentionPolicy};
-use nervix_interconnect::Transport;
+use nervix_consensus::{Consensus, ConsensusSettings, RaftRetentionPolicy};
+use nervix_interconnect::{HandlerRegistrationError, Transport};
+use nervix_recovery::Discarded as _;
 use triomphe::Arc;
 
 use super::{Application, Args, error, error::AppError};
 use crate::{
-    cluster,
+    ConfiguredFaultInjection, cluster,
     memory_pressure::MemoryPressureConfig,
     registry::Registry,
     resource::{ResourceStore, ResourceStoreLimits},
@@ -34,6 +35,30 @@ pub(in crate::application) struct ApplicationStartup {
 }
 
 impl ApplicationStartup {
+    pub(in crate::application) async fn open_consensus(
+        &self,
+        settings: ConsensusSettings,
+        _fault_injection: &ConfiguredFaultInjection,
+    ) -> Result<Consensus, Report<AppError>> {
+        #[cfg(feature = "testing")]
+        let node_id = settings.node_id.clone();
+        #[cfg(feature = "testing")]
+        let consensus = Consensus::from_database_with_test_probe(
+            self.db.clone(),
+            settings,
+            _fault_injection.consensus_test_probe(&node_id),
+        )
+        .await
+        .change_context(AppError::StartConsensus)?;
+        #[cfg(not(feature = "testing"))]
+        let consensus = Consensus::from_database(self.db.clone(), settings)
+            .await
+            .change_context(AppError::StartConsensus)?;
+        #[cfg(feature = "testing")]
+        _fault_injection.register_consensus(node_id, &consensus);
+        Ok(consensus)
+    }
+
     pub(in crate::application) async fn terminate(self) {
         self.runtime.shutdown().await;
         if let Some(consensus) = &self.consensus {
@@ -45,6 +70,22 @@ impl ApplicationStartup {
         if let Err(error) = tokio::task::spawn_blocking(move || drop(self)).await {
             error!(error = %error, "failed to join application startup cleanup task");
         }
+    }
+
+    pub(in crate::application) async fn require_handler_registration(
+        self,
+        cluster: &cluster::ClusterHandle,
+        registration: Result<(), Report<HandlerRegistrationError>>,
+    ) -> Result<Self, Report<AppError>> {
+        let Err(error) = registration else {
+            return Ok(self);
+        };
+        cluster
+            .shutdown()
+            .await
+            .discarded("the handler-registration error remains the startup failure");
+        self.terminate().await;
+        Err(error.change_context(AppError::StartInterconnect))
     }
 }
 

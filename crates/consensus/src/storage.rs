@@ -71,7 +71,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 
 #[derive(Debug, Serialize, Deserialize)]
 enum StateEncoding {
-    SemanticRecords,
+    NodeAdmissionFencedRecords,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -85,7 +85,7 @@ struct StateMetadata {
 impl From<&StateMachineData> for StateMetadata {
     fn from(state: &StateMachineData) -> Self {
         Self {
-            encoding: StateEncoding::SemanticRecords,
+            encoding: StateEncoding::NodeAdmissionFencedRecords,
             last_applied_log_id: state.last_applied_log_id.clone(),
             last_membership: state.last_membership.clone(),
             runtime_revision: state.runtime_revision,
@@ -96,7 +96,7 @@ impl From<&StateMachineData> for StateMetadata {
 impl StateMachineData {
     fn load(sm: &Keyspace, metadata: StateMetadata) -> io::Result<Self> {
         let StateMetadata {
-            encoding: StateEncoding::SemanticRecords,
+            encoding: StateEncoding::NodeAdmissionFencedRecords,
             last_applied_log_id,
             last_membership,
             runtime_revision,
@@ -118,7 +118,9 @@ impl StateMachineData {
                 uploads: Records::load(b'o', sm)?,
             },
             cordoned_node_ids: Records::load(b'n', sm)?,
+            node_admission_fences: Records::load(b'f', sm)?,
             transactions: Records::load(b't', sm)?,
+            command_executions: Records::load(b'e', sm)?,
         })
     }
 
@@ -155,8 +157,16 @@ impl StateMachineData {
             .write_changes(&preceding.resources.uploads, b'o', batch, sm)?;
         self.cordoned_node_ids
             .write_changes(&preceding.cordoned_node_ids, b'n', batch, sm)?;
+        self.node_admission_fences.write_changes(
+            &preceding.node_admission_fences,
+            b'f',
+            batch,
+            sm,
+        )?;
         self.transactions
             .write_changes(&preceding.transactions, b't', batch, sm)?;
+        self.command_executions
+            .write_changes(&preceding.command_executions, b'e', batch, sm)?;
         batch.insert(sm, KEY_METADATA, &StateMetadata::from(self))
     }
 }
@@ -175,6 +185,7 @@ pub(super) struct StoreState {
     /// Appended entry bytes since the last completed snapshot, which is what the byte-based
     /// snapshot cadence watches. Truncation leaves it high, so the cadence only ever fires early.
     log_bytes_since_snapshot: AtomicU64,
+    pub(super) applied_tx: watch::Sender<u64>,
     pub(super) schedule_tx: watch::Sender<u64>,
     pub(super) domain_tx: watch::Sender<u64>,
     pub(super) resource_tx: watch::Sender<u64>,
@@ -260,6 +271,7 @@ impl StoreInner {
         // Swap one coherent revision; destruction and notifications run after releasing the lock.
         let preceding = std::mem::replace(&mut *self.state_machine.write(), state);
         drop(preceding);
+        self.applied_tx.send_replace(revision);
         if changes.schedule_changed {
             self.schedule_tx.send_replace(revision);
         }
@@ -589,6 +601,7 @@ impl FjallStore {
                                 state_machine: RwLock::new(state_machine),
                                 snapshots: generations,
                                 log_bytes_since_snapshot: AtomicU64::new(0),
+                                applied_tx: watch::channel(revision).0,
                                 schedule_tx: watch::channel(revision).0,
                                 domain_tx: watch::channel(revision).0,
                                 resource_tx: watch::channel(revision).0,

@@ -108,6 +108,7 @@ static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<StdMutex<BTreeMap<String, String>>> 
 static SCENARIO_EXECUTION_LOCK: OnceLock<StdArc<tokio::sync::RwLock<()>>> = OnceLock::new();
 static WEB_CONSOLE_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> = OnceLock::new();
 const MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS: usize = 2;
+const WEB_CONSOLE_ASSERTION_TIMEOUT: Duration = Duration::from_secs(30);
 const ZEROMQ_OBSERVER_BIND_ATTEMPTS: usize = 8;
 const DURABLE_CATCH_UP_STORAGE_COMMITS_PER_ENTRY: u32 = 2;
 const DURABLE_CATCH_UP_MARGIN: Duration = Duration::from_secs(5);
@@ -4180,6 +4181,15 @@ async fn given_health_responses_are_paused(
         .arm_health_response_pause(&probing_node_id, &responding_node_id);
 }
 
+#[given(expr = "application health responses from node {string} fail")]
+#[when(expr = "application health responses from node {string} fail")]
+async fn given_health_responses_fail(world: &mut ScenarioWorld, responding_node_id: String) {
+    let responding_node_id = expand_placeholders(world, &responding_node_id);
+    world
+        .cluster()
+        .fail_health_responses_from(&responding_node_id);
+}
+
 #[then(expr = "the health response pause from node {string} to node {string} is reached")]
 async fn then_health_response_pause_is_reached(
     world: &mut ScenarioWorld,
@@ -4370,6 +4380,46 @@ async fn when_command_admission_pause_is_released(world: &mut ScenarioWorld, nod
         .release_command_admission_pause(&crate::common::cluster::node_name(&node_id));
 }
 
+#[given(expr = "resource installation on node {string} pauses before promotion")]
+async fn given_resource_installation_pause(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_resource_installation_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "the resource installation pause on node {string} is reached")]
+async fn then_resource_installation_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node_name = crate::common::cluster::node_name(&node_id);
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_resource_installation_pause(&node_name),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("resource installation pause on '{node_id}' was not reached: {error}")
+    });
+    let background = world
+        .background_nspl
+        .as_ref()
+        .verified("the preceding step started a background resource upload");
+    assert!(
+        !background.is_finished(),
+        "resource upload returned before '{node_id}' installed its archive"
+    );
+}
+
+#[when(expr = "the resource installation pause on node {string} is released")]
+async fn when_resource_installation_pause_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_resource_installation_pause(&crate::common::cluster::node_name(&node_id));
+}
+
 #[given(expr = "transaction commit on node {string} pauses after {int} statement")]
 async fn given_transaction_commit_pause(
     world: &mut ScenarioWorld,
@@ -4379,6 +4429,7 @@ async fn given_transaction_commit_pause(
     let node_id = expand_placeholders(world, &node_id);
     world.fault_injection.pause_transaction_commit_after(
         crate::common::cluster::node_name(&node_id),
+        world.domain.clone(),
         completed_statements,
     );
 }
@@ -4720,6 +4771,7 @@ async fn then_transaction_commit_pause_is_reached(
         Duration::from_secs(10),
         world.fault_injection.wait_for_transaction_commit_pause(
             &crate::common::cluster::node_name(&node_id),
+            &world.domain,
             completed_statements,
         ),
     )
@@ -4736,6 +4788,7 @@ async fn when_transaction_commit_pause_is_released(
     let node_id = expand_placeholders(world, &node_id);
     world.fault_injection.release_transaction_commit_pause(
         &crate::common::cluster::node_name(&node_id),
+        &world.domain,
         completed_statements,
     );
 }
@@ -5497,6 +5550,94 @@ async fn when_command_request_begins_in_background(world: &mut ScenarioWorld, #[
     })));
 }
 
+#[when(
+    expr = "this NSPL command request with execution reference {string} begins executing in the \
+            background on the leader node"
+)]
+async fn when_referenced_command_request_begins_in_background(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+    #[step] step: &Step,
+) {
+    assert!(
+        world.background_command_result.is_none(),
+        "a background command request is already active"
+    );
+    let query = expand_placeholders(world, docstring(step));
+    let execution_reference = expand_placeholders(world, &execution_reference);
+    let leader = current_leader_node(world).await;
+    let mut session = world
+        .cluster()
+        .open_session(&leader, &world.domain)
+        .await
+        .unwrap_or_else(|error| panic!("failed to open the background command session: {error}"));
+    world.background_command_result = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        session
+            .run_command_result_with_reference(&query, &execution_reference)
+            .await
+    })));
+}
+
+#[when("the background command request connection is dropped")]
+async fn when_background_command_request_connection_is_dropped(world: &mut ScenarioWorld) {
+    let request = world
+        .background_command_result
+        .take()
+        .verified("the preceding step started a background command request");
+    drop(request);
+    tokio::task::yield_now().await;
+}
+
+#[when(expr = "the background command caller deadline expires after {string}")]
+async fn when_background_command_caller_deadline_expires(
+    world: &mut ScenarioWorld,
+    duration: String,
+) {
+    let duration =
+        humantime::parse_duration(&duration).assured("the scenario caller deadline is valid");
+    let mut request = world
+        .background_command_result
+        .take()
+        .verified("the preceding step started a background command request");
+    let outcome = tokio::time::timeout(duration, &mut request).await;
+    assert!(
+        outcome.is_err(),
+        "the command request returned before its caller deadline: {outcome:?}"
+    );
+    drop(request);
+    tokio::task::yield_now().await;
+}
+
+#[when(
+    expr = "this NSPL command request with execution reference {string} is executed on the leader \
+            node"
+)]
+async fn when_referenced_command_request_is_executed_on_leader(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+    #[step] step: &Step,
+) {
+    let query = expand_placeholders(world, docstring(step));
+    let execution_reference = expand_placeholders(world, &execution_reference);
+    let leader = current_leader_node(world).await;
+    let mut session = world
+        .cluster()
+        .open_session(&leader, &world.domain)
+        .await
+        .unwrap_or_else(|error| panic!("failed to open the resumed command session: {error}"));
+    let result = session
+        .run_command_result_with_reference(&query, &execution_reference)
+        .await
+        .unwrap_or_else(|error| panic!("resumed command request failed: {error}"));
+    if result.success {
+        world.last_command_error = None;
+        world.last_command_output = Some(result.message);
+    } else {
+        world.last_command_output = None;
+        world.last_command_error = Some(result.message);
+    }
+}
+
 #[then(expr = "the background command request is rejected with a redirect to node {string}")]
 async fn then_background_command_request_redirects(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -5565,6 +5706,55 @@ async fn when_named_client_begins_executing_in_the_background(
         }
         Ok(last_output)
     })));
+}
+
+#[when(
+    expr = "client {string} begins uploading resource {string} from {string} with identity \
+            {string} in the background"
+)]
+async fn when_named_client_begins_resource_upload_in_the_background(
+    world: &mut ScenarioWorld,
+    name: String,
+    resource: String,
+    directory: String,
+    identity: String,
+) {
+    assert!(
+        world.background_nspl.is_none(),
+        "a background NSPL execution is already active"
+    );
+    let name = expand_placeholders(world, &name);
+    let resource = expand_placeholders(world, &resource);
+    let directory = PathBuf::from(expand_placeholders(world, &directory));
+    let identity = expand_placeholders(world, &identity);
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let identity = nervix_client_core::ResourceUploadIdentity::parse(identity)
+        .assured("the scenario identity is an identifier-shaped literal");
+    world.background_nspl = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        let outcome = client
+            .upload_resource_from_directory_with_identity(&resource, directory, identity, |_| {})
+            .await
+            .map_err(|error| error.to_string())?;
+        if outcome.success {
+            Ok(outcome.message)
+        } else {
+            Err(outcome.message)
+        }
+    })));
+}
+
+#[when("the background resource upload connection is dropped")]
+async fn when_background_resource_upload_connection_is_dropped(world: &mut ScenarioWorld) {
+    let upload = world
+        .background_nspl
+        .take()
+        .verified("the preceding step started a background resource upload");
+    drop(upload);
+    tokio::task::yield_now().await;
 }
 
 #[then("the background NSPL execution succeeds")]
@@ -6044,6 +6234,29 @@ async fn when_named_client_uploads_resource_with_identity(
 }
 
 #[when(
+    expr = "an incomplete upload of resource {string} with identity {string} is sent to the \
+            leader node"
+)]
+async fn when_incomplete_resource_upload_is_sent(
+    world: &mut ScenarioWorld,
+    resource: String,
+    identity: String,
+) {
+    let resource = expand_placeholders(world, &resource);
+    let identity = expand_placeholders(world, &identity);
+    let leader = current_leader_node(world).await;
+    let result = world
+        .cluster()
+        .send_incomplete_resource_upload(&leader, &world.domain, &resource, &identity)
+        .await
+        .unwrap_or_else(|error| panic!("incomplete upload request failed: {error}"));
+    assert!(!result.success, "incomplete upload unexpectedly succeeded");
+    assert_eq!(result.upload_identity, identity);
+    world.last_command_error = Some(result.message.clone());
+    world.last_command_output = Some(result.message);
+}
+
+#[when(
     expr = "client {string} upload of resource {string} from {string} with identity {string} \
             fails with {string}"
 )]
@@ -6079,34 +6292,6 @@ async fn when_named_client_resource_upload_fails_with(
     );
     world.last_command_error = Some(outcome.message.clone());
     world.last_command_output = Some(outcome.message);
-}
-
-#[when(expr = "client {string} waits {string} for resource {string} version {int} readiness")]
-async fn when_named_client_waits_for_resource_readiness(
-    world: &mut ScenarioWorld,
-    name: String,
-    duration: String,
-    resource: String,
-    version: u64,
-) {
-    world.last_command_error = None;
-    world.last_command_output = None;
-    let name = expand_placeholders(world, &name);
-    let resource = expand_placeholders(world, &resource);
-    let duration = humantime::parse_duration(&duration).expect("readiness duration must be valid");
-    let client = world
-        .transaction_clients
-        .get(&name)
-        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
-        .clone();
-    let readiness = client
-        .wait_for_resource_ready(&resource, version, duration)
-        .await
-        .unwrap_or_else(|error| panic!("client '{name}' resource readiness wait failed: {error}"));
-    world.last_command_output = Some(format!(
-        "version: {}\ncluster_ready: {}\nmessage: {}",
-        readiness.version, readiness.cluster_ready, readiness.message
-    ));
 }
 
 #[then(expr = "client {string} active domain is {string}")]
@@ -7282,7 +7467,7 @@ async fn then_selector_contains_text_exactly_times(
     let selector = expand_placeholders(world, &selector);
     let expected = expand_placeholders(world, &expected);
     let locator = page.locator(&selector);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + WEB_CONSOLE_ASSERTION_TIMEOUT;
     loop {
         tokio::task::consume_budget().await;
         let texts = locator
@@ -7316,7 +7501,7 @@ async fn then_selector_contains_text(
     let selector = expand_placeholders(world, &selector);
     let expected = expand_placeholders(world, &expected);
     let locator = page.locator(&selector);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + WEB_CONSOLE_ASSERTION_TIMEOUT;
     loop {
         tokio::task::consume_budget().await;
         let texts = locator
@@ -7348,7 +7533,7 @@ async fn then_selector_contains_docstring(
         .expect("a browser page must be opened before selector assertions");
     let selector = expand_placeholders(world, &selector);
     let locator = page.locator(&selector);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + WEB_CONSOLE_ASSERTION_TIMEOUT;
     loop {
         tokio::task::consume_budget().await;
         let texts = locator
@@ -16599,6 +16784,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
                 append_cucumber_log_line("scenario finished");
                 if let Some(world) = world {
                     world.stop_durable_catch_up_work();
+                    world.fault_injection.release_all_health_responses();
                     world.fault_injection.release_all_domain_clock_progress();
                     append_cluster_statuses(world, "scenario teardown").await;
                     append_cucumber_log_line(&format!(

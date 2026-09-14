@@ -32,6 +32,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
 const RUNTIME_VERSION_LABEL: &str = concat!("nervix runtime v", env!("CARGO_PKG_VERSION"));
+const SUGGESTION_REQUEST_DEBOUNCE_DELAY: Duration = Duration::from_millis(50);
 const WEBSOCKET_INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const WEBSOCKET_MAX_RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
@@ -326,32 +327,51 @@ fn App() -> impl IntoView {
                 .means_shutdown("web console session");
         }
     });
+    let suggestion_request_sequence = RwSignal::new(0_u64);
     let suggestion_session = web_console_session.clone();
     let request_suggestions = move |value: String| {
+        suggestion_request_sequence.update(|sequence| {
+            *sequence = sequence
+                .checked_add(1)
+                .assured("a console session cannot request 2^64 suggestions");
+        });
+        let request_sequence = suggestion_request_sequence.get_untracked();
         if !domains_loaded.get_untracked() {
             suggestions.set(Vec::new());
             return;
         }
-        let cursor = u32::try_from(value.len())
-            .assured("WebAssembly linear memory limits input lengths to u32");
-        let request = nervix_proto::SessionRequest {
-            request: Some(nervix_proto::session_request::Request::Suggest(
-                nervix_proto::SuggestRequest {
-                    input: value,
-                    cursor,
-                    domain: active_domain_name(),
-                },
-            )),
-        };
-        let queued = QueuedRequest::Suggest { request };
-        if let Some(request_tx) = suggestion_session.request_tx.get_untracked()
-            && request_tx.unbounded_send(queued).is_err()
-        {
-            suggestions.set(Vec::new());
-        }
+        let domain = active_domain_name();
+        spawn_local(async move {
+            wait_for_browser_delay(SUGGESTION_REQUEST_DEBOUNCE_DELAY).await;
+            if suggestion_request_sequence.get_untracked() != request_sequence {
+                return;
+            }
+            let cursor = u32::try_from(value.len())
+                .assured("WebAssembly linear memory limits input lengths to u32");
+            let request = nervix_proto::SessionRequest {
+                request: Some(nervix_proto::session_request::Request::Suggest(
+                    nervix_proto::SuggestRequest {
+                        input: value,
+                        cursor,
+                        domain,
+                    },
+                )),
+            };
+            let queued = QueuedRequest::Suggest { request };
+            if let Some(request_tx) = suggestion_session.request_tx.get_untracked()
+                && request_tx.unbounded_send(queued).is_err()
+            {
+                suggestions.set(Vec::new());
+            }
+        });
     };
 
     let run_command = move |next_command: Option<String>| {
+        suggestion_request_sequence.update(|sequence| {
+            *sequence = sequence
+                .checked_add(1)
+                .assured("a console session cannot request 2^64 suggestions");
+        });
         let command = next_command
             .unwrap_or_else(|| input.get())
             .trim()
@@ -432,11 +452,19 @@ fn App() -> impl IntoView {
                 return;
             }
             let request_domain = active_domain.get_untracked().unwrap_or_default();
+            let expected_transaction_position = match transaction_status.get_untracked() {
+                Some(status) if transaction_is_active(Some(status.clone())) => {
+                    Some(status.pending_count)
+                }
+                Some(_) | None => None,
+            };
             let request = nervix_proto::SessionRequest {
                 request: Some(nervix_proto::session_request::Request::Command(
                     nervix_proto::CommandRequest {
                         query: command.clone(),
                         domain: request_domain,
+                        execution_reference: command_execution_reference(),
+                        expected_transaction_position,
                     },
                 )),
             };
@@ -512,6 +540,8 @@ fn App() -> impl IntoView {
                 nervix_proto::CommandRequest {
                     query: subscribe_command,
                     domain,
+                    execution_reference: command_execution_reference(),
+                    expected_transaction_position: None,
                 },
             )),
         };
@@ -554,6 +584,8 @@ fn App() -> impl IntoView {
                 nervix_proto::CommandRequest {
                     query: tab.unsubscribe_command,
                     domain: tab.domain,
+                    execution_reference: command_execution_reference(),
+                    expected_transaction_position: None,
                 },
             )),
         };
@@ -692,7 +724,7 @@ fn use_websocket_session(signals: WebConsoleSignals) -> WebConsoleSession {
                 domains_loaded.set(false);
                 pending_requests.clear();
                 redirected_url = None;
-                wait_for_websocket_reconnect(WEBSOCKET_INITIAL_RECONNECT_DELAY).await;
+                wait_for_browser_delay(WEBSOCKET_INITIAL_RECONNECT_DELAY).await;
                 continue;
             };
             let Some(url) = redirected_url
@@ -700,7 +732,7 @@ fn use_websocket_session(signals: WebConsoleSignals) -> WebConsoleSession {
                 .or_else(|| web_console_websocket_url(&current_auth_token))
             else {
                 state.set(ConsoleConnectionState::Waiting);
-                wait_for_websocket_reconnect(reconnect_delay).await;
+                wait_for_browser_delay(reconnect_delay).await;
                 reconnect_delay = (reconnect_delay * 2).min(WEBSOCKET_MAX_RECONNECT_DELAY);
                 continue;
             };
@@ -958,7 +990,7 @@ fn use_websocket_session(signals: WebConsoleSignals) -> WebConsoleSession {
                 continue;
             }
             state.set(ConsoleConnectionState::Waiting);
-            wait_for_websocket_reconnect(reconnect_delay).await;
+            wait_for_browser_delay(reconnect_delay).await;
             reconnect_delay = (reconnect_delay * 2).min(WEBSOCKET_MAX_RECONNECT_DELAY);
         }
     });
@@ -973,11 +1005,11 @@ fn use_websocket_session(signals: WebConsoleSignals) -> WebConsoleSession {
 
 async fn wait_for_websocket_open(socket: &WebSocket) {
     while matches!(socket.state(), WebSocketState::Connecting) {
-        wait_for_websocket_reconnect(Duration::from_millis(50)).await;
+        wait_for_browser_delay(Duration::from_millis(50)).await;
     }
 }
 
-async fn wait_for_websocket_reconnect(delay: Duration) {
+async fn wait_for_browser_delay(delay: Duration) {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
         if let Some(window) = web_sys::window() {
             window
@@ -1113,19 +1145,6 @@ fn transaction_is_active(status: Option<nervix_proto::TransactionStatus>) -> boo
     )
 }
 
-fn transaction_operation_was_observed(
-    previous: Option<&nervix_proto::TransactionStatus>,
-    current: Option<&nervix_proto::TransactionStatus>,
-) -> bool {
-    let (Some(previous), Some(current)) = (previous, current) else {
-        return false;
-    };
-    current_transaction_state(Some(current.clone())) != Some(nervix_proto::TransactionState::Open)
-        || current.pending_count != previous.pending_count
-        || current.completed_count != previous.completed_count
-        || current.total_count != previous.total_count
-}
-
 fn active_domain_graph_missing(
     active_domain: Option<String>,
     domain_snapshots: &RwSignal<Vec<DomainSnapshotView>>,
@@ -1161,10 +1180,10 @@ fn handle_session_response(
     } = signals;
     match response.event {
         Some(nervix_proto::session_response::Event::Result(result)) => {
+            let result = *result;
             if let Some(leader_url) = leader_web_console_redirect_url(&result) {
                 return SessionResponseAction::Reconnect(leader_url);
             }
-            let previous_transaction = transaction_status.get_untracked();
             if let Some(status) = result.transaction.clone() {
                 if !status.domain.is_empty()
                     && active_domain.get_untracked().as_deref() != Some(status.domain.as_str())
@@ -1193,7 +1212,9 @@ fn handle_session_response(
             }
             let pending = pending;
             if let Some(PendingRequest::AttachTransaction { .. }) = pending {
-                if !result.success {
+                let transaction_active = transaction_is_active(result.transaction.clone());
+                let terminal_transaction = result.transaction.is_some() && !transaction_active;
+                if !result.success && !terminal_transaction {
                     if result.transaction.is_none() {
                         transaction_status.set(None);
                     }
@@ -1208,18 +1229,14 @@ fn handle_session_response(
                     });
                     return SessionResponseAction::TransactionAttachFailed;
                 }
-                let operation_was_observed = transaction_operation_was_observed(
-                    previous_transaction.as_ref(),
-                    result.transaction.as_ref(),
-                );
-                if operation_was_observed {
+                if terminal_transaction {
                     pending_requests.clear();
                     terminal_lines.update(|lines| {
                         lines.extend(command_result_lines(result, "ATTACH TRANSACTION"));
                     });
                 }
                 return SessionResponseAction::TransactionAttached {
-                    replay_pending: !operation_was_observed,
+                    replay_pending: transaction_active,
                 };
             }
             if let Some(PendingRequest::ResourceDescribe { resource, .. }) = pending {
@@ -2228,13 +2245,26 @@ fn request_resource_describe(
     let query = format!("DESCRIBE RESOURCE {resource};");
     let request = nervix_proto::SessionRequest {
         request: Some(nervix_proto::session_request::Request::Command(
-            nervix_proto::CommandRequest { query, domain },
+            nervix_proto::CommandRequest {
+                query,
+                domain,
+                execution_reference: command_execution_reference(),
+                expected_transaction_position: None,
+            },
         )),
     };
     if let Some(tx) = request_tx.get_untracked() {
         tx.unbounded_send(QueuedRequest::ResourceDescribe { resource, request })
             .means_shutdown("web console session");
     }
+}
+
+fn command_execution_reference() -> String {
+    let window = web_sys::window().assured("the web console runs inside a browser window");
+    let crypto = window
+        .crypto()
+        .assured("supported web console browsers expose Web Crypto");
+    crypto.random_uuid()
 }
 
 fn entity_describe_command(kind: &str, name: &str) -> Option<String> {
@@ -5459,39 +5489,6 @@ mod tests {
         );
 
         assert!(lines.is_empty());
-    }
-
-    #[test]
-    fn transaction_reconnect_replays_only_when_replicated_progress_is_unchanged() {
-        let previous = nervix_proto::TransactionStatus {
-            id: "tx-1".to_string(),
-            domain: "tenant".to_string(),
-            state: i32::from(nervix_proto::TransactionState::Open),
-            pending_count: 1,
-            completed_count: 0,
-            total_count: 1,
-            error: String::new(),
-            failing_step: None,
-        };
-        assert!(!transaction_operation_was_observed(
-            Some(&previous),
-            Some(&previous)
-        ));
-
-        let mut queued = previous.clone();
-        queued.pending_count = 2;
-        queued.total_count = 2;
-        assert!(transaction_operation_was_observed(
-            Some(&previous),
-            Some(&queued)
-        ));
-
-        let mut committing = previous.clone();
-        committing.state = i32::from(nervix_proto::TransactionState::Committing);
-        assert!(transaction_operation_was_observed(
-            Some(&previous),
-            Some(&committing)
-        ));
     }
 
     #[test]

@@ -29,6 +29,7 @@ use super::{
 use crate::{
     proto::{CommandResult, CommandResultKind, Diagnostic, SessionResponse},
     registry::{RegistryError, RegistryMutation},
+    runtime::RuntimeError,
 };
 
 /// One statement of a model-mutation batch that reached the registry: which statement it was,
@@ -85,10 +86,6 @@ pub(in crate::application) fn requires_existing_domain(statement: &Statement) ->
     )
 }
 
-pub(in crate::application) fn requires_runtime_reconcile(statement: &Statement) -> bool {
-    requires_existing_domain(statement) && !matches!(statement, Statement::StartDomain(_))
-}
-
 fn requires_leader(statement: &Statement) -> bool {
     !matches!(
         statement,
@@ -117,6 +114,24 @@ fn requires_leader(statement: &Statement) -> bool {
             | Statement::ShowPlacements(_)
             | Statement::ShowRelayMaterializedState(_)
     )
+}
+
+pub(in crate::application) fn is_persistent_statement(statement: &Statement) -> bool {
+    statement.is_model_mutation()
+        || matches!(
+            statement,
+            Statement::CreateDomain(_)
+                | Statement::AlterDomain(_)
+                | Statement::CreateUser(_)
+                | Statement::CreateResource(_)
+                | Statement::StartDomain(_)
+                | Statement::StopDomain(_)
+                | Statement::DropNode(_)
+                | Statement::CordonNode(_)
+                | Statement::UncordonNode(_)
+                | Statement::DrainNode(_)
+                | Statement::Relocate(_)
+        )
 }
 
 pub(in crate::application) fn command_ok(message: String) -> CommandResult {
@@ -245,6 +260,12 @@ fn model_mutation_success_result(
             )
         })
         .collect::<Vec<_>>();
+    if results.len() == 1 {
+        return results
+            .into_iter()
+            .next()
+            .verified("the length check observed the only model mutation result");
+    }
     CommandResult {
         success: true,
         message: command_results_message(&results),
@@ -332,10 +353,6 @@ impl SessionServiceImpl {
                 domain.as_str()
             ));
         }
-        if let Err(error) = self.reconcile_running_domain_runtime(&domain).await {
-            return command_error(error);
-        }
-
         let mut results = vec![None; statements.len()];
         let mut mutations = Vec::new();
         let mut applied = Vec::<AppliedModelMutation>::new();
@@ -559,6 +576,9 @@ impl SessionServiceImpl {
         }
 
         let mut completed_result = None;
+        let mut recorded_transaction = None;
+        let mut transaction_application_failure = None;
+        let mut transaction_application_deferred = false;
         if !mutations.is_empty() {
             let error_target = applied
                 .first()
@@ -672,6 +692,12 @@ impl SessionServiceImpl {
                     "model mutation batch has no model diff; skipping persistence and schedule \
                      publication"
                 );
+                if let Err(error) = self.apply_current_cluster_state().await {
+                    return command_error(format!(
+                        "the existing models in domain '{}' are not usable everywhere: {error}",
+                        domain.as_str()
+                    ));
+                }
             }
             if !is_noop
                 && requires_domain_pause
@@ -835,10 +861,17 @@ impl SessionServiceImpl {
                         .await
                     {
                         Ok(transaction) => {
-                            *transaction_step.outcome.lock() = Some(Ok(transaction));
+                            self.pause_transaction_commit_if_armed(&transaction).await;
+                            recorded_transaction = Some(transaction);
                             let activation_error = self.apply_current_cluster_state().await.err();
                             if let Some(handoff) = ownership_handoff.take() {
                                 if let Some(error) = &activation_error {
+                                    transaction_application_failure = Some(format!(
+                                        "committed transaction model step in domain '{}' failed \
+                                         runtime activation before ownership handoff completion: \
+                                         {error}",
+                                        domain.as_str()
+                                    ));
                                     self.defer_planned_ownership_handoff_release(
                                         &domain, handoff, error,
                                     );
@@ -847,6 +880,11 @@ impl SessionServiceImpl {
                                         .finish_planned_ownership_handoff(&domain, handoff)
                                         .await
                                     {
+                                        transaction_application_failure = Some(format!(
+                                            "committed transaction model step in domain '{}' \
+                                             failed ownership activation: {error}",
+                                            domain.as_str()
+                                        ));
                                         self.broadcast_error(format!(
                                             "failed to confirm ownership state activation for \
                                              committed transaction model step in domain '{}': \
@@ -857,6 +895,21 @@ impl SessionServiceImpl {
                                 }
                             }
                             if let Some(error) = activation_error {
+                                if transaction_application_failure.is_none()
+                                    && matches!(
+                                        error,
+                                        RuntimeError::RuntimeRevisionPreparation { .. }
+                                            | RuntimeError::RuntimeRevisionReadiness { .. }
+                                    )
+                                {
+                                    transaction_application_deferred = true;
+                                } else if transaction_application_failure.is_none() {
+                                    transaction_application_failure = Some(format!(
+                                        "committed transaction model step in domain '{}' failed \
+                                         runtime activation: {error}",
+                                        domain.as_str()
+                                    ));
+                                }
                                 self.broadcast_error(format!(
                                     "failed to reconcile committed transaction model step in \
                                      domain '{}': {error}",
@@ -1018,6 +1071,11 @@ impl SessionServiceImpl {
                 if requires_domain_pause {
                     if let Err(error) = self.wait_for_paused_domain_drain(&domain).await {
                         if transaction_step.is_some() {
+                            transaction_application_failure = Some(format!(
+                                "committed transaction model step in domain '{}' failed to drain \
+                                 its pause: {error}",
+                                domain.as_str()
+                            ));
                             self.broadcast_error(format!(
                                 "committed transaction model step in domain '{}' is waiting for \
                                  quiescence recovery: {error}",
@@ -1040,6 +1098,11 @@ impl SessionServiceImpl {
                     }
                     if let Err(error) = self.resume_domain_after_alter(&domain).await {
                         if transaction_step.is_some() {
+                            transaction_application_failure = Some(format!(
+                                "committed transaction model step in domain '{}' failed to \
+                                 release its pause: {error}",
+                                domain.as_str()
+                            ));
                             self.broadcast_error(format!(
                                 "failed to release transaction-owned pause in domain '{}': {error}",
                                 domain.as_str()
@@ -1061,12 +1124,38 @@ impl SessionServiceImpl {
                     }
                 }
             }
-            if let Some(gate) = cluster_entity_gate {
-                self.release_cluster_entity_gates(gate).await;
+            if let Some(gate) = cluster_entity_gate
+                && let Err(error) = self.release_cluster_entity_gates_and_wait(gate).await
+            {
+                if transaction_step.is_some() {
+                    transaction_application_failure = Some(format!(
+                        "committed transaction model step in domain '{}' failed to release its \
+                         entity gate: {error}",
+                        domain.as_str()
+                    ));
+                } else {
+                    return command_error(format!(
+                        "committed models in domain '{}', but their entity gate did not release: \
+                         {error}",
+                        domain.as_str()
+                    ));
+                }
             }
 
             if refresh_http_tls && let Err(error) = self.refresh_http_tls_server_config().await {
-                self.broadcast_error(format!("failed to refresh HTTP TLS config: {error}"));
+                if transaction_step.is_some() {
+                    transaction_application_failure = Some(format!(
+                        "committed transaction model step in domain '{}' failed to activate HTTP \
+                         TLS: {error}",
+                        domain.as_str()
+                    ));
+                    self.broadcast_error(format!("failed to refresh HTTP TLS config: {error}"));
+                } else {
+                    return command_error(format!(
+                        "committed models in domain '{}', but HTTP TLS activation failed: {error}",
+                        domain.as_str()
+                    ));
+                }
             }
             completed_result = Some(model_mutation_success_result(
                 &results,
@@ -1081,8 +1170,8 @@ impl SessionServiceImpl {
         } else {
             model_mutation_success_result(&results, &applied, QuiesceLevel::Dynamic, 0)
         };
-        if let Some(transaction_step) = transaction_step
-            && transaction_step.outcome.lock().is_none()
+        if let Some(transaction_step) = transaction_step.as_ref()
+            && recorded_transaction.is_none()
         {
             match self
                 .record_transaction_step(
@@ -1096,13 +1185,39 @@ impl SessionServiceImpl {
                 .await
             {
                 Ok(transaction) => {
-                    *transaction_step.outcome.lock() = Some(Ok(transaction));
+                    recorded_transaction = Some(transaction);
                 }
                 Err(error) => {
                     let message =
                         format!("failed to record transaction model step progress: {error}");
                     *transaction_step.outcome.lock() = Some(Err(error));
                     return command_error(message);
+                }
+            }
+        }
+        if let Some(transaction_step) = transaction_step.as_ref()
+            && let Some(transaction) = recorded_transaction
+        {
+            if transaction_application_deferred {
+                *transaction_step.outcome.lock() = Some(Ok(transaction));
+            } else {
+                match self
+                    .record_transaction_application_completion(
+                        &transaction,
+                        transaction_application_failure,
+                    )
+                    .await
+                {
+                    Ok(transaction) => {
+                        *transaction_step.outcome.lock() = Some(Ok(transaction));
+                    }
+                    Err(error) => {
+                        let message = format!(
+                            "failed to record transaction model application outcome: {error}"
+                        );
+                        *transaction_step.outcome.lock() = Some(Err(error));
+                        return command_error(message);
+                    }
                 }
             }
         }
@@ -1144,9 +1259,6 @@ impl SessionServiceImpl {
                 };
                 if self.inner.consensus.current_domain(&domain).await.is_none() {
                     return command_error(format!("domain '{}' does not exist", domain.as_str()));
-                }
-                if let Err(error) = self.reconcile_running_domain_runtime(&domain).await {
-                    return command_error(error);
                 }
                 return self
                     .create_subscription(&domain, subscription, tx, subscriptions)
@@ -1209,15 +1321,6 @@ impl SessionServiceImpl {
                 .verified("this statement requires a request domain, which was resolved above");
             if self.inner.consensus.current_domain(domain).await.is_none() {
                 return command_error(format!("domain '{}' does not exist", domain.as_str()));
-            }
-        }
-
-        if requires_runtime_reconcile(&statement) {
-            let domain = domain
-                .as_ref()
-                .verified("this statement requires a request domain, which was resolved above");
-            if let Err(error) = self.reconcile_running_domain_runtime(domain).await {
-                return command_error(error);
             }
         }
 
@@ -1547,6 +1650,8 @@ mod tests {
                 CommandRequest {
                     query: "CREATE IF NOT EXISTS SCHEMA notification ( user_id U32 );".to_string(),
                     domain: "default".to_string(),
+                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    expected_transaction_position: None,
                 },
                 &tx,
                 &mut subscriptions,
@@ -1560,6 +1665,8 @@ mod tests {
                 CommandRequest {
                     query: "CREATE IF NOT EXISTS SCHEMA notification ( user_id U32 );".to_string(),
                     domain: "default".to_string(),
+                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    expected_transaction_position: None,
                 },
                 &tx,
                 &mut subscriptions,
@@ -1584,6 +1691,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persistent_model_command_replays_one_terminal_result_for_its_reference() {
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
+        let (tx, _rx) = mpsc::channel(16);
+        let mut subscriptions = SessionSubscriptions::new();
+        let reference = uuid::Uuid::now_v7().to_string();
+        let request = CommandRequest {
+            query: "CREATE SCHEMA retained_result ( user_id U32 );".to_string(),
+            domain: "default".to_string(),
+            execution_reference: reference.clone(),
+            expected_transaction_position: None,
+        };
+
+        let first = service
+            .process_command(request.clone(), &tx, &mut subscriptions)
+            .await;
+        assert!(first.success, "{first:?}");
+        let replay = service
+            .process_command(request, &tx, &mut subscriptions)
+            .await;
+        assert_eq!(replay, first);
+
+        let changed = service
+            .process_command(
+                CommandRequest {
+                    query: "CREATE SCHEMA retained_result ( user_id U64 );".to_string(),
+                    domain: "default".to_string(),
+                    execution_reference: reference,
+                    expected_transaction_position: None,
+                },
+                &tx,
+                &mut subscriptions,
+            )
+            .await;
+        assert!(!changed.success);
+        assert!(changed.message.contains("bound to a different"));
+        assert_eq!(
+            service.inner.consensus.current_transactions().await.len(),
+            1
+        );
+
+        subscriptions.stop_all(&service).await;
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
     async fn process_command_rejects_implicit_semicolon_batch() {
         let TestService {
             service,
@@ -1599,6 +1755,8 @@ mod tests {
                     query: "CREATE DOMAIN prod; CREATE SCHEMA notification ( user_id U32 )"
                         .to_string(),
                     domain: "prod".to_string(),
+                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    expected_transaction_position: None,
                 },
                 &tx,
                 &mut subscriptions,
@@ -1641,6 +1799,8 @@ mod tests {
                             duplicated ( user_id U32 ); COMMIT"
                         .to_string(),
                     domain: "prod".to_string(),
+                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    expected_transaction_position: None,
                 },
                 &tx,
                 &mut subscriptions,
@@ -1698,6 +1858,8 @@ mod tests {
                             CREATE SCHEMA notification ( user_id U32 ); COMMIT"
                         .to_string(),
                     domain: "prod".to_string(),
+                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    expected_transaction_position: None,
                 },
                 &tx,
                 &mut subscriptions,
@@ -1765,6 +1927,8 @@ mod tests {
                     CommandRequest {
                         query: command.to_string(),
                         domain: "default".to_string(),
+                        execution_reference: uuid::Uuid::now_v7().to_string(),
+                        expected_transaction_position: None,
                     },
                     &tx,
                     &mut subscriptions,
@@ -1835,6 +1999,8 @@ mod tests {
                     CommandRequest {
                         query: command.to_string(),
                         domain: "default".to_string(),
+                        execution_reference: uuid::Uuid::now_v7().to_string(),
+                        expected_transaction_position: None,
                     },
                     &tx,
                     &mut subscriptions,
@@ -1901,6 +2067,8 @@ mod tests {
                     CommandRequest {
                         query: command.to_string(),
                         domain: "default".to_string(),
+                        execution_reference: uuid::Uuid::now_v7().to_string(),
+                        expected_transaction_position: None,
                     },
                     &tx,
                     &mut subscriptions,
