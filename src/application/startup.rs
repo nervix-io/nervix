@@ -12,7 +12,8 @@ use std::{net::SocketAddr, path::PathBuf};
 use error_stack::{Report, ResultExt};
 use fjall::Database;
 use nervix_consensus::{Consensus, RaftRetentionPolicy};
-use nervix_interconnect::Transport;
+use nervix_interconnect::{HandlerRegistrationError, Transport};
+use nervix_recovery::Discarded as _;
 use triomphe::Arc;
 
 use super::{Application, Args, error, error::AppError};
@@ -45,6 +46,22 @@ impl ApplicationStartup {
         if let Err(error) = tokio::task::spawn_blocking(move || drop(self)).await {
             error!(error = %error, "failed to join application startup cleanup task");
         }
+    }
+
+    pub(in crate::application) async fn require_handler_registration(
+        self,
+        cluster: &cluster::ClusterHandle,
+        registration: Result<(), Report<HandlerRegistrationError>>,
+    ) -> Result<Self, Report<AppError>> {
+        let Err(error) = registration else {
+            return Ok(self);
+        };
+        cluster
+            .shutdown()
+            .await
+            .discarded("the handler-registration error remains the startup failure");
+        self.terminate().await;
+        Err(error.change_context(AppError::StartInterconnect))
     }
 }
 

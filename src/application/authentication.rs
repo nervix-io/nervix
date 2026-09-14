@@ -142,7 +142,10 @@ async fn hash_password(password: String) -> Result<String, String> {
     .map_err(|error| format!("password hash task failed: {error}"))?
 }
 
-async fn verify_password_hash(password_hash: String, password: String) -> bool {
+pub(in crate::application) async fn verify_password_hash(
+    password_hash: String,
+    password: String,
+) -> bool {
     tokio::task::spawn_blocking(move || {
         let Ok(parsed_hash) = PasswordHash::new(&password_hash) else {
             return false;
@@ -259,10 +262,16 @@ impl SessionServiceImpl {
             .is_some()
         {
             if if_not_exists {
-                return command_ok_already_existed(format!(
-                    "user '{}' already exists",
-                    create.name.as_str()
-                ));
+                return match self.wait_for_authoritative_visibility().await {
+                    Ok(()) => command_ok_already_existed(format!(
+                        "user '{}' already exists",
+                        create.name.as_str()
+                    )),
+                    Err(error) => command_error(format!(
+                        "user '{}' exists, but authoritative visibility did not complete: {error}",
+                        create.name.as_str()
+                    )),
+                };
             }
             return command_error(format!("user '{}' already exists", create.name.as_str()));
         }
@@ -276,7 +285,13 @@ impl SessionServiceImpl {
             }
         };
         match self.inner.consensus.create_user(user).await {
-            Ok(()) => command_ok(format!("created user '{}'", create.name.as_str())),
+            Ok(()) => match self.wait_for_authoritative_visibility().await {
+                Ok(()) => command_ok(format!("created user '{}'", create.name.as_str())),
+                Err(error) => command_error(format!(
+                    "created user '{}', but authoritative visibility did not complete: {error}",
+                    create.name.as_str()
+                )),
+            },
             Err(error) => {
                 self.consensus_error_response(
                     &error,
@@ -286,11 +301,63 @@ impl SessionServiceImpl {
             }
         }
     }
+
+    pub(in crate::application) async fn apply_persistent_user_creation(
+        &self,
+        if_not_exists: bool,
+        user: UserCredentials,
+    ) -> CommandResult {
+        if let Some(existing) = self.inner.consensus.current_user(&user.name).await {
+            if existing == user {
+                return match self.wait_for_authoritative_visibility().await {
+                    Ok(()) => command_ok(format!("created user '{}'", existing.name.as_str())),
+                    Err(error) => command_error(format!(
+                        "created user '{}', but authoritative visibility did not complete: {error}",
+                        existing.name.as_str()
+                    )),
+                };
+            }
+            if if_not_exists {
+                return match self.wait_for_authoritative_visibility().await {
+                    Ok(()) => command_ok_already_existed(format!(
+                        "user '{}' already exists",
+                        user.name.as_str()
+                    )),
+                    Err(error) => command_error(format!(
+                        "user '{}' exists, but authoritative visibility did not complete: {error}",
+                        user.name.as_str()
+                    )),
+                };
+            }
+            return command_error(format!("user '{}' already exists", user.name.as_str()));
+        }
+
+        let name = user.name.clone();
+        match self.inner.consensus.create_user(user).await {
+            Ok(()) => match self.wait_for_authoritative_visibility().await {
+                Ok(()) => command_ok(format!("created user '{}'", name.as_str())),
+                Err(error) => command_error(format!(
+                    "created user '{}', but authoritative visibility did not complete: {error}",
+                    name.as_str()
+                )),
+            },
+            Err(error) => {
+                self.consensus_error_response(
+                    &error,
+                    format!("failed to create user '{}': {error}", name.as_str()),
+                )
+                .await
+            }
+        }
+    }
 }
 
 #[cfg(all(test, feature = "testing"))]
 mod tests {
+    use nervix_models::{CreateStatement, CreateUser, UserName};
+
     use super::*;
+    use crate::application::test_fixtures::{TestService, build_test_service};
 
     #[tokio::test]
     async fn testing_feature_hashes_passwords_with_lean_argon2_params() {
@@ -322,5 +389,76 @@ mod tests {
             Some(TESTING_ARGON2_PARALLELISM)
         );
         assert!(verify_password_hash(password_hash, "secret".to_string()).await);
+    }
+
+    #[tokio::test]
+    async fn user_creation_retries_preserve_the_admitted_credentials() {
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(false).await;
+        let direct_name = UserName::parse("direct_user")
+            .assured("the test user name is an identifier-shaped literal");
+
+        let created = service
+            .create_user(CreateStatement::new(
+                CreateUser {
+                    name: direct_name.clone(),
+                    password: "direct-secret".to_string(),
+                },
+                false,
+            ))
+            .await;
+        assert!(created.success, "user creation must succeed: {created:?}");
+        let duplicate = service
+            .create_user(CreateStatement::new(
+                CreateUser {
+                    name: direct_name,
+                    password: "ignored-secret".to_string(),
+                },
+                true,
+            ))
+            .await;
+        assert!(
+            duplicate.success,
+            "idempotent creation must succeed: {duplicate:?}"
+        );
+        assert!(duplicate.already_existed);
+
+        let retained_name = UserName::parse("retained_user")
+            .assured("the test user name is an identifier-shaped literal");
+        let retained = user_credentials(retained_name.clone(), "retained-secret".to_string())
+            .await
+            .assured("the testing Argon2 parameters accept this password");
+        let applied = service
+            .apply_persistent_user_creation(false, retained.clone())
+            .await;
+        assert!(
+            applied.success,
+            "admitted user creation must succeed: {applied:?}"
+        );
+
+        let resumed = service
+            .apply_persistent_user_creation(false, retained)
+            .await;
+        assert_eq!(resumed, applied);
+
+        let conflicting = user_credentials(retained_name, "different-secret".to_string())
+            .await
+            .assured("the testing Argon2 parameters accept this password");
+        let ignored_conflict = service
+            .apply_persistent_user_creation(true, conflicting.clone())
+            .await;
+        assert!(ignored_conflict.success);
+        assert!(ignored_conflict.already_existed);
+
+        let rejected_conflict = service
+            .apply_persistent_user_creation(false, conflicting)
+            .await;
+        assert!(!rejected_conflict.success);
+        assert!(rejected_conflict.message.contains("already exists"));
+
+        let _ = std::fs::remove_dir_all(&path);
     }
 }

@@ -32,7 +32,12 @@ CREATE [IF NOT EXISTS] HASH MAP <name>
   DECODE USING <codec>;
 ```
 
-The hash map loads records from a versioned `RESOURCE` file in the same domain as the hash map. The file is decoded through the declared codec, and the `KEY <field>` value becomes the lookup key. If `VERSION <n>` is omitted, the hash map resolves the latest version uploaded into that domain when the model is created.
+The hash map loads records from a versioned `RESOURCE` file in the same domain as the hash map. The
+file is decoded through the declared codec, and the `KEY <field>` value becomes the lookup key. If
+`VERSION <n>` is omitted, the hash map resolves the latest version uploaded into that domain when
+the model is created. Creation succeeds only after the selected file has decoded and the index is
+usable on every current live node, including while the domain is stopped. The next command may run
+`LOOKUP` immediately; malformed input fails creation.
 
 Resource files are typically newline-delimited encoded records, such as JSON Lines when the codec uses a JSON wire schema:
 

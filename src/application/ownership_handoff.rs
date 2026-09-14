@@ -436,10 +436,10 @@ pub(in crate::application) fn planned_ownership_moves(
         let Some(current_node) = current.nodes.get(identity) else {
             continue;
         };
-        let Some(former_owner) = current_node.execution_node() else {
+        let Some(former_owner) = current_node.primary_node() else {
             continue;
         };
-        let Some(destination) = planned_node.execution_node() else {
+        let Some(destination) = planned_node.primary_node() else {
             continue;
         };
         if former_owner == destination {
@@ -973,7 +973,7 @@ impl SessionServiceImpl {
                     request.entity.identifier.as_str()
                 ))
             })?;
-        if scheduled.execution_node() != Some(&request.source) {
+        if scheduled.primary_node() != Some(&request.source) {
             return Err(OwnershipHandoffError::participant(format!(
                 "{} '{}' is no longer owned by source node '{}'",
                 request.entity.kind.as_str(),
@@ -1435,7 +1435,9 @@ impl SessionServiceImpl {
             &handoff.moves,
         )
         .await;
-        self.release_cluster_entity_gates(handoff.gate).await;
+        self.release_cluster_entity_gates_and_wait(handoff.gate)
+            .await
+            .map_err(OwnershipHandoffError::transport)?;
         Ok(())
     }
 

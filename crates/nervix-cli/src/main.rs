@@ -699,7 +699,7 @@ async fn execute_upload_and_print(
     let result = outcome.map_err(|err| StackReport::new(ClientError::from(err)))?;
     if result.success {
         emit_terminal_line(format!(
-            "upload resource '{}' finished: {} sent, publication committed",
+            "upload resource '{}' finished: {} sent, installed on every live node",
             identifier,
             human_bytes(total_uploaded),
         ));

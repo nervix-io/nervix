@@ -41,7 +41,7 @@ impl RuntimeStatePreparationIdentity {
 
 #[derive(Debug, Clone)]
 pub(in crate::runtime) struct PreparedForcedRuntimeStateRecovery {
-    pub(super) operation_id: String,
+    pub(super) recovery: ForcedRuntimeStateRecoveryIdentity,
     pub(super) destination_incarnation: ClusterNodeIncarnation,
     pub(super) target_schedule_fingerprint: [u8; 32],
     pub(super) checkpoints: Vec<(RuntimeStatePlacement, PersistedRuntimeStateEntry)>,

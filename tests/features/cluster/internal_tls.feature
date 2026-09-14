@@ -18,13 +18,13 @@ Feature: Internal TLS
       """
       UPLOAD RESOURCE proto VERSION '{{resource_dir}}';
       """
-    Then within "10s" node "node-1" eventually reports describe resource as "cluster_ready: true"
+    When these NSPL commands are executed on node "node-1"
       """
       DESCRIBE RESOURCE proto VERSION 1;
       """
-    And within "10s" node "node-1" eventually reports describe resource as "resource: proto@1"
+    Then the last command output contains
       """
-      DESCRIBE RESOURCE proto VERSION 1;
+      resource: proto@1
       """
 
     Examples:

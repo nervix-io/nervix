@@ -12,6 +12,12 @@ Capabilities:
 - `Client::next_subscription()`
 - `Client::suggest(...)` behind the `autocomplete` feature
 
+Each `execute` call creates one stable execution reference and retains it through leader redirects,
+transaction reattachment, and transport reconnects. A successful outcome means the command's
+administrative effect is usable on the current live-node set. If the caller cancels its future, the
+cluster still owns any already-admitted effect; submitting the same logical request requires
+retaining its execution identity at the protocol boundary.
+
 Minimal example:
 
 ```rust
@@ -80,9 +86,10 @@ mutation's message reports its statement-local quiesce level before execution. Q
 without useful output have an empty message.
 
 The client automatically attaches its active transaction after a leader redirect or transport
-reconnect before retrying a command. It compares the attached status with the status it last saw:
-if replicated queue or commit progress already records the operation, it returns that state instead
-of repeating the operation. A recovered committed operation is returned as a successful
+reconnect before retrying a command. It retains each append's execution reference and expected
+position and only treats the exact recorded append as completion. A pending `COMMIT` remains
+pending while attached status is `Committing`; it completes from the exact retained terminal
+outcome rather than from a coincidental progress count. A recovered committed operation returns a successful
 `CommandOutcome` containing the retained aggregate quiesce output. A direct `COMMIT` outcome has no
 per-statement `results`; its message contains only the maximum quiesce level actually executed.
 If a peer briefly has no leader address while an election converges, the client retries that
