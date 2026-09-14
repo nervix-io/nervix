@@ -1270,6 +1270,71 @@ struct ConsensusState {
     retention_task: Mutex<Option<JoinHandle<()>>>,
 }
 
+#[cfg(feature = "testing")]
+#[derive(Clone, Debug, Default)]
+pub struct ConsensusTestProbe {
+    /// The harness and Raft network clients retain this node's controls and observations together.
+    inner: Arc<ConsensusTestProbeState>,
+}
+
+#[cfg(feature = "testing")]
+#[derive(Debug, Default)]
+struct ConsensusTestProbeState {
+    /// `FjallStore` retains a clone after construction so live delay and failure controls continue
+    /// to reach the storage worker without borrowing this probe.
+    storage_fault: StorageFault,
+    append_stream_opens: Mutex<BTreeMap<ClusterNodeName, u64>>,
+}
+
+#[cfg(feature = "testing")]
+impl ConsensusTestProbe {
+    pub fn storage_fault(&self) -> StorageFault {
+        self.inner.storage_fault.clone()
+    }
+
+    /// Delay every completed consensus storage sync; a zero duration disables the delay.
+    pub fn set_storage_commit_delay(&self, delay: Duration) {
+        self.inner.storage_fault.set_after_sync_delay(delay);
+    }
+
+    pub fn append_stream_open_count(&self, target: &ClusterNodeName) -> u64 {
+        let counts = self.inner.append_stream_opens.lock();
+        match counts.get(target) {
+            Some(count) => *count,
+            None => 0,
+        }
+    }
+
+    fn record_append_stream_open(&self, target: &ClusterNodeName) {
+        let mut counts = self.inner.append_stream_opens.lock();
+        let current = match counts.get(target) {
+            Some(current) => *current,
+            None => 0,
+        };
+        let Some(next) = current.checked_add(1) else {
+            // At u64::MAX this is already a sufficient lower bound for every bounded append-stream
+            // assertion, so retaining it preserves the observation's meaning.
+            return;
+        };
+        counts.insert(target.clone(), next);
+    }
+}
+
+trait AppendStreamOpenRecorder: Clone + Send + Sync + 'static {
+    fn record_append_stream_open(&self, target: &ClusterNodeName);
+}
+
+impl AppendStreamOpenRecorder for () {
+    fn record_append_stream_open(&self, _target: &ClusterNodeName) {}
+}
+
+#[cfg(feature = "testing")]
+impl AppendStreamOpenRecorder for ConsensusTestProbe {
+    fn record_append_stream_open(&self, target: &ClusterNodeName) {
+        ConsensusTestProbe::record_append_stream_open(self, target);
+    }
+}
+
 /// The consensus event bus, and the one way a Raft transition reaches an attached session.
 ///
 /// A transition is already the node's own record of itself, which is why publishing goes through
@@ -1310,11 +1375,6 @@ impl std::ops::Deref for Proposer {
 }
 
 impl Consensus {
-    #[cfg(feature = "testing")]
-    pub fn storage_fault(&self) -> StorageFault {
-        self.inner.store.inner.faults.clone()
-    }
-
     pub fn observer(&self) -> Observer {
         Observer {
             inner: self.inner.clone(),
@@ -1369,6 +1429,35 @@ impl Consensus {
         let store = FjallStore::from_database(db, settings.executor.clone())
             .await
             .map_err(ConsensusError::Storage)?;
+        Self::from_store(store, settings, ())
+            .await
+            .map_err(|_| ConsensusError::Startup)
+    }
+
+    #[cfg(feature = "testing")]
+    pub async fn from_database_with_test_probe(
+        db: Database,
+        settings: ConsensusSettings,
+        test_probe: ConsensusTestProbe,
+    ) -> Result<Self, Report<ConsensusError>> {
+        let store = FjallStore::from_database_with_storage_fault(
+            db,
+            settings.executor.clone(),
+            test_probe.storage_fault(),
+        )
+        .await
+        .map_err(ConsensusError::Storage)?;
+        Self::from_store(store, settings, test_probe).await
+    }
+
+    async fn from_store<Recorder>(
+        store: FjallStore,
+        settings: ConsensusSettings,
+        append_stream_open_recorder: Recorder,
+    ) -> Result<Self, Report<ConsensusError>>
+    where
+        Recorder: AppendStreamOpenRecorder,
+    {
         let retention = settings.raft_retention;
         let config = StdArc::new(
             Config {
@@ -1401,6 +1490,7 @@ impl Consensus {
             local_node_id: settings.node_id.clone(),
             interconnect: settings.interconnect.clone(),
             executor: settings.executor.clone(),
+            append_stream_open_recorder,
         };
         let raft = Raft::new(
             settings.node_id.clone(),
@@ -2875,35 +2965,44 @@ impl ProtocolReceiver {
 }
 
 #[derive(Clone)]
-struct NetworkFactory {
+struct NetworkFactory<Recorder> {
     local_node_id: ClusterNodeName,
     interconnect: Transport,
     executor: nervix_execution::Executor,
+    append_stream_open_recorder: Recorder,
 }
 
 #[derive(Clone)]
-struct NetworkClient {
+struct NetworkClient<Recorder> {
     local_node_id: ClusterNodeName,
     target: ClusterNodeName,
     interconnect: Transport,
     executor: nervix_execution::Executor,
     append_path: AppendPath,
+    append_stream_open_recorder: Recorder,
 }
 
-impl NetworkFactory {
-    fn client(&self, target: ClusterNodeName, append_path: AppendPath) -> NetworkClient {
+impl<Recorder> NetworkFactory<Recorder>
+where
+    Recorder: AppendStreamOpenRecorder,
+{
+    fn client(&self, target: ClusterNodeName, append_path: AppendPath) -> NetworkClient<Recorder> {
         NetworkClient {
             local_node_id: self.local_node_id.clone(),
             target,
             interconnect: self.interconnect.clone(),
             executor: self.executor.clone(),
             append_path,
+            append_stream_open_recorder: self.append_stream_open_recorder.clone(),
         }
     }
 }
 
-impl RaftNetworkFactory<TypeConfig> for NetworkFactory {
-    type Network = NetworkClient;
+impl<Recorder> RaftNetworkFactory<TypeConfig> for NetworkFactory<Recorder>
+where
+    Recorder: AppendStreamOpenRecorder,
+{
+    type Network = NetworkClient<Recorder>;
 
     async fn new_client(&mut self, target: ClusterNodeName, _node: &Node) -> Self::Network {
         self.client(target, AppendPath::Replication)
@@ -2970,7 +3069,10 @@ fn unreachable_err<E: std::error::Error + Send + Sync + 'static>(
     openraft::error::Unreachable::new(&err)
 }
 
-impl RaftNetworkV2<TypeConfig> for NetworkClient {
+impl<Recorder> RaftNetworkV2<TypeConfig> for NetworkClient<Recorder>
+where
+    Recorder: AppendStreamOpenRecorder,
+{
     type SnapshotData = SealedSnapshot;
 
     async fn append_entries(
@@ -3028,6 +3130,7 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
                 let executor = self.executor.clone();
                 let local_node_id = self.local_node_id.clone();
                 let target = self.target.clone();
+                let append_stream_open_recorder = self.append_stream_open_recorder.clone();
                 Box::pin(async move {
                     let answers = replication::open_append_stream(
                         &interconnect,
@@ -3038,6 +3141,7 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
                         option,
                     )
                     .await?;
+                    append_stream_open_recorder.record_append_stream_open(&target);
                     Ok(answers)
                 })
             }

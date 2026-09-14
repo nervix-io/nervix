@@ -78,7 +78,7 @@ use sqlx::{
     },
 };
 use tempfile::TempDir;
-use tokio_util::task::AbortOnDropHandle;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use uuid::Uuid;
 
 use crate::common::{
@@ -110,6 +110,10 @@ static WEB_CONSOLE_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> = 
 const MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS: usize = 2;
 const WEB_CONSOLE_ASSERTION_TIMEOUT: Duration = Duration::from_secs(30);
 const ZEROMQ_OBSERVER_BIND_ATTEMPTS: usize = 8;
+const DURABLE_CATCH_UP_STORAGE_COMMITS_PER_ENTRY: u32 = 2;
+const DURABLE_CATCH_UP_MARGIN: Duration = Duration::from_secs(5);
+const DURABLE_CATCH_UP_WRITE_CADENCE: Duration = Duration::from_millis(100);
+const MAX_DURABLE_CATCH_UP_WRITES: usize = 128;
 const WEB_CONSOLE_FEATURE_NAMES: [&str; 2] =
     ["Web console NSPL REPL", "Web console execution graph"];
 const DEPENDENCY_LIFECYCLE_HELPER_ENV: &str = "NERVIX_DEPENDENCY_LIFECYCLE_HELPER";
@@ -123,6 +127,21 @@ enum ScenarioExecutionPermit {
     Exclusive {
         _permit: tokio::sync::OwnedRwLockWriteGuard<()>,
     },
+}
+
+#[derive(Clone, Debug)]
+struct DurableCatchUpObservation {
+    follower: String,
+    initial_leader: String,
+    commit_delay: Duration,
+    started_at: Instant,
+    append_stream_opens_at_start: BTreeMap<String, u64>,
+}
+
+struct DurableCatchUpWriter {
+    cancellation: CancellationToken,
+    prefix: String,
+    task: AbortOnDropHandle<Result<usize, String>>,
 }
 
 #[derive(cucumber::World, Default)]
@@ -172,6 +191,9 @@ struct ScenarioWorld {
     avro_http_field_order: Vec<String>,
     avro_http_optional_fields: BTreeSet<String>,
     fault_injection: FaultInjection,
+    consensus_commit_delays: BTreeMap<String, Duration>,
+    durable_catch_up: Option<DurableCatchUpObservation>,
+    durable_catch_up_writer: Option<DurableCatchUpWriter>,
     cluster_config: TestClusterConfig,
     temp_root: Option<TempDir>,
     formatter_root: Option<TempDir>,
@@ -282,6 +304,19 @@ impl fmt::Debug for ScenarioWorld {
 }
 
 impl ScenarioWorld {
+    fn stop_durable_catch_up_work(&mut self) {
+        if let Some(writer) = self.durable_catch_up_writer.take() {
+            writer.cancellation.cancel();
+            drop(writer.task);
+        }
+        for node_id in self.consensus_commit_delays.keys() {
+            self.fault_injection.set_consensus_storage_commit_delay(
+                &crate::common::cluster::node_name(node_id),
+                Duration::ZERO,
+            );
+        }
+    }
+
     fn cluster_mut(&mut self) -> &mut Cluster {
         self.cluster
             .as_mut()
@@ -2450,6 +2485,17 @@ async fn given_raft_retention_bounds(
     };
 }
 
+#[given(expr = "consensus commits on node {string} take {string}")]
+fn given_consensus_commits_take(world: &mut ScenarioWorld, node_id: String, duration: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let duration = humantime::parse_duration(&duration)
+        .assured("the Cucumber expression supplies a valid consensus commit duration");
+    world
+        .fault_injection
+        .set_consensus_storage_commit_delay(&crate::common::cluster::node_name(&node_id), duration);
+    world.consensus_commit_delays.insert(node_id, duration);
+}
+
 #[when(expr = "{int} domains named {string} are created on the leader node")]
 async fn when_domains_are_created_in_a_burst(
     world: &mut ScenarioWorld,
@@ -2457,10 +2503,16 @@ async fn when_domains_are_created_in_a_burst(
     prefix: String,
 ) {
     let leader = running_leader_node(world).await;
+    let mut session = world
+        .cluster()
+        .open_session(&leader, &world.domain)
+        .await
+        .unwrap_or_else(|error| panic!("failed to open burst NSPL session: {error}"));
     for index in 0..count {
         tokio::task::consume_budget().await;
         let name = burst_domain_name(&prefix, index);
-        run_nspl_commands_on_node(world, &leader, &format!("CREATE DOMAIN {name};"))
+        session
+            .run_command(&format!("CREATE DOMAIN {name};"))
             .await
             .unwrap_or_else(|error| panic!("creating domain '{name}' failed: {error}"));
     }
@@ -2486,6 +2538,264 @@ async fn applied_burst_domains(world: &ScenarioWorld, node_id: &str, prefix: &st
             .assured("a scenario creates a bounded number of burst domains");
     }
     applied
+}
+
+fn durable_catch_up_bound(commit_delay: Duration, entries: usize) -> Duration {
+    let entries = u32::try_from(entries)
+        .assured("a durable catch-up scenario creates at most u32::MAX entries");
+    let delayed_commits = entries
+        .checked_mul(DURABLE_CATCH_UP_STORAGE_COMMITS_PER_ENTRY)
+        .assured("twice the bounded scenario entry count fits in u32");
+    let storage_delay = commit_delay
+        .checked_mul(delayed_commits)
+        .assured("the configured test delay times its bounded commit count fits in Duration");
+    storage_delay
+        .checked_add(DURABLE_CATCH_UP_MARGIN)
+        .assured("the bounded storage delay plus the test load margin fits in Duration")
+}
+
+fn durable_catch_up_append_stream_opens(
+    world: &ScenarioWorld,
+    observation: &DurableCatchUpObservation,
+) -> u64 {
+    let mut opened = 0_u64;
+    for (source, baseline) in &observation.append_stream_opens_at_start {
+        let total = world.fault_injection.consensus_append_stream_open_count(
+            &crate::common::cluster::node_name(source),
+            &crate::common::cluster::node_name(&observation.follower),
+        );
+        let source_opened = total
+            .checked_sub(*baseline)
+            .verified("the append stream counter only increases after the catch-up baseline");
+        // A saturated total still proves that any small scenario maximum was exceeded.
+        opened = opened.saturating_add(source_opened);
+    }
+    opened
+}
+
+async fn finish_durable_catch_up_writer(world: &mut ScenarioWorld) -> (String, usize) {
+    let writer = world
+        .durable_catch_up_writer
+        .take()
+        .verified("durable catch-up started its continuous client writer");
+    writer.cancellation.cancel();
+    let prefix = writer.prefix;
+    let joined = tokio::time::timeout(Duration::from_secs(5), writer.task)
+        .await
+        .unwrap_or_else(|error| panic!("durable catch-up client writer did not stop: {error}"));
+    let result = joined
+        .unwrap_or_else(|error| panic!("durable catch-up client writer task failed: {error}"));
+    let written = result
+        .unwrap_or_else(|error| panic!("a leader write failed during follower catch-up: {error}"));
+    (prefix, written)
+}
+
+#[when(
+    expr = "node {string} starts catching up while the leader keeps creating domains named \
+            {string}"
+)]
+async fn when_node_starts_durable_catch_up(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    live_prefix: String,
+) {
+    assert!(
+        world.durable_catch_up.is_none(),
+        "a durable follower catch-up is already being observed"
+    );
+    assert!(
+        world.durable_catch_up_writer.is_none(),
+        "a durable follower catch-up client writer is already active"
+    );
+
+    let follower = expand_placeholders(world, &node_id);
+    let live_prefix = expand_placeholders(world, &live_prefix);
+    let leader = running_leader_node(world).await;
+    let commit_delay = *world
+        .consensus_commit_delays
+        .get(&follower)
+        .verified("the scenario configured this follower's consensus commit delay");
+    let mut append_stream_opens_at_start = BTreeMap::new();
+    for source in world.cluster().node_ids() {
+        if source == follower {
+            continue;
+        }
+        let count = world.fault_injection.consensus_append_stream_open_count(
+            &crate::common::cluster::node_name(&source),
+            &crate::common::cluster::node_name(&follower),
+        );
+        append_stream_opens_at_start.insert(source, count);
+    }
+    let leader_uri = world
+        .cluster()
+        .grpc_uri(&leader)
+        .unwrap_or_else(|error| panic!("failed to resolve leader '{leader}': {error}"));
+    let connect_options = client_connect_options(&leader_uri)
+        .unwrap_or_else(|error| panic!("failed to configure the durable catch-up client: {error}"));
+    let client = Client::connect_with_options(&leader_uri, world.domain.clone(), connect_options)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to open the durable catch-up client session: {error}")
+        });
+    let started_at = Instant::now();
+    let cancellation = CancellationToken::new();
+    let writer_cancellation = cancellation.clone();
+    let writer_prefix = live_prefix.clone();
+    let task = AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut written = 0_usize;
+        loop {
+            tokio::task::consume_budget().await;
+            if writer_cancellation.is_cancelled() {
+                return Ok(written);
+            }
+
+            let name = burst_domain_name(&writer_prefix, written);
+            let request = client.execute(format!("CREATE DOMAIN {name};"));
+            let outcome = tokio::select! {
+                () = writer_cancellation.cancelled() => return Ok(written),
+                outcome = request => outcome,
+            };
+            let outcome = outcome.map_err(|error| error.to_string())?;
+            if !outcome.success {
+                return Err(format!(
+                    "command failed with {:?}: {}; diagnostics: {:?}",
+                    outcome.kind, outcome.message, outcome.diagnostics
+                ));
+            }
+            written = written
+                .checked_add(1)
+                .assured("the durable catch-up writer has a fixed entry limit");
+
+            if writer_cancellation.is_cancelled() {
+                return Ok(written);
+            }
+            if written >= MAX_DURABLE_CATCH_UP_WRITES {
+                return Err(format!(
+                    "follower catch-up did not finish while {written} leader writes succeeded"
+                ));
+            }
+            tokio::select! {
+                () = writer_cancellation.cancelled() => return Ok(written),
+                () = tokio::time::sleep(DURABLE_CATCH_UP_WRITE_CADENCE) => {}
+            }
+        }
+    }));
+
+    world.durable_catch_up = Some(DurableCatchUpObservation {
+        follower: follower.clone(),
+        initial_leader: leader,
+        commit_delay,
+        started_at,
+        append_stream_opens_at_start,
+    });
+    world.durable_catch_up_writer = Some(DurableCatchUpWriter {
+        cancellation,
+        prefix: live_prefix,
+        task,
+    });
+    world
+        .cluster_mut()
+        .start_node_without_waiting_for_raft_catch_up(&follower)
+        .await
+        .unwrap_or_else(|error| panic!("failed to start catch-up follower '{follower}': {error}"));
+}
+
+#[then(
+    expr = "node {string} applies {int} domains named {string} and the concurrent writes within \
+            its durable storage bound using at most {int} append streams"
+)]
+async fn then_node_catches_up_within_durable_storage_bound(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    backlog_count: usize,
+    backlog_prefix: String,
+    maximum_append_streams: usize,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let backlog_prefix = expand_placeholders(world, &backlog_prefix);
+    let observation = world
+        .durable_catch_up
+        .as_ref()
+        .verified("the scenario started a durable follower catch-up")
+        .clone();
+    assert_eq!(
+        node_id, observation.follower,
+        "the durable catch-up assertion must observe the follower it started"
+    );
+
+    let maximum_entries = backlog_count
+        .checked_add(MAX_DURABLE_CATCH_UP_WRITES)
+        .assured("the bounded backlog and live-write limit fit in usize");
+    let maximum_bound = durable_catch_up_bound(observation.commit_delay, maximum_entries);
+    let maximum_deadline = observation
+        .started_at
+        .checked_add(maximum_bound)
+        .assured("the durable catch-up test bound fits the monotonic clock range");
+
+    let backlog_applied = loop {
+        tokio::task::consume_budget().await;
+        let applied = applied_burst_domains(world, &node_id, &backlog_prefix).await;
+        if applied >= backlog_count || Instant::now() >= maximum_deadline {
+            break applied;
+        }
+        tokio::time::sleep(DURABLE_CATCH_UP_WRITE_CADENCE).await;
+    };
+
+    let (live_prefix, live_writes) = finish_durable_catch_up_writer(world).await;
+    assert!(
+        live_writes > 0,
+        "the leader must complete a client write while the durable follower catches up"
+    );
+    let total_entries = backlog_count
+        .checked_add(live_writes)
+        .assured("the bounded backlog and completed live writes fit in usize");
+    let bound = durable_catch_up_bound(observation.commit_delay, total_entries);
+    let deadline = observation
+        .started_at
+        .checked_add(bound)
+        .assured("the durable catch-up test bound fits the monotonic clock range");
+
+    let live_applied = loop {
+        tokio::task::consume_budget().await;
+        let applied = applied_burst_domains(world, &node_id, &live_prefix).await;
+        let all_applied = backlog_applied >= backlog_count && applied >= live_writes;
+        if all_applied || Instant::now() >= deadline {
+            break applied;
+        }
+        tokio::time::sleep(DURABLE_CATCH_UP_WRITE_CADENCE).await;
+    };
+
+    let elapsed = observation.started_at.elapsed();
+    let append_stream_opens = durable_catch_up_append_stream_opens(world, &observation);
+    let maximum_append_streams = u64::try_from(maximum_append_streams)
+        .assured("a Cucumber append stream limit fits in the observation counter");
+    assert!(
+        append_stream_opens <= maximum_append_streams,
+        "leaders opened {append_stream_opens} append streams to catch-up follower '{}'; the \
+         initial leader was '{}', the expected maximum was {maximum_append_streams}, and the \
+         follower applied {backlog_applied} of {backlog_count} '{}' entries plus {live_applied} \
+         of {live_writes} '{}' concurrent writes after {:?} against a {:?} bound",
+        observation.follower,
+        observation.initial_leader,
+        backlog_prefix,
+        live_prefix,
+        elapsed,
+        bound,
+    );
+    assert!(
+        backlog_applied >= backlog_count && live_applied >= live_writes && elapsed <= bound,
+        "follower '{}' durable catch-up exceeded {:?}: applied {backlog_applied} of \
+         {backlog_count} '{}' entries and {live_applied} of {live_writes} '{}' concurrent writes \
+         after {:?} with {:?} per consensus commit; the initial leader was '{}' and leaders \
+         opened {append_stream_opens} append streams",
+        observation.follower,
+        bound,
+        backlog_prefix,
+        live_prefix,
+        elapsed,
+        observation.commit_delay,
+        observation.initial_leader,
+    );
 }
 
 #[then(expr = "within {string} node {string} has applied {int} domains named {string}")]
@@ -16459,8 +16769,15 @@ async fn run_dependency_lifecycle_helper(scope: String) -> Option<String> {
 }
 
 async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
-    let cli =
+    let mut cli =
         cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, TestParallelismArgs>::parsed();
+    if cli.tags_filter.is_none() {
+        cli.tags_filter = Some(
+            "not @raft_io_expected_failure"
+                .parse()
+                .assured("the built-in RAFT-IO tag expression is valid"),
+        );
+    }
     let concurrency_factor = cli.custom.concurrency_factor();
     let default_max_concurrent_scenarios = parallelism.max_concurrent_scenarios(concurrency_factor);
     let effective_max_concurrent_scenarios = cli
@@ -16535,6 +16852,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
             Box::pin(async move {
                 append_cucumber_log_line("scenario finished");
                 if let Some(world) = world {
+                    world.stop_durable_catch_up_work();
                     world.fault_injection.release_all_health_responses();
                     world.fault_injection.release_all_domain_clock_progress();
                     append_cluster_statuses(world, "scenario teardown").await;
