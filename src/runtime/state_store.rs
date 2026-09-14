@@ -727,6 +727,40 @@ impl RuntimeStateStore {
         Ok(())
     }
 
+    pub(in crate::runtime) fn replace_handoff_preparation(
+        &self,
+        replaced: &RuntimeStateHandoffTransition<'_>,
+        replacement: &RuntimeStateHandoffTransition<'_>,
+        checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
+    ) -> Result<(), Report<RuntimePersistenceError>> {
+        let replaced_key = Self::handoff_preparation_key(
+            replaced.coordination,
+            replaced.operation_id,
+            &replaced.entity.domain,
+            replaced.entity.kind(),
+            replaced.entity.identifier(),
+        );
+        let replacement_key = Self::handoff_preparation_key(
+            replacement.coordination,
+            replacement.operation_id,
+            &replacement.entity.domain,
+            replacement.entity.kind(),
+            replacement.entity.identifier(),
+        );
+        let encoded = Self::encode_handoff_preparation(replacement, checkpoints)?;
+        let mut batch = self.db.batch();
+        batch.remove(&self.handoff_preparations, replaced_key.clone());
+        batch.remove(&self.handoff_activations, replaced_key);
+        batch.insert(&self.handoff_preparations, replacement_key, encoded);
+        batch
+            .commit()
+            .map_err(|_| RuntimePersistenceError::WriteValue)?;
+        self.db
+            .persist(PersistMode::SyncAll)
+            .map_err(|_| RuntimePersistenceError::WriteValue)?;
+        Ok(())
+    }
+
     pub(in crate::runtime) fn persist_forced_recovery_preparation(
         &self,
         transition: &ForcedRuntimeStateRecoveryTransition<'_>,

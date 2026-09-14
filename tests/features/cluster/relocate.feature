@@ -371,6 +371,163 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       - domain={{domain}} kind=junction name=moving_route owner=node-1
       """
+    When these NSPL commands are executed on the leader node
+      """
+      RELOCATE JUNCTION moving_route ONTO NODE node-2 IGNORE PREFERENCES;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=junction name=moving_route owner=node-2
+      """
+
+  @ownership-state-handoff
+  Scenario: A lost prepare response is reconciled before a later relocation
+    Given runtime replication is configured with replica count 0 and snapshot interval "1h"
+    And entity gate deadline is configured as "1s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( id I64 );
+      CREATE RELAY inbound SCHEMA event UNBRANCHED;
+      CREATE RELAY outbound SCHEMA event UNBRANCHED;
+      CREATE JUNCTION moving_route FROM inbound UNBRANCHED
+        TO outbound INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      """
+    And these NSPL commands are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    Given ownership handoff for domain "{{domain}}" pauses before its prepare response
+    When these NSPL commands begin executing in the background
+      """
+      RELOCATE JUNCTION moving_route ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    Then the ownership handoff prepare response pause for domain "{{domain}}" is reached
+    And the background NSPL execution fails with "timed out preparing"
+    When the ownership handoff prepare response pause for domain "{{domain}}" is released
+    And physical time passes for "500ms"
+    And these NSPL commands are executed on the leader node
+      """
+      RELOCATE JUNCTION moving_route ONTO NODE node-2 IGNORE PREFERENCES;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=junction name=moving_route owner=node-2
+      """
+
+  @ownership-state-handoff
+  Scenario: Canceling the coordinator after preparation does not strand the destination
+    Given runtime replication is configured with replica count 0 and snapshot interval "1h"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( id I64 );
+      CREATE RELAY inbound SCHEMA event UNBRANCHED;
+      CREATE RELAY outbound SCHEMA event UNBRANCHED;
+      CREATE JUNCTION moving_route FROM inbound UNBRANCHED
+        TO outbound INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      """
+    And these NSPL commands are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    Given ownership handoff for domain "{{domain}}" pauses after preparation
+    When these NSPL commands begin executing in the background
+      """
+      RELOCATE JUNCTION moving_route ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    Then the ownership handoff preparation pause for domain "{{domain}}" is reached
+    When the background NSPL execution is canceled
+    And the ownership handoff preparation pause for domain "{{domain}}" is released
+    And physical time passes for "1s"
+    And these NSPL commands are executed on the leader node
+      """
+      RELOCATE JUNCTION moving_route ONTO NODE node-2 IGNORE PREFERENCES;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=junction name=moving_route owner=node-2
+      """
+
+  @ownership-state-handoff
+  Scenario: A new leader reconciles preparation left before schedule commit
+    Given runtime replication is configured with replica count 0 and snapshot interval "1h"
+    And entity gate deadline is configured as "1s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( id I64 );
+      CREATE RELAY inbound SCHEMA event UNBRANCHED;
+      CREATE RELAY outbound SCHEMA event UNBRANCHED;
+      CREATE JUNCTION moving_route FROM inbound UNBRANCHED
+        TO outbound INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      """
+    And these NSPL commands are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    And leadership is transferred to node "node-3"
+    Given ownership handoff for domain "{{domain}}" pauses after preparation
+    When these NSPL commands begin executing in the background
+      """
+      RELOCATE JUNCTION moving_route ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    Then the ownership handoff preparation pause for domain "{{domain}}" is reached
+    When leadership is transferred to node "node-1"
+    Then node "node-1" eventually reports leader "node-1"
+    When physical time passes for "3s"
+    And the background NSPL execution is canceled
+    And the ownership handoff preparation pause for domain "{{domain}}" is released
+    And node "node-3" is stopped
+    And physical time passes for "12s"
+    And these NSPL commands are executed through the client on node "node-1"
+      """
+      RELOCATE JUNCTION moving_route ONTO NODE node-2 IGNORE PREFERENCES;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=junction name=moving_route owner=node-2
+      """
 
   @ownership-state-handoff
   Scenario: Owner loss promotes a replica with visible unverified state

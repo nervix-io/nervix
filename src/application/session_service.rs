@@ -175,6 +175,9 @@ pub(in crate::application) struct SessionServiceInner {
     /// independent domains continue applying.
     pub(in crate::application) transaction_domain_executions:
         DashMap<DomainName, StdArc<AsyncMutex<()>>, RandomState>,
+    /// Serializes destination preparation with authority reconciliation so a request from a
+    /// superseded leader cannot race a current leader's preparation into the runtime.
+    pub(in crate::application) ownership_handoff_operations: AsyncMutex<()>,
     /// Also held by a request while it installs. Calls with one durable identity share the lock,
     /// so only one of them can build and publish that assigned version on this leader.
     pub(in crate::application) resource_upload_executions:
