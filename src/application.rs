@@ -855,22 +855,28 @@ impl Application {
         };
         startup.interconnect = Some(interconnect.clone());
 
-        let consensus_result = Consensus::from_database(
+        let consensus_settings = ConsensusSettings {
+            cluster_name: cluster_id.clone(),
+            node_id: node_id.clone(),
+            interconnect_advertise_addr: interconnect_advertise_addr.to_string(),
+            interconnect: interconnect.clone(),
+            executor: startup.runtime.executor().clone(),
+            raft_heartbeat_interval,
+            raft_election_timeout_min,
+            raft_election_timeout_max,
+            raft_retention,
+        };
+        #[cfg(feature = "testing")]
+        let consensus_result = Consensus::from_database_with_test_probe(
             startup.db.clone(),
-            ConsensusSettings {
-                cluster_name: cluster_id.clone(),
-                node_id: node_id.clone(),
-                interconnect_advertise_addr: interconnect_advertise_addr.to_string(),
-                interconnect: interconnect.clone(),
-                executor: startup.runtime.executor().clone(),
-                raft_heartbeat_interval,
-                raft_election_timeout_min,
-                raft_election_timeout_max,
-                raft_retention,
-            },
+            consensus_settings,
+            fault_injection.consensus_test_probe(&node_id),
         )
-        .await
-        .change_context(AppError::StartConsensus);
+        .await;
+        #[cfg(not(feature = "testing"))]
+        let consensus_result =
+            Consensus::from_database(startup.db.clone(), consensus_settings).await;
+        let consensus_result = consensus_result.change_context(AppError::StartConsensus);
         let consensus = match consensus_result {
             Ok(consensus) => consensus,
             Err(error) => {

@@ -52,7 +52,7 @@ struct FaultInjectionState {
     /// One-shot, domain-scoped drain failures consumed after a pending status is observed.
     forced_entity_drain_timeouts: DashMap<DomainName, (), RandomState>,
     transaction_binding_drops: DashMap<ClusterNodeName, (), RandomState>,
-    consensus_probes: DashMap<ClusterNodeName, ConsensusProbe, RandomState>,
+    consensus_probes: DashMap<ClusterNodeName, ConsensusProbeState, RandomState>,
     bulk_executions: DashMap<ClusterNodeName, NodeBulkExecution, RandomState>,
     /// Application health handlers clone a pause so it remains alive after its map guard drops.
     health_response_pauses: DashMap<HealthResponsePauseKey, Arc<TestPause>, RandomState>,
@@ -81,7 +81,13 @@ struct FaultInjectionState {
 
 struct ConsensusProbe {
     observer: nervix_consensus::Observer,
-    fault: nervix_consensus::StorageFault,
+}
+
+#[derive(Debug, Default)]
+struct ConsensusProbeState {
+    /// Running nodes register their observer; stopped nodes retain the test probe and its controls.
+    probe: Option<ConsensusProbe>,
+    test_probe: nervix_consensus::ConsensusTestProbe,
 }
 
 impl std::fmt::Debug for ConsensusProbe {
@@ -177,7 +183,9 @@ impl Default for FaultInjection {
 
 impl FaultInjection {
     pub fn unregister_consensus(&self, node: &ClusterNodeName) {
-        self.inner.consensus_probes.remove(node);
+        if let Some(mut state) = self.inner.consensus_probes.get_mut(node) {
+            state.probe = None;
+        }
     }
 
     pub(crate) fn register_consensus(
@@ -185,23 +193,55 @@ impl FaultInjection {
         node: ClusterNodeName,
         consensus: &nervix_consensus::Consensus,
     ) {
-        self.inner.consensus_probes.insert(
-            node,
-            ConsensusProbe {
-                observer: consensus.observer(),
-                fault: consensus.storage_fault(),
-            },
-        );
+        let mut state = self.inner.consensus_probes.entry(node).or_default();
+        state.probe = Some(ConsensusProbe {
+            observer: consensus.observer(),
+        });
+    }
+
+    pub(crate) fn consensus_test_probe(
+        &self,
+        node: &ClusterNodeName,
+    ) -> nervix_consensus::ConsensusTestProbe {
+        self.inner
+            .consensus_probes
+            .entry(node.clone())
+            .or_default()
+            .test_probe
+            .clone()
     }
 
     pub fn consensus_observer(&self, node: &ClusterNodeName) -> nervix_consensus::Observer {
         use meticulous::OptionExt as _;
-        self.inner
+        let state = self
+            .inner
             .consensus_probes
             .get(node)
+            .verified("the harness registered this node before observing consensus");
+        state
+            .probe
+            .as_ref()
             .verified("the harness started this node before observing consensus")
             .observer
             .clone()
+    }
+
+    pub fn consensus_append_stream_open_count(
+        &self,
+        node: &ClusterNodeName,
+        target: &ClusterNodeName,
+    ) -> u64 {
+        use meticulous::OptionExt as _;
+        let state = self
+            .inner
+            .consensus_probes
+            .get(node)
+            .verified("the harness registered this node before observing consensus");
+        let _running_probe = state
+            .probe
+            .as_ref()
+            .verified("the harness started this node before observing consensus");
+        state.test_probe.append_stream_open_count(target)
     }
 
     pub fn fail_consensus_storage(
@@ -211,12 +251,25 @@ impl FaultInjection {
         boundary: nervix_consensus::StorageBoundary,
     ) {
         use meticulous::OptionExt as _;
-        self.inner
+        let state = self
+            .inner
             .consensus_probes
             .get(node)
-            .verified("the harness started this node before injecting storage failure")
-            .fault
+            .verified("the harness registered this node before injecting storage failure");
+        let _running_probe = state
+            .probe
+            .as_ref()
+            .verified("the harness started this node before injecting storage failure");
+        state
+            .test_probe
+            .storage_fault()
             .fail_next(operation, boundary);
+    }
+
+    /// Delay every consensus storage commit on this node, including after its next registration.
+    pub fn set_consensus_storage_commit_delay(&self, node: &ClusterNodeName, delay: Duration) {
+        let state = self.inner.consensus_probes.entry(node.clone()).or_default();
+        state.test_probe.set_storage_commit_delay(delay);
     }
 
     pub fn fail_emitter(&self, emitter: &str) {

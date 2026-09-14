@@ -1,7 +1,7 @@
-//! Storage publication fault controls.
+//! Storage publication fault and timing controls.
 //!
 //! Layer: engines and infrastructure; testing hooks are enabled only for test harnesses.
-//! - **Owns.** Deterministic failures at the durable commit and publication boundaries.
+//! - **Owns.** Deterministic failures, pauses, and delays at durable storage boundaries.
 //! - **Depends on.** Synchronization primitives.
 //! - **Must not know.** Graph semantics or transport behavior.
 
@@ -29,7 +29,9 @@ pub use enabled::{StorageFault, StoragePause};
 
 #[cfg(any(test, feature = "testing"))]
 mod enabled {
-    use parking_lot::{Condvar, Mutex};
+    use std::{thread, time::Duration};
+
+    use parking_lot::{Condvar, Mutex, RwLock};
     use tokio::sync::Notify;
     use triomphe::Arc;
 
@@ -37,7 +39,13 @@ mod enabled {
 
     #[derive(Clone, Debug, Default)]
     pub struct StorageFault {
-        inner: Arc<Mutex<Option<ArmedFault>>>,
+        inner: Arc<StorageFaultState>,
+    }
+
+    #[derive(Debug, Default)]
+    struct StorageFaultState {
+        armed: Mutex<Option<ArmedFault>>,
+        after_sync_delay: RwLock<Duration>,
     }
 
     #[derive(Debug)]
@@ -82,7 +90,7 @@ mod enabled {
 
     impl StorageFault {
         pub fn fail_next(&self, operation: String, boundary: StorageBoundary) {
-            *self.inner.lock() = Some(ArmedFault {
+            *self.inner.armed.lock() = Some(ArmedFault {
                 operation,
                 boundary,
                 effect: Effect::Fail,
@@ -90,16 +98,26 @@ mod enabled {
         }
         pub fn pause_next(&self, operation: String, boundary: StorageBoundary) -> StoragePause {
             let gate = Arc::new(Gate::default());
-            *self.inner.lock() = Some(ArmedFault {
+            *self.inner.armed.lock() = Some(ArmedFault {
                 operation,
                 boundary,
                 effect: Effect::Pause(gate.clone()),
             });
             StoragePause { gate }
         }
+        /// Delay every completed durable sync; a zero duration disables the delay.
+        pub fn set_after_sync_delay(&self, delay: Duration) {
+            *self.inner.after_sync_delay.write() = delay;
+        }
         pub(crate) fn check(&self, operation: &str, boundary: StorageBoundary) -> io::Result<()> {
+            if boundary == StorageBoundary::AfterSync {
+                let delay = *self.inner.after_sync_delay.read();
+                if !delay.is_zero() {
+                    thread::sleep(delay);
+                }
+            }
             let fault = {
-                let mut armed = self.inner.lock();
+                let mut armed = self.inner.armed.lock();
                 if let Some(fault) = armed.as_ref()
                     && fault.operation == operation
                     && fault.boundary == boundary
