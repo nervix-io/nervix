@@ -22,10 +22,7 @@ use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use super::{
-    background_task::BackgroundTask, model_validation::domain_clock_period,
-    session_service::SessionServiceImpl,
-};
+use super::{background_task::BackgroundTask, session_service::SessionServiceImpl};
 use crate::{domain_clock_authority::DomainClockAuthorityCandidates, task_shutdown::JoinShutdown};
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DomainClockTaskSpec {
@@ -142,15 +139,8 @@ pub(in crate::application) async fn reconcile_domain_clock_tasks(
         if owner != &local_identity {
             continue;
         }
-        let period = match domain_clock_period(&domain.config) {
-            Ok(period) => period,
-            Err(error) => {
-                warn!(
-                    domain = domain_id.as_str(),
-                    error, "committed paced domain has an invalid clock period"
-                );
-                continue;
-            }
+        let DomainPace::Paced { period, .. } = domain.config.pace else {
+            continue;
         };
         desired.insert(
             domain_id.clone(),

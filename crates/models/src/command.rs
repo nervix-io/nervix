@@ -6,6 +6,7 @@
 //! - **Depends on.** Serialization primitives only.
 //! - **Must not know.** Sessions, consensus, parsing, command effects, or runtime application.
 
+use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -28,22 +29,24 @@ const MAX_COMMAND_EXECUTION_REFERENCE_BYTES: usize = 128;
 pub struct CommandExecutionReference(String);
 
 impl CommandExecutionReference {
-    pub fn parse(value: impl Into<String>) -> Result<Self, CommandExecutionReferenceError> {
+    pub fn parse(value: impl Into<String>) -> Result<Self, Report<CommandExecutionReferenceError>> {
         let value = value.into();
         if value.is_empty() {
-            return Err(CommandExecutionReferenceError::Empty);
+            return Err(Report::new(CommandExecutionReferenceError::Empty));
         }
         if value.len() > MAX_COMMAND_EXECUTION_REFERENCE_BYTES {
-            return Err(CommandExecutionReferenceError::TooLong {
+            return Err(Report::new(CommandExecutionReferenceError::TooLong {
                 actual: value.len(),
                 limit: MAX_COMMAND_EXECUTION_REFERENCE_BYTES,
-            });
+            }));
         }
         if !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         {
-            return Err(CommandExecutionReferenceError::InvalidCharacter);
+            return Err(Report::new(
+                CommandExecutionReferenceError::InvalidCharacter,
+            ));
         }
         Ok(Self(value))
     }

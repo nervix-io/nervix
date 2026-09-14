@@ -28,9 +28,9 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_interconnect::{HandlerRegistrationError, Transport};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule,
-    DomainClockAuthority, DomainClockState, DomainName, DomainPace, DomainSchedule,
-    DomainStartPoint, DomainState, DomainStatus, ResourceName, ResourceNodeStatus, ResourceUpload,
-    ResourceUploadKey, ResourceVersion, ResourceVersionStatus, Statement, UserName,
+    DomainClockAuthority, DomainClockState, DomainName, DomainSchedule, DomainStartPoint,
+    DomainState, DomainStatus, ResourceName, ResourceNodeStatus, ResourceUpload, ResourceUploadKey,
+    ResourceVersion, ResourceVersionStatus, Statement, UserName,
 };
 use nervix_recovery::Discarded as _;
 pub use openraft::raft::{
@@ -682,7 +682,7 @@ impl StateMachineData {
             .assured("a domain cannot be started 2^64 times in the lifetime of a cluster");
         domain.last_start = start.clone();
         domain.clock = clock.clone();
-        let paced = matches!(domain.config.pace, DomainPace::Paced);
+        let paced = domain.config.pace.is_paced();
 
         if paced {
             self.advance_domain_clock_authority(domain_id, authority.clone());
@@ -698,7 +698,7 @@ impl StateMachineData {
         };
         domain.status = DomainStatus::Stopped;
         domain.clock = None;
-        let paced = matches!(domain.config.pace, DomainPace::Paced);
+        let paced = domain.config.pace.is_paced();
 
         if paced {
             self.advance_domain_clock_authority(domain_id, None);
@@ -724,7 +724,7 @@ impl StateMachineData {
         let eligible = current_domain.is_some_and(|domain| {
             domain.start_version == expected_start_version
                 && !matches!(domain.status, DomainStatus::Stopped)
-                && matches!(domain.config.pace, DomainPace::Paced)
+                && domain.config.pace.is_paced()
         }) && &current_authority == expected_authority;
         if !eligible || expected_authority.owner() == owner.as_ref() {
             return false;
@@ -1794,14 +1794,15 @@ impl Observer {
 
         let mut lines = Vec::new();
         for domain in domains.into_values() {
-            let line = if let nervix_models::DomainPace::Paced = domain.config.pace {
+            let line = if let nervix_models::DomainPace::Paced { period, skew } = domain.config.pace
+            {
                 format!(
                     "- {} status={:?} pace={} period={} skew={}",
                     domain.id.as_str(),
                     domain.status,
                     domain.config.pace.as_ref(),
-                    domain.config.period,
-                    domain.config.skew
+                    period,
+                    skew
                 )
             } else {
                 format!(
@@ -4201,8 +4202,6 @@ mod tests {
             id: domain(raw),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
-                period: "1s".to_string(),
-                skew: "0ms".to_string(),
                 placement: nervix_models::PlacementPolicy::Neutral,
             },
             status: DomainStatus::Running,
@@ -4223,7 +4222,14 @@ mod tests {
     fn committed_clock_authority_revisions_fence_transfer_and_stop() {
         let domain_id = domain("paced");
         let mut stopped = running_domain_state("paced");
-        stopped.config.pace = DomainPace::Paced;
+        stopped.config.pace = DomainPace::Paced {
+            period: "1s"
+                .parse()
+                .assured("one second is a positive fixture cadence"),
+            skew: "0s"
+                .parse()
+                .assured("zero nanoseconds is a valid fixture skew"),
+        };
         stopped.status = DomainStatus::Stopped;
         stopped.start_version = 0;
         let mut state = StateMachineData::default();
@@ -4321,7 +4327,14 @@ mod tests {
     fn direct_and_transactional_lifecycle_commit_the_same_clock_state() {
         let domain_id = domain("paced");
         let mut stopped = running_domain_state("paced");
-        stopped.config.pace = DomainPace::Paced;
+        stopped.config.pace = DomainPace::Paced {
+            period: "1s"
+                .parse()
+                .assured("one second is a positive fixture cadence"),
+            skew: "0s"
+                .parse()
+                .assured("zero nanoseconds is a valid fixture skew"),
+        };
         stopped.status = DomainStatus::Stopped;
         stopped.start_version = 0;
         let mut direct = StateMachineData::default();

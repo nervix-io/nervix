@@ -130,9 +130,7 @@ impl Runtime {
             }));
         }
         let clock = state.clock.bind().change_context(context())?;
-        let snapshot = clock
-            .ingestion_snapshot(&state.config.period, &state.config.skew)
-            .change_context(context())?;
+        let snapshot = clock.ingestion_snapshot().change_context(context())?;
         Ok(IngestionTime {
             domain,
             ingestor,
@@ -150,7 +148,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        runtime::{current_timestamp, domain, named, paced_domain_state, unpaced_domain_state},
+        runtime::{domain, named, paced_domain_state, unpaced_domain_state},
         runtime_schema::test_runtime_row,
     };
 
@@ -161,7 +159,7 @@ mod tests {
         let ingestor = named("source");
         let mut state = paced_domain_state(domain.as_str());
         state.clock = Some(DomainClockState::new(
-            current_timestamp(),
+            Timestamp::now(),
             Timestamp::from_unix_nanos(0),
             DomainTimeRate::try_from(1e-300).assured("fixture rate is positive and finite"),
         ));
@@ -169,7 +167,7 @@ mod tests {
         let time = runtime
             .ingestion_time(&domain, &ingestor)
             .assured("fixture clock is installed");
-        let record = test_runtime_row([]).with_ingested_at_watermarks(current_timestamp());
+        let record = test_runtime_row([]).with_ingested_at_watermarks(Timestamp::now());
         assert_eq!(
             time.select(Some(&IngestTimestampSource::Now), &record)
                 .assured("origin is eligible"),
@@ -189,10 +187,9 @@ mod tests {
         let runtime = Runtime::new();
         let domain = domain("unpaced");
         let ingestor = named("source");
-        let mut state = unpaced_domain_state(domain.as_str());
-        state.config.period = "0ms".to_string();
+        let state = unpaced_domain_state(domain.as_str());
         runtime.sync_domains(&BTreeMap::from([(domain.clone(), state)]));
-        let before = current_timestamp();
+        let before = Timestamp::now();
         let time = runtime
             .ingestion_time(&domain, &ingestor)
             .assured("fixture clock is installed");
@@ -202,7 +199,7 @@ mod tests {
             RuntimeValue::Datetime(external.into_datetime().fixed_offset()),
         )])
         .with_ingested_at_watermarks(Timestamp::from_unix_nanos(42));
-        assert!(time.now() >= before && time.now() <= current_timestamp());
+        assert!(time.now() >= before && time.now() <= Timestamp::now());
         assert_eq!(
             time.select(Some(&IngestTimestampSource::Now), &record)
                 .assured("unpaced time is eligible"),

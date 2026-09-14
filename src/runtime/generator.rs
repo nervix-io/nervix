@@ -1,3 +1,10 @@
+//! Branch-local generator execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** Generator task cadence, materialized-state projection and route output.
+//! - **Depends on.** Validated generator plans, bound domain clocks and Arrow construction.
+//! - **Must not know.** NSPL parsing, connector transports or placement selection.
+
 use tokio_util::sync::CancellationToken;
 
 use super::*;
@@ -413,7 +420,7 @@ impl Runtime {
             routes,
         } = spec;
         let cadence = self
-            .bind_domain_cadence(domain, &generator.each, DomainCadenceStart::Immediate)
+            .bind_domain_cadence(domain, generator.each, DomainCadenceStart::Immediate)
             .map_err(|error| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!(
@@ -1062,7 +1069,9 @@ mod tests {
             name: named("synth_notifications"),
             materialized_relay: named("notifications"),
             branched_by: processor_branched_by("generated_notifications", &["tenant"]),
-            each: "100ms".to_string(),
+            each: "100ms"
+                .parse()
+                .assured("the fixture cadence is a positive duration"),
             output_routes: ProcessorOutputs::new(vec![output.clone()]),
         };
 

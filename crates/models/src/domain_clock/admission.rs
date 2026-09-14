@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 
-use super::DomainClockPeriod;
+use super::{DomainClockPeriod, DomainClockSkew};
 use crate::Timestamp;
 
 /// A bounded set of reached tick centers, reconstructed from logical time in constant space.
@@ -18,7 +18,7 @@ pub struct DomainAdmissionWindow {
     first: Timestamp,
     last: Timestamp,
     period: DomainClockPeriod,
-    skew: Duration,
+    skew: DomainClockSkew,
 }
 
 impl DomainAdmissionWindow {
@@ -32,7 +32,7 @@ impl DomainAdmissionWindow {
         origin: Timestamp,
         now: Timestamp,
         period: DomainClockPeriod,
-        skew: Duration,
+        skew: DomainClockSkew,
     ) -> Option<Self> {
         let elapsed = now.duration_since(origin)?;
         let period_nanos = u128::from(period.as_nanos());
@@ -71,13 +71,13 @@ impl DomainAdmissionWindow {
                 .first
                 .duration_since(event)
                 .verified("event precedes the first retained center")
-                <= self.skew;
+                <= self.skew.as_duration();
         }
         if event > self.last {
             return event
                 .duration_since(self.last)
                 .verified("event follows the last reached center")
-                <= self.skew;
+                <= self.skew.as_duration();
         }
         let elapsed = event
             .duration_since(self.first)
@@ -87,7 +87,8 @@ impl DomainAdmissionWindow {
         let distance_to_next = period
             .checked_sub(remainder)
             .assured("the remainder is strictly less than the positive period");
-        remainder <= self.skew.as_nanos() || distance_to_next <= self.skew.as_nanos()
+        remainder <= u128::from(self.skew.as_nanos())
+            || distance_to_next <= u128::from(self.skew.as_nanos())
     }
 }
 
@@ -105,7 +106,9 @@ mod tests {
             Duration::from_nanos(100)
                 .try_into()
                 .assured("period is positive"),
-            Duration::from_nanos(10),
+            Duration::from_nanos(10)
+                .try_into()
+                .assured("fixture skew fits the supported range"),
         )
         .assured("now has reached the origin");
         for nanos in [990, 1000, 1010] {
@@ -148,7 +151,9 @@ mod tests {
                 Timestamp::from_unix_nanos(0),
                 Timestamp::from_unix_nanos(reached),
                 period,
-                Duration::from_nanos(10),
+                Duration::from_nanos(10)
+                    .try_into()
+                    .assured("fixture skew fits the supported range"),
             )
             .assured("fixture time is nonnegative");
             let first = frontier
@@ -190,7 +195,9 @@ mod tests {
                 Timestamp::from_unix_nanos(-100),
                 Timestamp::from_unix_nanos(100),
                 period,
-                Duration::from_nanos(skew),
+                Duration::from_nanos(skew)
+                    .try_into()
+                    .assured("fixture skew fits the supported range"),
             )
             .assured("now follows origin");
             for event in -1200_i64..=1200 {
@@ -216,7 +223,9 @@ mod tests {
                 Duration::from_nanos(nanos)
                     .try_into()
                     .assured("period is positive and fits u64"),
-                Duration::ZERO,
+                Duration::ZERO
+                    .try_into()
+                    .assured("zero skew fits the supported range"),
             )
             .assured("maximum follows minimum");
             assert!(window.contains(Timestamp::from_unix_nanos(i64::MAX)));

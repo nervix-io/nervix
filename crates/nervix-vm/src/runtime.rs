@@ -1,3 +1,12 @@
+//! Columnar expression execution.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Executing compiled VM programs against typed Arrow batches and calling injected
+//!   functions with one explicit execution context.
+//! - **Depends on.** Compiled VM IR, Arrow kernels and vocabulary timestamps.
+//! - **Must not know.** Domains, branches, runtime clock installation or physical deadlines.
+
 use std::{
     fmt::{self, Write as _},
     ops::Range,
@@ -42,6 +51,7 @@ use arrow_string::like::{
     contains as string_contains, ends_with as string_ends_with, starts_with as string_starts_with,
 };
 use chrono::DateTime;
+use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
 use nervix_models::Timestamp;
@@ -53,8 +63,8 @@ use crate::{
     batch::{TypedArray, TypedBatch},
     error::{ErrorCode, RowErrorMask, RowErrors, RuntimeError, SideError},
     ir::{
-        CompiledProgram, InputBinding, Instruction, InstructionKind, RegisterLayout,
-        RegisterLayouts, RegisterRef, RegisterSpace, RegisterType, ScalarValue,
+        CompiledPredicate, CompiledProgram, InputBinding, Instruction, InstructionKind,
+        RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace, RegisterType, ScalarValue,
     },
     program::{BinaryOp, FunctionName, Span, UnaryOp},
     semantics::BuiltinLowering,
@@ -291,6 +301,23 @@ pub struct ExecutionResult {
     pub invocations: Vec<FunctionInvocation>,
 }
 
+/// The only execution result exposed by a compiled predicate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PredicateExecutionResult {
+    selected_rows: RowSelection,
+    errors: RowErrors,
+}
+
+impl PredicateExecutionResult {
+    pub fn selected_rows(&self) -> &RowSelection {
+        &self.selected_rows
+    }
+
+    pub fn errors(&self) -> &RowErrors {
+        &self.errors
+    }
+}
+
 /// Maps output rows back to input rows without allocating for the identity case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowSelection {
@@ -345,36 +372,15 @@ pub trait FunctionInjector: Send + Sync + fmt::Debug {
         FunctionExecutionPolicy::Inline
     }
 
-    fn inject(
-        &self,
-        function: &FunctionName,
-        arguments: &[TypedArray],
-        row_count: usize,
-        span: Span,
-    ) -> Result<TypedArray, RuntimeError>;
-
-    fn inject_with_errors(
-        &self,
-        function: &FunctionName,
-        arguments: &[TypedArray],
-        row_count: usize,
-        span: Span,
-    ) -> Result<InjectedResult, RuntimeError> {
-        self.inject(function, arguments, row_count, span)
-            .map(InjectedResult::success)
-    }
-
     fn inject_with_context(
         &self,
         function: &FunctionName,
         arguments: &[TypedArray],
         row_count: usize,
         span: Span,
-        _now: Timestamp,
-        _prior_error_rows: RowErrorMask<'_>,
-    ) -> Result<InjectedResult, RuntimeError> {
-        self.inject_with_errors(function, arguments, row_count, span)
-    }
+        now: Timestamp,
+        prior_error_rows: RowErrorMask<'_>,
+    ) -> Result<InjectedResult, RuntimeError>;
 }
 
 #[derive(Debug, Clone)]
@@ -405,6 +411,30 @@ impl ExecutionContext {
             injector: None,
         }
     }
+}
+
+/// Executes a predicate without exposing constructed columns or invocations.
+///
+/// A construction-capable program cannot be passed through this entry point:
+///
+/// ```compile_fail
+/// use nervix_vm::{CompiledProgram, ExecutionContext, TypedBatch, execute_predicate_in_context};
+///
+/// async fn execute(program: &CompiledProgram, batch: &TypedBatch, context: &ExecutionContext) {
+///     let _ = execute_predicate_in_context(program, batch, context).await;
+/// }
+/// ```
+pub async fn execute_predicate_in_context(
+    predicate: &CompiledPredicate,
+    batch: &TypedBatch,
+    context: &ExecutionContext,
+) -> Result<PredicateExecutionResult, Report<RuntimeError>> {
+    let result =
+        execute_program_with_selection_in_context(predicate.program(), batch, context).await?;
+    Ok(PredicateExecutionResult {
+        selected_rows: result.selected_rows,
+        errors: result.batch.errors().clone(),
+    })
 }
 
 pub async fn execute_program_in_context(
@@ -513,14 +543,18 @@ fn execute_program_with_selection_in_context_sync(
     }
     let mut invocations = Vec::with_capacity(program.invocations.len());
     for invocation in &program.invocations {
+        // The function name is owned before any fallible argument lookup, which fixes the binding
+        // materialization order for both successful and failed invocations.
+        let function = invocation.function.clone();
+        let span = invocation.span;
         let mut arguments = Vec::with_capacity(invocation.inputs.len());
         for input in &invocation.inputs {
             arguments.push(registers.output_array(*input)?);
         }
         invocations.push(FunctionInvocation {
-            function: invocation.function.clone(),
+            function,
             arguments,
-            span: invocation.span,
+            span,
         });
     }
 
@@ -3462,24 +3496,26 @@ mod tests {
     struct TestHeaderInjector;
 
     impl FunctionInjector for TestHeaderInjector {
-        fn inject(
+        fn inject_with_context(
             &self,
             function: &FunctionName,
             arguments: &[TypedArray],
             row_count: usize,
             _span: Span,
-        ) -> Result<TypedArray, RuntimeError> {
+            _now: Timestamp,
+            _prior_error_rows: RowErrorMask<'_>,
+        ) -> Result<InjectedResult, RuntimeError> {
             assert_eq!(*function, FunctionName::ReadHeader);
             let [TypedArray::Utf8(names)] = arguments else {
                 panic!("read_header must receive one Utf8 array");
             };
             assert_eq!(names.len(), row_count);
-            Ok(TypedArray::Utf8(StringArray::from_iter(names.iter().map(
-                |name| match name {
+            Ok(InjectedResult::success(TypedArray::Utf8(
+                StringArray::from_iter(names.iter().map(|name| match name {
                     Some("route") => Some("primary"),
                     Some(_) | None => None,
-                },
-            ))))
+                })),
+            )))
         }
     }
 
@@ -3494,13 +3530,15 @@ mod tests {
             FunctionExecutionPolicy::SpawnBlocking
         }
 
-        fn inject(
+        fn inject_with_context(
             &self,
             function: &FunctionName,
             arguments: &[TypedArray],
             row_count: usize,
             span: Span,
-        ) -> Result<TypedArray, RuntimeError> {
+            now: Timestamp,
+            prior_error_rows: RowErrorMask<'_>,
+        ) -> Result<InjectedResult, RuntimeError> {
             self.release
                 .lock()
                 .expect("release receiver lock must be available")
@@ -3509,7 +3547,14 @@ mod tests {
                     function: function.as_str().to_string(),
                     message: format!("blocking injector was not released: {error}"),
                 })?;
-            TestHeaderInjector.inject(function, arguments, row_count, span)
+            TestHeaderInjector.inject_with_context(
+                function,
+                arguments,
+                row_count,
+                span,
+                now,
+                prior_error_rows,
+            )
         }
     }
 

@@ -1,6 +1,14 @@
+//! NATS ingestor execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** NATS subscription consumption, acknowledgement and source-boundary observation.
+//! - **Depends on.** Typed NATS plans, broker clients and ingestor runtime admission.
+//! - **Must not know.** NSPL parsing, registry validation or placement computation.
+
 use async_nats::Client as NatsClient;
 
 use super::super::*;
+use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct NatsIngestor;
 
@@ -306,6 +314,7 @@ impl NatsIngestor {
                                         let payload = BufferedIngestPayload::new(
                                             payload,
                                             BufferedIngestMetadata::Headers(headers),
+                                            actual_utc_now(),
                                         );
                                         if let IngestorQuiesceIntake::Dispatch(payload) =
                                             task_quiesce.intake(instance_idx, payload, false)

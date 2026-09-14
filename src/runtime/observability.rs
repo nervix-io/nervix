@@ -1,3 +1,10 @@
+//! Runtime-state observation projections.
+//!
+//! Layer: data plane.
+//! - **Owns.** Read-only descriptions and metrics derived from installed runtime state.
+//! - **Depends on.** Execution plans, branch-local state and runtime metric collectors.
+//! - **Must not know.** NSPL parsing, persistence mutations or external telemetry transport.
+
 use super::*;
 
 pub(super) fn kafka_domain_offset_describe_from_schedule(
@@ -628,7 +635,7 @@ impl Runtime {
                 physical_node_id: self.inner.remote_dispatch.local_node_id.read().as_ref(),
                 messages: 1,
                 bytes: key.len().arch_into(),
-                domain_timestamp: Some(current_timestamp()),
+                domain_timestamp: None,
             });
         self.mark_branch_aggregated_metrics_updated(domain, ModelKind::Lookup, name);
         lookup

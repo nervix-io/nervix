@@ -1,3 +1,10 @@
+//! Ingestor runtime materialization.
+//!
+//! Layer: data plane.
+//! - **Owns.** Starting concrete connector tasks from validated ingestor execution plans.
+//! - **Depends on.** Ingestor plans, installed domain capabilities and connector runtimes.
+//! - **Must not know.** NSPL parsing, registry validation or placement selection.
+
 use std::borrow::Cow;
 
 use super::*;
@@ -543,8 +550,6 @@ mod tests {
                 id: domain.clone(),
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
-                    period: "1s".to_string(),
-                    skew: "0s".to_string(),
                     placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Running,
@@ -673,8 +678,6 @@ mod tests {
                 id: domain.clone(),
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
-                    period: "1s".to_string(),
-                    skew: "0s".to_string(),
                     placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Running,

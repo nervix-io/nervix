@@ -1,3 +1,10 @@
+//! Branch-local window processor execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** Window state, aggregate accumulation, due-window emission and eviction.
+//! - **Depends on.** Validated window plans, Arrow batches and bound domain time.
+//! - **Must not know.** NSPL parsing, placement decisions or connector transports.
+
 use super::*;
 
 #[derive(Debug)]
@@ -1205,13 +1212,15 @@ pub(super) struct WindowAggregateFunctionInjector {
 }
 
 impl VmFunctionInjector for WindowAggregateFunctionInjector {
-    fn inject(
+    fn inject_with_context(
         &self,
         function: &FunctionName,
         _arguments: &[VmTypedArray],
         row_count: usize,
         _span: nervix_vm::program::Span,
-    ) -> Result<VmTypedArray, nervix_vm::RuntimeError> {
+        _now: Timestamp,
+        _prior_error_rows: nervix_vm::RowErrorMask<'_>,
+    ) -> Result<nervix_vm::InjectedResult, nervix_vm::RuntimeError> {
         let FunctionName::WindowAggregate(invocation) = function else {
             return Err(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!("function '{}' is not a window aggregate", function.as_str()),
@@ -1243,11 +1252,12 @@ impl VmFunctionInjector for WindowAggregateFunctionInjector {
         })?;
         let array = runtime_value_arrow_array(data_type, Some(&value), row_count)
             .map_err(|message| nervix_vm::RuntimeError::InvalidBatch { message })?;
-        VmTypedArray::try_from_array_ref(array).map_err(|error| {
+        let output = VmTypedArray::try_from_array_ref(array).map_err(|error| {
             nervix_vm::RuntimeError::InvalidBatch {
                 message: error.to_string(),
             }
-        })
+        })?;
+        Ok(nervix_vm::InjectedResult::success(output))
     }
 }
 

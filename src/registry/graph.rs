@@ -89,11 +89,11 @@ impl ActiveGraph {
             } else {
                 nodes.insert(node.dataflow_id());
             }
-            if let Some(client) = node.dataflow_source_client() {
-                nodes.insert(client.node.id);
+            if let Some(client) = node.dataflow_source_client_node() {
+                nodes.insert(client.id);
             }
-            if let Some(client) = node.dataflow_sink_client() {
-                nodes.insert(client.node.id);
+            if let Some(client) = node.dataflow_sink_client_node() {
+                nodes.insert(client.id);
             }
         }
         DataflowGraphCounts {
@@ -428,21 +428,27 @@ impl ActiveNode {
         format!("{}:{}", self.kind.as_str(), self.identifier.as_str())
     }
 
-    /// The external system an ingestor reads from. The ingest and emit sides of one named client
-    /// are separate identities, so a client both ingested from and emitted to is drawn twice.
-    fn dataflow_source_client(&self) -> Option<DataflowClient> {
+    /// The external system node an ingestor reads from. Graph counts use the node alone so they do
+    /// not allocate metric strings that only a rendered edge needs.
+    fn dataflow_source_client_node(&self) -> Option<DataflowNode> {
         let Model::Ingestor(ingestor) = self.config.as_ref() else {
             return None;
         };
         let source = ingestor.source.source_ref();
         let source_kind = ingestor.source.source_kind().as_str();
-        let node = DataflowNode::new(
+        Some(DataflowNode::new(
             format!("{}_source:{}", source_kind, source.as_str()),
             source.as_str(),
             DataflowNodeRole::Client {
                 transport: ingestor.source.transport_label().to_string(),
             },
-        );
+        ))
+    }
+
+    /// The external system an ingestor reads from. The ingest and emit sides of one named client
+    /// are separate identities, so a client both ingested from and emitted to is drawn twice.
+    fn dataflow_source_client(&self) -> Option<DataflowClient> {
+        let node = self.dataflow_source_client_node()?;
         let metric = DataflowMetricRef::new(
             self.kind.as_str().to_ascii_uppercase(),
             self.identifier.as_str(),
@@ -452,20 +458,29 @@ impl ActiveNode {
         Some(DataflowClient { node, metric })
     }
 
-    /// The external system an emitter writes to. The metric names the input relay only when the
-    /// emitter has exactly one, since that is what makes the count attributable to a relay.
-    fn dataflow_sink_client(&self) -> Option<DataflowClient> {
+    /// The external system node an emitter writes to. Graph counts use the node alone so they do
+    /// not allocate metric strings that only a rendered edge needs.
+    fn dataflow_sink_client_node(&self) -> Option<DataflowNode> {
         let Model::Emitter(emitter) = self.config.as_ref() else {
             return None;
         };
         let client = emitter.sink.client();
-        let node = DataflowNode::new(
+        Some(DataflowNode::new(
             format!("client_sink:{}", client.as_str()),
             client.as_str(),
             DataflowNodeRole::Client {
                 transport: emitter.sink.transport_label().to_string(),
             },
-        );
+        ))
+    }
+
+    /// The external system an emitter writes to. The metric names the input relay only when the
+    /// emitter has exactly one, since that is what makes the count attributable to a relay.
+    fn dataflow_sink_client(&self) -> Option<DataflowClient> {
+        let node = self.dataflow_sink_client_node()?;
+        let Model::Emitter(emitter) = self.config.as_ref() else {
+            return None;
+        };
         let sole_input_relay = if emitter.from.relays().len() == 1 {
             emitter.from.first().map(|relay| relay.as_str().to_string())
         } else {

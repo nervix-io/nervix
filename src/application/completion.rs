@@ -66,7 +66,7 @@ pub(in crate::application) enum CompletionError {
 impl SessionServiceImpl {
     pub(in crate::application) async fn wait_for_authoritative_visibility(
         &self,
-    ) -> Result<(), CompletionError> {
+    ) -> Result<(), Report<CompletionError>> {
         let revision = self.inner.consensus.current_revision().await;
         self.wait_for_authoritative_revision(revision).await
     }
@@ -74,7 +74,7 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn wait_for_authoritative_revision(
         &self,
         revision: u64,
-    ) -> Result<(), CompletionError> {
+    ) -> Result<(), Report<CompletionError>> {
         let mut cluster_state = self.inner.cluster.subscribe_state_changes().await;
         self.inner
             .cluster
@@ -85,16 +85,16 @@ impl SessionServiceImpl {
         let Some(wait_budget) =
             node_unavailability_timeout.checked_add(RUNTIME_REVISION_READINESS_PROPAGATION_BOUND)
         else {
-            return Err(CompletionError::DeadlineOverflow {
+            return Err(Report::new(CompletionError::DeadlineOverflow {
                 node_unavailability_timeout,
                 propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
-            });
+            }));
         };
         let Some(deadline) = tokio::time::Instant::now().checked_add(wait_budget) else {
-            return Err(CompletionError::DeadlineOverflow {
+            return Err(Report::new(CompletionError::DeadlineOverflow {
                 node_unavailability_timeout,
                 propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
-            });
+            }));
         };
 
         let local_identity = ClusterNodeIdentity::new(
@@ -122,10 +122,10 @@ impl SessionServiceImpl {
                 return Ok(());
             }
             if deadline_elapsed {
-                return Err(CompletionError::Visibility {
+                return Err(Report::new(CompletionError::Visibility {
                     revision,
                     pending_nodes,
-                });
+                }));
             }
             tokio::select! {
                 biased;

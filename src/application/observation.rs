@@ -2407,8 +2407,6 @@ mod tests {
                 id: DomainName::parse("default").expect("valid domain"),
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
-                    period: "0ms".to_string(),
-                    skew: "0ms".to_string(),
                     placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Stopped,

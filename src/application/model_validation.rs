@@ -10,8 +10,8 @@
 use ahash::{HashMap, HashSet};
 use meticulous::OptionExt as _;
 use nervix_models::{
-    CreateInferencer, CreateLookup, DomainClockPeriod, DomainConfig, DomainName, DomainPace,
-    InferencerTensorDimension, InferencerTensorSchema, Model, ModelKind, VhostTlsResource,
+    CreateInferencer, CreateLookup, DomainName, DomainPace, InferencerTensorDimension,
+    InferencerTensorSchema, Model, ModelKind, VhostTlsResource,
 };
 use ort::{
     session::Session,
@@ -157,30 +157,6 @@ impl OnnxTensorMetadata {
     }
 }
 
-pub(in crate::application) fn validate_domain_config(config: &DomainConfig) -> Result<(), String> {
-    if let DomainPace::Paced = config.pace {
-        domain_clock_period(config)?;
-        let skew = humantime::parse_duration(&config.skew)
-            .map_err(|err| format!("invalid domain skew '{}': {err}", config.skew))?;
-        u64::try_from(skew.as_nanos()).map_err(|_| {
-            format!(
-                "invalid domain skew '{}': duration does not fit in 64-bit nanoseconds",
-                config.skew
-            )
-        })?;
-    }
-    Ok(())
-}
-
-pub(in crate::application) fn domain_clock_period(
-    config: &DomainConfig,
-) -> Result<DomainClockPeriod, String> {
-    config
-        .period
-        .parse::<DomainClockPeriod>()
-        .map_err(|error| format!("invalid domain period '{}': {error}", config.period))
-}
-
 impl SessionServiceImpl {
     /// Validates the bindings a planned batch would activate: everything that has to reach outside
     /// the registry (domain pace, resource storage, ONNX metadata) and therefore cannot live in
@@ -198,9 +174,7 @@ impl SessionServiceImpl {
             tokio::task::consume_budget().await;
             match model {
                 Model::Ingestor(ingestor) => {
-                    if let DomainPace::Paced = pace
-                        && ingestor.timestamp_source.is_none()
-                    {
+                    if pace.is_paced() && ingestor.timestamp_source.is_none() {
                         return Err(format!(
                             "paced domain '{}' requires ingestor '{}' to declare TIMESTAMP NOW or \
                              TIMESTAMP AT <field>",
@@ -457,34 +431,5 @@ impl SessionServiceImpl {
             inputs: model_inputs,
             outputs: model_outputs,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn validate_domain_config_accepts_paced_domains_with_valid_period() {
-        let config = DomainConfig {
-            pace: DomainPace::Paced,
-            period: "30s".to_string(),
-            skew: "1s".to_string(),
-            placement: nervix_models::PlacementPolicy::Neutral,
-        };
-
-        assert!(validate_domain_config(&config).is_ok());
-    }
-
-    #[test]
-    fn validate_domain_config_accepts_unpaced_domains_without_tick_period() {
-        let config = DomainConfig {
-            pace: DomainPace::Unpaced,
-            period: "not-a-duration".to_string(),
-            skew: "not-a-duration".to_string(),
-            placement: nervix_models::PlacementPolicy::Neutral,
-        };
-
-        assert!(validate_domain_config(&config).is_ok());
     }
 }

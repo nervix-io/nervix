@@ -89,6 +89,13 @@ collection is independent for each source relay and concrete branch and releases
 optional size boundary. Equal keys from differently named branches are never collected together.
 Branch identity still collapses only after successful publication.
 
+Emitter filtering, construction, headers, direct `VALUES`, encoding, and generated integration
+timestamps use the batch's accepted domain execution snapshot. A failed publish keeps that
+snapshot with the pending batch across physical retry backoff; retry does not reevaluate
+expressions at a later domain time. Explicit source event timestamps remain unchanged. Fields
+whose public contract is observation time, such as OTEL `observed_time_unix_nano`, read actual UTC
+only at the external export boundary.
+
 ## Publishing modes
 
 Every emitter sink requires `MODE <body>` as its final sink subclause, immediately before

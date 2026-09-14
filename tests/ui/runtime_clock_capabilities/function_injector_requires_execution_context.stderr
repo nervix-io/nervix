@@ -1,0 +1,5 @@
+error[E0576]: cannot find method or associated constant `inject` in trait `FunctionInjector`
+  --> tests/ui/runtime_clock_capabilities/function_injector_requires_execution_context.rs:10:48
+   |
+10 |     let _ = <UdfExecutor as FunctionInjector>::inject(
+   |                                                ^^^^^^ not found in `FunctionInjector`

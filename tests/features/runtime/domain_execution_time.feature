@@ -81,6 +81,80 @@ Feature: Domain execution time
       | 1            |
       | 3            |
 
+  @domain_execution_time @clock_architecture
+  Scenario Outline: A volatile Roto UDF receives the bound domain execution time
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UDF domain_time_precedes
+        WITH ROTO_0_13
+        ARGS (boundary DATETIME)
+        RETURNS BOOL
+        VOLATILE
+        CODE $roto$
+          fn domain_time_precedes(boundary: DatetimeColumn) -> BoolColumn {
+              boundary.lt_s(now()).not()
+          }
+        $roto$;
+      CREATE SCHEMA clock_probe (
+        sequence I64,
+        boundary DATETIME
+      );
+      CREATE WIRE JSON SCHEMA clock_probe_wire MODE STRICT (
+        sequence integer,
+        boundary string
+      );
+      CREATE CODEC clock_probe_codec
+        FROM WIRE JSON SCHEMA clock_probe_wire
+        TO SCHEMA clock_probe
+        ENCODE boundary AS RFC3339;
+      CREATE RELAY clock_probes SCHEMA clock_probe UNBRANCHED;
+      CREATE RELAY accepted_clock_probes SCHEMA clock_probe UNBRANCHED;
+      CREATE VHOST edge roto-clock-{{test_id}}.example.com;
+      CREATE ENDPOINT clock_probe_endpoint
+        ON edge
+        PATH '/probe'
+        TYPE HTTP;
+      CREATE INGESTOR clock_probe_source
+        FROM ENDPOINT clock_probe_endpoint MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING clock_probe_codec
+        TIMESTAMP NOW
+        TO clock_probes
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE JUNCTION apply_clock_probe
+        FROM clock_probes
+        UNBRANCHED
+        TO accepted_clock_probes
+          INHERIT ALL
+          WHERE udf::domain_time_precedes(input.boundary)
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION accepted_clock_probes_subscription TO accepted_clock_probes;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
+      """
+    And http payload is posted to host "roto-clock-{{test_id}}.example.com" path "/probe"
+      """
+      {"sequence":1,"boundary":"2001-01-01T00:00:00Z"}
+      """
+    Then within "5s" the relay subscription receives a payload
+      """
+      "sequence":1
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @domain_execution_time
   Scenario Outline: Generated message errors use the failing execution snapshot
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"

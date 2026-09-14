@@ -41,7 +41,7 @@ pub use command::{CommandExecutionReference, CommandExecutionReferenceError};
 pub use domain_clock::{
     DomainAdmissionWindow, DomainClockAdvancement, DomainClockAuthority,
     DomainClockAuthorityRevision, DomainClockBoundary, DomainClockError, DomainClockPeriod,
-    DomainClockProgress, DomainClockState, DomainTimeRate,
+    DomainClockProgress, DomainClockSkew, DomainClockState, DomainTimeRate,
 };
 pub use expression::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,

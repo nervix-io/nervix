@@ -1118,6 +1118,7 @@ pub(in crate::registry) fn add_output_branch_dependency_edges(
 mod tests {
     use std::fs;
 
+    use meticulous::ResultExt as _;
     use nervix_models::{
         AckMode, Assignment, AssignmentTarget, AssignmentTargetScope, ClusterNodeName,
         CreateGenerator, CreateIngestor, CreateReingestor, CreateWireSchema, Expression,
@@ -1517,7 +1518,9 @@ mod tests {
                         name: named("generate"),
                         materialized_relay: named("input"),
                         branched_by: BranchSelection::branched_by(named("branch_b")),
-                        each: "100ms".to_string(),
+                        each: "100ms"
+                            .parse()
+                            .assured("the fixture cadence is a positive duration"),
                         output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
                             relay: named("output"),
                             construction: nervix_nspl::parse_route_construction(

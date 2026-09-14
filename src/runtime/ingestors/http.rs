@@ -1,7 +1,15 @@
+//! HTTP polling ingestor execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** HTTP polling, response capture and source-boundary timestamp observation.
+//! - **Depends on.** Typed HTTP plans, connector clients and installed domain cadence.
+//! - **Must not know.** NSPL parsing, registry validation or placement computation.
+
 use reqwest::Client as HttpClient;
 use tokio_util::sync::CancellationToken;
 
 use super::super::*;
+use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct HttpIngestor;
 
@@ -69,7 +77,7 @@ impl HttpIngestor {
             }
         })?;
         let cadence = runtime
-            .bind_domain_cadence(domain, &every, DomainCadenceStart::Immediate)
+            .bind_domain_cadence(domain, every, DomainCadenceStart::Immediate)
             .map_err(|source| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
@@ -107,7 +115,7 @@ impl HttpIngestor {
                 domain = task_domain.as_str(),
                 ingestor = task_ingestor.as_str(),
                 endpoint = endpoint.as_str(),
-                every = every.as_str(),
+                every = %every,
                 "started http ingestor"
             );
 
@@ -240,6 +248,7 @@ impl HttpIngestor {
                                         let payload = BufferedIngestPayload::new(
                                             payload.as_ref(),
                                             BufferedIngestMetadata::Headers(headers),
+                                            actual_utc_now(),
                                         );
                                         if let IngestorQuiesceIntake::Dispatch(payload) =
                                             task_quiesce.intake(0, payload, false)

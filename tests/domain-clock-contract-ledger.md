@@ -138,14 +138,16 @@ Actual UTC has these semantic owners. None of these observations waits directly 
 
 | Semantic owner | Permitted observation |
 | --- | --- |
-| Domain-clock mapping | An unpaced read and the physical anchor of a new paced mapping observe actual UTC through the runtime physical-time boundary. Once created, the mapping projects logical time with a process-local monotonic instant. |
+| Domain-clock mapping | An unpaced read, the physical anchor of a new paced mapping, and paced projection observe actual UTC through the runtime physical-time boundary. Per-node reads are clamped so they do not move backward within one generation. Logical waits convert their remaining duration into a process-local monotonic deadline. |
 | External telemetry connectors | OTEL observation timestamps and omitted external observation fields use actual UTC. Sentry and OTEL interpret an HTTP-date `Retry-After` against actual UTC, convert the result to a duration, and hand it to the emitter's monotonic retry schedule. User-authored event timestamps and domain `VALUES` keep their declared logical or preserved-source classes. |
 | Interconnect security | Certificate `not before` and `not after` values are compared with actual UTC. A valid certificate's remaining lifetime is converted immediately to a monotonic connection deadline. |
 | Edge decoding | RFC 3164 syslog, whose wire form omits a year, supplies the current UTC year while decoding the external source timestamp. |
 | Control-plane records | Transaction, resource, credential-verification, administrative event, and observation metadata use actual UTC because they describe real control-plane events rather than domain execution. |
 | Cluster incarnation | A process start uses Unix-epoch nanoseconds as the restart generation that distinguishes gossip incarnations. It is identity metadata and never schedules a wait. |
 | Metrics | Monotonic instants age live wall series. Actual UTC stamps persisted wall snapshots so restart downtime can be observed and supplies external scrape and latency-observation timestamps. Domain-series windows and event watermarks retain domain timestamps. |
-| Context-free engine boundary | The generic UDF injector's context-free entry point supplies actual UTC for callers outside a Nervix domain. Every Nervix data-plane invocation uses the context-bearing entry point and supplies its domain execution snapshot. |
+
+Expression engines receive a bound execution snapshot from their caller. Their public execution
+interfaces do not expose a context-free clock path and the engines do not observe actual UTC.
 
 ## Baseline probes and controls
 
@@ -440,3 +442,25 @@ The actual-UTC source audit found only the observation owners enumerated above. 
 physical infrastructure owners imports or reads a domain clock to schedule its deadlines.
 
 No complete Cucumber-suite or final qualification result is claimed by this record.
+
+## Task 13 validation record
+
+Recorded on 13 September 2026 against the task 13 worktree:
+
+| Probe | Result |
+| --- | --- |
+| Public bound-engine-clock reproducer before product changes | Pass in both the one- and three-node examples. The running data-plane path already supplied the paced domain snapshot to Roto, so the behavioral scenario did not expose the dormant context-free APIs. The source and API audit found those paths in the generic VM injector and WASM host and found a data-plane-wide actual-UTC helper. |
+| `A volatile Roto UDF receives the bound domain execution time` | Pass; both one- and three-node examples and all 12 steps evaluated `now()` near the domain's 2000 logical origin rather than actual UTC. |
+| Clock architecture source check | Pass; direct actual-UTC reads, actual-UTC boundary imports, physical-deadline capability construction, VM injection, WASM guest operations, and ownership headers conform to their declared owner sets. The check runs in `just validate` and `just validate-ci`. |
+| Runtime capability compile failures | Pass; all 11 state and clock capability cases prove logical and physical deadline types cannot be interchanged and the VM has no context-free injector. The clock architecture source check separately proves physical-deadline construction remains private and every WASM guest operation requires explicit time context. |
+| Typed model and language coverage | Pass; all 104 model and 780 NSPL unit tests covered typed domain periods and skew, typed HTTP, Prometheus, and generator cadence, canonical rendering, and current-shape persistence. |
+| Engine coverage | Pass; all 105 VM, 6 Roto, and 38 WASM unit tests covered explicit execution snapshots across injection, initialization, input, timeout, flush, and state operations, including Rust and Go guests. |
+| Stopped-domain direct lookup regression | Fixed after the complete suite exposed all 11 examples in `lookup.feature` requesting an active domain snapshot only to timestamp a metric. All 11 lookup scenarios and 144 steps now pass across stopped domains, remote owners, replicas, and cluster restarts. Both hash-map metric scenarios and all 42 steps also pass; direct control-plane lookups retain wall-rate metrics and correctly leave domain-rate metrics unavailable because no graph record or execution timestamp exists. |
+| Server and consensus suites | Pass; all 848 `nervix-server` library tests and all 43 consensus unit tests passed. |
+| Public documentation and skill | Pass; the NSPL skill publication dry-run, all 140 executable NSPL documentation blocks, 90 documentation-generator tests, and 6 documentation-worker tests passed. |
+| `just book 0.1.0-dev` | Pass; fresh console screenshots and the HTML, LLM, and Markdown renderers completed successfully. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, all executable NSPL documentation blocks, and the clock architecture boundary check. |
+| `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline. String error signatures fell from 487 to 485 and bare error signatures fell from 838 to 834, and the baseline records both reductions. |
+
+No complete Cucumber-suite or final qualification result is claimed by this record. The full
+repository qualification remains owned by task 14.

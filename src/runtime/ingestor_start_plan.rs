@@ -115,7 +115,9 @@ macro_rules! client_plan {
     };
 }
 
-client_plan!(HttpIngestorStartPlan { every: String });
+client_plan!(HttpIngestorStartPlan {
+    every: nervix_models::DomainClockPeriod,
+});
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct KafkaOffsetStatePlacement {
     pub(super) placement: RuntimeStatePlacement,
@@ -157,7 +159,7 @@ client_plan!(RedisPubSubIngestorStartPlan {
 });
 client_plan!(PrometheusIngestorStartPlan {
     query: String,
-    every: String,
+    every: nervix_models::DomainClockPeriod,
 });
 client_plan!(ZeroMqIngestorStartPlan {
     mode: nervix_models::ZeroMqIngestMode,
@@ -304,7 +306,7 @@ impl IngestorStartPlan {
                     IngestorQuiesceSupport::SuspendOrBuffer,
                 ),
                 client: client(expected, &resolved.name, &resolved.mount, &resolved.config)?,
-                every: every.clone(),
+                every: *every,
             })),
             (
                 IngestSource::Kafka {
@@ -471,7 +473,7 @@ impl IngestorStartPlan {
                 ),
                 client: client(expected, &resolved.name, &resolved.mount, &resolved.config)?,
                 query: query.clone(),
-                every: every.clone(),
+                every: *every,
             })),
             (
                 IngestSource::ZeroMq {
@@ -664,7 +666,9 @@ mod tests {
             IngestorConnectorKind::Http => (
                 IngestSource::Http {
                     client,
-                    every: "1s".to_string(),
+                    every: "1s"
+                        .parse()
+                        .assured("the fixture cadence is a positive duration"),
                     quiesce: IngestQuiesceMode::Suspend,
                 },
                 Model::ClientHttp(CreateClientHttp {
@@ -770,7 +774,9 @@ mod tests {
                 IngestSource::Prometheus {
                     client,
                     query: "up".to_string(),
-                    every: "1s".to_string(),
+                    every: "1s"
+                        .parse()
+                        .assured("the fixture cadence is a positive duration"),
                     quiesce: IngestQuiesceMode::Suspend,
                 },
                 Model::ClientPrometheus(CreateClientPrometheus {
@@ -881,7 +887,9 @@ mod tests {
     fn decides_http_connector_from_the_scheduled_ingestor_and_resolved_client() {
         let scheduled = scheduled_ingestor(IngestSource::Http {
             client: named("upstream"),
-            every: "1s".to_string(),
+            every: "1s"
+                .parse()
+                .assured("the fixture cadence is a positive duration"),
             quiesce: IngestQuiesceMode::Suspend,
         });
         let source_model = Model::ClientHttp(CreateClientHttp {

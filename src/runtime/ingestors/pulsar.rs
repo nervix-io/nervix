@@ -1,3 +1,10 @@
+//! Pulsar ingestor execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** Pulsar consumption, acknowledgement and source-boundary observation.
+//! - **Depends on.** Typed Pulsar plans, broker clients and ingestor runtime admission.
+//! - **Must not know.** NSPL parsing, registry validation or placement computation.
+
 use std::borrow::Cow;
 
 use nervix_models::{DomainName, IngestorName};
@@ -8,6 +15,7 @@ use pulsar::{
 };
 
 use super::super::*;
+use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct PulsarIngestor;
 
@@ -332,7 +340,7 @@ impl PulsarIngestor {
                                                             output_routes: &task_output_routes,
                                                             filter_where: task_filter_where.as_ref(),
                                                             metadata: &metadata,
-                                                            ingested_at: current_timestamp(),
+                                                            ingested_at: actual_utc_now(),
                                                             acks: vec![AckSet::empty()],
                                                         })
                                                         .await
@@ -463,7 +471,7 @@ impl PulsarIngestor {
                                                         output_routes: &task_output_routes,
                                                         filter_where: task_filter_where.as_ref(),
                                                         metadata: &metadata,
-                                                        ingested_at: current_timestamp(),
+                                                        ingested_at: actual_utc_now(),
                                                         acks: vec![if !task_branched_senders.is_empty() {
                                                             acks.attached()
                                                         } else {
@@ -656,7 +664,7 @@ impl PulsarIngestor {
                                                 tokio::task::consume_budget().await;
                                                 let mut completions = Vec::with_capacity(messages.len());
                                                 let mut batch_failure = None::<String>;
-                                                let ingested_at = current_timestamp();
+                                                let ingested_at = actual_utc_now();
 
                                                 // Every message keeps its own ack root; the group only
                                                 // shares the dispatch call, so an ack still resolves per

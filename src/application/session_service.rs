@@ -1149,7 +1149,7 @@ impl SessionServiceImpl {
         let persistent_request =
             match PersistentCommandRequest::from_operations(&operations, &req.domain) {
                 Ok(request) => request,
-                Err(error) => return command_error(error),
+                Err(error) => return command_error(error.to_string()),
             };
         let mut execution_guard = None;
         let mut persistent_execution = None;

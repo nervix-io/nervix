@@ -1,3 +1,10 @@
+//! Branch-local hash-map lookup execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** Typed lookup-call keys, pending calls and result-column construction.
+//! - **Depends on.** Compiled expressions, Arrow values and resource lookups.
+//! - **Must not know.** NSPL parsing, scheduling or connector lifecycle.
+
 use super::*;
 
 #[derive(Debug, Clone)]
@@ -623,7 +630,7 @@ mod tests {
             "FILTER-MAP",
             &program,
             batch,
-            current_timestamp(),
+            Timestamp::now(),
             &HashMap::default(),
         )
         .await

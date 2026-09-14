@@ -242,7 +242,7 @@ pub(super) async fn run_processor_node_runtime(
         .into_iter()
         // Processor collection is branch-local and paced by the domain clock. The outer relay
         // interaction therefore delivers each dequeued batch unchanged.
-        .map(|(relay, receiver)| RelayInteractionInput::new(relay, receiver, None))
+        .map(|(relay, receiver)| RelayInteractionInput::immediate(relay, receiver))
         .collect();
     let mut interaction = RelayInteraction::with_commands(
         interaction_inputs,
@@ -1375,7 +1375,7 @@ mod tests {
         let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
         instances.insert_restored(
             None,
-            current_timestamp(),
+            Timestamp::now(),
             ProcessorBranchTask {
                 input: input_tx,
                 commands,

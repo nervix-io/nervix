@@ -380,9 +380,14 @@ pub(in crate::application) async fn create_test_domain(consensus: &Proposer, raw
     let state = DomainState {
         id: domain,
         config: DomainConfig {
-            pace: DomainPace::Paced,
-            period: "30s".to_string(),
-            skew: "1s".to_string(),
+            pace: DomainPace::Paced {
+                period: "30s"
+                    .parse()
+                    .assured("thirty seconds is a positive fixture cadence"),
+                skew: "1s"
+                    .parse()
+                    .assured("one second fits the fixture skew representation"),
+            },
             placement: nervix_models::PlacementPolicy::Neutral,
         },
         status: DomainStatus::Stopped,

@@ -94,11 +94,15 @@ use nervix_roto::UdfExecutor;
 use nervix_vm::SPAWN_BLOCKING_ROW_THRESHOLD as VM_SPAWN_BLOCKING_ROW_THRESHOLD;
 use nervix_vm::{
     CompileBinding as VmCompileBinding, CompileNamespace as VmCompileNamespace,
-    CompileOptions as VmCompileOptions, CompiledProgram as VmCompiledProgram,
-    ExecutionContext as VmExecutionContext, FunctionInjector as VmFunctionInjector,
-    OutputMode as VmOutputMode, SchemaSensitivity as VmSchemaSensitivity, SemanticNamespaces,
-    TypedArray as VmTypedArray, TypedBatch as VmTypedBatch, UdfSignatures as VmUdfSignatures,
+    CompileOptions as VmCompileOptions, CompiledPredicate as VmCompiledPredicate,
+    CompiledProgram as VmCompiledProgram, ExecutionContext as VmExecutionContext,
+    FunctionInjector as VmFunctionInjector, OutputMode as VmOutputMode,
+    PredicateCompileOptions as VmPredicateCompileOptions, SchemaSensitivity as VmSchemaSensitivity,
+    SemanticNamespaces, TypedArray as VmTypedArray, TypedBatch as VmTypedBatch,
+    UdfSignatures as VmUdfSignatures,
+    compile_predicate_with_options_for_bindings as compile_vm_predicate_with_options_for_bindings,
     compile_program_with_options_for_bindings_with_sensitivity as compile_vm_program_with_options_for_bindings_with_sensitivity,
+    execute_predicate_in_context as execute_vm_predicate_in_context,
     execute_program_with_selection_in_context,
     infer_set_expr_types_for_bindings_with_udfs as infer_vm_set_expr_types_for_bindings_with_udfs,
     lower_branch_construction, lower_finalized_output_filter, lower_generated_route,
@@ -235,6 +239,7 @@ mod state_replication;
 mod state_snapshot_exchange;
 mod state_snapshot_transfer;
 mod state_store;
+mod subscription_predicate;
 mod syslog;
 #[cfg(test)]
 mod test_fixtures;
@@ -276,7 +281,7 @@ use deduplicator::{
 };
 use domain_clock::{
     DomainCadenceOccurrence, DomainCadenceStart, DomainClock, DomainClockAccessResult,
-    DomainClockLifecycle, LogicalDeadline, checked_add_duration_to_timestamp, current_timestamp,
+    DomainClockLifecycle, LogicalDeadline, checked_add_duration_to_timestamp,
     wait_for_branch_deadline,
 };
 use domain_execution::{
@@ -543,6 +548,14 @@ pub mod clock_capability_compile_tests {
     };
 }
 
+/// The opaque subscription predicate exposed only so compile-fail tests can prove that general VM
+/// programs and predicates compiled with a different input context cannot be substituted.
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub mod subscription_predicate_capability_compile_tests {
+    pub use super::subscription_predicate::CompiledSubscriptionPredicate;
+}
+
 /// What the data plane exposes. Everything else this module and its submodules declare is
 /// `pub(in crate::runtime)` or narrower, so the layers above reach the runtime only through the
 /// names below.
@@ -552,7 +565,6 @@ pub(crate) use entity_gate::{
 };
 pub(crate) use error::RuntimeError;
 pub(crate) use events::RuntimeEvent;
-pub(crate) use filter_map::execute_filter_map_on_record;
 pub(crate) use ingest_metadata::{
     IngestFilterMapMetadata, IngestMessageHeaders, RetainedIngestHeaders,
 };
@@ -574,9 +586,13 @@ pub(crate) use state_snapshot_transfer::{
 pub(crate) use state_store::{
     PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
 };
+pub(crate) use subscription_predicate::{
+    CompiledSubscriptionPredicate, SubscriptionPredicateCompileContext,
+    compile_subscription_predicate, execute_subscription_predicate_on_record,
+};
 pub(crate) use vm_compile::{
     CompiledDomainUdfs, CompiledProgramWithMaterializedInterest, MaterializedProgramInterest,
-    RuntimeMaterializedRelaySpec, RuntimeVmCompileContext, compile_session_filter_map_program,
+    RuntimeMaterializedRelaySpec, RuntimeVmCompileContext,
 };
 pub(crate) use websocket_signaling::{
     CompiledSignalingProtocol, SignalingDataSink, WebsocketSignalingSession,

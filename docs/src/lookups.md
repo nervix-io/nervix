@@ -75,7 +75,10 @@ DESCRIBE HASH MAP <name>;
 LOOKUP <name> KEY '<key>';
 ```
 
-`DESCRIBE HASH MAP` reports the loaded resource version, path, codec, owner/replica placement, key field, and entry count. `LOOKUP` returns the matching decoded record when the key exists.
+`DESCRIBE HASH MAP` reports the loaded resource version, path, codec, owner/replica placement, key
+field, and entry count. `LOOKUP` returns the matching decoded record when the key exists. These are
+read-only control-plane commands: they do not execute the graph or require a running domain clock,
+so a loaded hash map remains directly queryable while its domain is stopped.
 
 Expressions can call `LOOKUP_HASH_MAP`:
 

@@ -67,7 +67,10 @@ appears — `order_count` of `3`, with the totals. Interleave `globex` orders an
 each customer's window fills separately: the branch keeps window state per customer, exactly like
 the deduplicator's history. If a window stays partially filled, the `30s` duration bound closes it.
 
-Duration bounds follow record timestamp watermarks — see
+Duration bounds start from record timestamp watermarks and become due when a later watermark or
+the bound domain clock reaches the target. A paced domain's `TIME RATE` changes the real wait for a
+partially filled window while preserving the records' external event timestamps. The output keeps
+the window's minimum low watermark and records the emission snapshot as its high watermark. See
 [Ingestion Timestamps](domains-and-time.md#ingestion-timestamps).
 
 Next: produce records without any input at all in [Generators](./quickstart-generators.md).

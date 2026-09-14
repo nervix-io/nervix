@@ -29,9 +29,9 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{ParseAsType, Timestamp, WasmProcessorLimits};
 use nervix_recovery::NoReceiver as _;
 use nervix_wasm_protocol as protocol;
-use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::sync::mpsc;
+#[cfg(test)]
 use triomphe::Arc;
 use wasmtime::{
     Caller, Config, Engine, Instance, InstancePre, Linker, Memory, Module, OptLevel,
@@ -665,10 +665,6 @@ impl WasmProcessorType {
     }
 }
 
-pub trait DomainClock: Send + Sync {
-    fn now(&self) -> Timestamp;
-}
-
 /// The domain time chosen by the data plane for one guest invocation.
 ///
 /// Runtime lifecycle and clock-generation validation happen before this engine boundary. The WASM
@@ -685,29 +681,6 @@ impl WasmExecutionContext {
 
     pub const fn now(self) -> Timestamp {
         self.now
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct FixedDomainClock {
-    now: Arc<Mutex<Timestamp>>,
-}
-
-impl FixedDomainClock {
-    pub fn new(now: Timestamp) -> Self {
-        Self {
-            now: Arc::new(Mutex::new(now)),
-        }
-    }
-
-    pub fn set(&self, now: Timestamp) {
-        *self.now.lock() = now;
-    }
-}
-
-impl DomainClock for FixedDomainClock {
-    fn now(&self) -> Timestamp {
-        *self.now.lock()
     }
 }
 
@@ -1185,7 +1158,6 @@ impl WasmRoutedOutput {
 }
 
 struct BranchStore {
-    clock: Box<dyn DomainClock>,
     memory_limiter: GuestMemoryLimiter,
     timeout_requests: Vec<WasmTimeoutRequest>,
     next_timeout_handle: i64,
@@ -1194,12 +1166,10 @@ struct BranchStore {
 
 impl BranchStore {
     fn new(
-        clock: Box<dyn DomainClock>,
         max_memory_bytes: usize,
         emitted_batch_sender: Option<mpsc::UnboundedSender<WasmEnvelope>>,
     ) -> Self {
         Self {
-            clock,
             memory_limiter: GuestMemoryLimiter::new(max_memory_bytes),
             timeout_requests: Vec::new(),
             next_timeout_handle: 1,
@@ -1208,10 +1178,9 @@ impl BranchStore {
     }
 
     fn now(&self) -> Timestamp {
-        match INVOCATION_NOW.try_with(|now| *now) {
-            Ok(now) => now,
-            Err(_) => self.clock.now(),
-        }
+        INVOCATION_NOW
+            .try_with(|now| *now)
+            .assured("every guest call is scoped to an explicit WASM execution context")
     }
 
     fn timeout_after(&mut self, delay_nanos: i64) -> i64 {
@@ -1247,10 +1216,10 @@ impl CompiledWasmProcessor {
         &self,
         limits: WasmProcessorLimits,
         init: WasmBranchInit,
-        clock: Box<dyn DomainClock>,
+        context: WasmExecutionContext,
         restored_state: Option<&[u8]>,
     ) -> Result<WasmBranchInstance, WasmProcessorError> {
-        self.instantiate_branch_with_emitter(limits, init, clock, restored_state, None)
+        self.instantiate_branch_with_emitter(limits, init, context, restored_state, None)
             .await
     }
 
@@ -1258,14 +1227,36 @@ impl CompiledWasmProcessor {
         &self,
         limits: WasmProcessorLimits,
         init: WasmBranchInit,
-        clock: Box<dyn DomainClock>,
+        context: WasmExecutionContext,
+        restored_state: Option<&[u8]>,
+        emitted_batch_sender: Option<mpsc::UnboundedSender<WasmEnvelope>>,
+    ) -> Result<WasmBranchInstance, WasmProcessorError> {
+        INVOCATION_NOW
+            .scope(context.now(), async {
+                self.instantiate_branch_inner(
+                    limits,
+                    init,
+                    context,
+                    restored_state,
+                    emitted_batch_sender,
+                )
+                .await
+            })
+            .await
+    }
+
+    async fn instantiate_branch_inner(
+        &self,
+        limits: WasmProcessorLimits,
+        init: WasmBranchInit,
+        context: WasmExecutionContext,
         restored_state: Option<&[u8]>,
         emitted_batch_sender: Option<mpsc::UnboundedSender<WasmEnvelope>>,
     ) -> Result<WasmBranchInstance, WasmProcessorError> {
         let max_memory_bytes = limits.max_memory_bytes.get().arch_into();
         let mut store = Store::new(
             &self.engine,
-            BranchStore::new(clock, max_memory_bytes, emitted_batch_sender),
+            BranchStore::new(max_memory_bytes, emitted_batch_sender),
         );
         store.limiter(|state| &mut state.memory_limiter);
         store
@@ -1284,9 +1275,9 @@ impl CompiledWasmProcessor {
             .map_err(|source| wasm_instantiate_error(limits, source))?;
         let mut branch =
             WasmBranchInstance::load_exports(store, instance, self.max_guest_buffer_bytes, limits)?;
-        branch.init(init).await?;
+        branch.init(init, context).await?;
         if let Some(restored_state) = restored_state {
-            branch.load_state(restored_state).await?;
+            branch.load_state(restored_state, context).await?;
         }
         Ok(branch)
     }
@@ -1369,19 +1360,27 @@ impl WasmBranchInstance {
             })
     }
 
-    pub async fn init(&mut self, init: WasmBranchInit) -> Result<(), WasmProcessorError> {
-        self.begin_operation("initialization")?;
-        let capacity_hint = init.serialized_capacity_hint();
-        let encoding = init.to_protocol();
-        let (ptr, size) = self
-            .write_message_to_guest(&encoding, capacity_hint)
-            .await?;
-        let code = self
-            .init
-            .call_async(&mut self.store, (ptr, size))
+    async fn init(
+        &mut self,
+        init: WasmBranchInit,
+        context: WasmExecutionContext,
+    ) -> Result<(), WasmProcessorError> {
+        INVOCATION_NOW
+            .scope(context.now(), async {
+                self.begin_operation("initialization")?;
+                let capacity_hint = init.serialized_capacity_hint();
+                let encoding = init.to_protocol();
+                let (ptr, size) = self
+                    .write_message_to_guest(&encoding, capacity_hint)
+                    .await?;
+                let code = self
+                    .init
+                    .call_async(&mut self.store, (ptr, size))
+                    .await
+                    .map_err(|source| wasm_call_error(self.limits, "nervix_init", source))?;
+                ensure_success("nervix_init", code)
+            })
             .await
-            .map_err(|source| wasm_call_error(self.limits, "nervix_init", source))?;
-        ensure_success("nervix_init", code)
     }
 
     pub async fn init_in_context(
@@ -1389,40 +1388,33 @@ impl WasmBranchInstance {
         init: WasmBranchInit,
         context: WasmExecutionContext,
     ) -> Result<(), Report<WasmProcessorError>> {
-        INVOCATION_NOW
-            .scope(context.now(), self.init(init))
-            .await
-            .map_err(Report::new)
+        self.init(init, context).await.map_err(Report::new)
     }
 
-    pub async fn current_domain_time(&mut self) -> Result<Timestamp, WasmProcessorError> {
-        self.begin_operation("domain-time read")?;
-        let nanos = self
-            .current_domain_time_nanos
-            .call_async(&mut self.store, ())
+    async fn current_domain_time(
+        &mut self,
+        context: WasmExecutionContext,
+    ) -> Result<Timestamp, WasmProcessorError> {
+        INVOCATION_NOW
+            .scope(context.now(), async {
+                self.begin_operation("domain-time read")?;
+                let nanos = self
+                    .current_domain_time_nanos
+                    .call_async(&mut self.store, ())
+                    .await
+                    .map_err(|source| {
+                        wasm_call_error(self.limits, "nervix_current_domain_time_nanos", source)
+                    })?;
+                Ok(Timestamp::from_unix_nanos(nanos))
+            })
             .await
-            .map_err(|source| {
-                wasm_call_error(self.limits, "nervix_current_domain_time_nanos", source)
-            })?;
-        Ok(Timestamp::from_unix_nanos(nanos))
     }
 
     pub async fn current_domain_time_in_context(
         &mut self,
         context: WasmExecutionContext,
     ) -> Result<Timestamp, Report<WasmProcessorError>> {
-        INVOCATION_NOW
-            .scope(context.now(), self.current_domain_time())
-            .await
-            .map_err(Report::new)
-    }
-
-    pub async fn process_batch(
-        &mut self,
-        arrow_ipc_batch: &[u8],
-    ) -> Result<Vec<WasmEnvelope>, WasmProcessorError> {
-        let envelope = WasmEnvelope::input_arrow_only(arrow_ipc_batch.to_vec());
-        self.process_envelope(&envelope).await
+        self.current_domain_time(context).await.map_err(Report::new)
     }
 
     pub async fn process_batch_in_context(
@@ -1434,37 +1426,43 @@ impl WasmBranchInstance {
         self.process_envelope_in_context(&envelope, context).await
     }
 
-    pub async fn process_envelope(
+    async fn process_envelope(
         &mut self,
         envelope: &WasmEnvelope,
+        context: WasmExecutionContext,
     ) -> Result<Vec<WasmEnvelope>, WasmProcessorError> {
-        self.begin_operation("batch processing")?;
-        let (ptr, size) = self.write_envelope_to_guest(envelope).await?;
-        let call_result = self
-            .process_batch
-            .call_async(&mut self.store, (ptr, size))
-            .await;
-        let code = match call_result {
-            Ok(code) => code,
-            Err(source) => {
-                if let Some(error) = wasm_limit_error(self.limits, "nervix_process_batch", &source)
-                {
-                    return Err(error);
-                }
+        INVOCATION_NOW
+            .scope(context.now(), async {
+                self.begin_operation("batch processing")?;
+                let (ptr, size) = self.write_envelope_to_guest(envelope).await?;
+                let call_result = self
+                    .process_batch
+                    .call_async(&mut self.store, (ptr, size))
+                    .await;
+                let code = match call_result {
+                    Ok(code) => code,
+                    Err(source) => {
+                        if let Some(error) =
+                            wasm_limit_error(self.limits, "nervix_process_batch", &source)
+                        {
+                            return Err(error);
+                        }
+                        if let Some(reason) = self.take_global_error().await? {
+                            return Err(WasmProcessorError::GuestGlobalError(reason));
+                        }
+                        return Err(wasm_call_error(self.limits, "nervix_process_batch", source));
+                    }
+                };
                 if let Some(reason) = self.take_global_error().await? {
                     return Err(WasmProcessorError::GuestGlobalError(reason));
                 }
-                return Err(wasm_call_error(self.limits, "nervix_process_batch", source));
-            }
-        };
-        if let Some(reason) = self.take_global_error().await? {
-            return Err(WasmProcessorError::GuestGlobalError(reason));
-        }
-        ensure_success("nervix_process_batch", code)?;
-        if let Some(reason) = self.take_global_error().await? {
-            return Err(WasmProcessorError::GuestGlobalError(reason));
-        }
-        self.read_pending_emit().await
+                ensure_success("nervix_process_batch", code)?;
+                if let Some(reason) = self.take_global_error().await? {
+                    return Err(WasmProcessorError::GuestGlobalError(reason));
+                }
+                self.read_pending_emit().await
+            })
+            .await
     }
 
     pub async fn process_envelope_in_context(
@@ -1472,41 +1470,47 @@ impl WasmBranchInstance {
         envelope: &WasmEnvelope,
         context: WasmExecutionContext,
     ) -> Result<Vec<WasmEnvelope>, Report<WasmProcessorError>> {
-        INVOCATION_NOW
-            .scope(context.now(), self.process_envelope(envelope))
+        self.process_envelope(envelope, context)
             .await
             .map_err(Report::new)
     }
 
-    pub async fn on_timeout(
+    async fn on_timeout(
         &mut self,
         handle: WasmTimeoutHandle,
+        context: WasmExecutionContext,
     ) -> Result<Vec<WasmEnvelope>, WasmProcessorError> {
-        self.begin_operation("timeout callback")?;
-        let call_result = self
-            .on_timeout
-            .call_async(&mut self.store, handle.raw())
-            .await;
-        let code = match call_result {
-            Ok(code) => code,
-            Err(source) => {
-                if let Some(error) = wasm_limit_error(self.limits, "nervix_on_timeout", &source) {
-                    return Err(error);
-                }
+        INVOCATION_NOW
+            .scope(context.now(), async {
+                self.begin_operation("timeout callback")?;
+                let call_result = self
+                    .on_timeout
+                    .call_async(&mut self.store, handle.raw())
+                    .await;
+                let code = match call_result {
+                    Ok(code) => code,
+                    Err(source) => {
+                        if let Some(error) =
+                            wasm_limit_error(self.limits, "nervix_on_timeout", &source)
+                        {
+                            return Err(error);
+                        }
+                        if let Some(reason) = self.take_global_error().await? {
+                            return Err(WasmProcessorError::GuestGlobalError(reason));
+                        }
+                        return Err(wasm_call_error(self.limits, "nervix_on_timeout", source));
+                    }
+                };
                 if let Some(reason) = self.take_global_error().await? {
                     return Err(WasmProcessorError::GuestGlobalError(reason));
                 }
-                return Err(wasm_call_error(self.limits, "nervix_on_timeout", source));
-            }
-        };
-        if let Some(reason) = self.take_global_error().await? {
-            return Err(WasmProcessorError::GuestGlobalError(reason));
-        }
-        ensure_success("nervix_on_timeout", code)?;
-        if let Some(reason) = self.take_global_error().await? {
-            return Err(WasmProcessorError::GuestGlobalError(reason));
-        }
-        self.read_pending_emit().await
+                ensure_success("nervix_on_timeout", code)?;
+                if let Some(reason) = self.take_global_error().await? {
+                    return Err(WasmProcessorError::GuestGlobalError(reason));
+                }
+                self.read_pending_emit().await
+            })
+            .await
     }
 
     pub async fn on_timeout_in_context(
@@ -1514,76 +1518,90 @@ impl WasmBranchInstance {
         handle: WasmTimeoutHandle,
         context: WasmExecutionContext,
     ) -> Result<Vec<WasmEnvelope>, Report<WasmProcessorError>> {
-        INVOCATION_NOW
-            .scope(context.now(), self.on_timeout(handle))
-            .await
-            .map_err(Report::new)
+        self.on_timeout(handle, context).await.map_err(Report::new)
     }
 
     /// Asks the guest to release everything it is holding because the host is quiescing this
     /// branch. Returns the output envelopes the guest emitted, which the caller must dispatch
     /// before snapshotting so a handoff neither loses nor duplicates them.
-    pub async fn flush(&mut self) -> Result<Vec<WasmEnvelope>, WasmProcessorError> {
-        self.begin_operation("flush")?;
-        let call_result = self.flush.call_async(&mut self.store, ()).await;
-        let code = match call_result {
-            Ok(code) => code,
-            Err(source) => {
-                if let Some(error) = wasm_limit_error(self.limits, "nervix_flush", &source) {
-                    return Err(error);
-                }
+    async fn flush(
+        &mut self,
+        context: WasmExecutionContext,
+    ) -> Result<Vec<WasmEnvelope>, WasmProcessorError> {
+        INVOCATION_NOW
+            .scope(context.now(), async {
+                self.begin_operation("flush")?;
+                let call_result = self.flush.call_async(&mut self.store, ()).await;
+                let code = match call_result {
+                    Ok(code) => code,
+                    Err(source) => {
+                        if let Some(error) = wasm_limit_error(self.limits, "nervix_flush", &source)
+                        {
+                            return Err(error);
+                        }
+                        if let Some(reason) = self.take_global_error().await? {
+                            return Err(WasmProcessorError::GuestGlobalError(reason));
+                        }
+                        return Err(wasm_call_error(self.limits, "nervix_flush", source));
+                    }
+                };
                 if let Some(reason) = self.take_global_error().await? {
                     return Err(WasmProcessorError::GuestGlobalError(reason));
                 }
-                return Err(wasm_call_error(self.limits, "nervix_flush", source));
-            }
-        };
-        if let Some(reason) = self.take_global_error().await? {
-            return Err(WasmProcessorError::GuestGlobalError(reason));
-        }
-        ensure_success("nervix_flush", code)?;
-        self.read_pending_emit().await
+                ensure_success("nervix_flush", code)?;
+                self.read_pending_emit().await
+            })
+            .await
     }
 
     pub async fn flush_in_context(
         &mut self,
         context: WasmExecutionContext,
     ) -> Result<Vec<WasmEnvelope>, Report<WasmProcessorError>> {
-        INVOCATION_NOW
-            .scope(context.now(), self.flush())
-            .await
-            .map_err(Report::new)
+        self.flush(context).await.map_err(Report::new)
     }
 
-    pub async fn save_state(&mut self) -> Result<Vec<u8>, WasmProcessorError> {
-        self.begin_operation("state snapshot")?;
-        let size = self
-            .dump_state
-            .call_async(&mut self.store, ())
+    async fn save_state(
+        &mut self,
+        context: WasmExecutionContext,
+    ) -> Result<Vec<u8>, WasmProcessorError> {
+        INVOCATION_NOW
+            .scope(context.now(), async {
+                self.begin_operation("state snapshot")?;
+                let size = self
+                    .dump_state
+                    .call_async(&mut self.store, ())
+                    .await
+                    .map_err(|source| wasm_call_error(self.limits, "nervix_dump_state", source))?;
+                self.read_guest_buffer(size).await
+            })
             .await
-            .map_err(|source| wasm_call_error(self.limits, "nervix_dump_state", source))?;
-        self.read_guest_buffer(size).await
     }
 
     pub async fn save_state_in_context(
         &mut self,
         context: WasmExecutionContext,
     ) -> Result<Vec<u8>, Report<WasmProcessorError>> {
-        INVOCATION_NOW
-            .scope(context.now(), self.save_state())
-            .await
-            .map_err(Report::new)
+        self.save_state(context).await.map_err(Report::new)
     }
 
-    pub async fn load_state(&mut self, state: &[u8]) -> Result<(), WasmProcessorError> {
-        self.begin_operation("state restore")?;
-        let (ptr, size) = self.write_to_guest_buffer(state).await?;
-        let code = self
-            .load_state
-            .call_async(&mut self.store, (ptr, size))
+    async fn load_state(
+        &mut self,
+        state: &[u8],
+        context: WasmExecutionContext,
+    ) -> Result<(), WasmProcessorError> {
+        INVOCATION_NOW
+            .scope(context.now(), async {
+                self.begin_operation("state restore")?;
+                let (ptr, size) = self.write_to_guest_buffer(state).await?;
+                let code = self
+                    .load_state
+                    .call_async(&mut self.store, (ptr, size))
+                    .await
+                    .map_err(|source| wasm_call_error(self.limits, "nervix_load_state", source))?;
+                ensure_success("nervix_load_state", code)
+            })
             .await
-            .map_err(|source| wasm_call_error(self.limits, "nervix_load_state", source))?;
-        ensure_success("nervix_load_state", code)
     }
 
     pub async fn load_state_in_context(
@@ -1591,30 +1609,31 @@ impl WasmBranchInstance {
         state: &[u8],
         context: WasmExecutionContext,
     ) -> Result<(), Report<WasmProcessorError>> {
-        INVOCATION_NOW
-            .scope(context.now(), self.load_state(state))
-            .await
-            .map_err(Report::new)
+        self.load_state(state, context).await.map_err(Report::new)
     }
 
-    pub async fn reset_state(&mut self) -> Result<(), WasmProcessorError> {
-        self.begin_operation("state reset")?;
-        let code = self
-            .reset_state
-            .call_async(&mut self.store, ())
+    async fn reset_state(
+        &mut self,
+        context: WasmExecutionContext,
+    ) -> Result<(), WasmProcessorError> {
+        INVOCATION_NOW
+            .scope(context.now(), async {
+                self.begin_operation("state reset")?;
+                let code = self
+                    .reset_state
+                    .call_async(&mut self.store, ())
+                    .await
+                    .map_err(|source| wasm_call_error(self.limits, "nervix_reset_state", source))?;
+                ensure_success("nervix_reset_state", code)
+            })
             .await
-            .map_err(|source| wasm_call_error(self.limits, "nervix_reset_state", source))?;
-        ensure_success("nervix_reset_state", code)
     }
 
     pub async fn reset_state_in_context(
         &mut self,
         context: WasmExecutionContext,
     ) -> Result<(), Report<WasmProcessorError>> {
-        INVOCATION_NOW
-            .scope(context.now(), self.reset_state())
-            .await
-            .map_err(Report::new)
+        self.reset_state(context).await.map_err(Report::new)
     }
 
     pub fn timeout_requests(&self) -> &[WasmTimeoutRequest] {
@@ -1979,6 +1998,10 @@ mod tests {
     use nonzero_ext::nonzero;
 
     use super::*;
+
+    fn test_execution_context() -> WasmExecutionContext {
+        WasmExecutionContext::new(Timestamp::from_unix_nanos(1_234))
+    }
 
     const TEST_WASM: &str = r#"
         (module
@@ -2403,7 +2426,7 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(0)),
                 None,
             )
             .await
@@ -2611,7 +2634,7 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(0)),
                 Some(b"bad state"),
             )
             .await
@@ -2672,21 +2695,21 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(0)),
                 None,
             )
             .await
             .expect("guest branch should instantiate");
 
         let error = branch
-            .process_batch(&vec![0; 600])
+            .process_batch_in_context(&vec![0; 600], test_execution_context())
             .await
             .expect_err("oversized input should be rejected by host");
 
-        match error {
+        match error.current_context() {
             WasmProcessorError::GuestBufferTooLarge { size, limit } => {
-                assert!(size > 512);
-                assert_eq!(limit, 512);
+                assert!(*size > 512);
+                assert_eq!(*limit, 512);
             }
             other => panic!("expected guest buffer limit error, got {other:?}"),
         }
@@ -2703,21 +2726,21 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(0)),
                 None,
             )
             .await
             .expect("guest branch should instantiate");
 
         let error = branch
-            .process_batch(b"bad")
+            .process_batch_in_context(b"bad", test_execution_context())
             .await
             .expect_err("negative process code should be reported");
 
-        match error {
+        match error.current_context() {
             WasmProcessorError::GuestError { name, code } => {
-                assert_eq!(name, "nervix_process_batch");
-                assert_eq!(code, -4);
+                assert_eq!(*name, "nervix_process_batch");
+                assert_eq!(*code, -4);
             }
             other => panic!("expected process guest error, got {other:?}"),
         }
@@ -2734,14 +2757,14 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(0)),
                 None,
             )
             .await
             .expect("guest branch should instantiate");
 
         let error = branch
-            .on_timeout(WasmTimeoutHandle(42))
+            .on_timeout(WasmTimeoutHandle(42), test_execution_context())
             .await
             .expect_err("negative timeout code should be reported");
 
@@ -2765,14 +2788,14 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(0)),
                 None,
             )
             .await
             .expect("guest branch should instantiate");
 
         let error = branch
-            .flush()
+            .flush(test_execution_context())
             .await
             .expect_err("a guest that refuses to quiesce must be reported, not ignored");
 
@@ -2796,7 +2819,7 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(0)),
                 None,
             )
             .await
@@ -2804,13 +2827,13 @@ mod tests {
 
         assert!(
             branch
-                .flush()
+                .flush(test_execution_context())
                 .await
                 .expect("a guest that holds nothing must accept the quiesce flush")
                 .is_empty()
         );
         branch
-            .process_batch(b"after")
+            .process_batch_in_context(b"after", test_execution_context())
             .await
             .expect("the branch must keep processing after a quiesce flush that emitted nothing");
     }
@@ -2842,14 +2865,14 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(0)),
                 None,
             )
             .await
             .expect("guest branch should instantiate");
 
         let error = branch
-            .flush()
+            .flush(test_execution_context())
             .await
             .expect_err("a trapping quiesce flush must surface as a call failure");
 
@@ -2897,13 +2920,13 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(0)),
                 None,
             )
             .await
             .expect("guest branch should instantiate");
 
-        let error = branch.flush().await.expect_err(
+        let error = branch.flush(test_execution_context()).await.expect_err(
             "a guest that reports a global error while quiescing must not look drained",
         );
 
@@ -2924,7 +2947,7 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1_234)),
                 None,
             )
             .await
@@ -2932,7 +2955,7 @@ mod tests {
 
         assert!(
             branch
-                .flush()
+                .flush(test_execution_context())
                 .await
                 .expect("quiescing a guest that never received input must succeed")
                 .is_empty(),
@@ -2966,7 +2989,7 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(0)),
                 None,
             )
             .await
@@ -3004,7 +3027,7 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(0)),
                 None,
             )
             .await
@@ -3057,7 +3080,7 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1_234)),
                 None,
             )
             .await
@@ -3079,7 +3102,7 @@ mod tests {
 
         assert_eq!(
             branch
-                .process_envelope(&input)
+                .process_envelope(&input, test_execution_context())
                 .await
                 .expect("first input must process"),
             Vec::<WasmEnvelope>::new()
@@ -3089,7 +3112,7 @@ mod tests {
             .pop()
             .expect("guest should request a timeout");
         let output = branch
-            .on_timeout(timeout.handle)
+            .on_timeout(timeout.handle, test_execution_context())
             .await
             .expect("timeout must emit output");
         assert_eq!(output.len(), 1);
@@ -3126,7 +3149,7 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 string_passthrough_init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1_234)),
                 None,
             )
             .await
@@ -3143,7 +3166,7 @@ mod tests {
 
         assert!(
             branch
-                .process_envelope(&input)
+                .process_envelope(&input, test_execution_context())
                 .await
                 .expect("input must process")
                 .is_empty()
@@ -3153,7 +3176,7 @@ mod tests {
             .pop()
             .expect("guest should request a timeout");
         let outputs = branch
-            .on_timeout(timeout.handle)
+            .on_timeout(timeout.handle, test_execution_context())
             .await
             .expect("timeout must emit output");
         let WasmEnvelope::Output {
@@ -3189,7 +3212,7 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 shared_generated_init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1_234)),
                 None,
             )
             .await
@@ -3206,7 +3229,7 @@ mod tests {
 
         assert!(
             branch
-                .process_envelope(&input)
+                .process_envelope(&input, test_execution_context())
                 .await
                 .expect("input must process")
                 .is_empty()
@@ -3216,7 +3239,7 @@ mod tests {
             .pop()
             .expect("guest should request a timeout");
         let envelopes = branch
-            .on_timeout(timeout.handle)
+            .on_timeout(timeout.handle, test_execution_context())
             .await
             .expect("timeout must emit output");
         let WasmEnvelope::Output {
@@ -3258,7 +3281,7 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1_234)),
                 None,
             )
             .await
@@ -3273,7 +3296,7 @@ mod tests {
 
         assert!(
             branch
-                .process_envelope(&buffered)
+                .process_envelope(&buffered, test_execution_context())
                 .await
                 .expect("input must process")
                 .is_empty(),
@@ -3281,7 +3304,7 @@ mod tests {
         );
 
         let flushed = branch
-            .flush()
+            .flush(test_execution_context())
             .await
             .expect("quiesce flush must reach the guest");
         assert_eq!(
@@ -3291,7 +3314,7 @@ mod tests {
         );
         assert!(
             branch
-                .flush()
+                .flush(test_execution_context())
                 .await
                 .expect("a second quiesce flush must succeed")
                 .is_empty(),
@@ -3329,18 +3352,18 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1_234)),
                 None,
             )
             .await
             .expect("guest branch must instantiate");
         flushed_branch
-            .process_envelope(&buffered)
+            .process_envelope(&buffered, test_execution_context())
             .await
             .expect("input must process");
         assert_eq!(
             flushed_branch
-                .flush()
+                .flush(test_execution_context())
                 .await
                 .expect("quiesce flush must reach the guest")
                 .len(),
@@ -3348,7 +3371,7 @@ mod tests {
             "the flush releases the buffered batch"
         );
         let drained_snapshot = flushed_branch
-            .save_state()
+            .save_state(test_execution_context())
             .await
             .expect("a flushed guest must still snapshot");
 
@@ -3356,17 +3379,17 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1_234)),
                 None,
             )
             .await
             .expect("guest branch must instantiate");
         stranded_branch
-            .process_envelope(&buffered)
+            .process_envelope(&buffered, test_execution_context())
             .await
             .expect("input must process");
         let stranded_snapshot = stranded_branch
-            .save_state()
+            .save_state(test_execution_context())
             .await
             .expect("an unflushed guest must snapshot");
 
@@ -3374,14 +3397,14 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(2_345))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(2_345)),
                 Some(&drained_snapshot),
             )
             .await
             .expect("the replacement must restore the drained snapshot");
         assert_eq!(
             resumed
-                .process_envelope(&follow_up)
+                .process_envelope(&follow_up, test_execution_context())
                 .await
                 .expect("the replacement must accept new input")
                 .len(),
@@ -3394,14 +3417,14 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(2_345))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(2_345)),
                 Some(&stranded_snapshot),
             )
             .await
             .expect("the replacement must restore the unflushed snapshot");
         assert_eq!(
             resumed_without_flush
-                .process_envelope(&follow_up)
+                .process_envelope(&follow_up, test_execution_context())
                 .await
                 .expect("the replacement must accept new input")
                 .len(),
@@ -3423,25 +3446,28 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1_234)),
                 None,
             )
             .await
             .expect("guest branch must instantiate");
         branch
-            .process_envelope(&WasmEnvelope::input(
-                sample_arrow_ipc(&[2]),
-                WasmAckSidecar {
-                    rows: vec![output_row(10)],
-                    ..WasmAckSidecar::default()
-                },
-            ))
+            .process_envelope(
+                &WasmEnvelope::input(
+                    sample_arrow_ipc(&[2]),
+                    WasmAckSidecar {
+                        rows: vec![output_row(10)],
+                        ..WasmAckSidecar::default()
+                    },
+                ),
+                test_execution_context(),
+            )
             .await
             .expect("input must process");
 
         assert_eq!(
             branch
-                .flush()
+                .flush(test_execution_context())
                 .await
                 .expect("quiesce flush must reach the guest")
                 .len(),
@@ -3454,7 +3480,7 @@ mod tests {
             .expect("the guest requests a flush timeout while processing");
         assert!(
             branch
-                .on_timeout(timeout)
+                .on_timeout(timeout, test_execution_context())
                 .await
                 .expect("the guest timeout must still run after a flush")
                 .is_empty(),
@@ -3474,7 +3500,7 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1_234)),
                 None,
             )
             .await
@@ -3482,13 +3508,16 @@ mod tests {
 
         assert!(
             branch
-                .process_envelope(&WasmEnvelope::input(
-                    sample_arrow_ipc(&[2]),
-                    WasmAckSidecar {
-                        rows: vec![output_row(10)],
-                        ..WasmAckSidecar::default()
-                    },
-                ))
+                .process_envelope(
+                    &WasmEnvelope::input(
+                        sample_arrow_ipc(&[2]),
+                        WasmAckSidecar {
+                            rows: vec![output_row(10)],
+                            ..WasmAckSidecar::default()
+                        },
+                    ),
+                    test_execution_context(),
+                )
                 .await
                 .expect("input must process")
                 .is_empty(),
@@ -3496,7 +3525,7 @@ mod tests {
         );
         assert_eq!(
             branch
-                .flush()
+                .flush(test_execution_context())
                 .await
                 .expect("quiesce flush must reach the Go guest")
                 .len(),
@@ -3505,7 +3534,7 @@ mod tests {
         );
         assert!(
             branch
-                .flush()
+                .flush(test_execution_context())
                 .await
                 .expect("a second quiesce flush must succeed")
                 .is_empty(),
@@ -3524,7 +3553,7 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1_234)),
                 None,
             )
             .await
@@ -3546,13 +3575,13 @@ mod tests {
 
         assert!(
             branch
-                .process_envelope(&first)
+                .process_envelope(&first, test_execution_context())
                 .await
                 .expect("first input must process")
                 .is_empty()
         );
         let groups = branch
-            .process_envelope(&second)
+            .process_envelope(&second, test_execution_context())
             .await
             .expect("second input must flush both pending layouts");
 
@@ -3581,7 +3610,7 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1_234)),
                 None,
             )
             .await
@@ -3595,18 +3624,21 @@ mod tests {
         );
         assert!(
             branch
-                .process_envelope(&first)
+                .process_envelope(&first, test_execution_context())
                 .await
                 .expect("first input must process")
                 .is_empty()
         );
-        let state = branch.save_state().await.expect("guest state must dump");
+        let state = branch
+            .save_state(test_execution_context())
+            .await
+            .expect("guest state must dump");
 
         let mut restored = compiled
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(5_678))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(5_678)),
                 Some(&state),
             )
             .await
@@ -3619,7 +3651,7 @@ mod tests {
             },
         );
         let groups = restored
-            .process_envelope(&second)
+            .process_envelope(&second, test_execution_context())
             .await
             .expect("second input must flush the restored pending batch");
 
@@ -3648,33 +3680,38 @@ mod tests {
             .compile_processor(TEST_WASM)
             .await
             .expect("module must compile");
-        let left_clock = FixedDomainClock::new(Timestamp::from_unix_nanos(100));
-        let right_clock = FixedDomainClock::new(Timestamp::from_unix_nanos(200));
+        let left_context = WasmExecutionContext::new(Timestamp::from_unix_nanos(100));
+        let right_context = WasmExecutionContext::new(Timestamp::from_unix_nanos(200));
 
         let mut left = compiled
-            .instantiate_branch(limits(), init(), Box::new(left_clock.clone()), None)
+            .instantiate_branch(limits(), init(), left_context, None)
             .await
             .expect("left branch must instantiate");
         let mut right = compiled
-            .instantiate_branch(limits(), init(), Box::new(right_clock.clone()), None)
+            .instantiate_branch(limits(), init(), right_context, None)
             .await
             .expect("right branch must instantiate");
 
         assert_eq!(
-            left.current_domain_time().await.expect("clock must work"),
+            left.current_domain_time_in_context(left_context)
+                .await
+                .expect("clock must work"),
             Timestamp::from_unix_nanos(100)
         );
         assert_eq!(
-            right.current_domain_time().await.expect("clock must work"),
+            right
+                .current_domain_time_in_context(right_context)
+                .await
+                .expect("clock must work"),
             Timestamp::from_unix_nanos(200)
         );
 
         let left_out = left
-            .process_batch(b"left batch")
+            .process_batch_in_context(b"left batch", left_context)
             .await
             .expect("left batch must process");
         let right_out = right
-            .process_batch(b"right batch")
+            .process_batch_in_context(b"right batch", right_context)
             .await
             .expect("right batch must process");
 
@@ -3697,7 +3734,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_invocation_context_owns_guest_time() {
+    async fn every_guest_invocation_uses_its_explicit_context() {
         let runtime = runtime();
         let compiled = runtime
             .compile_processor(TEST_WASM)
@@ -3707,7 +3744,7 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(100))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(100)),
                 None,
             )
             .await
@@ -3726,13 +3763,7 @@ mod tests {
             )
             .await
             .expect("context batch must process");
-        let unscoped = branch
-            .current_domain_time()
-            .await
-            .expect("the fixture clock must remain readable");
-
         assert_eq!(observed, Timestamp::from_unix_nanos(500));
-        assert_eq!(unscoped, Timestamp::from_unix_nanos(100));
         assert_eq!(
             branch.timeout_requests()[0].requested_at,
             Timestamp::from_unix_nanos(600)
@@ -3746,23 +3777,29 @@ mod tests {
             .compile_processor(TEST_WASM)
             .await
             .expect("module must compile");
-        let clock = FixedDomainClock::new(Timestamp::from_unix_nanos(700));
+        let first_context = WasmExecutionContext::new(Timestamp::from_unix_nanos(700));
         let mut branch = compiled
-            .instantiate_branch(limits(), init(), Box::new(clock.clone()), None)
+            .instantiate_branch(limits(), init(), first_context, None)
             .await
             .expect("branch must instantiate");
         branch
-            .process_batch(b"one")
+            .process_batch_in_context(b"one", first_context)
             .await
             .expect("batch must process");
-        let state = branch.save_state().await.expect("state must dump");
+        let state = branch
+            .save_state_in_context(first_context)
+            .await
+            .expect("state must dump");
 
-        clock.set(Timestamp::from_unix_nanos(900));
+        let restored_context = WasmExecutionContext::new(Timestamp::from_unix_nanos(900));
         let mut restored = compiled
-            .instantiate_branch(limits(), init(), Box::new(clock), Some(&state))
+            .instantiate_branch(limits(), init(), restored_context, Some(&state))
             .await
             .expect("restored branch must instantiate");
-        let restored_state = restored.save_state().await.expect("state must dump");
+        let restored_state = restored
+            .save_state_in_context(restored_context)
+            .await
+            .expect("state must dump");
 
         assert_eq!(&restored_state[..8], &1_i64.to_le_bytes());
         assert_eq!(&restored_state[8..16], &700_i64.to_le_bytes());
@@ -3780,7 +3817,7 @@ mod tests {
             .instantiate_branch_with_emitter(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1)),
                 None,
                 Some(sender),
             )
@@ -3788,7 +3825,7 @@ mod tests {
             .expect("branch must instantiate");
 
         let returned = branch
-            .process_batch(b"stream me")
+            .process_batch_in_context(b"stream me", test_execution_context())
             .await
             .expect("batch must process");
         assert_eq!(
@@ -3853,23 +3890,23 @@ mod tests {
             .instantiate_branch(
                 configured_limits,
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1)),
                 None,
             )
             .await
             .expect("branch must instantiate");
 
         let error = branch
-            .process_batch(b"cpu")
+            .process_batch_in_context(b"cpu", test_execution_context())
             .await
             .expect_err("CPU-bound guest must exhaust its fuel budget");
 
         assert!(matches!(
-            error,
+            error.current_context(),
             WasmProcessorError::FuelExhausted {
                 limit,
                 operation: "nervix_process_batch"
-            } if limit == nonzero!(1_000u64)
+            } if *limit == nonzero!(1_000u64)
         ));
     }
 
@@ -3888,19 +3925,19 @@ mod tests {
             .instantiate_branch(
                 configured_limits,
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1)),
                 None,
             )
             .await
             .expect("branch must instantiate");
 
         branch
-            .process_batch(b"first")
+            .process_batch_in_context(b"first", test_execution_context())
             .await
             .expect("first operation must fit its fuel budget");
         let first_remaining = branch.store.get_fuel().expect("fuel must be enabled");
         branch
-            .process_batch(b"second")
+            .process_batch_in_context(b"second", test_execution_context())
             .await
             .expect("second operation must receive a fresh fuel budget");
         let second_remaining = branch.store.get_fuel().expect("fuel must be enabled");
@@ -3924,20 +3961,20 @@ mod tests {
             .instantiate_branch(
                 configured_limits,
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1)),
                 None,
             )
             .await
             .expect("two-page branch must instantiate at its total memory limit");
 
         let error = branch
-            .process_batch(b"grow")
+            .process_batch_in_context(b"grow", test_execution_context())
             .await
             .expect_err("guest memory growth must exceed MAX MEMORY");
 
         assert!(
             matches!(
-                error,
+                error.current_context(),
                 WasmProcessorError::MemoryLimitExceeded {
                     limit: 131_072,
                     allocated: 131_072,
@@ -3965,7 +4002,7 @@ mod tests {
             .instantiate_branch(
                 configured_limits,
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1)),
                 None,
             )
             .await
@@ -4002,7 +4039,7 @@ mod tests {
             .instantiate_branch(
                 limits(),
                 init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1))),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1)),
                 None,
             )
             .await
@@ -4018,7 +4055,7 @@ mod tests {
         });
 
         let returned = branch
-            .process_batch(b"cpu")
+            .process_batch_in_context(b"cpu", test_execution_context())
             .await
             .expect("batch must process");
         progress_task.abort();

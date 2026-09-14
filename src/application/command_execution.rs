@@ -6,6 +6,7 @@
 //! - **Must not know.** Parser recovery, transport reconnect policy, or runtime implementation.
 
 use blake3::Hasher;
+use error_stack::Report;
 use nervix_consensus::{
     CommandExecution, CommandExecutionChildResult, CommandExecutionDiagnostic,
     CommandExecutionEffect, CommandExecutionResult, CommandExecutionResultKind,
@@ -16,6 +17,7 @@ use nervix_models::{
     UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
+use thiserror::Error;
 use tokio::sync::mpsc;
 use tonic::Status;
 
@@ -23,7 +25,6 @@ use super::{
     authentication::{user_credentials, verify_password_hash},
     domain_clock::current_timestamp,
     model_mutation::{command_error, is_persistent_statement, parse_request_domain},
-    model_validation::validate_domain_config,
     session_service::SessionServiceImpl,
     subscription::{PendingSessionCommand, SessionCommandOperation, SessionSubscriptions},
     transaction::is_queueable_transaction_statement,
@@ -37,11 +38,21 @@ pub(in crate::application) struct PersistentCommandRequest {
     statement: Statement,
 }
 
+#[derive(Debug, Error)]
+pub(in crate::application) enum PersistentCommandRequestError {
+    #[error("one ordinary command execution reference cannot own multiple persistent statements")]
+    MultiplePersistentStatements,
+    #[error("failed to identify command semantics: {message}")]
+    Encoding { message: String },
+    #[error("command semantics exceed the supported size")]
+    SemanticsTooLarge,
+}
+
 impl PersistentCommandRequest {
     pub(in crate::application) fn from_operations(
         operations: &[SessionCommandOperation],
         request_domain: &str,
-    ) -> Result<Option<Self>, String> {
+    ) -> Result<Option<Self>, Report<PersistentCommandRequestError>> {
         let mut persistent_command = None;
         for operation in operations {
             let SessionCommandOperation::Execute(pending) = operation else {
@@ -54,11 +65,9 @@ impl PersistentCommandRequest {
             };
             if is_persistent_statement(statement) {
                 if persistent_command.is_some() {
-                    return Err(
-                        "one ordinary command execution reference cannot own multiple persistent \
-                         statements"
-                            .to_string(),
-                    );
+                    return Err(Report::new(
+                        PersistentCommandRequestError::MultiplePersistentStatements,
+                    ));
                 }
                 persistent_command = Some((pending.source.clone(), statement.clone()));
             }
@@ -77,11 +86,15 @@ impl PersistentCommandRequest {
         if let Statement::CreateUser(create) = &mut digest_statement {
             create.body.password.clear();
         }
-        let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&digest_statement)
-            .map_err(|error| format!("failed to identify command semantics: {error}"))?;
+        let encoded =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&digest_statement).map_err(|error| {
+                Report::new(PersistentCommandRequestError::Encoding {
+                    message: error.to_string(),
+                })
+            })?;
         let encoded_bytes = encoded.as_slice();
         let encoded_length = u64::try_from(encoded_bytes.len())
-            .map_err(|_| "command semantics exceed the supported size".to_string())?;
+            .map_err(|_| Report::new(PersistentCommandRequestError::SemanticsTooLarge))?;
         hasher.update(&encoded_length.to_le_bytes());
         hasher.update(encoded_bytes);
         Ok(Some(Self {
@@ -181,18 +194,14 @@ impl SessionServiceImpl {
                 let existed_at_admission = existing.is_some();
                 let state = match existing {
                     Some(existing) => existing,
-                    None => {
-                        validate_domain_config(&create.config)
-                            .map_err(|error| Box::new(command_error(error)))?;
-                        DomainState {
-                            id: create.id.clone(),
-                            config: create.config.clone(),
-                            status: DomainStatus::Stopped,
-                            start_version: 0,
-                            last_start: DomainStartPoint::Resume,
-                            clock: None,
-                        }
-                    }
+                    None => DomainState {
+                        id: create.id.clone(),
+                        config: create.config.clone(),
+                        status: DomainStatus::Stopped,
+                        start_version: 0,
+                        last_start: DomainStartPoint::Resume,
+                        clock: None,
+                    },
                 };
                 CommandExecutionEffect::CreateDomain {
                     if_not_exists: create.if_not_exists,

@@ -528,7 +528,9 @@ Generator-specific rules:
   `relay_state.<relay>.<field>`
 - every route sees the same immutable state snapshot for one tick
 - `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` is mandatory and controls buffered emission
-- paced domains evaluate both generator cadence and flush cadence against the domain clock, while unpaced domains use wall clock time
+- paced domains evaluate both generator cadence and flush cadence against the bound logical clock;
+  unpaced domains receive actual UTC through the same domain capability, with no missing-clock
+  fallback
 
 ## Runtime Node Error Policies
 

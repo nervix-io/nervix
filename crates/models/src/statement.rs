@@ -1,3 +1,11 @@
+//! Public semantic models for NSPL statements.
+//!
+//! Layer: vocabulary.
+//!
+//! - **Owns.** Typed statement bodies and configuration values after language parsing.
+//! - **Depends on.** Vocabulary names, timestamps, clock values and primitive collections.
+//! - **Must not know.** Parser recovery state, registry validation, scheduling or runtime tasks.
+
 use std::{
     collections::BTreeMap,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -16,12 +24,13 @@ use crate::{
     AlterSchema, AlterWireSchema, AvroType, BranchName, CborType, ChannelName, ClientName,
     ClusterNodeName, CodecName, CollectionName, ConsumerGroupName, CorrelatorName,
     CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, CreateSchema, CreateUdf,
-    DeduplicatorName, DomainClockState, DomainName, DomainTimeRate, EmitterName, EndpointName,
-    FieldName, GeneratorName, InferencerName, IngestorName, JsonType, JunctionName, LookupName,
-    ModelName, NodeRef, ParseAsType, PlacementName, PulsarSubscriptionName, QueueGroupName,
-    QueueName, ReingestorName, RelayName, ReordererName, ResourceName, SchemaName,
-    SignalingProtocolName, SubjectName, SubscriptionName, TableName, Timestamp, TopicName, UdfName,
-    UserName, VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
+    DeduplicatorName, DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName,
+    DomainTimeRate, EmitterName, EndpointName, FieldName, GeneratorName, InferencerName,
+    IngestorName, JsonType, JunctionName, LookupName, ModelName, NodeRef, ParseAsType,
+    PlacementName, PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName, RelayName,
+    ReordererName, ResourceName, SchemaName, SignalingProtocolName, SubjectName, SubscriptionName,
+    TableName, Timestamp, TopicName, UdfName, UserName, VhostName, WasmProcessorName,
+    WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
@@ -410,8 +419,6 @@ pub struct StopDomain;
 )]
 pub struct DomainConfig {
     pub pace: DomainPace,
-    pub period: String,
-    pub skew: String,
     pub placement: PlacementPolicy,
 }
 
@@ -455,13 +462,34 @@ pub enum PlacementPolicy {
     RkyvSerialize,
     RkyvDeserialize,
     AsRefStr,
-    EnumString,
-    IntoStaticStr,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE", ascii_case_insensitive)]
 pub enum DomainPace {
-    Paced,
+    Paced {
+        period: DomainClockPeriod,
+        skew: DomainClockSkew,
+    },
     Unpaced,
+}
+
+impl DomainPace {
+    pub const fn is_paced(self) -> bool {
+        matches!(self, Self::Paced { .. })
+    }
+
+    pub const fn period(self) -> Option<DomainClockPeriod> {
+        match self {
+            Self::Paced { period, .. } => Some(period),
+            Self::Unpaced => None,
+        }
+    }
+
+    pub const fn skew(self) -> Option<DomainClockSkew> {
+        match self {
+            Self::Paced { skew, .. } => Some(skew),
+            Self::Unpaced => None,
+        }
+    }
 }
 
 #[derive(
@@ -1726,7 +1754,7 @@ pub struct CreateGenerator {
     pub name: GeneratorName,
     pub materialized_relay: RelayName,
     pub branched_by: BranchSelection,
-    pub each: String,
+    pub each: DomainClockPeriod,
     pub output_routes: ProcessorOutputs,
 }
 
@@ -1743,7 +1771,7 @@ pub struct AlterGenerator {
 )]
 pub enum AlterGeneratorOperation {
     SetMaterializedState { relay: RelayName },
-    SetEach { each: String },
+    SetEach { each: DomainClockPeriod },
     SetBranching { branching: BranchSelection },
     AddRoute { route: ProcessorOutput },
     DropRoute { relay: RelayName },
@@ -1781,7 +1809,7 @@ impl CreateGenerator {
                     candidate.materialized_relay = relay.clone();
                 }
                 AlterGeneratorOperation::SetEach { each } => {
-                    candidate.each = each.clone();
+                    candidate.each = *each;
                 }
                 AlterGeneratorOperation::SetBranching { branching } => {
                     candidate.branched_by = branching.clone();
@@ -3380,7 +3408,7 @@ impl SignalingProtocolOnConnect {
 pub enum IngestSource {
     Http {
         client: ClientName,
-        every: String,
+        every: DomainClockPeriod,
         quiesce: IngestQuiesceMode,
     },
     Kafka {
@@ -3432,7 +3460,7 @@ pub enum IngestSource {
     Prometheus {
         client: ClientName,
         query: String,
-        every: String,
+        every: DomainClockPeriod,
         quiesce: IngestQuiesceMode,
     },
     #[strum(serialize = "ZEROMQ")]
@@ -5117,6 +5145,7 @@ pub enum AckMode {
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
     use nonzero_ext::nonzero;
 
     use super::{
@@ -6393,7 +6422,9 @@ mod tests {
             name: named("synth"),
             materialized_relay: named("state"),
             branched_by: BranchSelection::unbranched(),
-            each: "1s".to_string(),
+            each: "1s"
+                .parse()
+                .assured("the fixture cadence is a positive duration"),
             output_routes: ProcessorOutputs::new(vec![route.clone()]),
         };
         generator
@@ -6401,10 +6432,14 @@ mod tests {
                 generator: named("synth"),
                 operations: vec![
                     AlterGeneratorOperation::SetEach {
-                        each: "500ms".to_string(),
+                        each: "500ms"
+                            .parse()
+                            .assured("the fixture cadence is a positive duration"),
                     },
                     AlterGeneratorOperation::SetEach {
-                        each: "250ms".to_string(),
+                        each: "250ms"
+                            .parse()
+                            .assured("the fixture cadence is a positive duration"),
                     },
                     AlterGeneratorOperation::SetMaterializedState {
                         relay: named("state_v2"),
@@ -6415,7 +6450,7 @@ mod tests {
                 ],
             })
             .expect("generator alter should apply");
-        assert_eq!(generator.each, "250ms");
+        assert_eq!(generator.each.to_string(), "250ms");
         assert_eq!(generator.materialized_relay, named("state_v2"));
         assert_eq!(generator.output_routes.routes.len(), 2);
 
@@ -6425,7 +6460,9 @@ mod tests {
                 generator: named("synth"),
                 operations: vec![
                     AlterGeneratorOperation::SetEach {
-                        each: "10ms".to_string(),
+                        each: "10ms"
+                            .parse()
+                            .assured("the fixture cadence is a positive duration"),
                     },
                     AlterGeneratorOperation::DropRoute {
                         relay: named("missing"),

@@ -1,0 +1,8 @@
+error[E0277]: the trait bound `nervix_server::runtime::subscription_predicate_capability_compile_tests::CompiledSubscriptionPredicate: From<CompiledPredicate>` is not satisfied
+ --> $DIR/vm_predicate_cannot_be_subscription_predicate.rs:5:15
+  |
+5 |     predicate.into()
+  |               ^^^^ unsatisfied trait bound
+  |
+  = help: the trait `From<CompiledPredicate>` is not implemented for `nervix_server::runtime::subscription_predicate_capability_compile_tests::CompiledSubscriptionPredicate`
+  = note: required for `CompiledPredicate` to implement `Into<nervix_server::runtime::subscription_predicate_capability_compile_tests::CompiledSubscriptionPredicate>`

@@ -66,6 +66,14 @@ At runtime, the ingestor:
 Branch execution receives these completed Arrow batches and does not buffer them behind another
 flush policy.
 
+Timestamp selection and admission use one domain execution snapshot when the source group is
+delivered. `TIMESTAMP NOW` records that snapshot. `TIMESTAMP AT <field>` and connector-owned event
+timestamps preserve the external instant exactly; `TIME RATE` never scales them. The internal low
+and high watermarks initially equal the selected event time, so source event time remains distinct
+from delivery and observation time throughout the graph. The 5 ms source-idle close and the
+`FLUSH IMMEDIATE` 100 µs minimum are physical monotonic waits. `FLUSH EACH` and paced admission use
+domain-logical time. See [Domains And Time](domains-and-time.md#ingestion-timestamps).
+
 ## Altering Ingestors
 
 `ALTER INGESTOR` applies one or more comma-separated operations in written order:

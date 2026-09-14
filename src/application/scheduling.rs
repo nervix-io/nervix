@@ -1019,11 +1019,14 @@ impl SessionServiceImpl {
         if let Some(primary) = old_primary.as_ref() {
             let primary_is_available =
                 primary != unavailable_node_id && live_nodes.contains(primary);
-            let primary_owns_every_member = current_nodes.iter().all(|node| {
-                node.primary_node.as_ref() == Some(primary) && node.assigned_nodes.contains(primary)
-            });
-            if primary_is_available && primary_owns_every_member {
-                preserved_live_primary = Some(primary.clone());
+            if primary_is_available {
+                let primary_owns_every_member = current_nodes.iter().all(|node| {
+                    node.primary_node.as_ref() == Some(primary)
+                        && node.assigned_nodes.contains(primary)
+                });
+                if primary_owns_every_member {
+                    preserved_live_primary = Some(primary.clone());
+                }
             }
         }
 
@@ -1058,9 +1061,11 @@ impl SessionServiceImpl {
         let first_current_node = current_nodes.first()?;
         let mut common_replicas = Vec::new();
         for candidate in &first_current_node.assigned_nodes {
-            let candidate_is_available = candidate != unavailable_node_id;
+            if candidate == unavailable_node_id {
+                continue;
+            }
             let candidate_is_target_eligible = target_nodes.contains(candidate);
-            if !candidate_is_available || !candidate_is_target_eligible {
+            if !candidate_is_target_eligible {
                 continue;
             }
 
@@ -1085,12 +1090,15 @@ impl SessionServiceImpl {
             }
         };
         let primary_changed = old_primary.as_ref() != Some(&target);
-        let target_was_assigned_to_every_member = current_nodes
-            .iter()
-            .all(|node| node.assigned_nodes.contains(&target));
-        let promotes_common_replica = primary_changed && target_was_assigned_to_every_member;
-        let promoted_replica = if promotes_common_replica {
-            Some(target.clone())
+        let promoted_replica = if primary_changed {
+            let target_was_assigned_to_every_member = current_nodes
+                .iter()
+                .all(|node| node.assigned_nodes.contains(&target));
+            if target_was_assigned_to_every_member {
+                Some(target.clone())
+            } else {
+                None
+            }
         } else {
             None
         };

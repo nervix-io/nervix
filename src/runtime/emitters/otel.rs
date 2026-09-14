@@ -1,3 +1,10 @@
+//! OpenTelemetry emission at the external data-plane boundary.
+//!
+//! Layer: data plane.
+//! - **Owns.** OTLP value mapping, request encoding and export-observation timestamps.
+//! - **Depends on.** Validated emitter plans, Arrow batches and OpenTelemetry protocols.
+//! - **Must not know.** NSPL parsing, placement decisions or control-plane transactions.
+
 use std::{io::Write, num::NonZeroU64, str::FromStr};
 
 use arrow_array::{

@@ -883,7 +883,9 @@ mod tests {
                     tick_id: 1,
                     logical_timestamp: Timestamp::from_unix_nanos(0),
                     wall_clock: Timestamp::from_unix_nanos(10_000_000_000),
-                    period: "1s".parse().expect("fixture period is valid"),
+                    period: "1s"
+                        .parse()
+                        .assured("one second is a positive fixture cadence"),
                 },
             )
             .expect("the fixture domain exists");
@@ -893,9 +895,14 @@ mod tests {
             DomainState {
                 id: domain("paced"),
                 config: DomainConfig {
-                    pace: DomainPace::Paced,
-                    period: "1s".to_string(),
-                    skew: "250ms".to_string(),
+                    pace: DomainPace::Paced {
+                        period: "1s"
+                            .parse()
+                            .assured("one second is a positive fixture cadence"),
+                        skew: "250ms"
+                            .parse()
+                            .assured("250 milliseconds fits the fixture skew representation"),
+                    },
                     placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Stopped,
@@ -926,7 +933,9 @@ mod tests {
                     tick_id: 1,
                     logical_timestamp: Timestamp::from_unix_nanos(0),
                     wall_clock: Timestamp::from_unix_nanos(10_000_000_000),
-                    period: "1s".parse().expect("fixture period is valid"),
+                    period: "1s"
+                        .parse()
+                        .assured("one second is a positive fixture cadence"),
                 },
             )
             .expect("the fixture domain exists");
@@ -965,8 +974,7 @@ mod tests {
         let logical_origin = "2000-01-01T00:00:00Z"
             .parse::<Timestamp>()
             .expect("fixture timestamp is valid");
-        let mapping =
-            DomainClockState::new(current_timestamp(), logical_origin, DomainTimeRate::ONE);
+        let mapping = DomainClockState::new(Timestamp::now(), logical_origin, DomainTimeRate::ONE);
         let mut state = paced_domain_state("paced");
         state.start_version = 9;
         state.clock = Some(mapping);
@@ -1017,7 +1025,7 @@ mod tests {
         let mut state = paced_domain_state("paced");
         state.start_version = 3;
         state.clock = Some(DomainClockState::new(
-            current_timestamp(),
+            Timestamp::now(),
             Timestamp::from_unix_nanos(0),
             DomainTimeRate::ONE,
         ));

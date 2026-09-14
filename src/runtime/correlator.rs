@@ -1,3 +1,10 @@
+//! Branch-local correlator execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** Correlator program compilation, paired-input evaluation and output construction.
+//! - **Depends on.** Validated correlator plans, Arrow batches and bound domain execution time.
+//! - **Must not know.** NSPL parsing, placement decisions or connector transports.
+
 use super::*;
 
 pub(super) fn compile_correlator_where_program(
@@ -144,7 +151,6 @@ impl CorrelatorOutputCompileContext<'_> {
         Ok(CompiledCorrelatorOutputProgram {
             program: CompiledProgramWithMaterializedInterest {
                 compiled: Arc::new(compiled),
-                output_sensitivity: self.output_sensitivity,
                 materialized_interest,
                 output_namespace_input: OutputNamespaceInput::Uninitialized,
                 lookup_hash_maps,
@@ -1308,7 +1314,7 @@ mod tests {
             None,
         )
         .expect("correlator WHERE should compile");
-        let now = current_timestamp();
+        let now = Timestamp::now();
         let pending = |id, marker| CorrelatorPendingMessage {
             received_at: now,
             message: RelayMessage {
@@ -1456,7 +1462,7 @@ mod tests {
                 ])
                 .expect("right rows should build"),
         );
-        let now = current_timestamp();
+        let now = Timestamp::now();
         let key = string_branch_key("tenant", "acme");
         let correlation = |row, status: &str| {
             let state = Arc::new(HashMap::from_iter([(

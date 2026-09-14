@@ -19,8 +19,8 @@ use nervix_consensus::{
     TransactionStepResult,
 };
 use nervix_models::{
-    CommandExecutionReference, DomainName, DomainPace, DomainStatus, QuiesceLevel, ResourceName,
-    Statement, UserName,
+    CommandExecutionReference, DomainName, DomainStatus, QuiesceLevel, ResourceName, Statement,
+    UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
 use parking_lot::Mutex as ParkingMutex;
@@ -39,7 +39,6 @@ use super::{
         RequestDomainError, append_command_output, command_error, command_ok,
         command_ok_already_existed, parse_request_domain, quiesce_level_message,
     },
-    model_validation::validate_domain_config,
     ownership_handoff::{mark_complete_ownership_transitions, planned_ownership_moves},
     scheduling::PreparedDomainSchedule,
     session_service::SessionServiceImpl,
@@ -921,7 +920,6 @@ impl SessionServiceImpl {
                     let domain = domains
                         .get_mut(domain_id)
                         .ok_or_else(|| format!("domain '{}' does not exist", domain_id.as_str()))?;
-                    validate_domain_config(&domain.config)?;
                     if let DomainStatus::Running = domain.status {
                         return Err(format!(
                             "domain '{}' is already running",
@@ -1799,9 +1797,7 @@ impl SessionServiceImpl {
                         )
                         .await;
                 };
-                if let Err(message) = validate_domain_config(&domain.config) {
-                    (command_error(message), None)
-                } else if let DomainStatus::Running = domain.status {
+                if let DomainStatus::Running = domain.status {
                     (
                         command_error(format!(
                             "domain '{}' is already running",
@@ -1818,7 +1814,7 @@ impl SessionServiceImpl {
                         None,
                     )
                 } else {
-                    let authority = if let DomainPace::Paced = domain.config.pace {
+                    let authority = if domain.config.pace.is_paced() {
                         match self.selected_domain_clock_authority(domain_id).await {
                             Some(authority) => Ok(Some(authority)),
                             None => Err(format!(
@@ -1841,7 +1837,10 @@ impl SessionServiceImpl {
                                         domain_id: domain_id.clone(),
                                         expected_start_version: domain.start_version,
                                         start: resolved_start.concrete_start,
-                                        clock: matches!(domain.config.pace, DomainPace::Paced)
+                                        clock: domain
+                                            .config
+                                            .pace
+                                            .is_paced()
                                             .then_some(resolved_start.clock),
                                         authority,
                                     }),

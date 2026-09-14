@@ -1,7 +1,15 @@
+//! Columnar filter-map execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** VM input projection, filter evaluation and route-local output construction.
+//! - **Depends on.** Compiled programs, Arrow batches and explicit execution timestamps.
+//! - **Must not know.** NSPL source, scheduling decisions or connector I/O.
+
 use super::*;
 
-pub(crate) async fn execute_filter_map_on_record(
-    subscription: &SubscriptionName,
+#[cfg(test)]
+pub(super) async fn execute_filter_map_on_record(
+    processor: &ModelName,
     filter_map: &CompiledProgramWithMaterializedInterest,
     record: RuntimeRow,
     branch_key: Option<&BranchKey>,
@@ -14,7 +22,7 @@ pub(crate) async fn execute_filter_map_on_record(
     let carrier = record.one_row_batch();
     let outcome = evaluate_filter_map_on_batch(
         "subscription",
-        subscription,
+        processor,
         filter_map,
         FilterMapOutcomeInputs {
             carrier: &carrier,
@@ -1471,7 +1479,7 @@ mod tests {
             "FILTER-MAP",
             &program,
             batch,
-            current_timestamp(),
+            Timestamp::now(),
             &HashMap::default(),
         )
         .await
@@ -1570,7 +1578,7 @@ mod tests {
             "FILTER-MAP",
             &program,
             batch,
-            current_timestamp(),
+            Timestamp::now(),
             &HashMap::default(),
         )
         .await
@@ -1661,7 +1669,7 @@ mod tests {
             "FILTER-MAP",
             &program,
             batch,
-            current_timestamp(),
+            Timestamp::now(),
             &HashMap::default(),
         )
         .await
@@ -1737,7 +1745,7 @@ mod tests {
             "FILTER-MAP",
             &program,
             batch,
-            current_timestamp(),
+            Timestamp::now(),
             &HashMap::default(),
         )
         .await
@@ -2045,26 +2053,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filter_map_on_runtime_row_evaluates_only_selected_arrow_row() {
+    async fn subscription_predicate_evaluates_only_selected_arrow_row() {
         let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
         let where_clause = expression("input.value = (3 AS U32)");
-        let program = compile_session_filter_map_program(
+        let predicate = compile_subscription_predicate(
             &domain("default"),
-            named::<ModelName>("selected_row_subscription"),
-            Some(&where_clause),
-            schema.arrow_schema(),
-            VmSchemaSensitivity::default(),
-            RuntimeVmCompileContext {
-                available_materialized_streams: &HashMap::default(),
-                available_lookups: &HashMap::default(),
-                current_branching: &[],
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
-                udfs: None,
-            },
+            &named("selected_row_subscription"),
+            &where_clause,
+            SubscriptionPredicateCompileContext::new(
+                schema.arrow_schema(),
+                VmSchemaSensitivity::default(),
+                None,
+            ),
         )
-        .expect("subscription filter must compile")
-        .expect("WHERE clause must produce a program");
+        .expect("subscription predicate must compile");
         let rows = [
             test_runtime_row([
                 (
@@ -2090,18 +2092,15 @@ mod tests {
         let selected = RuntimeRow::new(Arc::new(batch), 1, rows[1].metadata().clone())
             .expect("second Arrow row should be addressable");
 
-        let output = execute_filter_map_for_test(
-            &program,
-            selected,
-            None,
-            None,
+        let selected = execute_subscription_predicate_on_record(
+            &predicate,
+            &selected,
             Timestamp::from_unix_nanos(1),
         )
         .await
-        .expect("selected row filter-map must execute")
-        .expect("second Arrow row must pass the filter");
+        .expect("selected row predicate must execute");
 
-        assert_eq!(row_value(&output, "value"), Some(RuntimeValue::U32(3)));
+        assert!(selected);
     }
 
     #[tokio::test]

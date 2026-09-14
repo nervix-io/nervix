@@ -101,8 +101,6 @@ impl RelayInteractionBenchmark {
                 id: domain,
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
-                    period: "1s".to_string(),
-                    skew: "0ms".to_string(),
                     placement: PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Running,
@@ -121,10 +119,13 @@ impl RelayInteractionBenchmark {
             );
             let broadcast = RelayBroadcast::with_capacity(capacity);
             let receiver = RelayRuntimeFanIn::new(broadcast.new_receiver());
-            inputs.push(
-                RelayInteractionInput::new(relay, receiver, collect_policy)
-                    .with_domain_clock(domain_clock.clone()),
-            );
+            let input = match collect_policy {
+                Some(policy) => {
+                    RelayInteractionInput::collecting(relay, receiver, policy, domain_clock.clone())
+                }
+                None => RelayInteractionInput::immediate(relay, receiver),
+            };
+            inputs.push(input);
             sources.push(broadcast);
         }
         let (shutdown_tx, shutdown_rx) = watch::channel(false);

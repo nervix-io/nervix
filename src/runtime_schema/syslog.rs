@@ -1,3 +1,10 @@
+//! Syslog wire decoding and encoding.
+//!
+//! Layer: engines and infrastructure.
+//! - **Owns.** Typed Arrow conversion for RFC 3164 and RFC 5424 syslog messages.
+//! - **Depends on.** Wire codec models, Arrow builders and UTC for omitted RFC 3164 years.
+//! - **Must not know.** Domains, runtime clocks, schedules or connector lifecycle.
+
 use ahash::HashSet;
 use arrow_array::{
     Array, StringArray, TimestampNanosecondArray, UInt8Array,
