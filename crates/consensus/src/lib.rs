@@ -1924,6 +1924,26 @@ impl Observer {
         }
     }
 
+    /// Return the applied log index of the newest runtime-state change.
+    pub async fn current_runtime_revision(&self) -> u64 {
+        self.inner.store.inner.state().runtime_revision
+    }
+
+    /// Wait until this observer has applied runtime state newer than `revision`.
+    pub async fn wait_for_runtime_revision_after(&self, revision: u64) -> Option<u64> {
+        let mut applied = self.subscribe_applied();
+        loop {
+            tokio::task::consume_budget().await;
+            let current_revision = self.current_runtime_revision().await;
+            if current_revision > revision {
+                return Some(current_revision);
+            }
+            if applied.changed().await.is_err() {
+                return None;
+            }
+        }
+    }
+
     /// Establish a strict read boundary with the current leader, apply through it locally, and
     /// then take one coherent runtime-state snapshot.
     pub async fn admitted_runtime_state(

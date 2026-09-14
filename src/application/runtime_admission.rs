@@ -3,7 +3,7 @@
 //! Layer: control plane.
 //!
 //! - **Owns.** The process-local linearizable catch-up proof and ordering of coherent runtime-state
-//!   installations through local preparation after that proof.
+//!   installation and activation after that proof.
 //! - **Depends on.** Consensus observation, Tokio synchronization, and process shutdown.
 //! - **Must not know.** Runtime graph internals, connector implementations, or scheduling policy.
 
@@ -33,7 +33,7 @@ impl RuntimeAdmission {
         }
     }
 
-    /// Serialize coherent state capture, runtime installation, and local preparation.
+    /// Serialize each local runtime installation or activation decision.
     pub(in crate::application) async fn begin_installation(
         &self,
         shutdown: &CancellationToken,

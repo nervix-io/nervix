@@ -13,6 +13,7 @@ use std::sync::Arc as StdArc;
 use ahash::RandomState;
 use arch_into::ArchInto;
 use dashmap::DashMap;
+use futures_util::future::BoxFuture;
 use nervix_consensus::{Administrator, CommandExecutionState, ConsensusError, Observer, Proposer};
 use nervix_interconnect::Transport;
 use nervix_models::{
@@ -584,133 +585,199 @@ impl SessionService for SessionServiceImpl {
     }
 }
 
-pub(in crate::application) async fn apply_current_cluster_runtime_state(
-    runtime: &Runtime,
-    cluster: &cluster::ClusterHandle,
-    interconnect: &Transport,
-    registry: &Registry,
-    consensus: &Observer,
-    admission: &RuntimeAdmission,
-    shutdown: &CancellationToken,
-) -> Result<(), crate::runtime::RuntimeError> {
-    let Some(installation) = admission.begin_installation(shutdown).await else {
-        return Ok(());
-    };
-    let Some(state) = admission.runtime_state(consensus, shutdown).await else {
-        return Ok(());
-    };
-    let local_node_id = consensus.local_node_id();
-    debug!(
-        %local_node_id,
-        revision = state.revision,
-        "installing admitted cluster runtime state"
-    );
-    if let Err(error) = registry.synchronize_cluster_schedule(&state.schedule) {
-        warn!(error = %error, "failed to synchronize registry from admitted cluster schedule");
-    }
-    runtime
-        .apply_cluster_state(
-            local_node_id,
-            state.revision,
-            &state.domains,
-            &state.domain_clock_authorities,
-            &state.schedule,
-        )
-        .await?;
-    cluster
-        .set_local_runtime_revision_prepared(state.revision)
-        .await;
-    debug!(
-        %local_node_id,
-        revision = state.revision,
-        "local runtime revision prepared"
-    );
-    drop(installation);
+/// Apply the newest admitted runtime state with a heap-backed future so command execution keeps a
+/// bounded stack regardless of the preparation and readiness paths active inside this operation.
+pub(in crate::application) fn apply_current_cluster_runtime_state<'a>(
+    runtime: &'a Runtime,
+    cluster: &'a cluster::ClusterHandle,
+    interconnect: &'a Transport,
+    registry: &'a Registry,
+    consensus: &'a Observer,
+    admission: &'a RuntimeAdmission,
+    shutdown: &'a CancellationToken,
+) -> BoxFuture<'a, Result<(), crate::runtime::RuntimeError>> {
+    Box::pin(async move {
+        let local_node_id = consensus.local_node_id();
+        loop {
+            tokio::task::consume_budget().await;
+            let Some(installation) = admission.begin_installation(shutdown).await else {
+                return Ok(());
+            };
+            let Some(state) = admission.runtime_state(consensus, shutdown).await else {
+                return Ok(());
+            };
+            debug!(
+                %local_node_id,
+                revision = state.revision,
+                "installing admitted cluster runtime state"
+            );
+            if let Err(error) = registry.synchronize_cluster_schedule(&state.schedule) {
+                warn!(error = %error, "failed to synchronize registry from admitted cluster schedule");
+            }
+            runtime
+                .apply_cluster_state(
+                    local_node_id,
+                    state.revision,
+                    &state.domains,
+                    &state.domain_clock_authorities,
+                    &state.schedule,
+                )
+                .await?;
+            cluster
+                .set_local_runtime_revision_prepared(state.revision)
+                .await;
+            debug!(
+                %local_node_id,
+                revision = state.revision,
+                "local runtime revision prepared"
+            );
+            drop(installation);
 
-    let node_unavailability_timeout = cluster.node_unavailability_timeout();
-    // Applying a revision gets one start-time operation budget: peer-failure detection followed
-    // by readiness propagation. A peer that disconnects after this starts has only the remaining
-    // portion of that budget.
-    let Some(readiness_timeout) =
-        node_unavailability_timeout.checked_add(RUNTIME_REVISION_READINESS_PROPAGATION_BOUND)
-    else {
-        return Err(
-            crate::runtime::RuntimeError::RuntimeRevisionReadinessDeadlineOverflow {
-                node_unavailability_timeout,
-                readiness_propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
-            },
-        );
-    };
-    let Some(deadline) = tokio::time::Instant::now().checked_add(readiness_timeout) else {
-        return Err(
-            crate::runtime::RuntimeError::RuntimeRevisionReadinessDeadlineOverflow {
-                node_unavailability_timeout,
-                readiness_propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
-            },
-        );
-    };
-    let preparation = wait_for_application_revision(
-        cluster,
-        interconnect,
-        state.revision,
-        ApplicationRevisionPhase::RuntimePrepared,
-        deadline,
-    );
-    tokio::pin!(preparation);
-    let preparation_result = tokio::select! {
-        biased;
-        _ = shutdown.cancelled() => return Ok(()),
-        result = &mut preparation => result,
-    };
-    preparation_result.map_err(|timeout| {
-        crate::runtime::RuntimeError::RuntimeRevisionPreparation {
-            revision: state.revision,
-            pending_nodes: timeout.pending_nodes,
+            let node_unavailability_timeout = cluster.node_unavailability_timeout();
+            // Applying a revision gets one start-time operation budget: peer-failure detection followed
+            // by readiness propagation. A peer that disconnects after this starts has only the remaining
+            // portion of that budget.
+            let Some(readiness_timeout) = node_unavailability_timeout
+                .checked_add(RUNTIME_REVISION_READINESS_PROPAGATION_BOUND)
+            else {
+                return Err(
+                    crate::runtime::RuntimeError::RuntimeRevisionReadinessDeadlineOverflow {
+                        node_unavailability_timeout,
+                        readiness_propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
+                    },
+                );
+            };
+            let Some(deadline) = tokio::time::Instant::now().checked_add(readiness_timeout) else {
+                return Err(
+                    crate::runtime::RuntimeError::RuntimeRevisionReadinessDeadlineOverflow {
+                        node_unavailability_timeout,
+                        readiness_propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
+                    },
+                );
+            };
+            let preparation = wait_for_application_revision(
+                cluster,
+                interconnect,
+                state.revision,
+                ApplicationRevisionPhase::RuntimePrepared,
+                deadline,
+            );
+            tokio::pin!(preparation);
+            let supersession = consensus.wait_for_runtime_revision_after(state.revision);
+            tokio::pin!(supersession);
+            let preparation_result = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => return Ok(()),
+                newer_revision = &mut supersession => {
+                    let Some(newer_revision) = newer_revision else {
+                        return Ok(());
+                    };
+                    debug!(
+                        %local_node_id,
+                        revision = state.revision,
+                        newer_revision,
+                        "superseding runtime revision during cluster preparation"
+                    );
+                    continue;
+                }
+                result = &mut preparation => result,
+            };
+            if let Err(timeout) = preparation_result {
+                let current_revision = consensus.current_runtime_revision().await;
+                if current_revision > state.revision {
+                    debug!(
+                        %local_node_id,
+                        revision = state.revision,
+                        newer_revision = current_revision,
+                        "superseding runtime revision at cluster preparation deadline"
+                    );
+                    continue;
+                }
+                return Err(crate::runtime::RuntimeError::RuntimeRevisionPreparation {
+                    revision: state.revision,
+                    pending_nodes: timeout.pending_nodes,
+                });
+            }
+            debug!(
+                %local_node_id,
+                revision = state.revision,
+                "cluster runtime revision prepared"
+            );
+
+            let Some(activation) = admission.begin_installation(shutdown).await else {
+                return Ok(());
+            };
+            let current_revision = consensus.current_runtime_revision().await;
+            if current_revision > state.revision {
+                debug!(
+                    %local_node_id,
+                    revision = state.revision,
+                    newer_revision = current_revision,
+                    "superseding runtime revision before source activation"
+                );
+                continue;
+            }
+            runtime.start_running_domain_ingestors().await?;
+            debug!(
+                %local_node_id,
+                revision = state.revision,
+                "started running-domain ingestors"
+            );
+            cluster
+                .set_local_runtime_revision_ready(state.revision)
+                .await;
+            drop(activation);
+            let readiness = wait_for_application_revision(
+                cluster,
+                interconnect,
+                state.revision,
+                ApplicationRevisionPhase::RuntimeReady,
+                deadline,
+            );
+            tokio::pin!(readiness);
+            let supersession = consensus.wait_for_runtime_revision_after(state.revision);
+            tokio::pin!(supersession);
+            let readiness_result = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => return Ok(()),
+                newer_revision = &mut supersession => {
+                    let Some(newer_revision) = newer_revision else {
+                        return Ok(());
+                    };
+                    debug!(
+                        %local_node_id,
+                        revision = state.revision,
+                        newer_revision,
+                        "superseding runtime revision during cluster readiness"
+                    );
+                    continue;
+                }
+                result = &mut readiness => result,
+            };
+            if let Err(timeout) = readiness_result {
+                let current_revision = consensus.current_runtime_revision().await;
+                if current_revision > state.revision {
+                    debug!(
+                        %local_node_id,
+                        revision = state.revision,
+                        newer_revision = current_revision,
+                        "superseding runtime revision at cluster readiness deadline"
+                    );
+                    continue;
+                }
+                return Err(crate::runtime::RuntimeError::RuntimeRevisionReadiness {
+                    revision: state.revision,
+                    pending_nodes: timeout.pending_nodes,
+                });
+            }
+            debug!(
+                %local_node_id,
+                revision = state.revision,
+                "cluster runtime revision ready"
+            );
+            return Ok(());
         }
-    })?;
-    debug!(
-        %local_node_id,
-        revision = state.revision,
-        "cluster runtime revision prepared"
-    );
-
-    if shutdown.is_cancelled() {
-        return Ok(());
-    }
-    runtime.start_running_domain_ingestors().await?;
-    debug!(
-        %local_node_id,
-        revision = state.revision,
-        "started running-domain ingestors"
-    );
-    cluster
-        .set_local_runtime_revision_ready(state.revision)
-        .await;
-    let readiness = wait_for_application_revision(
-        cluster,
-        interconnect,
-        state.revision,
-        ApplicationRevisionPhase::RuntimeReady,
-        deadline,
-    );
-    tokio::pin!(readiness);
-    let readiness_result = tokio::select! {
-        biased;
-        _ = shutdown.cancelled() => return Ok(()),
-        result = &mut readiness => result,
-    };
-    readiness_result.map_err(
-        |timeout| crate::runtime::RuntimeError::RuntimeRevisionReadiness {
-            revision: state.revision,
-            pending_nodes: timeout.pending_nodes,
-        },
-    )?;
-    debug!(
-        %local_node_id,
-        revision = state.revision,
-        "cluster runtime revision ready"
-    );
-    Ok(())
+    })
 }
 
 fn error_response(kind: &str, diagnostics: &[ParseDiagnostic]) -> CommandResult {
