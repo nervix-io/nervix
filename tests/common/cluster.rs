@@ -808,6 +808,20 @@ impl Cluster {
         Ok(())
     }
 
+    /// Start a node without waiting for it to catch up with the leader.
+    ///
+    /// A scenario whose subject is a node that cannot apply what the leader committed waits for
+    /// its own condition instead, and the retry [`Cluster::start_node`] performs would restart a
+    /// node that had already consumed the failure the scenario armed.
+    pub(crate) async fn start_node_without_catching_up(&mut self, node_id: &str) -> io::Result<()> {
+        let handle = self
+            .nodes
+            .get_mut(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        handle.start()?;
+        handle.wait_until_ready().await
+    }
+
     pub(crate) async fn start_node(&mut self, node_id: &str) -> io::Result<()> {
         let handle = self
             .nodes

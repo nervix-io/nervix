@@ -5,7 +5,8 @@
 //! - **Owns.** Route batching, concrete branch instantiation, branch-local FIFO dispatch, and
 //!   branch TTL and capacity eviction.
 //! - **Depends on.** Validated branch templates, relay boundaries, processors, execution
-//!   admission, and runtime state persistence.
+//!   admission, domain force-flush generations, node quiesce accounting, and runtime state
+//!   persistence.
 //! - **Must not know.** NSPL text, control-plane transactions, consensus, or connector protocols.
 
 use super::*;
@@ -121,6 +122,9 @@ pub(super) struct IngestorRouteTask {
     pub(super) template: IngestorRouteTemplate,
     pub(super) branch_sender: mpsc::Sender<BranchedEntrypointInput>,
     pub(super) pending: HashMap<Option<BranchKey>, PendingIngestorRouteBatch>,
+    /// Reports the depth of `pending` to this route's owning node, so a drain sees route output
+    /// that has left the ingest group but has not yet reached branch execution.
+    pub(super) quiesce: OutputBufferQuiesceGauge,
 }
 
 pub(super) struct BranchExecutionDispatchContext<'a> {
@@ -880,6 +884,7 @@ impl IngestorRouteTask {
         let Some(pending) = self.pending.remove(key) else {
             return;
         };
+        self.quiesce.remove_batches(pending.batches.len());
         let acks = pending
             .batches
             .iter()
@@ -971,10 +976,12 @@ impl IngestorRouteTask {
                 .checked_add(estimated_bytes)
                 .assured("both counts estimate bytes of batches this node already holds");
             pending.batches.push(batch);
+            let buffered_bytes = pending.estimated_bytes;
+            self.quiesce.add_batch();
             if self
                 .template
                 .flush_policy
-                .size_boundary_reached(pending.estimated_bytes)
+                .size_boundary_reached(buffered_bytes)
             {
                 self.flush_key(&key).await;
             }
@@ -1009,6 +1016,47 @@ impl IngestorRouteTask {
         }
     }
 
+    /// Releases every branch buffer for one force-flush generation.
+    ///
+    /// A generation covers the route input this node already holds, so the messages that are
+    /// ready on the channel are accepted into their branch buffers before those buffers are
+    /// released. The cut is the count the channel holds when the generation arrives: input that
+    /// lands after it belongs to the next generation, so a producing source cannot extend one
+    /// flush indefinitely.
+    async fn force_flush(
+        &mut self,
+        input: &mut mpsc::Receiver<BranchedEntrypointInput>,
+        domain_clock: &DomainClock,
+    ) {
+        let ready = input.len();
+        for _ in 0..ready {
+            tokio::task::consume_budget().await;
+            let Ok(message) = input.try_recv() else {
+                break;
+            };
+            self.accept(message, domain_clock).await;
+        }
+        self.flush_all().await;
+    }
+
+    /// Accepts everything the owner already handed this route, then releases every buffer.
+    ///
+    /// Closing the channel first is what bounds the drain. A source that publishes afterwards
+    /// sees a closed route and reports the failure through its own error policy, rather than
+    /// adding to a buffer that nothing will publish.
+    async fn drain_and_flush(
+        &mut self,
+        input: &mut mpsc::Receiver<BranchedEntrypointInput>,
+        domain_clock: &DomainClock,
+    ) {
+        input.close();
+        while let Some(message) = input.recv().await {
+            tokio::task::consume_budget().await;
+            self.accept(message, domain_clock).await;
+        }
+        self.flush_all().await;
+    }
+
     pub(super) fn flush_deadlines(&self) -> Vec<BranchBufferDeadline> {
         self.pending
             .values()
@@ -1028,6 +1076,7 @@ impl IngestorRouteTask {
         mut self,
         mut input: mpsc::Receiver<BranchedEntrypointInput>,
         mut shutdown_rx: watch::Receiver<bool>,
+        mut force_flush: DomainForceFlushParticipant,
     ) {
         let domain_clock = match self.runtime_handle.bind_domain_clock(&self.domain) {
             Ok(clock) => clock,
@@ -1041,8 +1090,21 @@ impl IngestorRouteTask {
                 return;
             }
         };
+        let ownership_entity = DomainNodeRef::node_in(
+            self.domain.clone(),
+            self.template.branch.source_kind,
+            ModelName::from(&self.template.branch.source),
+        );
+        let ownership_handoff_freeze_changed = self
+            .runtime_handle
+            .inner
+            .ownership_handoff_freeze_changed
+            .clone();
         loop {
             tokio::task::consume_budget().await;
+            let ownership_frozen = self
+                .runtime_handle
+                .ownership_handoff_entity_is_frozen(&ownership_entity);
             let flush_deadlines = self.flush_deadlines();
             let has_flush_deadlines = !flush_deadlines.is_empty();
             tokio::select! {
@@ -1050,14 +1112,24 @@ impl IngestorRouteTask {
                 // A signalled stop and a dropped sender both mean the owner is gone, and this
                 // arm drains and finishes either way, so the outcome carries nothing to read.
                 _ = shutdown_rx.changed() => {
-                    input.close();
-                    while let Some(message) = input.recv().await {
-                        tokio::task::consume_budget().await;
-                        self.accept(message, &domain_clock).await;
-                    }
-                    self.flush_all().await;
+                    self.drain_and_flush(&mut input, &domain_clock).await;
                     break;
                 }
+                completion = force_flush.changed(), if !ownership_frozen => {
+                    let Ok(completion) = completion else {
+                        // The domain's coordinator is gone, so this domain is being torn down and
+                        // no later generation can arrive. Release everything this route holds
+                        // rather than leaving it for a generation that cannot be requested.
+                        self.drain_and_flush(&mut input, &domain_clock).await;
+                        break;
+                    };
+                    self.force_flush(&mut input, &domain_clock).await;
+                    completion.complete();
+                }
+                // A frozen entity keeps its obligation outstanding rather than publishing into a
+                // branch runtime whose state is being captured. Waking on the freeze change is
+                // what re-enables the arm above.
+                _ = ownership_handoff_freeze_changed.notified(), if ownership_frozen => {}
                 result = wait_for_branch_buffer_deadlines(&domain_clock, flush_deadlines),
                     if has_flush_deadlines =>
                 {
@@ -1125,6 +1197,16 @@ impl IngestorRouteRuntime {
             task: parking_lot::Mutex::new(None),
             branch_runtime: branch_runtime.clone(),
         });
+        // The obligation is registered before the task starts, so a generation requested between
+        // the spawn and the first poll is still owed by this route rather than missed.
+        let quiesce = OutputBufferQuiesceGauge::new(runtime_handle.node_quiesce_counters(
+            &domain,
+            NodeRef::new(
+                template.branch.source_kind,
+                ModelName::from(&template.branch.source),
+            ),
+        ));
+        let force_flush = runtime_handle.force_flush_participant(&domain, quiesce.counters());
         let task = tokio::spawn(
             IngestorRouteTask {
                 runtime_handle,
@@ -1133,8 +1215,9 @@ impl IngestorRouteRuntime {
                 template,
                 branch_sender: branch_runtime.sender(),
                 pending: HashMap::default(),
+                quiesce,
             }
-            .run(input, shutdown_rx),
+            .run(input, shutdown_rx, force_flush),
         );
         *runtime.task.lock() = Some(task);
         runtime
@@ -2088,6 +2171,7 @@ mod tests {
 
     use nervix_interconnect::EntityGatePurpose;
     use nervix_models::{IngestorName, ModelKind, ModelName, NodeRef, ParseAsType, RelayName};
+    use tokio::time::timeout;
     use triomphe::Arc;
 
     use super::*;
@@ -2249,5 +2333,117 @@ mod tests {
         );
         assert_eq!(handoff.outstanding_acks, 0);
         assert!(handoff.is_drained());
+    }
+
+    /// A domain force flush releases route buffers that a long logical cadence still holds, and
+    /// the route's obligation clears only after its output has been published.
+    #[tokio::test]
+    async fn force_flush_releases_held_ingestor_route_buffers() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
+        let ingestor = named::<IngestorName>("orders_source");
+        let relay = named::<RelayName>("orders");
+        let schema = test_schema(&[("user_id", ParseAsType::U32)]);
+        let counters = runtime
+            .node_quiesce_counters(&domain, NodeRef::new(ModelKind::Ingestor, ingestor.clone()));
+        let force_flush = runtime.force_flush_participant(&domain, counters.clone());
+        let (branch_sender, mut branch_output) = mpsc::channel(TWO_ITEM_TEST_CHANNEL_CAPACITY);
+        let (route_sender, route_input) = mpsc::channel(TWO_ITEM_TEST_CHANNEL_CAPACITY);
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let route_task = IngestorRouteTask {
+            runtime_handle: runtime.clone(),
+            domain: domain.clone(),
+            ingestor: ingestor.clone(),
+            template: IngestorRouteTemplate {
+                branch: BranchInstanceTemplate {
+                    source_kind: ModelKind::Ingestor,
+                    source: named("orders_source"),
+                    root_relay: relay.clone(),
+                    branch: None,
+                    branch_ttl: None,
+                    branch_max_instances: None,
+                    error_policies: ErrorPolicies::handled_by_log(),
+                    relays: HashMap::default(),
+                    processors: HashMap::default(),
+                },
+                ack_boundary: BranchInstanceAckBoundary::Preserve,
+                flush_policy: RuntimeFlushPolicy::Each {
+                    interval: Duration::from_secs(3600),
+                    max_batch_size: u64::from(u32::MAX),
+                },
+            },
+            branch_sender,
+            pending: HashMap::default(),
+            quiesce: OutputBufferQuiesceGauge::new(counters.clone()),
+        };
+        let task = tokio::spawn(route_task.run(route_input, shutdown_rx, force_flush));
+
+        route_sender
+            .send(
+                RelayRecordBatch::single(
+                    schema.clone(),
+                    None,
+                    test_runtime_row([("user_id".to_string(), RuntimeValue::U32(11))]),
+                    AckSet::empty(),
+                )
+                .expect("route input batch should build"),
+            )
+            .await
+            .expect("the route task should accept input");
+        timeout(Duration::from_secs(1), async {
+            while counters.output_buffers.load(Ordering::Acquire) != 1 {
+                tokio::task::consume_budget().await;
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the route output should enter its branch buffer");
+        assert!(
+            timeout(Duration::from_millis(20), branch_output.recv())
+                .await
+                .is_err(),
+            "a long logical cadence must keep the route output buffered"
+        );
+
+        runtime.force_flush_domain(&domain);
+
+        let forced = timeout(Duration::from_secs(1), branch_output.recv())
+            .await
+            .expect("the force flush should publish the buffered route output")
+            .expect("the branch entrypoint channel should remain open");
+        assert_eq!(
+            row_value(
+                &forced
+                    .runtime_row(0)
+                    .expect("the forced output should contain an Arrow row"),
+                "user_id",
+            ),
+            Some(RuntimeValue::U32(11))
+        );
+        timeout(Duration::from_secs(1), async {
+            loop {
+                tokio::task::consume_budget().await;
+                let pending = runtime
+                    .inner
+                    .force_flush_by_domain
+                    .get(&domain)
+                    .map(|force_flush| force_flush.pending())
+                    .unwrap_or_default();
+                if pending == 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the route obligation should clear once its output is published");
+        assert_eq!(counters.output_buffers.load(Ordering::Acquire), 0);
+
+        shutdown.send_replace(true);
+        timeout(Duration::from_secs(1), task)
+            .await
+            .expect("the route task should stop")
+            .expect("the route task should not panic");
     }
 }

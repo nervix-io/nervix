@@ -67,8 +67,7 @@ async fn coordination_identity_is_unique_and_bound_to_the_authenticated_process(
             },
         )
         .await
-        .err()
-        .expect("a prior process incarnation must be rejected");
+        .expect_err("a prior process incarnation must be rejected");
     assert!(
         error
             .to_string()
@@ -119,8 +118,7 @@ async fn coordination_identity_is_unique_and_bound_to_the_authenticated_process(
             },
         )
         .await
-        .err()
-        .expect("the replacement process must not replay its prior incarnation identity");
+        .expect_err("the replacement process must not replay its prior incarnation identity");
     assert!(
         error
             .to_string()
