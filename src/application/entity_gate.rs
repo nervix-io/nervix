@@ -7,7 +7,7 @@
 //! - **Depends on.** The interconnect to reach every node and the runtime for the local gate.
 //! - **Must not know.** Why the caller is altering the entity.
 
-use std::{collections::BTreeSet, sync::atomic::Ordering};
+use std::collections::BTreeSet;
 
 use arch_into::ArchInto;
 use error_stack::Report;
@@ -19,7 +19,7 @@ use nervix_interconnect::{
     EntityGatePurpose, EntityGateReleaseRequest as RemoteEntityGateReleaseRequest,
     EntityGateRequest as RemoteEntityGateRequest,
 };
-use nervix_models::{ClusterNodeName, DomainName, NodeRef, RelayName};
+use nervix_models::{ClusterNodeName, CoordinationIdentity, DomainName, NodeRef, RelayName};
 use tokio::time::{Duration, interval, sleep};
 use tracing::{debug, warn};
 
@@ -149,7 +149,7 @@ impl std::fmt::Display for DrainOutstanding {
 }
 
 pub(in crate::application) struct ClusterEntityGate {
-    operation_id: u64,
+    pub(in crate::application) coordination: CoordinationIdentity,
     pub(in crate::application) domain: DomainName,
     /// Nodes whose gate engagement was attempted and not yet released. Membership decides both
     /// what still needs releasing and what a repeated attempt must not duplicate, so this is a set.
@@ -158,7 +158,7 @@ pub(in crate::application) struct ClusterEntityGate {
 }
 
 struct PendingClusterEntityGateRelease {
-    operation_id: u64,
+    coordination: CoordinationIdentity,
     domain: DomainName,
     nodes: BTreeSet<ClusterNodeName>,
 }
@@ -168,7 +168,7 @@ struct PendingClusterEntityGateRelease {
 /// paths consume the same value, so the two cannot describe different gates.
 #[derive(Clone, Copy)]
 struct EntityGateEngagement<'a> {
-    operation_id: u64,
+    coordination: &'a CoordinationIdentity,
     domain: &'a DomainName,
     relays: &'a [RelayName],
     affected_entities: &'a [NodeRef],
@@ -177,10 +177,24 @@ struct EntityGateEngagement<'a> {
     reason: &'a str,
 }
 
+#[derive(Clone, Copy)]
+struct EntityGateStatusQuery<'a> {
+    coordination: &'a CoordinationIdentity,
+    domain: &'a DomainName,
+    relays: &'a [RelayName],
+    affected_entities: &'a [NodeRef],
+    purpose: EntityGatePurpose,
+    deadline: tokio::time::Instant,
+}
+
 impl ClusterEntityGate {
-    fn new(service: &SessionServiceImpl, operation_id: u64, domain: &DomainName) -> Self {
+    fn new(
+        service: &SessionServiceImpl,
+        coordination: CoordinationIdentity,
+        domain: &DomainName,
+    ) -> Self {
         Self {
-            operation_id,
+            coordination,
             domain: domain.clone(),
             nodes: BTreeSet::new(),
             release_owner: Some(service.clone()),
@@ -206,7 +220,7 @@ impl ClusterEntityGate {
             return;
         }
         owner.schedule_cluster_entity_gate_release(PendingClusterEntityGateRelease {
-            operation_id: self.operation_id,
+            coordination: self.coordination.clone(),
             domain: self.domain.clone(),
             nodes: std::mem::take(&mut self.nodes),
         });
@@ -224,12 +238,6 @@ impl Drop for ClusterEntityGate {
 }
 
 impl SessionServiceImpl {
-    fn next_entity_gate_operation_id(&self) -> u64 {
-        self.inner
-            .next_entity_gate_operation_id
-            .fetch_add(1, Ordering::Relaxed)
-    }
-
     pub(in crate::application) fn local_domain_drain_status(
         &self,
         domain: &DomainName,
@@ -274,26 +282,34 @@ impl SessionServiceImpl {
 
     pub(in crate::application) fn local_entity_drain_status(
         &self,
+        coordination: &CoordinationIdentity,
         domain: &DomainName,
         relays: &[RelayName],
         affected_entities: &[NodeRef],
         purpose: EntityGatePurpose,
-    ) -> EntityDrainStatusEnvelope {
-        let status =
-            self.inner
-                .runtime
-                .entity_drain_status(domain, relays, affected_entities, purpose);
+    ) -> Result<EntityDrainStatusEnvelope, String> {
+        let status = self
+            .inner
+            .runtime
+            .entity_gate_operation_drain_status(
+                coordination,
+                domain,
+                relays,
+                affected_entities,
+                purpose,
+            )
+            .map_err(|error| error.to_string())?;
         let emitter_publishing = status
             .emitter_publishing
             .into_iter()
             .map(emitter_publishing_drain_status_envelope)
             .collect();
-        EntityDrainStatusEnvelope {
+        Ok(EntityDrainStatusEnvelope {
             buffered_relay_batches: status.buffered_relay_batches.arch_into(),
             node_work_items: status.node_work_items.arch_into(),
             outstanding_acks: status.outstanding_acks.arch_into(),
             emitter_publishing,
-        }
+        })
     }
 
     async fn engage_entity_gate_on_node(
@@ -302,7 +318,7 @@ impl SessionServiceImpl {
         engagement: EntityGateEngagement<'_>,
     ) -> Result<(), String> {
         let EntityGateEngagement {
-            operation_id,
+            coordination,
             domain,
             relays,
             affected_entities,
@@ -315,14 +331,15 @@ impl SessionServiceImpl {
                 .inner
                 .runtime
                 .engage_entity_gate_operation(
-                    operation_id,
+                    coordination,
                     domain,
                     relays,
                     affected_entities,
                     purpose,
                     EntityGateLease { deadline, reason },
                 )
-                .await;
+                .await
+                .map_err(|error| error.to_string());
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let deadline_millis = u64::try_from(remaining.as_millis().max(1)).unwrap_or(u64::MAX);
@@ -331,7 +348,7 @@ impl SessionServiceImpl {
             .request_with_timeout(
                 node_id,
                 RemoteEntityGateRequest {
-                    operation_id,
+                    coordination: coordination.clone(),
                     domain: domain.clone(),
                     relays: relays.to_vec(),
                     affected_entities: affected_entities.to_vec(),
@@ -349,14 +366,24 @@ impl SessionServiceImpl {
     async fn entity_drain_status_on_node(
         &self,
         node_id: &ClusterNodeName,
-        domain: &DomainName,
-        relays: &[RelayName],
-        affected_entities: &[NodeRef],
-        purpose: EntityGatePurpose,
-        deadline: tokio::time::Instant,
+        query: EntityGateStatusQuery<'_>,
     ) -> Result<EntityDrainStatusEnvelope, String> {
+        let EntityGateStatusQuery {
+            coordination,
+            domain,
+            relays,
+            affected_entities,
+            purpose,
+            deadline,
+        } = query;
         if node_id == self.inner.consensus.local_node_id() {
-            let status = self.local_entity_drain_status(domain, relays, affected_entities, purpose);
+            let status = self.local_entity_drain_status(
+                coordination,
+                domain,
+                relays,
+                affected_entities,
+                purpose,
+            )?;
             if status.buffered_relay_batches != 0
                 || status.node_work_items != 0
                 || status.outstanding_acks != 0
@@ -371,6 +398,7 @@ impl SessionServiceImpl {
             .request_with_timeout(
                 node_id,
                 RemoteEntityDrainStatusRequest {
+                    coordination: coordination.clone(),
                     domain: domain.clone(),
                     relays: relays.to_vec(),
                     affected_entities: affected_entities.to_vec(),
@@ -386,22 +414,23 @@ impl SessionServiceImpl {
     async fn release_entity_gate_on_node(
         &self,
         node_id: &ClusterNodeName,
-        operation_id: u64,
+        coordination: &CoordinationIdentity,
         domain: &DomainName,
     ) -> Result<(), String> {
         if node_id == self.inner.consensus.local_node_id() {
             return self
                 .inner
                 .runtime
-                .release_entity_gate_operation(operation_id, domain)
-                .await;
+                .release_entity_gate_operation(coordination, domain)
+                .await
+                .map_err(|error| error.to_string());
         }
         self.inner
             .interconnect
             .request(
                 node_id,
                 RemoteEntityGateReleaseRequest {
-                    operation_id,
+                    coordination: coordination.clone(),
                     domain: domain.clone(),
                 },
             )
@@ -430,7 +459,7 @@ impl SessionServiceImpl {
                     _ = self.inner.shutdown.cancelled() => return,
                     result = self.release_entity_gate_on_node(
                         &node,
-                        release.operation_id,
+                        &release.coordination,
                         &release.domain,
                     ) => result,
                 };
@@ -441,7 +470,7 @@ impl SessionServiceImpl {
                     Err(error) => {
                         debug!(
                             domain = release.domain.as_str(),
-                            operation_id = release.operation_id,
+                            coordination = %release.coordination,
                             %node,
                             error,
                             "entity gate release retry remains pending"
@@ -476,8 +505,18 @@ impl SessionServiceImpl {
         }
         nodes.sort();
         nodes.dedup();
-        let operation_id = self.next_entity_gate_operation_id();
-        let mut gate = ClusterEntityGate::new(self, operation_id, domain);
+        let coordination = self
+            .inner
+            .interconnect
+            .next_coordination_identity()
+            .map_err(|error| {
+                Report::new(DomainAlterError::EntityGate {
+                    domain: domain.clone(),
+                    operation: purpose.operation_name(),
+                    reason: format!("failed to allocate coordination identity: {error}"),
+                })
+            })?;
+        let mut gate = ClusterEntityGate::new(self, coordination.clone(), domain);
         let reason = match purpose {
             EntityGatePurpose::ModelAlteration => "leader-orchestrated entity alteration",
             EntityGatePurpose::OwnershipHandoff => "leader-orchestrated ownership handoff",
@@ -489,7 +528,7 @@ impl SessionServiceImpl {
                 .engage_entity_gate_on_node(
                     node,
                     EntityGateEngagement {
-                        operation_id,
+                        coordination: &coordination,
                         domain,
                         relays,
                         affected_entities,
@@ -552,11 +591,14 @@ impl SessionServiceImpl {
                 match self
                     .entity_drain_status_on_node(
                         node,
-                        domain,
-                        relays,
-                        affected_entities,
-                        purpose,
-                        deadline,
+                        EntityGateStatusQuery {
+                            coordination: &gate.coordination,
+                            domain,
+                            relays,
+                            affected_entities,
+                            purpose,
+                            deadline,
+                        },
                     )
                     .await
                 {
@@ -639,7 +681,7 @@ impl SessionServiceImpl {
         for node in gate.nodes.clone() {
             tokio::task::consume_budget().await;
             match self
-                .release_entity_gate_on_node(&node, gate.operation_id, &domain)
+                .release_entity_gate_on_node(&node, &gate.coordination, &domain)
                 .await
             {
                 Ok(()) => gate.mark_released(&node),
@@ -679,7 +721,7 @@ impl SessionServiceImpl {
                     continue;
                 }
                 if self
-                    .release_entity_gate_on_node(&node, gate.operation_id, &gate.domain)
+                    .release_entity_gate_on_node(&node, &gate.coordination, &gate.domain)
                     .await
                     .is_ok()
                 {
@@ -722,12 +764,16 @@ mod tests {
             path,
         } = build_test_service(false).await;
         let domain = DomainName::parse("default").expect("valid domain");
-        let operation_id = 41;
+        let coordination = service
+            .inner
+            .interconnect
+            .next_coordination_identity()
+            .expect("test interconnect should allocate a coordination identity");
         service
             .inner
             .runtime
             .engage_entity_gate_operation(
-                operation_id,
+                &coordination,
                 &domain,
                 &[],
                 &[],
@@ -743,10 +789,10 @@ mod tests {
             service
                 .inner
                 .runtime
-                .entity_gate_operation_is_held(operation_id, &domain)
+                .entity_gate_operation_is_held(&coordination)
         );
 
-        let mut gate = ClusterEntityGate::new(&service, operation_id, &domain);
+        let mut gate = ClusterEntityGate::new(&service, coordination.clone(), &domain);
         gate.record_attempt(service.inner.consensus.local_node_id().clone());
         drop(gate);
 
@@ -754,7 +800,7 @@ mod tests {
             while service
                 .inner
                 .runtime
-                .entity_gate_operation_is_held(operation_id, &domain)
+                .entity_gate_operation_is_held(&coordination)
             {
                 tokio::task::consume_budget().await;
                 tokio::task::yield_now().await;

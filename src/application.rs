@@ -22,7 +22,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     net::SocketAddr,
     path::PathBuf,
-    sync::atomic::AtomicU64,
 };
 
 use ahash::{HashMap, HashMapExt, HashSet, RandomState};
@@ -1689,7 +1688,6 @@ impl Application {
                 events: events.clone(),
                 subscription_interest_counts: DashMap::with_hasher(RandomState::new()),
                 interconnect: interconnect.clone(),
-                next_entity_gate_operation_id: AtomicU64::new(1),
                 service_tasks: TaskTracker::new(),
                 configured_basic_auth,
                 auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
@@ -1920,23 +1918,22 @@ impl Application {
                     let deadline = tokio::time::Instant::now()
                         .checked_add(Duration::from_millis(request.deadline_millis));
                     let result = match deadline {
-                        Some(deadline) => {
-                            service
-                                .inner
-                                .runtime
-                                .engage_entity_gate_operation(
-                                    request.operation_id,
-                                    &request.domain,
-                                    &request.relays,
-                                    &request.affected_entities,
-                                    request.purpose,
-                                    EntityGateLease {
-                                        deadline,
-                                        reason: &request.reason,
-                                    },
-                                )
-                                .await
-                        }
+                        Some(deadline) => service
+                            .inner
+                            .runtime
+                            .engage_entity_gate_operation(
+                                &request.coordination,
+                                &request.domain,
+                                &request.relays,
+                                &request.affected_entities,
+                                request.purpose,
+                                EntityGateLease {
+                                    deadline,
+                                    reason: &request.reason,
+                                },
+                            )
+                            .await
+                            .map_err(|error| error.to_string()),
                         None => Err("entity gate deadline exceeds the monotonic clock".to_string()),
                     };
                     RemoteEntityGateResponse { result }
@@ -1949,22 +1946,24 @@ impl Application {
             .register_handler::<RemoteEntityDrainStatusRequest, _, _>(move |_context, request| {
                 let service = entity_drain_service.clone();
                 async move {
-                    let status = service.local_entity_drain_status(
+                    let result = service.local_entity_drain_status(
+                        &request.coordination,
                         &request.domain,
                         &request.relays,
                         &request.affected_entities,
                         request.purpose,
                     );
-                    if status.buffered_relay_batches != 0
-                        || status.node_work_items != 0
-                        || status.outstanding_acks != 0
+                    if let Ok(status) = &result
+                        && (status.buffered_relay_batches != 0
+                            || status.node_work_items != 0
+                            || status.outstanding_acks != 0)
                     {
                         service
                             .inner
                             .runtime
                             .force_flush_domain_if_idle(&request.domain);
                     }
-                    RemoteEntityDrainStatusResponse { result: Ok(status) }
+                    RemoteEntityDrainStatusResponse { result }
                 }
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
@@ -1978,8 +1977,9 @@ impl Application {
                         result: service
                             .inner
                             .runtime
-                            .release_entity_gate_operation(request.operation_id, &request.domain)
-                            .await,
+                            .release_entity_gate_operation(&request.coordination, &request.domain)
+                            .await
+                            .map_err(|error| error.to_string()),
                     }
                 }
             })
@@ -2099,6 +2099,7 @@ impl Application {
                                 .inner
                                 .runtime
                                 .capture_ownership_handoff_state(
+                                    &request.coordination,
                                     &request.domain,
                                     &request.entity,
                                     request.base_schedule_fingerprint,
@@ -2271,6 +2272,7 @@ impl Application {
                             .inner
                             .runtime
                             .discard_prepared_ownership_handoff_state(
+                                &request.coordination,
                                 &request.operation_id,
                                 &request.domain,
                                 &request.entity,

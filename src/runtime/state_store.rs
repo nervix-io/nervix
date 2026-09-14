@@ -6,8 +6,8 @@ use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use meticulous::OptionExt as _;
 pub(crate) use nervix_interconnect::RuntimeStateKind;
 use nervix_models::{
-    ClusterNodeIncarnation, ClusterNodeName, DomainName, DomainNodeRef, ModelKind, ModelName,
-    NodeRef,
+    ClusterNodeIncarnation, ClusterNodeName, CoordinationIdentity, DomainName, DomainNodeRef,
+    ModelKind, ModelName, NodeRef,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use thiserror::Error;
@@ -314,6 +314,7 @@ struct StoredHandoffCheckpoint {
 
 #[derive(Debug, Archive, RkyvSerialize, RkyvDeserialize)]
 struct StoredHandoffPreparation {
+    coordination: CoordinationIdentity,
     operation_id: String,
     source: ClusterNodeName,
     destination: ClusterNodeName,
@@ -390,6 +391,7 @@ impl ForcedRuntimeStateRecoveryIdentity {
 
 #[derive(Debug)]
 pub(in crate::runtime) struct PersistedRuntimeStateHandoffPreparation {
+    pub(in crate::runtime) coordination: CoordinationIdentity,
     pub(in crate::runtime) operation_id: String,
     pub(in crate::runtime) source: ClusterNodeName,
     pub(in crate::runtime) destination: ClusterNodeName,
@@ -408,6 +410,7 @@ pub(in crate::runtime) struct PersistedRuntimeStateHandoffPreparation {
 
 #[derive(Debug, Clone, Copy)]
 pub(in crate::runtime) struct RuntimeStateHandoffTransition<'a> {
+    pub(in crate::runtime) coordination: &'a CoordinationIdentity,
     pub(in crate::runtime) operation_id: &'a str,
     pub(in crate::runtime) source: &'a ClusterNodeName,
     pub(in crate::runtime) destination: &'a ClusterNodeName,
@@ -547,12 +550,18 @@ impl RuntimeStateStore {
     }
 
     fn handoff_preparation_key(
+        coordination: &CoordinationIdentity,
         operation_id: &str,
         domain: &DomainName,
         kind: ModelKind,
         identifier: &ModelName,
     ) -> Vec<u8> {
-        let mut key = operation_id.as_bytes().to_vec();
+        let mut key = coordination.coordinator().as_str().as_bytes().to_vec();
+        key.push(0);
+        key.extend_from_slice(&coordination.process_epoch().to_be_bytes());
+        key.extend_from_slice(&coordination.sequence().to_be_bytes());
+        key.push(0);
+        key.extend_from_slice(operation_id.as_bytes());
         key.push(0);
         key.extend_from_slice(domain.as_str().as_bytes());
         key.push(0);
@@ -580,6 +589,7 @@ impl RuntimeStateStore {
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
     ) -> Result<Vec<u8>, Report<RuntimePersistenceError>> {
         let stored = StoredHandoffPreparation {
+            coordination: transition.coordination.clone(),
             operation_id: transition.operation_id.to_string(),
             source: transition.source.clone(),
             destination: transition.destination.clone(),
@@ -611,6 +621,7 @@ impl RuntimeStateStore {
         let stored = rkyv::from_bytes::<StoredHandoffPreparation, rkyv::rancor::Error>(&aligned)
             .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
         Ok(PersistedRuntimeStateHandoffPreparation {
+            coordination: stored.coordination,
             operation_id: stored.operation_id,
             source: stored.source,
             destination: stored.destination,
@@ -700,6 +711,7 @@ impl RuntimeStateStore {
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
     ) -> Result<(), Report<RuntimePersistenceError>> {
         let key = Self::handoff_preparation_key(
+            transition.coordination,
             transition.operation_id,
             &transition.entity.domain,
             transition.entity.kind(),
@@ -817,12 +829,14 @@ impl RuntimeStateStore {
 
     pub(in crate::runtime) fn discard_handoff_preparation(
         &self,
+        coordination: &CoordinationIdentity,
         operation_id: &str,
         domain: &DomainName,
         kind: ModelKind,
         identifier: &ModelName,
     ) -> Result<(), Report<RuntimePersistenceError>> {
-        let key = Self::handoff_preparation_key(operation_id, domain, kind, identifier);
+        let key =
+            Self::handoff_preparation_key(coordination, operation_id, domain, kind, identifier);
         let mut batch = self.db.batch();
         batch.remove(&self.handoff_preparations, key.clone());
         batch.remove(&self.handoff_activations, key);
@@ -853,13 +867,15 @@ impl RuntimeStateStore {
 
     pub(in crate::runtime) fn handoff_activation(
         &self,
+        coordination: &CoordinationIdentity,
         operation_id: &str,
         domain: &DomainName,
         kind: ModelKind,
         identifier: &ModelName,
     ) -> Result<Option<PersistedRuntimeStateHandoffPreparation>, Report<RuntimePersistenceError>>
     {
-        let key = Self::handoff_preparation_key(operation_id, domain, kind, identifier);
+        let key =
+            Self::handoff_preparation_key(coordination, operation_id, domain, kind, identifier);
         let Some(raw) = self
             .handoff_activations
             .get(key)
@@ -877,6 +893,7 @@ impl RuntimeStateStore {
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
     ) -> Result<(), Report<RuntimePersistenceError>> {
         let preparation_key = Self::handoff_preparation_key(
+            transition.coordination,
             transition.operation_id,
             &transition.entity.domain,
             transition.entity.kind(),
@@ -952,6 +969,7 @@ impl RuntimeStateStore {
         batch.insert(
             &self.handoff_activations,
             Self::handoff_preparation_key(
+                transition.coordination,
                 transition.operation_id,
                 &transition.entity.domain,
                 transition.entity.kind(),
@@ -1389,6 +1407,109 @@ fn stored_placement_schema(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ownership_handoff_preparation_retains_exact_coordination_identity_across_reopen() {
+        let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
+        let domain = DomainName::parse("testing").expect("valid domain name");
+        let identifier = ModelName::parse("moving_state").expect("valid model name");
+        let coordinator = ClusterNodeName::parse("leader-a").expect("valid coordinator name");
+        let source = ClusterNodeName::parse("node-1").expect("valid cluster node name");
+        let destination = ClusterNodeName::parse("node-2").expect("valid cluster node name");
+        let coordination = CoordinationIdentity::new(coordinator.clone(), 22, 1);
+        let prior_incarnation = CoordinationIdentity::new(coordinator, 21, 1);
+        let entity = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, identifier.clone());
+        let operation_id = "handoff-operation";
+        let transition = RuntimeStateHandoffTransition {
+            coordination: &coordination,
+            operation_id,
+            source: &source,
+            destination: &destination,
+            source_incarnation: ClusterNodeIncarnation::new(31),
+            destination_incarnation: ClusterNodeIncarnation::new(32),
+            entity: &entity,
+            base_schedule_fingerprint: [4; 32],
+            target_schedule_fingerprint: [5; 32],
+        };
+
+        {
+            let db = Database::builder(dir.path())
+                .open()
+                .expect("database should open");
+            let store = RuntimeStateStore::from_database(db).expect("state store should open");
+            store
+                .persist_handoff_preparation(&transition, &[])
+                .expect("ownership handoff preparation should persist");
+        }
+
+        let db = Database::builder(dir.path())
+            .open()
+            .expect("database should reopen");
+        let store = RuntimeStateStore::from_database(db).expect("state store should reopen");
+        let preparations = store
+            .handoff_preparations()
+            .expect("persisted handoff preparation should load");
+        assert_eq!(preparations.len(), 1);
+        assert_eq!(preparations[0].coordination, coordination);
+
+        store
+            .activate_handoff_preparation(&transition, &[])
+            .expect("the exact preparation should activate");
+        assert!(
+            store
+                .handoff_activation(
+                    &prior_incarnation,
+                    operation_id,
+                    &domain,
+                    ModelKind::Relay,
+                    &identifier,
+                )
+                .expect("a stale activation lookup should be readable")
+                .is_none()
+        );
+        store
+            .discard_handoff_preparation(
+                &prior_incarnation,
+                operation_id,
+                &domain,
+                ModelKind::Relay,
+                &identifier,
+            )
+            .expect("stale cleanup should remain idempotent");
+        assert!(
+            store
+                .handoff_activation(
+                    &coordination,
+                    operation_id,
+                    &domain,
+                    ModelKind::Relay,
+                    &identifier,
+                )
+                .expect("the exact activation should remain readable")
+                .is_some()
+        );
+        store
+            .discard_handoff_preparation(
+                &coordination,
+                operation_id,
+                &domain,
+                ModelKind::Relay,
+                &identifier,
+            )
+            .expect("the exact coordination identity should discard its activation");
+        assert!(
+            store
+                .handoff_activation(
+                    &coordination,
+                    operation_id,
+                    &domain,
+                    ModelKind::Relay,
+                    &identifier,
+                )
+                .expect("discarded activation lookup should be readable")
+                .is_none()
+        );
+    }
 
     #[test]
     fn forced_recovery_preparation_survives_reopen_and_activation_is_idempotent() {

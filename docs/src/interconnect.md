@@ -92,6 +92,31 @@ Three identities serve different purposes:
 Replacing an endpoint, restarting a process, and rotating a certificate therefore have distinct
 meanings even when the stable node identifier does not change.
 
+Coordination operations use a typed identity composed of the authenticated coordinator node, its
+current process epoch, and a process-local sequence. The sequence begins independently in every
+process; the node and process epoch make equal sequence values distinct across concurrent leaders
+and restarts. For every coordination request, the receiver verifies the node and process epoch
+against the bound connection before the application handler can observe the request. A process
+therefore cannot issue or replay an identity that belongs to another node or to an earlier run of
+the same node.
+
+Entity-gate engagement binds that identity to one canonical domain, relay set, affected-entity set,
+and purpose. A retry succeeds only for the same identity and complete scope; using the identity for
+a different scope is rejected. Drain status and release carry the same identity, so a delayed
+message from another coordinator or process incarnation cannot observe or remove the hold. Planned
+ownership-handoff capture, preparation, confirmation, activation, and discard also carry this
+identity. Prepared handoff state persists it in the sole current stored shape and checks it again
+before activation or cleanup after a restart. The handoff's committed schedule-transition ID still
+names the schedule change; it does not authorize coordination traffic.
+
+After a receiver admits a new gate engagement or release, a receiver-owned task finishes that state
+transition even if the requesting connection disappears. Coordinator loss therefore cannot strand
+an operation in a partially engaged state or cancel cleanup after the receiver accepted it.
+
+Each receiver lease is a distinct in-memory instance even when an identical request is re-engaged
+after release. Its deadline task may remove only that exact instance. An earlier deadline can
+therefore neither release nor erase a replacement lease occupying the same logical operation key.
+
 ## Wire Contract And Payloads
 
 All nodes in a running cluster use one current wire contract. A fixed fingerprint covers the set of

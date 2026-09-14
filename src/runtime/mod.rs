@@ -61,9 +61,9 @@ use nervix_interconnect::{
 use nervix_models::{
     AckMode, Assignment, BranchName, ClickHouseValueMapping, ClientConfigEntry, ClientName,
     ClientPoolBounds, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule, CodecName,
-    CodecWireFormat, CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateClientAzureBlob,
-    CreateClientGcs, CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt,
-    CreateClientNats, CreateClientOtel, CreateClientPulsar, CreateClientRabbitMq,
+    CodecWireFormat, CoordinationIdentity, CorrelationTimeoutAction, CorrelatorMatchPolicy,
+    CreateClientAzureBlob, CreateClientGcs, CreateClientIcebergRest, CreateClientKafka,
+    CreateClientMqtt, CreateClientNats, CreateClientOtel, CreateClientPulsar, CreateClientRabbitMq,
     CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientZeroMq, CreateCodec, CreateEmitter, CreateGenerator, CreateIngestor, CreateLookup,
     CreateReingestor, CreateRelay, CreateSignalingProtocol, CreateUdf, DomainClockAuthority,
@@ -299,8 +299,8 @@ use endpoint::{
 };
 pub(in crate::runtime) use entity_gate::OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL;
 use entity_gate::{
-    ActiveDomainAlter, BranchQuiesceGauges, DomainActivityGuard, EntityAlterHold,
-    EntityGateHoldKey, NodeQuiesceCounters, NodeQuiesceWorkGuard, OutputBufferQuiesceGauge,
+    ActiveDomainAlter, BranchQuiesceGauges, DomainActivityGuard, EntityGateOperation,
+    NodeQuiesceCounters, NodeQuiesceWorkGuard, OutputBufferQuiesceGauge,
 };
 pub(in crate::runtime) use events::RuntimeEvents;
 pub(in crate::runtime) use filter_map::evaluate_sqs_fifo_group_program;

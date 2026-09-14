@@ -216,7 +216,6 @@ fn test_session_service(
             events: SessionEvents::new(16),
             subscription_interest_counts: DashMap::with_hasher(RandomState::new()),
             interconnect,
-            next_entity_gate_operation_id: AtomicU64::new(1),
             service_tasks: TaskTracker::new(),
             configured_basic_auth: None,
             auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),

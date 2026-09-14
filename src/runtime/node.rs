@@ -73,11 +73,11 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<DomainNodeRef, Arc<NodeQuiesceCounters>, RandomState>,
     /// Also held by the entity gate's deadline task, alongside `ingestors`.
     pub(in crate::runtime) entity_gate_holds:
-        Arc<DashMap<EntityGateHoldKey, EntityAlterHold, RandomState>>,
+        Arc<DashMap<CoordinationIdentity, Arc<EntityGateOperation>, RandomState>>,
     /// Also held by the entity gate deadline task so a failed handoff resumes state timers when
     /// its lease expires.
     pub(in crate::runtime) frozen_ownership_handoff_entities:
-        Arc<DashMap<DomainNodeRef, (), RandomState>>,
+        Arc<DashMap<DomainNodeRef, BTreeSet<CoordinationIdentity>, RandomState>>,
     /// Also held by branch tasks waiting for a handoff freeze to end.
     pub(in crate::runtime) ownership_handoff_freeze_changed: Arc<Notify>,
     /// Also held by every outstanding `DomainAlterGuard`, which clears its entry on drop.
