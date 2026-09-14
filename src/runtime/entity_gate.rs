@@ -177,6 +177,56 @@ impl Drop for NodeQuiesceWorkGuard {
     }
 }
 
+/// Publishes the depth of one task's output buffers into its node's quiesce accounting.
+///
+/// A batch that a node has accepted but not yet released to its destination is work that node
+/// holds in memory, so an entity gate or an ownership handoff has to be able to see it. The gauge
+/// owns the count it contributed, so dropping the task that owns the buffers withdraws exactly
+/// that contribution and nothing else.
+pub(super) struct OutputBufferQuiesceGauge {
+    counters: Arc<NodeQuiesceCounters>,
+    output_buffers: usize,
+}
+
+impl OutputBufferQuiesceGauge {
+    pub(super) fn new(counters: Arc<NodeQuiesceCounters>) -> Self {
+        Self {
+            counters,
+            output_buffers: 0,
+        }
+    }
+
+    pub(super) fn counters(&self) -> Arc<NodeQuiesceCounters> {
+        self.counters.clone()
+    }
+
+    pub(super) fn add_batch(&mut self) {
+        self.output_buffers = self
+            .output_buffers
+            .checked_add(1)
+            .assured("the count cannot exceed the batches this task holds in memory");
+        self.counters.output_buffers.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(super) fn remove_batches(&mut self, count: usize) {
+        self.output_buffers = self
+            .output_buffers
+            .checked_sub(count)
+            .verified("only batches counted when they entered this buffer can be removed");
+        self.counters
+            .output_buffers
+            .fetch_sub(count, Ordering::AcqRel);
+    }
+}
+
+impl Drop for OutputBufferQuiesceGauge {
+    fn drop(&mut self) {
+        self.counters
+            .output_buffers
+            .fetch_sub(self.output_buffers, Ordering::AcqRel);
+    }
+}
+
 pub(super) struct BranchQuiesceGauges {
     pub(super) counters: Arc<NodeQuiesceCounters>,
     pub(super) collected_inputs: usize,
