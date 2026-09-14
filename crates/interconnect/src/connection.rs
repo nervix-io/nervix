@@ -16,7 +16,7 @@ use std::{
     ops::Deref,
     sync::{
         Arc as StdArc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -31,7 +31,9 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{
     BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
 };
-use nervix_models::{ClusterNodeName, RemoteAckOutcome, RemoteAckRegistration};
+use nervix_models::{
+    ClusterNodeName, CoordinationIdentity, RemoteAckOutcome, RemoteAckRegistration,
+};
 use rand_core::{OsRng, RngCore as _};
 use rustls::pki_types::ServerName;
 use strum::EnumCount as _;
@@ -46,9 +48,10 @@ use tracing::{debug, warn};
 use triomphe::Arc;
 
 use super::{
-    ControlEnvelope, Envelope, PeerTarget, PoolClass, RELAY_GRANT_LIFETIME, ReceivedEnvelope,
-    RelayAdmissionDecision, RelayAdmissionStatus, RelayDelivery, RelayPayload, RequestSubquota,
-    TlsConfigBundle, TransportError, TransportOptions, wire,
+    ControlEnvelope, CoordinationIdentityAllocationError, Envelope, PeerTarget, PoolClass,
+    RELAY_GRANT_LIFETIME, ReceivedEnvelope, RelayAdmissionDecision, RelayAdmissionStatus,
+    RelayDelivery, RelayPayload, RequestSubquota, TlsConfigBundle, TransportError,
+    TransportOptions, wire,
 };
 use crate::{
     identity::CertificateIdentity,
@@ -536,6 +539,7 @@ pub(crate) struct TransportStateInner {
     node_id: ClusterNodeName,
     advertised_host: String,
     process_epoch: u64,
+    next_coordination_sequence: AtomicU64,
     local_addr: SocketAddr,
     tls: parking_lot::RwLock<ActiveTls>,
     tls_changed: Notify,
@@ -612,6 +616,7 @@ impl TransportState {
                 node_id,
                 advertised_host,
                 process_epoch,
+                next_coordination_sequence: AtomicU64::new(1),
                 local_addr,
                 tls: parking_lot::RwLock::new(ActiveTls {
                     generation: 1,
@@ -687,6 +692,22 @@ impl TransportState {
 
     pub(crate) fn node_id(&self) -> &ClusterNodeName {
         &self.node_id
+    }
+
+    pub(crate) fn next_coordination_identity(
+        &self,
+    ) -> Result<CoordinationIdentity, Report<CoordinationIdentityAllocationError>> {
+        let sequence = self
+            .next_coordination_sequence
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| Report::new(CoordinationIdentityAllocationError))?;
+        Ok(CoordinationIdentity::new(
+            self.node_id.clone(),
+            self.process_epoch,
+            sequence,
+        ))
     }
 
     pub(crate) fn requests(&self) -> &super::RequestState {
@@ -1908,6 +1929,7 @@ impl TransportState {
             self.handle_stream_request(
                 peer.node_id,
                 peer.advertised_host,
+                peer.process_epoch,
                 peer.class,
                 request.into_body(),
                 respond,
@@ -1919,6 +1941,7 @@ impl TransportState {
             self.handle_duplex_request(
                 peer.node_id,
                 peer.advertised_host,
+                peer.process_epoch,
                 peer.class,
                 request.into_body(),
                 respond,
@@ -1927,15 +1950,8 @@ impl TransportState {
             return Ok(());
         }
         if path == CONTROL_PATH {
-            self.handle_control(
-                peer.addr,
-                peer.node_id,
-                peer.advertised_host,
-                peer.class,
-                request.into_body(),
-                respond,
-            )
-            .await?;
+            self.handle_control(peer, request.into_body(), respond)
+                .await?;
             return Ok(());
         }
         if path == ACK_PATH {
@@ -2074,30 +2090,27 @@ impl TransportState {
 
     async fn handle_control(
         &self,
-        peer_addr: SocketAddr,
-        peer_node_id: ClusterNodeName,
-        peer_advertised_host: String,
-        class: PoolClass,
+        peer: InboundPeer,
         body: RecvStream,
         mut respond: server::SendResponse<Bytes>,
     ) -> Result<(), TransportError> {
         let bytes = read_body(
             &self.executor,
-            class.memory_class(),
-            class.control_body_limit(&self.executor),
+            peer.class.memory_class(),
+            peer.class.control_body_limit(&self.executor),
             self.options.progress_timeout,
             body,
         )
         .await?;
         let decoded = wire::decode_rkyv::<ControlEnvelope>(
             &self.executor,
-            class.memory_class(),
-            class.cpu_class(),
+            peer.class.memory_class(),
+            peer.class.cpu_class(),
             bytes,
         )
         .await?;
         let (control, reservation) = decoded.into_parts();
-        if control.pool_class() != class {
+        if control.pool_class() != peer.class {
             send_response(
                 respond,
                 StatusCode::FORBIDDEN,
@@ -2112,8 +2125,9 @@ impl TransportState {
             let response = tokio::select! {
                 response = self.requests.handle(
                     &self.executor,
-                    peer_node_id,
-                    peer_advertised_host,
+                    peer.node_id,
+                    peer.advertised_host,
+                    peer.process_epoch,
                     request,
                 ) => response,
                 reset = poll_fn(|context| respond.poll_reset(context)) => {
@@ -2124,9 +2138,9 @@ impl TransportState {
             let (response, _payload_reservation) = response.into_parts();
             let response = wire::encode_rkyv(
                 &self.executor,
-                class.memory_class(),
-                class.cpu_class(),
-                class.control_body_limit(&self.executor),
+                peer.class.memory_class(),
+                peer.class.cpu_class(),
+                peer.class.control_body_limit(&self.executor),
                 ControlEnvelope::Response(response),
             )
             .await?;
@@ -2152,8 +2166,8 @@ impl TransportState {
         }
 
         self.deliver_incoming(
-            peer_addr,
-            peer_node_id,
+            peer.addr,
+            peer.node_id,
             Envelope::Control(control),
             Some(reservation),
         )?;

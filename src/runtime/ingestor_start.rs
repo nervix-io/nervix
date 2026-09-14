@@ -444,7 +444,7 @@ impl Runtime {
             .map(|value| *value)
         else {
             return Err(format!(
-                "resource '{}' has no published versions for lookup '{}' in domain '{}'",
+                "resource '{}' has no installed versions for lookup '{}' in domain '{}'",
                 lookup.resource.as_str(),
                 lookup.name.as_str(),
                 domain.as_str()
@@ -777,9 +777,10 @@ mod tests {
             .await;
 
         let error = result.expect_err("invalid ACK timeout must fail schedule application");
+        let start_error = error.to_string();
         assert!(
-            error.to_string().contains("invalid ack timeout 'oops'"),
-            "unexpected start error: {error}"
+            start_error.contains("invalid ack timeout 'oops'"),
+            "unexpected start error: {start_error}"
         );
         assert!(
             !runtime.inner.executions.contains_key(&domain),
@@ -796,12 +797,14 @@ mod tests {
                 )),
             "failed scheduled ingestor start must not leave an ingestor runtime"
         );
-        let describe_error = runtime
+        let describe = runtime
             .describe_local_ingestor(&domain, &ingestor)
-            .expect_err("describe should expose the domain instantiation error");
-        assert!(
-            describe_error.contains("invalid ack timeout 'oops'"),
-            "describe should expose start error, got {describe_error}"
+            .expect("describe should represent the stopped ingestor");
+        assert!(!describe.running);
+        assert!(!describe.ready);
+        assert_eq!(
+            describe.transient_error.as_deref(),
+            Some(start_error.as_str())
         );
     }
 }

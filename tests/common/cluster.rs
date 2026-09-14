@@ -46,8 +46,8 @@ use nervix_server::{
 };
 use parking_lot::Mutex;
 use proto::{
-    CommandRequest, ServerEventLevel, SessionRequest, session_response::Event,
-    session_service_client::SessionServiceClient,
+    CommandRequest, ServerEventLevel, SessionRequest, UploadResourceRequest, UploadResourceStart,
+    session_response::Event, session_service_client::SessionServiceClient,
 };
 use pulsar::{
     ConsumerOptions as PulsarConsumerOptions, Pulsar, SubType as PulsarSubType, TokioExecutor,
@@ -808,12 +808,61 @@ impl Cluster {
         Ok(())
     }
 
-    pub(crate) async fn start_node(&mut self, node_id: &str) -> io::Result<()> {
-        self.start_node_process(node_id).await?;
-        self.wait_for_node_consensus_catch_up(node_id).await
+    /// Start a node without waiting for it to catch up with the leader.
+    ///
+    /// A scenario whose subject is a node that cannot apply what the leader committed waits for
+    /// its own condition instead, and the retry [`Cluster::start_node`] performs would restart a
+    /// node that had already consumed the failure the scenario armed.
+    pub(crate) async fn start_node_without_catching_up(&mut self, node_id: &str) -> io::Result<()> {
+        let handle = self
+            .nodes
+            .get_mut(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        handle.start()?;
+        handle.wait_until_ready().await
     }
 
-    pub(crate) async fn start_node_process(&mut self, node_id: &str) -> io::Result<()> {
+    pub(crate) async fn start_node(&mut self, node_id: &str) -> io::Result<()> {
+        self.start_node_without_waiting_for_raft_catch_up(node_id)
+            .await?;
+        let mut leader_applied = None;
+        for probe_node_id in self
+            .nodes
+            .keys()
+            .filter(|existing_id| existing_id.as_str() != node_id)
+        {
+            tokio::task::consume_budget().await;
+            let Ok(probe_status) = self.show_status(probe_node_id).await else {
+                continue;
+            };
+            let Some(leader_id) = probe_status
+                .current_leader
+                .filter(|leader_id| leader_id != node_id)
+            else {
+                continue;
+            };
+            let Ok(leader_status) = self.show_status(&leader_id).await else {
+                continue;
+            };
+            leader_applied = leader_status.last_applied.filter(|value| *value > 0);
+            if leader_applied.is_some() {
+                break;
+            }
+        }
+        if let Some(leader_applied) = leader_applied {
+            self.wait_for_last_applied_at_least(node_id, leader_applied)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Start a stopped node and wait only until its server is ready to answer requests.
+    ///
+    /// The node may still be catching up its Raft log when this returns.
+    pub(crate) async fn start_node_without_waiting_for_raft_catch_up(
+        &mut self,
+        node_id: &str,
+    ) -> io::Result<()> {
         let handle = self
             .nodes
             .get_mut(node_id)
@@ -843,37 +892,6 @@ impl Cluster {
         }
         if let Some(error) = last_error {
             return Err(error);
-        }
-        Ok(())
-    }
-
-    async fn wait_for_node_consensus_catch_up(&self, node_id: &str) -> io::Result<()> {
-        let mut leader_applied = None;
-        for probe_node_id in self
-            .nodes
-            .keys()
-            .filter(|existing_id| existing_id.as_str() != node_id)
-        {
-            let Ok(probe_status) = self.show_status(probe_node_id).await else {
-                continue;
-            };
-            let Some(leader_id) = probe_status
-                .current_leader
-                .filter(|leader_id| leader_id != node_id)
-            else {
-                continue;
-            };
-            let Ok(leader_status) = self.show_status(&leader_id).await else {
-                continue;
-            };
-            leader_applied = leader_status.last_applied.filter(|value| *value > 0);
-            if leader_applied.is_some() {
-                break;
-            }
-        }
-        if let Some(leader_applied) = leader_applied {
-            self.wait_for_last_applied_at_least(node_id, leader_applied)
-                .await?;
         }
         Ok(())
     }
@@ -1392,6 +1410,17 @@ impl Cluster {
         Ok(handle.spec.grpc_uri(handle.config.grpc_mode))
     }
 
+    pub(crate) async fn send_incomplete_resource_upload(
+        &self,
+        node_id: &str,
+        domain: &str,
+        resource: &str,
+        identity: &str,
+    ) -> io::Result<proto::UploadResourceResponse> {
+        let server = self.grpc_uri(node_id)?;
+        send_incomplete_resource_upload(&server, domain, resource, identity).await
+    }
+
     pub(crate) fn web_console_url(&self, node_id: &str) -> io::Result<String> {
         let handle = self
             .nodes
@@ -1781,6 +1810,11 @@ impl Cluster {
     ) {
         self.fault_injection
             .arm_health_response_pause(node_name(probing_node_id), node_name(responding_node_id));
+    }
+
+    pub(crate) fn fail_health_responses_from(&self, responding_node_id: &str) {
+        self.fault_injection
+            .fail_health_responses_from(node_name(responding_node_id));
     }
 
     pub(crate) async fn wait_for_health_response_pause(
@@ -3115,9 +3149,11 @@ pub(crate) struct TestSubscriptionEvent {
 #[derive(Debug)]
 pub(crate) struct RawTestSession {
     domain: String,
+    transaction: Option<proto::TransactionStatus>,
     request_tx: mpsc::Sender<SessionRequest>,
     response: tonic::Streaming<proto::SessionResponse>,
     pending_subscriptions: VecDeque<proto::SubscriptionEvent>,
+    pending_server_errors: VecDeque<TestServerEvent>,
 }
 
 pub(crate) enum TestSession {
@@ -3220,6 +3256,20 @@ impl TestSession {
         }
     }
 
+    pub(crate) async fn run_command_result_with_reference(
+        &mut self,
+        query: &str,
+        execution_reference: &str,
+    ) -> io::Result<proto::CommandResult> {
+        match self {
+            Self::Raw(session) => {
+                session
+                    .run_command_result_with_reference(query, execution_reference)
+                    .await
+            }
+        }
+    }
+
     pub(crate) async fn try_next_subscription(
         &mut self,
         timeout_duration: Duration,
@@ -3252,11 +3302,29 @@ impl RawTestSession {
     }
 
     async fn run_command_result(&mut self, query: &str) -> io::Result<proto::CommandResult> {
+        let execution_reference = uuid::Uuid::now_v7().to_string();
+        self.run_command_result_with_reference(query, &execution_reference)
+            .await
+    }
+
+    async fn run_command_result_with_reference(
+        &mut self,
+        query: &str,
+        execution_reference: &str,
+    ) -> io::Result<proto::CommandResult> {
+        let expected_transaction_position = match &self.transaction {
+            Some(transaction) if transaction.state == i32::from(proto::TransactionState::Open) => {
+                Some(transaction.pending_count)
+            }
+            Some(_) | None => None,
+        };
         self.request_tx
             .send(SessionRequest {
                 request: Some(proto::session_request::Request::Command(CommandRequest {
                     query: query.to_string(),
                     domain: self.domain.clone(),
+                    execution_reference: execution_reference.to_string(),
+                    expected_transaction_position,
                 })),
             })
             .await
@@ -3268,7 +3336,8 @@ impl RawTestSession {
                 Some(proto::SessionResponse {
                     event: Some(Event::Result(result)),
                 }) => {
-                    return Ok(result);
+                    self.transaction = result.transaction.clone();
+                    return Ok(*result);
                 }
                 Some(proto::SessionResponse {
                     event: Some(Event::Subscription(event)),
@@ -3276,8 +3345,15 @@ impl RawTestSession {
                     self.pending_subscriptions.push_back(event);
                 }
                 Some(proto::SessionResponse {
-                    event: Some(Event::Server(_)),
-                }) => {}
+                    event: Some(Event::Server(event)),
+                }) => {
+                    if event.level == i32::from(ServerEventLevel::Error) {
+                        self.pending_server_errors.push_back(TestServerEvent {
+                            level: event.level,
+                            message: event.message,
+                        });
+                    }
+                }
                 Some(proto::SessionResponse {
                     event: Some(Event::Suggest(_)),
                 }) => {}
@@ -3326,8 +3402,15 @@ impl RawTestSession {
                             }));
                         }
                         Some(proto::SessionResponse {
-                            event: Some(Event::Server(_)),
-                        }) => {}
+                            event: Some(Event::Server(event)),
+                        }) => {
+                            if event.level == i32::from(ServerEventLevel::Error) {
+                                self.pending_server_errors.push_back(TestServerEvent {
+                                    level: event.level,
+                                    message: event.message,
+                                });
+                            }
+                        }
                         Some(proto::SessionResponse {
                             event: Some(Event::Suggest(_)),
                         })
@@ -3359,6 +3442,9 @@ impl RawTestSession {
         &mut self,
         timeout_duration: Duration,
     ) -> io::Result<Option<TestServerEvent>> {
+        if let Some(event) = self.pending_server_errors.pop_front() {
+            return Ok(Some(event));
+        }
         let deadline = sleep(timeout_duration);
         tokio::pin!(deadline);
         loop {
@@ -3586,10 +3672,63 @@ async fn open_raw_session(server: &str, domain: &str) -> io::Result<TestSession>
 
     Ok(TestSession::Raw(Box::new(RawTestSession {
         domain: domain.to_string(),
+        transaction: None,
         request_tx,
         response,
         pending_subscriptions: VecDeque::new(),
+        pending_server_errors: VecDeque::new(),
     })))
+}
+
+async fn send_incomplete_resource_upload(
+    server: &str,
+    domain: &str,
+    resource: &str,
+    identity: &str,
+) -> io::Result<proto::UploadResourceResponse> {
+    let mut endpoint = Endpoint::from_shared(server.to_string()).map_err(io::Error::other)?;
+    if server.starts_with("https://") {
+        endpoint = endpoint
+            .tls_config(
+                ClientTlsConfig::new().ca_certificate(Certificate::from_pem(dev_tls_ca_pem()?)),
+            )
+            .map_err(io::Error::other)?;
+    }
+    let channel = endpoint.connect().await.map_err(io::Error::other)?;
+    let mut client = SessionServiceClient::new(channel);
+    let (request_tx, request_rx) = mpsc::channel(2);
+    request_tx
+        .send(UploadResourceRequest {
+            event: Some(proto::upload_resource_request::Event::Start(
+                UploadResourceStart {
+                    name: resource.to_string(),
+                    total_bytes: 2,
+                    domain: domain.to_string(),
+                    upload_identity: identity.to_string(),
+                },
+            )),
+        })
+        .await
+        .map_err(io::Error::other)?;
+    request_tx
+        .send(UploadResourceRequest {
+            event: Some(proto::upload_resource_request::Event::Chunk(vec![0].into())),
+        })
+        .await
+        .map_err(io::Error::other)?;
+    drop(request_tx);
+
+    let mut request = Request::new(ReceiverStream::new(request_rx));
+    let authorization =
+        MetadataValue::from_str(&test_basic_authorization()).map_err(io::Error::other)?;
+    request
+        .metadata_mut()
+        .insert("authorization", authorization);
+    client
+        .upload_resource(request)
+        .await
+        .map(|response| response.into_inner())
+        .map_err(io::Error::other)
 }
 
 async fn publish_mqtt(

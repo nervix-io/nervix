@@ -28,8 +28,8 @@ use dashmap::DashMap;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{GossipNode, GossipState};
 use nervix_interconnect::{
-    InterconnectRequest, PeerTarget, PoolClass, RequestContext, RequestSubquota,
-    Transport as InterconnectTransport,
+    ApplicationRevisionResponse, InterconnectRequest, PeerTarget, PoolClass, RequestContext,
+    RequestSubquota, Transport as InterconnectTransport,
 };
 use nervix_models::{ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName};
 use nervix_recovery::Discarded as _;
@@ -51,7 +51,10 @@ const KEY_WEB_CONSOLE_ADVERTISE_ADDR: &str = "web_console_advertise_addr";
 const KEY_INTERCONNECT_LISTEN_ADDR: &str = "interconnect_listen_addr";
 const KEY_INTERCONNECT_ADVERTISE_ADDR: &str = "interconnect_advertise_addr";
 const KEY_BOOTSTRAP_HOST: &str = "bootstrap_host";
+const KEY_TERMINATING: &str = "terminating";
 const KEY_SUBSCRIPTION_INTEREST_PREFIX: &str = "subscription_interest:";
+const KEY_AUTHORITATIVE_REVISION_APPLIED: &str = "authoritative_revision_applied";
+const KEY_RUNTIME_REVISION_PREPARED: &str = "runtime_revision_prepared";
 const KEY_RUNTIME_REVISION_READY: &str = "runtime_revision_ready";
 /// How many cluster changes a session can fall behind before the bus drops the oldest.
 const CLUSTER_EVENT_CAPACITY: usize = 256;
@@ -1202,32 +1205,91 @@ impl ClusterHandle {
 
     pub async fn live_node_ids(&self) -> Vec<ClusterNodeName> {
         let gossip = self.availability_state().await;
-        let dead_node_ids = gossip.dead_node_ids;
-        gossip
-            .live_nodes
-            .into_iter()
-            .filter(|node| !dead_node_ids.contains(&node.node_id))
-            .map(|node| node.node_id)
-            .collect()
+        gossip.live_node_ids().into_iter().collect()
+    }
+
+    pub async fn mark_local_terminating(&self) {
+        let chitchat_handle = self.chitchat.clone();
+        let mut chitchat = chitchat_handle.lock().await;
+        let local_id = chitchat.self_chitchat_id().clone();
+        chitchat.self_node_state().set(KEY_TERMINATING, "1");
+        info!(
+            node_id = local_id.node_id,
+            incarnation = local_id.generation_id,
+            "advertised terminating process incarnation"
+        );
     }
 
     pub async fn set_local_runtime_revision_ready(&self, revision: u64) {
+        self.set_local_revision(KEY_RUNTIME_REVISION_READY, revision)
+            .await;
+    }
+
+    pub async fn set_local_authoritative_revision(&self, revision: u64) {
+        self.set_local_revision(KEY_AUTHORITATIVE_REVISION_APPLIED, revision)
+            .await;
+    }
+
+    pub async fn nodes_at_authoritative_revision(
+        &self,
+        revision: u64,
+    ) -> BTreeSet<ClusterNodeIdentity> {
+        self.nodes_at_revision(KEY_AUTHORITATIVE_REVISION_APPLIED, revision)
+            .await
+    }
+
+    pub async fn set_local_runtime_revision_prepared(&self, revision: u64) {
+        self.set_local_revision(KEY_RUNTIME_REVISION_PREPARED, revision)
+            .await;
+    }
+
+    async fn set_local_revision(&self, key: &str, revision: u64) {
         let chitchat_handle = self.chitchat.clone();
         let mut chitchat = chitchat_handle.lock().await;
-        advance_runtime_revision_readiness(chitchat.self_node_state(), revision);
+        advance_revision(chitchat.self_node_state(), key, revision);
+    }
+
+    pub async fn local_application_revision(&self) -> ApplicationRevisionResponse {
+        let chitchat_handle = self.chitchat.clone();
+        let chitchat = chitchat_handle.lock().await;
+        let self_id = chitchat.self_chitchat_id();
+        let identity = cluster_node_identity(self_id)
+            .assured("the local Chitchat identity contains the validated server node name");
+        let state = chitchat
+            .node_state(self_id)
+            .assured("Chitchat retains its own node state for the server lifetime");
+        ApplicationRevisionResponse {
+            identity,
+            authoritative: revision_or_zero(state, KEY_AUTHORITATIVE_REVISION_APPLIED),
+            runtime_prepared: revision_or_zero(state, KEY_RUNTIME_REVISION_PREPARED),
+            runtime_ready: revision_or_zero(state, KEY_RUNTIME_REVISION_READY),
+        }
+    }
+
+    pub async fn nodes_prepared_for_runtime_revision(
+        &self,
+        revision: u64,
+    ) -> BTreeSet<ClusterNodeIdentity> {
+        self.nodes_at_revision(KEY_RUNTIME_REVISION_PREPARED, revision)
+            .await
     }
 
     pub async fn nodes_ready_for_runtime_revision(
         &self,
         revision: u64,
     ) -> BTreeSet<ClusterNodeIdentity> {
+        self.nodes_at_revision(KEY_RUNTIME_REVISION_READY, revision)
+            .await
+    }
+
+    async fn nodes_at_revision(&self, key: &str, revision: u64) -> BTreeSet<ClusterNodeIdentity> {
         let chitchat_handle = self.chitchat.clone();
         let chitchat = chitchat_handle.lock().await;
         let self_id = chitchat.self_chitchat_id().clone();
         let mut ready = BTreeSet::new();
 
         if let Some(state) = chitchat.node_state(&self_id)
-            && runtime_revision_is_ready(state, revision)
+            && revision_is_at_least(state, key, revision)
             && let Some(identity) = cluster_node_identity(&self_id)
         {
             ready.insert(identity);
@@ -1237,7 +1299,7 @@ impl ClusterHandle {
                 continue;
             }
             if let Some(state) = chitchat.node_state(node_id)
-                && runtime_revision_is_ready(state, revision)
+                && revision_is_at_least(state, key, revision)
                 && let Some(identity) = cluster_node_identity(node_id)
             {
                 ready.insert(identity);
@@ -1433,8 +1495,8 @@ fn subscription_interest_key(domain: &str, relay: &str) -> String {
     format!("{KEY_SUBSCRIPTION_INTEREST_PREFIX}{domain}:{relay}")
 }
 
-fn runtime_revision_is_ready(state: &NodeState, revision: u64) -> bool {
-    let Some(value) = state.get(KEY_RUNTIME_REVISION_READY) else {
+fn revision_is_at_least(state: &NodeState, key: &str, revision: u64) -> bool {
+    let Some(value) = state.get(key) else {
         return false;
     };
     let Ok(ready_revision) = value.parse::<u64>() else {
@@ -1443,11 +1505,20 @@ fn runtime_revision_is_ready(state: &NodeState, revision: u64) -> bool {
     ready_revision >= revision
 }
 
-fn advance_runtime_revision_readiness(state: &mut NodeState, revision: u64) {
-    if runtime_revision_is_ready(state, revision) {
+fn revision_or_zero(state: &NodeState, key: &str) -> u64 {
+    let Some(value) = state.get(key) else {
+        return 0;
+    };
+    value
+        .parse::<u64>()
+        .assured("application revision values are written from a u64")
+}
+
+fn advance_revision(state: &mut NodeState, key: &str, revision: u64) {
+    if revision_is_at_least(state, key, revision) {
         return;
     }
-    state.set(KEY_RUNTIME_REVISION_READY, revision.to_string());
+    state.set(key, revision.to_string());
 }
 
 fn cluster_node_identity(node_id: &ChitchatId) -> Option<ClusterNodeIdentity> {
@@ -1469,6 +1540,7 @@ fn render_node_state_lines(node_id: &ChitchatId, state: &NodeState) -> Vec<Strin
     vec![
         format!("- node_id: {}", node_id.node_id),
         format!("  gossip_addr: {}", node_id.gossip_advertise_addr),
+        format!("  terminating: {}", state.get(KEY_TERMINATING).is_some()),
         format!(
             "  grpc_listen_addr: {}",
             state.get(KEY_GRPC_LISTEN_ADDR).unwrap_or("<unknown>")
@@ -1534,6 +1606,7 @@ fn to_gossip_node(node_id: &ChitchatId, state: &NodeState) -> Option<GossipNode>
     Some(GossipNode {
         node_id: identity.node_id().clone(),
         incarnation: identity.incarnation(),
+        terminating: state.get(KEY_TERMINATING).is_some(),
         grpc_advertise_addr,
         web_console_advertise_addr,
         interconnect_advertise_addr,
@@ -1626,12 +1699,28 @@ mod tests {
     fn runtime_revision_readiness_advances_monotonically() {
         let mut state = NodeState::for_test();
 
-        advance_runtime_revision_readiness(&mut state, 12);
-        advance_runtime_revision_readiness(&mut state, 11);
+        advance_revision(&mut state, KEY_RUNTIME_REVISION_READY, 12);
+        advance_revision(&mut state, KEY_RUNTIME_REVISION_READY, 11);
         assert_eq!(state.get(KEY_RUNTIME_REVISION_READY), Some("12"));
 
-        advance_runtime_revision_readiness(&mut state, 13);
+        advance_revision(&mut state, KEY_RUNTIME_REVISION_READY, 13);
         assert_eq!(state.get(KEY_RUNTIME_REVISION_READY), Some("13"));
+    }
+
+    #[test]
+    fn runtime_preparation_and_completion_advance_independently() {
+        let mut state = NodeState::for_test();
+
+        advance_revision(&mut state, KEY_RUNTIME_REVISION_PREPARED, 8);
+        assert!(revision_is_at_least(
+            &state,
+            KEY_RUNTIME_REVISION_PREPARED,
+            8
+        ));
+        assert!(!revision_is_at_least(&state, KEY_RUNTIME_REVISION_READY, 8));
+
+        advance_revision(&mut state, KEY_RUNTIME_REVISION_READY, 8);
+        assert!(revision_is_at_least(&state, KEY_RUNTIME_REVISION_READY, 8));
     }
 
     #[test]

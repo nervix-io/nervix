@@ -1,3 +1,5 @@
+use parking_lot::Mutex;
+
 use super::*;
 
 /// Default deadline for draining one runtime branch during a domain or node transition.
@@ -13,12 +15,151 @@ pub const fn branch_task_stop_timeout(domain_drain_timeout: Duration) -> Duratio
 pub(in crate::runtime) const OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL: Duration =
     Duration::from_millis(25);
 
-/// One in-flight entity-gate hold, identified by the domain it pauses and the operation that took
-/// it, so a retried operation reuses the hold it already owns.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct EntityGateHoldKey {
-    pub(super) domain: DomainName,
-    pub(super) operation_id: u64,
+/// The complete logical scope one coordination operation fenced. A retry must name this exact
+/// scope before it can reuse the completed hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EntityGateScope {
+    domain: DomainName,
+    relays: SortedSet<RelayName>,
+    affected_entities: SortedSet<NodeRef>,
+    purpose: EntityGatePurpose,
+}
+
+impl EntityGateScope {
+    fn new(
+        domain: &DomainName,
+        relays: &[RelayName],
+        affected_entities: &[NodeRef],
+        purpose: EntityGatePurpose,
+    ) -> Self {
+        Self {
+            domain: domain.clone(),
+            relays: SortedSet::from_unsorted(relays.to_vec()),
+            affected_entities: SortedSet::from_unsorted(affected_entities.to_vec()),
+            purpose,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Error)]
+pub(crate) enum EntityGateOperationError {
+    #[error(
+        "coordination identity '{coordination}' is already bound to a different entity gate scope"
+    )]
+    ScopeConflict { coordination: CoordinationIdentity },
+    #[error("entity gate operation was already released")]
+    Released,
+    #[error("the receiver-owned entity gate release task terminated before cleanup completed")]
+    ReleaseTaskTerminated,
+    #[error("relay dispatch gate fence for domain '{domain}' did not complete before its deadline")]
+    RelayFenceDeadline { domain: DomainName },
+    #[error("entity gate for domain '{domain}' expired while it was being engaged")]
+    EngagementExpired { domain: DomainName },
+    #[error("entity gate coordination identity '{coordination}' is not held")]
+    NotHeld { coordination: CoordinationIdentity },
+    #[error("entity gate coordination identity '{coordination}' does not own the requested scope")]
+    ScopeMismatch { coordination: CoordinationIdentity },
+    #[error("entity gate coordination identity '{coordination}' has not completed engagement")]
+    EngagementIncomplete { coordination: CoordinationIdentity },
+    #[error(
+        "entity gate coordination identity '{coordination}' belongs to domain '{actual}', not \
+         '{requested}'"
+    )]
+    DomainMismatch {
+        coordination: CoordinationIdentity,
+        actual: DomainName,
+        requested: DomainName,
+    },
+}
+
+pub(super) struct EntityGateOperation {
+    scope: EntityGateScope,
+    state: Mutex<EntityGateOperationState>,
+    state_changed: Notify,
+}
+
+enum EntityGateOperationState {
+    Engaging,
+    Held(EntityAlterHold),
+    Failed(EntityGateOperationError),
+    Released,
+}
+
+impl EntityGateOperation {
+    fn new(scope: EntityGateScope) -> Self {
+        Self {
+            scope,
+            state: Mutex::new(EntityGateOperationState::Engaging),
+            state_changed: Notify::new(),
+        }
+    }
+
+    fn scope(&self) -> &EntityGateScope {
+        &self.scope
+    }
+
+    fn scope_matches(&self, scope: &EntityGateScope) -> bool {
+        &self.scope == scope
+    }
+
+    fn complete(&self, hold: EntityAlterHold) {
+        *self.state.lock() = EntityGateOperationState::Held(hold);
+        self.state_changed.notify_waiters();
+    }
+
+    fn fail(&self, error: EntityGateOperationError) {
+        *self.state.lock() = EntityGateOperationState::Failed(error);
+        self.state_changed.notify_waiters();
+    }
+
+    async fn wait_until_held(&self) -> Result<(), Report<EntityGateOperationError>> {
+        loop {
+            let changed = self.state_changed.notified();
+            let result = match &*self.state.lock() {
+                EntityGateOperationState::Engaging => None,
+                EntityGateOperationState::Held(_) => Some(Ok(())),
+                EntityGateOperationState::Failed(error) => Some(Err(Report::new(error.clone()))),
+                EntityGateOperationState::Released => {
+                    Some(Err(Report::new(EntityGateOperationError::Released)))
+                }
+            };
+            if let Some(result) = result {
+                return result;
+            }
+            changed.await;
+        }
+    }
+
+    async fn take_hold(&self) -> Option<EntityAlterHold> {
+        loop {
+            let changed = self.state_changed.notified();
+            let ready = {
+                let mut state = self.state.lock();
+                let current = std::mem::replace(&mut *state, EntityGateOperationState::Released);
+                match current {
+                    EntityGateOperationState::Engaging => {
+                        *state = EntityGateOperationState::Engaging;
+                        None
+                    }
+                    EntityGateOperationState::Held(hold) => Some(Some(hold)),
+                    EntityGateOperationState::Failed(error) => {
+                        *state = EntityGateOperationState::Failed(error);
+                        Some(None)
+                    }
+                    EntityGateOperationState::Released => Some(None),
+                }
+            };
+            if let Some(hold) = ready {
+                self.state_changed.notify_waiters();
+                return hold;
+            }
+            changed.await;
+        }
+    }
+
+    fn is_held(&self) -> bool {
+        matches!(&*self.state.lock(), EntityGateOperationState::Held(_))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +213,7 @@ pub(crate) struct EntityGateLease<'a> {
 }
 
 pub(super) struct EntityAlterHold {
+    pub(super) coordination: CoordinationIdentity,
     pub(super) gates: EntityGateHold,
     pub(super) affected_entities: Vec<NodeRef>,
     pub(super) purpose: EntityGatePurpose,
@@ -174,6 +316,56 @@ impl Drop for NodeQuiesceWorkGuard {
             &self.counters.mailbox_and_in_flight
         };
         counter.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Publishes the depth of one task's output buffers into its node's quiesce accounting.
+///
+/// A batch that a node has accepted but not yet released to its destination is work that node
+/// holds in memory, so an entity gate or an ownership handoff has to be able to see it. The gauge
+/// owns the count it contributed, so dropping the task that owns the buffers withdraws exactly
+/// that contribution and nothing else.
+pub(super) struct OutputBufferQuiesceGauge {
+    counters: Arc<NodeQuiesceCounters>,
+    output_buffers: usize,
+}
+
+impl OutputBufferQuiesceGauge {
+    pub(super) fn new(counters: Arc<NodeQuiesceCounters>) -> Self {
+        Self {
+            counters,
+            output_buffers: 0,
+        }
+    }
+
+    pub(super) fn counters(&self) -> Arc<NodeQuiesceCounters> {
+        self.counters.clone()
+    }
+
+    pub(super) fn add_batch(&mut self) {
+        self.output_buffers = self
+            .output_buffers
+            .checked_add(1)
+            .assured("the count cannot exceed the batches this task holds in memory");
+        self.counters.output_buffers.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(super) fn remove_batches(&mut self, count: usize) {
+        self.output_buffers = self
+            .output_buffers
+            .checked_sub(count)
+            .verified("only batches counted when they entered this buffer can be removed");
+        self.counters
+            .output_buffers
+            .fetch_sub(count, Ordering::AcqRel);
+    }
+}
+
+impl Drop for OutputBufferQuiesceGauge {
+    fn drop(&mut self) {
+        self.counters
+            .output_buffers
+            .fetch_sub(self.output_buffers, Ordering::AcqRel);
     }
 }
 
@@ -453,43 +645,73 @@ impl Runtime {
 
     pub(crate) async fn engage_entity_gate_operation(
         &self,
-        operation_id: u64,
+        coordination: &CoordinationIdentity,
         domain: &DomainName,
         relays: &[RelayName],
         affected_entities: &[NodeRef],
         purpose: EntityGatePurpose,
         lease: EntityGateLease<'_>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Report<EntityGateOperationError>> {
         let EntityGateLease { deadline, reason } = lease;
-        let hold_key = EntityGateHoldKey {
-            domain: domain.clone(),
-            operation_id,
+        let scope = EntityGateScope::new(domain, relays, affected_entities, purpose);
+        let operation = match self.inner.entity_gate_holds.entry(coordination.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => {
+                let operation = entry.get().clone();
+                if !operation.scope_matches(&scope) {
+                    return Err(Report::new(EntityGateOperationError::ScopeConflict {
+                        coordination: coordination.clone(),
+                    }));
+                }
+                operation
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let operation = Arc::new(EntityGateOperation::new(scope.clone()));
+                entry.insert(operation.clone());
+                let runtime = self.clone();
+                let coordination = coordination.clone();
+                let reason = reason.to_string();
+                let engagement = operation.clone();
+                drop(tokio::spawn(async move {
+                    runtime
+                        .complete_entity_gate_engagement(
+                            coordination,
+                            scope,
+                            deadline,
+                            reason,
+                            engagement,
+                        )
+                        .await;
+                }));
+                operation
+            }
         };
-        if self.inner.entity_gate_holds.contains_key(&hold_key) {
-            return Ok(());
-        }
-        let mut gates = self.engage_entity_gates(domain, relays, deadline, reason);
+        operation.wait_until_held().await
+    }
+
+    async fn complete_entity_gate_engagement(
+        self,
+        coordination: CoordinationIdentity,
+        scope: EntityGateScope,
+        deadline: Instant,
+        reason: String,
+        operation: Arc<EntityGateOperation>,
+    ) {
+        let domain = &scope.domain;
+        let purpose = scope.purpose;
+        let mut gates = self.engage_entity_gates(domain, &scope.relays, deadline, &reason);
         if !gates.wait_quiescent().await {
             gates.release();
-            return Err(format!(
-                "relay dispatch gate fence for domain '{}' did not complete before its deadline",
-                domain.as_str()
-            ));
+            let failure = EntityGateOperationError::RelayFenceDeadline {
+                domain: domain.clone(),
+            };
+            operation.fail(failure);
+            self.inner
+                .entity_gate_holds
+                .remove_if(&coordination, |_, current| Arc::ptr_eq(current, &operation));
+            return;
         }
-        if self.inner.entity_gate_holds.contains_key(&hold_key) {
-            gates.release();
-            return Ok(());
-        }
-        self.inner.entity_gate_holds.insert(
-            hold_key.clone(),
-            EntityAlterHold {
-                gates,
-                affected_entities: affected_entities.to_vec(),
-                purpose,
-                quiesced_ingestors: Vec::new(),
-            },
-        );
-        let ingestors = affected_entities
+        let ingestors = scope
+            .affected_entities
             .iter()
             .filter(|entity| entity.kind == ModelKind::Ingestor)
             .map(|entity| entity.identifier.clone())
@@ -498,6 +720,7 @@ impl Runtime {
             EntityGatePurpose::ModelAlteration => IngestorQuiesceCause::EntityHold,
             EntityGatePurpose::OwnershipHandoff => IngestorQuiesceCause::OwnershipHandoff,
         };
+        let mut quiesced_ingestors = Vec::new();
         for ingestor in &ingestors {
             tokio::task::consume_budget().await;
             let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
@@ -507,26 +730,151 @@ impl Runtime {
             if let Some(control) =
                 self.engage_ingestor_quiesce(domain, &IngestorName::from(ingestor), quiesce_cause)
             {
-                match self.inner.entity_gate_holds.get_mut(&hold_key) {
-                    Some(mut hold) => hold.quiesced_ingestors.push(QuiescedIngestorHold {
-                        ingestor: IngestorName::from(ingestor),
-                        cause: quiesce_cause,
-                        control,
-                    }),
-                    // The gate this quiesce belongs to is already gone, so nothing will release
-                    // it later; undo it here instead of leaving the ingestor quiesced forever.
-                    None => control.release(quiesce_cause),
-                }
+                quiesced_ingestors.push(QuiescedIngestorHold {
+                    ingestor: IngestorName::from(ingestor),
+                    cause: quiesce_cause,
+                    control,
+                });
             }
         }
+        if purpose == EntityGatePurpose::OwnershipHandoff {
+            for entity in &scope.affected_entities {
+                let key =
+                    DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone());
+                self.inner
+                    .frozen_ownership_handoff_entities
+                    .entry(key)
+                    .or_default()
+                    .insert(coordination.clone());
+            }
+            self.inner.ownership_handoff_freeze_changed.notify_waiters();
+        }
+        let hold = EntityAlterHold {
+            coordination: coordination.clone(),
+            gates,
+            affected_entities: scope.affected_entities.to_vec(),
+            purpose,
+            quiesced_ingestors,
+        };
         self.force_flush_domain(domain);
         if Instant::now() >= deadline {
-            self.release_entity_gate_operation(operation_id, domain)
-                .await?;
-            return Err(format!(
-                "entity gate for domain '{}' expired while it was being engaged",
-                domain.as_str()
+            Self::release_entity_alter_hold(
+                &self.inner.ingestors,
+                &self.inner.ingestor_quiescence,
+                &self.inner.frozen_ownership_handoff_entities,
+                &self.inner.ownership_handoff_freeze_changed,
+                domain,
+                hold,
+            )
+            .await;
+            let failure = EntityGateOperationError::EngagementExpired {
+                domain: domain.clone(),
+            };
+            operation.fail(failure);
+            self.inner
+                .entity_gate_holds
+                .remove_if(&coordination, |_, current| Arc::ptr_eq(current, &operation));
+            return;
+        }
+        operation.complete(hold);
+        let entity_gate_holds = self.inner.entity_gate_holds.clone();
+        let ingestors = self.inner.ingestors.clone();
+        let ingestor_quiescence = self.inner.ingestor_quiescence.clone();
+        let frozen_ownership_handoff_entities =
+            self.inner.frozen_ownership_handoff_entities.clone();
+        let ownership_handoff_freeze_changed = self.inner.ownership_handoff_freeze_changed.clone();
+        let expiring_operation = operation.clone();
+        drop(tokio::spawn(async move {
+            tokio::time::sleep_until(deadline).await;
+            debug!(
+                domain = expiring_operation.scope().domain.as_str(),
+                %coordination,
+                "entity gate lease reached its deadline"
+            );
+            Self::release_entity_gate_operation_from_state(
+                &entity_gate_holds,
+                &ingestors,
+                &ingestor_quiescence,
+                &frozen_ownership_handoff_entities,
+                &ownership_handoff_freeze_changed,
+                &coordination,
+                &expiring_operation,
+            )
+            .await;
+        }));
+    }
+
+    pub(crate) fn entity_gate_operation_drain_status(
+        &self,
+        coordination: &CoordinationIdentity,
+        domain: &DomainName,
+        relays: &[RelayName],
+        affected_entities: &[NodeRef],
+        purpose: EntityGatePurpose,
+    ) -> Result<EntityDrainStatus, Report<EntityGateOperationError>> {
+        let requested_scope = EntityGateScope::new(domain, relays, affected_entities, purpose);
+        let Some(operation) = self.inner.entity_gate_holds.get(coordination) else {
+            return Err(Report::new(EntityGateOperationError::NotHeld {
+                coordination: coordination.clone(),
+            }));
+        };
+        if !operation.scope_matches(&requested_scope) {
+            return Err(Report::new(EntityGateOperationError::ScopeMismatch {
+                coordination: coordination.clone(),
+            }));
+        }
+        if !operation.is_held() {
+            return Err(Report::new(
+                EntityGateOperationError::EngagementIncomplete {
+                    coordination: coordination.clone(),
+                },
             ));
+        }
+        let scope = operation.scope();
+        Ok(self.entity_drain_status(
+            &scope.domain,
+            &scope.relays,
+            &scope.affected_entities,
+            scope.purpose,
+        ))
+    }
+
+    pub(crate) fn entity_gate_operation_owns_entity(
+        &self,
+        coordination: &CoordinationIdentity,
+        domain: &DomainName,
+        entity: &NodeRef,
+        purpose: EntityGatePurpose,
+    ) -> bool {
+        let Some(operation) = self.inner.entity_gate_holds.get(coordination) else {
+            return false;
+        };
+        let scope = operation.scope();
+        operation.is_held()
+            && &scope.domain == domain
+            && scope.purpose == purpose
+            && scope.affected_entities.binary_search(entity).is_ok()
+    }
+
+    pub(crate) async fn release_entity_gate_operation(
+        &self,
+        coordination: &CoordinationIdentity,
+        domain: &DomainName,
+    ) -> Result<(), Report<EntityGateOperationError>> {
+        let Some(operation) = self
+            .inner
+            .entity_gate_holds
+            .get(coordination)
+            .map(|entry| entry.value().clone())
+        else {
+            return Ok(());
+        };
+        if &operation.scope().domain != domain {
+            return Err(Report::new(EntityGateOperationError::DomainMismatch {
+                coordination: coordination.clone(),
+                actual: operation.scope().domain.clone(),
+                requested: domain.clone(),
+            }));
         }
         let entity_gate_holds = self.inner.entity_gate_holds.clone();
         let ingestors = self.inner.ingestors.clone();
@@ -534,81 +882,84 @@ impl Runtime {
         let frozen_ownership_handoff_entities =
             self.inner.frozen_ownership_handoff_entities.clone();
         let ownership_handoff_freeze_changed = self.inner.ownership_handoff_freeze_changed.clone();
-        let domain = domain.clone();
-        drop(tokio::spawn(async move {
-            tokio::time::sleep_until(deadline).await;
-            if entity_gate_holds.contains_key(&EntityGateHoldKey {
-                domain: domain.clone(),
-                operation_id,
-            }) {
-                debug!(
-                    domain = domain.as_str(),
-                    operation_id, "entity gate lease reached its deadline"
-                );
-                if let Err(error) = Self::release_entity_gate_operation_from_state(
-                    &entity_gate_holds,
-                    &ingestors,
-                    &ingestor_quiescence,
-                    &frozen_ownership_handoff_entities,
-                    &ownership_handoff_freeze_changed,
-                    operation_id,
-                    &domain,
-                )
-                .await
-                {
-                    warn!(
-                        domain = domain.as_str(),
-                        operation_id, error, "failed to release expired entity gate lease"
-                    );
-                }
-            }
-        }));
+        let coordination = coordination.clone();
+        let release = tokio::spawn(async move {
+            Self::release_entity_gate_operation_from_state(
+                &entity_gate_holds,
+                &ingestors,
+                &ingestor_quiescence,
+                &frozen_ownership_handoff_entities,
+                &ownership_handoff_freeze_changed,
+                &coordination,
+                &operation,
+            )
+            .await;
+        });
+        release
+            .await
+            .map_err(|_| Report::new(EntityGateOperationError::ReleaseTaskTerminated))?;
         Ok(())
     }
 
-    pub(crate) async fn release_entity_gate_operation(
-        &self,
-        operation_id: u64,
-        domain: &DomainName,
-    ) -> Result<(), String> {
-        Self::release_entity_gate_operation_from_state(
-            &self.inner.entity_gate_holds,
-            &self.inner.ingestors,
-            &self.inner.ingestor_quiescence,
-            &self.inner.frozen_ownership_handoff_entities,
-            &self.inner.ownership_handoff_freeze_changed,
-            operation_id,
-            domain,
-        )
-        .await
-    }
-
-    pub(super) async fn release_entity_gate_operation_from_state(
-        entity_gate_holds: &DashMap<EntityGateHoldKey, EntityAlterHold, RandomState>,
+    async fn release_entity_gate_operation_from_state(
+        entity_gate_holds: &DashMap<CoordinationIdentity, Arc<EntityGateOperation>, RandomState>,
         ingestors: &DashMap<DomainNodeRef, IngestorRuntime, RandomState>,
         ingestor_quiescence: &DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>,
-        frozen_ownership_handoff_entities: &DashMap<DomainNodeRef, (), RandomState>,
+        frozen_ownership_handoff_entities: &DashMap<
+            DomainNodeRef,
+            BTreeSet<CoordinationIdentity>,
+            RandomState,
+        >,
         ownership_handoff_freeze_changed: &Notify,
-        operation_id: u64,
+        coordination: &CoordinationIdentity,
+        expected_operation: &Arc<EntityGateOperation>,
+    ) {
+        // The pointer comparison binds this removal to the exact lease instance captured by its
+        // deadline task. A delayed deadline cannot take a replacement out of the map.
+        let removed = entity_gate_holds.remove_if(coordination, |_, current| {
+            Arc::ptr_eq(current, expected_operation)
+        });
+        let Some((_, operation)) = removed else {
+            return;
+        };
+        let Some(hold) = operation.take_hold().await else {
+            return;
+        };
+        Self::release_entity_alter_hold(
+            ingestors,
+            ingestor_quiescence,
+            frozen_ownership_handoff_entities,
+            ownership_handoff_freeze_changed,
+            &operation.scope().domain,
+            hold,
+        )
+        .await;
+    }
+
+    async fn release_entity_alter_hold(
+        ingestors: &DashMap<DomainNodeRef, IngestorRuntime, RandomState>,
+        ingestor_quiescence: &DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>,
+        frozen_ownership_handoff_entities: &DashMap<
+            DomainNodeRef,
+            BTreeSet<CoordinationIdentity>,
+            RandomState,
+        >,
+        ownership_handoff_freeze_changed: &Notify,
         domain: &DomainName,
-    ) -> Result<(), String> {
-        // Taking the hold out of the map is what makes this release exclusive: the entity gate
-        // is released both by an explicit request and by its deadline task, and only the caller
-        // that removes the hold may release the reasons it engaged.
-        let hold_key = EntityGateHoldKey {
-            domain: domain.clone(),
-            operation_id,
-        };
-        let Some((_, hold)) = entity_gate_holds.remove(&hold_key) else {
-            return Ok(());
-        };
+        hold: EntityAlterHold,
+    ) {
         if hold.purpose == EntityGatePurpose::OwnershipHandoff {
             for entity in &hold.affected_entities {
-                frozen_ownership_handoff_entities.remove(&DomainNodeRef::node_in(
-                    domain.clone(),
-                    entity.kind,
-                    entity.identifier.clone(),
-                ));
+                let key =
+                    DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone());
+                if let dashmap::mapref::entry::Entry::Occupied(mut entry) =
+                    frozen_ownership_handoff_entities.entry(key)
+                {
+                    entry.get_mut().remove(&hold.coordination);
+                    if entry.get().is_empty() {
+                        entry.remove();
+                    }
+                }
             }
             ownership_handoff_freeze_changed.notify_waiters();
         }
@@ -633,21 +984,17 @@ impl Runtime {
             }
         }
         hold.gates.release();
-        Ok(())
     }
 
     #[cfg(test)]
     pub(crate) fn entity_gate_operation_is_held(
         &self,
-        operation_id: u64,
-        domain: &DomainName,
+        coordination: &CoordinationIdentity,
     ) -> bool {
         self.inner
             .entity_gate_holds
-            .contains_key(&EntityGateHoldKey {
-                domain: domain.clone(),
-                operation_id,
-            })
+            .get(coordination)
+            .is_some_and(|operation| operation.is_held())
     }
 
     pub(crate) fn entity_drain_status(
@@ -910,10 +1257,10 @@ mod tests {
 
     use nervix_interconnect::EntityGatePurpose;
     use nervix_models::{
-        AckMode, BranchSelection, ClusterNodeName, CreateEmitter, CreateJunction, CreateRelay,
-        DomainSchedule, EmitSink, EmitterName, EmitterPublishingMode, ErrorPolicies,
-        IngestQuiesceMode, IngestorName, ModelKind, ModelName, NodeRef, ProcessorInputs,
-        ProcessorOutputs, RelayBranching, RelayName, RetryPolicy,
+        AckMode, BranchSelection, ClusterNodeName, CoordinationIdentity, CreateEmitter,
+        CreateJunction, CreateRelay, DomainSchedule, EmitSink, EmitterName, EmitterPublishingMode,
+        ErrorPolicies, IngestQuiesceMode, IngestorName, ModelKind, ModelName, NodeRef,
+        ProcessorInputs, ProcessorOutputs, RelayBranching, RelayName, RetryPolicy,
     };
     use nonzero_ext::nonzero;
     use tokio::{
@@ -923,6 +1270,10 @@ mod tests {
     use triomphe::Arc;
 
     use super::*;
+
+    fn coordination(coordinator: &str, process_epoch: u64, sequence: u64) -> CoordinationIdentity {
+        CoordinationIdentity::new(named(coordinator), process_epoch, sequence)
+    }
 
     #[test]
     fn domain_drain_status_reports_structured_emitter_publishing_state() {
@@ -1038,7 +1389,7 @@ mod tests {
         let domain = domain("default");
         let relay = named::<RelayName>("events");
         let ingestor = named::<IngestorName>("events_source");
-        let operation_id = 41;
+        let coordination = coordination("coordinator-a", 7, 41);
 
         let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
         let gate = fanout.dispatch_gate();
@@ -1074,7 +1425,7 @@ mod tests {
         };
         runtime
             .engage_entity_gate_operation(
-                operation_id,
+                &coordination,
                 &domain,
                 std::slice::from_ref(&relay),
                 std::slice::from_ref(&affected),
@@ -1090,7 +1441,7 @@ mod tests {
         assert!(runtime.inner.ingestors.get(&key).is_some());
         assert!(!stopped.load(Ordering::SeqCst));
         assert!(gate.is_closed());
-        assert!(runtime.entity_gate_operation_is_held(operation_id, &domain));
+        assert!(runtime.entity_gate_operation_is_held(&coordination));
         assert_eq!(
             runtime
                 .inner
@@ -1101,10 +1452,10 @@ mod tests {
         );
 
         runtime
-            .release_entity_gate_operation(operation_id, &domain)
+            .release_entity_gate_operation(&coordination, &domain)
             .await
             .expect("entity hold should release");
-        assert!(!runtime.entity_gate_operation_is_held(operation_id, &domain));
+        assert!(!runtime.entity_gate_operation_is_held(&coordination));
         assert!(!gate.is_closed());
         assert!(runtime.inner.ingestors.get(&key).is_some());
         assert!(!stopped.load(Ordering::SeqCst));
@@ -1128,7 +1479,7 @@ mod tests {
         let runtime = Runtime::default();
         let domain = domain("default");
         let relay = named::<RelayName>("events");
-        let operation_id = 42;
+        let coordination = coordination("coordinator-a", 7, 42);
         let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
         let gate = fanout.dispatch_gate();
         runtime.inner.relay_boundary_fanouts.insert(
@@ -1138,7 +1489,7 @@ mod tests {
 
         runtime
             .engage_entity_gate_operation(
-                operation_id,
+                &coordination,
                 &domain,
                 std::slice::from_ref(&relay),
                 &[],
@@ -1153,7 +1504,7 @@ mod tests {
         assert!(gate.is_closed());
 
         tokio::time::timeout(Duration::from_secs(1), async {
-            while runtime.entity_gate_operation_is_held(operation_id, &domain) {
+            while runtime.entity_gate_operation_is_held(&coordination) {
                 tokio::task::consume_budget().await;
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -1161,6 +1512,381 @@ mod tests {
         .await
         .expect("entity hold should release at its deadline");
         assert!(!gate.is_closed());
+    }
+
+    #[tokio::test]
+    async fn equal_operation_ids_from_different_coordinators_fence_each_requested_relay() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let first_relay = named::<RelayName>("first_events");
+        let second_relay = named::<RelayName>("second_events");
+        let first_coordination = coordination("leader-a", 10, 1);
+        let second_coordination = coordination("leader-b", 20, 1);
+        let first_fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
+        let first_gate = first_fanout.dispatch_gate();
+        runtime.inner.relay_boundary_fanouts.insert(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, first_relay.clone()),
+            first_fanout,
+        );
+        let second_fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
+        let second_gate = second_fanout.dispatch_gate();
+        runtime.inner.relay_boundary_fanouts.insert(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, second_relay.clone()),
+            second_fanout,
+        );
+
+        runtime
+            .engage_entity_gate_operation(
+                &first_coordination,
+                &domain,
+                std::slice::from_ref(&first_relay),
+                &[],
+                EntityGatePurpose::ModelAlteration,
+                EntityGateLease {
+                    deadline: Instant::now() + Duration::from_secs(5),
+                    reason: "first coordinator",
+                },
+            )
+            .await
+            .expect("the first coordinator hold should engage");
+        runtime
+            .engage_entity_gate_operation(
+                &second_coordination,
+                &domain,
+                std::slice::from_ref(&second_relay),
+                &[],
+                EntityGatePurpose::ModelAlteration,
+                EntityGateLease {
+                    deadline: Instant::now() + Duration::from_secs(5),
+                    reason: "replacement coordinator",
+                },
+            )
+            .await
+            .expect("a successful second coordinator hold should engage its complete scope");
+
+        assert!(first_gate.is_closed());
+        assert!(second_gate.is_closed());
+    }
+
+    #[tokio::test]
+    async fn concurrent_coordinators_with_equal_sequences_hold_independent_scopes() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let first_relay = named::<RelayName>("first_events");
+        let second_relay = named::<RelayName>("second_events");
+        let first_coordination = coordination("leader-a", 10, 1);
+        let second_coordination = coordination("leader-b", 20, 1);
+        let first_fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
+        let first_gate = first_fanout.dispatch_gate();
+        runtime.inner.relay_boundary_fanouts.insert(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, first_relay.clone()),
+            first_fanout,
+        );
+        let second_fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
+        let second_gate = second_fanout.dispatch_gate();
+        runtime.inner.relay_boundary_fanouts.insert(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, second_relay.clone()),
+            second_fanout,
+        );
+
+        let first = runtime.engage_entity_gate_operation(
+            &first_coordination,
+            &domain,
+            std::slice::from_ref(&first_relay),
+            &[],
+            EntityGatePurpose::ModelAlteration,
+            EntityGateLease {
+                deadline: Instant::now() + Duration::from_secs(5),
+                reason: "first concurrent coordinator",
+            },
+        );
+        let second = runtime.engage_entity_gate_operation(
+            &second_coordination,
+            &domain,
+            std::slice::from_ref(&second_relay),
+            &[],
+            EntityGatePurpose::ModelAlteration,
+            EntityGateLease {
+                deadline: Instant::now() + Duration::from_secs(5),
+                reason: "second concurrent coordinator",
+            },
+        );
+        let (first, second) = tokio::join!(first, second);
+
+        first.expect("the first concurrent hold should engage");
+        second.expect("the second concurrent hold should engage");
+        assert!(first_gate.is_closed());
+        assert!(second_gate.is_closed());
+    }
+
+    #[tokio::test]
+    async fn receiver_finishes_engagement_after_the_coordinator_request_is_cancelled() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let relay = named::<RelayName>("events");
+        let coordination = coordination("leader-a", 10, 1);
+        let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
+        let gate = fanout.dispatch_gate();
+        runtime.inner.relay_boundary_fanouts.insert(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
+            fanout,
+        );
+        let dispatch = gate.acquire_dispatch().await;
+        let request = tokio::spawn({
+            let runtime = runtime.clone();
+            let domain = domain.clone();
+            let relay = relay.clone();
+            let coordination = coordination.clone();
+            async move {
+                runtime
+                    .engage_entity_gate_operation(
+                        &coordination,
+                        &domain,
+                        &[relay],
+                        &[],
+                        EntityGatePurpose::ModelAlteration,
+                        EntityGateLease {
+                            deadline: Instant::now() + Duration::from_secs(5),
+                            reason: "coordinator request cancellation regression",
+                        },
+                    )
+                    .await
+            }
+        });
+        while !gate.is_closed() {
+            tokio::task::consume_budget().await;
+            tokio::task::yield_now().await;
+        }
+
+        request.abort();
+        assert!(
+            request
+                .await
+                .expect_err("the simulated coordinator request should be cancelled")
+                .is_cancelled()
+        );
+        drop(dispatch);
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            runtime.engage_entity_gate_operation(
+                &coordination,
+                &domain,
+                std::slice::from_ref(&relay),
+                &[],
+                EntityGatePurpose::ModelAlteration,
+                EntityGateLease {
+                    deadline: Instant::now() + Duration::from_secs(5),
+                    reason: "same operation retry after coordinator loss",
+                },
+            ),
+        )
+        .await
+        .expect("the receiver-owned engagement should finish after request cancellation")
+        .expect("the same operation retry should observe the completed hold");
+        assert!(runtime.entity_gate_operation_is_held(&coordination));
+        assert!(gate.is_closed());
+    }
+
+    #[tokio::test]
+    async fn retries_require_the_same_scope_and_stale_operations_cannot_observe_or_release_it() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let held_relay = named::<RelayName>("held_events");
+        let conflicting_relay = named::<RelayName>("conflicting_events");
+        let current = coordination("leader-a", 11, 1);
+        let prior_incarnation = coordination("leader-a", 10, 1);
+        let held_fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
+        let held_gate = held_fanout.dispatch_gate();
+        runtime.inner.relay_boundary_fanouts.insert(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, held_relay.clone()),
+            held_fanout,
+        );
+        let conflicting_fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
+        let conflicting_gate = conflicting_fanout.dispatch_gate();
+        runtime.inner.relay_boundary_fanouts.insert(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, conflicting_relay.clone()),
+            conflicting_fanout,
+        );
+        let lease = || EntityGateLease {
+            deadline: Instant::now() + Duration::from_secs(5),
+            reason: "scope identity regression",
+        };
+
+        runtime
+            .engage_entity_gate_operation(
+                &current,
+                &domain,
+                std::slice::from_ref(&held_relay),
+                &[],
+                EntityGatePurpose::ModelAlteration,
+                lease(),
+            )
+            .await
+            .expect("the current operation should engage");
+        runtime
+            .engage_entity_gate_operation(
+                &current,
+                &domain,
+                &[held_relay.clone(), held_relay.clone()],
+                &[],
+                EntityGatePurpose::ModelAlteration,
+                lease(),
+            )
+            .await
+            .expect("a retry with the same canonical scope should succeed");
+
+        let conflict = runtime
+            .engage_entity_gate_operation(
+                &current,
+                &domain,
+                std::slice::from_ref(&conflicting_relay),
+                &[],
+                EntityGatePurpose::ModelAlteration,
+                lease(),
+            )
+            .await;
+        assert!(conflict.is_err());
+        assert!(!conflicting_gate.is_closed());
+        runtime
+            .entity_gate_operation_drain_status(
+                &current,
+                &domain,
+                std::slice::from_ref(&held_relay),
+                &[],
+                EntityGatePurpose::ModelAlteration,
+            )
+            .expect("the exact operation and scope should report status");
+        assert!(
+            runtime
+                .entity_gate_operation_drain_status(
+                    &prior_incarnation,
+                    &domain,
+                    std::slice::from_ref(&held_relay),
+                    &[],
+                    EntityGatePurpose::ModelAlteration,
+                )
+                .is_err()
+        );
+
+        runtime
+            .release_entity_gate_operation(&prior_incarnation, &domain)
+            .await
+            .expect("a stale release should be idempotent");
+        assert!(runtime.entity_gate_operation_is_held(&current));
+        assert!(held_gate.is_closed());
+        runtime
+            .release_entity_gate_operation(&current, &domain)
+            .await
+            .expect("the exact operation should release");
+        assert!(!held_gate.is_closed());
+    }
+
+    #[tokio::test]
+    async fn releasing_one_coordinator_preserves_an_overlapping_ownership_freeze() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let affected = NodeRef {
+            kind: ModelKind::Deduplicator,
+            identifier: named("deduplicate_events"),
+        };
+        let entity = affected.clone().in_domain(&domain);
+        let first = coordination("leader-a", 10, 1);
+        let second = coordination("leader-b", 20, 1);
+        let lease = || EntityGateLease {
+            deadline: Instant::now() + Duration::from_secs(5),
+            reason: "overlapping ownership freeze regression",
+        };
+
+        runtime
+            .engage_entity_gate_operation(
+                &first,
+                &domain,
+                &[],
+                std::slice::from_ref(&affected),
+                EntityGatePurpose::OwnershipHandoff,
+                lease(),
+            )
+            .await
+            .expect("the first ownership hold should engage");
+        runtime
+            .engage_entity_gate_operation(
+                &second,
+                &domain,
+                &[],
+                std::slice::from_ref(&affected),
+                EntityGatePurpose::OwnershipHandoff,
+                lease(),
+            )
+            .await
+            .expect("the replacement coordinator ownership hold should engage");
+
+        runtime
+            .release_entity_gate_operation(&first, &domain)
+            .await
+            .expect("the first ownership hold should release");
+        assert!(!runtime.ownership_handoff_entity_is_frozen_by(&entity, &first));
+        assert!(runtime.ownership_handoff_entity_is_frozen_by(&entity, &second));
+        assert!(runtime.ownership_handoff_entity_is_frozen(&entity));
+
+        runtime
+            .release_entity_gate_operation(&second, &domain)
+            .await
+            .expect("the replacement ownership hold should release");
+        assert!(!runtime.ownership_handoff_entity_is_frozen(&entity));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn preceding_lease_expiry_does_not_release_a_reengaged_hold() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let relay = named::<RelayName>("events");
+        let coordination = coordination("leader-a", 10, 1);
+        let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
+        let gate = fanout.dispatch_gate();
+        runtime.inner.relay_boundary_fanouts.insert(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
+            fanout,
+        );
+
+        runtime
+            .engage_entity_gate_operation(
+                &coordination,
+                &domain,
+                std::slice::from_ref(&relay),
+                &[],
+                EntityGatePurpose::ModelAlteration,
+                EntityGateLease {
+                    deadline: Instant::now() + Duration::from_millis(10),
+                    reason: "preceding lease",
+                },
+            )
+            .await
+            .expect("the preceding hold should engage");
+        runtime
+            .release_entity_gate_operation(&coordination, &domain)
+            .await
+            .expect("the preceding hold should release");
+        runtime
+            .engage_entity_gate_operation(
+                &coordination,
+                &domain,
+                std::slice::from_ref(&relay),
+                &[],
+                EntityGatePurpose::ModelAlteration,
+                EntityGateLease {
+                    deadline: Instant::now() + Duration::from_secs(1),
+                    reason: "replacement lease",
+                },
+            )
+            .await
+            .expect("the replacement hold should engage");
+
+        tokio::time::advance(Duration::from_millis(11)).await;
+        tokio::task::yield_now().await;
+
+        assert!(runtime.entity_gate_operation_is_held(&coordination));
+        assert!(gate.is_closed());
     }
 
     #[test]

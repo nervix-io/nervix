@@ -145,6 +145,14 @@ impl SessionServiceImpl {
             );
         };
 
+        if let Err(error) = self.apply_current_cluster_state().await {
+            return command_error(format!(
+                "failed to prepare the current runtime schedule for relocation in domain '{}': \
+                 {error}",
+                domain.as_str()
+            ));
+        }
+
         let plan = match self.plan_relocation(domain, &relocation).await {
             Ok(plan) => plan,
             Err(message) => return command_error(message),
@@ -287,15 +295,13 @@ impl SessionServiceImpl {
 
         // Failover reassigns from the same liveness signal, so a relocation must read it the same
         // way or it would plan a handoff from an owner failover is already taking over.
-        let live_nodes = self
-            .available_node_ids()
-            .await
-            .into_iter()
-            .collect::<BTreeSet<_>>();
+        let availability = self.inner.cluster.availability_state().await;
+        let live_nodes = availability.live_node_ids();
+        let placement_candidate_nodes = availability.placement_candidate_node_ids();
         let schedulable_nodes = self
             .inner
             .consensus
-            .schedulable_live_voter_ids(live_nodes.iter().cloned())
+            .schedulable_live_voter_ids(placement_candidate_nodes.iter().cloned())
             .await
             .into_iter()
             .collect::<BTreeSet<_>>();
@@ -308,8 +314,12 @@ impl SessionServiceImpl {
             );
         }
 
-        self.validate_relocation_destination(&relocation.destination, &live_nodes)
-            .await?;
+        self.validate_relocation_destination(
+            &relocation.destination,
+            &live_nodes,
+            &placement_candidate_nodes,
+        )
+        .await?;
 
         let moved = unit
             .members
@@ -407,6 +417,7 @@ impl SessionServiceImpl {
         &self,
         destination: &ClusterNodeName,
         live_nodes: &BTreeSet<ClusterNodeName>,
+        placement_candidate_nodes: &BTreeSet<ClusterNodeName>,
     ) -> Result<(), String> {
         let membership = self.inner.consensus.membership_nodes().await;
         if !membership.contains_key(destination) {
@@ -419,6 +430,9 @@ impl SessionServiceImpl {
             .await;
         if !live_voters.iter().any(|voter| voter == destination) {
             return Err(format!("node '{destination}' is not a live raft voter"));
+        }
+        if !placement_candidate_nodes.contains(destination) {
+            return Err(format!("node '{destination}' is terminating"));
         }
         if self
             .inner

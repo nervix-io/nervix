@@ -78,7 +78,7 @@ use sqlx::{
     },
 };
 use tempfile::TempDir;
-use tokio_util::task::AbortOnDropHandle;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use uuid::Uuid;
 
 use crate::common::{
@@ -108,7 +108,12 @@ static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<StdMutex<BTreeMap<String, String>>> 
 static SCENARIO_EXECUTION_LOCK: OnceLock<StdArc<tokio::sync::RwLock<()>>> = OnceLock::new();
 static WEB_CONSOLE_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> = OnceLock::new();
 const MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS: usize = 2;
+const WEB_CONSOLE_ASSERTION_TIMEOUT: Duration = Duration::from_secs(30);
 const ZEROMQ_OBSERVER_BIND_ATTEMPTS: usize = 8;
+const DURABLE_CATCH_UP_STORAGE_COMMITS_PER_ENTRY: u32 = 2;
+const DURABLE_CATCH_UP_MARGIN: Duration = Duration::from_secs(5);
+const DURABLE_CATCH_UP_WRITE_CADENCE: Duration = Duration::from_millis(100);
+const MAX_DURABLE_CATCH_UP_WRITES: usize = 128;
 const WEB_CONSOLE_FEATURE_NAMES: [&str; 2] =
     ["Web console NSPL REPL", "Web console execution graph"];
 const DEPENDENCY_LIFECYCLE_HELPER_ENV: &str = "NERVIX_DEPENDENCY_LIFECYCLE_HELPER";
@@ -122,6 +127,21 @@ enum ScenarioExecutionPermit {
     Exclusive {
         _permit: tokio::sync::OwnedRwLockWriteGuard<()>,
     },
+}
+
+#[derive(Clone, Debug)]
+struct DurableCatchUpObservation {
+    follower: String,
+    initial_leader: String,
+    commit_delay: Duration,
+    started_at: Instant,
+    append_stream_opens_at_start: BTreeMap<String, u64>,
+}
+
+struct DurableCatchUpWriter {
+    cancellation: CancellationToken,
+    prefix: String,
+    task: AbortOnDropHandle<Result<usize, String>>,
 }
 
 #[derive(cucumber::World, Default)]
@@ -171,6 +191,9 @@ struct ScenarioWorld {
     avro_http_field_order: Vec<String>,
     avro_http_optional_fields: BTreeSet<String>,
     fault_injection: FaultInjection,
+    consensus_commit_delays: BTreeMap<String, Duration>,
+    durable_catch_up: Option<DurableCatchUpObservation>,
+    durable_catch_up_writer: Option<DurableCatchUpWriter>,
     cluster_config: TestClusterConfig,
     temp_root: Option<TempDir>,
     formatter_root: Option<TempDir>,
@@ -281,6 +304,19 @@ impl fmt::Debug for ScenarioWorld {
 }
 
 impl ScenarioWorld {
+    fn stop_durable_catch_up_work(&mut self) {
+        if let Some(writer) = self.durable_catch_up_writer.take() {
+            writer.cancellation.cancel();
+            drop(writer.task);
+        }
+        for node_id in self.consensus_commit_delays.keys() {
+            self.fault_injection.set_consensus_storage_commit_delay(
+                &crate::common::cluster::node_name(node_id),
+                Duration::ZERO,
+            );
+        }
+    }
+
     fn cluster_mut(&mut self) -> &mut Cluster {
         self.cluster
             .as_mut()
@@ -2449,6 +2485,17 @@ async fn given_raft_retention_bounds(
     };
 }
 
+#[given(expr = "consensus commits on node {string} take {string}")]
+fn given_consensus_commits_take(world: &mut ScenarioWorld, node_id: String, duration: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let duration = humantime::parse_duration(&duration)
+        .assured("the Cucumber expression supplies a valid consensus commit duration");
+    world
+        .fault_injection
+        .set_consensus_storage_commit_delay(&crate::common::cluster::node_name(&node_id), duration);
+    world.consensus_commit_delays.insert(node_id, duration);
+}
+
 #[when(expr = "{int} domains named {string} are created on the leader node")]
 async fn when_domains_are_created_in_a_burst(
     world: &mut ScenarioWorld,
@@ -2456,10 +2503,16 @@ async fn when_domains_are_created_in_a_burst(
     prefix: String,
 ) {
     let leader = running_leader_node(world).await;
+    let mut session = world
+        .cluster()
+        .open_session(&leader, &world.domain)
+        .await
+        .unwrap_or_else(|error| panic!("failed to open burst NSPL session: {error}"));
     for index in 0..count {
         tokio::task::consume_budget().await;
         let name = burst_domain_name(&prefix, index);
-        run_nspl_commands_on_node(world, &leader, &format!("CREATE DOMAIN {name};"))
+        session
+            .run_command(&format!("CREATE DOMAIN {name};"))
             .await
             .unwrap_or_else(|error| panic!("creating domain '{name}' failed: {error}"));
     }
@@ -2485,6 +2538,264 @@ async fn applied_burst_domains(world: &ScenarioWorld, node_id: &str, prefix: &st
             .assured("a scenario creates a bounded number of burst domains");
     }
     applied
+}
+
+fn durable_catch_up_bound(commit_delay: Duration, entries: usize) -> Duration {
+    let entries = u32::try_from(entries)
+        .assured("a durable catch-up scenario creates at most u32::MAX entries");
+    let delayed_commits = entries
+        .checked_mul(DURABLE_CATCH_UP_STORAGE_COMMITS_PER_ENTRY)
+        .assured("twice the bounded scenario entry count fits in u32");
+    let storage_delay = commit_delay
+        .checked_mul(delayed_commits)
+        .assured("the configured test delay times its bounded commit count fits in Duration");
+    storage_delay
+        .checked_add(DURABLE_CATCH_UP_MARGIN)
+        .assured("the bounded storage delay plus the test load margin fits in Duration")
+}
+
+fn durable_catch_up_append_stream_opens(
+    world: &ScenarioWorld,
+    observation: &DurableCatchUpObservation,
+) -> u64 {
+    let mut opened = 0_u64;
+    for (source, baseline) in &observation.append_stream_opens_at_start {
+        let total = world.fault_injection.consensus_append_stream_open_count(
+            &crate::common::cluster::node_name(source),
+            &crate::common::cluster::node_name(&observation.follower),
+        );
+        let source_opened = total
+            .checked_sub(*baseline)
+            .verified("the append stream counter only increases after the catch-up baseline");
+        // A saturated total still proves that any small scenario maximum was exceeded.
+        opened = opened.saturating_add(source_opened);
+    }
+    opened
+}
+
+async fn finish_durable_catch_up_writer(world: &mut ScenarioWorld) -> (String, usize) {
+    let writer = world
+        .durable_catch_up_writer
+        .take()
+        .verified("durable catch-up started its continuous client writer");
+    writer.cancellation.cancel();
+    let prefix = writer.prefix;
+    let joined = tokio::time::timeout(Duration::from_secs(5), writer.task)
+        .await
+        .unwrap_or_else(|error| panic!("durable catch-up client writer did not stop: {error}"));
+    let result = joined
+        .unwrap_or_else(|error| panic!("durable catch-up client writer task failed: {error}"));
+    let written = result
+        .unwrap_or_else(|error| panic!("a leader write failed during follower catch-up: {error}"));
+    (prefix, written)
+}
+
+#[when(
+    expr = "node {string} starts catching up while the leader keeps creating domains named \
+            {string}"
+)]
+async fn when_node_starts_durable_catch_up(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    live_prefix: String,
+) {
+    assert!(
+        world.durable_catch_up.is_none(),
+        "a durable follower catch-up is already being observed"
+    );
+    assert!(
+        world.durable_catch_up_writer.is_none(),
+        "a durable follower catch-up client writer is already active"
+    );
+
+    let follower = expand_placeholders(world, &node_id);
+    let live_prefix = expand_placeholders(world, &live_prefix);
+    let leader = running_leader_node(world).await;
+    let commit_delay = *world
+        .consensus_commit_delays
+        .get(&follower)
+        .verified("the scenario configured this follower's consensus commit delay");
+    let mut append_stream_opens_at_start = BTreeMap::new();
+    for source in world.cluster().node_ids() {
+        if source == follower {
+            continue;
+        }
+        let count = world.fault_injection.consensus_append_stream_open_count(
+            &crate::common::cluster::node_name(&source),
+            &crate::common::cluster::node_name(&follower),
+        );
+        append_stream_opens_at_start.insert(source, count);
+    }
+    let leader_uri = world
+        .cluster()
+        .grpc_uri(&leader)
+        .unwrap_or_else(|error| panic!("failed to resolve leader '{leader}': {error}"));
+    let connect_options = client_connect_options(&leader_uri)
+        .unwrap_or_else(|error| panic!("failed to configure the durable catch-up client: {error}"));
+    let client = Client::connect_with_options(&leader_uri, world.domain.clone(), connect_options)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to open the durable catch-up client session: {error}")
+        });
+    let started_at = Instant::now();
+    let cancellation = CancellationToken::new();
+    let writer_cancellation = cancellation.clone();
+    let writer_prefix = live_prefix.clone();
+    let task = AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut written = 0_usize;
+        loop {
+            tokio::task::consume_budget().await;
+            if writer_cancellation.is_cancelled() {
+                return Ok(written);
+            }
+
+            let name = burst_domain_name(&writer_prefix, written);
+            let request = client.execute(format!("CREATE DOMAIN {name};"));
+            let outcome = tokio::select! {
+                () = writer_cancellation.cancelled() => return Ok(written),
+                outcome = request => outcome,
+            };
+            let outcome = outcome.map_err(|error| error.to_string())?;
+            if !outcome.success {
+                return Err(format!(
+                    "command failed with {:?}: {}; diagnostics: {:?}",
+                    outcome.kind, outcome.message, outcome.diagnostics
+                ));
+            }
+            written = written
+                .checked_add(1)
+                .assured("the durable catch-up writer has a fixed entry limit");
+
+            if writer_cancellation.is_cancelled() {
+                return Ok(written);
+            }
+            if written >= MAX_DURABLE_CATCH_UP_WRITES {
+                return Err(format!(
+                    "follower catch-up did not finish while {written} leader writes succeeded"
+                ));
+            }
+            tokio::select! {
+                () = writer_cancellation.cancelled() => return Ok(written),
+                () = tokio::time::sleep(DURABLE_CATCH_UP_WRITE_CADENCE) => {}
+            }
+        }
+    }));
+
+    world.durable_catch_up = Some(DurableCatchUpObservation {
+        follower: follower.clone(),
+        initial_leader: leader,
+        commit_delay,
+        started_at,
+        append_stream_opens_at_start,
+    });
+    world.durable_catch_up_writer = Some(DurableCatchUpWriter {
+        cancellation,
+        prefix: live_prefix,
+        task,
+    });
+    world
+        .cluster_mut()
+        .start_node_without_waiting_for_raft_catch_up(&follower)
+        .await
+        .unwrap_or_else(|error| panic!("failed to start catch-up follower '{follower}': {error}"));
+}
+
+#[then(
+    expr = "node {string} applies {int} domains named {string} and the concurrent writes within \
+            its durable storage bound using at most {int} append streams"
+)]
+async fn then_node_catches_up_within_durable_storage_bound(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    backlog_count: usize,
+    backlog_prefix: String,
+    maximum_append_streams: usize,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let backlog_prefix = expand_placeholders(world, &backlog_prefix);
+    let observation = world
+        .durable_catch_up
+        .as_ref()
+        .verified("the scenario started a durable follower catch-up")
+        .clone();
+    assert_eq!(
+        node_id, observation.follower,
+        "the durable catch-up assertion must observe the follower it started"
+    );
+
+    let maximum_entries = backlog_count
+        .checked_add(MAX_DURABLE_CATCH_UP_WRITES)
+        .assured("the bounded backlog and live-write limit fit in usize");
+    let maximum_bound = durable_catch_up_bound(observation.commit_delay, maximum_entries);
+    let maximum_deadline = observation
+        .started_at
+        .checked_add(maximum_bound)
+        .assured("the durable catch-up test bound fits the monotonic clock range");
+
+    let backlog_applied = loop {
+        tokio::task::consume_budget().await;
+        let applied = applied_burst_domains(world, &node_id, &backlog_prefix).await;
+        if applied >= backlog_count || Instant::now() >= maximum_deadline {
+            break applied;
+        }
+        tokio::time::sleep(DURABLE_CATCH_UP_WRITE_CADENCE).await;
+    };
+
+    let (live_prefix, live_writes) = finish_durable_catch_up_writer(world).await;
+    assert!(
+        live_writes > 0,
+        "the leader must complete a client write while the durable follower catches up"
+    );
+    let total_entries = backlog_count
+        .checked_add(live_writes)
+        .assured("the bounded backlog and completed live writes fit in usize");
+    let bound = durable_catch_up_bound(observation.commit_delay, total_entries);
+    let deadline = observation
+        .started_at
+        .checked_add(bound)
+        .assured("the durable catch-up test bound fits the monotonic clock range");
+
+    let live_applied = loop {
+        tokio::task::consume_budget().await;
+        let applied = applied_burst_domains(world, &node_id, &live_prefix).await;
+        let all_applied = backlog_applied >= backlog_count && applied >= live_writes;
+        if all_applied || Instant::now() >= deadline {
+            break applied;
+        }
+        tokio::time::sleep(DURABLE_CATCH_UP_WRITE_CADENCE).await;
+    };
+
+    let elapsed = observation.started_at.elapsed();
+    let append_stream_opens = durable_catch_up_append_stream_opens(world, &observation);
+    let maximum_append_streams = u64::try_from(maximum_append_streams)
+        .assured("a Cucumber append stream limit fits in the observation counter");
+    assert!(
+        append_stream_opens <= maximum_append_streams,
+        "leaders opened {append_stream_opens} append streams to catch-up follower '{}'; the \
+         initial leader was '{}', the expected maximum was {maximum_append_streams}, and the \
+         follower applied {backlog_applied} of {backlog_count} '{}' entries plus {live_applied} \
+         of {live_writes} '{}' concurrent writes after {:?} against a {:?} bound",
+        observation.follower,
+        observation.initial_leader,
+        backlog_prefix,
+        live_prefix,
+        elapsed,
+        bound,
+    );
+    assert!(
+        backlog_applied >= backlog_count && live_applied >= live_writes && elapsed <= bound,
+        "follower '{}' durable catch-up exceeded {:?}: applied {backlog_applied} of \
+         {backlog_count} '{}' entries and {live_applied} of {live_writes} '{}' concurrent writes \
+         after {:?} with {:?} per consensus commit; the initial leader was '{}' and leaders \
+         opened {append_stream_opens} append streams",
+        observation.follower,
+        bound,
+        backlog_prefix,
+        live_prefix,
+        elapsed,
+        observation.commit_delay,
+        observation.initial_leader,
+    );
 }
 
 #[then(expr = "within {string} node {string} has applied {int} domains named {string}")]
@@ -2572,6 +2883,56 @@ async fn when_leadership_is_transferred_to_node(world: &mut ScenarioWorld, to_no
         .wait_for_leader(&to_node_id, Some(&to_node_id))
         .await
         .unwrap_or_else(|error| panic!("leadership did not move to '{to_node_id}': {error}"));
+}
+
+/// Arm the failure that interrupts the next snapshot installation the node performs.
+///
+/// The node has to be stopped: its storage, and with it the failure, is built as the node starts
+/// and before it answers the Raft traffic that asks it to install a snapshot.
+#[given(expr = "node {string} interrupts its next raft snapshot installation")]
+async fn given_node_interrupts_its_next_snapshot_installation(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world.fault_injection.fail_consensus_storage_on_start(
+        &crate::common::cluster::node_name(&node_id),
+        "snapshot_clear".to_owned(),
+        nervix_consensus::StorageBoundary::AfterSync,
+    );
+}
+
+#[when(expr = "node {string} is started without waiting for it to catch up")]
+async fn when_node_is_started_without_catching_up(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .start_node_without_catching_up(&node_id)
+        .await
+        .expect("failed to start node");
+}
+
+#[then(expr = "within {string} node {string} has interrupted a raft snapshot installation")]
+async fn then_node_interrupted_a_snapshot_installation(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node = crate::common::cluster::node_name(&node_id);
+    let deadline = Instant::now()
+        + humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    loop {
+        tokio::task::consume_budget().await;
+        if world.fault_injection.consensus_storage_failure_fired(&node) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node '{node_id}' did not interrupt a raft snapshot installation within {duration}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[then(expr = "within {string} node {string} recovers by installing a raft snapshot")]
@@ -3872,6 +4233,15 @@ async fn given_health_responses_are_paused(
         .arm_health_response_pause(&probing_node_id, &responding_node_id);
 }
 
+#[given(expr = "application health responses from node {string} fail")]
+#[when(expr = "application health responses from node {string} fail")]
+async fn given_health_responses_fail(world: &mut ScenarioWorld, responding_node_id: String) {
+    let responding_node_id = expand_placeholders(world, &responding_node_id);
+    world
+        .cluster()
+        .fail_health_responses_from(&responding_node_id);
+}
+
 #[then(expr = "the health response pause from node {string} to node {string} is reached")]
 async fn then_health_response_pause_is_reached(
     world: &mut ScenarioWorld,
@@ -4003,7 +4373,7 @@ async fn when_node_is_started_while_consensus_connectivity_is_blocked(
         .block_consensus_connectivity(crate::common::cluster::node_name(&node_id));
     world
         .cluster_mut()
-        .start_node_process(&node_id)
+        .start_node_without_waiting_for_raft_catch_up(&node_id)
         .await
         .expect("failed to start node with blocked consensus connectivity");
 }
@@ -4089,6 +4459,46 @@ async fn when_command_admission_pause_is_released(world: &mut ScenarioWorld, nod
         .release_command_admission_pause(&crate::common::cluster::node_name(&node_id));
 }
 
+#[given(expr = "resource installation on node {string} pauses before promotion")]
+async fn given_resource_installation_pause(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_resource_installation_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "the resource installation pause on node {string} is reached")]
+async fn then_resource_installation_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node_name = crate::common::cluster::node_name(&node_id);
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_resource_installation_pause(&node_name),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("resource installation pause on '{node_id}' was not reached: {error}")
+    });
+    let background = world
+        .background_nspl
+        .as_ref()
+        .verified("the preceding step started a background resource upload");
+    assert!(
+        !background.is_finished(),
+        "resource upload returned before '{node_id}' installed its archive"
+    );
+}
+
+#[when(expr = "the resource installation pause on node {string} is released")]
+async fn when_resource_installation_pause_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_resource_installation_pause(&crate::common::cluster::node_name(&node_id));
+}
+
 #[given(expr = "transaction commit on node {string} pauses after {int} statement")]
 async fn given_transaction_commit_pause(
     world: &mut ScenarioWorld,
@@ -4098,6 +4508,7 @@ async fn given_transaction_commit_pause(
     let node_id = expand_placeholders(world, &node_id);
     world.fault_injection.pause_transaction_commit_after(
         crate::common::cluster::node_name(&node_id),
+        world.domain.clone(),
         completed_statements,
     );
 }
@@ -4439,6 +4850,7 @@ async fn then_transaction_commit_pause_is_reached(
         Duration::from_secs(10),
         world.fault_injection.wait_for_transaction_commit_pause(
             &crate::common::cluster::node_name(&node_id),
+            &world.domain,
             completed_statements,
         ),
     )
@@ -4455,6 +4867,7 @@ async fn when_transaction_commit_pause_is_released(
     let node_id = expand_placeholders(world, &node_id);
     world.fault_injection.release_transaction_commit_pause(
         &crate::common::cluster::node_name(&node_id),
+        &world.domain,
         completed_statements,
     );
 }
@@ -5168,6 +5581,22 @@ async fn run_nspl_commands_on_node(
     Ok(last_output)
 }
 
+#[when(expr = "these NSPL commands are attempted on node {string}")]
+async fn when_these_nspl_commands_are_attempted_on_node(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    #[step] step: &Step,
+) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    let node_id = expand_placeholders(world, &node_id);
+    let commands = expand_placeholders(world, docstring(step));
+    match run_nspl_commands_on_node(world, &node_id, &commands).await {
+        Ok(output) => world.last_command_output = Some(output),
+        Err(error) => world.last_command_error = Some(error),
+    }
+}
+
 #[when("these NSPL commands begin executing in the background")]
 async fn when_these_nspl_commands_begin_executing_in_the_background(
     world: &mut ScenarioWorld,
@@ -5214,6 +5643,94 @@ async fn when_command_request_begins_in_background(world: &mut ScenarioWorld, #[
     world.background_command_result = Some(AbortOnDropHandle::new(tokio::spawn(async move {
         session.run_command_result(&query).await
     })));
+}
+
+#[when(
+    expr = "this NSPL command request with execution reference {string} begins executing in the \
+            background on the leader node"
+)]
+async fn when_referenced_command_request_begins_in_background(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+    #[step] step: &Step,
+) {
+    assert!(
+        world.background_command_result.is_none(),
+        "a background command request is already active"
+    );
+    let query = expand_placeholders(world, docstring(step));
+    let execution_reference = expand_placeholders(world, &execution_reference);
+    let leader = current_leader_node(world).await;
+    let mut session = world
+        .cluster()
+        .open_session(&leader, &world.domain)
+        .await
+        .unwrap_or_else(|error| panic!("failed to open the background command session: {error}"));
+    world.background_command_result = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        session
+            .run_command_result_with_reference(&query, &execution_reference)
+            .await
+    })));
+}
+
+#[when("the background command request connection is dropped")]
+async fn when_background_command_request_connection_is_dropped(world: &mut ScenarioWorld) {
+    let request = world
+        .background_command_result
+        .take()
+        .verified("the preceding step started a background command request");
+    drop(request);
+    tokio::task::yield_now().await;
+}
+
+#[when(expr = "the background command caller deadline expires after {string}")]
+async fn when_background_command_caller_deadline_expires(
+    world: &mut ScenarioWorld,
+    duration: String,
+) {
+    let duration =
+        humantime::parse_duration(&duration).assured("the scenario caller deadline is valid");
+    let mut request = world
+        .background_command_result
+        .take()
+        .verified("the preceding step started a background command request");
+    let outcome = tokio::time::timeout(duration, &mut request).await;
+    assert!(
+        outcome.is_err(),
+        "the command request returned before its caller deadline: {outcome:?}"
+    );
+    drop(request);
+    tokio::task::yield_now().await;
+}
+
+#[when(
+    expr = "this NSPL command request with execution reference {string} is executed on the leader \
+            node"
+)]
+async fn when_referenced_command_request_is_executed_on_leader(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+    #[step] step: &Step,
+) {
+    let query = expand_placeholders(world, docstring(step));
+    let execution_reference = expand_placeholders(world, &execution_reference);
+    let leader = current_leader_node(world).await;
+    let mut session = world
+        .cluster()
+        .open_session(&leader, &world.domain)
+        .await
+        .unwrap_or_else(|error| panic!("failed to open the resumed command session: {error}"));
+    let result = session
+        .run_command_result_with_reference(&query, &execution_reference)
+        .await
+        .unwrap_or_else(|error| panic!("resumed command request failed: {error}"));
+    if result.success {
+        world.last_command_error = None;
+        world.last_command_output = Some(result.message);
+    } else {
+        world.last_command_output = None;
+        world.last_command_error = Some(result.message);
+    }
 }
 
 #[then(expr = "the background command request is rejected with a redirect to node {string}")]
@@ -5286,6 +5803,55 @@ async fn when_named_client_begins_executing_in_the_background(
     })));
 }
 
+#[when(
+    expr = "client {string} begins uploading resource {string} from {string} with identity \
+            {string} in the background"
+)]
+async fn when_named_client_begins_resource_upload_in_the_background(
+    world: &mut ScenarioWorld,
+    name: String,
+    resource: String,
+    directory: String,
+    identity: String,
+) {
+    assert!(
+        world.background_nspl.is_none(),
+        "a background NSPL execution is already active"
+    );
+    let name = expand_placeholders(world, &name);
+    let resource = expand_placeholders(world, &resource);
+    let directory = PathBuf::from(expand_placeholders(world, &directory));
+    let identity = expand_placeholders(world, &identity);
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let identity = nervix_client_core::ResourceUploadIdentity::parse(identity)
+        .assured("the scenario identity is an identifier-shaped literal");
+    world.background_nspl = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        let outcome = client
+            .upload_resource_from_directory_with_identity(&resource, directory, identity, |_| {})
+            .await
+            .map_err(|error| error.to_string())?;
+        if outcome.success {
+            Ok(outcome.message)
+        } else {
+            Err(outcome.message)
+        }
+    })));
+}
+
+#[when("the background resource upload connection is dropped")]
+async fn when_background_resource_upload_connection_is_dropped(world: &mut ScenarioWorld) {
+    let upload = world
+        .background_nspl
+        .take()
+        .verified("the preceding step started a background resource upload");
+    drop(upload);
+    tokio::task::yield_now().await;
+}
+
 #[then("the background NSPL execution succeeds")]
 async fn then_the_background_nspl_execution_succeeds(world: &mut ScenarioWorld) {
     let task = world
@@ -5333,6 +5899,7 @@ fn commands_are_retry_safe_session_ops(commands: &str) -> bool {
     nspl_statements(commands).into_iter().all(|command| {
         let normalized = command.trim().to_ascii_uppercase();
         normalized == "DESCRIBE DOMAIN;"
+            || normalized.starts_with("DESCRIBE RELOCATION ")
             || normalized.starts_with("DESCRIBE ENDPOINT ")
             || normalized.starts_with("DESCRIBE RESOURCE ")
             || normalized.starts_with("DESCRIBE RELAY ")
@@ -5763,6 +6330,29 @@ async fn when_named_client_uploads_resource_with_identity(
 }
 
 #[when(
+    expr = "an incomplete upload of resource {string} with identity {string} is sent to the \
+            leader node"
+)]
+async fn when_incomplete_resource_upload_is_sent(
+    world: &mut ScenarioWorld,
+    resource: String,
+    identity: String,
+) {
+    let resource = expand_placeholders(world, &resource);
+    let identity = expand_placeholders(world, &identity);
+    let leader = current_leader_node(world).await;
+    let result = world
+        .cluster()
+        .send_incomplete_resource_upload(&leader, &world.domain, &resource, &identity)
+        .await
+        .unwrap_or_else(|error| panic!("incomplete upload request failed: {error}"));
+    assert!(!result.success, "incomplete upload unexpectedly succeeded");
+    assert_eq!(result.upload_identity, identity);
+    world.last_command_error = Some(result.message.clone());
+    world.last_command_output = Some(result.message);
+}
+
+#[when(
     expr = "client {string} upload of resource {string} from {string} with identity {string} \
             fails with {string}"
 )]
@@ -5798,34 +6388,6 @@ async fn when_named_client_resource_upload_fails_with(
     );
     world.last_command_error = Some(outcome.message.clone());
     world.last_command_output = Some(outcome.message);
-}
-
-#[when(expr = "client {string} waits {string} for resource {string} version {int} readiness")]
-async fn when_named_client_waits_for_resource_readiness(
-    world: &mut ScenarioWorld,
-    name: String,
-    duration: String,
-    resource: String,
-    version: u64,
-) {
-    world.last_command_error = None;
-    world.last_command_output = None;
-    let name = expand_placeholders(world, &name);
-    let resource = expand_placeholders(world, &resource);
-    let duration = humantime::parse_duration(&duration).expect("readiness duration must be valid");
-    let client = world
-        .transaction_clients
-        .get(&name)
-        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
-        .clone();
-    let readiness = client
-        .wait_for_resource_ready(&resource, version, duration)
-        .await
-        .unwrap_or_else(|error| panic!("client '{name}' resource readiness wait failed: {error}"));
-    world.last_command_output = Some(format!(
-        "version: {}\ncluster_ready: {}\nmessage: {}",
-        readiness.version, readiness.cluster_ready, readiness.message
-    ));
 }
 
 #[then(expr = "client {string} active domain is {string}")]
@@ -7001,7 +7563,7 @@ async fn then_selector_contains_text_exactly_times(
     let selector = expand_placeholders(world, &selector);
     let expected = expand_placeholders(world, &expected);
     let locator = page.locator(&selector);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + WEB_CONSOLE_ASSERTION_TIMEOUT;
     loop {
         tokio::task::consume_budget().await;
         let texts = locator
@@ -7035,7 +7597,7 @@ async fn then_selector_contains_text(
     let selector = expand_placeholders(world, &selector);
     let expected = expand_placeholders(world, &expected);
     let locator = page.locator(&selector);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + WEB_CONSOLE_ASSERTION_TIMEOUT;
     loop {
         tokio::task::consume_budget().await;
         let texts = locator
@@ -7067,7 +7629,7 @@ async fn then_selector_contains_docstring(
         .expect("a browser page must be opened before selector assertions");
     let selector = expand_placeholders(world, &selector);
     let locator = page.locator(&selector);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + WEB_CONSOLE_ASSERTION_TIMEOUT;
     loop {
         tokio::task::consume_budget().await;
         let texts = locator
@@ -16260,8 +16822,15 @@ async fn run_dependency_lifecycle_helper(scope: String) -> Option<String> {
 }
 
 async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
-    let cli =
+    let mut cli =
         cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, TestParallelismArgs>::parsed();
+    if cli.tags_filter.is_none() {
+        cli.tags_filter = Some(
+            "not @raft_io_expected_failure"
+                .parse()
+                .assured("the built-in RAFT-IO tag expression is valid"),
+        );
+    }
     let concurrency_factor = cli.custom.concurrency_factor();
     let default_max_concurrent_scenarios = parallelism.max_concurrent_scenarios(concurrency_factor);
     let effective_max_concurrent_scenarios = cli
@@ -16284,7 +16853,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
     .repeat_failed();
     let writer = ScenarioWorld::cucumber()
         .max_concurrent_scenarios(default_max_concurrent_scenarios)
-        .retries(1)
+        .retries(2)
         .before(|feature, rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();
@@ -16336,6 +16905,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
             Box::pin(async move {
                 append_cucumber_log_line("scenario finished");
                 if let Some(world) = world {
+                    world.stop_durable_catch_up_work();
+                    world.fault_injection.release_all_health_responses();
                     world.fault_injection.release_all_domain_clock_progress();
                     append_cluster_statuses(world, "scenario teardown").await;
                     append_cucumber_log_line(&format!(

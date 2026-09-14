@@ -4,6 +4,7 @@ fn main() {
     let build_server = std::env::var_os("CARGO_FEATURE_SERVER").is_some();
     tonic_build::configure()
         .bytes(["."])
+        .boxed(".io.nervix.api.v1.SessionResponse.event.result")
         .build_server(build_server)
         .build_client(build_client)
         .client_mod_attribute(

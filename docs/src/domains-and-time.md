@@ -2,6 +2,9 @@
 
 Every runtime graph in Nervix runs inside a domain.
 
+This chapter describes the public language and runtime behavior. See
+[Domain Clock](./domain-clock.md) for the internal clock architecture.
+
 Nervix currently supports:
 
 - `CREATE PACED DOMAIN <id> WITH PERIOD <duration> SKEW <duration> [PLACEMENT <policy>];`
@@ -110,6 +113,12 @@ Important runtime consequences:
 - `START AT NOW` reinitializes paced time and domain-owned source offsets from current wall clock
 - `STOP` preserves persisted runtime state
 - `START` clears materialized relay state for the active domain before new execution proceeds
+
+Successful lifecycle commands are completion boundaries. `START` returns after every current live
+node has prepared the same revision and every configured listener and assigned source has completed
+startup. `STOP` returns after intake and runtime work have stopped remotely, including when it is the
+last running domain. A dependent connection, observation, or publish can follow immediately through
+any live node.
 
 The lifecycle state, active paced-clock anchor, and one clock authority are replicated. The
 authority identifies a concrete incarnation of a named cluster node and carries a revision that
@@ -246,8 +255,8 @@ it while holding the domain's exclusive ALTER lock. For an entity-pause alterati
 the affected relays or stops the affected ingestor instances on every live node, then waits only
 for their rings and target-node work to drain. Unrelated graph paths continue to run. For a
 domain-pause alteration, Nervix instead stops domain ingestion and generators on every node, keeps
-the processing graph and domain clock alive, force-flushes processor and emitter output, and waits
-for ingestors, generators, ACK roots, and emitter buffers to drain. Both waits are condition-based
+the processing graph and domain clock alive, force-flushes ingestor route, processor, and emitter
+output, and waits for ingestors, generators, ACK roots, and emitter buffers to drain. Both waits are condition-based
 and bounded to 60 seconds by default.
 
 After a successful drain, Nervix atomically installs the model batch, replaces the schedule while

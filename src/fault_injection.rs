@@ -19,7 +19,10 @@ use ahash::RandomState;
 use dashmap::DashMap;
 use meticulous::ResultExt as _;
 use nervix_execution::{CpuClass, Executor, MemoryClass};
-use nervix_models::{ClusterNodeName, DomainName, EmitterName, IngestorName};
+use nervix_models::{
+    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, DomainName, EmitterName,
+    IngestorName,
+};
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::{broadcast, watch};
@@ -32,6 +35,20 @@ use crate::registry::SchedulerMode;
 enum EmitterFaultMode {
     Fail,
     Stall,
+}
+
+/// A consensus storage failure a scenario armed for a node before that node started.
+///
+/// Storage belongs to the node, so the failure can only be armed once the node builds it. Keeping
+/// the record afterwards is what lets a scenario tell a failure that has fired from one that was
+/// never armed at all.
+#[derive(Debug)]
+enum StartupConsensusFault {
+    Pending {
+        operation: String,
+        boundary: nervix_consensus::StorageBoundary,
+    },
+    Armed,
 }
 
 /// One cloneable handle for every fault and override a server test can inject.
@@ -52,9 +69,12 @@ struct FaultInjectionState {
     /// One-shot, domain-scoped drain failures consumed after a pending status is observed.
     forced_entity_drain_timeouts: DashMap<DomainName, (), RandomState>,
     transaction_binding_drops: DashMap<ClusterNodeName, (), RandomState>,
-    consensus_probes: DashMap<ClusterNodeName, ConsensusProbe, RandomState>,
-    blocked_consensus_connectivity: DashMap<ClusterNodeName, (), RandomState>,
+    consensus_probes: DashMap<ClusterNodeName, ConsensusProbeState, RandomState>,
+    /// Consensus storage failures armed as each named node builds its storage, before it answers
+    /// any Raft traffic.
+    startup_consensus_faults: DashMap<ClusterNodeName, StartupConsensusFault, RandomState>,
     bulk_executions: DashMap<ClusterNodeName, NodeBulkExecution, RandomState>,
+    failed_health_responders: DashMap<ClusterNodeName, (), RandomState>,
     /// Application health handlers clone a pause so it remains alive after its map guard drops.
     health_response_pauses: DashMap<HealthResponsePauseKey, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
@@ -82,8 +102,13 @@ struct FaultInjectionState {
 
 struct ConsensusProbe {
     observer: nervix_consensus::Observer,
-    fault: nervix_consensus::StorageFault,
-    connectivity: nervix_consensus::ConnectivityFault,
+}
+
+#[derive(Debug, Default)]
+struct ConsensusProbeState {
+    /// Running nodes register their observer; stopped nodes retain the test probe and its controls.
+    probe: Option<ConsensusProbe>,
+    test_probe: nervix_consensus::ConsensusTestProbe,
 }
 
 impl std::fmt::Debug for ConsensusProbe {
@@ -127,8 +152,10 @@ struct HealthResponsePauseKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
     Admission(ClusterNodeName),
+    ResourceInstallation(ClusterNodeName),
     TransactionCommit {
         node_id: ClusterNodeName,
+        domain: String,
         completed_statements: usize,
     },
 }
@@ -157,8 +184,9 @@ impl Default for FaultInjection {
                 forced_entity_drain_timeouts: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
                 consensus_probes: DashMap::default(),
-                blocked_consensus_connectivity: DashMap::default(),
+                startup_consensus_faults: DashMap::default(),
                 bulk_executions: DashMap::default(),
+                failed_health_responders: DashMap::default(),
                 health_response_pauses: DashMap::default(),
                 command_pauses: DashMap::default(),
                 entity_gate_pauses: DashMap::default(),
@@ -180,7 +208,9 @@ impl Default for FaultInjection {
 
 impl FaultInjection {
     pub fn unregister_consensus(&self, node: &ClusterNodeName) {
-        self.inner.consensus_probes.remove(node);
+        if let Some(mut state) = self.inner.consensus_probes.get_mut(node) {
+            state.probe = None;
+        }
     }
 
     pub(crate) fn register_consensus(
@@ -188,48 +218,79 @@ impl FaultInjection {
         node: ClusterNodeName,
         consensus: &nervix_consensus::Consensus,
     ) {
-        let connectivity = consensus.connectivity_fault();
-        if self
+        let mut state = self.inner.consensus_probes.entry(node).or_default();
+        state.probe = Some(ConsensusProbe {
+            observer: consensus.observer(),
+        });
+    }
+
+    pub(crate) fn consensus_test_probe(
+        &self,
+        node: &ClusterNodeName,
+    ) -> nervix_consensus::ConsensusTestProbe {
+        let test_probe = self
             .inner
-            .blocked_consensus_connectivity
-            .contains_key(&node)
-        {
-            connectivity.block();
+            .consensus_probes
+            .entry(node.clone())
+            .or_default()
+            .test_probe
+            .clone();
+        // This probe is handed to storage before consensus starts, so a failure armed here is in
+        // place for the first installation the node is asked to perform.
+        if let Some(mut startup) = self.inner.startup_consensus_faults.get_mut(node) {
+            let pending = std::mem::replace(&mut *startup, StartupConsensusFault::Armed);
+            if let StartupConsensusFault::Pending {
+                operation,
+                boundary,
+            } = pending
+            {
+                test_probe.storage_fault().fail_next(operation, boundary);
+            }
         }
-        self.inner.consensus_probes.insert(
-            node,
-            ConsensusProbe {
-                observer: consensus.observer(),
-                fault: consensus.storage_fault(),
-                connectivity,
-            },
-        );
+        test_probe
     }
 
     pub fn block_consensus_connectivity(&self, node: ClusterNodeName) {
-        self.inner
-            .blocked_consensus_connectivity
-            .insert(node.clone(), ());
-        if let Some(probe) = self.inner.consensus_probes.get(&node) {
-            probe.connectivity.block();
-        }
+        let state = self.inner.consensus_probes.entry(node).or_default();
+        state.test_probe.block_connectivity();
     }
 
     pub fn restore_consensus_connectivity(&self, node: &ClusterNodeName) {
-        self.inner.blocked_consensus_connectivity.remove(node);
-        if let Some(probe) = self.inner.consensus_probes.get(node) {
-            probe.connectivity.restore();
-        }
+        let state = self.inner.consensus_probes.entry(node.clone()).or_default();
+        state.test_probe.restore_connectivity();
     }
 
     pub fn consensus_observer(&self, node: &ClusterNodeName) -> nervix_consensus::Observer {
         use meticulous::OptionExt as _;
-        self.inner
+        let state = self
+            .inner
             .consensus_probes
             .get(node)
+            .verified("the harness registered this node before observing consensus");
+        state
+            .probe
+            .as_ref()
             .verified("the harness started this node before observing consensus")
             .observer
             .clone()
+    }
+
+    pub fn consensus_append_stream_open_count(
+        &self,
+        node: &ClusterNodeName,
+        target: &ClusterNodeName,
+    ) -> u64 {
+        use meticulous::OptionExt as _;
+        let state = self
+            .inner
+            .consensus_probes
+            .get(node)
+            .verified("the harness registered this node before observing consensus");
+        let _running_probe = state
+            .probe
+            .as_ref()
+            .verified("the harness started this node before observing consensus");
+        state.test_probe.append_stream_open_count(target)
     }
 
     pub fn fail_consensus_storage(
@@ -239,12 +300,67 @@ impl FaultInjection {
         boundary: nervix_consensus::StorageBoundary,
     ) {
         use meticulous::OptionExt as _;
-        self.inner
+        let state = self
+            .inner
             .consensus_probes
             .get(node)
-            .verified("the harness started this node before injecting storage failure")
-            .fault
+            .verified("the harness registered this node before injecting storage failure");
+        let _running_probe = state
+            .probe
+            .as_ref()
+            .verified("the harness started this node before injecting storage failure");
+        state
+            .test_probe
+            .storage_fault()
             .fail_next(operation, boundary);
+    }
+
+    /// Delay every consensus storage commit on this node, including after its next registration.
+    pub fn set_consensus_storage_commit_delay(&self, node: &ClusterNodeName, delay: Duration) {
+        let state = self.inner.consensus_probes.entry(node.clone()).or_default();
+        state.test_probe.set_storage_commit_delay(delay);
+    }
+
+    /// Arm a consensus storage failure for a node that has not started yet.
+    ///
+    /// Storage a running node already owns cannot be reached before its first installation, so a
+    /// scenario that interrupts one arms the failure while the node is stopped.
+    pub fn fail_consensus_storage_on_start(
+        &self,
+        node: &ClusterNodeName,
+        operation: String,
+        boundary: nervix_consensus::StorageBoundary,
+    ) {
+        self.inner.startup_consensus_faults.insert(
+            node.clone(),
+            StartupConsensusFault::Pending {
+                operation,
+                boundary,
+            },
+        );
+    }
+
+    /// Whether the failure armed for this node as it started has since stopped its storage.
+    pub fn consensus_storage_failure_fired(&self, node: &ClusterNodeName) -> bool {
+        use meticulous::OptionExt as _;
+        let armed = self
+            .inner
+            .startup_consensus_faults
+            .get(node)
+            .verified("the scenario armed this node before observing its failure");
+        if let StartupConsensusFault::Pending { .. } = &*armed {
+            return false;
+        }
+        let state = self
+            .inner
+            .consensus_probes
+            .get(node)
+            .verified("an armed node registered its storage as it started");
+        let _running_probe = state
+            .probe
+            .as_ref()
+            .verified("the harness started this node before observing its storage failure");
+        !state.test_probe.storage_fault().is_armed()
     }
 
     pub fn fail_emitter(&self, emitter: &str) {
@@ -386,6 +502,12 @@ impl FaultInjection {
         );
     }
 
+    pub fn fail_health_responses_from(&self, responding_node: ClusterNodeName) {
+        self.inner
+            .failed_health_responders
+            .insert(responding_node, ());
+    }
+
     pub async fn wait_for_health_response_pause(
         &self,
         probing_node: &ClusterNodeName,
@@ -404,6 +526,14 @@ impl FaultInjection {
         pause.release();
     }
 
+    pub fn release_all_health_responses(&self) {
+        for pause in &self.inner.health_response_pauses {
+            pause.release();
+        }
+        self.inner.health_response_pauses.clear();
+        self.inner.failed_health_responders.clear();
+    }
+
     pub fn pause_command_admission_on(&self, node_id: ClusterNodeName) {
         self.arm_command_pause(CommandPausePoint::Admission(node_id));
     }
@@ -417,13 +547,28 @@ impl FaultInjection {
         self.release_command_pause(&CommandPausePoint::Admission(node_id.clone()));
     }
 
+    pub fn pause_resource_installation_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::ResourceInstallation(node_id));
+    }
+
+    pub async fn wait_for_resource_installation_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::ResourceInstallation(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_resource_installation_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::ResourceInstallation(node_id.clone()));
+    }
+
     pub fn pause_transaction_commit_after(
         &self,
         node_id: ClusterNodeName,
+        domain: impl Into<String>,
         completed_statements: usize,
     ) {
         self.arm_command_pause(CommandPausePoint::TransactionCommit {
             node_id,
+            domain: domain.into().to_ascii_lowercase(),
             completed_statements,
         });
     }
@@ -431,10 +576,12 @@ impl FaultInjection {
     pub async fn wait_for_transaction_commit_pause(
         &self,
         node_id: &ClusterNodeName,
+        domain: &str,
         completed_statements: usize,
     ) {
         self.wait_for_command_pause(&CommandPausePoint::TransactionCommit {
             node_id: node_id.clone(),
+            domain: domain.to_ascii_lowercase(),
             completed_statements,
         })
         .await;
@@ -443,10 +590,12 @@ impl FaultInjection {
     pub fn release_transaction_commit_pause(
         &self,
         node_id: &ClusterNodeName,
+        domain: &str,
         completed_statements: usize,
     ) {
         self.release_command_pause(&CommandPausePoint::TransactionCommit {
             node_id: node_id.clone(),
+            domain: domain.to_ascii_lowercase(),
             completed_statements,
         });
     }
@@ -729,10 +878,12 @@ impl FaultInjection {
     pub(crate) async fn pause_transaction_commit_after_progress_if_armed(
         &self,
         node_id: &ClusterNodeName,
+        domain: &DomainName,
         completed_statements: usize,
     ) {
         self.pause_command_if_armed(CommandPausePoint::TransactionCommit {
             node_id: node_id.clone(),
+            domain: domain.as_str().to_ascii_lowercase(),
             completed_statements,
         })
         .await;
@@ -740,6 +891,11 @@ impl FaultInjection {
 
     pub(crate) async fn pause_command_admission_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::Admission(node_id.clone()))
+            .await;
+    }
+
+    pub(crate) async fn pause_resource_installation_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::ResourceInstallation(node_id.clone()))
             .await;
     }
 
@@ -763,6 +919,26 @@ impl FaultInjection {
         pause.reach();
         pause.wait_until_released().await;
         self.inner.health_response_pauses.remove(&key);
+    }
+
+    pub(crate) fn health_response_identity(
+        &self,
+        responding_node: ClusterNodeIdentity,
+    ) -> ClusterNodeIdentity {
+        if !self
+            .inner
+            .failed_health_responders
+            .contains_key(responding_node.node_id())
+        {
+            return responding_node;
+        }
+
+        let current_incarnation = responding_node.incarnation().get();
+        let failed_incarnation = if current_incarnation == 0 { 1 } else { 0 };
+        ClusterNodeIdentity::new(
+            responding_node.node_id().clone(),
+            ClusterNodeIncarnation::new(failed_incarnation),
+        )
     }
 
     pub(crate) async fn pause_entity_gate_if_armed(&self, domain: &DomainName) {

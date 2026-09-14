@@ -101,6 +101,12 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   discovery and topology, wire contracts and exchange forms, pool and quota isolation, limits and
   deadlines, relay delivery and acknowledgements, application health, consensus and bulk traffic,
   connection lifecycle, failure semantics, and observability.
+- [Domain Clock](docs/src/domain-clock.md) is the authoritative architecture reference for domain
+  time. Any change to the domain-clock architecture, or to domain architecture that changes how
+  time is established, propagated, or consumed, must keep that chapter current in the same change.
+  Its scope includes mappings and lifecycle generations, authority selection and fencing, local
+  installation and reads, progress delivery, execution snapshots, admission, logical and physical
+  deadline ownership, recovery, and distributed-time guarantees.
 
 ## System Layers and Migration
 

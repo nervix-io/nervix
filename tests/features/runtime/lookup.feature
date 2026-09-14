@@ -19,11 +19,7 @@ Feature: Resource-backed lookups
       """
     Then the last command output contains
       """
-      published resource version 1
-      """
-    And within "30s" node "node-1" eventually reports describe resource as "cluster_ready: true"
-      """
-      DESCRIBE RESOURCE zip_codes VERSION 1;
+      uploaded resource version 1
       """
     When these NSPL commands are executed
       """
@@ -47,7 +43,6 @@ Feature: Resource-backed lookups
         PATH 'lookup.jsonl'
         DECODE USING zip_code_entry_codec;
       """
-    Then node "node-1" eventually reports status containing "{{domain}} status=Stopped pace=UNPACED"
     When these NSPL commands are executed
       """
       DESCRIBE HASH MAP zip_codes_by_zip;
@@ -95,6 +90,38 @@ Feature: Resource-backed lookups
       | 3            | 0             |
       | 3            | 1             |
 
+  @command_completion
+  Scenario: Malformed lookup records fail hash map creation
+    Given a 1 node nervix cluster is started
+    And node "node-1" has resource directory "malformed_lookup_dir" containing
+      """
+      {
+        "lookup.jsonl": "{not-json}\n"
+      }
+      """
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE DOMAIN {{domain}};
+      CREATE RESOURCE malformed_lookup;
+      UPLOAD RESOURCE malformed_lookup VERSION '{{malformed_lookup_dir}}';
+      CREATE SCHEMA malformed_entry ( key STRING, value STRING );
+      CREATE WIRE JSON SCHEMA malformed_entry_wire MODE STRICT (
+        key string,
+        value string
+      );
+      CREATE CODEC malformed_entry_codec
+        FROM WIRE JSON SCHEMA malformed_entry_wire
+        TO SCHEMA malformed_entry;
+      """
+    When these NSPL commands fail with "failed to decode lookup 'malformed_by_key' line 1"
+      """
+      CREATE HASH MAP malformed_by_key
+        KEY key
+        FROM RESOURCE malformed_lookup
+        PATH 'lookup.jsonl'
+        DECODE USING malformed_entry_codec;
+      """
+
   Scenario Outline: Hash map lookups report a missing key clearly
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -112,10 +139,6 @@ Feature: Resource-backed lookups
       """
       CREATE RESOURCE zip_codes;
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_dir}}';
-      """
-    Then within "30s" node "node-1" eventually reports describe resource as "cluster_ready: true"
-      """
-      DESCRIBE RESOURCE zip_codes VERSION 1;
       """
     When these NSPL commands are executed on the leader node
       """
@@ -140,7 +163,6 @@ Feature: Resource-backed lookups
         PATH 'lookup.jsonl'
         DECODE USING zip_code_entry_codec;
       """
-    Then node "node-1" eventually reports status containing "{{domain}} status=Stopped pace=UNPACED"
     When these NSPL commands fail with "hash map 'zip_codes_by_zip' has no entry for key '99999'"
       """
       LOOKUP zip_codes_by_zip KEY '99999';
@@ -170,10 +192,6 @@ Feature: Resource-backed lookups
       CREATE RESOURCE zip_codes;
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_dir}}';
       """
-    Then within "30s" node "node-1" eventually reports describe resource as "cluster_ready: true"
-      """
-      DESCRIBE RESOURCE zip_codes VERSION 1;
-      """
     When these NSPL commands are executed on the leader node
       """
 
@@ -197,7 +215,6 @@ Feature: Resource-backed lookups
         PATH 'lookup.jsonl'
         DECODE USING zip_code_entry_codec;
       """
-    Then node "node-1" eventually reports status containing "{{domain}} status=Stopped pace=UNPACED"
     When these NSPL commands are executed on the leader node
       """
       DESCRIBE HASH MAP zip_codes_by_zip;
@@ -249,10 +266,6 @@ Feature: Resource-backed lookups
       """
       CREATE RESOURCE zip_codes;
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_dir}}';
-      """
-    Then within "30s" node "node-1" eventually reports describe resource as "cluster_ready: true"
-      """
-      DESCRIBE RESOURCE zip_codes VERSION 1;
       """
     When these NSPL commands are executed on the leader node
       """

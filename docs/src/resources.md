@@ -30,20 +30,29 @@ DESCRIBE RESOURCE <name> VERSION <n>;
 
 With `IF NOT EXISTS`, creating an already-registered resource becomes a successful no-op instead of an error.
 
-`UPLOAD RESOURCE` uploads a local directory recursively and returns the assigned numeric version after the leader has durably installed the archive and committed its publication metadata. Replication to the other live nodes continues asynchronously. The upload result distinguishes publication from cluster readiness, so a published version can briefly report `cluster_ready: false`.
+`UPLOAD RESOURCE` uploads a local directory recursively and returns the assigned numeric version
+after every current live node incarnation has verified and atomically installed the same archive
+digest. A command that references the version can run immediately through any live node after the
+upload succeeds.
 
-Clients give each administrative upload an identity and retain it across redirects and transport retries. Reusing an identity for the same user, domain, and resource returns its existing assigned version and publication outcome. Reusing a completed identity with different archive bytes fails with a digest conflict. This prevents an uncertain response from allocating another version.
+Clients give each administrative upload an identity and retain it across redirects and transport
+retries. Reusing an identity for the same user, domain, and resource returns its existing assigned
+version and terminal outcome. Reusing an identity with different archive bytes fails with a digest
+conflict. Once the client has supplied the complete declared archive and the cluster admits it,
+installation continues if that request disconnects. An interrupted partial body has not admitted a
+complete upload and can be sent again with the same identity.
 
-Callers that must wait for every live node use the resource-readiness API with their own timeout. A timeout is an ordinary `cluster_ready: false` result that still includes the published version. `DESCRIBE RESOURCE <name> VERSION <n>` provides the same readiness state for polling clients.
-
-`DESCRIBE RESOURCE <name>` shows the resource and the list of published versions.
+`DESCRIBE RESOURCE <name>` shows the resource and its completed versions.
 
 `DESCRIBE RESOURCE <name> VERSION <n>` shows the detailed state for one version, including:
 
 - content checksums
 - total file count and size
-- whether the version is cluster-ready
-- per-node replica state
+- the terminal upload outcome
+- per-incarnation replica state and installation diagnostics
+
+Descriptions are observations. They are useful for diagnosis and recovery visibility, but a caller
+does not poll them to finish an upload.
 
 ## Versioning
 
@@ -55,7 +64,12 @@ There is no `latest` keyword in NSPL. If a model omits a version and chooses "la
 
 The client builds a deterministic tar archive, declares its exact size, and sends it in bounded chunks. Internode replication also streams bounded chunks with HTTP/2 flow control; neither endpoint retains the complete archive in memory. A failed transfer restarts from the beginning on its next reconciliation attempt.
 
-On each node, Nervix verifies the archive digest, enforces the staged-archive quota, then enforces extracted-byte and file-count quotas from tar headers before writing each entry. It writes into a staging tree, verifies the manifest, and atomically promotes the complete version. Failed and cancelled installs remove their staging trees, and startup removes staging trees abandoned by an interrupted process.
+On each node, Nervix verifies the archive digest, enforces the staged-archive quota, then enforces
+extracted-byte and file-count quotas from tar headers before writing each entry. It writes into a
+staging tree, verifies the manifest, and atomically promotes the complete version. Failed installs
+remove their staging trees, and startup removes staging trees abandoned by an interrupted process.
+TLS configuration and any other existing binding that selects the uploaded version refreshes before
+the upload returns success.
 
 The per-version limits are configured with `NERVIX_RESOURCE_MAX_ARCHIVE_BYTES`, `NERVIX_RESOURCE_MAX_EXTRACTED_BYTES`, and `NERVIX_RESOURCE_MAX_FILE_COUNT`. Their defaults are 4 GiB, 16 GiB, and 1,000,000 files.
 

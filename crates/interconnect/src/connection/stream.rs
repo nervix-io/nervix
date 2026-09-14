@@ -189,6 +189,7 @@ impl TransportState {
         &self,
         peer_node_id: ClusterNodeName,
         peer_advertised_host: String,
+        peer_process_epoch: u64,
         class: PoolClass,
         body: RecvStream,
         mut respond: server::SendResponse<Bytes>,
@@ -224,6 +225,7 @@ impl TransportState {
                 &self.executor,
                 peer_node_id,
                 peer_advertised_host,
+                peer_process_epoch,
                 request,
             ) => handled,
             reset = poll_fn(|context| respond.poll_reset(context)) => {

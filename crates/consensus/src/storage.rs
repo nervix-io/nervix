@@ -46,6 +46,14 @@ use crate::{
     storage_fault::{StorageBoundary, StorageFault},
 };
 
+/// Consensus storage as opening it found the database, before anything it holds is published.
+struct OpenedStore {
+    store: FjallStore,
+    /// The generation whose records still have to replace the state machine, left by an install
+    /// the node was part-way through when it stopped.
+    installing: Option<u64>,
+}
+
 /// One consistent view of the state machine, gathered before its sections are written.
 struct SealedGeneration {
     metadata: StateMetadata,
@@ -71,7 +79,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 
 #[derive(Debug, Serialize, Deserialize)]
 enum StateEncoding {
-    SemanticRecords,
+    NodeAdmissionFencedRecords,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -85,7 +93,7 @@ struct StateMetadata {
 impl From<&StateMachineData> for StateMetadata {
     fn from(state: &StateMachineData) -> Self {
         Self {
-            encoding: StateEncoding::SemanticRecords,
+            encoding: StateEncoding::NodeAdmissionFencedRecords,
             last_applied_log_id: state.last_applied_log_id.clone(),
             last_membership: state.last_membership.clone(),
             runtime_revision: state.runtime_revision,
@@ -96,7 +104,7 @@ impl From<&StateMachineData> for StateMetadata {
 impl StateMachineData {
     fn load(sm: &Keyspace, metadata: StateMetadata) -> io::Result<Self> {
         let StateMetadata {
-            encoding: StateEncoding::SemanticRecords,
+            encoding: StateEncoding::NodeAdmissionFencedRecords,
             last_applied_log_id,
             last_membership,
             runtime_revision,
@@ -118,7 +126,9 @@ impl StateMachineData {
                 uploads: Records::load(b'o', sm)?,
             },
             cordoned_node_ids: Records::load(b'n', sm)?,
+            node_admission_fences: Records::load(b'f', sm)?,
             transactions: Records::load(b't', sm)?,
+            command_executions: Records::load(b'e', sm)?,
         })
     }
 
@@ -155,8 +165,16 @@ impl StateMachineData {
             .write_changes(&preceding.resources.uploads, b'o', batch, sm)?;
         self.cordoned_node_ids
             .write_changes(&preceding.cordoned_node_ids, b'n', batch, sm)?;
+        self.node_admission_fences.write_changes(
+            &preceding.node_admission_fences,
+            b'f',
+            batch,
+            sm,
+        )?;
         self.transactions
             .write_changes(&preceding.transactions, b't', batch, sm)?;
+        self.command_executions
+            .write_changes(&preceding.command_executions, b'e', batch, sm)?;
         batch.insert(sm, KEY_METADATA, &StateMetadata::from(self))
     }
 }
@@ -175,6 +193,7 @@ pub(super) struct StoreState {
     /// Appended entry bytes since the last completed snapshot, which is what the byte-based
     /// snapshot cadence watches. Truncation leaves it high, so the cadence only ever fires early.
     log_bytes_since_snapshot: AtomicU64,
+    pub(super) applied_tx: watch::Sender<u64>,
     pub(super) schedule_tx: watch::Sender<u64>,
     pub(super) domain_tx: watch::Sender<u64>,
     pub(super) resource_tx: watch::Sender<u64>,
@@ -260,6 +279,7 @@ impl StoreInner {
         // Swap one coherent revision; destruction and notifications run after releasing the lock.
         let preceding = std::mem::replace(&mut *self.state_machine.write(), state);
         drop(preceding);
+        self.applied_tx.send_replace(revision);
         if changes.schedule_changed {
             self.schedule_tx.send_replace(revision);
         }
@@ -502,9 +522,26 @@ pub(super) struct FjallStore {
 
 impl FjallStore {
     pub(super) async fn from_database(db: Database, executor: Executor) -> io::Result<Self> {
+        Self::from_database_with_fault(db, executor, StorageFault::default()).await
+    }
+
+    #[cfg(feature = "testing")]
+    pub(super) async fn from_database_with_storage_fault(
+        db: Database,
+        executor: Executor,
+        fault: StorageFault,
+    ) -> io::Result<Self> {
+        Self::from_database_with_fault(db, executor, fault).await
+    }
+
+    async fn from_database_with_fault(
+        db: Database,
+        executor: Executor,
+        fault: StorageFault,
+    ) -> io::Result<Self> {
         let reservation = StoreInner::reserve(&executor, MemoryClass::Commands).await?;
         let store_executor = executor.clone();
-        let store = executor
+        let opened = executor
             .run_storage(
                 StorageClass::Consensus,
                 reservation,
@@ -527,23 +564,25 @@ impl FjallStore {
                     let snapshot = db
                         .keyspace(KEYSPACE_SNAPSHOT, KeyspaceCreateOptions::default)
                         .map_err(io::Error::other)?;
-                    let state_machine = match read_key(&sm, KEY_METADATA)? {
-                        Some(metadata) => StateMachineData::load(&sm, metadata)?,
-                        None => {
-                            if !sm.is_empty().map_err(io::Error::other)?
-                                || !logs.is_empty().map_err(io::Error::other)?
-                                || !meta.is_empty().map_err(io::Error::other)?
-                                || !snapshot.is_empty().map_err(io::Error::other)?
-                            {
-                                return Err(io::Error::other(StorageFailure::InvalidState));
-                            }
-                            let state = StateMachineData::default();
-                            let mut batch = DurableBatch::new(&reservation)?;
-                            batch.insert(&sm, KEY_METADATA, &StateMetadata::from(&state))?;
-                            batch.commit(&db)?;
-                            state
+                    let installing = read_key::<u64>(&snapshot, KEY_INSTALLING)?;
+                    // An install that was cut short has already cleared the state-machine
+                    // records, so the metadata naming them is absent until the replacement
+                    // finishes. Only a database with no install pending can be a fresh one.
+                    if installing.is_none()
+                        && read_key::<StateMetadata>(&sm, KEY_METADATA)?.is_none()
+                    {
+                        if !sm.is_empty().map_err(io::Error::other)?
+                            || !logs.is_empty().map_err(io::Error::other)?
+                            || !meta.is_empty().map_err(io::Error::other)?
+                            || !snapshot.is_empty().map_err(io::Error::other)?
+                        {
+                            return Err(io::Error::other(StorageFailure::InvalidState));
                         }
-                    };
+                        let mut batch = DurableBatch::new(&reservation)?;
+                        let metadata = StateMetadata::from(&StateMachineData::default());
+                        batch.insert(&sm, KEY_METADATA, &metadata)?;
+                        batch.commit(&db)?;
+                    }
                     let manifest = read_key::<SnapshotManifest>(&snapshot, KEY_MANIFEST)?;
                     let generations = SnapshotGenerations::new(manifest);
                     let mut stored_generations = BTreeSet::new();
@@ -554,51 +593,66 @@ impl FjallStore {
                         }
                     }
                     generations.observe_stored(stored_generations.into_iter());
-                    let revision = match &state_machine.last_applied_log_id {
-                        Some(id) => id.index,
-                        None => 0,
-                    };
-                    Ok(Self {
-                        inner: StoreInner {
-                            shared: Arc::new(StoreState {
-                                db,
-                                executor: store_executor,
-                                faults: StorageFault::default(),
-                                failed: AtomicBool::new(false),
-                                logs,
-                                meta,
-                                sm,
-                                snapshot,
-                                state_machine: RwLock::new(state_machine),
-                                snapshots: generations,
-                                log_bytes_since_snapshot: AtomicU64::new(0),
-                                schedule_tx: watch::channel(revision).0,
-                                domain_tx: watch::channel(revision).0,
-                                resource_tx: watch::channel(revision).0,
-                                transaction_tx: watch::channel(revision).0,
-                            }),
+                    Ok(OpenedStore {
+                        store: Self {
+                            inner: StoreInner {
+                                shared: Arc::new(StoreState {
+                                    db,
+                                    executor: store_executor,
+                                    faults: fault,
+                                    failed: AtomicBool::new(false),
+                                    logs,
+                                    meta,
+                                    sm,
+                                    snapshot,
+                                    state_machine: RwLock::new(StateMachineData::default()),
+                                    snapshots: generations,
+                                    log_bytes_since_snapshot: AtomicU64::new(0),
+                                    applied_tx: watch::channel(0).0,
+                                    schedule_tx: watch::channel(0).0,
+                                    domain_tx: watch::channel(0).0,
+                                    resource_tx: watch::channel(0).0,
+                                    transaction_tx: watch::channel(0).0,
+                                }),
+                            },
                         },
+                        installing,
                     })
                 },
             )
             .await
             .map_err(io::Error::other)??;
-        // A node that stopped between publishing a snapshot manifest and replacing its state
-        // machine from that generation finishes the replacement before anything reads the state.
-        store.resume_interrupted_install().await?;
+        let OpenedStore { store, installing } = opened;
+        // The store opens with nothing published, so an install the node was part-way through is
+        // finished before the state it left behind could be read as if it were current.
+        let state = store.recover_state(installing).await?;
+        store.inner.publish(
+            state,
+            &AppliedConsensusCommand::applied(StateMachineChanges {
+                schedule_changed: true,
+                domains_changed: true,
+                resources_changed: true,
+                transactions_changed: true,
+            }),
+        );
         Ok(store)
     }
 
-    /// Finish an install the node was part-way through when it stopped.
-    async fn resume_interrupted_install(&self) -> io::Result<()> {
-        let installing = self
-            .inner
-            .run(MemoryClass::Management, |inner, _| {
-                read_key::<u64>(&inner.snapshot, KEY_INSTALLING)
-            })
-            .await?;
+    /// The state machine as it stands once an interrupted install has been finished.
+    ///
+    /// `installing` names the generation whose records still have to replace the state machine.
+    /// Replacing is idempotent, so a node redoes the whole replacement however far the
+    /// interrupted one had got.
+    async fn recover_state(&self, installing: Option<u64>) -> io::Result<StateMachineData> {
         let Some(generation) = installing else {
-            return Ok(());
+            return self
+                .inner
+                .run(MemoryClass::Bulk, |inner, _| {
+                    let metadata = read_key(&inner.sm, KEY_METADATA)?
+                        .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
+                    StateMachineData::load(&inner.sm, metadata)
+                })
+                .await;
         };
         let Some(manifest) = self.inner.snapshots.active() else {
             return Err(io::Error::other(StorageFailure::InvalidState));
@@ -606,9 +660,7 @@ impl FjallStore {
         if manifest.generation != generation {
             return Err(io::Error::other(StorageFailure::InvalidState));
         }
-        let state = self.inner.replace_state_machine(&manifest).await?;
-        *self.inner.state_machine.write() = state;
-        Ok(())
+        self.inner.replace_state_machine(&manifest).await
     }
 
     pub(super) async fn has_raft_state(&self) -> io::Result<bool> {

@@ -22,8 +22,9 @@ use nervix_interconnect::{
     PrepareOwnershipHandoffStateRequest as RemotePrepareOwnershipHandoffStateRequest, Transport,
 };
 use nervix_models::{
-    ClusterNodeIncarnation, ClusterNodeName, DomainName, NodeRef, OwnershipStateRecoveryOutcome,
-    OwnershipStateReset, OwnershipStateResetCause, OwnershipTransition, ScheduledNode,
+    ClusterNodeIncarnation, ClusterNodeName, CoordinationIdentity, DomainName, NodeRef,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
+    OwnershipTransition, ScheduledNode,
 };
 use tokio::time::{Duration, sleep};
 use tracing::{debug, info, warn};
@@ -741,6 +742,7 @@ impl SessionServiceImpl {
                 activation_deadline,
             )
             .await?;
+        let coordination = gate.coordination.clone();
         #[cfg(feature = "testing")]
         self.inner.runtime.pause_entity_gate_if_armed(domain).await;
         if let Err(error) = self
@@ -763,6 +765,7 @@ impl SessionServiceImpl {
             let result = tokio::time::timeout_at(preparation_deadline, async {
                 let checkpoints = self
                     .capture_ownership_handoff_state(
+                        &coordination,
                         &operation_id,
                         domain,
                         moved,
@@ -773,6 +776,7 @@ impl SessionServiceImpl {
                     )
                     .await?;
                 self.prepare_ownership_handoff_state(RemotePrepareOwnershipHandoffStateRequest {
+                    coordination: coordination.clone(),
                     operation_id: operation_id.clone(),
                     source: moved.former_owner.clone(),
                     destination: moved.destination.clone(),
@@ -794,8 +798,13 @@ impl SessionServiceImpl {
             match result {
                 Ok(Ok(())) => prepared.push(moved.clone()),
                 Ok(Err(reason)) => {
-                    self.discard_ownership_handoff_state(&operation_id, domain, &prepared)
-                        .await;
+                    self.discard_ownership_handoff_state(
+                        &coordination,
+                        &operation_id,
+                        domain,
+                        &prepared,
+                    )
+                    .await;
                     self.release_cluster_entity_gates(gate).await;
                     return Err(Report::new(DomainAlterError::EntityGate {
                         domain: domain.clone(),
@@ -810,8 +819,13 @@ impl SessionServiceImpl {
                     }));
                 }
                 Err(_) => {
-                    self.discard_ownership_handoff_state(&operation_id, domain, &prepared)
-                        .await;
+                    self.discard_ownership_handoff_state(
+                        &coordination,
+                        &operation_id,
+                        domain,
+                        &prepared,
+                    )
+                    .await;
                     self.release_cluster_entity_gates(gate).await;
                     return Err(Report::new(DomainAlterError::EntityGate {
                         domain: domain.clone(),
@@ -867,6 +881,7 @@ impl SessionServiceImpl {
 
     async fn capture_ownership_handoff_state(
         &self,
+        coordination: &CoordinationIdentity,
         operation_id: &str,
         domain: &DomainName,
         moved: &PlannedOwnershipMove,
@@ -899,7 +914,12 @@ impl SessionServiceImpl {
             return self
                 .inner
                 .runtime
-                .capture_ownership_handoff_state(domain, &moved.entity, base_schedule_fingerprint)
+                .capture_ownership_handoff_state(
+                    coordination,
+                    domain,
+                    &moved.entity,
+                    base_schedule_fingerprint,
+                )
                 .await;
         }
         let response = self
@@ -908,6 +928,7 @@ impl SessionServiceImpl {
             .request(
                 &moved.former_owner,
                 RemoteCaptureOwnershipHandoffStateRequest {
+                    coordination: coordination.clone(),
                     operation_id: operation_id.to_string(),
                     source: moved.former_owner.clone(),
                     source_incarnation,
@@ -984,6 +1005,7 @@ impl SessionServiceImpl {
         for moved in &handoff.moves {
             tokio::task::consume_budget().await;
             let request = RemoteConfirmOwnershipHandoffStateRequest {
+                coordination: handoff.gate.coordination.clone(),
                 operation_id: handoff.operation_id.clone(),
                 source: moved.former_owner.clone(),
                 destination: moved.destination.clone(),
@@ -1103,7 +1125,7 @@ impl SessionServiceImpl {
             if !self
                 .inner
                 .runtime
-                .ownership_handoff_entity_is_frozen(&entity)
+                .ownership_handoff_entity_is_frozen_by(&entity, &request.coordination)
             {
                 return Err(OwnershipHandoffError::participant(format!(
                     "source node '{}' no longer holds the ownership handoff freeze",
@@ -1132,6 +1154,7 @@ impl SessionServiceImpl {
 
     async fn discard_ownership_handoff_state(
         &self,
+        coordination: &CoordinationIdentity,
         operation_id: &str,
         domain: &DomainName,
         moves: &[PlannedOwnershipMove],
@@ -1140,6 +1163,7 @@ impl SessionServiceImpl {
             tokio::task::consume_budget().await;
             if moved.destination == *self.inner.consensus.local_node_id() {
                 if let Err(error) = self.inner.runtime.discard_prepared_ownership_handoff_state(
+                    coordination,
                     operation_id,
                     domain,
                     &moved.entity,
@@ -1159,6 +1183,7 @@ impl SessionServiceImpl {
                 .request(
                     &moved.destination,
                     RemoteDiscardOwnershipHandoffStateRequest {
+                        coordination: coordination.clone(),
                         operation_id: operation_id.to_string(),
                         domain: domain.clone(),
                         entity: moved.entity.clone(),
@@ -1186,8 +1211,13 @@ impl SessionServiceImpl {
         domain: &DomainName,
         handoff: PlannedOwnershipHandoff,
     ) {
-        self.discard_ownership_handoff_state(&handoff.operation_id, domain, &handoff.moves)
-            .await;
+        self.discard_ownership_handoff_state(
+            &handoff.gate.coordination,
+            &handoff.operation_id,
+            domain,
+            &handoff.moves,
+        )
+        .await;
         self.release_cluster_entity_gates(handoff.gate).await;
     }
 
@@ -1319,6 +1349,7 @@ impl SessionServiceImpl {
                 )));
             }
             let request = RemoteActivateOwnershipHandoffStateRequest {
+                coordination: handoff.gate.coordination.clone(),
                 operation_id: handoff.operation_id.clone(),
                 source: moved.former_owner.clone(),
                 destination: moved.destination.clone(),
@@ -1397,9 +1428,16 @@ impl SessionServiceImpl {
                 );
             }
         }
-        self.discard_ownership_handoff_state(&handoff.operation_id, domain, &handoff.moves)
-            .await;
-        self.release_cluster_entity_gates(handoff.gate).await;
+        self.discard_ownership_handoff_state(
+            &handoff.gate.coordination,
+            &handoff.operation_id,
+            domain,
+            &handoff.moves,
+        )
+        .await;
+        self.release_cluster_entity_gates_and_wait(handoff.gate)
+            .await
+            .map_err(OwnershipHandoffError::transport)?;
         Ok(())
     }
 

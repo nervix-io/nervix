@@ -80,6 +80,69 @@ pub(in crate::application) struct ResolvedDomainStart {
 }
 
 impl SessionServiceImpl {
+    pub(in crate::application) async fn apply_persistent_domain_creation(
+        &self,
+        if_not_exists: bool,
+        existed_at_admission: bool,
+        state: DomainState,
+    ) -> CommandResult {
+        if existed_at_admission {
+            if !if_not_exists {
+                return command_error(format!("domain '{}' already exists", state.id.as_str()));
+            }
+            return match self.apply_current_cluster_state().await {
+                Ok(()) => match self.wait_for_authoritative_visibility().await {
+                    Ok(()) => command_ok_already_existed(format!(
+                        "domain '{}' already exists",
+                        state.id.as_str()
+                    )),
+                    Err(error) => command_error(format!(
+                        "domain '{}' exists, but authoritative visibility did not complete: \
+                         {error}",
+                        state.id.as_str()
+                    )),
+                },
+                Err(error) => command_error(format!(
+                    "domain '{}' exists, but its stopped state is not usable everywhere: {error}",
+                    state.id.as_str()
+                )),
+            };
+        }
+
+        match self.inner.consensus.current_domain(&state.id).await {
+            Some(current) if current != state => {
+                return command_error(format!(
+                    "domain '{}' changed while its creation was applying",
+                    state.id.as_str()
+                ));
+            }
+            Some(_) => {}
+            None => {
+                if let Err(error) = self.inner.consensus.put_domain(state.clone()).await {
+                    return self
+                        .consensus_error_response(
+                            &error,
+                            format!("failed to create domain '{}': {error}", state.id.as_str()),
+                        )
+                        .await;
+                }
+            }
+        }
+        if let Err(error) = self.apply_current_cluster_state().await {
+            return command_error(format!(
+                "created domain '{}', but its stopped state failed to become usable: {error}",
+                state.id.as_str()
+            ));
+        }
+        match self.wait_for_authoritative_visibility().await {
+            Ok(()) => command_ok(format!("created domain '{}'", state.id.as_str())),
+            Err(error) => command_error(format!(
+                "created domain '{}', but authoritative visibility did not complete: {error}",
+                state.id.as_str()
+            )),
+        }
+    }
+
     pub(in crate::application) async fn pause_and_drain_domain_for_alter(
         &self,
         domain: &DomainName,
@@ -292,18 +355,6 @@ impl SessionServiceImpl {
         }
     }
 
-    pub(in crate::application) async fn reconcile_running_domain_runtime(
-        &self,
-        domain: &DomainName,
-    ) -> Result<(), String> {
-        self.apply_current_cluster_state().await.map_err(|error| {
-            format!(
-                "failed to restore runtime for running domain '{}': {error}",
-                domain.as_str()
-            )
-        })
-    }
-
     pub(in crate::application) async fn create_domain(
         &self,
         create: CreateStatement<CreateDomain>,
@@ -316,10 +367,24 @@ impl SessionServiceImpl {
             .is_some()
         {
             if create.if_not_exists {
-                return command_ok_already_existed(format!(
-                    "domain '{}' already exists",
-                    create.id.as_str()
-                ));
+                return match self.apply_current_cluster_state().await {
+                    Ok(()) => match self.wait_for_authoritative_visibility().await {
+                        Ok(()) => command_ok_already_existed(format!(
+                            "domain '{}' already exists",
+                            create.id.as_str()
+                        )),
+                        Err(error) => command_error(format!(
+                            "domain '{}' exists, but authoritative visibility did not complete: \
+                             {error}",
+                            create.id.as_str()
+                        )),
+                    },
+                    Err(error) => command_error(format!(
+                        "domain '{}' exists, but its stopped state is not usable everywhere: \
+                         {error}",
+                        create.id.as_str()
+                    )),
+                };
             }
             return command_error(format!("domain '{}' already exists", create.id.as_str()));
         }
@@ -335,12 +400,20 @@ impl SessionServiceImpl {
         match self.inner.consensus.put_domain(state).await {
             Ok(()) => {
                 if let Err(error) = self.apply_current_cluster_state().await {
-                    self.broadcast_error(format!(
-                        "failed to reconcile runtime after creating domain '{}': {error}",
-                        create.id.as_str(),
+                    return command_error(format!(
+                        "created domain '{}', but its stopped state failed to become usable: \
+                         {error}",
+                        create.id.as_str()
                     ));
                 }
-                command_ok(format!("created domain '{}'", create.id.as_str()))
+                match self.wait_for_authoritative_visibility().await {
+                    Ok(()) => command_ok(format!("created domain '{}'", create.id.as_str())),
+                    Err(error) => command_error(format!(
+                        "created domain '{}', but authoritative visibility did not complete: \
+                         {error}",
+                        create.id.as_str()
+                    )),
+                }
             }
             Err(error) => {
                 self.consensus_error_response(
@@ -378,26 +451,32 @@ impl SessionServiceImpl {
             ));
         }
         if previous_state.config.placement == alter.policy {
-            return command_ok(format!(
-                "domain '{}' placement is already {}; {}\nplanned relocations: 0",
-                domain.as_str(),
-                alter.policy.as_ref(),
-                quiesce_level_message(QuiesceLevel::Dynamic),
-            ));
+            return match self.apply_current_cluster_state().await {
+                Ok(()) => command_ok(format!(
+                    "domain '{}' placement is already {}; {}\nplanned relocations: 0",
+                    domain.as_str(),
+                    alter.policy.as_ref(),
+                    quiesce_level_message(QuiesceLevel::Dynamic),
+                )),
+                Err(error) => command_error(format!(
+                    "domain '{}' already has placement {}, but it is not usable everywhere: \
+                     {error}",
+                    domain.as_str(),
+                    alter.policy.as_ref()
+                )),
+            };
         }
 
         let current_schedule = self.inner.consensus.current_schedule().await;
         let previous_schedule = current_schedule.domain(domain).cloned();
-        let live_node_ids = self.inner.cluster.live_node_ids().await;
-        let live_voters = self
-            .inner
-            .consensus
-            .live_voter_ids(live_node_ids.clone())
-            .await;
+        let availability = self.inner.cluster.availability_state().await;
+        let live_node_ids = availability.live_node_ids();
+        let placement_candidate_node_ids = availability.placement_candidate_node_ids();
+        let live_voters = self.inner.consensus.live_voter_ids(live_node_ids).await;
         let cluster_nodes = self
             .inner
             .consensus
-            .schedulable_live_voter_ids(live_node_ids)
+            .schedulable_live_voter_ids(placement_candidate_node_ids)
             .await;
         let mut next_schedule = self.inner.registry.active_graph(domain).map(|graph| {
             #[cfg(feature = "testing")]
@@ -620,7 +699,7 @@ impl SessionServiceImpl {
                         domain_id.as_str()
                     ));
                 }
-                command_ok(format!("starting domain '{}'", domain_id.as_str()))
+                command_ok(format!("started domain '{}'", domain_id.as_str()))
             }
             Err(error) => {
                 self.consensus_error_response(
@@ -649,9 +728,9 @@ impl SessionServiceImpl {
         match self.inner.consensus.stop_domain(domain_id.clone()).await {
             Ok(()) => {
                 if let Err(error) = self.apply_current_cluster_state().await {
-                    self.broadcast_error(format!(
-                        "failed to reconcile runtime after stopping domain '{}': {error}",
-                        domain_id.as_str(),
+                    return command_error(format!(
+                        "stopped domain '{}', but remote stopping did not complete: {error}",
+                        domain_id.as_str()
                     ));
                 }
                 command_ok(format!("stopped domain '{}'", domain_id.as_str()))
@@ -669,13 +748,11 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{DomainConfig, DomainPace, DomainStartPoint, StartDomain, Statement};
+    use meticulous::ResultExt as _;
+    use nervix_models::{DomainConfig, DomainPace};
 
     use super::{
-        super::{
-            model_mutation::{requires_existing_domain, requires_runtime_reconcile},
-            test_fixtures::{TestService, build_test_service},
-        },
+        super::test_fixtures::{TestService, build_test_service},
         *,
     };
 
@@ -721,12 +798,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[test]
-    fn start_domain_does_not_reconcile_runtime_in_generic_pre_dispatch() {
-        let statement = Statement::StartDomain(StartDomain {
-            start: DomainStartPoint::Resume,
-        });
-        assert!(requires_existing_domain(&statement));
-        assert!(!requires_runtime_reconcile(&statement));
+    #[tokio::test]
+    async fn admitted_domain_creation_resumes_after_its_domain_record_exists() {
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(false).await;
+        let state = DomainState {
+            id: DomainName::parse("resumed")
+                .assured("the test domain is an identifier-shaped literal"),
+            config: DomainConfig {
+                pace: DomainPace::Unpaced,
+                placement: nervix_models::PlacementPolicy::Neutral,
+            },
+            status: DomainStatus::Stopped,
+            start_version: 0,
+            last_start: DomainStartPoint::Resume,
+            clock: None,
+        };
+
+        let first = service
+            .apply_persistent_domain_creation(false, false, state.clone())
+            .await;
+        assert!(first.success, "{first:?}");
+        let resumed = service
+            .apply_persistent_domain_creation(false, false, state)
+            .await;
+        assert_eq!(resumed, first);
+
+        let _ = std::fs::remove_dir_all(&path);
     }
 }

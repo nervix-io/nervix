@@ -144,11 +144,11 @@ transaction. Read-only statements, subscriptions, `CREATE DOMAIN`, `CREATE USER`
 administration are also rejected while queueing transaction content. `BEGIN` requires an existing
 active domain and binds the transaction to it; attaching a transaction switches the active domain
 to the transaction's domain. An upload targets the active domain, renders live progress, and
-finishes once the leader has published the version; cluster replication continues asynchronously:
+finishes after every current live node incarnation has verified and installed the assigned version:
 
 ```text
-upload resource 'order_model' finished: 4.2 MiB sent, publication committed
-published resource version 1
+upload resource 'order_model' finished: 4.2 MiB sent
+uploaded resource version 1
 ```
 
 See [Resources](resources.md#lifecycle) for what a resource version contains.
@@ -225,17 +225,18 @@ the server, so it works before a cluster exists.
 
 ## Leader Redirects
 
-Model statements are applied by the leader. If the session lands on a follower the client reports
-the redirect and reconnects on its own, following up to four hops:
+Persistent statements are applied by the leader. The CLI gives each one a stable execution
+reference and retains it until the terminal result. If the session lands on a follower the client
+reports the redirect and reconnects on its own, following up to four hops:
 
 ```text
 topology: not-a-leader, retry on leader 'node-2' at http://10.0.0.12:47391
 ```
 
 Transaction controls follow the same redirect beginning with `BEGIN`. The CLI retains the returned
-transaction id and attaches it on the new connection before retrying any queued statement or
-commit. If the attached progress shows that the cluster already accepted that operation, the CLI
-uses the replicated state or retained commit result instead of submitting it twice. An open
+transaction id and attaches it on the new connection before resuming any queued statement or
+commit. Each append keeps its execution reference and expected queue position. A pending commit
+waits through `COMMITTING` for the exact retained terminal result. An open
 transaction therefore survives an unclean connection loss or leader failover; a clean CLI exit
 reverts it. See
 [Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions).

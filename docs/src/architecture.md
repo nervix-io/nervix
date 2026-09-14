@@ -59,6 +59,10 @@ whose construction is limited to timeout, retry, and external-I/O owners. Actual
 data plane through one physical-time owner and is projected into logical time or used by an
 explicit external observation contract.
 
+The [Domain Clock](./domain-clock.md) chapter defines the mapping, lifecycle generation,
+authority fence, progress delivery, local installation, execution snapshots, admission arithmetic,
+and logical-deadline boundary in detail.
+
 Runtime execution has its own persistence boundary. Selected execution-node state is persisted
 through periodic snapshots and replication, but in-flight message batches and ACK state are
 hot-path memory only. Relay buffers, concrete presence, fan-out, and metrics are owner-local and

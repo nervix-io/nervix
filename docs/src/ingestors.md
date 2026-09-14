@@ -60,8 +60,9 @@ At runtime, the ingestor:
 - executes each route's ordered construction and `WHERE` program once against the surviving group
 - resolves the concrete branch group from the referenced `CREATE BRANCH`
 - accumulates decoded rows independently for every matching destination and branch group
-- writes each route's buffered rows when its configured interval or size boundary fires, or when
-  the documented [`FLUSH IMMEDIATE` system timeout](nspl-overview.md) expires
+- writes each route's buffered rows when its configured interval or size boundary fires, when the
+  documented [`FLUSH IMMEDIATE` system timeout](nspl-overview.md) expires, or when the domain is
+  force-flushed by a model alteration, a domain pause, or a planned ownership handoff
 
 Branch execution receives these completed Arrow batches and does not buffer them behind another
 flush policy.
@@ -106,7 +107,9 @@ the same relay remain legal, so `DROP ROUTE` and `REPLACE ROUTE` reject an ambig
 ingestor must retain at least one route.
 
 Every ingestor alteration uses `ENTITY_PAUSE`. Nervix quiesces only the affected ingestor instances
-on all live nodes and waits for their already accepted in-flight work to drain before commit.
+on all live nodes and waits for their already accepted in-flight work to drain before commit. That
+work includes route output still held behind a `FLUSH EACH` interval: the hold force-flushes those
+branch buffers, so a slow or stopped domain clock cannot keep accepted rows out of the drain.
 Schedule application starts the desired source configuration on its assigned nodes; unrelated graph
 paths keep flowing. The quiesce mode in effect when the hold begins governs that hold; a mode changed
 by the alteration applies to later pauses. A drain or cutover failure leaves the candidate unapplied

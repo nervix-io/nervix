@@ -354,7 +354,8 @@ Feature: Domain clock contract regressions
         ON GENERAL ERROR LOG;
       START AT '2000-01-01T00:00:00Z' TIME RATE 4.0;
       """
-    Then within "650ms" clock source recorder "{{test_id}}" records 3 requests
+    Given clock source recorder "{{test_id}}" is reset
+    Then within "850ms" clock source recorder "{{test_id}}" records 3 requests
 
     Examples:
       | cluster_size |

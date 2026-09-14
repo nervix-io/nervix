@@ -28,10 +28,7 @@ use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
     SanType,
 };
-use tokio::{
-    sync::{Mutex as AsyncMutex, mpsc},
-    time::Duration,
-};
+use tokio::{sync::mpsc, time::Duration};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tonic::Status;
 use triomphe::Arc;
@@ -220,7 +217,6 @@ fn test_session_service(
             events: SessionEvents::new(16),
             subscription_interest_counts: DashMap::with_hasher(RandomState::new()),
             interconnect,
-            next_entity_gate_operation_id: AtomicU64::new(1),
             service_tasks: TaskTracker::new(),
             configured_basic_auth: None,
             auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
@@ -231,8 +227,9 @@ fn test_session_service(
             transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
             transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
             transaction_bindings: DashMap::with_hasher(RandomState::new()),
-            transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_commit_execution: AsyncMutex::new(()),
+            command_executions: DashMap::with_hasher(RandomState::new()),
+            transaction_executions: DashMap::with_hasher(RandomState::new()),
+            transaction_domain_executions: DashMap::with_hasher(RandomState::new()),
             resource_upload_executions: DashMap::with_hasher(RandomState::new()),
             resource_replication_executions: DashMap::with_hasher(RandomState::new()),
         }),
@@ -534,6 +531,19 @@ pub(in crate::application) async fn queue_in_transaction(
             CommandRequest {
                 query: query.to_string(),
                 domain: "default".to_string(),
+                execution_reference: uuid::Uuid::now_v7().to_string(),
+                expected_transaction_position: match subscriptions.transaction_id() {
+                    Some(transaction_id) => service
+                        .inner
+                        .consensus
+                        .current_transaction(transaction_id)
+                        .await
+                        .map(|transaction| {
+                            u64::try_from(transaction.pending_statement_count())
+                                .assured("the test transaction statement limit fits in u64")
+                        }),
+                    None => None,
+                },
             },
             tx,
             subscriptions,

@@ -15,7 +15,7 @@ use meticulous::OptionExt as _;
 use nervix_client_core::Client as NervixClient;
 use nervix_consensus::ConsensusError;
 use nervix_models::{
-    ClusterNodeName, DomainName, IngestSource, IngestorName, KafkaOffsetMode,
+    ClusterNodeIdentity, ClusterNodeName, DomainName, IngestSource, IngestorName, KafkaOffsetMode,
     KafkaPartitionSchedule, Model, ModelKind, ModelName, NodeRef, PlacementGroupSchedule,
     PlacementPolicy, QuiesceLevel, ScheduledNode,
 };
@@ -43,6 +43,8 @@ pub(in crate::application) const LEADER_KAFKA_PARTITION_WATCH_INTERVAL: Duration
 
 pub(in crate::application) const RUNTIME_REVISION_READINESS_PROPAGATION_BOUND: Duration =
     Duration::from_secs(30);
+
+const SHUTDOWN_CORDON_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(in crate::application) struct KafkaPartitionWatcherKey {
@@ -140,16 +142,14 @@ impl SessionServiceImpl {
         graph: Option<ActiveGraph>,
         placement: PlacementPolicy,
     ) -> Result<PreparedDomainSchedule, String> {
-        let live_node_ids = self.inner.cluster.live_node_ids().await;
-        let live_voters = self
-            .inner
-            .consensus
-            .live_voter_ids(live_node_ids.clone())
-            .await;
+        let availability = self.inner.cluster.availability_state().await;
+        let live_node_ids = availability.live_node_ids();
+        let placement_candidate_node_ids = availability.placement_candidate_node_ids();
+        let live_voters = self.inner.consensus.live_voter_ids(live_node_ids).await;
         let cluster_nodes = self
             .inner
             .consensus
-            .schedulable_live_voter_ids(live_node_ids)
+            .schedulable_live_voter_ids(placement_candidate_node_ids)
             .await;
         let current = self.inner.consensus.current_schedule().await;
         let schedule = match graph {
@@ -194,54 +194,76 @@ impl SessionServiceImpl {
         &self,
         node_id: ClusterNodeName,
     ) -> CommandResult {
+        let availability = self.inner.cluster.availability_state().await;
+        let mut latest_nodes = availability.latest_nodes_by_id();
+        let Some(node) = latest_nodes.remove(&node_id) else {
+            return command_error(format!(
+                "cannot identify the current incarnation of raft member '{node_id}'"
+            ));
+        };
+        let membership_nodes = self.inner.consensus.membership_nodes().await;
+        let member_at_admission = membership_nodes.contains_key(&node_id);
+        self.drop_admitted_node(node.identity(), member_at_admission)
+            .await
+    }
+
+    pub(in crate::application) async fn drop_admitted_node(
+        &self,
+        identity: ClusterNodeIdentity,
+        member_at_admission: bool,
+    ) -> CommandResult {
+        let node_id = identity.node_id().clone();
+        let membership_nodes = self.inner.consensus.membership_nodes().await;
+        let is_current_member = membership_nodes.contains_key(&node_id);
         let gossip = self.inner.cluster.availability_state().await;
-        let is_live = gossip
-            .live_nodes
-            .iter()
-            .any(|live_node| live_node.node_id == node_id);
-        if is_live && !gossip.dead_node_ids.contains(&node_id) {
+        let live_node_ids = gossip
+            .live_identities()
+            .into_iter()
+            .map(|identity| identity.node_id().clone())
+            .collect::<BTreeSet<_>>();
+        let is_live = live_node_ids.contains(&node_id);
+        let is_resuming_applied_removal = member_at_admission && !is_current_member;
+        if !is_resuming_applied_removal && is_live {
             return command_error(format!(
                 "cannot drop live node '{node_id}'; stop the node before removing it"
             ));
         }
 
-        let membership_nodes = self.inner.consensus.membership_nodes().await;
-        if membership_nodes.contains_key(&node_id) {
+        if is_current_member {
             let voters = self.inner.consensus.membership_voter_ids().await;
-            let live_node_ids = gossip
-                .live_nodes
-                .iter()
-                .filter(|live_node| !gossip.dead_node_ids.contains(&live_node.node_id))
-                .map(|live_node| live_node.node_id.clone())
-                .collect::<BTreeSet<_>>();
             if let Some(message) = Self::drop_node_quorum_error(&node_id, &voters, &live_node_ids) {
                 return command_error(message);
             }
         }
 
         let current_schedule = self.inner.consensus.current_schedule().await;
-        match self.inner.consensus_administrator.drop_node(&node_id).await {
-            Ok(()) => {}
-            Err(error) => {
-                return self
-                    .consensus_error_response(
-                        &error,
-                        format!("failed to drop node '{node_id}': {error}"),
-                    )
-                    .await;
+        if !is_resuming_applied_removal {
+            match self
+                .inner
+                .consensus_administrator
+                .drop_node(&identity, self.inner.cluster.availability_state())
+                .await
+            {
+                Ok(()) => {}
+                Err(error) => {
+                    return self
+                        .consensus_error_response(
+                            &error,
+                            format!("failed to drop node '{node_id}': {error}"),
+                        )
+                        .await;
+                }
             }
         }
 
-        let live_node_ids = self.inner.cluster.live_node_ids().await;
-        let live_voters = self
-            .inner
-            .consensus
-            .live_voter_ids(live_node_ids.clone())
-            .await;
+        let availability = self.inner.cluster.availability_state().await;
+        let live_node_ids = availability.live_node_ids();
+        let placement_candidate_node_ids = availability.placement_candidate_node_ids();
+        let live_voters = self.inner.consensus.live_voter_ids(live_node_ids).await;
         let schedulable_nodes = self
             .inner
             .consensus
-            .schedulable_live_voter_ids(live_node_ids)
+            .schedulable_live_voter_ids(placement_candidate_node_ids)
             .await;
         let (cluster_nodes, preservable_nodes) =
             Self::drop_node_schedule_node_sets(&live_voters, &schedulable_nodes);
@@ -285,6 +307,18 @@ impl SessionServiceImpl {
                     domain.as_str()
                 ));
             }
+        }
+
+        if let Err(error) = self.apply_current_cluster_state().await {
+            return command_error(format!(
+                "dropped node '{node_id}', but the resulting schedules failed to become usable: \
+                 {error}"
+            ));
+        }
+        if let Err(error) = self.wait_for_authoritative_visibility().await {
+            return command_error(format!(
+                "dropped node '{node_id}', but authoritative visibility did not complete: {error}"
+            ));
         }
 
         command_ok(format!("dropped node '{node_id}'"))
@@ -346,14 +380,19 @@ impl SessionServiceImpl {
             let action = if cordoned { "cordon" } else { "uncordon" };
             return self
                 .consensus_error_response(
-                    &error,
+                    error.current_context(),
                     format!("failed to {action} node '{node_id}': {error}"),
                 )
                 .await;
         }
 
         let action = if cordoned { "cordoned" } else { "uncordoned" };
-        command_ok(format!("{action} node '{node_id}'"))
+        match self.wait_for_authoritative_visibility().await {
+            Ok(()) => command_ok(format!("{action} node '{node_id}'")),
+            Err(error) => command_error(format!(
+                "{action} node '{node_id}', but authoritative visibility did not complete: {error}"
+            )),
+        }
     }
 
     pub(in crate::application) async fn drain_node(
@@ -373,7 +412,7 @@ impl SessionServiceImpl {
         {
             return self
                 .consensus_error_response(
-                    &error,
+                    error.current_context(),
                     format!("failed to cordon node '{node_id}' before drain: {error}"),
                 )
                 .await;
@@ -392,16 +431,14 @@ impl SessionServiceImpl {
         let mut failed_units = BTreeSet::<(DomainName, String)>::new();
         let mut failed_domains = BTreeSet::<DomainName>::new();
         loop {
-            let live_node_ids = self.inner.cluster.live_node_ids().await;
-            let live_voters = self
-                .inner
-                .consensus
-                .live_voter_ids(live_node_ids.clone())
-                .await;
+            let availability = self.inner.cluster.availability_state().await;
+            let live_node_ids = availability.live_node_ids();
+            let placement_candidate_node_ids = availability.placement_candidate_node_ids();
+            let live_voters = self.inner.consensus.live_voter_ids(live_node_ids).await;
             let replacement_nodes = self
                 .inner
                 .consensus
-                .schedulable_live_voter_ids(live_node_ids)
+                .schedulable_live_voter_ids(placement_candidate_node_ids)
                 .await;
             if replacement_nodes.is_empty() {
                 failed = true;
@@ -636,18 +673,58 @@ impl SessionServiceImpl {
         }
     }
 
-    pub(in crate::application) async fn drain_local_node_before_shutdown(&self) {
+    pub(in crate::application) async fn drain_local_node_before_shutdown(
+        &self,
+        drain_timeout: Duration,
+    ) {
         let local_node_id = self.inner.consensus.local_node_id().clone();
-        let live_node_ids = self.inner.cluster.live_node_ids().await;
+        let operator_cordon_exists = self
+            .inner
+            .consensus
+            .cordoned_node_ids()
+            .await
+            .contains(&local_node_id);
+        let drain = self.drain_local_node_for_shutdown(&local_node_id);
+        if tokio::time::timeout(drain_timeout, drain).await.is_err() {
+            warn!(
+                node_id = %local_node_id,
+                timeout = ?drain_timeout,
+                "timed out draining local node before graceful shutdown"
+            );
+        }
+
+        if operator_cordon_exists {
+            info!(
+                node_id = %local_node_id,
+                "preserving operator cordon across graceful shutdown"
+            );
+            return;
+        }
+
+        if tokio::time::timeout(
+            SHUTDOWN_CORDON_CLEANUP_TIMEOUT,
+            self.clear_shutdown_drain_cordon(&local_node_id),
+        )
+        .await
+        .is_err()
+        {
+            warn!(
+                node_id = %local_node_id,
+                timeout = ?SHUTDOWN_CORDON_CLEANUP_TIMEOUT,
+                "timed out clearing shutdown drain cordon"
+            );
+        }
+    }
+
+    async fn drain_local_node_for_shutdown(&self, local_node_id: &ClusterNodeName) {
+        let availability = self.inner.cluster.availability_state().await;
+        let placement_candidate_node_ids = availability.placement_candidate_node_ids();
         let drain_targets = self
             .inner
             .consensus
-            .schedulable_live_voter_ids(live_node_ids)
+            .schedulable_live_voter_ids(placement_candidate_node_ids)
             .await;
-        if !drain_targets
-            .iter()
-            .any(|node_id| *node_id != local_node_id)
-        {
+        if !drain_targets.iter().any(|node_id| node_id != local_node_id) {
             warn!(
                 node_id = %local_node_id,
                 "skipping graceful shutdown drain: no live schedulable replacement nodes remain"
@@ -656,7 +733,7 @@ impl SessionServiceImpl {
         }
         let leader = self.inner.consensus.current_leader().await;
         match leader.as_ref() {
-            Some(leader_id) if *leader_id == local_node_id => {
+            Some(leader_id) if leader_id == local_node_id => {
                 let result = self.drain_node(local_node_id.clone()).await;
                 if result.success {
                     info!(
@@ -664,16 +741,12 @@ impl SessionServiceImpl {
                         message = result.message,
                         "drained local node before graceful shutdown"
                     );
-                    self.uncordon_local_node_after_shutdown_drain(&local_node_id)
-                        .await;
                 } else {
                     warn!(
                         node_id = %local_node_id,
                         message = result.message,
                         "failed to drain local node before graceful shutdown"
                     );
-                    self.uncordon_local_node_after_shutdown_drain(&local_node_id)
-                        .await;
                 }
             }
             Some(leader_id) => {
@@ -705,12 +778,6 @@ impl SessionServiceImpl {
                                     message = outcome.message,
                                     "drained local node through leader before graceful shutdown"
                                 );
-                                self.uncordon_local_node_through_leader_after_shutdown_drain(
-                                    &client,
-                                    &local_node_id,
-                                    leader_id,
-                                )
-                                .await;
                             }
                             Ok(outcome) => {
                                 warn!(
@@ -720,12 +787,6 @@ impl SessionServiceImpl {
                                     "failed to drain local node through leader before graceful \
                                      shutdown"
                                 );
-                                self.uncordon_local_node_through_leader_after_shutdown_drain(
-                                    &client,
-                                    &local_node_id,
-                                    leader_id,
-                                )
-                                .await;
                             }
                             Err(error) => {
                                 warn!(
@@ -757,35 +818,68 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn uncordon_local_node_after_shutdown_drain(&self, local_node_id: &ClusterNodeName) {
-        match self
-            .inner
-            .consensus
-            .set_node_cordoned(local_node_id.clone(), false)
-            .await
-        {
-            Ok(()) => {
-                info!(
-                    node_id = %local_node_id,
-                    "cleared shutdown drain cordon before graceful shutdown"
-                );
+    async fn clear_shutdown_drain_cordon(&self, local_node_id: &ClusterNodeName) {
+        let leader = self.inner.consensus.current_leader().await;
+        let Some(leader_id) = leader.as_ref() else {
+            warn!(
+                node_id = %local_node_id,
+                "failed to clear shutdown drain cordon: raft leader is unknown"
+            );
+            return;
+        };
+        if leader_id == local_node_id {
+            match self
+                .inner
+                .consensus
+                .set_node_cordoned(local_node_id.clone(), false)
+                .await
+            {
+                Ok(()) => {
+                    info!(
+                        node_id = %local_node_id,
+                        "cleared shutdown drain cordon before graceful shutdown"
+                    );
+                }
+                Err(error) => {
+                    warn!(
+                        node_id = %local_node_id,
+                        error = %error,
+                        "failed to clear shutdown drain cordon before graceful shutdown"
+                    );
+                }
             }
+            return;
+        }
+
+        let Some(leader_grpc_uri) = self.leader_grpc_uri(leader_id).await else {
+            warn!(
+                node_id = %local_node_id,
+                leader = %leader_id,
+                "failed to clear shutdown drain cordon: leader grpc uri is unknown"
+            );
+            return;
+        };
+        let client = NervixClient::connect_with_options(
+            &leader_grpc_uri,
+            "default",
+            grpc_client_connect_options(
+                &leader_grpc_uri,
+                self.inner.configured_basic_auth.as_ref(),
+            ),
+        )
+        .await;
+        let client = match client {
+            Ok(client) => client,
             Err(error) => {
                 warn!(
                     node_id = %local_node_id,
+                    leader = %leader_id,
                     error = %error,
-                    "failed to clear shutdown drain cordon before graceful shutdown"
+                    "failed to connect to leader to clear shutdown drain cordon"
                 );
+                return;
             }
-        }
-    }
-
-    async fn uncordon_local_node_through_leader_after_shutdown_drain(
-        &self,
-        client: &NervixClient,
-        local_node_id: &ClusterNodeName,
-        leader_id: &ClusterNodeName,
-    ) {
+        };
         match client
             .execute(format!("UNCORDON NODE {local_node_id};"))
             .await

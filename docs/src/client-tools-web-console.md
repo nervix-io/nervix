@@ -156,9 +156,11 @@ nervix[quickstart committing]>
 `BEGIN` requires a selected domain that already exists and binds the transaction to it. The
 console follows the transaction's domain, so attaching switches the domain selector to it.
 
-The transaction id and status are replicated. If the WebSocket closes unexpectedly or leadership
-changes, the console reconnects and attaches that id before replaying a pending command. It does
-not replay when the attached status shows that queue or commit progress was already recorded. A
+Every persistent command keeps one execution reference while the browser waits, reconnects, or
+follows leadership. The transaction id and status are replicated. If the WebSocket closes
+unexpectedly or leadership changes, the console reconnects and attaches that id before resuming a
+pending command. Each append is matched by its reference and expected position, and an outstanding
+commit remains pending through `COMMITTING` until its exact terminal result. A
 second session can attach the same owner's transaction and take it over; the displaced console
 then gets an explicit takeover error. A clean console session close reverts an open transaction,
 while an accepted commit continues on the leader without the browser. See
@@ -173,8 +175,9 @@ empties the scrollback.
 ![The resource dialog after uploading a version](images/console-resource-dialog.png)
 
 Selecting a resource in the sidebar opens its version list. Files or a whole directory can be
-uploaded from the browser as a new version of that resource in the selected domain, which is then
-replicated across the cluster. Version contents and how nodes consume them are covered in
+uploaded from the browser as a new version of that resource in the selected domain. The successful
+upload result arrives after every current live node has verified and installed the version. Version
+contents and how nodes consume them are covered in
 [Resources](resources.md).
 
 ## Domain Lifecycle
