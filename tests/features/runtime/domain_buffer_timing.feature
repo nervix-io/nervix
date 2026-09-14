@@ -227,3 +227,88 @@ Feature: Domain-paced branch buffering
       | cluster_size |
       | 1            |
       | 3            |
+
+  @domain_buffer_timing
+  Scenario Outline: A force flush releases ingestor route buffers held by slow domain time
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA timed_event (
+        tenant STRING,
+        sequence I64,
+        path STRING
+      );
+      CREATE WIRE JSON SCHEMA timed_event_wire MODE STRICT (
+        tenant string,
+        sequence integer,
+        path string
+      );
+      CREATE CODEC timed_event_codec
+        FROM WIRE JSON SCHEMA timed_event_wire
+        TO SCHEMA timed_event;
+      CREATE SCHEMA tenant_branch (tenant STRING);
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE RELAY held_ingested SCHEMA timed_event BRANCHED BY by_tenant;
+      CREATE RELAY gate_ingested SCHEMA timed_event BRANCHED BY by_tenant;
+      CREATE VHOST edge held-buffering-{{test_id}}.example.com;
+      CREATE ENDPOINT held_buffering_endpoint
+        ON edge
+        PATH '/events'
+        TYPE HTTP;
+      CREATE ENDPOINT gate_buffering_endpoint
+        ON edge
+        PATH '/gate'
+        TYPE HTTP;
+      CREATE INGESTOR held_buffering_source
+        FROM ENDPOINT held_buffering_endpoint MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
+        TIMESTAMP NOW
+        TO held_ingested
+          INHERIT ALL
+          BRANCHED BY by_tenant
+          SET tenant = message.tenant
+          FLUSH EACH 1h MAX BATCH SIZE 1MiB
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE INGESTOR gate_buffering_source
+        FROM ENDPOINT gate_buffering_endpoint MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
+        TIMESTAMP NOW
+        TO gate_ingested
+          INHERIT ALL
+          BRANCHED BY by_tenant
+          SET tenant = message.tenant
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION held_subscription TO held_ingested;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 0.0001;
+      """
+    And http payload is posted to host "held-buffering-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1,"path":"held"}
+      """
+    And http payload is posted to host "held-buffering-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":1,"path":"held"}
+      """
+    Then the relay subscription does not receive a payload within "2s"
+    When these NSPL commands are executed
+      """
+      ALTER INGESTOR gate_buffering_source SET QUIESCE BUFFER MAX SIZE 2MiB;
+      """
+    Then within "10s" the relay subscription receives payloads
+      """
+      {"path":"held","sequence":1,"tenant":"alpha"}
+      {"path":"held","sequence":1,"tenant":"beta"}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

@@ -94,7 +94,7 @@ struct ReingestorOutputBufferKey {
 
 struct ReingestorOutputBuffers {
     routes: Vec<IndexMap<Option<BranchKey>, ReingestorBranchOutputBuffer>>,
-    quiesce: ReingestorOutputQuiesceGauge,
+    quiesce: OutputBufferQuiesceGauge,
 }
 
 impl ReingestorOutputBuffers {
@@ -103,7 +103,7 @@ impl ReingestorOutputBuffers {
             routes: std::iter::repeat_with(IndexMap::new)
                 .take(route_count)
                 .collect(),
-            quiesce: ReingestorOutputQuiesceGauge::new(quiesce_counters),
+            quiesce: OutputBufferQuiesceGauge::new(quiesce_counters),
         }
     }
 
@@ -180,46 +180,6 @@ impl ReingestorOutputBuffers {
             .flat_map(IndexMap::values)
             .filter_map(|buffer| buffer.flush_timer.deadline())
             .collect()
-    }
-}
-
-struct ReingestorOutputQuiesceGauge {
-    counters: Arc<NodeQuiesceCounters>,
-    output_buffers: usize,
-}
-
-impl ReingestorOutputQuiesceGauge {
-    fn new(counters: Arc<NodeQuiesceCounters>) -> Self {
-        Self {
-            counters,
-            output_buffers: 0,
-        }
-    }
-
-    fn add_batch(&mut self) {
-        self.output_buffers = self
-            .output_buffers
-            .checked_add(1)
-            .assured("the count cannot exceed the batches this reingestor holds in memory");
-        self.counters.output_buffers.fetch_add(1, Ordering::AcqRel);
-    }
-
-    fn remove_batches(&mut self, count: usize) {
-        self.output_buffers = self
-            .output_buffers
-            .checked_sub(count)
-            .verified("only batches counted when they entered this buffer can be removed");
-        self.counters
-            .output_buffers
-            .fetch_sub(count, Ordering::AcqRel);
-    }
-}
-
-impl Drop for ReingestorOutputQuiesceGauge {
-    fn drop(&mut self) {
-        self.counters
-            .output_buffers
-            .fetch_sub(self.output_buffers, Ordering::AcqRel);
     }
 }
 
@@ -1784,6 +1744,13 @@ mod tests {
             },
             branch_sender,
             pending: HashMap::default(),
+            quiesce: OutputBufferQuiesceGauge::new(runtime.node_quiesce_counters(
+                &domain,
+                NodeRef::new(
+                    ModelKind::Reingestor,
+                    named::<ModelName>("tenant_partition"),
+                ),
+            )),
         };
 
         let domain_clock = runtime

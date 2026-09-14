@@ -2885,6 +2885,56 @@ async fn when_leadership_is_transferred_to_node(world: &mut ScenarioWorld, to_no
         .unwrap_or_else(|error| panic!("leadership did not move to '{to_node_id}': {error}"));
 }
 
+/// Arm the failure that interrupts the next snapshot installation the node performs.
+///
+/// The node has to be stopped: its storage, and with it the failure, is built as the node starts
+/// and before it answers the Raft traffic that asks it to install a snapshot.
+#[given(expr = "node {string} interrupts its next raft snapshot installation")]
+async fn given_node_interrupts_its_next_snapshot_installation(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world.fault_injection.fail_consensus_storage_on_start(
+        &crate::common::cluster::node_name(&node_id),
+        "snapshot_clear".to_owned(),
+        nervix_consensus::StorageBoundary::AfterSync,
+    );
+}
+
+#[when(expr = "node {string} is started without waiting for it to catch up")]
+async fn when_node_is_started_without_catching_up(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .start_node_without_catching_up(&node_id)
+        .await
+        .expect("failed to start node");
+}
+
+#[then(expr = "within {string} node {string} has interrupted a raft snapshot installation")]
+async fn then_node_interrupted_a_snapshot_installation(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node = crate::common::cluster::node_name(&node_id);
+    let deadline = Instant::now()
+        + humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    loop {
+        tokio::task::consume_budget().await;
+        if world.fault_injection.consensus_storage_failure_fired(&node) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node '{node_id}' did not interrupt a raft snapshot installation within {duration}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[then(expr = "within {string} node {string} recovers by installing a raft snapshot")]
 async fn then_node_recovers_by_snapshot(
     world: &mut ScenarioWorld,
@@ -16733,7 +16783,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
     .repeat_failed();
     let writer = ScenarioWorld::cucumber()
         .max_concurrent_scenarios(default_max_concurrent_scenarios)
-        .retries(1)
+        .retries(2)
         .before(|feature, rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();

@@ -37,6 +37,20 @@ enum EmitterFaultMode {
     Stall,
 }
 
+/// A consensus storage failure a scenario armed for a node before that node started.
+///
+/// Storage belongs to the node, so the failure can only be armed once the node builds it. Keeping
+/// the record afterwards is what lets a scenario tell a failure that has fired from one that was
+/// never armed at all.
+#[derive(Debug)]
+enum StartupConsensusFault {
+    Pending {
+        operation: String,
+        boundary: nervix_consensus::StorageBoundary,
+    },
+    Armed,
+}
+
 /// One cloneable handle for every fault and override a server test can inject.
 ///
 /// Every clone points at the same state, so a Cucumber world can arm a seam after handing the
@@ -56,6 +70,9 @@ struct FaultInjectionState {
     forced_entity_drain_timeouts: DashMap<DomainName, (), RandomState>,
     transaction_binding_drops: DashMap<ClusterNodeName, (), RandomState>,
     consensus_probes: DashMap<ClusterNodeName, ConsensusProbeState, RandomState>,
+    /// Consensus storage failures armed as each named node builds its storage, before it answers
+    /// any Raft traffic.
+    startup_consensus_faults: DashMap<ClusterNodeName, StartupConsensusFault, RandomState>,
     bulk_executions: DashMap<ClusterNodeName, NodeBulkExecution, RandomState>,
     failed_health_responders: DashMap<ClusterNodeName, (), RandomState>,
     /// Application health handlers clone a pause so it remains alive after its map guard drops.
@@ -167,6 +184,7 @@ impl Default for FaultInjection {
                 forced_entity_drain_timeouts: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
                 consensus_probes: DashMap::default(),
+                startup_consensus_faults: DashMap::default(),
                 bulk_executions: DashMap::default(),
                 failed_health_responders: DashMap::default(),
                 health_response_pauses: DashMap::default(),
@@ -210,12 +228,26 @@ impl FaultInjection {
         &self,
         node: &ClusterNodeName,
     ) -> nervix_consensus::ConsensusTestProbe {
-        self.inner
+        let test_probe = self
+            .inner
             .consensus_probes
             .entry(node.clone())
             .or_default()
             .test_probe
-            .clone()
+            .clone();
+        // This probe is handed to storage before consensus starts, so a failure armed here is in
+        // place for the first installation the node is asked to perform.
+        if let Some(mut startup) = self.inner.startup_consensus_faults.get_mut(node) {
+            let pending = std::mem::replace(&mut *startup, StartupConsensusFault::Armed);
+            if let StartupConsensusFault::Pending {
+                operation,
+                boundary,
+            } = pending
+            {
+                test_probe.storage_fault().fail_next(operation, boundary);
+            }
+        }
+        test_probe
     }
 
     pub fn consensus_observer(&self, node: &ClusterNodeName) -> nervix_consensus::Observer {
@@ -277,6 +309,48 @@ impl FaultInjection {
     pub fn set_consensus_storage_commit_delay(&self, node: &ClusterNodeName, delay: Duration) {
         let state = self.inner.consensus_probes.entry(node.clone()).or_default();
         state.test_probe.set_storage_commit_delay(delay);
+    }
+
+    /// Arm a consensus storage failure for a node that has not started yet.
+    ///
+    /// Storage a running node already owns cannot be reached before its first installation, so a
+    /// scenario that interrupts one arms the failure while the node is stopped.
+    pub fn fail_consensus_storage_on_start(
+        &self,
+        node: &ClusterNodeName,
+        operation: String,
+        boundary: nervix_consensus::StorageBoundary,
+    ) {
+        self.inner.startup_consensus_faults.insert(
+            node.clone(),
+            StartupConsensusFault::Pending {
+                operation,
+                boundary,
+            },
+        );
+    }
+
+    /// Whether the failure armed for this node as it started has since stopped its storage.
+    pub fn consensus_storage_failure_fired(&self, node: &ClusterNodeName) -> bool {
+        use meticulous::OptionExt as _;
+        let armed = self
+            .inner
+            .startup_consensus_faults
+            .get(node)
+            .verified("the scenario armed this node before observing its failure");
+        if let StartupConsensusFault::Pending { .. } = &*armed {
+            return false;
+        }
+        let state = self
+            .inner
+            .consensus_probes
+            .get(node)
+            .verified("an armed node registered its storage as it started");
+        let _running_probe = state
+            .probe
+            .as_ref()
+            .verified("the harness started this node before observing its storage failure");
+        !state.test_probe.storage_fault().is_armed()
     }
 
     pub fn fail_emitter(&self, emitter: &str) {
