@@ -52,6 +52,8 @@ const KEY_INTERCONNECT_LISTEN_ADDR: &str = "interconnect_listen_addr";
 const KEY_INTERCONNECT_ADVERTISE_ADDR: &str = "interconnect_advertise_addr";
 const KEY_BOOTSTRAP_HOST: &str = "bootstrap_host";
 const KEY_SUBSCRIPTION_INTEREST_PREFIX: &str = "subscription_interest:";
+const KEY_AUTHORITATIVE_REVISION_APPLIED: &str = "authoritative_revision_applied";
+const KEY_RUNTIME_REVISION_PREPARED: &str = "runtime_revision_prepared";
 const KEY_RUNTIME_REVISION_READY: &str = "runtime_revision_ready";
 /// How many cluster changes a session can fall behind before the bus drops the oldest.
 const CLUSTER_EVENT_CAPACITY: usize = 256;
@@ -1214,20 +1216,65 @@ impl ClusterHandle {
     pub async fn set_local_runtime_revision_ready(&self, revision: u64) {
         let chitchat_handle = self.chitchat.clone();
         let mut chitchat = chitchat_handle.lock().await;
-        advance_runtime_revision_readiness(chitchat.self_node_state(), revision);
+        advance_revision(
+            chitchat.self_node_state(),
+            KEY_RUNTIME_REVISION_READY,
+            revision,
+        );
+    }
+
+    pub async fn set_local_authoritative_revision(&self, revision: u64) {
+        let chitchat_handle = self.chitchat.clone();
+        let mut chitchat = chitchat_handle.lock().await;
+        advance_revision(
+            chitchat.self_node_state(),
+            KEY_AUTHORITATIVE_REVISION_APPLIED,
+            revision,
+        );
+    }
+
+    pub async fn nodes_at_authoritative_revision(
+        &self,
+        revision: u64,
+    ) -> BTreeSet<ClusterNodeIdentity> {
+        self.nodes_at_revision(KEY_AUTHORITATIVE_REVISION_APPLIED, revision)
+            .await
+    }
+
+    pub async fn set_local_runtime_revision_prepared(&self, revision: u64) {
+        let chitchat_handle = self.chitchat.clone();
+        let mut chitchat = chitchat_handle.lock().await;
+        advance_revision(
+            chitchat.self_node_state(),
+            KEY_RUNTIME_REVISION_PREPARED,
+            revision,
+        );
+    }
+
+    pub async fn nodes_prepared_for_runtime_revision(
+        &self,
+        revision: u64,
+    ) -> BTreeSet<ClusterNodeIdentity> {
+        self.nodes_at_revision(KEY_RUNTIME_REVISION_PREPARED, revision)
+            .await
     }
 
     pub async fn nodes_ready_for_runtime_revision(
         &self,
         revision: u64,
     ) -> BTreeSet<ClusterNodeIdentity> {
+        self.nodes_at_revision(KEY_RUNTIME_REVISION_READY, revision)
+            .await
+    }
+
+    async fn nodes_at_revision(&self, key: &str, revision: u64) -> BTreeSet<ClusterNodeIdentity> {
         let chitchat_handle = self.chitchat.clone();
         let chitchat = chitchat_handle.lock().await;
         let self_id = chitchat.self_chitchat_id().clone();
         let mut ready = BTreeSet::new();
 
         if let Some(state) = chitchat.node_state(&self_id)
-            && runtime_revision_is_ready(state, revision)
+            && revision_is_at_least(state, key, revision)
             && let Some(identity) = cluster_node_identity(&self_id)
         {
             ready.insert(identity);
@@ -1237,7 +1284,7 @@ impl ClusterHandle {
                 continue;
             }
             if let Some(state) = chitchat.node_state(node_id)
-                && runtime_revision_is_ready(state, revision)
+                && revision_is_at_least(state, key, revision)
                 && let Some(identity) = cluster_node_identity(node_id)
             {
                 ready.insert(identity);
@@ -1433,8 +1480,8 @@ fn subscription_interest_key(domain: &str, relay: &str) -> String {
     format!("{KEY_SUBSCRIPTION_INTEREST_PREFIX}{domain}:{relay}")
 }
 
-fn runtime_revision_is_ready(state: &NodeState, revision: u64) -> bool {
-    let Some(value) = state.get(KEY_RUNTIME_REVISION_READY) else {
+fn revision_is_at_least(state: &NodeState, key: &str, revision: u64) -> bool {
+    let Some(value) = state.get(key) else {
         return false;
     };
     let Ok(ready_revision) = value.parse::<u64>() else {
@@ -1443,11 +1490,11 @@ fn runtime_revision_is_ready(state: &NodeState, revision: u64) -> bool {
     ready_revision >= revision
 }
 
-fn advance_runtime_revision_readiness(state: &mut NodeState, revision: u64) {
-    if runtime_revision_is_ready(state, revision) {
+fn advance_revision(state: &mut NodeState, key: &str, revision: u64) {
+    if revision_is_at_least(state, key, revision) {
         return;
     }
-    state.set(KEY_RUNTIME_REVISION_READY, revision.to_string());
+    state.set(key, revision.to_string());
 }
 
 fn cluster_node_identity(node_id: &ChitchatId) -> Option<ClusterNodeIdentity> {
@@ -1626,12 +1673,28 @@ mod tests {
     fn runtime_revision_readiness_advances_monotonically() {
         let mut state = NodeState::for_test();
 
-        advance_runtime_revision_readiness(&mut state, 12);
-        advance_runtime_revision_readiness(&mut state, 11);
+        advance_revision(&mut state, KEY_RUNTIME_REVISION_READY, 12);
+        advance_revision(&mut state, KEY_RUNTIME_REVISION_READY, 11);
         assert_eq!(state.get(KEY_RUNTIME_REVISION_READY), Some("12"));
 
-        advance_runtime_revision_readiness(&mut state, 13);
+        advance_revision(&mut state, KEY_RUNTIME_REVISION_READY, 13);
         assert_eq!(state.get(KEY_RUNTIME_REVISION_READY), Some("13"));
+    }
+
+    #[test]
+    fn runtime_preparation_and_completion_advance_independently() {
+        let mut state = NodeState::for_test();
+
+        advance_revision(&mut state, KEY_RUNTIME_REVISION_PREPARED, 8);
+        assert!(revision_is_at_least(
+            &state,
+            KEY_RUNTIME_REVISION_PREPARED,
+            8
+        ));
+        assert!(!revision_is_at_least(&state, KEY_RUNTIME_REVISION_READY, 8));
+
+        advance_revision(&mut state, KEY_RUNTIME_REVISION_READY, 8);
+        assert!(revision_is_at_least(&state, KEY_RUNTIME_REVISION_READY, 8));
     }
 
     #[test]

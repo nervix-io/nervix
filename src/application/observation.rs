@@ -1573,7 +1573,7 @@ impl SessionServiceImpl {
         if self.inner.consensus.current_domain(domain).await.is_none() {
             return Err(format!("domain '{}' does not exist", domain.as_str()));
         }
-        self.reconcile_running_domain_runtime(domain).await
+        Ok(())
     }
 
     pub(in crate::application) async fn lookup_query(
@@ -1972,33 +1972,28 @@ impl SessionServiceImpl {
             .cloned()
             .collect::<Vec<_>>();
         let gossip = self.inner.cluster.availability_state().await;
-        let live_node_ids = gossip
-            .live_identities()
-            .into_iter()
+        let mut live_nodes = gossip.live_identities();
+        if live_nodes.is_empty() {
+            live_nodes.insert(nervix_models::ClusterNodeIdentity::new(
+                self.inner.consensus.local_node_id().clone(),
+                self.inner.cluster.local_incarnation(),
+            ));
+        }
+        let live_node_ids = live_nodes
+            .iter()
             .map(|identity| identity.node_id().clone())
             .collect::<BTreeSet<_>>();
-        let mut live_node_ids = live_node_ids;
-        if live_node_ids.is_empty() {
-            live_node_ids.insert(self.inner.consensus.local_node_id().clone());
-        }
         let dead_node_ids = gossip.dead_node_ids;
         let node_ids = live_node_ids
             .iter()
             .cloned()
             .chain(dead_node_ids.iter().cloned())
-            .chain(replicas.iter().map(|replica| replica.key.node_id.clone()))
+            .chain(
+                replicas
+                    .iter()
+                    .map(|replica| replica.key.node.node_id().clone()),
+            )
             .collect::<BTreeSet<_>>();
-        let ready_live_nodes = live_node_ids
-            .iter()
-            .filter(|node_id| {
-                replicas.iter().any(|replica| {
-                    &replica.key.node_id == *node_id
-                        && replica.state.as_ref() == "ready"
-                        && replica.root_checksum.as_deref() == Some(resource.root_checksum.as_str())
-                })
-            })
-            .count();
-        let cluster_ready = !live_node_ids.is_empty() && ready_live_nodes == live_node_ids.len();
 
         let mut lines = vec![
             format!(
@@ -2012,10 +2007,6 @@ impl SessionServiceImpl {
             format!("total_bytes: {}", resource.total_bytes),
             format!("created_by_node: {}", resource.created_by_node),
             format!("created_at: {}", resource.created_at),
-            format!(
-                "cluster_ready: {}",
-                if cluster_ready { "true" } else { "false" }
-            ),
             "entries:".to_string(),
         ];
         lines.extend(self.resource_version_entry_lines(&resource).await);
@@ -2050,9 +2041,18 @@ impl SessionServiceImpl {
                 } else {
                     "unknown"
                 };
-                let replica = replicas
+                let live_identity = live_nodes
                     .iter()
-                    .find(|replica| replica.key.node_id == node_id);
+                    .find(|identity| identity.node_id() == &node_id);
+                let replica = match live_identity {
+                    Some(identity) => replicas
+                        .iter()
+                        .find(|replica| &replica.key.node == identity),
+                    None => replicas
+                        .iter()
+                        .filter(|replica| replica.key.node.node_id() == &node_id)
+                        .max_by_key(|replica| replica.key.node.incarnation()),
+                };
                 let state = match replica {
                     Some(replica) => replica.state.as_ref(),
                     None if live_node_ids.contains(&node_id) => "pending",
@@ -2070,9 +2070,13 @@ impl SessionServiceImpl {
                 } else {
                     "-".to_string()
                 };
-                let source = match replica.and_then(|replica| replica.source_node_id.as_ref()) {
-                    Some(source) => source.as_str(),
-                    None => "-",
+                let source = match replica.and_then(|replica| replica.source_node.as_ref()) {
+                    Some(source) => source.to_string(),
+                    None => "-".to_string(),
+                };
+                let incarnation = match replica {
+                    Some(replica) => replica.key.node.incarnation().to_string(),
+                    None => "-".to_string(),
                 };
                 let error = if let Some(replica) = replica {
                     replica.error.as_deref().unwrap_or("-")
@@ -2080,8 +2084,9 @@ impl SessionServiceImpl {
                     "-"
                 };
                 lines.push(format!(
-                    "- {} topology={} state={} checksum={} verified_at={} source={} error={}",
-                    node_id, topology, state, checksum, verified_at, source, error,
+                    "- {} topology={} state={} incarnation={} checksum={} verified_at={} \
+                     source={} error={}",
+                    node_id, topology, state, incarnation, checksum, verified_at, source, error,
                 ));
             }
         }
@@ -2257,6 +2262,8 @@ mod tests {
                             corridor_sink NEUTRAL RANK 1; COMMIT;"
                         .to_string(),
                     domain: "default".to_string(),
+                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    expected_transaction_position: None,
                 },
                 &tx,
                 &mut subscriptions,
@@ -2292,6 +2299,10 @@ mod tests {
             path,
         } = build_test_service(true).await;
         let expected_leader = service.inner.consensus.local_node_id().clone();
+        let expected_leader_identity = nervix_models::ClusterNodeIdentity::new(
+            expected_leader.clone(),
+            service.inner.cluster.local_incarnation(),
+        );
         let resource_store = service.inner.resource_store.clone();
         let proposer = service.inner.consensus.clone();
         let source_v1 = path.join("resource-source-v1");
@@ -2335,7 +2346,10 @@ mod tests {
             ResourceUploadIdentity::parse("describe-v1").expect("valid upload identity"),
         );
         proposer
-            .begin_resource_upload(upload_v1.clone())
+            .begin_resource_upload(
+                upload_v1.clone(),
+                manifest_v1.resource.root_checksum.clone(),
+            )
             .await
             .expect("resource upload should begin");
         let replica_v1 = nervix_models::ResourceNodeStatus {
@@ -2343,12 +2357,12 @@ mod tests {
                 resource_domain.clone(),
                 named("fraud_model"),
                 1,
-                expected_leader.clone(),
+                expected_leader_identity.clone(),
             ),
             state: nervix_models::ResourceNodeState::Ready,
             root_checksum: Some(manifest_v1.resource.root_checksum.clone()),
             last_verified_at: Some(Timestamp::from_unix_nanos(78)),
-            source_node_id: Some(expected_leader.clone()),
+            source_node: Some(expected_leader_identity.clone()),
             error: None,
         };
         proposer
@@ -2362,7 +2376,10 @@ mod tests {
             ResourceUploadIdentity::parse("describe-v2").expect("valid upload identity"),
         );
         proposer
-            .begin_resource_upload(upload_v2.clone())
+            .begin_resource_upload(
+                upload_v2.clone(),
+                manifest_v2.resource.root_checksum.clone(),
+            )
             .await
             .expect("resource upload should begin");
         proposer
@@ -2374,12 +2391,12 @@ mod tests {
                         resource_domain.clone(),
                         named("fraud_model"),
                         2,
-                        expected_leader.clone(),
+                        expected_leader_identity.clone(),
                     ),
                     state: nervix_models::ResourceNodeState::Ready,
                     root_checksum: Some(manifest_v2.resource.root_checksum.clone()),
                     last_verified_at: Some(Timestamp::from_unix_nanos(80)),
-                    source_node_id: Some(expected_leader.clone()),
+                    source_node: Some(expected_leader_identity.clone()),
                     error: None,
                 },
             )
@@ -2409,6 +2426,8 @@ mod tests {
                 CommandRequest {
                     query: "DESCRIBE RESOURCE fraud_model VERSION 1;".to_string(),
                     domain: "default".to_string(),
+                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    expected_transaction_position: None,
                 },
                 &tx,
                 &mut subscriptions,
@@ -2417,10 +2436,11 @@ mod tests {
 
         assert!(result.success, "command must succeed: {}", result.message);
         assert!(result.message.contains("resource: fraud_model@1"));
-        assert!(result.message.contains("cluster_ready: true"));
         assert!(result.message.contains(&format!(
-            "- {} topology=alive state=ready checksum={}",
-            expected_leader, manifest_v1.resource.root_checksum
+            "- {} topology=alive state=ready incarnation={} checksum={}",
+            expected_leader,
+            expected_leader_identity.incarnation(),
+            manifest_v1.resource.root_checksum
         )));
         assert!(result.message.contains("entries:"));
         assert!(
@@ -2439,6 +2459,8 @@ mod tests {
                 CommandRequest {
                     query: "DESCRIBE RESOURCE fraud_model;".to_string(),
                     domain: "default".to_string(),
+                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    expected_transaction_position: None,
                 },
                 &tx,
                 &mut subscriptions,

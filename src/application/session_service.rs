@@ -13,11 +13,13 @@ use std::sync::{Arc as StdArc, atomic::AtomicU64};
 use ahash::RandomState;
 use arch_into::ArchInto;
 use dashmap::DashMap;
-use nervix_consensus::{Administrator, ConsensusError, ConsensusRuntimeState, Proposer};
+use nervix_consensus::{
+    Administrator, CommandExecutionState, ConsensusError, ConsensusRuntimeState, Proposer,
+};
 use nervix_interconnect::Transport;
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainStatus, ModelKind, ModelName, ResourceId, ResourceName,
-    ResourceUploadIdentity, ResourceUploadKey,
+    ClusterNodeName, CommandExecutionReference, DomainName, ModelKind, ModelName, ResourceId,
+    ResourceName, ResourceUploadIdentity, ResourceUploadKey,
 };
 use nervix_nspl::{
     Token, Word,
@@ -44,6 +46,7 @@ use triomphe::Arc;
 
 use super::{
     authentication::{AuthRateLimiter, BasicAuthCredentials},
+    command_execution::PersistentCommandRequest,
     describe_output::placement_runtime_node_ref_suggestions,
     model_mutation::{RequestDomainError, command_error, parse_request_domain},
     peer_grpc::grpc_uri_from_advertise_addr,
@@ -60,7 +63,6 @@ use crate::{
         CommandRequest, CommandResult, CommandResultKind, Diagnostic, ServerEvent,
         ServerEventLevel, SessionRequest, SessionResponse, SuggestRequest, SuggestResponse,
         Suggestion as ApiSuggestion, SuggestionKind, UploadResourceRequest, UploadResourceResponse,
-        WaitForResourceReadyRequest, WaitForResourceReadyResponse,
         session_service_server::SessionService,
     },
     registry::{Registry, RegistryError},
@@ -162,9 +164,17 @@ pub(in crate::application) struct SessionServiceInner {
     pub(in crate::application) transaction_max_source_bytes: u64,
     pub(in crate::application) transaction_max_open: usize,
     pub(in crate::application) transaction_bindings: DashMap<String, String, RandomState>,
-    /// Also held by every outstanding `TransactionExecutionLease`, which clears its entry on drop.
-    pub(in crate::application) transaction_executions: Arc<DashMap<String, (), RandomState>>,
-    pub(in crate::application) transaction_commit_execution: AsyncMutex<()>,
+    /// Requests with one durable execution reference join one application owner on this leader.
+    pub(in crate::application) command_executions:
+        DashMap<CommandExecutionReference, StdArc<AsyncMutex<()>>, RandomState>,
+    /// Calls adopting the same replicated transaction share one executor without serializing
+    /// commits in independent domains.
+    pub(in crate::application) transaction_executions:
+        DashMap<String, StdArc<AsyncMutex<()>>, RandomState>,
+    /// Transactions in the same domain serialize the state transitions that can conflict while
+    /// independent domains continue applying.
+    pub(in crate::application) transaction_domain_executions:
+        DashMap<DomainName, StdArc<AsyncMutex<()>>, RandomState>,
     /// Also held by a request while it installs. Calls with one durable identity share the lock,
     /// so only one of them can build and publish that assigned version on this leader.
     pub(in crate::application) resource_upload_executions:
@@ -189,9 +199,65 @@ impl SessionService for SessionServiceImpl {
         let (tx, rx) = mpsc::channel(16);
         let mut event_rx = self.inner.events.subscribe();
         let mut runtime_event_rx = self.inner.runtime.subscribe_events();
+        let session_done = CancellationToken::new();
 
+        let event_service = service.clone();
+        let event_tx = tx.clone();
+        let event_session_done = session_done.clone();
         let service_tasks = service.inner.service_tasks.clone();
         service_tasks.spawn(async move {
+            loop {
+                tokio::task::consume_budget().await;
+                tokio::select! {
+                    _ = event_service.inner.shutdown.cancelled() => break,
+                    _ = event_session_done.cancelled() => break,
+                    server_event = event_rx.recv() => {
+                        match server_event {
+                            Ok(event) => {
+                                let response = SessionResponse {
+                                    event: Some(proto::session_response::Event::Server(event)),
+                                };
+                                if event_tx.send(Ok(response)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            // The session stays open and resumes from the newest event. Saying how
+                            // many it skipped is what stops the gap from looking like quiet.
+                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                warn!(skipped, "session fell behind the server event bus");
+                            }
+                            Err(broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                    runtime_event = runtime_event_rx.recv() => {
+                        match runtime_event {
+                            Ok(RuntimeEvent::Error(message)) => {
+                                let response = SessionResponse {
+                                    event: Some(proto::session_response::Event::Server(ServerEvent {
+                                        level: i32::from(ServerEventLevel::Error),
+                                        message,
+                                    })),
+                                };
+                                if event_tx.send(Ok(response)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            // As above: the runtime errors the session missed are gone, so the
+                            // count is the only record that they happened.
+                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                warn!(skipped, "session fell behind the runtime event bus");
+                            }
+                            Err(broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                }
+            }
+        });
+
+        let session_done_guard = session_done.clone().drop_guard();
+        let service_tasks = service.inner.service_tasks.clone();
+        service_tasks.spawn(async move {
+            let _session_done_guard = session_done_guard;
             let mut subscriptions = SessionSubscriptions::for_user(authenticated_user);
             let mut clean_close = false;
             let shutdown = service.inner.shutdown.clone();
@@ -229,7 +295,9 @@ impl SessionService for SessionServiceImpl {
                                     )
                                     .await;
                                 let event = SessionResponse {
-                                    event: Some(proto::session_response::Event::Result(result)),
+                                    event: Some(proto::session_response::Event::Result(Box::new(
+                                        result,
+                                    ))),
                                 };
                                 if tx.send(Ok(event)).await.is_err() {
                                     subscriptions.stop_all(&service).await;
@@ -274,7 +342,9 @@ impl SessionService for SessionServiceImpl {
                                     .attach_transaction(request, &mut subscriptions)
                                     .await;
                                 let event = SessionResponse {
-                                    event: Some(proto::session_response::Event::Result(result)),
+                                    event: Some(proto::session_response::Event::Result(Box::new(
+                                        result,
+                                    ))),
                                 };
                                 if tx.send(Ok(event)).await.is_err() {
                                     subscriptions.stop_all(&service).await;
@@ -294,52 +364,10 @@ impl SessionService for SessionServiceImpl {
                             }
                         }
                     }
-                    server_event = event_rx.recv() => {
-                        match server_event {
-                            Ok(event) => {
-                                let response = SessionResponse {
-                                    event: Some(proto::session_response::Event::Server(event)),
-                                };
-                                if tx.send(Ok(response)).await.is_err() {
-                                    subscriptions.stop_all(&service).await;
-                                    service.release_session_transaction_binding(&mut subscriptions);
-                                    return;
-                                }
-                            }
-                            // The session stays open and resumes from the newest event. Saying how
-                            // many it skipped is what stops the gap from looking like quiet.
-                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                                warn!(skipped, "session fell behind the server event bus");
-                            }
-                            Err(broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
-                    runtime_event = runtime_event_rx.recv() => {
-                        match runtime_event {
-                            Ok(RuntimeEvent::Error(message)) => {
-                                let response = SessionResponse {
-                                    event: Some(proto::session_response::Event::Server(ServerEvent {
-                                        level: i32::from(ServerEventLevel::Error),
-                                        message,
-                                    })),
-                                };
-                                if tx.send(Ok(response)).await.is_err() {
-                                    subscriptions.stop_all(&service).await;
-                                    service.release_session_transaction_binding(&mut subscriptions);
-                                    return;
-                                }
-                            }
-                            // As above: the runtime errors the session missed are gone, so the
-                            // count is the only record that they happened.
-                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                                warn!(skipped, "session fell behind the runtime event bus");
-                            }
-                            Err(broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
                 }
             }
 
+            session_done.cancel();
             subscriptions.stop_all(&service).await;
             if clean_close {
                 service.clean_close_transaction(&mut subscriptions).await;
@@ -386,8 +414,7 @@ impl SessionService for SessionServiceImpl {
                     None => String::new(),
                 },
                 leader_grpc_uri,
-                published: false,
-                cluster_ready: false,
+                upload_identity: String::new(),
             }));
         }
 
@@ -428,8 +455,7 @@ impl SessionService for SessionServiceImpl {
                 kind: i32::from(CommandResultKind::Error),
                 leader: String::new(),
                 leader_grpc_uri: String::new(),
-                published: false,
-                cluster_ready: false,
+                upload_identity: upload_identity.to_string(),
             }));
         }
         if start.total_bytes == 0 {
@@ -500,35 +526,37 @@ impl SessionService for SessionServiceImpl {
                 kind: i32::from(CommandResultKind::Error),
                 leader: String::new(),
                 leader_grpc_uri: String::new(),
-                published: false,
-                cluster_ready: false,
+                upload_identity: upload_identity.to_string(),
             }));
         }
 
+        let response_upload_identity = upload_identity.to_string();
         let upload_key = ResourceUploadKey::new(
             authenticated_user,
             domain,
             ResourceName::from(&identifier),
             upload_identity,
         );
-        match self
-            .install_uploaded_resource_archive(
-                upload_key,
-                archive.path(),
-                archive.root_checksum().to_string(),
-            )
+        let service = self.clone();
+        let root_checksum = archive.root_checksum().to_string();
+        let installation = self.inner.service_tasks.spawn(async move {
+            service
+                .install_uploaded_resource_archive(upload_key, archive.path(), root_checksum)
+                .await
+        });
+        let installation = installation
             .await
-        {
-            Ok(publication) => Ok(Response::new(UploadResourceResponse {
+            .map_err(|error| Status::internal(format!("resource upload task failed: {error}")))?;
+        match installation {
+            Ok(installation) => Ok(Response::new(UploadResourceResponse {
                 success: true,
-                message: format!("published resource version {}", publication.version),
-                version: publication.version,
+                message: format!("uploaded resource version {}", installation.version),
+                version: installation.version,
                 diagnostics: Vec::new(),
                 kind: i32::from(CommandResultKind::Ok),
                 leader: String::new(),
                 leader_grpc_uri: String::new(),
-                published: true,
-                cluster_ready: publication.cluster_ready,
+                upload_identity: response_upload_identity.clone(),
             })),
             Err(error) => {
                 let assigned_version = match error.downcast_ref::<ResourceUploadError>() {
@@ -548,56 +576,10 @@ impl SessionService for SessionServiceImpl {
                     kind: result.kind,
                     leader: result.leader,
                     leader_grpc_uri: result.leader_grpc_uri,
-                    published: false,
-                    cluster_ready: false,
+                    upload_identity: response_upload_identity,
                 }))
             }
         }
-    }
-
-    async fn wait_for_resource_ready(
-        &self,
-        request: Request<WaitForResourceReadyRequest>,
-    ) -> Result<Response<WaitForResourceReadyResponse>, Status> {
-        let _authenticated_user = self.authenticate_grpc_metadata(request.metadata()).await?;
-        let request = request.into_inner();
-        let identifier = ResourceName::parse(&request.name)
-            .map_err(|_| Status::invalid_argument("resource name is invalid"))?;
-        let domain = parse_request_domain(&request.domain)
-            .map_err(|_| Status::invalid_argument("resource domain is invalid"))?;
-        let id = ResourceId::new(domain, identifier, request.version);
-        let resources = self.inner.consensus.current_resources().await;
-        if resources.version(&id).is_none() {
-            return Err(Status::not_found(format!(
-                "resource '{}@{}' is not published",
-                id.identifier.as_str(),
-                id.version
-            )));
-        }
-        let timeout = Duration::from_millis(request.timeout_millis);
-        let deadline = tokio::time::Instant::now()
-            .checked_add(timeout)
-            .ok_or_else(|| Status::invalid_argument("resource readiness timeout is too large"))?;
-        let cluster_ready = self.wait_for_resource_cluster_ready(&id, deadline).await;
-        let message = if cluster_ready {
-            format!(
-                "resource '{}@{}' is ready on every live node",
-                id.identifier.as_str(),
-                id.version
-            )
-        } else {
-            format!(
-                "resource '{}@{}' is published but not ready on every live node before the \
-                 deadline",
-                id.identifier.as_str(),
-                id.version
-            )
-        };
-        Ok(Response::new(WaitForResourceReadyResponse {
-            version: id.version,
-            cluster_ready,
-            message,
-        }))
     }
 }
 
@@ -607,11 +589,69 @@ pub(in crate::application) async fn apply_cluster_runtime_state(
     local_node_id: &ClusterNodeName,
     state: ConsensusRuntimeState,
 ) -> Result<(), crate::runtime::RuntimeError> {
+    #[derive(Clone, Copy)]
+    enum RuntimeRevisionPhase {
+        Prepared,
+        Ready,
+    }
+
+    async fn wait_for_runtime_revision_phase(
+        cluster: &cluster::ClusterHandle,
+        cluster_state: &mut cluster::ClusterStateWatcher,
+        revision: u64,
+        deadline: tokio::time::Instant,
+        phase: RuntimeRevisionPhase,
+    ) -> Result<(), crate::runtime::RuntimeError> {
+        let mut deadline_elapsed = false;
+        loop {
+            tokio::task::consume_budget().await;
+            let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
+            tokio::pin!(cluster_change);
+            let gossip = cluster.availability_state().await;
+            let expected_nodes = gossip.live_identities();
+            let completed_nodes = match phase {
+                RuntimeRevisionPhase::Prepared => {
+                    cluster.nodes_prepared_for_runtime_revision(revision).await
+                }
+                RuntimeRevisionPhase::Ready => {
+                    cluster.nodes_ready_for_runtime_revision(revision).await
+                }
+            };
+            let pending_nodes = expected_nodes
+                .difference(&completed_nodes)
+                .map(|identity| identity.node_id().clone())
+                .collect::<Vec<_>>();
+            if pending_nodes.is_empty() {
+                return Ok(());
+            }
+            if deadline_elapsed {
+                let error = match phase {
+                    RuntimeRevisionPhase::Prepared => {
+                        crate::runtime::RuntimeError::RuntimeRevisionPreparation {
+                            revision,
+                            pending_nodes,
+                        }
+                    }
+                    RuntimeRevisionPhase::Ready => {
+                        crate::runtime::RuntimeError::RuntimeRevisionReadiness {
+                            revision,
+                            pending_nodes,
+                        }
+                    }
+                };
+                return Err(error);
+            }
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(deadline) => {
+                    deadline_elapsed = true;
+                }
+                _ = &mut cluster_change => {}
+            }
+        }
+    }
+
     let mut cluster_state = cluster.subscribe_state_changes().await;
-    let has_running_domain = state
-        .domains
-        .values()
-        .any(|domain| matches!(domain.status, DomainStatus::Running));
     runtime
         .apply_cluster_state(
             local_node_id,
@@ -622,11 +662,8 @@ pub(in crate::application) async fn apply_cluster_runtime_state(
         )
         .await?;
     cluster
-        .set_local_runtime_revision_ready(state.revision)
+        .set_local_runtime_revision_prepared(state.revision)
         .await;
-    if !has_running_domain {
-        return Ok(());
-    }
 
     let node_unavailability_timeout = cluster.node_unavailability_timeout();
     // Applying a revision gets one start-time operation budget: peer-failure detection followed
@@ -650,39 +687,27 @@ pub(in crate::application) async fn apply_cluster_runtime_state(
             },
         );
     };
-    let mut deadline_elapsed = false;
-    loop {
-        tokio::task::consume_budget().await;
-        let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
-        tokio::pin!(cluster_change);
-        let gossip = cluster.availability_state().await;
-        let expected_nodes = gossip.live_identities();
-        let ready_nodes = cluster
-            .nodes_ready_for_runtime_revision(state.revision)
-            .await;
-        let pending_nodes = expected_nodes
-            .difference(&ready_nodes)
-            .map(|identity| identity.node_id().clone())
-            .collect::<Vec<_>>();
-        if pending_nodes.is_empty() {
-            break;
-        }
-        if deadline_elapsed {
-            return Err(crate::runtime::RuntimeError::RuntimeRevisionReadiness {
-                revision: state.revision,
-                pending_nodes,
-            });
-        }
-        tokio::select! {
-            biased;
-            _ = tokio::time::sleep_until(deadline) => {
-                deadline_elapsed = true;
-            }
-            _ = &mut cluster_change => {}
-        }
-    }
+    wait_for_runtime_revision_phase(
+        cluster,
+        &mut cluster_state,
+        state.revision,
+        deadline,
+        RuntimeRevisionPhase::Prepared,
+    )
+    .await?;
 
-    runtime.start_running_domain_ingestors().await
+    runtime.start_running_domain_ingestors().await?;
+    cluster
+        .set_local_runtime_revision_ready(state.revision)
+        .await;
+    wait_for_runtime_revision_phase(
+        cluster,
+        &mut cluster_state,
+        state.revision,
+        deadline,
+        RuntimeRevisionPhase::Ready,
+    )
+    .await
 }
 
 fn error_response(kind: &str, diagnostics: &[ParseDiagnostic]) -> CommandResult {
@@ -1009,6 +1034,49 @@ impl SessionServiceImpl {
         tx: &mpsc::Sender<Result<SessionResponse, Status>>,
         subscriptions: &mut SessionSubscriptions,
     ) -> CommandResult {
+        let raw_reference = req.execution_reference.clone();
+        let execution_reference = match CommandExecutionReference::parse(raw_reference.clone()) {
+            Ok(reference) => reference,
+            Err(error) => {
+                let mut result = command_error(error.to_string());
+                result.execution_reference = raw_reference;
+                return result;
+            }
+        };
+        let expected_transaction_position = match req.expected_transaction_position {
+            Some(position) => match usize::try_from(position) {
+                Ok(position) => Some(position),
+                Err(_) => {
+                    let mut result = command_error(
+                        "expected transaction position exceeds this server's address space"
+                            .to_string(),
+                    );
+                    result.execution_reference = execution_reference.to_string();
+                    return result;
+                }
+            },
+            None => None,
+        };
+        let mut result = Box::pin(self.process_command_with_reference(
+            req,
+            tx,
+            subscriptions,
+            &execution_reference,
+            expected_transaction_position,
+        ))
+        .await;
+        result.execution_reference = execution_reference.to_string();
+        result
+    }
+
+    async fn process_command_with_reference(
+        &self,
+        req: CommandRequest,
+        tx: &mpsc::Sender<Result<SessionResponse, Status>>,
+        subscriptions: &mut SessionSubscriptions,
+        execution_reference: &CommandExecutionReference,
+        expected_transaction_position: Option<usize>,
+    ) -> CommandResult {
         let client_statements = match parse_client_statement_sources(&req.query) {
             Ok(statements) => statements,
             Err(ParseFromSourceError::Lex { diagnostics, .. }) => {
@@ -1063,21 +1131,100 @@ impl SessionServiceImpl {
             }
         }
 
-        let operations =
-            match subscriptions.plan_commands(client_statements, &req.query, &req.domain) {
-                Ok(operations) => operations,
-                Err(error) => {
-                    return self
-                        .command_with_transaction_status(command_error(error), subscriptions)
-                        .await;
-                }
-            };
+        let operations = match subscriptions.plan_commands(
+            client_statements,
+            &req.query,
+            &req.domain,
+            execution_reference,
+            expected_transaction_position,
+        ) {
+            Ok(operations) => operations,
+            Err(error) => {
+                return self
+                    .command_with_transaction_status(command_error(error), subscriptions)
+                    .await;
+            }
+        };
 
+        let persistent_request =
+            match PersistentCommandRequest::from_operations(&operations, &req.domain) {
+                Ok(request) => request,
+                Err(error) => return command_error(error),
+            };
+        let mut execution_guard = None;
+        let mut persistent_execution = None;
+        if let Some(request) = &persistent_request {
+            let leader = self.inner.consensus.current_leader().await;
+            if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
+                return self.not_leader_response(&req.query, leader).await;
+            }
+            let lock = self
+                .inner
+                .command_executions
+                .entry(execution_reference.clone())
+                .or_insert_with(|| StdArc::new(AsyncMutex::new(())))
+                .clone();
+            execution_guard = Some(lock.lock_owned().await);
+            let execution = match self
+                .admit_persistent_command(
+                    execution_reference.clone(),
+                    subscriptions.user.clone(),
+                    request,
+                )
+                .await
+            {
+                Ok(execution) => execution,
+                Err(result) => return *result,
+            };
+            match &execution.state {
+                CommandExecutionState::Applying => {
+                    persistent_execution = Some(execution);
+                }
+                CommandExecutionState::Finished { .. } | CommandExecutionState::Expired { .. } => {
+                    return match self
+                        .result_from_finished_execution(execution_reference, execution.clone())
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(result) => *result,
+                    };
+                }
+            }
+        }
+
+        let result = match persistent_execution.as_ref() {
+            Some(execution) => {
+                self.execute_persistent_command(execution, tx, subscriptions)
+                    .await
+            }
+            None => {
+                self.process_session_command_operations(operations, tx, subscriptions)
+                    .await
+            }
+        };
         let result = self
-            .process_session_command_operations(operations, tx, subscriptions)
+            .command_with_transaction_status(result, subscriptions)
             .await;
-        self.command_with_transaction_status(result, subscriptions)
-            .await
+        let result = if let Some(request) = &persistent_request
+            && result.kind != i32::from(CommandResultKind::NotLeader)
+        {
+            match self
+                .finish_persistent_command(
+                    execution_reference.clone(),
+                    subscriptions.user.clone(),
+                    request.digest,
+                    &result,
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(result) => *result,
+            }
+        } else {
+            result
+        };
+        drop(execution_guard);
+        result
     }
 }
 
@@ -1202,6 +1349,8 @@ mod tests {
                             MESSAGE ERROR LOG; COMMIT;"
                         .to_string(),
                     domain: "default".to_string(),
+                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    expected_transaction_position: None,
                 },
                 &tx,
                 &mut subscriptions,

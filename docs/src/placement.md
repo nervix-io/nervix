@@ -385,6 +385,12 @@ resolved and the statement retried. See
 [Control Plane](control-plane.md#planned-ownership-handoffs-and-failover) for the shared hold,
 drain, and failure behavior.
 
+Successful relocation returns after the destination has activated the exact schedule revision, the
+source has drained, and the handoff gates have opened. A following command can use the destination
+immediately. Cordon and uncordon similarly return after the eligibility state is authoritative;
+drain and node removal return after resulting ownership and schedules are usable on the remaining
+live set.
+
 The reported quiesce level is `ENTITY_PAUSE` when the plan moves at least one runtime node in a
 running domain, and `DYNAMIC` when the plan moves nothing or the domain is stopped. A stopped
 domain keeps its schedule, so its runtime nodes are relocated without a hold and execute on the

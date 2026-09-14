@@ -7,29 +7,30 @@
 //! - **Depends on.** Consensus for the replicated transaction and the registry for mutation plans.
 //! - **Must not know.** How the models a commit applies are executed.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc as StdArc};
 
-use ahash::RandomState;
 use arch_into::ArchInto;
-use dashmap::DashMap;
 use error_stack::{Report, ResultExt};
 use meticulous::OptionExt as _;
 use nervix_consensus::{
-    ConsensusError, ConsensusTransactionError, ReplicatedTransaction, TransactionCommandResult,
-    TransactionCommitAdvance, TransactionDiagnostic, TransactionOutcome, TransactionQueueLimits,
-    TransactionState, TransactionStatement, TransactionStepEffect, TransactionStepResult,
+    ConsensusError, ConsensusTransactionError, ReplicatedTransaction, TransactionApplyingStep,
+    TransactionCommandResult, TransactionCommitAdvance, TransactionDiagnostic, TransactionOutcome,
+    TransactionQueueLimits, TransactionState, TransactionStatement, TransactionStepEffect,
+    TransactionStepResult,
 };
-use nervix_models::{DomainName, DomainPace, DomainStatus, QuiesceLevel, ResourceName, Statement};
+use nervix_models::{
+    CommandExecutionReference, DomainName, DomainPace, DomainStatus, QuiesceLevel, ResourceName,
+    Statement, UserName,
+};
 use nervix_nspl::client_statement::ClientStatement;
 use parking_lot::Mutex as ParkingMutex;
 use thiserror::Error;
 use tokio::{
     sync::mpsc,
-    time::{Duration, interval},
+    time::{Duration, sleep},
 };
 use tonic::Status;
 use tracing::{info, warn};
-use triomphe::Arc;
 
 use super::{
     domain_clock::{current_timestamp, subtract_timestamp_duration},
@@ -51,6 +52,7 @@ use crate::{
         TransactionState as ApiTransactionState, TransactionStatus as ApiTransactionStatus,
     },
     registry::RegistryMutation,
+    runtime::RuntimeError,
 };
 
 pub(in crate::application) const DEFAULT_TRANSACTION_IDLE_TIMEOUT: Duration =
@@ -64,11 +66,6 @@ pub(in crate::application) const DEFAULT_TRANSACTION_MAX_STATEMENTS: usize = 256
 pub(in crate::application) const DEFAULT_TRANSACTION_MAX_SOURCE_BYTES: u64 = 1024 * 1024;
 
 pub(in crate::application) const DEFAULT_TRANSACTION_MAX_OPEN: usize = 1024;
-
-struct TransactionExecutionLease {
-    executions: Arc<DashMap<String, (), RandomState>>,
-    id: String,
-}
 
 #[derive(Debug, Error)]
 pub(in crate::application) enum TransactionCommitError {
@@ -109,10 +106,9 @@ pub(in crate::application) struct TransactionModelStepContext<'a> {
         &'a ParkingMutex<Option<Result<ReplicatedTransaction, Report<TransactionCommitError>>>>,
 }
 
-impl Drop for TransactionExecutionLease {
-    fn drop(&mut self) {
-        self.executions.remove(&self.id);
-    }
+enum TransactionApplicationAttempt {
+    Retry,
+    Completed(Box<ReplicatedTransaction>),
 }
 
 /// Why a session may not act on the transaction it names. `Detached` is a recoverable routing
@@ -306,7 +302,46 @@ fn transaction_commit_result(transaction: &ReplicatedTransaction) -> CommandResu
     result
 }
 
-fn is_queueable_transaction_statement(statement: &Statement) -> bool {
+fn standalone_transaction_result(transaction: &ReplicatedTransaction) -> CommandResult {
+    if !matches!(
+        transaction.finished_outcome(),
+        Some(TransactionOutcome::Committed)
+    ) {
+        let mut result = transaction_commit_result(transaction);
+        result.transaction = None;
+        return result;
+    }
+
+    let Some(step) = transaction.commit_results().last() else {
+        return command_error(format!(
+            "durable command transaction '{}' completed without a command result",
+            transaction.id
+        ));
+    };
+    CommandResult {
+        success: step.result.success,
+        message: step.result.message.clone(),
+        diagnostics: step
+            .result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| Diagnostic {
+                message: diagnostic.message.clone(),
+                span_start: diagnostic.span_start,
+                span_end: diagnostic.span_end,
+            })
+            .collect(),
+        kind: if step.result.success {
+            i32::from(CommandResultKind::Ok)
+        } else {
+            i32::from(CommandResultKind::Error)
+        },
+        already_existed: step.result.already_existed,
+        ..Default::default()
+    }
+}
+
+pub(in crate::application) fn is_queueable_transaction_statement(statement: &Statement) -> bool {
     statement.is_model_mutation()
         || matches!(
             statement,
@@ -614,6 +649,10 @@ impl SessionServiceImpl {
             }
         };
         let queued = TransactionStatement {
+            request_reference: command.request_reference,
+            expected_position: command
+                .expected_transaction_position
+                .verified("transaction planning requires a queue position for every append"),
             source: command.source,
             statement,
         };
@@ -659,6 +698,183 @@ impl SessionServiceImpl {
                 result
             }
             Err(error) => self.transaction_consensus_error_response(error).await,
+        }
+    }
+
+    pub(in crate::application) async fn execute_standalone_transaction(
+        &self,
+        transaction_id: String,
+        request_reference: CommandExecutionReference,
+        owner: UserName,
+        domain: DomainName,
+        source: String,
+        statement: Statement,
+    ) -> CommandResult {
+        if !is_queueable_transaction_statement(&statement) {
+            return command_error(format!(
+                "{} cannot use durable transaction application",
+                transaction_statement_label(&statement)
+            ));
+        }
+        let limits = TransactionQueueLimits {
+            max_statements: self.inner.transaction_max_statements,
+            max_source_bytes: self.inner.transaction_max_source_bytes,
+        };
+        let queued = TransactionStatement {
+            request_reference,
+            expected_position: 0,
+            source,
+            statement,
+        };
+
+        let current = self
+            .inner
+            .consensus
+            .current_transaction(&transaction_id)
+            .await;
+        let transaction = match current {
+            Some(transaction) => transaction,
+            None => {
+                let candidate = ReplicatedTransaction::open(
+                    transaction_id.clone(),
+                    domain.clone(),
+                    owner.clone(),
+                    current_timestamp(),
+                );
+                if let Err(error) =
+                    candidate.validate_queue_admission(&owner, &domain, &queued, limits)
+                {
+                    return command_error(error.to_string());
+                }
+                if let Err(error) = self
+                    .preflight_transaction_statement(&candidate, &queued)
+                    .await
+                {
+                    return command_error(error);
+                }
+                match self
+                    .inner
+                    .consensus
+                    .open_transaction(candidate, self.inner.transaction_max_open)
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(error) => return self.transaction_consensus_error_response(error).await,
+                }
+                match self
+                    .inner
+                    .consensus
+                    .queue_transaction_statement(
+                        transaction_id.clone(),
+                        owner.clone(),
+                        domain.clone(),
+                        current_timestamp(),
+                        queued.clone(),
+                        limits,
+                    )
+                    .await
+                {
+                    Ok(transaction) => transaction,
+                    Err(error) => {
+                        let existing = self
+                            .inner
+                            .consensus
+                            .current_transaction(&transaction_id)
+                            .await;
+                        match existing {
+                            Some(transaction)
+                                if transaction.statements.first() == Some(&queued) =>
+                            {
+                                transaction
+                            }
+                            _ => {
+                                return self.transaction_consensus_error_response(error).await;
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        if transaction.owner != owner || transaction.domain != domain {
+            return command_error(format!(
+                "durable command transaction '{}' is bound to a different owner or domain",
+                transaction.id
+            ));
+        }
+        if let TransactionState::Open = &transaction.state {
+            match transaction.statements.as_slice() {
+                [] => {
+                    if let Err(error) = self
+                        .preflight_transaction_statement(&transaction, &queued)
+                        .await
+                    {
+                        return command_error(error);
+                    }
+                    if let Err(error) = self
+                        .inner
+                        .consensus
+                        .queue_transaction_statement(
+                            transaction_id.clone(),
+                            owner.clone(),
+                            domain,
+                            current_timestamp(),
+                            queued.clone(),
+                            limits,
+                        )
+                        .await
+                    {
+                        return self.transaction_consensus_error_response(error).await;
+                    }
+                }
+                [existing] if existing == &queued => {}
+                _ => {
+                    return command_error(format!(
+                        "durable command transaction '{}' contains a different request",
+                        transaction.id
+                    ));
+                }
+            }
+        }
+
+        let current = self
+            .inner
+            .consensus
+            .current_transaction(&transaction_id)
+            .await
+            .verified("the durable command transaction was opened or observed above");
+        let committing = match &current.state {
+            TransactionState::Open => match self
+                .inner
+                .consensus
+                .start_transaction_commit(transaction_id.clone(), owner, current_timestamp())
+                .await
+            {
+                Ok(transaction) => transaction,
+                Err(error) => return self.transaction_consensus_error_response(error).await,
+            },
+            TransactionState::Committing(_) | TransactionState::Finished(_) => current,
+        };
+        let finished = if matches!(committing.state, TransactionState::Finished(_)) {
+            Ok(committing)
+        } else {
+            self.execute_replicated_commit(&transaction_id).await
+        };
+        match finished {
+            Ok(transaction) => standalone_transaction_result(&transaction),
+            Err(error) => {
+                if let Some(ConsensusError::LeadershipLost { leader_id }) = error
+                    .current_context()
+                    .consensus_error()
+                    .or_else(|| error.downcast_ref::<ConsensusError>())
+                {
+                    self.not_leader_response("", leader_id.clone()).await
+                } else {
+                    command_error(format!(
+                        "durable command transaction '{transaction_id}' remains applying: {error}"
+                    ))
+                }
+            }
         }
     }
 
@@ -879,14 +1095,28 @@ impl SessionServiceImpl {
         let Some(id) = subscriptions.transaction_id().map(ToOwned::to_owned) else {
             return command_error("COMMIT requires an active transaction".to_string());
         };
-        let started = match self
-            .inner
-            .consensus
-            .start_transaction_commit(id.clone(), subscriptions.user.clone(), current_timestamp())
-            .await
-        {
-            Ok(transaction) => transaction,
-            Err(error) => return self.transaction_consensus_error_response(error).await,
+        let Some(current) = self.inner.consensus.current_transaction(&id).await else {
+            return command_error(format!("transaction '{id}' is unknown"));
+        };
+        let started = match &current.state {
+            TransactionState::Open => match self
+                .inner
+                .consensus
+                .start_transaction_commit(
+                    id.clone(),
+                    subscriptions.user.clone(),
+                    current_timestamp(),
+                )
+                .await
+            {
+                Ok(transaction) => transaction,
+                Err(error) => return self.transaction_consensus_error_response(error).await,
+            },
+            TransactionState::Committing(_) => current,
+            TransactionState::Finished(_) => {
+                self.release_session_transaction_binding(subscriptions);
+                return transaction_commit_result(&current);
+            }
         };
         let finished = if started.statements.is_empty() {
             self.inner
@@ -899,7 +1129,10 @@ impl SessionServiceImpl {
             // model-mutation future off the session's poll stack as well.
             let service = self.clone();
             let commit_id = id.clone();
-            match tokio::spawn(async move { service.execute_replicated_commit(&commit_id).await })
+            match self
+                .inner
+                .service_tasks
+                .spawn(async move { service.execute_replicated_commit(&commit_id).await })
                 .await
             {
                 Ok(result) => result,
@@ -936,35 +1169,42 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn execute_replicated_commit(
+    pub(in crate::application) async fn execute_replicated_commit(
         &self,
         id: &str,
     ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
-        let _commit_execution = self.inner.transaction_commit_execution.lock().await;
-        let mut wait = interval(Duration::from_millis(100));
-        let lease = loop {
-            tokio::task::consume_budget().await;
-            match self.inner.transaction_executions.entry(id.to_string()) {
-                dashmap::mapref::entry::Entry::Vacant(entry) => {
-                    entry.insert(());
-                    break TransactionExecutionLease {
-                        executions: self.inner.transaction_executions.clone(),
-                        id: id.to_string(),
-                    };
-                }
-                dashmap::mapref::entry::Entry::Occupied(_) => {
-                    if let Some(transaction) = self.inner.consensus.current_transaction(id).await
-                        && matches!(transaction.state, TransactionState::Finished(_))
-                    {
-                        return Ok(transaction);
-                    }
-                    wait.tick().await;
-                }
-            }
-        };
-
+        let execution = self
+            .inner
+            .transaction_executions
+            .entry(id.to_string())
+            .or_insert_with(|| StdArc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _execution_guard = execution.lock().await;
+        let transaction = self
+            .inner
+            .consensus
+            .current_transaction(id)
+            .await
+            .ok_or_else(|| {
+                Report::new(TransactionCommitError::UnknownTransaction { id: id.to_string() })
+            })?;
+        if matches!(transaction.state, TransactionState::Finished(_)) {
+            return Ok(transaction);
+        }
+        let domain_execution = self
+            .inner
+            .transaction_domain_executions
+            .entry(transaction.domain.clone())
+            .or_insert_with(|| StdArc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _domain_execution_guard = domain_execution.lock().await;
         let result = self.run_replicated_commit(id).await;
-        drop(lease);
+        if result
+            .as_ref()
+            .is_ok_and(|transaction| matches!(transaction.state, TransactionState::Finished(_)))
+        {
+            self.inner.transaction_executions.remove(id);
+        }
         result
     }
 
@@ -1003,6 +1243,20 @@ impl SessionServiceImpl {
                     }));
                 }
             };
+            if let Some(applying) = progress.applying.clone() {
+                match self
+                    .complete_transaction_application(&transaction, &applying)
+                    .await?
+                {
+                    TransactionApplicationAttempt::Retry => continue,
+                    TransactionApplicationAttempt::Completed(completed) => {
+                        if matches!(completed.state, TransactionState::Finished(_)) {
+                            return Ok(*completed);
+                        }
+                        continue;
+                    }
+                }
+            }
             let first_statement = progress.next_statement;
             let Some(first) = transaction.statements.get(first_statement) else {
                 return self
@@ -1069,7 +1323,6 @@ impl SessionServiceImpl {
                         }));
                     }
                 };
-                self.pause_transaction_commit_if_armed(&advanced).await;
                 if matches!(advanced.state, TransactionState::Finished(_)) {
                     return Ok(advanced);
                 }
@@ -1079,21 +1332,161 @@ impl SessionServiceImpl {
             let advanced = self
                 .execute_transaction_configuration_step(&transaction, first_statement)
                 .await?;
-            self.pause_transaction_commit_if_armed(&advanced).await;
             if matches!(advanced.state, TransactionState::Finished(_)) {
                 return Ok(advanced);
             }
         }
     }
 
-    async fn pause_transaction_commit_if_armed(&self, _transaction: &ReplicatedTransaction) {
+    async fn complete_transaction_application(
+        &self,
+        transaction: &ReplicatedTransaction,
+        applying: &TransactionApplyingStep,
+    ) -> Result<TransactionApplicationAttempt, Report<TransactionCommitError>> {
+        let application_failure = if !applying.result.result.success {
+            None
+        } else {
+            match &applying.effect {
+                Some(TransactionStepEffect::CreateResourceCatalog { .. }) | None => {
+                    if self.wait_for_authoritative_visibility().await.is_err() {
+                        sleep(Duration::from_millis(100)).await;
+                        return Ok(TransactionApplicationAttempt::Retry);
+                    }
+                    None
+                }
+                Some(_) => match self
+                    .wait_for_runtime_revision(applying.effect_revision)
+                    .await
+                {
+                    Ok(()) => None,
+                    Err(error)
+                        if matches!(
+                            error.current_context(),
+                            RuntimeError::RuntimeRevisionPreparation { .. }
+                                | RuntimeError::RuntimeRevisionReadiness { .. }
+                        ) =>
+                    {
+                        match self.apply_current_cluster_state().await {
+                            Ok(()) => {
+                                if self
+                                    .wait_for_runtime_revision(applying.effect_revision)
+                                    .await
+                                    .is_err()
+                                {
+                                    sleep(Duration::from_millis(100)).await;
+                                    return Ok(TransactionApplicationAttempt::Retry);
+                                }
+                                None
+                            }
+                            Err(
+                                RuntimeError::RuntimeRevisionPreparation { .. }
+                                | RuntimeError::RuntimeRevisionReadiness { .. },
+                            ) => {
+                                sleep(Duration::from_millis(100)).await;
+                                return Ok(TransactionApplicationAttempt::Retry);
+                            }
+                            Err(error) => Some(format!(
+                                "transaction '{}' committed the effect beginning at statement {}, \
+                                 but it failed to become usable: {error}",
+                                transaction.id,
+                                applying.result.first_statement.checked_add(1).assured(
+                                    "an applying result begins at a queued transaction statement"
+                                )
+                            )),
+                        }
+                    }
+                    Err(error) => {
+                        Some(format!(
+                            "transaction '{}' committed the effect beginning at statement {}, but \
+                             it failed to become usable: {error}",
+                            transaction.id,
+                            applying.result.first_statement.checked_add(1).assured(
+                                "an applying result begins at a queued transaction statement"
+                            )
+                        ))
+                    }
+                },
+            }
+        };
+        let completed = self
+            .record_transaction_application_completion(transaction, application_failure)
+            .await?;
+
+        Ok(TransactionApplicationAttempt::Completed(Box::new(
+            completed,
+        )))
+    }
+
+    pub(in crate::application) async fn record_transaction_application_completion(
+        &self,
+        transaction: &ReplicatedTransaction,
+        application_failure: Option<String>,
+    ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
+        let applying = match &transaction.state {
+            TransactionState::Committing(progress) => progress.applying.as_ref(),
+            TransactionState::Open | TransactionState::Finished(_) => None,
+        }
+        .ok_or_else(|| {
+            Report::new(TransactionCommitError::InvalidProgress {
+                id: transaction.id.clone(),
+            })
+        })?;
+        let completed = self
+            .inner
+            .consensus
+            .complete_transaction_application(
+                transaction.id.clone(),
+                applying.result.first_statement,
+                current_timestamp(),
+                application_failure,
+            )
+            .await
+            .map_err(|error| Report::new(TransactionCommitError::Proposal(error)))?;
+
+        if let TransactionState::Finished(finished) = &completed.state {
+            loop {
+                tokio::task::consume_budget().await;
+                if self
+                    .wait_for_authoritative_revision(finished.outcome_revision)
+                    .await
+                    .is_ok()
+                {
+                    break;
+                }
+                if self.inner.consensus.current_leader().await.as_ref()
+                    != Some(self.inner.consensus.local_node_id())
+                {
+                    return Err(Report::new(TransactionCommitError::Proposal(
+                        ConsensusTransactionError::Consensus(ConsensusError::LeadershipLost {
+                            leader_id: self.inner.consensus.current_leader().await,
+                        }),
+                    )));
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
+        }
+        Ok(completed)
+    }
+
+    pub(in crate::application) async fn pause_transaction_commit_if_armed(
+        &self,
+        _transaction: &ReplicatedTransaction,
+    ) {
         #[cfg(feature = "testing")]
         if let TransactionState::Committing(_) = _transaction.state {
+            let completed_statements = match &_transaction.state {
+                TransactionState::Committing(progress) => match &progress.applying {
+                    Some(applying) => applying.next_statement,
+                    None => progress.next_statement,
+                },
+                TransactionState::Open | TransactionState::Finished(_) => 0,
+            };
             self.inner
                 .runtime
                 .pause_transaction_commit_after_progress_if_armed(
                     self.inner.consensus.local_node_id(),
-                    _transaction.completed_statement_count(),
+                    &_transaction.domain,
+                    completed_statements,
                 )
                 .await;
         }
@@ -1530,6 +1923,8 @@ impl SessionServiceImpl {
                 return Err(error);
             }
         };
+        self.pause_transaction_commit_if_armed(&advanced).await;
+        let mut application_failure = None;
         if succeeded {
             let activation_error = self.apply_current_cluster_state().await.err();
             if let Some(error) = &activation_error {
@@ -1548,6 +1943,14 @@ impl SessionServiceImpl {
                     .finish_planned_ownership_handoff(domain_id, handoff)
                     .await
                 {
+                    application_failure = Some(format!(
+                        "transaction '{}' committed step {}, but ownership activation did not \
+                         complete: {error}",
+                        transaction.id,
+                        statement_index
+                            .checked_add(1)
+                            .assured("the index names a statement of a transaction held in memory")
+                    ));
                     self.broadcast_error(format!(
                         "failed to confirm ownership state activation after transaction '{}' step \
                          {}: {error}",
@@ -1558,12 +1961,54 @@ impl SessionServiceImpl {
                     ));
                 }
             }
+            if let Some(error) = activation_error
+                && !matches!(
+                    error,
+                    RuntimeError::RuntimeRevisionPreparation { .. }
+                        | RuntimeError::RuntimeRevisionReadiness { .. }
+                )
+            {
+                application_failure = Some(format!(
+                    "transaction '{}' committed step {}, but runtime activation did not complete: \
+                     {error}",
+                    transaction.id,
+                    statement_index
+                        .checked_add(1)
+                        .assured("the index names a statement of a transaction held in memory")
+                ));
+            }
         }
         if let Some(handoff) = ownership_handoff {
             self.abort_planned_ownership_handoff(domain_id, handoff)
                 .await;
         }
-        Ok(advanced)
+        let runtime_revision = match &advanced.state {
+            TransactionState::Committing(progress) => match &progress.applying {
+                Some(applying)
+                    if matches!(
+                        applying.effect,
+                        Some(TransactionStepEffect::CreateResourceCatalog { .. }) | None
+                    ) =>
+                {
+                    None
+                }
+                Some(applying) => Some(applying.effect_revision),
+                None => None,
+            },
+            TransactionState::Open | TransactionState::Finished(_) => None,
+        };
+        if succeeded
+            && application_failure.is_none()
+            && let Some(runtime_revision) = runtime_revision
+            && self
+                .wait_for_runtime_revision(runtime_revision)
+                .await
+                .is_err()
+        {
+            return Ok(advanced);
+        }
+        self.record_transaction_application_completion(&advanced, application_failure)
+            .await
     }
 
     pub(in crate::application) async fn reconcile_transactions_once(&self) {
@@ -1572,10 +2017,16 @@ impl SessionServiceImpl {
         {
             return;
         }
+        self.resume_persistent_commands().await;
         let now = current_timestamp();
         let idle_before = subtract_timestamp_duration(now, self.inner.transaction_idle_timeout);
         let finished_before =
             subtract_timestamp_duration(now, self.inner.transaction_tombstone_retention);
+        let command_retention = self
+            .inner
+            .transaction_tombstone_retention
+            .max(DEFAULT_TRANSACTION_TOMBSTONE_RETENTION);
+        let command_finished_before = subtract_timestamp_duration(now, command_retention);
         let transactions = self.inner.consensus.current_transactions().await;
 
         for transaction in transactions.values() {
@@ -1638,6 +2089,14 @@ impl SessionServiceImpl {
             .await
         {
             warn!(error = %error, "failed to remove expired transaction tombstones");
+        }
+        if let Err(error) = self
+            .inner
+            .consensus
+            .expire_command_executions(command_finished_before, now)
+            .await
+        {
+            warn!(error = %error, "failed to expire retained command results");
         }
     }
 
@@ -1715,6 +2174,8 @@ mod tests {
                             CREATE SCHEMA notification ( user_id U32 ); COMMIT"
                         .to_string(),
                     domain: "prod".to_string(),
+                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    expected_transaction_position: None,
                 },
                 &tx,
                 &mut subscriptions,
@@ -1773,6 +2234,8 @@ mod tests {
                 CommandRequest {
                     query: "BEGIN;".to_string(),
                     domain: "default".to_string(),
+                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    expected_transaction_position: None,
                 },
                 &tx,
                 &mut subscriptions,
@@ -1789,6 +2252,8 @@ mod tests {
                 CommandRequest {
                     query: "CREATE SCHEMA queued_event ( user_id U32 );".to_string(),
                     domain: "default".to_string(),
+                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    expected_transaction_position: Some(0),
                 },
                 &tx,
                 &mut subscriptions,
@@ -1816,6 +2281,8 @@ mod tests {
                 CommandRequest {
                     query: "REVERT;".to_string(),
                     domain: "default".to_string(),
+                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    expected_transaction_position: None,
                 },
                 &tx,
                 &mut subscriptions,
@@ -1861,6 +2328,8 @@ mod tests {
                 CommandRequest {
                     query: "BEGIN;".to_string(),
                     domain: "default".to_string(),
+                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    expected_transaction_position: None,
                 },
                 &tx,
                 &mut subscriptions,
@@ -1877,6 +2346,8 @@ mod tests {
                 CommandRequest {
                     query: "BEGIN;".to_string(),
                     domain: "default".to_string(),
+                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    expected_transaction_position: None,
                 },
                 &tx,
                 &mut subscriptions,
@@ -1912,6 +2383,8 @@ mod tests {
                     CommandRequest {
                         query: query.to_string(),
                         domain: "default".to_string(),
+                        execution_reference: uuid::Uuid::now_v7().to_string(),
+                        expected_transaction_position: None,
                     },
                     &tx,
                     &mut subscriptions,
@@ -1930,6 +2403,8 @@ mod tests {
                     CommandRequest {
                         query: "REVERT;".to_string(),
                         domain: "default".to_string(),
+                        execution_reference: uuid::Uuid::now_v7().to_string(),
+                        expected_transaction_position: None,
                     },
                     &tx,
                     &mut subscriptions,
@@ -1971,6 +2446,8 @@ mod tests {
                 CommandRequest {
                     query: "BEGIN;".to_string(),
                     domain: "absent".to_string(),
+                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    expected_transaction_position: None,
                 },
                 &tx,
                 &mut subscriptions,
@@ -1985,6 +2462,8 @@ mod tests {
                 CommandRequest {
                     query: "BEGIN;".to_string(),
                     domain: String::new(),
+                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    expected_transaction_position: None,
                 },
                 &tx,
                 &mut subscriptions,
@@ -2014,6 +2493,8 @@ mod tests {
                 CommandRequest {
                     query: "BEGIN;".to_string(),
                     domain: "default".to_string(),
+                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    expected_transaction_position: None,
                 },
                 &tx,
                 &mut subscriptions,
@@ -2033,6 +2514,8 @@ mod tests {
                 CommandRequest {
                     query: "CREATE SCHEMA foreign_event ( user_id U32 );".to_string(),
                     domain: "other".to_string(),
+                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    expected_transaction_position: Some(0),
                 },
                 &tx,
                 &mut subscriptions,
@@ -2076,6 +2559,8 @@ mod tests {
                 CommandRequest {
                     query: "BEGIN; CREATE SCHEMA notification ( user_id U32 ); COMMIT".to_string(),
                     domain: "attach_results".to_string(),
+                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    expected_transaction_position: None,
                 },
                 &tx,
                 &mut owner,

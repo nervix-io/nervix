@@ -1,8 +1,8 @@
 use arch_into::ArchInto as _;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    ClusterNodeIdentity, DomainClockState, DomainName, DomainSchedule, DomainStartPoint,
-    DomainState, QuiesceLevel, ResourceName, Statement, Timestamp, UserName,
+    ClusterNodeIdentity, CommandExecutionReference, DomainClockState, DomainName, DomainSchedule,
+    DomainStartPoint, DomainState, QuiesceLevel, ResourceName, Statement, Timestamp, UserName,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,8 @@ use thiserror::Error;
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct TransactionStatement {
+    pub request_reference: CommandExecutionReference,
+    pub expected_position: usize,
     pub source: String,
     pub statement: Statement,
 }
@@ -87,8 +89,23 @@ pub struct TransactionCommitAdvance {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct TransactionCommitProgress {
+    /// The first statement whose application has not completed yet.
     pub next_statement: usize,
+    /// Results whose authoritative effects and application obligations both completed.
     pub results: Vec<TransactionStepResult>,
+    /// A step whose authoritative effect is durable but whose application is still in progress.
+    pub applying: Option<TransactionApplyingStep>,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct TransactionApplyingStep {
+    pub effect_revision: u64,
+    pub next_statement: usize,
+    pub result: TransactionStepResult,
+    pub effect: Option<TransactionStepEffect>,
+    pub completion: Option<TransactionOutcome>,
 }
 
 #[derive(
@@ -122,6 +139,8 @@ impl TransactionOutcome {
 )]
 pub struct FinishedTransaction {
     pub outcome: TransactionOutcome,
+    /// The exact Raft revision that durably recorded this terminal outcome.
+    pub outcome_revision: u64,
     pub finished_at: Timestamp,
     pub results: Vec<TransactionStepResult>,
 }
@@ -131,7 +150,7 @@ pub struct FinishedTransaction {
 )]
 pub enum TransactionState {
     Open,
-    Committing(TransactionCommitProgress),
+    Committing(Box<TransactionCommitProgress>),
     Finished(FinishedTransaction),
 }
 
@@ -261,6 +280,26 @@ impl ReplicatedTransaction {
                 state: self.state.as_str().to_string(),
             });
         }
+        if let Some(existing) = self
+            .statements
+            .iter()
+            .find(|existing| existing.request_reference == statement.request_reference)
+        {
+            if existing == statement {
+                return Ok(());
+            }
+            return Err(TransactionMutationError::RequestConflict {
+                id: self.id.clone(),
+                request_reference: statement.request_reference.clone(),
+            });
+        }
+        if statement.expected_position != self.statements.len() {
+            return Err(TransactionMutationError::PositionConflict {
+                id: self.id.clone(),
+                expected: statement.expected_position,
+                actual: self.statements.len(),
+            });
+        }
         if self.statements.len() >= limits.max_statements {
             return Err(TransactionMutationError::StatementLimit {
                 id: self.id.clone(),
@@ -291,6 +330,13 @@ impl ReplicatedTransaction {
         limits: TransactionQueueLimits,
     ) -> Result<(), TransactionMutationError> {
         self.validate_queue_admission(owner, domain, &statement, limits)?;
+        if self
+            .statements
+            .iter()
+            .any(|existing| existing == &statement)
+        {
+            return Ok(());
+        }
         let next_source_bytes = self
             .queued_source_bytes
             .checked_add(statement.source_bytes())
@@ -318,10 +364,11 @@ impl ReplicatedTransaction {
             });
         }
         self.last_activity_at = at;
-        self.state = TransactionState::Committing(TransactionCommitProgress {
+        self.state = TransactionState::Committing(Box::new(TransactionCommitProgress {
             next_statement: 0,
             results: Vec::new(),
-        });
+            applying: None,
+        }));
         Ok(())
     }
 
@@ -343,13 +390,11 @@ impl ReplicatedTransaction {
         }
     }
 
-    pub(crate) fn advance(
+    pub(crate) fn begin_application(
         &mut self,
         expected_next_statement: usize,
-        next_statement: usize,
         at: Timestamp,
-        result: TransactionStepResult,
-        completion: Option<TransactionOutcome>,
+        applying: TransactionApplyingStep,
     ) -> Result<(), TransactionMutationError> {
         let TransactionState::Committing(progress) = &mut self.state else {
             return Err(TransactionMutationError::NotCommitting {
@@ -364,33 +409,43 @@ impl ReplicatedTransaction {
                 actual: progress.next_statement,
             });
         }
-        if next_statement <= expected_next_statement || next_statement > self.statements.len() {
+        if let Some(current) = &progress.applying {
+            if current == &applying {
+                return Ok(());
+            }
+            return Err(TransactionMutationError::ApplicationInProgress {
+                id: self.id.clone(),
+                statement: progress.next_statement,
+            });
+        }
+        if applying.next_statement <= expected_next_statement
+            || applying.next_statement > self.statements.len()
+        {
             return Err(TransactionMutationError::InvalidProgress {
                 id: self.id.clone(),
-                next: next_statement,
+                next: applying.next_statement,
                 statement_count: self.statements.len(),
             });
         }
-        if result.first_statement != expected_next_statement
-            || Some(result.statement_count) != next_statement.checked_sub(expected_next_statement)
+        if applying.result.first_statement != expected_next_statement
+            || Some(applying.result.statement_count)
+                != applying.next_statement.checked_sub(expected_next_statement)
         {
             return Err(TransactionMutationError::InvalidStepResult {
                 id: self.id.clone(),
             });
         }
         self.last_activity_at = at;
-        progress.next_statement = next_statement;
-        progress.results.push(result);
-        if let Some(outcome) = completion {
-            let results = std::mem::take(&mut progress.results);
-            self.finish(at, outcome, results);
-        }
+        progress.applying = Some(applying);
         Ok(())
     }
 
-    pub(crate) fn finish_empty_commit(
+    pub(crate) fn complete_application(
         &mut self,
+        expected_next_statement: usize,
         at: Timestamp,
+        outcome_revision: u64,
+        application_failure: Option<String>,
     ) -> Result<(), TransactionMutationError> {
         let TransactionState::Committing(progress) = &mut self.state else {
             return Err(TransactionMutationError::NotCommitting {
@@ -398,14 +453,78 @@ impl ReplicatedTransaction {
                 state: self.state.as_str().to_string(),
             });
         };
-        if !self.statements.is_empty() || progress.next_statement != 0 {
+        if progress.next_statement != expected_next_statement {
+            return Err(TransactionMutationError::ProgressConflict {
+                id: self.id.clone(),
+                expected: expected_next_statement,
+                actual: progress.next_statement,
+            });
+        }
+        let Some(mut applying) = progress.applying.take() else {
+            return Err(TransactionMutationError::NoApplicationInProgress {
+                id: self.id.clone(),
+                statement: expected_next_statement,
+            });
+        };
+        if applying.result.first_statement != expected_next_statement {
+            progress.applying = Some(applying);
+            return Err(TransactionMutationError::InvalidStepResult {
+                id: self.id.clone(),
+            });
+        }
+
+        let completion = if let Some(error) = application_failure {
+            applying.result.result.success = false;
+            applying.result.result.message = error.clone();
+            applying.result.result.diagnostics = vec![TransactionDiagnostic {
+                message: error.clone(),
+                span_start: 0,
+                span_end: 0,
+            }];
+            Some(TransactionOutcome::Failed {
+                failing_step: expected_next_statement,
+                error,
+            })
+        } else {
+            applying.completion
+        };
+        self.last_activity_at = at;
+        progress.next_statement = applying.next_statement;
+        progress.results.push(applying.result);
+        if let Some(outcome) = completion {
+            let results = std::mem::take(&mut progress.results);
+            self.finish(at, outcome_revision, outcome, results);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish_empty_commit(
+        &mut self,
+        at: Timestamp,
+        outcome_revision: u64,
+    ) -> Result<(), TransactionMutationError> {
+        let TransactionState::Committing(progress) = &mut self.state else {
+            return Err(TransactionMutationError::NotCommitting {
+                id: self.id.clone(),
+                state: self.state.as_str().to_string(),
+            });
+        };
+        if !self.statements.is_empty()
+            || progress.next_statement != 0
+            || progress.applying.is_some()
+        {
             return Err(TransactionMutationError::InvalidProgress {
                 id: self.id.clone(),
                 next: progress.next_statement,
                 statement_count: self.statements.len(),
             });
         }
-        self.finish(at, TransactionOutcome::Committed, Vec::new());
+        self.finish(
+            at,
+            outcome_revision,
+            TransactionOutcome::Committed,
+            Vec::new(),
+        );
         Ok(())
     }
 
@@ -413,6 +532,7 @@ impl ReplicatedTransaction {
         &mut self,
         owner: &UserName,
         at: Timestamp,
+        outcome_revision: u64,
     ) -> Result<(), TransactionMutationError> {
         self.ensure_owner(owner)?;
         if !matches!(self.state, TransactionState::Open) {
@@ -421,7 +541,12 @@ impl ReplicatedTransaction {
                 state: self.state.as_str().to_string(),
             });
         }
-        self.finish(at, TransactionOutcome::Reverted, Vec::new());
+        self.finish(
+            at,
+            outcome_revision,
+            TransactionOutcome::Reverted,
+            Vec::new(),
+        );
         Ok(())
     }
 
@@ -429,6 +554,7 @@ impl ReplicatedTransaction {
         &mut self,
         at: Timestamp,
         idle_before: Timestamp,
+        outcome_revision: u64,
     ) -> Result<bool, TransactionMutationError> {
         if !matches!(self.state, TransactionState::Open) {
             return Ok(false);
@@ -436,13 +562,19 @@ impl ReplicatedTransaction {
         if self.last_activity_at > idle_before {
             return Ok(false);
         }
-        self.finish(at, TransactionOutcome::Expired, Vec::new());
+        self.finish(
+            at,
+            outcome_revision,
+            TransactionOutcome::Expired,
+            Vec::new(),
+        );
         Ok(true)
     }
 
     fn finish(
         &mut self,
         at: Timestamp,
+        outcome_revision: u64,
         outcome: TransactionOutcome,
         results: Vec<TransactionStepResult>,
     ) {
@@ -451,6 +583,7 @@ impl ReplicatedTransaction {
         self.queued_source_bytes = 0;
         self.state = TransactionState::Finished(FinishedTransaction {
             outcome,
+            outcome_revision,
             finished_at: at,
             results,
         });
@@ -536,6 +669,20 @@ pub enum TransactionMutationError {
     #[error("transaction '{id}' queued source byte limit {limit} exceeded")]
     SourceByteLimit { id: String, limit: u64 },
     #[error(
+        "transaction '{id}' request reference '{request_reference}' was already used for a \
+         different append"
+    )]
+    RequestConflict {
+        id: String,
+        request_reference: CommandExecutionReference,
+    },
+    #[error("transaction '{id}' queue position changed: expected {expected}, found {actual}")]
+    PositionConflict {
+        id: String,
+        expected: usize,
+        actual: usize,
+    },
+    #[error(
         "transaction '{id}' commit progress changed: expected statement {expected}, found {actual}"
     )]
     ProgressConflict {
@@ -553,6 +700,10 @@ pub enum TransactionMutationError {
     },
     #[error("transaction '{id}' commit step result does not match its progress range")]
     InvalidStepResult { id: String },
+    #[error("transaction '{id}' is already applying the step beginning at statement {statement}")]
+    ApplicationInProgress { id: String, statement: usize },
+    #[error("transaction '{id}' has no applying step beginning at statement {statement}")]
+    NoApplicationInProgress { id: String, statement: usize },
     #[error("transaction '{id}' commit step effect does not match its queued statement(s)")]
     EffectMismatch { id: String },
     #[error("transaction '{id}' commit step conflicted with replicated state: {reason}")]

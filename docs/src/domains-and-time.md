@@ -111,6 +111,12 @@ Important runtime consequences:
 - `STOP` preserves persisted runtime state
 - `START` clears materialized relay state for the active domain before new execution proceeds
 
+Successful lifecycle commands are completion boundaries. `START` returns after every current live
+node has prepared the same revision and every configured listener and assigned source has completed
+startup. `STOP` returns after intake and runtime work have stopped remotely, including when it is the
+last running domain. A dependent connection, observation, or publish can follow immediately through
+any live node.
+
 The lifecycle state, active paced-clock anchor, and one clock authority are replicated. The
 authority identifies a concrete incarnation of a named cluster node and carries a revision that
 advances whenever ownership changes or is revoked. After leader failover, reconciliation uses that

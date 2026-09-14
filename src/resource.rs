@@ -1,4 +1,4 @@
-//! The on-disk store for published resource versions.
+//! The on-disk store for installed resource versions.
 //!
 //! Layer: engines and infrastructure.
 //!

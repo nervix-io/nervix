@@ -142,7 +142,10 @@ async fn hash_password(password: String) -> Result<String, String> {
     .map_err(|error| format!("password hash task failed: {error}"))?
 }
 
-async fn verify_password_hash(password_hash: String, password: String) -> bool {
+pub(in crate::application) async fn verify_password_hash(
+    password_hash: String,
+    password: String,
+) -> bool {
     tokio::task::spawn_blocking(move || {
         let Ok(parsed_hash) = PasswordHash::new(&password_hash) else {
             return false;
@@ -259,10 +262,16 @@ impl SessionServiceImpl {
             .is_some()
         {
             if if_not_exists {
-                return command_ok_already_existed(format!(
-                    "user '{}' already exists",
-                    create.name.as_str()
-                ));
+                return match self.wait_for_authoritative_visibility().await {
+                    Ok(()) => command_ok_already_existed(format!(
+                        "user '{}' already exists",
+                        create.name.as_str()
+                    )),
+                    Err(error) => command_error(format!(
+                        "user '{}' exists, but authoritative visibility did not complete: {error}",
+                        create.name.as_str()
+                    )),
+                };
             }
             return command_error(format!("user '{}' already exists", create.name.as_str()));
         }
@@ -276,11 +285,66 @@ impl SessionServiceImpl {
             }
         };
         match self.inner.consensus.create_user(user).await {
-            Ok(()) => command_ok(format!("created user '{}'", create.name.as_str())),
+            Ok(()) => match self.wait_for_authoritative_visibility().await {
+                Ok(()) => command_ok(format!("created user '{}'", create.name.as_str())),
+                Err(error) => command_error(format!(
+                    "created user '{}', but authoritative visibility did not complete: {error}",
+                    create.name.as_str()
+                )),
+            },
             Err(error) => {
                 self.consensus_error_response(
                     &error,
                     format!("failed to create user '{}': {error}", create.name.as_str()),
+                )
+                .await
+            }
+        }
+    }
+
+    pub(in crate::application) async fn apply_persistent_user_creation(
+        &self,
+        if_not_exists: bool,
+        user: UserCredentials,
+    ) -> CommandResult {
+        if let Some(existing) = self.inner.consensus.current_user(&user.name).await {
+            if existing == user {
+                return match self.wait_for_authoritative_visibility().await {
+                    Ok(()) => command_ok(format!("created user '{}'", existing.name.as_str())),
+                    Err(error) => command_error(format!(
+                        "created user '{}', but authoritative visibility did not complete: {error}",
+                        existing.name.as_str()
+                    )),
+                };
+            }
+            if if_not_exists {
+                return match self.wait_for_authoritative_visibility().await {
+                    Ok(()) => command_ok_already_existed(format!(
+                        "user '{}' already exists",
+                        user.name.as_str()
+                    )),
+                    Err(error) => command_error(format!(
+                        "user '{}' exists, but authoritative visibility did not complete: {error}",
+                        user.name.as_str()
+                    )),
+                };
+            }
+            return command_error(format!("user '{}' already exists", user.name.as_str()));
+        }
+
+        let name = user.name.clone();
+        match self.inner.consensus.create_user(user).await {
+            Ok(()) => match self.wait_for_authoritative_visibility().await {
+                Ok(()) => command_ok(format!("created user '{}'", name.as_str())),
+                Err(error) => command_error(format!(
+                    "created user '{}', but authoritative visibility did not complete: {error}",
+                    name.as_str()
+                )),
+            },
+            Err(error) => {
+                self.consensus_error_response(
+                    &error,
+                    format!("failed to create user '{}': {error}", name.as_str()),
                 )
                 .await
             }

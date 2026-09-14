@@ -36,7 +36,7 @@ relay or bulk work cannot consume.
 | Control handler blocks ACKs, gate release, or payload routing | 3, 4, 5 | `runtime/interconnect_admission.feature`: *Evicting a branch cancels its waiting remote admission*; `cluster/interconnect_health.feature`: *A silent peer does not delay peer health or control-plane work* |
 | Sequential fanout and repeated encoding/copies | 3, 5 | `cluster/bounded_execution.feature`: *Occupied bulk execution leaves management work responsive* |
 | Full-archive synchronous serving and memory amplification | 3, 6 | `cluster/resource_describe.feature`: *Large resource replication preserves control responsiveness*; `cluster/interconnect_observability.feature`: *A bulk transfer reports its progress without spending management capacity* |
-| Sequential resource reconciliation and ambiguous readiness timeout | 6 | `cluster/resource_describe.feature`: *Readiness deadline returns the published version while a replica is pending*, *Upload retry reports one published version* |
+| Resource completion under delayed replica installation | 6 | `cluster/resource_describe.feature`: *Upload remains pending until every live node installs the resource*, *Upload retry reports one assigned version* |
 | Async-worker stalls in Arrow, CBOR, rkyv, filesystem and snapshots | 3, 4, 6, 7, 8 | `cluster/bounded_execution.feature`; `cluster/interconnect_observability.feature`: *Occupied bulk execution leaves the reserved management budget intact* |
 | Unbounded payload queues and item-only transport budgets | 3, 4, 5 | `cluster/interconnect_observability.feature`: *Interconnection series are exposed with bounded dimensions* — `nervix_execution_memory_capacity_bytes` and `nervix_execution_memory_reserved_bytes` per class |
 | Queued admission timeout before progress starts | 5 | `runtime/interconnect_admission.feature`: *A waiting relay admission leaves another domain runnable*; `nervix-interconnect`: `reserved_relay_work_reports_progress_before_runtime_admission` |
@@ -89,14 +89,14 @@ capacity failure.
 
 ## User-visible resource status
 
-`DESCRIBE RESOURCE <name> VERSION <n>` distinguishes the three states the proposal requires:
-publication (`created_at`, `created_by_node`, and the assigned version), replication progress and
-failure (a per-node `state=` and `error=` line, with `source=` and `verified_at=`), and cluster
-readiness (`cluster_ready`). A readiness wait that expires returns the published version rather
-than an upload failure.
+`DESCRIBE RESOURCE <name> VERSION <n>` reports the completed resource metadata and per-incarnation
+installation state: `created_at`, `created_by_node`, assigned version, digest, and each replica's
+`state=`, `error=`, `source=`, and `verified_at=` fields. Upload itself waits for verified
+installation on every current live node; descriptions observe that state and are not a second
+completion operation.
 
 Evidence: `cluster/resource_describe.feature`: *Uploaded resource is describable after replication*,
-*Readiness deadline returns the published version while a replica is pending*, *Uploaded resources
+*Upload remains pending until every live node installs the resource*, *Uploaded resources
 converge after a node rejoins the cluster*.
 
 ## Open qualification

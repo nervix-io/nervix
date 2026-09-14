@@ -3,9 +3,9 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use nervix_models::{
-    ClusterNodeName, DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint,
-    DomainState, DomainStatus, ResourceName, ResourceNodeState, ResourceNodeStatus,
-    ResourceReplicaKey,
+    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, DomainConfig, DomainName,
+    DomainPace, DomainSchedule, DomainStartPoint, DomainState, DomainStatus, ResourceName,
+    ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
 };
 use openraft::{entry::RaftEntry as _, storage::RaftLogStorageExt as _, vote::RaftLeaderId as _};
 use tempfile::TempDir;
@@ -766,12 +766,12 @@ async fn replica_update_writes_one_record_and_metadata_amid_unrelated_graphs() -
             DomainName::try_from("tenant_0")?,
             ResourceName::parse("artifact")?,
             1,
-            Harness::node(),
+            ClusterNodeIdentity::new(Harness::node(), ClusterNodeIncarnation::new(1)),
         ),
         state: ResourceNodeState::Ready,
         root_checksum: Some("digest".into()),
         last_verified_at: None,
-        source_node_id: None,
+        source_node: None,
         error: None,
     };
     let applied = apply_consensus_command(
@@ -805,7 +805,8 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
 
     use crate::{
         ReplicatedTransaction, TransactionCommandResult, TransactionOutcome,
-        TransactionQueueLimits, TransactionStatement, TransactionStepEffect, TransactionStepResult,
+        TransactionQueueLimits, TransactionState, TransactionStatement, TransactionStepEffect,
+        TransactionStepResult,
     };
     for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
         tokio::task::consume_budget().await;
@@ -844,6 +845,10 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                     domain: domain.id.clone(),
                     at,
                     statement: Box::new(TransactionStatement {
+                        request_reference: nervix_models::CommandExecutionReference::parse(
+                            "request-0",
+                        )?,
+                        expected_position: 0,
                         source: "START;".into(),
                         statement: Statement::StartDomain(StartDomain {
                             start: DomainStartPoint::Resume,
@@ -909,10 +914,18 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                     .transactions
                     .get("transaction")
                     .ok_or("committed transaction missing")?;
-                assert_eq!(transaction.completed_statement_count(), 1);
+                assert_eq!(transaction.completed_statement_count(), 0);
+                assert!(transaction.finished_outcome().is_none());
+                let TransactionState::Committing(progress) = &transaction.state else {
+                    return Err("transaction should be applying its committed effect".into());
+                };
                 assert_eq!(
-                    transaction.finished_outcome(),
-                    Some(&TransactionOutcome::Committed)
+                    progress
+                        .applying
+                        .as_ref()
+                        .ok_or("applying transaction step missing")?
+                        .effect_revision,
+                    5
                 );
                 assert_eq!(
                     state
@@ -927,6 +940,27 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                 harness
                     .apply(
                         6,
+                        ConsensusCommand::CompleteTransactionApplication {
+                            id: "transaction".into(),
+                            expected_next_statement: 0,
+                            at,
+                            application_failure: None,
+                        },
+                    )
+                    .await?;
+                let completed = harness.store.inner.state();
+                let transaction = completed
+                    .transactions
+                    .get("transaction")
+                    .ok_or("completed transaction missing")?;
+                assert_eq!(transaction.completed_statement_count(), 1);
+                assert_eq!(
+                    transaction.finished_outcome(),
+                    Some(&TransactionOutcome::Committed)
+                );
+                harness
+                    .apply(
+                        7,
                         ConsensusCommand::RemoveFinishedTransactions {
                             finished_before: at,
                         },
@@ -936,7 +970,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                 let state = harness.store.inner.state();
                 assert_eq!(state.transactions.len(), 0);
                 assert_eq!(state.runtime_revision, 5);
-                assert_eq!(state.last_applied_log_id, Some(Harness::log_id(6)));
+                assert_eq!(state.last_applied_log_id, Some(Harness::log_id(7)));
             }
         }
     }

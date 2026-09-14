@@ -13,7 +13,10 @@ use std::{
     io,
     net::SocketAddr,
     path::{Component, Path, PathBuf},
-    sync::Arc as StdArc,
+    sync::{
+        Arc as StdArc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
 };
 
 use arch_into::ArchInto;
@@ -40,6 +43,7 @@ use nervix_models::{
     ResourceUploadKey, UserName,
 };
 use nervix_nspl::client_statement::{ClientStatement, parse_client_statements};
+use parking_lot::RwLock;
 use prost::Message as _;
 use rustls::ServerConfig;
 use tokio::{
@@ -56,6 +60,7 @@ use tokio_tungstenite::{
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
 use tracing::warn;
+use triomphe::Arc;
 
 use super::{
     AppError,
@@ -89,6 +94,8 @@ const WEB_CONSOLE_WASM: &[u8] =
 
 const WEB_CONSOLE_ICON: &[u8] = include_bytes!("../../crates/web-console/dist/nervix-icon.svg");
 
+const WEB_CONSOLE_SESSION_QUEUE_CAPACITY: usize = 16;
+
 const WEB_CONSOLE_WS_PATH: &str = "/console/ws";
 
 const WEB_CONSOLE_RESOURCE_UPLOAD_PATH: &str = "/console/resources/upload";
@@ -98,6 +105,22 @@ pub(in crate::application) const WEB_CONSOLE_AUTH_QUERY_PARAM: &str = "auth";
 const WEB_CONSOLE_LEADERSHIP_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 
 const WEB_CONSOLE_GRAPH_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(500);
+
+struct WebConsoleSessionState {
+    active_domain: RwLock<Option<DomainName>>,
+    pending_commands: AtomicUsize,
+    clean_close: AtomicBool,
+}
+
+impl WebConsoleSessionState {
+    fn new() -> Self {
+        Self {
+            active_domain: RwLock::new(None),
+            pending_commands: AtomicUsize::new(0),
+            clean_close: AtomicBool::new(false),
+        }
+    }
+}
 
 fn web_console_upload_text_response(
     status: StatusCode,
@@ -189,19 +212,36 @@ async fn handle_web_console_request(
                     let mut websocket =
                         WebSocketStream::from_raw_socket(io, Role::Server, None).await;
                     let (tx, mut response_rx) = mpsc::channel(16);
-                    let mut subscriptions = SessionSubscriptions::for_user(authenticated_user);
+                    let (request_tx, request_rx) =
+                        mpsc::channel(WEB_CONSOLE_SESSION_QUEUE_CAPACITY);
+                    let (state_refresh_tx, mut state_refresh_rx) = mpsc::channel(1);
+                    let session_state = Arc::new(WebConsoleSessionState::new());
+                    let worker_service = service.clone();
+                    let worker_session_state = session_state.clone();
+                    let service_tasks = service.inner.service_tasks.clone();
+                    service_tasks.spawn(async move {
+                        worker_service
+                            .run_web_console_session(
+                                request_rx,
+                                tx,
+                                authenticated_user,
+                                worker_session_state,
+                                state_refresh_tx,
+                            )
+                            .await;
+                    });
                     let mut leadership_check = interval(WEB_CONSOLE_LEADERSHIP_CHECK_INTERVAL);
                     let mut graph_snapshot = interval(WEB_CONSOLE_GRAPH_SNAPSHOT_INTERVAL);
                     let mut domains_rx = service.inner.consensus.subscribe_domains();
                     leadership_check.tick().await;
                     graph_snapshot.tick().await;
                     let mut leader_connected = false;
-                    let mut active_domain = None::<DomainName>;
-                    let mut clean_close = false;
+                    let mut state_refresh_open = true;
 
                     loop {
                         tokio::task::consume_budget().await;
                         tokio::select! {
+                            biased;
                             _ = service.inner.shutdown.cancelled() => break,
                             message = futures_util::StreamExt::next(&mut websocket) => {
                                 let Some(message) = message else {
@@ -211,66 +251,36 @@ async fn handle_web_console_request(
                                     Ok(Message::Binary(payload)) => {
                                         match proto::SessionRequest::decode(payload.as_ref()) {
                                             Ok(request) => {
-                                                match request.request {
-                                                    Some(proto::session_request::Request::SetActiveDomain(request)) => {
-                                                        match service
-                                                            .process_web_console_active_domain_request(
-                                                                request,
-                                                                &mut active_domain,
-                                                            )
-                                                            .await
-                                                        {
-                                                            Ok(response) => {
-                                                                if !send_web_console_session_response(
-                                                                    &mut websocket,
-                                                                    response,
-                                                                )
-                                                                .await
-                                                                {
-                                                                    break;
-                                                                }
-                                                                if leader_connected
-                                                                    && !send_web_console_state_responses(
-                                                                        &mut websocket,
-                                                                        &service,
-                                                                        active_domain.as_ref(),
-                                                                    )
-                                                                    .await
-                                                                {
-                                                                    break;
-                                                                }
-                                                            }
-                                                            Err(error) => {
-                                                                if !send_web_console_session_response(
-                                                                    &mut websocket,
-                                                                    web_console_server_error_response(
-                                                                        error.to_string(),
-                                                                    ),
-                                                                )
-                                                                .await
-                                                                {
-                                                                    break;
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                    _ => {
-                                                        let response = service
-                                                            .process_web_console_request(
-                                                                request,
-                                                                &tx,
-                                                                &mut subscriptions,
-                                                            )
-                                                            .await;
-                                                        if !send_web_console_session_response(
-                                                            &mut websocket,
-                                                            response,
+                                                let is_command = matches!(
+                                                    request.request.as_ref(),
+                                                    Some(proto::session_request::Request::Command(_))
+                                                );
+                                                if is_command {
+                                                    session_state
+                                                        .pending_commands
+                                                        .fetch_update(
+                                                            Ordering::AcqRel,
+                                                            Ordering::Acquire,
+                                                            |pending| pending.checked_add(1),
                                                         )
-                                                        .await
-                                                        {
-                                                            break;
-                                                        }
+                                                        .assured(
+                                                            "the bounded session queue keeps the pending command count below usize::MAX",
+                                                        );
+                                                }
+                                                if request_tx.send(request).await.is_err() {
+                                                    if is_command {
+                                                        session_state
+                                                            .pending_commands
+                                                            .fetch_update(
+                                                                Ordering::AcqRel,
+                                                                Ordering::Acquire,
+                                                                |pending| pending.checked_sub(1),
+                                                            )
+                                                            .assured(
+                                                                "this request incremented the pending command count",
+                                                            );
                                                     }
+                                                    break;
                                                 }
                                             }
                                             Err(error) => {
@@ -300,7 +310,11 @@ async fn handle_web_console_request(
                                         }
                                     }
                                     Ok(Message::Close(_)) => {
-                                        clean_close = true;
+                                        session_state.clean_close.store(
+                                            session_state.pending_commands.load(Ordering::Acquire)
+                                                == 0,
+                                            Ordering::Release,
+                                        );
                                         break;
                                     }
                                     Ok(_) => {}
@@ -338,6 +352,22 @@ async fn handle_web_console_request(
                                             break;
                                         }
                                     }
+                                }
+                            }
+                            refresh = state_refresh_rx.recv(), if leader_connected && state_refresh_open => {
+                                if refresh.is_none() {
+                                    state_refresh_open = false;
+                                    continue;
+                                }
+                                let selected_domain = session_state.active_domain.read().clone();
+                                if !send_web_console_state_responses(
+                                    &mut websocket,
+                                    &service,
+                                    selected_domain.as_ref(),
+                                )
+                                .await
+                                {
+                                    break;
                                 }
                             }
                             _ = leadership_check.tick() => {
@@ -382,10 +412,11 @@ async fn handle_web_console_request(
                                     {
                                         break;
                                     }
+                                    let selected_domain = session_state.active_domain.read().clone();
                                     if !send_web_console_state_responses(
                                         &mut websocket,
                                         &service,
-                                        active_domain.as_ref(),
+                                        selected_domain.as_ref(),
                                     )
                                     .await
                                     {
@@ -394,10 +425,11 @@ async fn handle_web_console_request(
                                 }
                             }
                             _ = graph_snapshot.tick(), if leader_connected => {
+                                let selected_domain = session_state.active_domain.read().clone();
                                 if !send_web_console_state_responses(
                                     &mut websocket,
                                     &service,
-                                    active_domain.as_ref(),
+                                    selected_domain.as_ref(),
                                 )
                                 .await
                                 {
@@ -408,10 +440,11 @@ async fn handle_web_console_request(
                                 if changed.is_err() {
                                     break;
                                 }
-                                if let Some(domain) = active_domain.as_ref()
+                                let selected_domain = session_state.active_domain.read().clone();
+                                if let Some(domain) = selected_domain.as_ref()
                                     && service.inner.consensus.current_domain(domain).await.is_none()
                                 {
-                                    active_domain = None;
+                                    *session_state.active_domain.write() = None;
                                 }
                                 let domain_response = service.domain_list_response(false).await;
                                 if !send_web_console_session_response(
@@ -422,10 +455,11 @@ async fn handle_web_console_request(
                                 {
                                     break;
                                 }
+                                let selected_domain = session_state.active_domain.read().clone();
                                 if !send_web_console_state_responses(
                                     &mut websocket,
                                     &service,
-                                    active_domain.as_ref(),
+                                    selected_domain.as_ref(),
                                 )
                                 .await
                                 {
@@ -434,12 +468,7 @@ async fn handle_web_console_request(
                             }
                         }
                     }
-                    subscriptions.stop_all(&service).await;
-                    if clean_close {
-                        service.clean_close_transaction(&mut subscriptions).await;
-                    } else {
-                        service.release_session_transaction_binding(&mut subscriptions);
-                    }
+                    drop(request_tx);
                 }
                 Err(error) => {
                     warn!(error = %error, "web console websocket upgrade failed");
@@ -799,9 +828,9 @@ impl SessionServiceImpl {
                 )
                 .await
             {
-                Ok(publication) => web_console_upload_text_response(
+                Ok(installation) => web_console_upload_text_response(
                     StatusCode::OK,
-                    format!("published resource version {}", publication.version),
+                    format!("uploaded resource version {}", installation.version),
                 ),
                 Err(error) => {
                     let status = if let Some(ConsensusError::LeadershipLost { .. }) =
@@ -902,7 +931,7 @@ impl SessionServiceImpl {
                     .process_web_console_command(command, tx, subscriptions)
                     .await;
                 SessionResponse {
-                    event: Some(proto::session_response::Event::Result(result)),
+                    event: Some(proto::session_response::Event::Result(Box::new(result))),
                 }
             }
             Some(proto::session_request::Request::Suggest(suggest)) => {
@@ -922,12 +951,76 @@ impl SessionServiceImpl {
             Some(proto::session_request::Request::AttachTransaction(request)) => {
                 let result = self.attach_transaction(request, subscriptions).await;
                 SessionResponse {
-                    event: Some(proto::session_response::Event::Result(result)),
+                    event: Some(proto::session_response::Event::Result(Box::new(result))),
                 }
             }
             None => {
                 web_console_server_error_response("session request payload is missing".to_string())
             }
+        }
+    }
+
+    async fn run_web_console_session(
+        self,
+        mut request_rx: mpsc::Receiver<SessionRequest>,
+        tx: mpsc::Sender<Result<SessionResponse, Status>>,
+        authenticated_user: UserName,
+        state: Arc<WebConsoleSessionState>,
+        state_refresh_tx: mpsc::Sender<()>,
+    ) {
+        let mut subscriptions = SessionSubscriptions::for_user(authenticated_user);
+        while let Some(request) = request_rx.recv().await {
+            tokio::task::consume_budget().await;
+            let is_command = matches!(
+                request.request.as_ref(),
+                Some(proto::session_request::Request::Command(_))
+            );
+            let active_domain_request = match request.request.as_ref() {
+                Some(proto::session_request::Request::SetActiveDomain(request)) => {
+                    Some(request.clone())
+                }
+                _ => None,
+            };
+            let (response, refresh_state) = if let Some(request) = active_domain_request {
+                let mut selected_domain = state.active_domain.read().clone();
+                match self
+                    .process_web_console_active_domain_request(request, &mut selected_domain)
+                    .await
+                {
+                    Ok(response) => {
+                        *state.active_domain.write() = selected_domain;
+                        (response, true)
+                    }
+                    Err(error) => (web_console_server_error_response(error.to_string()), false),
+                }
+            } else {
+                (
+                    self.process_web_console_request(request, &tx, &mut subscriptions)
+                        .await,
+                    false,
+                )
+            };
+            if is_command {
+                state
+                    .pending_commands
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                        pending.checked_sub(1)
+                    })
+                    .assured("every processed command was counted when its request was accepted");
+            }
+            if tx.send(Ok(response)).await.is_err() {
+                break;
+            }
+            if refresh_state && state_refresh_tx.send(()).await.is_err() {
+                break;
+            }
+        }
+
+        subscriptions.stop_all(&self).await;
+        if state.clean_close.load(Ordering::Acquire) {
+            self.clean_close_transaction(&mut subscriptions).await;
+        } else {
+            self.release_session_transaction_binding(&mut subscriptions);
         }
     }
 
@@ -988,7 +1081,7 @@ impl SessionServiceImpl {
         if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
             let result = self.not_leader_response("", leader).await;
             return Some(SessionResponse {
-                event: Some(proto::session_response::Event::Result(result)),
+                event: Some(proto::session_response::Event::Result(Box::new(result))),
             });
         }
 
@@ -1312,6 +1405,8 @@ mod tests {
                     request: Some(proto::session_request::Request::Command(CommandRequest {
                         query: "CREATE SCHEMA web_console_event ( user_id U32 );".to_string(),
                         domain: "default".to_string(),
+                        execution_reference: uuid::Uuid::now_v7().to_string(),
+                        expected_transaction_position: None,
                     })),
                 },
                 &tx,
@@ -1351,6 +1446,8 @@ mod tests {
                     request: Some(proto::session_request::Request::Command(CommandRequest {
                         query: "UPLOAD RESOURCE proto VERSION '/tmp/proto';".to_string(),
                         domain: "default".to_string(),
+                        execution_reference: uuid::Uuid::now_v7().to_string(),
+                        expected_transaction_position: None,
                     })),
                 },
                 &tx,

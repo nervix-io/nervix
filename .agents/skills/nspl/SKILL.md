@@ -67,6 +67,15 @@ applying effects; a queued model mutation reports its statement-local quiesce le
 Correct a rejected statement and continue the same transaction. Do not imply that one undivided
 request can mix those phases.
 
+Treat a successful administrative command as a completed effect. After `UPLOAD RESOURCE`, model or
+lookup creation, `START`, `STOP`, placement changes, or `COMMIT` returns `OK`, issue the dependent
+operation immediately. Do not add a readiness request, `DESCRIBE` polling loop, arbitrary delay, or
+retry before that dependent operation. Transaction statement success means durable validation and
+staging only; `COMMIT` supplies the full usable-effect boundary. CLI, Rust-client, and browser
+flows retain command execution references, upload identities, transaction append positions, and
+commit identity through redirects or reconnects. Do not manufacture a new identity for an
+uncertain admitted operation.
+
 For storage failures or uncertain administrative outcomes, consult `Control Plane` → `Durability
 and recovery` before suggesting a retry.
 

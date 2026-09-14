@@ -270,10 +270,6 @@ Feature: Relocating runtime nodes onto a named cluster node
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    Then within "30s" node "node-1" eventually reports describe resource as "cluster_ready: true"
-      """
-      DESCRIBE RESOURCE rejecting_guest VERSION 1;
-      """
     When these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA event ( value I32 );

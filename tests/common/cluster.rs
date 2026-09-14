@@ -46,8 +46,8 @@ use nervix_server::{
 };
 use parking_lot::Mutex;
 use proto::{
-    CommandRequest, ServerEventLevel, SessionRequest, session_response::Event,
-    session_service_client::SessionServiceClient,
+    CommandRequest, ServerEventLevel, SessionRequest, UploadResourceRequest, UploadResourceStart,
+    session_response::Event, session_service_client::SessionServiceClient,
 };
 use pulsar::{
     ConsumerOptions as PulsarConsumerOptions, Pulsar, SubType as PulsarSubType, TokioExecutor,
@@ -1381,6 +1381,17 @@ impl Cluster {
             .get(node_id)
             .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
         Ok(handle.spec.grpc_uri(handle.config.grpc_mode))
+    }
+
+    pub(crate) async fn send_incomplete_resource_upload(
+        &self,
+        node_id: &str,
+        domain: &str,
+        resource: &str,
+        identity: &str,
+    ) -> io::Result<proto::UploadResourceResponse> {
+        let server = self.grpc_uri(node_id)?;
+        send_incomplete_resource_upload(&server, domain, resource, identity).await
     }
 
     pub(crate) fn web_console_url(&self, node_id: &str) -> io::Result<String> {
@@ -3106,6 +3117,7 @@ pub(crate) struct TestSubscriptionEvent {
 #[derive(Debug)]
 pub(crate) struct RawTestSession {
     domain: String,
+    transaction: Option<proto::TransactionStatus>,
     request_tx: mpsc::Sender<SessionRequest>,
     response: tonic::Streaming<proto::SessionResponse>,
     pending_subscriptions: VecDeque<proto::SubscriptionEvent>,
@@ -3211,6 +3223,20 @@ impl TestSession {
         }
     }
 
+    pub(crate) async fn run_command_result_with_reference(
+        &mut self,
+        query: &str,
+        execution_reference: &str,
+    ) -> io::Result<proto::CommandResult> {
+        match self {
+            Self::Raw(session) => {
+                session
+                    .run_command_result_with_reference(query, execution_reference)
+                    .await
+            }
+        }
+    }
+
     pub(crate) async fn try_next_subscription(
         &mut self,
         timeout_duration: Duration,
@@ -3243,11 +3269,29 @@ impl RawTestSession {
     }
 
     async fn run_command_result(&mut self, query: &str) -> io::Result<proto::CommandResult> {
+        let execution_reference = uuid::Uuid::now_v7().to_string();
+        self.run_command_result_with_reference(query, &execution_reference)
+            .await
+    }
+
+    async fn run_command_result_with_reference(
+        &mut self,
+        query: &str,
+        execution_reference: &str,
+    ) -> io::Result<proto::CommandResult> {
+        let expected_transaction_position = match &self.transaction {
+            Some(transaction) if transaction.state == i32::from(proto::TransactionState::Open) => {
+                Some(transaction.pending_count)
+            }
+            Some(_) | None => None,
+        };
         self.request_tx
             .send(SessionRequest {
                 request: Some(proto::session_request::Request::Command(CommandRequest {
                     query: query.to_string(),
                     domain: self.domain.clone(),
+                    execution_reference: execution_reference.to_string(),
+                    expected_transaction_position,
                 })),
             })
             .await
@@ -3259,7 +3303,8 @@ impl RawTestSession {
                 Some(proto::SessionResponse {
                     event: Some(Event::Result(result)),
                 }) => {
-                    return Ok(result);
+                    self.transaction = result.transaction.clone();
+                    return Ok(*result);
                 }
                 Some(proto::SessionResponse {
                     event: Some(Event::Subscription(event)),
@@ -3577,10 +3622,62 @@ async fn open_raw_session(server: &str, domain: &str) -> io::Result<TestSession>
 
     Ok(TestSession::Raw(Box::new(RawTestSession {
         domain: domain.to_string(),
+        transaction: None,
         request_tx,
         response,
         pending_subscriptions: VecDeque::new(),
     })))
+}
+
+async fn send_incomplete_resource_upload(
+    server: &str,
+    domain: &str,
+    resource: &str,
+    identity: &str,
+) -> io::Result<proto::UploadResourceResponse> {
+    let mut endpoint = Endpoint::from_shared(server.to_string()).map_err(io::Error::other)?;
+    if server.starts_with("https://") {
+        endpoint = endpoint
+            .tls_config(
+                ClientTlsConfig::new().ca_certificate(Certificate::from_pem(dev_tls_ca_pem()?)),
+            )
+            .map_err(io::Error::other)?;
+    }
+    let channel = endpoint.connect().await.map_err(io::Error::other)?;
+    let mut client = SessionServiceClient::new(channel);
+    let (request_tx, request_rx) = mpsc::channel(2);
+    request_tx
+        .send(UploadResourceRequest {
+            event: Some(proto::upload_resource_request::Event::Start(
+                UploadResourceStart {
+                    name: resource.to_string(),
+                    total_bytes: 2,
+                    domain: domain.to_string(),
+                    upload_identity: identity.to_string(),
+                },
+            )),
+        })
+        .await
+        .map_err(io::Error::other)?;
+    request_tx
+        .send(UploadResourceRequest {
+            event: Some(proto::upload_resource_request::Event::Chunk(vec![0].into())),
+        })
+        .await
+        .map_err(io::Error::other)?;
+    drop(request_tx);
+
+    let mut request = Request::new(ReceiverStream::new(request_rx));
+    let authorization =
+        MetadataValue::from_str(&test_basic_authorization()).map_err(io::Error::other)?;
+    request
+        .metadata_mut()
+        .insert("authorization", authorization);
+    client
+        .upload_resource(request)
+        .await
+        .map(|response| response.into_inner())
+        .map_err(io::Error::other)
 }
 
 async fn publish_mqtt(

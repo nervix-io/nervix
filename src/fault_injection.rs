@@ -124,8 +124,10 @@ struct HealthResponsePauseKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
     Admission(ClusterNodeName),
+    ResourceInstallation(ClusterNodeName),
     TransactionCommit {
         node_id: ClusterNodeName,
+        domain: String,
         completed_statements: usize,
     },
 }
@@ -388,13 +390,28 @@ impl FaultInjection {
         self.release_command_pause(&CommandPausePoint::Admission(node_id.clone()));
     }
 
+    pub fn pause_resource_installation_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::ResourceInstallation(node_id));
+    }
+
+    pub async fn wait_for_resource_installation_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::ResourceInstallation(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_resource_installation_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::ResourceInstallation(node_id.clone()));
+    }
+
     pub fn pause_transaction_commit_after(
         &self,
         node_id: ClusterNodeName,
+        domain: impl Into<String>,
         completed_statements: usize,
     ) {
         self.arm_command_pause(CommandPausePoint::TransactionCommit {
             node_id,
+            domain: domain.into().to_ascii_lowercase(),
             completed_statements,
         });
     }
@@ -402,10 +419,12 @@ impl FaultInjection {
     pub async fn wait_for_transaction_commit_pause(
         &self,
         node_id: &ClusterNodeName,
+        domain: &str,
         completed_statements: usize,
     ) {
         self.wait_for_command_pause(&CommandPausePoint::TransactionCommit {
             node_id: node_id.clone(),
+            domain: domain.to_ascii_lowercase(),
             completed_statements,
         })
         .await;
@@ -414,10 +433,12 @@ impl FaultInjection {
     pub fn release_transaction_commit_pause(
         &self,
         node_id: &ClusterNodeName,
+        domain: &str,
         completed_statements: usize,
     ) {
         self.release_command_pause(&CommandPausePoint::TransactionCommit {
             node_id: node_id.clone(),
+            domain: domain.to_ascii_lowercase(),
             completed_statements,
         });
     }
@@ -700,10 +721,12 @@ impl FaultInjection {
     pub(crate) async fn pause_transaction_commit_after_progress_if_armed(
         &self,
         node_id: &ClusterNodeName,
+        domain: &DomainName,
         completed_statements: usize,
     ) {
         self.pause_command_if_armed(CommandPausePoint::TransactionCommit {
             node_id: node_id.clone(),
+            domain: domain.as_str().to_ascii_lowercase(),
             completed_statements,
         })
         .await;
@@ -711,6 +734,11 @@ impl FaultInjection {
 
     pub(crate) async fn pause_command_admission_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::Admission(node_id.clone()))
+            .await;
+    }
+
+    pub(crate) async fn pause_resource_installation_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::ResourceInstallation(node_id.clone()))
             .await;
     }
 

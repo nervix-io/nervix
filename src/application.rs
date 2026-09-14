@@ -98,7 +98,7 @@ use tls::{
 };
 use tokio::{
     net::TcpListener,
-    sync::{Mutex as AsyncMutex, broadcast},
+    sync::broadcast,
     time::{Duration, sleep},
 };
 use transaction::{
@@ -120,6 +120,8 @@ use crate::{
 mod authentication;
 mod background_task;
 mod cluster_status;
+mod command_execution;
+mod completion;
 mod describe_output;
 mod domain_clock;
 mod domain_lifecycle;
@@ -1578,6 +1580,12 @@ impl Application {
                 }
             }
         }));
+        background_tasks.push(completion::spawn_authoritative_revision_reporting(
+            cluster.clone(),
+            consensus.observer(),
+            shutdown.clone(),
+        ));
+
         let runtime_for_schedule = runtime.clone();
         let registry_for_schedule = registry.clone();
         let mut schedule_rx = consensus.observer().subscribe_schedule();
@@ -1686,8 +1694,9 @@ impl Application {
                 transaction_max_source_bytes,
                 transaction_max_open,
                 transaction_bindings: DashMap::with_hasher(RandomState::new()),
-                transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
-                transaction_commit_execution: AsyncMutex::new(()),
+                command_executions: DashMap::with_hasher(RandomState::new()),
+                transaction_executions: DashMap::with_hasher(RandomState::new()),
+                transaction_domain_executions: DashMap::with_hasher(RandomState::new()),
                 resource_upload_executions: DashMap::with_hasher(RandomState::new()),
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),
             }),
@@ -1723,10 +1732,10 @@ impl Application {
             .register_handler::<PublishResourceReplica, _, _>(move |context, request| {
                 let service = resource_replica_service.clone();
                 async move {
-                    if &request.replica.key.node_id != context.peer_node_id() {
+                    if request.replica.key.node.node_id() != context.peer_node_id() {
                         return Err(ResourceInterconnectError::ReplicaOrigin {
                             authenticated: context.peer_node_id().clone(),
-                            declared: request.replica.key.node_id.clone(),
+                            declared: request.replica.key.node.node_id().clone(),
                         });
                     }
                     service

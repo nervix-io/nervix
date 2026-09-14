@@ -658,6 +658,51 @@ impl SessionServiceImpl {
         }
         gate.schedule_remaining_releases();
     }
+
+    pub(in crate::application) async fn release_cluster_entity_gates_and_wait(
+        &self,
+        mut gate: ClusterEntityGate,
+    ) -> Result<(), String> {
+        while !gate.nodes.is_empty() {
+            tokio::task::consume_budget().await;
+            let available_nodes = self
+                .available_node_ids()
+                .await
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            let nodes = gate.nodes.clone();
+            for node in nodes {
+                tokio::task::consume_budget().await;
+                if node != *self.inner.consensus.local_node_id() && !available_nodes.contains(&node)
+                {
+                    gate.mark_released(&node);
+                    continue;
+                }
+                if self
+                    .release_entity_gate_on_node(&node, gate.operation_id, &gate.domain)
+                    .await
+                    .is_ok()
+                {
+                    gate.mark_released(&node);
+                }
+            }
+            if gate.nodes.is_empty() {
+                gate.release_owner = None;
+                return Ok(());
+            }
+            tokio::select! {
+                _ = self.inner.shutdown.cancelled() => {
+                    return Err(format!(
+                        "server stopped while releasing entity gates in domain '{}'",
+                        gate.domain.as_str()
+                    ));
+                }
+                _ = sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL) => {}
+            }
+        }
+        gate.release_owner = None;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

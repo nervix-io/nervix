@@ -23,10 +23,10 @@ use nervix_approx_into::ApproxInto;
 use nervix_consensus::ReplicatedTransaction;
 use nervix_interconnect::SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest;
 use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeName, CreateBranch, CreateRelay, CreateSchema, DomainName,
-    FieldName, Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayName, ScheduledModel,
-    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName,
-    UserName,
+    ClusterNodeIdentity, ClusterNodeName, CommandExecutionReference, CreateBranch, CreateRelay,
+    CreateSchema, DomainName, FieldName, Model, ModelKind, ModelName, NodeRef, ParseAsType,
+    RelayName, ScheduledModel, SubscriptionBinding, SubscriptionDeliveryBehavior,
+    SubscriptionLiteral, SubscriptionName, UserName,
 };
 use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
 use nervix_recovery::NoReceiver;
@@ -95,6 +95,8 @@ pub(in crate::application) struct SessionSubscriptions {
 
 #[derive(Debug, Clone)]
 pub(in crate::application) struct PendingSessionCommand {
+    pub(in crate::application) request_reference: CommandExecutionReference,
+    pub(in crate::application) expected_transaction_position: Option<usize>,
     pub(in crate::application) source: String,
     pub(in crate::application) statement: ClientStatement,
     pub(in crate::application) domain: String,
@@ -146,12 +148,15 @@ impl SessionSubscriptions {
         statements: Vec<ParsedClientStatement>,
         query: &str,
         request_domain: &str,
+        execution_reference: &CommandExecutionReference,
+        expected_transaction_position: Option<usize>,
     ) -> Result<Vec<SessionCommandOperation>, String> {
         let mut transaction_active = self.transaction_active();
+        let mut transaction_position = expected_transaction_position;
         let multi_statement = statements.len() > 1;
         let mut operations = Vec::with_capacity(statements.len());
 
-        for parsed in statements {
+        for (statement_index, parsed) in statements.into_iter().enumerate() {
             let span = parsed.span.clone();
             match parsed.statement {
                 ClientStatement::BeginTransaction => {
@@ -159,6 +164,7 @@ impl SessionSubscriptions {
                         return Err("transaction is already active".to_string());
                     }
                     transaction_active = true;
+                    transaction_position = Some(0);
                     operations.push(SessionCommandOperation::Begin {
                         domain: request_domain.to_string(),
                     });
@@ -178,12 +184,29 @@ impl SessionSubscriptions {
                     operations.push(SessionCommandOperation::Revert);
                 }
                 statement => {
+                    let request_reference = CommandExecutionReference::parse(format!(
+                        "{}.{}",
+                        execution_reference.as_str(),
+                        statement_index
+                    ))
+                    .map_err(|error| error.to_string())?;
                     let command = PendingSessionCommand {
+                        request_reference,
+                        expected_transaction_position: transaction_position,
                         source: query[span].to_string(),
                         statement,
                         domain: request_domain.to_string(),
                     };
                     if transaction_active {
+                        let Some(current_position) = transaction_position else {
+                            return Err("transaction command is missing its expected queue \
+                                        position"
+                                .to_string());
+                        };
+                        transaction_position = current_position.checked_add(1);
+                        if transaction_position.is_none() {
+                            return Err("transaction queue position overflowed".to_string());
+                        }
                         operations.push(SessionCommandOperation::Queue(command));
                     } else if multi_statement {
                         return Err("multiple commands require BEGIN".to_string());

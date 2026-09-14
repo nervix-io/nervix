@@ -56,6 +56,7 @@
 - [Architecture And Internals](./architecture-and-internals.md)
   - [Architecture Overview](./architecture.md)
   - [Control Plane](./control-plane.md)
+  - [Command Completion](./command-completion.md)
   - [Data Plane](./data-plane.md)
   - [Relay](./relay.md)
 - [Developing Nervix](./developing-nervix.md)

@@ -20,7 +20,7 @@ Feature: Hash map metrics
       """
     Then the last command output contains
       """
-      published resource version 1
+      uploaded resource version 1
       """
     When these NSPL commands are executed
       """
