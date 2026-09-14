@@ -72,12 +72,13 @@ impl PreparedSqsRecord {
         let body_bytes = body.len();
         let mut attribute_bytes = 0_usize;
         for (name, attribute) in &attributes {
-            let name_bytes = name.len();
-            let data_type_bytes = attribute.data_type().len();
+            // Read the value first to retain the original contribution-evaluation order.
             let value_bytes = match attribute.string_value() {
                 Some(value) => value.len(),
                 None => 0,
             };
+            let name_bytes = name.len();
+            let data_type_bytes = attribute.data_type().len();
             let name_and_type_bytes = name_bytes
                 .checked_add(data_type_bytes)
                 .assured(ENCODED_IN_MEMORY);

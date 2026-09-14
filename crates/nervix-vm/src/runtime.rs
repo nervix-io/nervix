@@ -555,14 +555,18 @@ fn execute_program_with_selection_in_context_sync(
     }
     let mut invocations = Vec::with_capacity(program.invocations.len());
     for invocation in &program.invocations {
+        // The function name is owned before any fallible argument lookup, which fixes the binding
+        // materialization order for both successful and failed invocations.
+        let function = invocation.function.clone();
+        let span = invocation.span;
         let mut arguments = Vec::with_capacity(invocation.inputs.len());
         for input in &invocation.inputs {
             arguments.push(registers.output_array(*input)?);
         }
         invocations.push(FunctionInvocation {
-            function: invocation.function.clone(),
+            function,
             arguments,
-            span: invocation.span,
+            span,
         });
     }
 

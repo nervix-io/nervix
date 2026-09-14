@@ -1703,7 +1703,12 @@ impl Compiler {
                     None => BranchSelection::RowDependent,
                 }
             } else {
-                let folded_when = fold_constant_expr(&branch.when)?;
+                // Written Boolean and NULL literals are selected directly. Folding them here
+                // would do work the branch decision does not inspect.
+                let folded_when = match &branch.when.inner {
+                    Expr::Literal(Literal::Bool(_) | Literal::Null) => None,
+                    _ => fold_constant_expr(&branch.when)?,
+                };
                 BranchSelection::for_searched_branch(&branch.when, folded_when)
             };
 
