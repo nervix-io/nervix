@@ -1,9 +1,9 @@
 # Cluster Interconnect
 
 The cluster interconnect is the authenticated transport between Nervix nodes. It carries cluster
-membership, consensus traffic, control-plane requests, relay batches, replicated runtime state,
-resources, and snapshots. It is present on every live node and remains available through leader
-changes, placement changes, elections, and recovery.
+membership, consensus traffic, control-plane requests, domain-clock progress, relay batches,
+replicated runtime state, resources, and snapshots. It is present on every live node and remains
+available through leader changes, placement changes, elections, and recovery.
 
 The interconnect owns peer authentication, transport connections, wire framing, traffic isolation,
 bounded decoding, deadlines, and the delivery protocol for remote relay batches. The operation that
@@ -34,7 +34,7 @@ The standard pool layout is:
 
 | Pool | Primary traffic | Outbound connections per peer | Streams per connection | Readiness |
 | --- | --- | ---: | ---: | --- |
-| Management | Membership, health, consensus control, relay progress and outcomes | 1 | 64 | Preconnected |
+| Management | Membership, health, consensus control, clock progress, relay progress and outcomes | 1 | 64 | Preconnected |
 | Commands | Control-plane and runtime requests | 1 | 32 | Preconnected |
 | Replication | Consensus log entries, runtime-state replication, ownership handoff | 1 | 8 | Preconnected |
 | Relay | Arrow record batches | 2 | 64 each | Preconnected |
@@ -133,7 +133,7 @@ The management connection reserves its 64 outbound stream slots as follows:
 | Shared management operations | 32 |
 | Discovery | 4 |
 | Application liveness | 8 |
-| Relay progress | 8 |
+| Progress reports and relay status | 8 |
 | Relay admission | 4 |
 | Relay cancellation | 4 |
 | Relay terminal outcomes | 4 |
@@ -154,7 +154,7 @@ applied separately to incoming and outgoing work across all peers and connection
 | Snapshot transfer | 8 |
 | Discovery | 8 |
 | Application liveness | 32 |
-| Relay progress | 8 |
+| Domain-clock progress | 8 |
 | Relay admission | 8 |
 | Relay cancellation | 4 |
 | Relay terminal outcomes | 4 |
@@ -187,7 +187,8 @@ operation's domain semantics.
    use this form.
 2. **Typed request and response.** The request type declares its operation name, response type,
    traffic class, admission subquota, deadline, and live-target requirement. Remote typed errors are
-   kept distinct from transport failures.
+   kept distinct from transport failures. Application health and domain-clock progress use this form
+   so their reserved quotas and typed outcomes apply independently of generic events.
 3. **Streamed response.** The receiver declares the exact byte length, then sends a flow-controlled
    sequence of chunks. The reader rejects early end, extra bytes, and a stalled chunk. Dropping the
    reader cancels the stream and releases its reservations.
@@ -200,9 +201,9 @@ operation's domain semantics.
 Connection setup has a five-second deadline covering TCP, TLS, HTTP/2, and connection binding. The
 default bounded request deadline is ten seconds and includes time waiting for an admission or stream
 slot. An operation can declare a tighter or longer semantic deadline; application health uses one
-second, while resource and state stream openings use longer operation deadlines. Once a streaming
-body is moving, five seconds without progress fails that transfer. Queueing never creates an
-unbounded extension to a declared deadline.
+second, domain-clock progress uses two seconds, and resource and state stream openings use longer
+operation deadlines. Once a streaming body is moving, five seconds without progress fails that
+transfer. Queueing never creates an unbounded extension to a declared deadline.
 
 ## Remote Relay Delivery
 
@@ -313,6 +314,31 @@ authoritative. The [Data Plane](./data-plane.md) defines how a local execution c
 state. The interconnect supplies bounded delivery between those owners and does not reinterpret
 their state.
 
+## Domain Clock Progress
+
+A paced domain's mapping, generation, and authority fence are committed control-plane state. The
+interconnect carries only replaceable progress from that committed authority. It uses a typed
+management request in the reserved progress subquota, rather than an unclassified cluster event.
+The response confirms that the authenticated receiver evaluated the report against its current
+fence; it does not establish or replace the receiver's committed clock mapping.
+
+For each domain and ready remote node, the authority owns one delivery loop with at most one request
+in flight and one latest pending report. A newer logical frontier replaces the pending report while
+the loop waits for capacity or a response, so a fast clock or slow peer cannot create an unbounded
+tick queue. The node-wide progress quota bounds attempts across every domain and peer. Liveness,
+relay admission, cancellation, and terminal outcomes retain their independent capacity.
+
+Only live peers that have installed the required runtime revision receive progress. A node that
+joins or reconnects receives the newest retained frontier once it becomes ready. Each attempt has a
+two-second physical deadline. A failed attempt waits 200 milliseconds, then retries the newest
+frontier; authority shutdown cancels both an active request and its retry delay.
+
+The wire report contains typed logical and UTC timestamps and no process-local monotonic instant.
+The receiver authenticates the reporting node and applies the committed generation, revision,
+authority, and fence checks before retaining the frontier. A stale, duplicate, reordered, or
+superseded report cannot replace the mapping or move logical time backward. See
+[Domains And Time](./domains-and-time.md) for clock semantics outside the transport boundary.
+
 ## Application Health And Availability
 
 An established HTTP/2 connection and a successful transport `PING` show that bytes can move; they
@@ -387,6 +413,10 @@ cover connection and stream occupancy, pending operations, setup failures and re
 exhaustion, request latency, relay channels and grants, admission wait, unresolved delivery age, and
 bulk-transfer bytes. Interconnect memory, worker queues, reactor delay, and consensus retention show
 whether pressure originates in transport, execution, or the protocol using it.
+
+Typed-request observations identify application health as operation `liveness` and replaceable
+domain-clock delivery as operation `progress`, so their request counts, outcomes, latency, and quota
+failures can be evaluated independently.
 
 Metric labels are bounded dimensions such as traffic class, direction, operation, outcome, and
 reason. They do not include peer, domain, relay, branch, delivery identity, or payload values.

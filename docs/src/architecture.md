@@ -79,6 +79,6 @@ the node. Application health is observed separately from transport connectivity.
 
 The [Cluster Interconnect](./interconnect.md) chapter defines peer identity, connection topology,
 wire contracts, resource isolation, exchange forms, relay delivery and reconciliation, consensus
-and bulk traffic, application health, lifecycle behavior, and observability.
+and bulk traffic, domain-clock progress, application health, lifecycle behavior, and observability.
 
 The rest of this section splits control-plane semantics from data-plane semantics because that distinction is fundamental to how Nervix behaves.

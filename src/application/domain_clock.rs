@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** Choosing a clock authority per domain, running the clock task, and delivering its
 //!   progress to every node.
-//! - **Depends on.** Consensus for the recorded authority and the interconnect to broadcast ticks.
+//! - **Depends on.** Consensus for the recorded authority and typed interconnect progress requests.
 //! - **Must not know.** What a domain does with the time it is given.
 
 use std::collections::BTreeSet;
@@ -12,18 +12,24 @@ use std::collections::BTreeSet;
 use ahash::{HashMap, HashMapExt};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_interconnect::{ControlEnvelope, DomainClockProgressEnvelope};
+use nervix_interconnect::DomainClockProgressRequest;
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, DomainClockAdvancement, DomainClockAuthority,
     DomainClockPeriod, DomainClockProgress, DomainClockState, DomainName, DomainPace, DomainStatus,
     DomainTick, Timestamp,
 };
-use tokio::time::{Duration, sleep};
+use tokio::{
+    sync::watch,
+    time::{Duration, sleep},
+};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::{background_task::BackgroundTask, session_service::SessionServiceImpl};
 use crate::{domain_clock_authority::DomainClockAuthorityCandidates, task_shutdown::JoinShutdown};
+
+const DOMAIN_CLOCK_PROGRESS_RETRY_BACKOFF: Duration = Duration::from_millis(200);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DomainClockTaskSpec {
     clock: DomainClockState,
@@ -36,6 +42,170 @@ struct DomainClockTaskSpec {
 pub(in crate::application) struct DomainClockTask {
     spec: DomainClockTaskSpec,
     pub(in crate::application) task: BackgroundTask,
+}
+
+/// One target's latest replaceable progress report and its physical delivery loop.
+///
+/// The watch channel retains one value regardless of tick rate or connection delay. A new report
+/// replaces the pending value while the previous request is in flight, and the transport's
+/// progress subquota bounds requests across every domain and peer on the node.
+struct DomainClockProgressDelivery {
+    latest: watch::Sender<Option<DomainClockProgressRequest>>,
+    task: BackgroundTask,
+}
+
+impl DomainClockProgressDelivery {
+    fn start(
+        service: SessionServiceImpl,
+        target: ClusterNodeIdentity,
+        shutdown: &CancellationToken,
+    ) -> Self {
+        let (latest, receiver) = watch::channel(None);
+        let token = shutdown.child_token();
+        let task_token = token.clone();
+        let handle = tokio::spawn(async move {
+            Self::run(service, target, receiver, task_token).await;
+        });
+        Self {
+            latest,
+            task: BackgroundTask {
+                cancel: token,
+                handle,
+            },
+        }
+    }
+
+    fn publish(&self, request: DomainClockProgressRequest) {
+        self.latest.send_replace(Some(request));
+    }
+
+    async fn stop(self) {
+        self.task.stop().await;
+    }
+
+    async fn run(
+        service: SessionServiceImpl,
+        target: ClusterNodeIdentity,
+        mut latest: watch::Receiver<Option<DomainClockProgressRequest>>,
+        shutdown: CancellationToken,
+    ) {
+        let mut retry_pending = false;
+        loop {
+            tokio::task::consume_budget().await;
+            if !retry_pending {
+                let changed = tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    changed = latest.changed() => changed,
+                };
+                if changed.is_err() {
+                    return;
+                }
+            }
+
+            let Some(request) = latest.borrow_and_update().clone() else {
+                retry_pending = false;
+                continue;
+            };
+            let domain_id = request.domain_id.clone();
+            let result = tokio::select! {
+                _ = shutdown.cancelled() => return,
+                result = service.inner.interconnect.request(target.node_id(), request) => result,
+            };
+            match result {
+                Ok(()) => {
+                    retry_pending = false;
+                }
+                Err(error) => {
+                    debug!(
+                        domain = domain_id.as_str(),
+                        node = %target,
+                        error = %error,
+                        "failed to deliver domain clock progress"
+                    );
+                    tokio::select! {
+                        _ = shutdown.cancelled() => return,
+                        _ = sleep(DOMAIN_CLOCK_PROGRESS_RETRY_BACKOFF) => {}
+                    }
+                    retry_pending = true;
+                }
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct DomainClockProgressDeliveries {
+    targets: HashMap<ClusterNodeIdentity, DomainClockProgressDelivery>,
+}
+
+impl DomainClockProgressDeliveries {
+    async fn reconcile(
+        &mut self,
+        service: &SessionServiceImpl,
+        spec: &DomainClockTaskSpec,
+        minimum_runtime_revision: u64,
+        latest: Option<&DomainClockProgress>,
+        shutdown: &CancellationToken,
+        domain_id: &DomainName,
+    ) {
+        let gossip = service.inner.cluster.availability_state().await;
+        let ready = service
+            .inner
+            .cluster
+            .nodes_ready_for_runtime_revision(minimum_runtime_revision)
+            .await;
+        let mut desired = gossip
+            .live_identities()
+            .intersection(&ready)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        desired.remove(&spec.authority);
+
+        let departed = self
+            .targets
+            .keys()
+            .filter(|target| !desired.contains(*target))
+            .cloned()
+            .collect::<Vec<_>>();
+        for target in departed {
+            tokio::task::consume_budget().await;
+            if let Some(delivery) = self.targets.remove(&target) {
+                delivery.stop().await;
+            }
+        }
+
+        for target in desired {
+            tokio::task::consume_budget().await;
+            if self.targets.contains_key(&target) {
+                continue;
+            }
+            let delivery =
+                DomainClockProgressDelivery::start(service.clone(), target.clone(), shutdown);
+            if let Some(progress) = latest {
+                delivery.publish(DomainClockProgressRequest {
+                    domain_id: domain_id.clone(),
+                    progress: progress.clone(),
+                });
+            }
+            self.targets.insert(target, delivery);
+        }
+    }
+
+    fn publish(&self, domain_id: &DomainName, progress: &DomainClockProgress) {
+        for delivery in self.targets.values() {
+            delivery.publish(DomainClockProgressRequest {
+                domain_id: domain_id.clone(),
+                progress: progress.clone(),
+            });
+        }
+    }
+
+    async fn stop_all(self) {
+        for delivery in self.targets.into_values() {
+            tokio::task::consume_budget().await;
+            delivery.stop().await;
+        }
+    }
 }
 
 /// Producers whose authority was revoked while they finish an in-flight fenced delivery.
@@ -268,12 +438,22 @@ async fn run_domain_clock(
 
     let mut next_tick_id = 1;
     let mut latest_progress = None;
-    let mut delivered_targets = BTreeSet::new();
+    let mut deliveries = DomainClockProgressDeliveries::default();
     loop {
         tokio::task::consume_budget().await;
         if shutdown.is_cancelled() {
             break;
         }
+        deliveries
+            .reconcile(
+                &service,
+                &spec,
+                minimum_runtime_revision,
+                latest_progress.as_ref(),
+                &shutdown,
+                &domain_id,
+            )
+            .await;
         let wall_time = current_timestamp();
         let due = match spec
             .clock
@@ -294,18 +474,20 @@ async fn run_domain_clock(
             }
         };
         if let Some(advancement) = due {
-            latest_progress = Some(
-                emit_domain_clock_progress(
-                    &service,
-                    &domain_id,
-                    &spec,
-                    minimum_runtime_revision,
-                    &mut next_tick_id,
-                    advancement,
-                    &mut delivered_targets,
-                )
-                .await,
-            );
+            let progress = emit_domain_clock_progress(
+                &service,
+                &domain_id,
+                &spec,
+                &mut next_tick_id,
+                advancement,
+                &deliveries,
+                &shutdown,
+            )
+            .await;
+            let Some(progress) = progress else {
+                break;
+            };
+            latest_progress = Some(progress);
             continue;
         }
         let next_boundary = match spec.clock.tick_boundary(spec.period, next_tick_id) {
@@ -355,38 +537,34 @@ async fn run_domain_clock(
         tokio::select! {
             _ = shutdown.cancelled() => break,
             _ = sleep(wait) => {}
-            _ = &mut cluster_change => {
-                if let Some(progress) = latest_progress.as_ref() {
-                    deliver_domain_clock_progress(
-                        &service,
-                        &domain_id,
-                        &spec,
-                        minimum_runtime_revision,
-                        progress,
-                        &mut delivered_targets,
-                    )
-                    .await;
-                }
-            }
+            _ = &mut cluster_change => {}
         }
     }
+    deliveries.stop_all().await;
 }
 
 async fn emit_domain_clock_progress(
     service: &SessionServiceImpl,
     domain_id: &DomainName,
     spec: &DomainClockTaskSpec,
-    minimum_runtime_revision: u64,
     next_tick_id: &mut u64,
     advancement: DomainClockAdvancement,
-    delivered_targets: &mut BTreeSet<ClusterNodeIdentity>,
-) -> DomainClockProgress {
+    deliveries: &DomainClockProgressDeliveries,
+    shutdown: &CancellationToken,
+) -> Option<DomainClockProgress> {
     #[cfg(feature = "testing")]
     let progress_was_paused = service
         .inner
         .runtime
-        .pause_domain_clock_progress_if_armed(domain_id, service.inner.consensus.local_node_id())
+        .pause_domain_clock_progress_if_armed(
+            domain_id,
+            service.inner.consensus.local_node_id(),
+            shutdown,
+        )
         .await;
+    if shutdown.is_cancelled() {
+        return None;
+    }
     let wall_clock = current_timestamp();
     let boundary = advancement.boundary();
     let tick = DomainTick {
@@ -402,16 +580,14 @@ async fn emit_domain_clock_progress(
         authority: spec.authority.clone(),
         tick,
     };
-    delivered_targets.clear();
-    deliver_domain_clock_progress(
-        service,
-        domain_id,
-        spec,
-        minimum_runtime_revision,
-        &progress,
-        delivered_targets,
-    )
-    .await;
+    service.handle_domain_clock_progress(
+        spec.authority.node_id(),
+        DomainClockProgressRequest {
+            domain_id: domain_id.clone(),
+            progress: progress.clone(),
+        },
+    );
+    deliveries.publish(domain_id, &progress);
     #[cfg(feature = "testing")]
     if progress_was_paused {
         service.inner.runtime.mark_domain_clock_progress_delivered(
@@ -419,71 +595,7 @@ async fn emit_domain_clock_progress(
             service.inner.consensus.local_node_id(),
         );
     }
-    progress
-}
-
-async fn deliver_domain_clock_progress(
-    service: &SessionServiceImpl,
-    domain_id: &DomainName,
-    spec: &DomainClockTaskSpec,
-    minimum_runtime_revision: u64,
-    progress: &DomainClockProgress,
-    delivered_targets: &mut BTreeSet<ClusterNodeIdentity>,
-) {
-    let gossip = service.inner.cluster.availability_state().await;
-    let ready = service
-        .inner
-        .cluster
-        .nodes_ready_for_runtime_revision(minimum_runtime_revision)
-        .await;
-    let mut targets = gossip
-        .live_identities()
-        .intersection(&ready)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    targets.insert(spec.authority.clone());
-    let pending_targets = targets
-        .difference(delivered_targets)
-        .cloned()
-        .collect::<Vec<_>>();
-    for target in pending_targets {
-        tokio::task::consume_budget().await;
-        let delivered = if target == spec.authority {
-            service.handle_domain_clock_progress(
-                spec.authority.node_id(),
-                DomainClockProgressEnvelope {
-                    domain_id: domain_id.clone(),
-                    progress: progress.clone(),
-                },
-            );
-            true
-        } else {
-            match service
-                .dispatch_interconnect_control(
-                    target.node_id(),
-                    ControlEnvelope::DomainClockProgress(DomainClockProgressEnvelope {
-                        domain_id: domain_id.clone(),
-                        progress: progress.clone(),
-                    }),
-                )
-                .await
-            {
-                Ok(()) => true,
-                Err(error) => {
-                    warn!(
-                        domain = domain_id.as_str(),
-                        node = %target,
-                        error = %error,
-                        "failed to deliver domain tick"
-                    );
-                    false
-                }
-            }
-        };
-        if delivered {
-            delivered_targets.insert(target);
-        }
-    }
+    Some(progress)
 }
 
 pub(in crate::application) fn current_timestamp() -> Timestamp {
@@ -574,16 +686,16 @@ impl SessionServiceImpl {
     pub(in crate::application) fn handle_domain_clock_progress(
         &self,
         authenticated_node: &ClusterNodeName,
-        envelope: DomainClockProgressEnvelope,
+        request: DomainClockProgressRequest,
     ) {
         if let Err(error) = self.inner.runtime.handle_domain_clock_progress(
-            &envelope.domain_id,
+            &request.domain_id,
             authenticated_node,
-            &envelope.progress,
+            &request.progress,
         ) {
             self.broadcast_error(format!(
                 "failed to apply domain clock progress for '{}': {error}",
-                envelope.domain_id.as_str(),
+                request.domain_id.as_str(),
             ));
         }
     }

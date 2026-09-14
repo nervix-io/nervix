@@ -43,10 +43,11 @@ use triomphe::Arc;
 use super::{
     ActivateOwnershipHandoffStateRequest, CaptureOwnershipHandoffStateRequest,
     ConfirmOwnershipHandoffStateRequest, ControlEnvelope, DescribeIngestorRequest,
-    DiscardOwnershipHandoffStateRequest, ForcedOwnershipRecoveryPreparation,
-    IngestorDescribeEnvelope, MAX_CONCURRENT_HEALTH_PROBES, OwnershipHandoffCheckpoint,
-    OwnershipHandoffResponse, PoolClass, PrepareForcedOwnershipRecoveryRequest,
-    PrepareOwnershipHandoffStateRequest, Transport, TransportError, wire,
+    DiscardOwnershipHandoffStateRequest, DomainClockProgressRequest,
+    ForcedOwnershipRecoveryPreparation, IngestorDescribeEnvelope, MAX_CONCURRENT_HEALTH_PROBES,
+    OwnershipHandoffCheckpoint, OwnershipHandoffResponse, PoolClass,
+    PrepareForcedOwnershipRecoveryRequest, PrepareOwnershipHandoffStateRequest, Transport,
+    TransportError, wire,
 };
 use crate::{
     connection::{
@@ -241,6 +242,15 @@ impl InterconnectRequest for ApplicationHealthProbe {
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
     const TIMEOUT: Duration = Duration::from_secs(1);
+}
+
+impl InterconnectRequest for DomainClockProgressRequest {
+    type Response = ();
+
+    const NAME: &'static str = "domain_clock_progress";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
+    const TIMEOUT: Duration = Duration::from_secs(2);
 }
 
 /// A typed request that opens one ordered bidirectional frame stream.
@@ -1590,6 +1600,24 @@ mod tests {
         assert_eq!(ApplicationHealthProbe::CLASS, PoolClass::Management);
         assert_eq!(ApplicationHealthProbe::SUBQUOTA, RequestSubquota::Liveness);
         assert_eq!(ApplicationHealthProbe::TIMEOUT, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn domain_clock_progress_uses_its_reserved_management_capacity() {
+        fn assert_unit_response<M>()
+        where
+            M: InterconnectRequest<Response = ()>,
+        {
+        }
+
+        assert_unit_response::<DomainClockProgressRequest>();
+        assert_eq!(DomainClockProgressRequest::NAME, "domain_clock_progress");
+        assert_eq!(DomainClockProgressRequest::CLASS, PoolClass::Management);
+        assert_eq!(
+            DomainClockProgressRequest::SUBQUOTA,
+            RequestSubquota::Progress
+        );
+        assert_eq!(DomainClockProgressRequest::TIMEOUT, Duration::from_secs(2));
     }
 
     #[test]
