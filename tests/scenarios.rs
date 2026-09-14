@@ -2650,10 +2650,12 @@ async fn when_node_starts_durable_catch_up(
             }
 
             let name = burst_domain_name(&writer_prefix, written);
-            let outcome = client
-                .execute(format!("CREATE DOMAIN {name};"))
-                .await
-                .map_err(|error| error.to_string())?;
+            let request = client.execute(format!("CREATE DOMAIN {name};"));
+            let outcome = tokio::select! {
+                () = writer_cancellation.cancelled() => return Ok(written),
+                outcome = request => outcome,
+            };
+            let outcome = outcome.map_err(|error| error.to_string())?;
             if !outcome.success {
                 return Err(format!(
                     "command failed with {:?}: {}; diagnostics: {:?}",
