@@ -823,6 +823,46 @@ impl Cluster {
     }
 
     pub(crate) async fn start_node(&mut self, node_id: &str) -> io::Result<()> {
+        self.start_node_without_waiting_for_raft_catch_up(node_id)
+            .await?;
+        let mut leader_applied = None;
+        for probe_node_id in self
+            .nodes
+            .keys()
+            .filter(|existing_id| existing_id.as_str() != node_id)
+        {
+            tokio::task::consume_budget().await;
+            let Ok(probe_status) = self.show_status(probe_node_id).await else {
+                continue;
+            };
+            let Some(leader_id) = probe_status
+                .current_leader
+                .filter(|leader_id| leader_id != node_id)
+            else {
+                continue;
+            };
+            let Ok(leader_status) = self.show_status(&leader_id).await else {
+                continue;
+            };
+            leader_applied = leader_status.last_applied.filter(|value| *value > 0);
+            if leader_applied.is_some() {
+                break;
+            }
+        }
+        if let Some(leader_applied) = leader_applied {
+            self.wait_for_last_applied_at_least(node_id, leader_applied)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Start a stopped node and wait only until its server is ready to answer requests.
+    ///
+    /// The node may still be catching up its Raft log when this returns.
+    pub(crate) async fn start_node_without_waiting_for_raft_catch_up(
+        &mut self,
+        node_id: &str,
+    ) -> io::Result<()> {
         let handle = self
             .nodes
             .get_mut(node_id)
@@ -852,33 +892,6 @@ impl Cluster {
         }
         if let Some(error) = last_error {
             return Err(error);
-        }
-        let mut leader_applied = None;
-        for probe_node_id in self
-            .nodes
-            .keys()
-            .filter(|existing_id| existing_id.as_str() != node_id)
-        {
-            let Ok(probe_status) = self.show_status(probe_node_id).await else {
-                continue;
-            };
-            let Some(leader_id) = probe_status
-                .current_leader
-                .filter(|leader_id| leader_id != node_id)
-            else {
-                continue;
-            };
-            let Ok(leader_status) = self.show_status(&leader_id).await else {
-                continue;
-            };
-            leader_applied = leader_status.last_applied.filter(|value| *value > 0);
-            if leader_applied.is_some() {
-                break;
-            }
-        }
-        if let Some(leader_applied) = leader_applied {
-            self.wait_for_last_applied_at_least(node_id, leader_applied)
-                .await?;
         }
         Ok(())
     }
