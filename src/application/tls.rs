@@ -308,54 +308,42 @@ impl SessionServiceImpl {
                     continue;
                 };
 
-                let id =
-                    match resolve_resource_id(&resources, domain_id, &tls.resource, tls.version) {
-                        Ok(id) => id,
-                        Err(error) => {
-                            warn!(
-                                domain = domain_id.as_str(),
-                                vhost = vhost.name.as_str(),
-                                resource = tls.resource.as_str(),
-                                error,
-                                "failed to resolve VHOST TLS resource version"
-                            );
-                            continue;
-                        }
-                    };
+                let id = resolve_resource_id(&resources, domain_id, &tls.resource, tls.version)
+                    .map_err(|error| {
+                        format!(
+                            "failed to resolve TLS resource for vhost '{}' in domain '{}': {error}",
+                            vhost.name.as_str(),
+                            domain_id.as_str()
+                        )
+                    })?;
                 let version = id.version;
-                let certified_key =
-                    match load_vhost_tls_materials(&self.inner.resource_store, &id).await {
-                        Ok(materials) => materials.certified_key,
-                        Err(error) => {
-                            warn!(
-                                domain = domain_id.as_str(),
-                                vhost = vhost.name.as_str(),
-                                resource = tls.resource.as_str(),
-                                version,
-                                error,
-                                "failed to load VHOST TLS materials"
-                            );
-                            continue;
-                        }
-                    };
-
-                let mut applied_hostname = false;
-                for hostname in &vhost.hostnames {
-                    if let Err(error) = resolver.add(hostname, certified_key.clone()) {
-                        warn!(
-                            domain = domain_id.as_str(),
-                            vhost = vhost.name.as_str(),
-                            hostname,
-                            resource = tls.resource.as_str(),
+                let materials = load_vhost_tls_materials(&self.inner.resource_store, &id)
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "failed to load TLS resource '{}@{}' for vhost '{}' in domain '{}': \
+                             {error}",
+                            tls.resource.as_str(),
                             version,
-                            error = %error,
-                            "failed to add VHOST TLS hostname to SNI resolver"
-                        );
-                        continue;
-                    }
-                    applied_hostname = true;
+                            vhost.name.as_str(),
+                            domain_id.as_str()
+                        )
+                    })?;
+                let certified_key = materials.certified_key;
+
+                for hostname in &vhost.hostnames {
+                    resolver
+                        .add(hostname, certified_key.clone())
+                        .map_err(|error| {
+                            format!(
+                                "failed to activate TLS hostname '{hostname}' for vhost '{}' in \
+                                 domain '{}': {error}",
+                                vhost.name.as_str(),
+                                domain_id.as_str()
+                            )
+                        })?;
                 }
-                configured_tls |= applied_hostname;
+                configured_tls = true;
             }
         }
 

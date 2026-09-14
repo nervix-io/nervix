@@ -76,6 +76,8 @@ pub fn split_query_statements(query: &str) -> Result<Vec<&str>, QuerySplitError>
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutcome {
+    /// Stable identity of the logical server command across redirects and reconnects.
+    pub execution_reference: Option<String>,
     pub success: bool,
     pub kind: CommandOutcomeKind,
     pub message: String,
@@ -92,15 +94,6 @@ pub struct CommandOutcome {
 pub struct ResourceUploadOutcome {
     pub identity: ResourceUploadIdentity,
     pub version: u64,
-    pub published: bool,
-    pub cluster_ready: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResourceReadiness {
-    pub version: u64,
-    pub cluster_ready: bool,
-    pub message: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,10 +231,8 @@ pub enum ClientError {
     BuildUploadArchive,
     #[error("upload request failed: {0}")]
     UploadResource(#[source] Box<tonic::Status>),
-    #[error("resource readiness wait failed: {0}")]
-    WaitForResourceReady(#[source] Box<tonic::Status>),
-    #[error("resource readiness timeout is too large")]
-    ResourceReadinessTimeoutTooLarge,
+    #[error("upload response identity '{received}' does not match request identity '{expected}'")]
+    UploadIdentityMismatch { expected: String, received: String },
     #[error("failed to load TLS CA certificate")]
     LoadTlsCaCertificate(#[source] std::io::Error),
 }
@@ -455,7 +446,14 @@ impl Client {
     pub async fn execute(&self, query: impl Into<String>) -> Result<CommandOutcome, ClientError> {
         let query = query.into();
         let _command_guard = self.inner.command_lock.lock().await;
-        let outcome = self.execute_with_redirects(&query).await?;
+        let execution_reference = uuid::Uuid::now_v7().to_string();
+        let expected_transaction_position = self
+            .active_transaction_status()
+            .await
+            .map(|status| status.pending_count);
+        let outcome = self
+            .execute_with_redirects(&query, &execution_reference, expected_transaction_position)
+            .await?;
         if let Some(transaction) = outcome.transaction.clone() {
             self.adopt_transaction_status(transaction).await;
         }
@@ -496,10 +494,18 @@ impl Client {
         rx.await.map_err(|_| ClientError::SessionClosed)
     }
 
-    async fn execute_with_redirects(&self, query: &str) -> Result<CommandOutcome, ClientError> {
+    async fn execute_with_redirects(
+        &self,
+        query: &str,
+        execution_reference: &str,
+        expected_transaction_position: Option<u64>,
+    ) -> Result<CommandOutcome, ClientError> {
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
             tokio::task::consume_budget().await;
-            let outcome = match self.execute_once(query).await {
+            let outcome = match self
+                .execute_once(query, execution_reference, expected_transaction_position)
+                .await
+            {
                 Ok(outcome) => outcome,
                 Err(ClientError::SessionClosed) => match self.recover_session().await? {
                     SessionRecovery::Ready => continue,
@@ -538,7 +544,8 @@ impl Client {
                 },
             }
         }
-        self.execute_once(query).await
+        self.execute_once(query, execution_reference, expected_transaction_position)
+            .await
     }
 
     async fn attach_transaction_with_redirects(
@@ -609,18 +616,14 @@ impl Client {
         if let Some(status) = outcome.transaction.clone() {
             self.adopt_transaction_status(status).await;
         }
-        if outcome.success {
-            let operation_was_observed = outcome
-                .transaction
-                .as_ref()
-                .is_some_and(|current| transaction_operation_was_observed(&previous, current));
-            Ok(operation_was_observed.then_some(outcome))
-        } else if outcome
+        if outcome
             .transaction
             .as_ref()
             .is_some_and(|status| !status.state.is_active())
         {
             Ok(Some(outcome))
+        } else if outcome.success {
+            Ok(None)
         } else {
             if outcome.transaction.is_none() {
                 *self.inner.transaction.lock().await = None;
@@ -629,7 +632,12 @@ impl Client {
         }
     }
 
-    async fn execute_once(&self, query: &str) -> Result<CommandOutcome, ClientError> {
+    async fn execute_once(
+        &self,
+        query: &str,
+        execution_reference: &str,
+        expected_transaction_position: Option<u64>,
+    ) -> Result<CommandOutcome, ClientError> {
         if let Ok(statements) = nervix_nspl::client_statement::parse_client_statement_sources(query)
             && statements
                 .iter()
@@ -655,7 +663,8 @@ impl Client {
                 .execute_client_statement(parsed.statement, &source)
                 .await;
         }
-        self.execute_remote_once(query).await
+        self.execute_remote_once(query, execution_reference, expected_transaction_position)
+            .await
     }
 
     async fn execute_client_statement(
@@ -688,11 +697,20 @@ impl Client {
             | ClientStatement::CommitTransaction
             | ClientStatement::RevertTransaction
             | ClientStatement::DeleteSubscription(_)
-            | ClientStatement::Server(_) => self.execute_remote_once(source).await,
+            | ClientStatement::Server(_) => {
+                let execution_reference = uuid::Uuid::now_v7().to_string();
+                self.execute_remote_once(source, &execution_reference, None)
+                    .await
+            }
         }
     }
 
-    async fn execute_remote_once(&self, query: &str) -> Result<CommandOutcome, ClientError> {
+    async fn execute_remote_once(
+        &self,
+        query: &str,
+        execution_reference: &str,
+        expected_transaction_position: Option<u64>,
+    ) -> Result<CommandOutcome, ClientError> {
         let (tx, rx) = oneshot::channel();
         self.inner
             .pending
@@ -703,6 +721,8 @@ impl Client {
             request: Some(proto::session_request::Request::Command(CommandRequest {
                 query: query.to_string(),
                 domain: self.inner.domain.lock().await.clone(),
+                execution_reference: execution_reference.to_string(),
+                expected_transaction_position,
             })),
         };
         let request_tx = self.inner.request_tx.lock().await.clone();
@@ -903,9 +923,19 @@ impl Client {
                 }
                 Err(status) => return Err(ClientError::UploadResource(Box::new(status))),
             };
+            let response_kind = proto::CommandResultKind::try_from(response.kind).ok();
+            if response_kind != Some(proto::CommandResultKind::NotLeader)
+                && response.upload_identity != upload_identity.as_str()
+            {
+                return Err(ClientError::UploadIdentityMismatch {
+                    expected: upload_identity.to_string(),
+                    received: response.upload_identity,
+                });
+            }
             let outcome = CommandOutcome {
+                execution_reference: None,
                 success: response.success,
-                kind: match proto::CommandResultKind::try_from(response.kind).ok() {
+                kind: match response_kind {
                     Some(proto::CommandResultKind::NotLeader) => CommandOutcomeKind::NotLeader,
                     Some(proto::CommandResultKind::Ok) if response.success => {
                         CommandOutcomeKind::Ok
@@ -923,8 +953,6 @@ impl Client {
                 resource_upload: Some(ResourceUploadOutcome {
                     identity: upload_identity.clone(),
                     version: response.version,
-                    published: response.published,
-                    cluster_ready: response.cluster_ready,
                 }),
                 results: Vec::new(),
             };
@@ -953,6 +981,7 @@ impl Client {
         }
 
         Ok(CommandOutcome {
+            execution_reference: None,
             success: false,
             kind: CommandOutcomeKind::Error,
             message: "upload redirect loop exceeded".to_string(),
@@ -964,42 +993,8 @@ impl Client {
             resource_upload: Some(ResourceUploadOutcome {
                 identity: upload_identity,
                 version: 0,
-                published: false,
-                cluster_ready: false,
             }),
             results: Vec::new(),
-        })
-    }
-
-    pub async fn wait_for_resource_ready(
-        &self,
-        identifier: &str,
-        version: u64,
-        timeout: Duration,
-    ) -> Result<ResourceReadiness, ClientError> {
-        let current_server = self.inner.current_server.lock().await.clone();
-        let server = current_server.ok_or(ClientError::SessionClosed)?;
-        let channel = self.inner.grpc_connector.connect(&server).await?;
-        let mut client = SessionServiceClient::new(channel);
-        let timeout_millis = u64::try_from(timeout.as_millis())
-            .map_err(|_| ClientError::ResourceReadinessTimeoutTooLarge)?;
-        let response = client
-            .wait_for_resource_ready(request_with_auth(
-                proto::WaitForResourceReadyRequest {
-                    name: identifier.to_string(),
-                    version,
-                    domain: self.domain().await,
-                    timeout_millis,
-                },
-                self.inner.grpc_connector.options.basic_authorization(),
-            )?)
-            .await
-            .map_err(|status| ClientError::WaitForResourceReady(Box::new(status)))?
-            .into_inner();
-        Ok(ResourceReadiness {
-            version: response.version,
-            cluster_ready: response.cluster_ready,
-            message: response.message,
         })
     }
 
@@ -1106,7 +1101,8 @@ async fn start_session(
                 Some(proto::session_response::Event::Result(result)) => {
                     let pending = pending.lock().await.pop_front();
                     if let Some(PendingResponse::Command(tx)) = pending {
-                        tx.send(result.into()).means_peer_left("command requester");
+                        tx.send((*result).into())
+                            .means_peer_left("command requester");
                     }
                 }
                 Some(proto::session_response::Event::Domains(domains)) => {
@@ -1355,6 +1351,7 @@ fn format_domain_list(domains: &[DomainInfo]) -> String {
 
 fn command_ok_outcome(message: String) -> CommandOutcome {
     CommandOutcome {
+        execution_reference: None,
         success: true,
         kind: CommandOutcomeKind::Ok,
         message,
@@ -1370,6 +1367,7 @@ fn command_ok_outcome(message: String) -> CommandOutcome {
 
 fn command_error_outcome(message: String) -> CommandOutcome {
     CommandOutcome {
+        execution_reference: None,
         success: false,
         kind: CommandOutcomeKind::Error,
         message,
@@ -1402,16 +1400,6 @@ fn recovered_transaction_outcome(mut outcome: CommandOutcome) -> CommandOutcome 
         outcome.kind = CommandOutcomeKind::Ok;
     }
     outcome
-}
-
-fn transaction_operation_was_observed(
-    previous: &TransactionStatus,
-    current: &TransactionStatus,
-) -> bool {
-    current.state != TransactionState::Open
-        || current.pending_count != previous.pending_count
-        || current.completed_count != previous.completed_count
-        || current.total_count != previous.total_count
 }
 
 impl SubscriptionRequest {
@@ -1469,6 +1457,8 @@ impl From<proto::Diagnostic> for Diagnostic {
 impl From<proto::CommandResult> for CommandOutcome {
     fn from(value: proto::CommandResult) -> Self {
         Self {
+            execution_reference: (!value.execution_reference.is_empty())
+                .then_some(value.execution_reference),
             success: value.success,
             kind: CommandOutcomeKind::from_i32(value.kind),
             message: value.message,
@@ -1574,8 +1564,7 @@ mod tests {
         Diagnostic, GrpcConnector, LeaderRouting, PendingResponse, ServerEvent, ServerEventLevel,
         SubscriptionEvent, SubscriptionRequest, TlsRequirement, TransactionState,
         TransactionStatus, clear_pending_responses, expand_user_path, proto, reconnect_candidates,
-        recovered_transaction_outcome, split_query_statements, transaction_operation_was_observed,
-        upload_status_is_retryable,
+        recovered_transaction_outcome, split_query_statements, upload_status_is_retryable,
     };
 
     #[test]
@@ -1717,6 +1706,7 @@ mod tests {
                 error: String::new(),
                 failing_step: None,
             }),
+            execution_reference: "command-1".to_string(),
         });
         assert!(!outcome.success);
         assert_eq!(outcome.kind, CommandOutcomeKind::NotLeader);
@@ -1795,6 +1785,7 @@ mod tests {
     #[test]
     fn not_leader_without_a_redirect_waits_for_election_convergence() {
         let mut outcome = CommandOutcome {
+            execution_reference: Some("command-1".to_string()),
             success: false,
             kind: CommandOutcomeKind::NotLeader,
             message: "not-a-leader".to_string(),
@@ -1816,32 +1807,9 @@ mod tests {
     }
 
     #[test]
-    fn transaction_restore_detects_replicated_progress_before_replay() {
-        let previous = TransactionStatus {
-            id: "tx-1".to_string(),
-            domain: "tenant".to_string(),
-            state: TransactionState::Open,
-            pending_count: 1,
-            completed_count: 0,
-            total_count: 1,
-            error: None,
-            failing_step: None,
-        };
-        assert!(!transaction_operation_was_observed(&previous, &previous));
-
-        let mut queued = previous.clone();
-        queued.pending_count = 2;
-        queued.total_count = 2;
-        assert!(transaction_operation_was_observed(&previous, &queued));
-
-        let mut committing = previous.clone();
-        committing.state = TransactionState::Committing;
-        assert!(transaction_operation_was_observed(&previous, &committing));
-    }
-
-    #[test]
     fn recovered_committed_transaction_returns_the_aggregate_commit_outcome() {
         let outcome = recovered_transaction_outcome(CommandOutcome {
+            execution_reference: Some("command-1".to_string()),
             success: false,
             kind: CommandOutcomeKind::Error,
             message: "transaction 'tx-1' finished with outcome COMMITTED".to_string(),
@@ -1865,6 +1833,7 @@ mod tests {
             }),
             resource_upload: None,
             results: vec![CommandOutcome {
+                execution_reference: Some("command-1.0".to_string()),
                 success: true,
                 kind: CommandOutcomeKind::Ok,
                 message: "quiesce level: DOMAIN_PAUSE".to_string(),
@@ -1989,7 +1958,7 @@ mod tests {
     }
 
     #[test]
-    fn upload_retries_transport_statuses_that_can_hide_a_published_response() {
+    fn upload_retries_transport_statuses_that_can_hide_an_installed_outcome() {
         for code in [
             tonic::Code::Cancelled,
             tonic::Code::Unknown,

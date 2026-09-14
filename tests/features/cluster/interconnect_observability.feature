@@ -118,7 +118,7 @@ Feature: Interconnection observability
       """
     Then the last command output contains
       """
-      published resource version 1
+      uploaded resource version 1
       """
     When node "node-3" is started
     Then within "30s" node "node-1" eventually reports describe resource as "- node-3 topology=alive state=ready"

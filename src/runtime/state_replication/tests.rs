@@ -3,13 +3,19 @@
 //! May depend on: runtime internals and test-only storage fixtures.
 //! Must not know: production control-plane orchestration or edge protocols.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    collections::BTreeMap,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use ahash::HashMap;
 use fjall::Database;
 use nervix_models::{
-    ClusterNodeName, DomainSchedule, ModelKind, ModelName, NodeRef, ParseAsType, ScheduledNode,
-    Timestamp,
+    ClusterNodeIncarnation, ClusterNodeName, CreateRelay, CreateSchema, DomainNodeRef,
+    DomainSchedule, DomainStatus, MaterializedRelayState, ModelKind, ModelName, NodeRef,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
+    OwnershipTransition, ParseAsType, RelayBranching, RelayName, ScheduledNode, SchemaField,
+    SchemaName, Timestamp,
 };
 use nonzero_ext::nonzero;
 use tempfile::tempdir;
@@ -39,6 +45,639 @@ fn recovered_handoff_retries_schedule_rebuild_until_activation() {
     let mut ordinary = OwnershipHandoffActivationAuthorization::AuthorizedByPreparation;
     assert!(!ordinary.authorize());
     assert!(ordinary.is_authorized());
+}
+
+#[tokio::test]
+async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuild() {
+    let dir = tempdir().expect("temporary runtime state directory should open");
+    let domain = domain("default");
+    let identifier = named::<ModelName>("latest_orders");
+    let source = named::<ClusterNodeName>("node-1");
+    let destination = named::<ClusterNodeName>("node-2");
+    let operation_id = "forced-recovery";
+    let placement = RuntimeStatePlacement {
+        domain: domain.clone(),
+        state: RuntimeStateKind::MaterializedRelay,
+        kind: ModelKind::Relay,
+        identifier: identifier.clone(),
+        schema_fingerprint: [7; 32],
+        branch_key: None,
+    };
+    let payload = empty_sealed_container(placement.schema_fingerprint)
+        .expect("empty materialized state should seal");
+    let prepared = PersistedRuntimeStateEntry {
+        lsm: 5,
+        schema_fingerprint: placement.schema_fingerprint,
+        payload: payload.clone(),
+    };
+    let schema = SchemaName::from(&identifier);
+    let schema_node = ScheduledNode::new(nervix_models::Model::Schema(CreateSchema {
+        name: schema.clone(),
+        fields: vec![SchemaField {
+            name: named("order_id"),
+            ty: ParseAsType::I64,
+            optional: false,
+            sensitive: false,
+        }],
+    }));
+    let mut scheduled = ScheduledNode::new(nervix_models::Model::Relay(CreateRelay {
+        name: RelayName::from(&identifier),
+        schema,
+        buffer: nonzero!(4usize),
+        branching: RelayBranching::unbranched(),
+        materialized_state: Some(MaterializedRelayState::LastByTimestamp),
+    }))
+    .with_schema_fingerprint(placement.schema_fingerprint)
+    .placed_on(Some(destination.clone()), vec![destination.clone()]);
+    scheduled.ownership_transition = Some(OwnershipTransition {
+        id: operation_id.to_string(),
+        source: source.clone(),
+        destination: destination.clone(),
+        state_recovery: OwnershipStateRecoveryOutcome::Unverified,
+        resets: Vec::new(),
+    });
+    let initial_schedule = DomainSchedule::new(
+        domain.clone(),
+        vec![schema_node.clone(), scheduled.clone()],
+        Vec::new(),
+    );
+    let initial_fingerprint = Runtime::ownership_handoff_schedule_fingerprint(&initial_schedule)
+        .expect("initial schedule should have a recovery fingerprint");
+    let entity = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, identifier.clone());
+
+    {
+        let db = Database::builder(dir.path())
+            .open()
+            .expect("database should open");
+        let runtime = Runtime::with_persistence(Some(db), Duration::from_secs(3_600))
+            .expect("runtime should open persisted state");
+        *runtime.inner.remote_dispatch.local_node_id.write() = Some(destination.clone());
+        *runtime.inner.remote_dispatch.local_node_incarnation.write() =
+            Some(ClusterNodeIncarnation::new(42));
+        let mut domain_state = unpaced_domain_state(domain.as_str());
+        domain_state.status = DomainStatus::Stopped;
+        runtime.sync_domains(&BTreeMap::from([(domain.clone(), domain_state)]));
+        let recovery = ForcedRuntimeStateRecoveryTransition {
+            operation_id,
+            source: &source,
+            destination: &destination,
+            destination_incarnation: ClusterNodeIncarnation::new(42),
+            entity: &entity,
+            target_schedule_fingerprint: initial_fingerprint,
+        };
+        let store = runtime
+            .inner
+            .state_store
+            .as_ref()
+            .expect("runtime should own a state store");
+        store
+            .persist_forced_recovery_preparation(&recovery, &[(placement.clone(), prepared)])
+            .expect("forced recovery preparation should persist");
+        runtime
+            .rebuild_domain_from_schedule(
+                &destination,
+                &domain,
+                Some(initial_schedule.clone()),
+                false,
+            )
+            .await
+            .expect("the initial forced-recovery schedule should build");
+        store
+            .persist_latest_snapshot(&placement, 6, &payload)
+            .expect("new owner checkpoint should persist");
+    }
+
+    {
+        let db = Database::builder(dir.path())
+            .open()
+            .expect("database should reopen after the owner restart");
+        let runtime = Runtime::with_persistence(Some(db), Duration::from_secs(3_600))
+            .expect("restarted runtime should open persisted state");
+        *runtime.inner.remote_dispatch.local_node_id.write() = Some(destination.clone());
+        *runtime.inner.remote_dispatch.local_node_incarnation.write() =
+            Some(ClusterNodeIncarnation::new(43));
+        let mut domain_state = unpaced_domain_state(domain.as_str());
+        domain_state.status = DomainStatus::Stopped;
+        runtime.sync_domains(&BTreeMap::from([(domain.clone(), domain_state)]));
+        let unrelated_schema = ScheduledNode::new(nervix_models::Model::Schema(CreateSchema {
+            name: named("unrelated_event"),
+            fields: vec![SchemaField {
+                name: named("event_id"),
+                ty: ParseAsType::I64,
+                optional: false,
+                sensitive: false,
+            }],
+        }));
+        let rebuilt_schedule = DomainSchedule::new(
+            domain.clone(),
+            vec![schema_node, scheduled, unrelated_schema],
+            Vec::new(),
+        );
+        let rebuilt_fingerprint =
+            Runtime::ownership_handoff_schedule_fingerprint(&rebuilt_schedule)
+                .expect("rebuilt schedule should have a recovery fingerprint");
+        assert_ne!(initial_fingerprint, rebuilt_fingerprint);
+        runtime
+            .rebuild_domain_from_schedule(
+                &destination,
+                &domain,
+                Some(rebuilt_schedule.clone()),
+                false,
+            )
+            .await
+            .expect("retained recovery should survive the owner restart and domain rebuild");
+        runtime
+            .rebuild_domain_from_schedule(&destination, &domain, Some(rebuilt_schedule), false)
+            .await
+            .expect("retained recovery should survive another schedule rebuild");
+
+        let current = runtime
+            .inner
+            .state_store
+            .as_ref()
+            .expect("runtime should own a state store")
+            .latest_snapshot(&placement)
+            .expect("checkpoint should load")
+            .expect("new owner checkpoint should remain");
+        assert_eq!(current.lsm, 6);
+    }
+}
+
+#[test]
+fn forced_recovery_recreates_state_only_for_a_complete_reset_decision() {
+    let dir = tempdir().expect("temporary runtime state directory should open");
+    let db = Database::builder(dir.path())
+        .open()
+        .expect("database should open");
+    let runtime = Runtime::with_persistence(Some(db), Duration::from_secs(3_600))
+        .expect("runtime should open persisted state");
+    let domain = domain("default");
+    let identifier = named::<ModelName>("latest_orders");
+    let source = named::<ClusterNodeName>("node-1");
+    let destination = named::<ClusterNodeName>("node-2");
+    *runtime.inner.remote_dispatch.local_node_id.write() = Some(destination.clone());
+    *runtime.inner.remote_dispatch.local_node_incarnation.write() =
+        Some(ClusterNodeIncarnation::new(42));
+    let placement = RuntimeStatePlacement {
+        domain: domain.clone(),
+        state: RuntimeStateKind::MaterializedRelay,
+        kind: ModelKind::Relay,
+        identifier: identifier.clone(),
+        schema_fingerprint: [7; 32],
+        branch_key: None,
+    };
+    let payload = empty_sealed_container(placement.schema_fingerprint)
+        .expect("empty materialized state should seal");
+    let store = runtime
+        .inner
+        .state_store
+        .as_ref()
+        .expect("runtime should own a state store");
+    store
+        .persist_latest_snapshot(&placement, 6, &payload)
+        .expect("current checkpoint should persist");
+    let mut scheduled = ScheduledNode::new(nervix_models::Model::Relay(CreateRelay {
+        name: RelayName::from(&identifier),
+        schema: SchemaName::from(&identifier),
+        buffer: nonzero!(4usize),
+        branching: RelayBranching::unbranched(),
+        materialized_state: Some(MaterializedRelayState::LastByTimestamp),
+    }))
+    .with_schema_fingerprint(placement.schema_fingerprint)
+    .placed_on(Some(destination.clone()), vec![destination.clone()]);
+    scheduled.ownership_transition = Some(OwnershipTransition {
+        id: "forced-reset".to_string(),
+        source,
+        destination: destination.clone(),
+        state_recovery: OwnershipStateRecoveryOutcome::Reset,
+        resets: Vec::new(),
+    });
+
+    let incomplete = runtime
+        .activate_prepared_forced_ownership_recovery_state(
+            &domain,
+            &scheduled,
+            &destination,
+            [9; 32],
+            false,
+        )
+        .expect_err("a reset without its state-component outcome should fail");
+    assert!(matches!(
+        incomplete.current_context(),
+        RuntimePersistenceError::InvalidForcedRecoveryDecision
+    ));
+    assert_eq!(
+        store
+            .latest_snapshot(&placement)
+            .expect("current checkpoint should load")
+            .expect("an invalid reset must preserve the checkpoint")
+            .lsm,
+        6
+    );
+
+    scheduled
+        .ownership_transition
+        .as_mut()
+        .expect("scheduled recovery should exist")
+        .resets
+        .push(OwnershipStateReset {
+            component: OwnershipStateComponent::MaterializedRelay,
+            cause: OwnershipStateResetCause::MissingCheckpoint,
+        });
+    runtime
+        .activate_prepared_forced_ownership_recovery_state(
+            &domain,
+            &scheduled,
+            &destination,
+            [9; 32],
+            false,
+        )
+        .expect("a complete reset decision should recreate state");
+    assert!(
+        store
+            .latest_snapshot(&placement)
+            .expect("checkpoint lookup should succeed")
+            .is_none(),
+        "the complete reset decision should remove the prior checkpoint"
+    );
+}
+
+#[test]
+fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() {
+    let dir = tempdir().expect("temporary runtime state directory should open");
+    let domain = domain("default");
+    let source = named::<ClusterNodeName>("node-1");
+    let destination = named::<ClusterNodeName>("node-2");
+    let kafka_placement = RuntimeStatePlacement {
+        domain: domain.clone(),
+        state: RuntimeStateKind::KafkaOffset,
+        kind: ModelKind::Ingestor,
+        identifier: named("orders_source"),
+        schema_fingerprint: [0; 32],
+        branch_key: None,
+    };
+    let kafka_state = Arc::new(
+        ReplicatedKafkaOffsetState::new(kafka_placement.clone(), None)
+            .expect("Kafka offset state should initialize"),
+    );
+    let mut kafka_assignment =
+        ReplicatedKafkaOffsetState::bind(&kafka_state, StateReplicationRoles::owned_by(None), None);
+    let kafka_originator = kafka_assignment
+        .originator
+        .take()
+        .expect("local Kafka state should grant authoritative access");
+    let (_, kafka_payload) = kafka_originator
+        .replace_offsets(HashMap::from_iter([(
+            KafkaTopicPartition {
+                topic: "orders".to_string(),
+                partition: 3,
+            },
+            42,
+        )]))
+        .expect("Kafka offset should update");
+    let deduplicator_placement = RuntimeStatePlacement {
+        domain: domain.clone(),
+        state: RuntimeStateKind::Deduplicator,
+        kind: ModelKind::Deduplicator,
+        identifier: named("deduplicate_orders"),
+        schema_fingerprint: [7; 32],
+        branch_key: string_branch_key("tenant", "acme"),
+    };
+    let sibling_branch_placement = RuntimeStatePlacement {
+        branch_key: string_branch_key("tenant", "globex"),
+        ..deduplicator_placement.clone()
+    };
+    let deduplicator_state = ReplicatedDeduplicatorState::new(deduplicator_placement.clone(), None)
+        .expect("deduplicator state should initialize");
+    let deduplicator_key =
+        DeduplicatorKey::new(vec![ReorderKeyPart::Utf8("order-123".to_string())]);
+    assert!(deduplicator_state.reserve_new_key(
+        deduplicator_key.clone(),
+        Timestamp::from_unix_nanos(1),
+        Duration::from_secs(600),
+    ));
+    let deduplicator_payload = deduplicator_state
+        .latest_snapshot()
+        .expect("deduplicator state should snapshot")
+        .payload;
+    let other_entity_placement = RuntimeStatePlacement {
+        identifier: named("other_deduplicator"),
+        branch_key: string_branch_key("tenant", "acme"),
+        ..deduplicator_placement.clone()
+    };
+    let kafka_entity = DomainNodeRef::node_in(
+        domain.clone(),
+        ModelKind::Ingestor,
+        kafka_placement.identifier.clone(),
+    );
+    let deduplicator_entity = DomainNodeRef::node_in(
+        domain.clone(),
+        ModelKind::Deduplicator,
+        deduplicator_placement.identifier.clone(),
+    );
+    let kafka_recovery = ForcedRuntimeStateRecoveryTransition {
+        operation_id: "recover-kafka-source",
+        source: &source,
+        destination: &destination,
+        destination_incarnation: ClusterNodeIncarnation::new(42),
+        entity: &kafka_entity,
+        target_schedule_fingerprint: [9; 32],
+    };
+    let deduplicator_recovery = ForcedRuntimeStateRecoveryTransition {
+        operation_id: "recover-deduplicator",
+        source: &source,
+        destination: &destination,
+        destination_incarnation: ClusterNodeIncarnation::new(42),
+        entity: &deduplicator_entity,
+        target_schedule_fingerprint: [9; 32],
+    };
+    let kafka_prepared = PersistedRuntimeStateEntry {
+        lsm: 5,
+        schema_fingerprint: kafka_placement.schema_fingerprint,
+        payload: kafka_payload.clone(),
+    };
+    let deduplicator_prepared = PersistedRuntimeStateEntry {
+        lsm: 5,
+        schema_fingerprint: deduplicator_placement.schema_fingerprint,
+        payload: deduplicator_payload.clone(),
+    };
+
+    {
+        let db = Database::builder(dir.path())
+            .open()
+            .expect("database should open");
+        let store = RuntimeStateStore::from_database(db).expect("state store should open");
+        store
+            .persist_forced_recovery_preparation(
+                &kafka_recovery,
+                &[(kafka_placement.clone(), kafka_prepared.clone())],
+            )
+            .expect("Kafka recovery preparation should persist");
+        store
+            .persist_forced_recovery_preparation(
+                &deduplicator_recovery,
+                &[
+                    (
+                        deduplicator_placement.clone(),
+                        deduplicator_prepared.clone(),
+                    ),
+                    (
+                        sibling_branch_placement.clone(),
+                        deduplicator_prepared.clone(),
+                    ),
+                ],
+            )
+            .expect("branch recovery preparation should persist");
+        assert!(
+            store
+                .activate_forced_recovery(
+                    &kafka_recovery,
+                    ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+                )
+                .expect("Kafka recovery should activate")
+                .is_some()
+        );
+        assert!(
+            store
+                .activate_forced_recovery(
+                    &deduplicator_recovery,
+                    ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+                )
+                .expect("branch recovery should activate")
+                .is_some()
+        );
+        store
+            .persist_latest_snapshot(&kafka_placement, 6, &kafka_payload)
+            .expect("new Kafka offset checkpoint should persist");
+        store
+            .persist_latest_snapshot(&deduplicator_placement, 6, &deduplicator_payload)
+            .expect("new branch checkpoint should persist");
+        store
+            .persist_latest_snapshot(&sibling_branch_placement, 7, &deduplicator_payload)
+            .expect("new sibling branch checkpoint should persist");
+        store
+            .persist_latest_snapshot(&other_entity_placement, 8, &deduplicator_payload)
+            .expect("other entity checkpoint should persist");
+    }
+
+    {
+        let db = Database::builder(dir.path())
+            .open()
+            .expect("database should reopen");
+        let store = RuntimeStateStore::from_database(db).expect("state store should reopen");
+        let replayed_kafka_recovery = ForcedRuntimeStateRecoveryTransition {
+            destination_incarnation: ClusterNodeIncarnation::new(43),
+            target_schedule_fingerprint: [10; 32],
+            ..kafka_recovery
+        };
+        let replayed_deduplicator_recovery = ForcedRuntimeStateRecoveryTransition {
+            destination_incarnation: ClusterNodeIncarnation::new(43),
+            target_schedule_fingerprint: [10; 32],
+            ..deduplicator_recovery
+        };
+        store
+            .persist_forced_recovery_preparation(
+                &replayed_kafka_recovery,
+                &[(kafka_placement.clone(), kafka_prepared)],
+            )
+            .expect("completed Kafka recovery should accept a repeated preparation request");
+        store
+            .persist_forced_recovery_preparation(
+                &replayed_deduplicator_recovery,
+                &[(deduplicator_placement.clone(), deduplicator_prepared)],
+            )
+            .expect("completed branch recovery should accept a repeated preparation request");
+        assert!(
+            store
+                .activate_forced_recovery(
+                    &replayed_kafka_recovery,
+                    ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+                )
+                .expect("completed Kafka recovery should replay")
+                .is_none()
+        );
+        assert!(
+            store
+                .activate_forced_recovery(
+                    &replayed_deduplicator_recovery,
+                    ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+                )
+                .expect("completed branch recovery should replay")
+                .is_none()
+        );
+
+        let kafka_snapshot = store
+            .latest_snapshot(&kafka_placement)
+            .expect("Kafka checkpoint should load")
+            .expect("Kafka checkpoint should remain");
+        assert_eq!(kafka_snapshot.lsm, 6);
+        let restored_kafka = Arc::new(
+            ReplicatedKafkaOffsetState::new(kafka_placement, Some(kafka_snapshot))
+                .expect("preserved Kafka checkpoint should decode"),
+        );
+        assert_eq!(
+            ReplicatedKafkaOffsetState::read(&restored_kafka).next_offset("orders", 3),
+            Some(42)
+        );
+        let deduplicator_snapshot = store
+            .latest_snapshot(&deduplicator_placement)
+            .expect("branch checkpoint should load")
+            .expect("branch checkpoint should remain");
+        assert_eq!(deduplicator_snapshot.lsm, 6);
+        let restored_deduplicator =
+            ReplicatedDeduplicatorState::new(deduplicator_placement, Some(deduplicator_snapshot))
+                .expect("preserved branch checkpoint should decode");
+        assert!(!restored_deduplicator.reserve_new_key(
+            deduplicator_key,
+            Timestamp::from_unix_nanos(2),
+            Duration::from_secs(600),
+        ));
+        assert_eq!(
+            store
+                .latest_snapshot(&sibling_branch_placement)
+                .expect("sibling branch checkpoint should load")
+                .expect("sibling branch checkpoint should remain")
+                .lsm,
+            7
+        );
+        assert_eq!(
+            store
+                .latest_snapshot(&other_entity_placement)
+                .expect("other entity checkpoint should load")
+                .expect("other entity checkpoint should remain")
+                .lsm,
+            8
+        );
+    }
+}
+
+#[test]
+fn forced_recovery_refuses_missing_or_stale_preparation_without_changing_state() {
+    let dir = tempdir().expect("temporary runtime state directory should open");
+    let db = Database::builder(dir.path())
+        .open()
+        .expect("database should open");
+    let store = RuntimeStateStore::from_database(db).expect("state store should open");
+    let domain = domain("default");
+    let source = named::<ClusterNodeName>("node-1");
+    let destination = named::<ClusterNodeName>("node-2");
+    let placement = RuntimeStatePlacement {
+        domain: domain.clone(),
+        state: RuntimeStateKind::Deduplicator,
+        kind: ModelKind::Deduplicator,
+        identifier: named("deduplicate_orders"),
+        schema_fingerprint: [7; 32],
+        branch_key: string_branch_key("tenant", "acme"),
+    };
+    let sibling_branch = RuntimeStatePlacement {
+        branch_key: string_branch_key("tenant", "globex"),
+        ..placement.clone()
+    };
+    let other_entity = RuntimeStatePlacement {
+        identifier: named("other_deduplicator"),
+        ..placement.clone()
+    };
+    let payload = ReplicatedDeduplicatorState::new(placement.clone(), None)
+        .expect("deduplicator state should initialize")
+        .latest_snapshot()
+        .expect("deduplicator state should snapshot")
+        .payload;
+    store
+        .persist_latest_snapshot(&placement, 6, &payload)
+        .expect("current branch checkpoint should persist");
+    store
+        .persist_latest_snapshot(&sibling_branch, 7, &payload)
+        .expect("sibling branch checkpoint should persist");
+    store
+        .persist_latest_snapshot(&other_entity, 8, &payload)
+        .expect("other entity checkpoint should persist");
+    let entity = DomainNodeRef::node_in(
+        domain,
+        ModelKind::Deduplicator,
+        placement.identifier.clone(),
+    );
+    let prepared_recovery = ForcedRuntimeStateRecoveryTransition {
+        operation_id: "recover-deduplicator",
+        source: &source,
+        destination: &destination,
+        destination_incarnation: ClusterNodeIncarnation::new(42),
+        entity: &entity,
+        target_schedule_fingerprint: [9; 32],
+    };
+
+    let missing = store
+        .activate_forced_recovery(
+            &prepared_recovery,
+            ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+        )
+        .expect_err("activation without a preparation should fail");
+    assert!(matches!(
+        missing.current_context(),
+        RuntimePersistenceError::MissingForcedRecoveryPreparation
+    ));
+    let stale_checkpoint = PersistedRuntimeStateEntry {
+        lsm: 5,
+        schema_fingerprint: placement.schema_fingerprint,
+        payload: payload.clone(),
+    };
+    store
+        .persist_forced_recovery_preparation(
+            &prepared_recovery,
+            &[(placement.clone(), stale_checkpoint)],
+        )
+        .expect("preparation should persist");
+    let changed_incarnation = ForcedRuntimeStateRecoveryTransition {
+        destination_incarnation: ClusterNodeIncarnation::new(43),
+        ..prepared_recovery
+    };
+    let stale_incarnation = store
+        .activate_forced_recovery(
+            &changed_incarnation,
+            ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+        )
+        .expect_err("a preparation for another process incarnation should fail");
+    assert!(matches!(
+        stale_incarnation.current_context(),
+        RuntimePersistenceError::ForcedRecoveryPreparationMismatch
+    ));
+    let changed_fingerprint = ForcedRuntimeStateRecoveryTransition {
+        target_schedule_fingerprint: [10; 32],
+        ..prepared_recovery
+    };
+    let stale_fingerprint = store
+        .activate_forced_recovery(
+            &changed_fingerprint,
+            ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+        )
+        .expect_err("a preparation for another schedule should fail");
+    assert!(matches!(
+        stale_fingerprint.current_context(),
+        RuntimePersistenceError::ForcedRecoveryPreparationMismatch
+    ));
+    assert_eq!(
+        store
+            .latest_snapshot(&placement)
+            .expect("current branch checkpoint should load")
+            .expect("current branch checkpoint should remain")
+            .lsm,
+        6
+    );
+    assert_eq!(
+        store
+            .latest_snapshot(&sibling_branch)
+            .expect("sibling branch checkpoint should load")
+            .expect("sibling branch checkpoint should remain")
+            .lsm,
+        7
+    );
+    assert_eq!(
+        store
+            .latest_snapshot(&other_entity)
+            .expect("other entity checkpoint should load")
+            .expect("other entity checkpoint should remain")
+            .lsm,
+        8
+    );
 }
 
 #[test]

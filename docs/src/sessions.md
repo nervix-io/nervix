@@ -36,6 +36,13 @@ Current session behavior:
 
 Sessions are runtime-facing protocol interactions, not part of the persisted namespace model.
 
+Persistent administrative commands carry a stable execution reference. The cluster binds that
+reference to the authenticated owner, selected domain, and semantic command, continues admitted
+work after the session disconnects, and retains one terminal result for at least 15 minutes. The
+CLI, web console, and Rust client reuse the reference through redirects and reconnects. Reuse for
+changed content fails. While a long command waits, transport keepalives, server events, and
+subscription delivery continue independently. See [Command Completion](command-completion.md).
+
 ## Transaction Binding
 
 An NSPL transaction is replicated control-plane state, but its binding to a live session is
@@ -48,17 +55,18 @@ A transaction also carries the domain it is bound to. Attaching adopts that doma
 selected domain, so a session can never queue a statement for a different domain than the
 transaction it holds. `USE` remains unavailable while a transaction is active.
 
-The CLI, web console, and Rust client retain the transaction id and automatically attach after a
-redirect or transport reconnect before replaying a command. A leader that has no binding for the
+The CLI, web console, and Rust client retain the transaction id, each append's execution reference
+and expected position, and the commit execution reference. They automatically attach after a
+redirect or transport reconnect before resuming a command. A leader that has no binding for the
 session's transaction answers with a distinct detached result rather than an ordinary error, and
 the client attaches again and replays the command instead of surfacing it. An unclean transport loss, node loss,
 or leadership change therefore leaves an open transaction intact until attach or idle expiry. A
-client compares the attached progress with the status it last observed and does not repeat an
-operation already recorded by the cluster. During election convergence, a client also retries a
+client matches the attached progress to the outstanding append or commit and does not satisfy that
+request from an unrelated transaction count. During election convergence, a client also retries a
 bounded interval when a peer cannot yet advertise the new leader. A clean end of the session
 preserves the existing interactive behavior by reverting a bound open transaction. Ending a
-session never reverts a transaction whose replicated state is already `COMMITTING`; the leader
-finishes it without a client.
+session never reverts admitted append work or a transaction whose replicated state is already
+`COMMITTING`; the leader finishes it without a client.
 
 Finished transaction outcomes remain available during tombstone retention. Attach during that
 window reports `COMMITTED`, `FAILED`, `REVERTED`, or `EXPIRED` and includes structured commit
