@@ -72,67 +72,13 @@ One concrete example is `VHOST` TLS:
 - a `VHOST` can bind one of those resources, optionally pinned to an explicit version
 - the data plane serves HTTPS and WSS from a dedicated HTTPS listener using the local replicated resource files
 
-All node-to-node traffic uses one authenticated HTTP/2 interconnect listener. TLS 1.3 is mandatory.
-Every node certificate carries its cluster and node identity in a
-`nervix://cluster/<cluster>/node/<node>` URI SAN and names its advertised DNS name or IP address in
-an endpoint SAN. A connection is accepted only when its CA trust, cluster identity, node identity,
-advertised endpoint, and HTTP/2 ALPN all agree.
+All node-to-node traffic uses one mutually authenticated TLS 1.3 and HTTP/2 listener. Independent
+management, command, replication, relay, and bulk pools isolate traffic, while typed operations,
+bounded payloads, admission quotas, memory budgets, and deadlines keep one workload from exhausting
+the node. Application health is observed separately from transport connectivity.
 
-Each peer has independent HTTP/2 pools for membership and management events, commands, Raft
-replication, Arrow relay batches, and bulk transfers. Relay progress, cancellation, status, and
-terminal admission acknowledgements use reserved management capacity. Application health probes
-also use management traffic through the reserved per-node liveness capacity. Every pool except bulk
-is connected before a peer is reported ready, with capacity reserved in both directions. This keeps
-gossip, heartbeats, elections, administrative operations, health checks, and the first remote batch
-and its acknowledgement from waiting behind another traffic class. Consensus log replication uses
-one ordered bidirectional stream per follower on the replication pool, so a leader can keep several
-batches in flight without either side reordering them. Gossip exchanges, Raft records,
-resource chunks, and other non-Arrow messages use bounded, validated rkyv records. Relay payloads
-remain Arrow IPC end to end. Resource archives, runtime state snapshots, and Raft snapshots cross
-the bulk pool as bounded chunks rather than one whole in-memory wire message, so a transfer larger
-than a node's transfer-memory budget moves without either side holding it whole.
-
-Application health is observed independently of transport-pool readiness. Each node keeps at most
-one health probe in flight per peer and at most 32 probes in flight across all peers. A probe has a
-one-second total deadline. A silent or slow peer therefore occupies only its own slot while results
-from other peers are published as soon as they arrive; neither transport `PING` nor an established
-pool substitutes for an application response.
-
-Every published observation is bound to the exact target identity and incarnation, its endpoint
-generation, and the observation time. A response is healthy only when its application identity
-agrees with the peer authenticated by the transport and with the targeted incarnation. An endpoint
-or incarnation change supersedes earlier in-flight work, whose eventual result is ignored. For
-availability decisions, a missing, stale, or unscheduled observation is unknown. Probe-capacity
-exhaustion is retained as a distinct outcome. None of those outcomes marks a peer unavailable or
-extends a previous failure run; only current, continuous probe failures may reach the configured
-node-unavailability policy.
-
-Connection setup, request progress, and whole-request deadlines are bounded. Failed pool slots
-reconnect with exponential backoff. When membership removes a peer or changes its advertised
-address, its prior slots are retired. Replacing credentials starts HTTP/2 graceful shutdown on old
-inbound connections and creates new pools with the replacement certificate. Node shutdown stops
-new admission, drains active streams for the configured interval, and then closes anything still
-active; an incomplete TLS handshake cannot extend that bound.
-
-Relay transfer has three observable boundaries. A successful relay-body response means the Arrow
-bytes reached the receiving process. A terminal admission response means the concrete runtime
-branch accepted the batch. Attached record acknowledgements report downstream processing
-completion. Receiver reservations include capacity for their terminal admission response, and
-progress responses may be coalesced while that terminal capacity remains reserved.
-
-Each sender orders batches by authenticated peer, payload kind, domain, destination relay, and
-concrete branch. Different channels run concurrently, while one channel preserves FIFO order and
-has at most one batch waiting for runtime admission. A delivery identity combines both process
-epochs with a channel incarnation and sequence. Reconnecting to the same receiver process queries
-that identity before sending bytes again. A receiver process change makes an unresolved result
-indeterminate and prevents automatic replay. A later source retry opens a fresh channel
-incarnation, so it is explicitly a new attempt.
-
-Cancellation and runtime admission share one atomic transition. Cancellation that wins before
-admission permanently fences that delivery identity. Cancellation after admission reports the
-known admitted outcome and does not reverse work already handed to the runtime. Branch and domain
-waits therefore retain their own admitted memory while leaving unrelated channels and the reserved
-management operations runnable. Evicting a branch cancels its unadmitted generation; if the branch
-appears again, its delivery channel opens with a fresh incarnation and sequence.
+The [Cluster Interconnect](./interconnect.md) chapter defines peer identity, connection topology,
+wire contracts, resource isolation, exchange forms, relay delivery and reconciliation, consensus
+and bulk traffic, application health, lifecycle behavior, and observability.
 
 The rest of this section splits control-plane semantics from data-plane semantics because that distinction is fundamental to how Nervix behaves.

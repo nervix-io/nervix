@@ -95,6 +95,12 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   in-memory hot-path state and are never persisted.
 - Connectors adapt external systems at explicit data-plane boundaries. They do not weaken internal
   schema, branch, error, or sensitivity rules.
+- [Cluster Interconnect](docs/src/interconnect.md) is the authoritative architecture reference for
+  node-to-node communication. Any change to interconnect code or to a node-to-node operation must
+  keep that chapter current in the same change. Its scope includes authentication and identity,
+  discovery and topology, wire contracts and exchange forms, pool and quota isolation, limits and
+  deadlines, relay delivery and acknowledgements, application health, consensus and bulk traffic,
+  connection lifecycle, failure semantics, and observability.
 
 ## System Layers and Migration
 
