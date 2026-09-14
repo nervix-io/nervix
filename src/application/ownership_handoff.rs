@@ -435,10 +435,10 @@ pub(in crate::application) fn planned_ownership_moves(
         let Some(current_node) = current.nodes.get(identity) else {
             continue;
         };
-        let Some(former_owner) = current_node.execution_node() else {
+        let Some(former_owner) = current_node.primary_node() else {
             continue;
         };
-        let Some(destination) = planned_node.execution_node() else {
+        let Some(destination) = planned_node.primary_node() else {
             continue;
         };
         if former_owner == destination {

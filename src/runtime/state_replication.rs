@@ -1133,7 +1133,7 @@ impl Runtime {
         let target_schedule_fingerprint = request.target_schedule_fingerprint;
         self.verify_local_handoff_schedule(domain, base_schedule_fingerprint)?;
         let scheduled = self.ownership_handoff_scheduled_node(domain, entity)?;
-        if scheduled.execution_node() != Some(source) {
+        if scheduled.primary_node() != Some(source) {
             return Err(OwnershipHandoffError::participant(format!(
                 "{} '{}' is no longer assigned to lost owner '{}'",
                 entity.kind.as_str(),
