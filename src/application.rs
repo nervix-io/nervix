@@ -80,7 +80,7 @@ use nervix_interconnect::{
     Transport,
 };
 use nervix_models::{ClusterNodeName, DomainName, DomainStatus, ModelKind, UserName};
-use nervix_recovery::{Discarded as _, Reported as _};
+use nervix_recovery::Reported as _;
 use observability_http::serve_observability_http;
 use ownership_handoff::{FORCED_OWNERSHIP_RECOVERY_BUDGET, ForcedOwnershipRecoveryCoordinator};
 use parking_lot::RwLock;
@@ -920,6 +920,7 @@ impl Application {
                 return Err(error);
             }
         };
+        let cluster = Arc::new(cluster);
         let local_health_identity = cluster.local_node_identity().await;
         #[cfg(feature = "testing")]
         let health_fault_injection = fault_injection.clone();
@@ -945,15 +946,14 @@ impl Application {
                 }
             }
         });
-        if let Err(error) = health_handler {
-            cluster
-                .shutdown()
-                .await
-                .discarded("the handler-registration error remains the startup failure");
-            startup.terminate().await;
-            return Err(error.change_context(AppError::StartInterconnect));
-        }
-        let cluster = Arc::new(cluster);
+        let startup = startup
+            .require_handler_registration(&cluster, health_handler)
+            .await?;
+        let application_revision_handler =
+            completion::register_application_revision_handler(cluster.clone(), &interconnect);
+        let startup = startup
+            .require_handler_registration(&cluster, application_revision_handler)
+            .await?;
         let ApplicationStartup {
             db,
             resource_store,
@@ -1594,6 +1594,7 @@ impl Application {
         let mut schedule_rx = consensus.observer().subscribe_schedule();
         let consensus_for_schedule = consensus.observer();
         let cluster_for_schedule = cluster.clone();
+        let interconnect_for_schedule = interconnect.clone();
         let schedule_local_node_id = consensus.observer().local_node_id().clone();
         let schedule_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
@@ -1611,6 +1612,7 @@ impl Application {
             if let Err(error) = apply_cluster_runtime_state(
                 &runtime_for_schedule,
                 &cluster_for_schedule,
+                &interconnect_for_schedule,
                 &schedule_local_node_id,
                 initial_state,
             )
@@ -1640,6 +1642,7 @@ impl Application {
                         if let Err(error) = apply_cluster_runtime_state(
                             &runtime_for_schedule,
                             &cluster_for_schedule,
+                            &interconnect_for_schedule,
                             &schedule_local_node_id,
                             state,
                         )

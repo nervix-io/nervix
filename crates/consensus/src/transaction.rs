@@ -709,3 +709,203 @@ pub enum TransactionMutationError {
     #[error("transaction '{id}' commit step conflicted with replicated state: {reason}")]
     StepConflict { id: String, reason: String },
 }
+
+#[cfg(test)]
+mod tests {
+    use meticulous::ResultExt as _;
+    use nervix_models::ShowTransactions;
+
+    use super::*;
+
+    fn test_owner() -> UserName {
+        UserName::parse("operator").assured("the test owner is an identifier-shaped literal")
+    }
+
+    fn test_domain() -> DomainName {
+        DomainName::parse("default").assured("the test domain is an identifier-shaped literal")
+    }
+
+    fn transaction_with_one_statement() -> ReplicatedTransaction {
+        let owner = test_owner();
+        let domain = test_domain();
+        let mut transaction = ReplicatedTransaction::open(
+            "transaction-1".to_string(),
+            domain.clone(),
+            owner.clone(),
+            Timestamp::from_unix_nanos(1),
+        );
+        transaction
+            .queue(
+                &owner,
+                &domain,
+                Timestamp::from_unix_nanos(2),
+                TransactionStatement {
+                    request_reference: CommandExecutionReference::parse("request.0")
+                        .assured("the test command reference is an accepted literal"),
+                    expected_position: 0,
+                    source: "SHOW TRANSACTIONS".to_string(),
+                    statement: Statement::ShowTransactions(ShowTransactions),
+                },
+                TransactionQueueLimits {
+                    max_statements: 2,
+                    max_source_bytes: 1024,
+                },
+            )
+            .assured("the first test statement is within every admission limit");
+        transaction
+            .start_commit(&owner, Timestamp::from_unix_nanos(3))
+            .assured("an open test transaction can begin committing");
+        transaction
+    }
+
+    fn applying_step() -> TransactionApplyingStep {
+        TransactionApplyingStep {
+            effect_revision: 4,
+            next_statement: 1,
+            result: TransactionStepResult {
+                first_statement: 0,
+                statement_count: 1,
+                quiesce_level: None,
+                planned_relocations: None,
+                result: TransactionCommandResult {
+                    success: true,
+                    message: "listed transactions".to_string(),
+                    diagnostics: Vec::new(),
+                    already_existed: false,
+                },
+            },
+            effect: None,
+            completion: Some(TransactionOutcome::Committed),
+        }
+    }
+
+    #[test]
+    fn beginning_application_is_idempotent_and_rejects_conflicting_progress() {
+        let mut transaction = transaction_with_one_statement();
+        let applying = applying_step();
+        transaction
+            .begin_application(0, Timestamp::from_unix_nanos(4), applying.clone())
+            .assured("the application step spans the queued test statement");
+        transaction
+            .begin_application(0, Timestamp::from_unix_nanos(5), applying.clone())
+            .assured("replaying the identical application step is idempotent");
+
+        let mut conflicting = applying;
+        conflicting.effect_revision = 5;
+        assert!(matches!(
+            transaction.begin_application(0, Timestamp::from_unix_nanos(6), conflicting),
+            Err(TransactionMutationError::ApplicationInProgress { statement: 0, .. })
+        ));
+
+        let mut invalid = transaction_with_one_statement();
+        let mut no_progress = applying_step();
+        no_progress.next_statement = 0;
+        no_progress.result.statement_count = 0;
+        assert!(matches!(
+            invalid.begin_application(0, Timestamp::from_unix_nanos(4), no_progress),
+            Err(TransactionMutationError::InvalidProgress {
+                next: 0,
+                statement_count: 1,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn completing_application_preserves_in_progress_state_after_conflicts() {
+        let mut open = ReplicatedTransaction::open(
+            "open".to_string(),
+            test_domain(),
+            test_owner(),
+            Timestamp::from_unix_nanos(1),
+        );
+        assert!(matches!(
+            open.complete_application(0, Timestamp::from_unix_nanos(2), 2, None),
+            Err(TransactionMutationError::NotCommitting { .. })
+        ));
+
+        let mut without_application = transaction_with_one_statement();
+        assert!(matches!(
+            without_application.complete_application(0, Timestamp::from_unix_nanos(4), 4, None),
+            Err(TransactionMutationError::NoApplicationInProgress { statement: 0, .. })
+        ));
+
+        let mut conflicting_progress = transaction_with_one_statement();
+        conflicting_progress
+            .begin_application(0, Timestamp::from_unix_nanos(4), applying_step())
+            .assured("the application step spans the queued test statement");
+        assert!(matches!(
+            conflicting_progress.complete_application(1, Timestamp::from_unix_nanos(5), 5, None,),
+            Err(TransactionMutationError::ProgressConflict {
+                expected: 1,
+                actual: 0,
+                ..
+            })
+        ));
+
+        let mut invalid_result = transaction_with_one_statement();
+        invalid_result
+            .begin_application(0, Timestamp::from_unix_nanos(4), applying_step())
+            .assured("the application step spans the queued test statement");
+        let TransactionState::Committing(progress) = &mut invalid_result.state else {
+            panic!("the test transaction must still be committing");
+        };
+        let current = progress
+            .applying
+            .as_mut()
+            .assured("the test installed one applying step above");
+        current.result.first_statement = 1;
+        assert!(matches!(
+            invalid_result.complete_application(0, Timestamp::from_unix_nanos(5), 5, None),
+            Err(TransactionMutationError::InvalidStepResult { .. })
+        ));
+        let TransactionState::Committing(progress) = &invalid_result.state else {
+            panic!("an invalid result must leave the transaction committing");
+        };
+        assert!(progress.applying.is_some());
+    }
+
+    #[test]
+    fn finishing_an_empty_commit_requires_empty_progress() {
+        let mut open = ReplicatedTransaction::open(
+            "open".to_string(),
+            test_domain(),
+            test_owner(),
+            Timestamp::from_unix_nanos(1),
+        );
+        assert!(matches!(
+            open.finish_empty_commit(Timestamp::from_unix_nanos(2), 2),
+            Err(TransactionMutationError::NotCommitting { .. })
+        ));
+
+        let mut nonempty = transaction_with_one_statement();
+        assert!(matches!(
+            nonempty.finish_empty_commit(Timestamp::from_unix_nanos(4), 4),
+            Err(TransactionMutationError::InvalidProgress {
+                next: 0,
+                statement_count: 1,
+                ..
+            })
+        ));
+
+        let owner = test_owner();
+        let mut empty = ReplicatedTransaction::open(
+            "empty".to_string(),
+            test_domain(),
+            owner.clone(),
+            Timestamp::from_unix_nanos(1),
+        );
+        empty
+            .start_commit(&owner, Timestamp::from_unix_nanos(2))
+            .assured("the empty test transaction can begin committing");
+        empty
+            .finish_empty_commit(Timestamp::from_unix_nanos(3), 7)
+            .assured("empty progress can finish as committed");
+        let TransactionState::Finished(finished) = &empty.state else {
+            panic!("the empty commit must finish the transaction");
+        };
+        assert_eq!(finished.outcome, TransactionOutcome::Committed);
+        assert_eq!(finished.outcome_revision, 7);
+        assert!(finished.results.is_empty());
+    }
+}

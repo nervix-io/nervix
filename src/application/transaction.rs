@@ -2022,7 +2022,6 @@ impl SessionServiceImpl {
         {
             return;
         }
-        self.resume_persistent_commands().await;
         let now = current_timestamp();
         let idle_before = subtract_timestamp_duration(now, self.inner.transaction_idle_timeout);
         let finished_before =
@@ -2032,7 +2031,10 @@ impl SessionServiceImpl {
             .transaction_tombstone_retention
             .max(DEFAULT_TRANSACTION_TOMBSTONE_RETENTION);
         let command_finished_before = subtract_timestamp_duration(now, command_retention);
+        self.reconcile_persistent_commands(command_finished_before, now)
+            .await;
         let transactions = self.inner.consensus.current_transactions().await;
+        let mut tombstone_removal_required = false;
 
         for transaction in transactions.values() {
             tokio::task::consume_budget().await;
@@ -2081,27 +2083,23 @@ impl SessionServiceImpl {
                         );
                     }
                 }
-                TransactionState::Finished(_) => {
+                TransactionState::Finished(finished) => {
                     self.inner.transaction_bindings.remove(&transaction.id);
+                    if finished.finished_at <= finished_before {
+                        tombstone_removal_required = true;
+                    }
                 }
                 TransactionState::Open => {}
             }
         }
-        if let Err(error) = self
-            .inner
-            .consensus
-            .remove_finished_transactions(finished_before)
-            .await
+        if tombstone_removal_required
+            && let Err(error) = self
+                .inner
+                .consensus
+                .remove_finished_transactions(finished_before)
+                .await
         {
             warn!(error = %error, "failed to remove expired transaction tombstones");
-        }
-        if let Err(error) = self
-            .inner
-            .consensus
-            .expire_command_executions(command_finished_before, now)
-            .await
-        {
-            warn!(error = %error, "failed to expire retained command results");
         }
     }
 

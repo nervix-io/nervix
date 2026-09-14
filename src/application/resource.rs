@@ -985,9 +985,11 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
-        ClusterNodeName, CreateResource, CreateStatement, DomainName, ResourceVersion,
-        ResourceVersionCounter, ResourceVersionStatus, Timestamp,
+        ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CreateResource,
+        CreateStatement, DomainName, ResourceName, ResourceUploadIdentity, ResourceVersion,
+        ResourceVersionCounter, ResourceVersionStatus, Timestamp, UserName,
     };
     use nervix_nspl::client_statement::upload_resource_path_fragment;
     use sorted_vec::SortedVec;
@@ -996,6 +998,74 @@ mod tests {
         super::test_fixtures::{TestService, build_test_service, create_test_domain, named},
         *,
     };
+
+    fn resource_upload_key(
+        domain: &DomainName,
+        identifier: &str,
+        identity: &str,
+    ) -> ResourceUploadKey {
+        ResourceUploadKey::new(
+            UserName::parse("default").assured("the test owner is an identifier-shaped literal"),
+            domain.clone(),
+            ResourceName::parse(identifier)
+                .assured("the test resource name is an identifier-shaped literal"),
+            ResourceUploadIdentity::parse(identity)
+                .assured("the test upload identity uses accepted characters"),
+        )
+    }
+
+    fn resource_version(
+        key: &ResourceUploadKey,
+        version: u64,
+        source: &ClusterNodeIdentity,
+        checksum: &str,
+    ) -> ResourceVersion {
+        ResourceVersion {
+            id: ResourceId::new(key.domain.clone(), key.identifier.clone(), version),
+            root_checksum: checksum.to_string(),
+            manifest_checksum: format!("manifest-{checksum}"),
+            file_count: 1,
+            total_bytes: 1,
+            archive_bytes: 1,
+            created_at: Timestamp::from_unix_nanos(1),
+            created_by_node: source.node_id().clone(),
+        }
+    }
+
+    fn ready_replica(resource: &ResourceVersion, node: ClusterNodeIdentity) -> ResourceNodeStatus {
+        ResourceNodeStatus {
+            key: ResourceReplicaKey::new(
+                resource.id.domain.clone(),
+                resource.id.identifier.clone(),
+                resource.id.version,
+                node.clone(),
+            ),
+            state: ResourceNodeState::Ready,
+            root_checksum: Some(resource.root_checksum.clone()),
+            last_verified_at: Some(Timestamp::from_unix_nanos(1)),
+            source_node: Some(node),
+            error: None,
+        }
+    }
+
+    async fn declare_resource(service: &SessionServiceImpl, domain: &DomainName, identifier: &str) {
+        let created = service
+            .create_resource(
+                domain,
+                CreateStatement::new(
+                    CreateResource {
+                        identifier: ResourceName::parse(identifier)
+                            .assured("the test resource name is an identifier-shaped literal"),
+                    },
+                    false,
+                ),
+            )
+            .await;
+        assert!(
+            created.success,
+            "resource catalog must be created: {created:?}"
+        );
+    }
 
     #[test]
     fn resource_ref_suggestions_expand_known_resource_names_in_the_active_domain() {
@@ -1176,6 +1246,223 @@ mod tests {
             same_name_other_domain.message
         );
         assert!(!same_name_other_domain.already_existed);
+
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn interrupted_resource_upload_without_a_durable_version_becomes_terminal() {
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
+        let domain =
+            DomainName::parse("default").assured("the test domain is an identifier-shaped literal");
+        let identifier = "interrupted_archive";
+        declare_resource(&service, &domain, identifier).await;
+        let key = resource_upload_key(&domain, identifier, "interrupted-upload");
+        let upload = service
+            .inner
+            .consensus
+            .begin_resource_upload(key.clone(), "expected-root".to_string())
+            .await
+            .assured("the test upload is admitted by the single-node leader");
+        let execution = service
+            .inner
+            .resource_upload_executions
+            .entry(key.clone())
+            .or_insert_with(|| StdArc::new(AsyncMutex::new(())))
+            .clone();
+        let execution_guard = execution.lock_owned().await;
+
+        service
+            .recover_resource_upload(upload, execution_guard)
+            .await;
+
+        let resources = service.inner.consensus.current_resources().await;
+        let retained = resources
+            .upload(&key)
+            .assured("the admitted upload remains in durable state");
+        let ResourceUploadState::Failed { reason, .. } = &retained.state else {
+            panic!("an interrupted upload without its version must fail: {retained:?}");
+        };
+        assert!(reason.contains("archive is unavailable"));
+        assert!(!service.inner.resource_upload_executions.contains_key(&key));
+
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn interrupted_resource_upload_with_ready_replicas_completes() {
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
+        let domain =
+            DomainName::parse("default").assured("the test domain is an identifier-shaped literal");
+        let identifier = "ready_archive";
+        declare_resource(&service, &domain, identifier).await;
+        let key = resource_upload_key(&domain, identifier, "ready-upload");
+        let upload = service
+            .inner
+            .consensus
+            .begin_resource_upload(key.clone(), "ready-root".to_string())
+            .await
+            .assured("the test upload is admitted by the single-node leader");
+        let local_node = ClusterNodeIdentity::new(
+            service.inner.consensus.local_node_id().clone(),
+            service.inner.cluster.local_incarnation(),
+        );
+        let resource = resource_version(&key, upload.version, &local_node, "ready-root");
+        service
+            .inner
+            .consensus
+            .publish_resource_upload(
+                key.clone(),
+                resource.clone(),
+                ready_replica(&resource, local_node),
+            )
+            .await
+            .assured("the durable resource version and local replica are published");
+        let execution = service
+            .inner
+            .resource_upload_executions
+            .entry(key.clone())
+            .or_insert_with(|| StdArc::new(AsyncMutex::new(())))
+            .clone();
+        let execution_guard = execution.lock_owned().await;
+
+        service
+            .recover_resource_upload(upload, execution_guard)
+            .await;
+
+        let resources = service.inner.consensus.current_resources().await;
+        let retained = resources
+            .upload(&key)
+            .assured("the completed upload remains in durable state");
+        assert!(matches!(
+            retained.state,
+            ResourceUploadState::Completed { .. }
+        ));
+        assert!(!service.inner.resource_upload_executions.contains_key(&key));
+
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn reconciliation_retains_a_failed_local_replica_when_no_live_source_exists() {
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
+        let domain =
+            DomainName::parse("default").assured("the test domain is an identifier-shaped literal");
+        let identifier = "remote_archive";
+        declare_resource(&service, &domain, identifier).await;
+        let key = resource_upload_key(&domain, identifier, "remote-upload");
+        let upload = service
+            .inner
+            .consensus
+            .begin_resource_upload(key.clone(), "remote-root".to_string())
+            .await
+            .assured("the test upload is admitted by the single-node leader");
+        let remote_node = ClusterNodeIdentity::new(
+            ClusterNodeName::parse("absent-node")
+                .assured("the test node name is an identifier-shaped literal"),
+            ClusterNodeIncarnation::new(1),
+        );
+        let resource = resource_version(&key, upload.version, &remote_node, "remote-root");
+        service
+            .inner
+            .consensus
+            .publish_resource_upload(
+                key.clone(),
+                resource.clone(),
+                ready_replica(&resource, remote_node),
+            )
+            .await
+            .assured("the durable resource version and remote replica are published");
+        service
+            .inner
+            .consensus
+            .complete_resource_upload(key)
+            .await
+            .assured("the durable upload is marked complete before reconciliation");
+        let local_node = ClusterNodeIdentity::new(
+            service.inner.consensus.local_node_id().clone(),
+            service.inner.cluster.local_incarnation(),
+        );
+        let local_key = ResourceReplicaKey::new(
+            resource.id.domain.clone(),
+            resource.id.identifier.clone(),
+            resource.id.version,
+            local_node,
+        );
+
+        service.reconcile_resources_once().await;
+        service.reconcile_resources_once().await;
+
+        let resources = service.inner.consensus.current_resources().await;
+        let replica_index = resources
+            .replicas
+            .binary_search_by(|replica| replica.key.cmp(&local_key))
+            .assured("reconciliation publishes the local replica outcome");
+        let replica = &resources.replicas[replica_index];
+        assert_eq!(replica.state, ResourceNodeState::Failed);
+        assert!(
+            replica
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("installed manifest"))
+        );
+
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn invalid_resource_archive_failure_is_retained_across_retry() {
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
+        let domain =
+            DomainName::parse("default").assured("the test domain is an identifier-shaped literal");
+        let identifier = "invalid_archive";
+        declare_resource(&service, &domain, identifier).await;
+        let key = resource_upload_key(&domain, identifier, "invalid-upload");
+        let missing_archive = path.join("missing-resource-archive.tar.zst");
+
+        let first = service
+            .install_uploaded_resource_archive(
+                key.clone(),
+                &missing_archive,
+                "invalid-root".to_string(),
+            )
+            .await;
+        let first_error = match first {
+            Ok(_) => panic!("a missing resource archive must fail installation"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            first_error.current_context(),
+            ResourceUploadError::Terminal { version: 1, .. }
+        ));
+
+        let retried = service
+            .install_uploaded_resource_archive(key, &missing_archive, "invalid-root".to_string())
+            .await;
+        let retried_error = match retried {
+            Ok(_) => panic!("a retained resource upload failure must remain terminal"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            retried_error.current_context(),
+            ResourceUploadError::Terminal { version: 1, .. }
+        ));
 
         let _ = std::fs::remove_dir_all(&path);
     }

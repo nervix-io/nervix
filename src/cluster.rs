@@ -28,8 +28,8 @@ use dashmap::DashMap;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{GossipNode, GossipState};
 use nervix_interconnect::{
-    InterconnectRequest, PeerTarget, PoolClass, RequestContext, RequestSubquota,
-    Transport as InterconnectTransport,
+    ApplicationRevisionResponse, InterconnectRequest, PeerTarget, PoolClass, RequestContext,
+    RequestSubquota, Transport as InterconnectTransport,
 };
 use nervix_models::{ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName};
 use nervix_recovery::Discarded as _;
@@ -1214,23 +1214,13 @@ impl ClusterHandle {
     }
 
     pub async fn set_local_runtime_revision_ready(&self, revision: u64) {
-        let chitchat_handle = self.chitchat.clone();
-        let mut chitchat = chitchat_handle.lock().await;
-        advance_revision(
-            chitchat.self_node_state(),
-            KEY_RUNTIME_REVISION_READY,
-            revision,
-        );
+        self.set_local_revision(KEY_RUNTIME_REVISION_READY, revision)
+            .await;
     }
 
     pub async fn set_local_authoritative_revision(&self, revision: u64) {
-        let chitchat_handle = self.chitchat.clone();
-        let mut chitchat = chitchat_handle.lock().await;
-        advance_revision(
-            chitchat.self_node_state(),
-            KEY_AUTHORITATIVE_REVISION_APPLIED,
-            revision,
-        );
+        self.set_local_revision(KEY_AUTHORITATIVE_REVISION_APPLIED, revision)
+            .await;
     }
 
     pub async fn nodes_at_authoritative_revision(
@@ -1242,13 +1232,31 @@ impl ClusterHandle {
     }
 
     pub async fn set_local_runtime_revision_prepared(&self, revision: u64) {
+        self.set_local_revision(KEY_RUNTIME_REVISION_PREPARED, revision)
+            .await;
+    }
+
+    async fn set_local_revision(&self, key: &str, revision: u64) {
         let chitchat_handle = self.chitchat.clone();
         let mut chitchat = chitchat_handle.lock().await;
-        advance_revision(
-            chitchat.self_node_state(),
-            KEY_RUNTIME_REVISION_PREPARED,
-            revision,
-        );
+        advance_revision(chitchat.self_node_state(), key, revision);
+    }
+
+    pub async fn local_application_revision(&self) -> ApplicationRevisionResponse {
+        let chitchat_handle = self.chitchat.clone();
+        let chitchat = chitchat_handle.lock().await;
+        let self_id = chitchat.self_chitchat_id();
+        let identity = cluster_node_identity(self_id)
+            .assured("the local Chitchat identity contains the validated server node name");
+        let state = chitchat
+            .node_state(self_id)
+            .assured("Chitchat retains its own node state for the server lifetime");
+        ApplicationRevisionResponse {
+            identity,
+            authoritative: revision_or_zero(state, KEY_AUTHORITATIVE_REVISION_APPLIED),
+            runtime_prepared: revision_or_zero(state, KEY_RUNTIME_REVISION_PREPARED),
+            runtime_ready: revision_or_zero(state, KEY_RUNTIME_REVISION_READY),
+        }
     }
 
     pub async fn nodes_prepared_for_runtime_revision(
@@ -1488,6 +1496,15 @@ fn revision_is_at_least(state: &NodeState, key: &str, revision: u64) -> bool {
         return false;
     };
     ready_revision >= revision
+}
+
+fn revision_or_zero(state: &NodeState, key: &str) -> u64 {
+    let Some(value) = state.get(key) else {
+        return 0;
+    };
+    value
+        .parse::<u64>()
+        .assured("application revision values are written from a u64")
 }
 
 fn advance_revision(state: &mut NodeState, key: &str, revision: u64) {

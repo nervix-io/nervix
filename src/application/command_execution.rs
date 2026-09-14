@@ -14,12 +14,13 @@ use nervix_consensus::{
 };
 use nervix_models::{
     CommandExecutionReference, DomainName, DomainStartPoint, DomainState, DomainStatus, Statement,
-    UserName,
+    Timestamp, UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tonic::Status;
+use tracing::warn;
 
 use super::{
     authentication::{user_credentials, verify_password_hash},
@@ -107,12 +108,24 @@ impl PersistentCommandRequest {
 }
 
 impl SessionServiceImpl {
-    pub(in crate::application) async fn resume_persistent_commands(&self) {
+    pub(in crate::application) async fn reconcile_persistent_commands(
+        &self,
+        finished_before: Timestamp,
+        now: Timestamp,
+    ) {
         let executions = self.inner.consensus.current_command_executions().await;
+        let mut expiration_required = false;
         for execution in executions.into_values() {
             tokio::task::consume_budget().await;
-            if !matches!(execution.state, CommandExecutionState::Applying) {
-                continue;
+            match &execution.state {
+                CommandExecutionState::Applying => {}
+                CommandExecutionState::Finished { finished_at, .. } => {
+                    if *finished_at <= finished_before {
+                        expiration_required = true;
+                    }
+                    continue;
+                }
+                CommandExecutionState::Expired { .. } => continue,
             }
             let lock = self
                 .inner
@@ -150,6 +163,15 @@ impl SessionServiceImpl {
                     ));
                 }
             });
+        }
+        if expiration_required
+            && let Err(error) = self
+                .inner
+                .consensus
+                .expire_command_executions(finished_before, now)
+                .await
+        {
+            warn!(error = %error, "failed to expire retained command results");
         }
     }
 
@@ -507,5 +529,135 @@ fn child_result(result: CommandExecutionChildResult) -> CommandResult {
         },
         already_existed: result.already_existed,
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use meticulous::{OptionExt as _, ResultExt as _};
+    use nervix_models::{CreateStatement, CreateUser};
+
+    use super::*;
+    use crate::proto::{Diagnostic, TransactionState, TransactionStatus};
+
+    fn persistent_user_operation(password: &str) -> SessionCommandOperation {
+        let statement = Statement::CreateUser(CreateStatement::new(
+            CreateUser {
+                name: UserName::parse("operator")
+                    .assured("the test user name is an identifier-shaped literal"),
+                password: password.to_string(),
+            },
+            false,
+        ));
+        SessionCommandOperation::Execute(PendingSessionCommand {
+            request_reference: CommandExecutionReference::parse("request.0")
+                .assured("the test command reference is an identifier-shaped literal"),
+            expected_transaction_position: None,
+            source: "CREATE USER operator WITH PASSWORD 'secret'".to_string(),
+            statement: ClientStatement::Server(statement),
+            domain: String::new(),
+        })
+    }
+
+    #[test]
+    fn persistent_request_digest_omits_user_password_and_rejects_multiple_effects() {
+        let first = PersistentCommandRequest::from_operations(
+            &[persistent_user_operation("first-secret")],
+            "default",
+        )
+        .assured("the test statement has serializable semantics")
+        .assured("the test includes one persistent statement");
+        let retried = PersistentCommandRequest::from_operations(
+            &[persistent_user_operation("changed-secret")],
+            "default",
+        )
+        .assured("the test statement has serializable semantics")
+        .assured("the test includes one persistent statement");
+
+        assert_eq!(first.digest, retried.digest);
+
+        let duplicate = PersistentCommandRequest::from_operations(
+            &[
+                persistent_user_operation("first-secret"),
+                persistent_user_operation("first-secret"),
+            ],
+            "default",
+        );
+        let error = match duplicate {
+            Ok(_) => panic!("two persistent effects must be rejected"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.current_context(),
+            PersistentCommandRequestError::MultiplePersistentStatements
+        ));
+    }
+
+    #[test]
+    fn durable_command_results_preserve_nested_diagnostics_and_transaction_status() {
+        let successful_child = CommandResult {
+            success: true,
+            message: "created schema".to_string(),
+            diagnostics: vec![Diagnostic {
+                message: "success detail".to_string(),
+                span_start: 2,
+                span_end: 7,
+            }],
+            kind: i32::from(CommandResultKind::Ok),
+            already_existed: true,
+            ..Default::default()
+        };
+        let failed_child = CommandResult {
+            success: false,
+            message: "invalid relay".to_string(),
+            diagnostics: vec![Diagnostic {
+                message: "failure detail".to_string(),
+                span_start: 11,
+                span_end: 19,
+            }],
+            kind: i32::from(CommandResultKind::Error),
+            ..Default::default()
+        };
+        let result = CommandResult {
+            success: true,
+            message: "committed".to_string(),
+            diagnostics: vec![Diagnostic {
+                message: "commit detail".to_string(),
+                span_start: 0,
+                span_end: 9,
+            }],
+            kind: i32::from(CommandResultKind::Ok),
+            results: vec![successful_child, failed_child],
+            transaction: Some(TransactionStatus {
+                id: "command.request".to_string(),
+                domain: "default".to_string(),
+                state: i32::from(TransactionState::Committed),
+                pending_count: 1,
+                completed_count: 2,
+                total_count: 3,
+                error: "retained detail".to_string(),
+                failing_step: Some(1),
+            }),
+            ..Default::default()
+        };
+
+        let restored = command_result(durable_command_result(&result));
+
+        assert_eq!(restored, result);
+    }
+
+    #[test]
+    fn durable_command_results_normalize_non_success_kinds_to_error() {
+        let result = CommandResult {
+            success: false,
+            message: "redirect".to_string(),
+            kind: i32::from(CommandResultKind::NotLeader),
+            ..Default::default()
+        };
+
+        let durable = durable_command_result(&result);
+        assert_eq!(durable.kind, CommandExecutionResultKind::Error);
+        let restored = command_result(durable);
+        assert_eq!(restored.kind, i32::from(CommandResultKind::Error));
     }
 }

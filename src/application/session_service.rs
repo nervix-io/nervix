@@ -47,6 +47,7 @@ use triomphe::Arc;
 use super::{
     authentication::{AuthRateLimiter, BasicAuthCredentials},
     command_execution::PersistentCommandRequest,
+    completion::{ApplicationRevisionPhase, wait_for_application_revision},
     describe_output::placement_runtime_node_ref_suggestions,
     model_mutation::{RequestDomainError, command_error, parse_request_domain},
     peer_grpc::grpc_uri_from_advertise_addr,
@@ -586,72 +587,10 @@ impl SessionService for SessionServiceImpl {
 pub(in crate::application) async fn apply_cluster_runtime_state(
     runtime: &Runtime,
     cluster: &cluster::ClusterHandle,
+    interconnect: &Transport,
     local_node_id: &ClusterNodeName,
     state: ConsensusRuntimeState,
 ) -> Result<(), crate::runtime::RuntimeError> {
-    #[derive(Clone, Copy)]
-    enum RuntimeRevisionPhase {
-        Prepared,
-        Ready,
-    }
-
-    async fn wait_for_runtime_revision_phase(
-        cluster: &cluster::ClusterHandle,
-        cluster_state: &mut cluster::ClusterStateWatcher,
-        revision: u64,
-        deadline: tokio::time::Instant,
-        phase: RuntimeRevisionPhase,
-    ) -> Result<(), crate::runtime::RuntimeError> {
-        let mut deadline_elapsed = false;
-        loop {
-            tokio::task::consume_budget().await;
-            let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
-            tokio::pin!(cluster_change);
-            let gossip = cluster.availability_state().await;
-            let expected_nodes = gossip.live_identities();
-            let completed_nodes = match phase {
-                RuntimeRevisionPhase::Prepared => {
-                    cluster.nodes_prepared_for_runtime_revision(revision).await
-                }
-                RuntimeRevisionPhase::Ready => {
-                    cluster.nodes_ready_for_runtime_revision(revision).await
-                }
-            };
-            let pending_nodes = expected_nodes
-                .difference(&completed_nodes)
-                .map(|identity| identity.node_id().clone())
-                .collect::<Vec<_>>();
-            if pending_nodes.is_empty() {
-                return Ok(());
-            }
-            if deadline_elapsed {
-                let error = match phase {
-                    RuntimeRevisionPhase::Prepared => {
-                        crate::runtime::RuntimeError::RuntimeRevisionPreparation {
-                            revision,
-                            pending_nodes,
-                        }
-                    }
-                    RuntimeRevisionPhase::Ready => {
-                        crate::runtime::RuntimeError::RuntimeRevisionReadiness {
-                            revision,
-                            pending_nodes,
-                        }
-                    }
-                };
-                return Err(error);
-            }
-            tokio::select! {
-                biased;
-                _ = tokio::time::sleep_until(deadline) => {
-                    deadline_elapsed = true;
-                }
-                _ = &mut cluster_change => {}
-            }
-        }
-    }
-
-    let mut cluster_state = cluster.subscribe_state_changes().await;
     runtime
         .apply_cluster_state(
             local_node_id,
@@ -687,27 +626,39 @@ pub(in crate::application) async fn apply_cluster_runtime_state(
             },
         );
     };
-    wait_for_runtime_revision_phase(
+    wait_for_application_revision(
         cluster,
-        &mut cluster_state,
+        interconnect,
         state.revision,
+        ApplicationRevisionPhase::RuntimePrepared,
         deadline,
-        RuntimeRevisionPhase::Prepared,
     )
-    .await?;
+    .await
+    .map_err(
+        |timeout| crate::runtime::RuntimeError::RuntimeRevisionPreparation {
+            revision: state.revision,
+            pending_nodes: timeout.pending_nodes,
+        },
+    )?;
 
     runtime.start_running_domain_ingestors().await?;
     cluster
         .set_local_runtime_revision_ready(state.revision)
         .await;
-    wait_for_runtime_revision_phase(
+    wait_for_application_revision(
         cluster,
-        &mut cluster_state,
+        interconnect,
         state.revision,
+        ApplicationRevisionPhase::RuntimeReady,
         deadline,
-        RuntimeRevisionPhase::Ready,
     )
     .await
+    .map_err(
+        |timeout| crate::runtime::RuntimeError::RuntimeRevisionReadiness {
+            revision: state.revision,
+            pending_nodes: timeout.pending_nodes,
+        },
+    )
 }
 
 fn error_response(kind: &str, diagnostics: &[ParseDiagnostic]) -> CommandResult {
@@ -892,6 +843,7 @@ impl SessionServiceImpl {
         apply_cluster_runtime_state(
             &self.inner.runtime,
             &self.inner.cluster,
+            &self.inner.interconnect,
             self.inner.consensus.local_node_id(),
             state,
         )
