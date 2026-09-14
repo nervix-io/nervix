@@ -102,6 +102,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   node installs that revision. `STOP` revokes the authority, while automatic ALTER quiescing leaves
   it running. Never describe a missing, stopped, uninstalled, or stale paced clock as falling back
   to wall time. Unpaced domains receive actual UTC through the same domain-time capability.
+  Require synchronized and monitored UTC on every cluster host. Reads are nondecreasing per node
+  and generation, but the mapping does not promise identical simultaneous reads or a total order
+  across hosts. Host offset affects `START AT NOW`, unpaced observations, and paced projection;
+  `TIME RATE` multiplies projection error. `SKEW` is event-admission tolerance, not a host-sync
+  allowance.
 - For ingestion, read `Domains And Time` → `Ingestion Timestamps`: `TIMESTAMP NOW` uses domain
   time at delivery, including after quiescing; explicit source times remain unchanged. Check
   admission against the newest 256 reached logical centers with inclusive `SKEW`, independently
@@ -127,6 +132,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   Bare fields, `message.<field>`, and `input.<field>` are equivalent there. Do not use `output`,
   `branch`, materialized `relay_state`, construction clauses, or side effects; subscription
   creation rejects them, and a selected record is delivered unchanged before sampling.
+- Roto `now()` and the WASM domain-time import receive the owning execution snapshot explicitly.
+  There is no context-free engine clock. Guest initialization, input, timeout, flush, and state
+  lifecycle operations each use the snapshot selected for that operation; guest timeout delays are
+  logical, while Wasmtime fuel and epoch yielding are physical safety controls.
 - Declare exact schema types and nullability. Use explicit conversions; never invent implicit
   casts between wire, internal, branch, processor, lookup, state, and sink values.
 - Use `IF ... THEN ... ELSE ... END` or searched/simple `CASE` for conditional values. Keep every

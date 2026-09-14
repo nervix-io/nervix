@@ -213,7 +213,8 @@ fn row_count() -> usize {
 }
 
 fn call_timestamp() -> Timestamp {
-    with_state(|state| state.now).unwrap_or_else(Timestamp::now)
+    with_state(|state| state.now)
+        .assured("every Roto call installs its explicit VM execution context")
 }
 
 fn column_arg(args: Val<UdfArgs>, index: u64, expected: &DataType) -> Column {
@@ -1156,43 +1157,6 @@ impl FunctionInjector for UdfExecutor {
         }
     }
 
-    fn inject(
-        &self,
-        function: &FunctionName,
-        arguments: &[TypedArray],
-        row_count: usize,
-        span: Span,
-    ) -> Result<TypedArray, RuntimeError> {
-        self.inject_with_errors(function, arguments, row_count, span)
-            .map(|result| result.output)
-    }
-
-    fn inject_with_errors(
-        &self,
-        function: &FunctionName,
-        arguments: &[TypedArray],
-        row_count: usize,
-        span: Span,
-    ) -> Result<InjectedResult, RuntimeError> {
-        let FunctionName::Udf(name) = function else {
-            return Err(RuntimeError::MissingFunctionInjector {
-                function: function.as_str().to_string(),
-            });
-        };
-        let Some(compiled) = self.functions.get(&name.to_ascii_lowercase()) else {
-            return Err(RuntimeError::MissingFunctionInjector {
-                function: function.as_str().to_string(),
-            });
-        };
-        compiled.execute(
-            arguments,
-            row_count,
-            span,
-            Timestamp::now(),
-            RowErrorMask::none(row_count),
-        )
-    }
-
     fn inject_with_context(
         &self,
         function: &FunctionName,
@@ -1529,7 +1493,7 @@ mod tests {
             FunctionExecutionPolicy::SpawnBlocking
         );
         let result = executor
-            .inject_with_errors(
+            .inject_with_context(
                 &function,
                 &[TypedArray::Int64(Int64Array::from(vec![
                     Some(1),
@@ -1538,6 +1502,8 @@ mod tests {
                 ]))],
                 3,
                 (0..7).into(),
+                Timestamp::from_unix_nanos(123),
+                RowErrorMask::none(3),
             )
             .expect("UDF should execute");
         assert_eq!(

@@ -1,3 +1,10 @@
+//! Iceberg emission at the external data-plane boundary.
+//!
+//! Layer: data plane.
+//! - **Owns.** Iceberg file staging, catalog commits and branch-local commit buffering.
+//! - **Depends on.** Validated emitter plans, Arrow batches and external Iceberg APIs.
+//! - **Must not know.** NSPL parsing, placement decisions or control-plane transactions.
+
 use std::{
     collections::VecDeque,
     fs::File,
@@ -594,7 +601,7 @@ impl IcebergEmitter {
                 "{}-{}-{}-{}",
                 context.emitter.as_str(),
                 table_name,
-                current_timestamp().unix_nanos(),
+                actual_utc_now().unix_nanos(),
                 fastrand::u64(..)
             ),
             data_file_sequence: 0,

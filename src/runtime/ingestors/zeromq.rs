@@ -1,6 +1,14 @@
+//! ZeroMQ ingestor execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** ZeroMQ socket consumption and source-boundary timestamp observation.
+//! - **Depends on.** Typed ZeroMQ plans, socket clients and ingestor runtime admission.
+//! - **Must not know.** NSPL parsing, registry validation or placement computation.
+
 use zeromq::{PullSocket, Socket, SocketRecv};
 
 use super::super::*;
+use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct ZeroMqIngestor;
 
@@ -202,6 +210,7 @@ impl ZeroMqIngestor {
                                     let payload = BufferedIngestPayload::new(
                                         payload,
                                         BufferedIngestMetadata::without_headers(),
+                                        actual_utc_now(),
                                     );
                                     if let IngestorQuiesceIntake::Dispatch(payload) =
                                         quiesce.intake(0, payload, false)

@@ -1,3 +1,10 @@
+//! Kafka ingestor execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** Kafka consumption, offset acknowledgement and source-boundary observation.
+//! - **Depends on.** Typed Kafka plans, broker clients and ingestor runtime admission.
+//! - **Must not know.** NSPL parsing, registry validation or placement computation.
+
 use std::{borrow::Cow, future};
 
 use rdkafka::{
@@ -8,6 +15,7 @@ use rdkafka::{
 };
 
 use super::super::*;
+use crate::runtime::physical_time::actual_utc_now;
 
 pub(crate) struct KafkaIngestor;
 
@@ -583,7 +591,7 @@ impl KafkaIngestor {
                                                             output_routes: &task_output_routes,
                                                             filter_where: task_filter_where.as_ref(),
                                                             metadata: &metadata,
-                                                            ingested_at: current_timestamp(),
+                                                            ingested_at: actual_utc_now(),
                                                             acks: vec![AckSet::empty()],
                                                         })
                                                         .await
@@ -730,7 +738,7 @@ impl KafkaIngestor {
                                                         output_routes: &task_output_routes,
                                                         filter_where: task_filter_where.as_ref(),
                                                         metadata: &metadata,
-                                                        ingested_at: current_timestamp(),
+                                                        ingested_at: actual_utc_now(),
                                                         acks: vec![if !task_branched_senders.is_empty() {
                                                             acks.attached()
                                                         } else {
@@ -984,7 +992,7 @@ impl KafkaIngestor {
                                             tokio::task::consume_budget().await;
                                                 let mut completions = Vec::with_capacity(messages.len());
                                                 let mut batch_failure = None::<String>;
-                                                let ingested_at = current_timestamp();
+                                                let ingested_at = actual_utc_now();
 
                                                 // Every message keeps its own ack root; the group only
                                                 // shares the dispatch call, so an ack still resolves per

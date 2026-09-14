@@ -1,3 +1,10 @@
+//! RabbitMQ ingestor execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** RabbitMQ consumption, acknowledgement and source-boundary observation.
+//! - **Depends on.** Typed RabbitMQ plans, broker clients and ingestor runtime admission.
+//! - **Must not know.** NSPL parsing, registry validation or placement computation.
+
 use std::borrow::Cow;
 
 use lapin::{
@@ -8,6 +15,7 @@ use lapin::{
 };
 
 use super::super::*;
+use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct RabbitMqIngestor;
 
@@ -286,7 +294,7 @@ impl RabbitMqIngestor {
                                                                 output_routes: &task_output_routes,
                                                                 filter_where: task_filter_where.as_ref(),
                                                                 metadata: &metadata,
-                                                                ingested_at: current_timestamp(),
+                                                                ingested_at: actual_utc_now(),
                                                                 acks: vec![if !task_branched_senders.is_empty() {
                                                                     acks.attached()
                                                                 } else {

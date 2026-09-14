@@ -31,6 +31,8 @@ pub enum DomainClockError {
     InvalidTimeRate { value: String },
     #[error("domain clock period '{value}' must be positive and fit in 64-bit nanoseconds")]
     InvalidPeriod { value: String },
+    #[error("domain clock skew '{value}' must fit in 64-bit nanoseconds")]
+    InvalidSkew { value: String },
     #[error("domain clock tick ids start at one")]
     InvalidTickId,
     #[error("domain clock tick advancement exceeds the supported tick-id range")]
@@ -277,6 +279,64 @@ impl fmt::Display for DomainClockPeriod {
 }
 
 #[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct DomainClockSkew(u64);
+
+impl DomainClockSkew {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn as_nanos(self) -> u64 {
+        self.0
+    }
+
+    pub const fn as_duration(self) -> Duration {
+        Duration::from_nanos(self.as_nanos())
+    }
+}
+
+impl TryFrom<Duration> for DomainClockSkew {
+    type Error = DomainClockError;
+
+    fn try_from(value: Duration) -> Result<Self, Self::Error> {
+        let nanos = u64::try_from(value.as_nanos()).map_err(|_| DomainClockError::InvalidSkew {
+            value: humantime::format_duration(value).to_string(),
+        })?;
+        Ok(Self(nanos))
+    }
+}
+
+impl FromStr for DomainClockSkew {
+    type Err = DomainClockError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let duration =
+            humantime::parse_duration(value).map_err(|_| DomainClockError::InvalidSkew {
+                value: value.to_string(),
+            })?;
+        Self::try_from(duration).map_err(|_| DomainClockError::InvalidSkew {
+            value: value.to_string(),
+        })
+    }
+}
+
+impl fmt::Display for DomainClockSkew {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        humantime::format_duration(self.as_duration()).fmt(formatter)
+    }
+}
+
+#[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct DomainClockState {
@@ -470,6 +530,8 @@ impl DomainClockAdvancement {
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
+
     use super::*;
 
     fn mapping(rate: f64) -> DomainClockState {
@@ -500,6 +562,16 @@ mod tests {
         assert!(DomainClockPeriod::try_from(Duration::from_nanos(1)).is_ok());
         assert!(DomainClockPeriod::try_from(Duration::from_secs(u64::MAX)).is_err());
         assert!(serde_json::from_str::<DomainClockPeriod>("0").is_err());
+    }
+
+    #[test]
+    fn skew_accepts_zero_and_rejects_durations_beyond_nanoseconds() {
+        assert_eq!(
+            DomainClockSkew::try_from(Duration::ZERO)
+                .assured("zero nanoseconds fits the domain-skew representation"),
+            DomainClockSkew::ZERO
+        );
+        assert!(DomainClockSkew::try_from(Duration::from_secs(u64::MAX)).is_err());
     }
 
     #[test]

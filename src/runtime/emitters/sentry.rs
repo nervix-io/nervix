@@ -1,3 +1,10 @@
+//! Sentry emission at the external data-plane boundary.
+//!
+//! Layer: data plane.
+//! - **Owns.** Sentry envelopes, event timestamp defaults and HTTP retry interpretation.
+//! - **Depends on.** Validated emitter plans, Arrow batches and the Sentry HTTP protocol.
+//! - **Must not know.** NSPL parsing, placement decisions or control-plane transactions.
+
 use reqwest::{
     Client as HttpClient, StatusCode,
     header::{CONTENT_TYPE, HeaderValue, RETRY_AFTER},

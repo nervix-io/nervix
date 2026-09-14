@@ -1,3 +1,10 @@
+//! Syslog ingestor execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** Syslog listeners, wire timestamp completion and source-boundary observation.
+//! - **Depends on.** Typed Syslog plans, socket transports and ingestor runtime admission.
+//! - **Must not know.** NSPL parsing, registry validation or placement computation.
+
 use std::net::SocketAddr;
 
 use nervix_models::{DomainName, IngestorName};
@@ -11,7 +18,10 @@ use tokio::{
 use tokio_rustls::TlsAcceptor;
 
 use super::super::*;
-use crate::runtime::syslog::{SyslogClientConfig, SyslogDirection, SyslogProtocol};
+use crate::runtime::{
+    physical_time::actual_utc_now,
+    syslog::{SyslogClientConfig, SyslogDirection, SyslogProtocol},
+};
 
 const STREAM_INTAKE_QUEUE_CAPACITY: usize = 64;
 const MAX_OCTET_COUNT_DIGITS: usize = 10;
@@ -328,6 +338,7 @@ impl SyslogIngestor {
                     let payload = BufferedIngestPayload::new(
                         &datagram[..size],
                         BufferedIngestMetadata::Syslog { peer_addr },
+                        actual_utc_now(),
                     );
                     if let IngestorQuiesceIntake::Dispatch(payload) =
                         context.quiesce.intake(0, payload, false)
@@ -463,6 +474,7 @@ impl SyslogIngestor {
                         BufferedIngestMetadata::Syslog {
                             peer_addr: frame.peer_addr,
                         },
+                        actual_utc_now(),
                     );
                     if let IngestorQuiesceIntake::Dispatch(payload) =
                         context.quiesce.intake(0, payload, false)

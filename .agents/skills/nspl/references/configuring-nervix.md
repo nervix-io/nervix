@@ -88,6 +88,9 @@ Use separate execution phases so transaction and active-domain rules stay clear.
    execution. One committed authority revision identifies the producing node incarnation; owner
    changes preserve the mapping, `STOP` revokes the authority, and automatic ALTER quiescing keeps
    the generation and authority running.
+   Run and monitor UTC synchronization on every cluster host. Per-node reads do not move backward
+   within a generation, but simultaneous cross-host reads need not match; `SKEW` controls event
+   admission and does not compensate for host-clock offset.
    Explicit start timestamps must fit the inclusive signed Unix-nanosecond range from
    `1677-09-21T00:12:43.145224192Z` through `2262-04-11T23:47:16.854775807Z`, and `TIME RATE` must
    be positive and finite.

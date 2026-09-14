@@ -1,3 +1,10 @@
+//! Generator statement grammar.
+//!
+//! Layer: language.
+//! - **Owns.** Parsing generator creation and alteration into generator models.
+//! - **Depends on.** Shared NSPL grammar primitives and vocabulary models.
+//! - **Must not know.** Generator scheduling, materialized-state execution or persistence.
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{AlterGenerator, AlterGeneratorOperation, CreateGenerator, CreateStatement};
@@ -6,9 +13,9 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, alter_generator_route_body,
-        alter_op_separator, branch_selection, completion_context, completion_tokens, duration_lit,
-        flushed_explicit_processor_outputs, generator_name, generator_ref, if_not_exists_clause,
-        into_parse_error, kw, kw_phrase3, lex_input, relay_ref, suggest_from,
+        alter_op_separator, branch_selection, completion_context, completion_tokens,
+        domain_clock_period_lit, flushed_explicit_processor_outputs, generator_name, generator_ref,
+        if_not_exists_clause, into_parse_error, kw, kw_phrase3, lex_input, relay_ref, suggest_from,
         suggestions_from_errors, tok,
     },
 };
@@ -27,7 +34,7 @@ pub fn create_generator_parser<'src>()
         ))
         .then(relay_ref())
         .then_ignore(kw(Identifier::Each))
-        .then(crate::parser_support::duration_lit())
+        .then(domain_clock_period_lit())
         .then(branch_selection())
         .then(flushed_explicit_processor_outputs())
         .then_ignore(tok(Token::Semicolon).or_not())
@@ -59,7 +66,7 @@ pub fn alter_generator_parser<'src>()
         .map(|relay| AlterGeneratorOperation::SetMaterializedState { relay });
     let set_each = kw(Identifier::Set)
         .ignore_then(kw(Identifier::Each))
-        .ignore_then(duration_lit())
+        .ignore_then(domain_clock_period_lit())
         .map(|each| AlterGeneratorOperation::SetEach { each });
     let set_branching = kw(Identifier::Set)
         .ignore_then(branch_selection())
@@ -204,7 +211,7 @@ mod tests {
 
         assert_eq!(parsed.name.as_str(), "synth");
         assert_eq!(parsed.materialized_relay.as_str(), "notifications");
-        assert_eq!(parsed.each, "100ms");
+        assert_eq!(parsed.each.to_string(), "100ms");
         let route = &parsed.output_routes.routes[0];
         assert_eq!(route.relay.as_str(), "alerts");
         assert_eq!(route.construction.assignments.len(), 2);

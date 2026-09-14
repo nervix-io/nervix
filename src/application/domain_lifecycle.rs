@@ -12,7 +12,7 @@ use error_stack::Report;
 use nervix_interconnect::DomainDrainStatusEnvelope;
 use nervix_models::{
     AlterDomain, ClusterNodeName, CreateDomain, CreateStatement, DomainClockState, DomainName,
-    DomainPace, DomainStartPoint, DomainState, DomainStatus, QuiesceLevel, StartDomain, StopDomain,
+    DomainStartPoint, DomainState, DomainStatus, QuiesceLevel, StartDomain, StopDomain,
     TimestampError,
 };
 use thiserror::Error;
@@ -24,7 +24,6 @@ use super::{
     model_mutation::{
         command_error, command_ok, command_ok_already_existed, quiesce_level_message,
     },
-    model_validation::validate_domain_config,
     ownership_handoff::{mark_complete_ownership_transitions, planned_relocation_count},
     session_service::SessionServiceImpl,
 };
@@ -351,9 +350,6 @@ impl SessionServiceImpl {
             }
             return command_error(format!("domain '{}' already exists", create.id.as_str()));
         }
-        if let Err(message) = validate_domain_config(&create.config) {
-            return command_error(message);
-        }
         let create = create.body;
         let state = DomainState {
             id: create.id.clone(),
@@ -553,14 +549,14 @@ impl SessionServiceImpl {
     ) -> Result<ResolvedDomainStart, Report<TimestampError>> {
         let wall_started_at = current_timestamp();
         let (mut logical_start, time_rate) = requested_start.resolve_at(wall_started_at);
-        if let DomainPace::Paced = domain.config.pace
+        if domain.config.pace.is_paced()
             && let DomainStartPoint::Resume = requested_start
             && let Ok(Some(resume_at)) = self.inner.runtime.current_paced_domain_time(domain_id)
         {
             logical_start = resume_at;
         }
         #[cfg(feature = "testing")]
-        let wall_started_at = if let DomainPace::Paced = domain.config.pace
+        let wall_started_at = if domain.config.pace.is_paced()
             && let DomainStartPoint::Now { .. } | DomainStartPoint::At { .. } = requested_start
             && let Some(initial_elapsed) = self
                 .inner
@@ -593,9 +589,6 @@ impl SessionServiceImpl {
         let Some(domain) = self.inner.consensus.current_domain(domain_id).await else {
             return command_error(format!("domain '{}' does not exist", domain_id.as_str()));
         };
-        if let Err(message) = validate_domain_config(&domain.config) {
-            return command_error(message);
-        }
         if let DomainStatus::Running = domain.status {
             return command_error(format!(
                 "domain '{}' is already running",
@@ -608,7 +601,7 @@ impl SessionServiceImpl {
                 domain_id.as_str()
             ));
         }
-        let authority = if let DomainPace::Paced = domain.config.pace {
+        let authority = if domain.config.pace.is_paced() {
             let Some(authority) = self.selected_domain_clock_authority(domain_id).await else {
                 return command_error(format!(
                     "no live voter is available to own the clock for domain '{}'",
@@ -637,7 +630,10 @@ impl SessionServiceImpl {
             .start_domain(
                 domain_id.clone(),
                 resolved_start.concrete_start,
-                matches!(domain.config.pace, DomainPace::Paced)
+                domain
+                    .config
+                    .pace
+                    .is_paced()
                     .then_some(resolved_start.clock.clone()),
                 authority,
             )
@@ -724,8 +720,6 @@ mod tests {
                     id: DomainName::parse("prod").expect("valid domain"),
                     config: DomainConfig {
                         pace: DomainPace::Unpaced,
-                        period: "0ms".to_string(),
-                        skew: "0ms".to_string(),
                         placement: nervix_models::PlacementPolicy::Neutral,
                     },
                 },
@@ -741,8 +735,6 @@ mod tests {
                     id: DomainName::parse("prod").expect("valid domain"),
                     config: DomainConfig {
                         pace: DomainPace::Unpaced,
-                        period: "0ms".to_string(),
-                        skew: "0ms".to_string(),
                         placement: nervix_models::PlacementPolicy::Neutral,
                     },
                 },

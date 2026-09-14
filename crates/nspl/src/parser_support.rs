@@ -1,3 +1,10 @@
+//! Shared NSPL grammar primitives.
+//!
+//! Layer: language.
+//! - **Owns.** Reusable lexical parsers, semantic reference parsers and parse diagnostics.
+//! - **Depends on.** Shared language tokens and vocabulary models.
+//! - **Must not know.** Registry state, runtime execution or connector lifecycle.
+
 use std::{
     num::{NonZeroU32, NonZeroU64},
     ops::Range,
@@ -11,15 +18,16 @@ use error_stack::Report;
 use nervix_models::{
     AckMode, AlterProcessorOperation, AssignmentTargetScope, BranchName, BranchSelection,
     ChannelName, ClientConfigEntry, ClientName, ClusterNodeName, CodecName, CollectionName,
-    ConsumerGroupName, CorrelatorName, DeduplicatorName, DomainName, EmitterAckWindow, EmitterName,
-    EndpointName, Expression, FieldName, FlushPolicy, GeneralErrorPolicy, GeneratorName,
-    InferencerName, IngestorName, InputCollectPolicy, JunctionName, LookupName,
-    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, ModelName, NameError,
-    OutputBranch, PlacementName, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
-    ProcessorOutputs, PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName, RelayName,
-    ReordererName, ResourceName, RetryPolicy, RouteConstruction, SchemaName, SignalingProtocolName,
-    SubjectName, SubscriptionName, TableName, TopicName, UdfName, UserName, VhostName,
-    WasmProcessorName, WindowProcessorName, WireSchemaName,
+    ConsumerGroupName, CorrelatorName, DeduplicatorName, DomainClockPeriod, DomainName,
+    EmitterAckWindow, EmitterName, EndpointName, Expression, FieldName, FlushPolicy,
+    GeneralErrorPolicy, GeneratorName, InferencerName, IngestorName, InputCollectPolicy,
+    JunctionName, LookupName, MaterializedStateDependency, MaterializedStatePolicy,
+    MessageErrorPolicy, ModelName, NameError, OutputBranch, PlacementName, ProcessorInputWhere,
+    ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarSubscriptionName, QueueGroupName,
+    QueueName, ReingestorName, RelayName, ReordererName, ResourceName, RetryPolicy,
+    RouteConstruction, SchemaName, SignalingProtocolName, SubjectName, SubscriptionName, TableName,
+    TopicName, UdfName, UserName, VhostName, WasmProcessorName, WindowProcessorName,
+    WireSchemaName,
 };
 use sorted_vec::SortedSet;
 
@@ -913,6 +921,14 @@ pub fn duration_lit<'src>()
     ))
     .labelled("duration_literal")
     .boxed()
+}
+
+pub fn domain_clock_period_lit<'src>()
+-> impl Parser<'src, &'src [Token], DomainClockPeriod, extra::Err<ParseError<'src>>> + Clone {
+    duration_lit().try_map(|raw, span| {
+        raw.parse::<DomainClockPeriod>()
+            .map_err(|error| Rich::custom(span, error.to_string()))
+    })
 }
 
 pub fn byte_size_lit<'src>()

@@ -1,3 +1,10 @@
+//! Ingestor quiescence and retained-input ownership.
+//!
+//! Layer: data plane.
+//! - **Owns.** In-memory quiescence causes, bounded retained payloads and intake decisions.
+//! - **Depends on.** Typed ingestor policy, observed input timestamps and runtime task handles.
+//! - **Must not know.** NSPL parsing, consensus decisions or persisted payload state.
+
 use super::*;
 
 pub(super) const DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL: Duration = Duration::from_secs(1);
@@ -104,19 +111,32 @@ pub(in crate::runtime) struct BufferedIngestPayload {
     pub(super) payloads: Vec<Vec<u8>>,
     /// Row-aligned with `payloads`.
     pub(super) metadata: Vec<BufferedIngestMetadata>,
+    observed_at: Timestamp,
 }
 
 impl BufferedIngestPayload {
-    pub(in crate::runtime) fn new(payload: &[u8], metadata: BufferedIngestMetadata) -> Self {
+    pub(in crate::runtime) fn new(
+        payload: &[u8],
+        metadata: BufferedIngestMetadata,
+        observed_at: Timestamp,
+    ) -> Self {
         Self {
             payloads: vec![payload.to_vec()],
             metadata: vec![metadata],
+            observed_at,
         }
     }
 
-    pub(in crate::runtime) fn batch(entries: Vec<(Vec<u8>, BufferedIngestMetadata)>) -> Self {
+    pub(in crate::runtime) fn batch(
+        entries: Vec<(Vec<u8>, BufferedIngestMetadata)>,
+        observed_at: Timestamp,
+    ) -> Self {
         let (payloads, metadata) = entries.into_iter().unzip();
-        Self { payloads, metadata }
+        Self {
+            payloads,
+            metadata,
+            observed_at,
+        }
     }
 
     pub(in crate::runtime) fn payload(&self) -> &[u8] {
@@ -151,6 +171,10 @@ impl BufferedIngestPayload {
 
     pub(super) fn payloads(&self) -> impl Iterator<Item = &[u8]> {
         self.payloads.iter().map(Vec::as_slice)
+    }
+
+    pub(super) const fn observed_at(&self) -> Timestamp {
+        self.observed_at
     }
 
     pub(super) fn byte_len(&self) -> usize {
@@ -1010,7 +1034,11 @@ mod tests {
         assert!(matches!(
             control.intake(
                 0,
-                BufferedIngestPayload::new(b"admitted", BufferedIngestMetadata::without_headers(),),
+                BufferedIngestPayload::new(
+                    b"admitted",
+                    BufferedIngestMetadata::without_headers(),
+                    Timestamp::from_unix_nanos(1),
+                ),
                 false,
             ),
             IngestorQuiesceIntake::Dispatch(_)
@@ -1040,7 +1068,11 @@ mod tests {
         assert!(matches!(
             control.intake(
                 0,
-                BufferedIngestPayload::new(b"one", BufferedIngestMetadata::without_headers(),),
+                BufferedIngestPayload::new(
+                    b"one",
+                    BufferedIngestMetadata::without_headers(),
+                    Timestamp::from_unix_nanos(1),
+                ),
                 false,
             ),
             IngestorQuiesceIntake::Buffered
@@ -1048,7 +1080,11 @@ mod tests {
         assert!(matches!(
             control.intake(
                 0,
-                BufferedIngestPayload::new(b"two", BufferedIngestMetadata::without_headers(),),
+                BufferedIngestPayload::new(
+                    b"two",
+                    BufferedIngestMetadata::without_headers(),
+                    Timestamp::from_unix_nanos(2),
+                ),
                 false,
             ),
             IngestorQuiesceIntake::Buffered
@@ -1058,13 +1094,11 @@ mod tests {
         assert_eq!(control.counters().dropped_total, 1);
 
         control.release(IngestorQuiesceCause::EntityHold);
-        assert_eq!(
-            control
-                .pop_buffered(0)
-                .expect("newest payload should remain")
-                .payload(),
-            b"two"
-        );
+        let retained = control
+            .pop_buffered(0)
+            .assured("drop-oldest intake retains the newest payload");
+        assert_eq!(retained.payload(), b"two");
+        assert_eq!(retained.observed_at(), Timestamp::from_unix_nanos(2));
     }
 
     #[test]
@@ -1085,7 +1119,11 @@ mod tests {
         assert!(matches!(
             control.intake(
                 0,
-                BufferedIngestPayload::new(b"kept", BufferedIngestMetadata::without_headers(),),
+                BufferedIngestPayload::new(
+                    b"kept",
+                    BufferedIngestMetadata::without_headers(),
+                    Timestamp::from_unix_nanos(1),
+                ),
                 true,
             ),
             IngestorQuiesceIntake::Buffered
@@ -1093,7 +1131,11 @@ mod tests {
         assert!(matches!(
             control.intake(
                 0,
-                BufferedIngestPayload::new(b"no", BufferedIngestMetadata::without_headers(),),
+                BufferedIngestPayload::new(
+                    b"no",
+                    BufferedIngestMetadata::without_headers(),
+                    Timestamp::from_unix_nanos(2),
+                ),
                 true,
             ),
             IngestorQuiesceIntake::Rejected { retry_after: None }
@@ -1152,7 +1194,11 @@ mod tests {
         assert!(matches!(
             control.intake(
                 0,
-                BufferedIngestPayload::new(b"retained", BufferedIngestMetadata::without_headers(),),
+                BufferedIngestPayload::new(
+                    b"retained",
+                    BufferedIngestMetadata::without_headers(),
+                    Timestamp::from_unix_nanos(1),
+                ),
                 false,
             ),
             IngestorQuiesceIntake::Buffered
@@ -1165,6 +1211,7 @@ mod tests {
                 BufferedIngestPayload::new(
                     b"discarded",
                     BufferedIngestMetadata::without_headers(),
+                    Timestamp::from_unix_nanos(2),
                 ),
                 false,
             ),

@@ -1,3 +1,10 @@
+//! Ingestor quiescence vocabulary.
+//!
+//! Layer: vocabulary.
+//! - **Owns.** Typed quiescence modes, overflow policies and their scalar limits.
+//! - **Depends on.** Self-contained model primitives.
+//! - **Must not know.** Runtime buffers, transport clients or lifecycle coordination.
+
 use std::num::NonZeroUsize;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -1492,6 +1499,7 @@ fn wire_schema_change_aspects<T>(
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
     use nonzero_ext::nonzero;
 
     use crate::{
@@ -1627,7 +1635,9 @@ mod tests {
             name: named("synth"),
             materialized_relay: named("state"),
             branched_by: BranchSelection::unbranched(),
-            each: "1s".to_string(),
+            each: "1s"
+                .parse()
+                .assured("the fixture cadence is a positive duration"),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
                 named("output"),
                 FlushPolicy::Each {
@@ -2208,7 +2218,9 @@ mod tests {
             (
                 {
                     let mut candidate = base.clone();
-                    candidate.each = "2s".to_string();
+                    candidate.each = "2s"
+                        .parse()
+                        .assured("the fixture cadence is a positive duration");
                     candidate
                 },
                 ModelChangeAspect::GeneratorCadence,

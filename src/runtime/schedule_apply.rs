@@ -1,3 +1,10 @@
+//! Application of validated schedules to one node's runtime.
+//!
+//! Layer: data plane.
+//! - **Owns.** Materializing, replacing and removing local tasks named by an execution schedule.
+//! - **Depends on.** Typed schedules, runtime lifecycle handles and installed domain capabilities.
+//! - **Must not know.** NSPL parsing, registry validation or placement-policy computation.
+
 use super::*;
 
 impl Runtime {
@@ -1959,8 +1966,6 @@ mod tests {
                 id: domain.clone(),
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
-                    period: "1s".to_string(),
-                    skew: "0s".to_string(),
                     placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Running,
@@ -2020,8 +2025,6 @@ mod tests {
             id: domain.clone(),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
-                period: "1s".to_string(),
-                skew: "0s".to_string(),
                 placement: nervix_models::PlacementPolicy::Neutral,
             },
             status: DomainStatus::Running,
@@ -2100,8 +2103,6 @@ mod tests {
                 id: domain.clone(),
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
-                    period: "1s".to_string(),
-                    skew: "0s".to_string(),
                     placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Running,

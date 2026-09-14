@@ -15,7 +15,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::DomainTick;
 use nervix_models::{
     DomainAdmissionWindow, DomainClockAuthority, DomainClockPeriod, DomainClockProgress,
-    DomainClockState, DomainName, DomainPace, DomainState, Timestamp,
+    DomainClockSkew, DomainClockState, DomainName, DomainPace, DomainState, Timestamp,
 };
 #[cfg(test)]
 use nervix_wasm::WasmExecutionContext;
@@ -58,13 +58,6 @@ pub(crate) enum DomainClockAccessError {
         domain: DomainName,
         operation: DomainClockArithmetic,
     },
-    #[error("domain '{domain}' has invalid ingestion timing configuration")]
-    AdmissionConfiguration { domain: DomainName },
-    #[error("domain '{domain}' has invalid cadence interval '{interval}'")]
-    CadenceConfiguration {
-        domain: DomainName,
-        interval: String,
-    },
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -94,14 +87,18 @@ pub type DomainClockWaitResult<T> = Result<T, Report<DomainClockWaitError>>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DomainClockSource {
     Unpaced,
-    Paced(DomainClockState),
+    Paced {
+        mapping: DomainClockState,
+        period: DomainClockPeriod,
+        skew: DomainClockSkew,
+    },
 }
 
 impl DomainClockSource {
     fn now(&self, domain: &DomainName, wall_now: Timestamp) -> DomainClockAccessResult<Timestamp> {
         match self {
             Self::Unpaced => Ok(wall_now),
-            Self::Paced(mapping) => mapping.logical_time_at(wall_now).change_context(
+            Self::Paced { mapping, .. } => mapping.logical_time_at(wall_now).change_context(
                 DomainClockAccessError::Arithmetic {
                     domain: domain.clone(),
                     operation: DomainClockArithmetic::Projection,
@@ -118,12 +115,12 @@ impl DomainClockSource {
     ) -> DomainClockAccessResult<Duration> {
         match self {
             Self::Unpaced => Ok(target.duration_since(current).unwrap_or(Duration::ZERO)),
-            Self::Paced(mapping) => mapping.wall_duration_until(current, target).change_context(
-                DomainClockAccessError::Arithmetic {
+            Self::Paced { mapping, .. } => mapping
+                .wall_duration_until(current, target)
+                .change_context(DomainClockAccessError::Arithmetic {
                     domain: domain.clone(),
                     operation: DomainClockArithmetic::DeadlineConversion,
-                },
-            ),
+                }),
         }
     }
 }
@@ -205,7 +202,7 @@ impl DomainClockLifecycle {
         authority: &DomainClockAuthority,
     ) {
         if let nervix_models::DomainStatus::Paused = state.status
-            && let DomainPace::Paced = state.config.pace
+            && let DomainPace::Paced { .. } = state.config.pace
             && state.clock.is_none()
             && authority.owner().is_some()
         {
@@ -214,7 +211,7 @@ impl DomainClockLifecycle {
                 &shared.installation,
                 DomainClockInstallation::Installed {
                     generation,
-                    source: DomainClockSource::Paced(_),
+                    source: DomainClockSource::Paced { .. },
                 } if *generation == state.start_version
             ) {
                 return;
@@ -231,10 +228,14 @@ impl DomainClockLifecycle {
                         generation: state.start_version,
                         source: DomainClockSource::Unpaced,
                     },
-                    DomainPace::Paced => match (&state.clock, authority.owner()) {
+                    DomainPace::Paced { period, skew } => match (&state.clock, authority.owner()) {
                         (Some(mapping), Some(_)) => DomainClockInstallation::Installed {
                             generation: state.start_version,
-                            source: DomainClockSource::Paced(mapping.clone()),
+                            source: DomainClockSource::Paced {
+                                mapping: mapping.clone(),
+                                period,
+                                skew,
+                            },
                         },
                         (None, _) | (_, None) => DomainClockInstallation::Uninstalled {
                             generation: state.start_version,
@@ -250,7 +251,11 @@ impl DomainClockLifecycle {
     pub(in crate::runtime) fn install_paced(&self, generation: u64, mapping: DomainClockState) {
         self.replace(DomainClockInstallation::Installed {
             generation,
-            source: DomainClockSource::Paced(mapping),
+            source: DomainClockSource::Paced {
+                mapping,
+                period: "1s".parse().assured("one second is a valid fixture period"),
+                skew: DomainClockSkew::ZERO,
+            },
         });
     }
 
@@ -366,36 +371,26 @@ impl DomainClock {
         Ok(snapshot)
     }
 
-    pub(super) fn ingestion_snapshot(
-        &self,
-        period: &str,
-        skew: &str,
-    ) -> DomainClockAccessResult<DomainIngestionSnapshot> {
+    pub(super) fn ingestion_snapshot(&self) -> DomainClockAccessResult<DomainIngestionSnapshot> {
         let mut shared = self.inner.state.lock();
         let snapshot = self.read(&mut shared)?;
         let window = match self.source(&shared.installation)? {
             DomainClockSource::Unpaced => None,
-            DomainClockSource::Paced(mapping) => {
-                let context = || DomainClockAccessError::AdmissionConfiguration {
-                    domain: self.inner.domain.clone(),
-                };
-                let period = period
-                    .parse::<DomainClockPeriod>()
-                    .change_context(context())?;
-                let skew = humantime::parse_duration(skew).change_context(context())?;
-                Some(
-                    DomainAdmissionWindow::reached(
-                        mapping.logical_start(),
-                        snapshot.now(),
-                        period,
-                        skew,
-                    )
-                    .assured(
-                        "a projected, nondecreasing clock read never precedes its generation's \
-                         origin",
-                    ),
+            DomainClockSource::Paced {
+                mapping,
+                period,
+                skew,
+            } => Some(
+                DomainAdmissionWindow::reached(
+                    mapping.logical_start(),
+                    snapshot.now(),
+                    period,
+                    skew,
                 )
-            }
+                .assured(
+                    "a projected, nondecreasing clock read never precedes its generation's origin",
+                ),
+            ),
         };
         Ok(DomainIngestionSnapshot { snapshot, window })
     }
@@ -767,23 +762,13 @@ pub(super) fn checked_add_duration_to_timestamp(base: Timestamp, duration: Durat
         .unwrap_or_else(|_| Timestamp::from_unix_nanos(i64::MAX))
 }
 
-pub(super) fn current_timestamp() -> Timestamp {
-    actual_utc_now()
-}
-
 impl Runtime {
     pub(super) fn bind_domain_cadence(
         &self,
         domain: &DomainName,
-        interval: &str,
+        interval: DomainClockPeriod,
         start: DomainCadenceStart,
     ) -> DomainClockAccessResult<DomainCadence> {
-        let interval = interval.parse::<DomainClockPeriod>().change_context(
-            DomainClockAccessError::CadenceConfiguration {
-                domain: domain.clone(),
-                interval: interval.to_string(),
-            },
-        )?;
         DomainCadence::new(self.bind_domain_clock(domain)?, interval, start)
     }
 
@@ -1131,7 +1116,7 @@ mod tests {
             &installed.installation,
             DomainClockInstallation::Installed {
                 generation: 5,
-                source: DomainClockSource::Paced(mapping),
+                source: DomainClockSource::Paced { mapping, .. },
             } if mapping == &next_mapping
         ));
     }
@@ -1280,7 +1265,7 @@ mod tests {
         let mut domains = BTreeMap::new();
         let mut state = paced_domain_state("paced");
         state.clock = Some(DomainClockState::new(
-            current_timestamp(),
+            Timestamp::now(),
             Timestamp::from_unix_nanos(0),
             DomainTimeRate::ONE,
         ));
@@ -1413,7 +1398,7 @@ mod tests {
         lifecycle.install_paced(
             2,
             DomainClockState::new(
-                current_timestamp(),
+                Timestamp::now(),
                 Timestamp::from_unix_nanos(1),
                 DomainTimeRate::ONE,
             ),
@@ -1453,7 +1438,7 @@ mod tests {
         lifecycle.install_paced(
             1,
             DomainClockState::new(
-                current_timestamp(),
+                Timestamp::now(),
                 Timestamp::from_unix_nanos(0),
                 DomainTimeRate::ONE,
             ),
@@ -1469,7 +1454,7 @@ mod tests {
     fn automatic_pause_preserves_the_installed_mapping() {
         let lifecycle = DomainClockLifecycle::new(domain("paced"));
         let mapping = DomainClockState::new(
-            current_timestamp(),
+            Timestamp::now(),
             Timestamp::from_unix_nanos(10),
             DomainTimeRate::ONE,
         );
@@ -1495,7 +1480,7 @@ mod tests {
         lifecycle.install_paced(
             1,
             DomainClockState::new(
-                current_timestamp(),
+                Timestamp::now(),
                 Timestamp::from_unix_nanos(0),
                 DomainTimeRate::ONE,
             ),
@@ -1534,8 +1519,6 @@ mod tests {
                 id: domain("first"),
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
-                    period: "1s".to_string(),
-                    skew: "0ms".to_string(),
                     placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: nervix_models::DomainStatus::Running,
@@ -1551,8 +1534,6 @@ mod tests {
                 id: domain("second"),
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
-                    period: "1s".to_string(),
-                    skew: "0ms".to_string(),
                     placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: nervix_models::DomainStatus::Running,
@@ -1595,7 +1576,7 @@ mod tests {
         lifecycle.install_paced(
             1,
             DomainClockState::new(
-                current_timestamp(),
+                Timestamp::now(),
                 Timestamp::from_unix_nanos(0),
                 DomainTimeRate::ONE,
             ),
@@ -1620,7 +1601,7 @@ mod tests {
         lifecycle.install_paced(
             2,
             DomainClockState::new(
-                current_timestamp(),
+                Timestamp::now(),
                 Timestamp::from_unix_nanos(0),
                 DomainTimeRate::ONE,
             ),
@@ -1652,8 +1633,6 @@ mod tests {
                 id: clock_domain,
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
-                    period: "1s".to_string(),
-                    skew: "0ms".to_string(),
                     placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: nervix_models::DomainStatus::Running,
@@ -1766,7 +1745,7 @@ mod tests {
         lifecycle.install_paced(
             1,
             DomainClockState::new(
-                current_timestamp(),
+                Timestamp::now(),
                 Timestamp::from_unix_nanos(0),
                 DomainTimeRate::ONE,
             ),
@@ -1789,7 +1768,7 @@ mod tests {
         lifecycle.install_paced(
             2,
             DomainClockState::new(
-                current_timestamp(),
+                Timestamp::now(),
                 Timestamp::from_unix_nanos(0),
                 DomainTimeRate::ONE,
             ),
@@ -1815,7 +1794,7 @@ mod tests {
         lifecycle.install_paced(
             1,
             DomainClockState::new(
-                current_timestamp(),
+                Timestamp::now(),
                 Timestamp::from_unix_nanos(0),
                 DomainTimeRate::ONE,
             ),

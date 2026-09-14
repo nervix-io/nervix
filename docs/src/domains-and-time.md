@@ -126,6 +126,15 @@ missing domain, stopped clock, uninstalled paced mapping, or task bound to an ea
 a lifecycle error and never selects wall time as a paced fallback. Reads on one node do not move
 backward within a generation.
 
+Nervix assumes every cluster host maintains UTC closely enough for the deployment's event-time
+contract. Operators must run and monitor a clock-synchronization service on every node. The
+committed mapping prevents authority changes and joins from inventing a new logical origin, and
+each node clamps its own reads so they do not move backward within a generation. It does not make
+simultaneous reads on different hosts identical or establish a distributed total order. Host UTC
+offset affects a newly established `START AT NOW`, unpaced observations, and each node's projection
+of a paced mapping; `TIME RATE` multiplies that projection error. `SKEW` is event-admission
+tolerance around logical tick centers, not an allowance for unsynchronized hosts.
+
 The authority begins producing only after every live node reports that it installed the consensus
 runtime revision containing the mapping and fence. Join, restart, owner loss, and membership change
 can select a new authority without changing the clock mapping. A progress report is accepted only
@@ -201,7 +210,8 @@ A message error records the snapshot of the operation that failed, and its error
 program uses that same instant. Generator output and WASM rows without a source token receive that
 instant as both ingestion watermarks. WASM rows with a source token retain the source metadata.
 Guest initialization, batch processing, timeouts, flushing, and state lifecycle calls each receive
-the snapshot of their owning execution.
+the snapshot of their owning execution. Roto and WASM hosts have no context-free time entry point:
+their `now()` or domain-time import returns that supplied snapshot and never reads UTC on its own.
 
 Generated timestamps at external boundaries follow their declared clock class. An omitted Sentry
 event timestamp uses the emitter batch's domain execution time, while an explicit timestamp is

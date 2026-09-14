@@ -1,3 +1,10 @@
+//! SQS ingestor execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** SQS polling, message acknowledgement and source-boundary observation.
+//! - **Depends on.** Typed SQS plans, queue clients and ingestor runtime admission.
+//! - **Must not know.** NSPL parsing, registry validation or placement computation.
+
 use std::borrow::Cow;
 
 use aws_config::BehaviorVersion;
@@ -8,6 +15,7 @@ use aws_sdk_sqs::{
 };
 
 use super::super::*;
+use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct SqsIngestor;
 
@@ -212,7 +220,7 @@ impl SqsIngestor {
                                                                 output_routes: &task_output_routes,
                                                                 filter_where: task_filter_where.as_ref(),
                                                                 metadata: &metadata,
-                                                                ingested_at: current_timestamp(),
+                                                                ingested_at: actual_utc_now(),
                                                                 acks: vec![if !task_branched_senders.is_empty() {
                                                                     acks.attached()
                                                                 } else {

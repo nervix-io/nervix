@@ -1,3 +1,10 @@
+//! Composed top-level NSPL statement grammar.
+//!
+//! Layer: language.
+//! - **Owns.** Statement-family composition, complete-input parsing and completion expectations.
+//! - **Depends on.** Statement grammars, shared tokens and vocabulary models.
+//! - **Must not know.** Validation, persistence or runtime execution.
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{Model, Statement};
@@ -223,7 +230,7 @@ mod tests {
         CreateClientSqs, CreateClientSyslog, CreateClientZeroMq, CreateCodec, CreateDeduplicator,
         CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateJunction,
         CreateRelay, CreateSchema, CreateSignalingProtocol, CreateWireSchema, DeduplicatorName,
-        DescribeRelay, DrainNode, DropModel, DropNode, EmitSink, EmitterName,
+        DescribeRelay, DomainClockPeriod, DrainNode, DropModel, DropNode, EmitSink, EmitterName,
         EmitterPublishingMode, EndpointIngestMode, EndpointName, EndpointType, ErrorPolicies,
         FieldName, FlushPolicy, GeneralErrorPolicy, IngestQuiesceMode, IngestSource, IngestorName,
         JsonType, JunctionName, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Model,
@@ -504,6 +511,9 @@ mod tests {
             25 => {
                 let materialized_relay: RelayName = g.name();
                 let output_relay: RelayName = g.name();
+                let each = format!("{}ms", g.bounded_u64(1, 5000))
+                    .parse::<DomainClockPeriod>()
+                    .assured("the generator always emits a positive millisecond cadence");
                 let output = flushed_output(
                     output_relay,
                     Some(format!(
@@ -515,7 +525,7 @@ mod tests {
                     name: g.name(),
                     materialized_relay,
                     branched_by: processor_branched_by(g.name()),
-                    each: format!("{}ms", g.bounded_u64(1, 5000)),
+                    each,
                     output_routes: ProcessorOutputs::new(vec![output]),
                 })
             }
@@ -834,7 +844,9 @@ mod tests {
                             client: g.name(),
                             query: r#"label_replace(vector(42.5), "source", "local", "", "")"#
                                 .to_string(),
-                            every: "15s".to_string(),
+                            every: "15s"
+                                .parse()
+                                .assured("the fixture cadence is a positive duration"),
                             quiesce: IngestQuiesceMode::Suspend,
                         },
                         general_error_policy: GeneralErrorPolicy::Log,

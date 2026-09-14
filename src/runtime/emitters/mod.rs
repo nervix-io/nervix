@@ -1,8 +1,15 @@
+//! External emitter execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** Emitter task lifecycle, batching, retries, acknowledgements and connector dispatch.
+//! - **Depends on.** Execution plans, Arrow batches, bound clocks and connector implementations.
+//! - **Must not know.** NSPL parsing, registry validation or placement policy.
+
 use error_stack::{AttachmentKind, FrameKind, Report, ResultExt as _};
 use thiserror::Error;
 
 use super::{
-    physical_time::{PhysicalDeadline, PhysicalDeadlineCapability},
+    physical_time::{PhysicalDeadline, PhysicalDeadlineCapability, actual_utc_now},
     *,
 };
 
@@ -3482,12 +3489,16 @@ impl EmitterTask {
                 .and_then(|config| config.mounts.clone());
             let mut interaction_inputs = Vec::with_capacity(inputs.len());
             for (relay, receiver) in inputs {
-                let input = RelayInteractionInput::new(relay, receiver, input_collect_policy);
-                if input_collect_policy.is_some() {
-                    interaction_inputs.push(input.with_domain_clock(domain_clock.clone()));
-                } else {
-                    interaction_inputs.push(input);
-                }
+                let input = match input_collect_policy {
+                    Some(policy) => RelayInteractionInput::collecting(
+                        relay,
+                        receiver,
+                        policy,
+                        domain_clock.clone(),
+                    ),
+                    None => RelayInteractionInput::immediate(relay, receiver),
+                };
+                interaction_inputs.push(input);
             }
             let mut interaction = RelayInteraction::with_commands(
                 interaction_inputs,
@@ -3973,7 +3984,7 @@ impl EmitterTask {
                         relay: input_relay,
                         batch,
                     } => {
-                        let delivery_observation = batch.delivery_observation(current_timestamp());
+                        let delivery_observation = batch.delivery_observation(actual_utc_now());
                         let physical_node_id =
                             runtime.inner.remote_dispatch.local_node_id.read().clone();
                         runtime

@@ -1,3 +1,10 @@
+//! Branch-local runtime-state replication and ownership handoff.
+//!
+//! Layer: data plane.
+//! - **Owns.** In-memory checkpoints, transfer activation and branch-state restoration.
+//! - **Depends on.** Typed runtime snapshots, interconnect transfer and node schedules.
+//! - **Must not know.** NSPL parsing, graph validation or external connector configuration.
+
 use super::*;
 
 pub(super) const DEFAULT_STATE_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
@@ -1931,7 +1938,7 @@ impl Runtime {
                 .instantiate_branch(
                     processor.limits,
                     init,
-                    Box::new(nervix_wasm::FixedDomainClock::new(execution_now)),
+                    nervix_wasm::WasmExecutionContext::new(execution_now),
                     restored_state,
                 )
                 .await

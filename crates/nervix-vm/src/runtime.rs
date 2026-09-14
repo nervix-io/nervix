@@ -1,3 +1,12 @@
+//! Columnar expression execution.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Executing compiled VM programs against typed Arrow batches and calling injected
+//!   functions with one explicit execution context.
+//! - **Depends on.** Compiled VM IR, Arrow kernels and vocabulary timestamps.
+//! - **Must not know.** Domains, branches, runtime clock installation or physical deadlines.
+
 use std::{
     fmt::{self, Write as _},
     ops::Range,
@@ -363,36 +372,15 @@ pub trait FunctionInjector: Send + Sync + fmt::Debug {
         FunctionExecutionPolicy::Inline
     }
 
-    fn inject(
-        &self,
-        function: &FunctionName,
-        arguments: &[TypedArray],
-        row_count: usize,
-        span: Span,
-    ) -> Result<TypedArray, RuntimeError>;
-
-    fn inject_with_errors(
-        &self,
-        function: &FunctionName,
-        arguments: &[TypedArray],
-        row_count: usize,
-        span: Span,
-    ) -> Result<InjectedResult, RuntimeError> {
-        self.inject(function, arguments, row_count, span)
-            .map(InjectedResult::success)
-    }
-
     fn inject_with_context(
         &self,
         function: &FunctionName,
         arguments: &[TypedArray],
         row_count: usize,
         span: Span,
-        _now: Timestamp,
-        _prior_error_rows: RowErrorMask<'_>,
-    ) -> Result<InjectedResult, RuntimeError> {
-        self.inject_with_errors(function, arguments, row_count, span)
-    }
+        now: Timestamp,
+        prior_error_rows: RowErrorMask<'_>,
+    ) -> Result<InjectedResult, RuntimeError>;
 }
 
 #[derive(Debug, Clone)]
@@ -3508,24 +3496,26 @@ mod tests {
     struct TestHeaderInjector;
 
     impl FunctionInjector for TestHeaderInjector {
-        fn inject(
+        fn inject_with_context(
             &self,
             function: &FunctionName,
             arguments: &[TypedArray],
             row_count: usize,
             _span: Span,
-        ) -> Result<TypedArray, RuntimeError> {
+            _now: Timestamp,
+            _prior_error_rows: RowErrorMask<'_>,
+        ) -> Result<InjectedResult, RuntimeError> {
             assert_eq!(*function, FunctionName::ReadHeader);
             let [TypedArray::Utf8(names)] = arguments else {
                 panic!("read_header must receive one Utf8 array");
             };
             assert_eq!(names.len(), row_count);
-            Ok(TypedArray::Utf8(StringArray::from_iter(names.iter().map(
-                |name| match name {
+            Ok(InjectedResult::success(TypedArray::Utf8(
+                StringArray::from_iter(names.iter().map(|name| match name {
                     Some("route") => Some("primary"),
                     Some(_) | None => None,
-                },
-            ))))
+                })),
+            )))
         }
     }
 
@@ -3540,13 +3530,15 @@ mod tests {
             FunctionExecutionPolicy::SpawnBlocking
         }
 
-        fn inject(
+        fn inject_with_context(
             &self,
             function: &FunctionName,
             arguments: &[TypedArray],
             row_count: usize,
             span: Span,
-        ) -> Result<TypedArray, RuntimeError> {
+            now: Timestamp,
+            prior_error_rows: RowErrorMask<'_>,
+        ) -> Result<InjectedResult, RuntimeError> {
             self.release
                 .lock()
                 .expect("release receiver lock must be available")
@@ -3555,7 +3547,14 @@ mod tests {
                     function: function.as_str().to_string(),
                     message: format!("blocking injector was not released: {error}"),
                 })?;
-            TestHeaderInjector.inject(function, arguments, row_count, span)
+            TestHeaderInjector.inject_with_context(
+                function,
+                arguments,
+                row_count,
+                span,
+                now,
+                prior_error_rows,
+            )
         }
     }
 

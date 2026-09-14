@@ -318,9 +318,14 @@ pub(super) fn paced_domain_state(raw: &str) -> DomainState {
     DomainState {
         id: domain(raw),
         config: DomainConfig {
-            pace: DomainPace::Paced,
-            period: "1s".to_string(),
-            skew: "250ms".to_string(),
+            pace: DomainPace::Paced {
+                period: "1s"
+                    .parse()
+                    .assured("one second is a positive fixture cadence"),
+                skew: "250ms"
+                    .parse()
+                    .assured("250 milliseconds fits the fixture skew representation"),
+            },
             placement: nervix_models::PlacementPolicy::Neutral,
         },
         status: DomainStatus::Running,
@@ -335,8 +340,6 @@ pub(super) fn unpaced_domain_state(raw: &str) -> DomainState {
         id: domain(raw),
         config: DomainConfig {
             pace: DomainPace::Unpaced,
-            period: "1s".to_string(),
-            skew: "0ms".to_string(),
             placement: nervix_models::PlacementPolicy::Neutral,
         },
         status: DomainStatus::Running,
