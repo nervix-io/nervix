@@ -55,6 +55,7 @@
 - [Rust WASM Guest SDK](./wasm-guest-sdk.md)
 - [Architecture And Internals](./architecture-and-internals.md)
   - [Architecture Overview](./architecture.md)
+  - [Domain Clock](./domain-clock.md)
   - [Cluster Interconnect](./interconnect.md)
   - [Control Plane](./control-plane.md)
   - [Command Completion](./command-completion.md)
