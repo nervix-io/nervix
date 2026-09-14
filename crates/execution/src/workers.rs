@@ -122,6 +122,42 @@ impl WorkerPool {
     where
         T: Send + 'static,
     {
+        let RunningJob {
+            handle,
+            cancellation,
+        } = self.start(reservation, job).await?;
+        let signal = CancelOnDrop::new(cancellation);
+        let value = handle.await.map_err(|_| {
+            Report::new(ExecutionError::JobPanicked {
+                class: self.class.as_str(),
+            })
+        })?;
+        signal.disarm();
+        Ok(value)
+    }
+
+    /// Admit and submit one job, leaving it to run after the async submitter returns.
+    pub(crate) async fn submit(
+        &self,
+        reservation: Reservation,
+        job: impl FnOnce(Reservation) + Send + 'static,
+    ) -> Result<(), Report<ExecutionError>> {
+        let running = self
+            .start(reservation, move |reservation, _| job(reservation))
+            .await?;
+        drop(running);
+        Ok(())
+    }
+
+    /// Take this class's ordered worker and put one blocking job onto it.
+    async fn start<T>(
+        &self,
+        reservation: Reservation,
+        job: impl FnOnce(Reservation, &Cancellation) -> T + Send + 'static,
+    ) -> Result<RunningJob<T>, Report<ExecutionError>>
+    where
+        T: Send + 'static,
+    {
         let queued = self.enter_queue()?;
         self.admitted.fetch_add(1, Ordering::AcqRel);
         let requested_at = Instant::now();
@@ -137,26 +173,23 @@ impl WorkerPool {
             .fetch_add(elapsed_nanos(requested_at), Ordering::AcqRel);
         drop(queued);
         let cancellation = Cancellation::new();
-        let signal = CancelOnDrop::new(cancellation.clone());
+        let job_cancellation = cancellation.clone();
         let completed = StdArc::clone(&self.completed);
         let worked_nanos = StdArc::clone(&self.worked_nanos);
         let handle = tokio::task::spawn_blocking(move || {
             // The job owns its charge while it runs, so the allocation it made is released when
             // the work actually exits and not when the caller stopped waiting.
             let started_at = Instant::now();
-            let value = job(reservation, &cancellation);
+            let value = job(reservation, &job_cancellation);
             worked_nanos.fetch_add(elapsed_nanos(started_at), Ordering::AcqRel);
             completed.fetch_add(1, Ordering::AcqRel);
             drop(worker);
             value
         });
-        let value = handle.await.map_err(|_| {
-            Report::new(ExecutionError::JobPanicked {
-                class: self.class.as_str(),
-            })
-        })?;
-        signal.disarm();
-        Ok(value)
+        Ok(RunningJob {
+            handle,
+            cancellation,
+        })
     }
 
     fn enter_queue(&self) -> Result<QueueSlot, Report<ExecutionError>> {
@@ -180,6 +213,12 @@ impl WorkerPool {
             })),
         }
     }
+}
+
+/// A blocking job already submitted to its worker, with the signal an awaiting caller may cancel.
+struct RunningJob<T> {
+    handle: tokio::task::JoinHandle<T>,
+    cancellation: Cancellation,
 }
 
 /// Nanoseconds since `started_at`, for the cumulative service counters this pool exposes.

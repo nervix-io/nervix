@@ -227,6 +227,19 @@ impl Executor {
         self.storage_pool(class).run(reservation, job).await
     }
 
+    /// Submit one storage job and return once it is running off the async workers.
+    ///
+    /// Unlike [`Self::run_storage`], dropping the async caller after this returns does not cancel
+    /// the job. The job owns its reservation until it exits.
+    pub async fn submit_storage(
+        &self,
+        class: StorageClass,
+        reservation: Reservation,
+        job: impl FnOnce(Reservation) + Send + 'static,
+    ) -> Result<(), Report<ExecutionError>> {
+        self.storage_pool(class).submit(reservation, job).await
+    }
+
     pub fn snapshot(&self) -> ExecutorSnapshot {
         ExecutorSnapshot {
             control_cpu: self.inner.control_cpu.snapshot(),

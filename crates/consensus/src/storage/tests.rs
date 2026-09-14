@@ -7,7 +7,10 @@ use nervix_models::{
     DomainPace, DomainSchedule, DomainStartPoint, DomainState, DomainStatus, ResourceName,
     ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
 };
-use openraft::{entry::RaftEntry as _, storage::RaftLogStorageExt as _, vote::RaftLeaderId as _};
+use openraft::{
+    entry::RaftEntry as _, storage::RaftLogStorageExt as _, type_config::TypeConfigExt as _,
+    vote::RaftLeaderId as _,
+};
 use tempfile::TempDir;
 
 use super::*;
@@ -257,13 +260,26 @@ async fn votes_appends_and_commit_positions_report_failures_and_recover_durable_
                         .save_vote(&VoteOf::new(3, Harness::node()))
                         .await
                 }
-                "append" => harness.append(1).await,
+                "append" => {
+                    let (tx, rx) = TypeConfig::oneshot();
+                    harness
+                        .store
+                        .append(
+                            (1..=2).map(|index| {
+                                EntryOf::<TypeConfig>::new_blank(Harness::log_id(index))
+                            }),
+                            IOFlushed::signal(tx),
+                        )
+                        .await?;
+                    rx.await.map_err(io::Error::other)?
+                }
                 _ => harness.store.save_committed(Some(Harness::log_id(1))).await,
             };
             assert!(
                 result.is_err(),
                 "{operation} must report the failed boundary"
             );
+            harness.store.wait_for_idle().await?;
             let mut harness = harness.reopen().await?;
             let expected = boundary == StorageBoundary::AfterSync;
             match operation {
@@ -277,10 +293,23 @@ async fn votes_appends_and_commit_positions_report_failures_and_recover_durable_
                         .is_some(),
                     expected
                 ),
-                "append" => assert_eq!(
-                    harness.store.get_log_state().await?.last_log_id.is_some(),
-                    expected
-                ),
+                "append" => {
+                    let entries = harness
+                        .store
+                        .get_log_reader()
+                        .await
+                        .try_get_log_entries(..)
+                        .await?;
+                    let indexes = entries
+                        .iter()
+                        .map(|entry| entry.log_id.index)
+                        .collect::<Vec<_>>();
+                    if expected {
+                        assert_eq!(indexes, vec![1, 2]);
+                    } else {
+                        assert!(indexes.is_empty());
+                    }
+                }
                 _ => assert_eq!(harness.store.read_committed().await?.is_some(), expected),
             }
         }
@@ -337,8 +366,8 @@ async fn responses_and_notifications_wait_for_storage_on_a_single_async_worker()
 }
 
 #[tokio::test]
-async fn a_queued_vote_runs_between_ready_append_entries() -> TestResult {
-    let harness = Harness::new().await?;
+async fn a_queued_vote_runs_after_a_ready_append_batch() -> TestResult {
+    let mut harness = Harness::new().await?;
     let append_pause = harness
         .store
         .inner
@@ -368,10 +397,22 @@ async fn a_queued_vote_runs_between_ready_append_entries() -> TestResult {
     .await?;
     append_pause.release();
     tokio::time::timeout(Duration::from_secs(10), vote_pause.entered()).await?;
-    assert!(!append.is_finished());
+    let append_result = tokio::time::timeout(Duration::from_secs(10), append).await?;
+    let append_result = append_result?;
+    append_result?;
     vote_pause.release();
     vote.await??;
-    append.await??;
+    let entries = harness
+        .store
+        .get_log_reader()
+        .await
+        .try_get_log_entries(..)
+        .await?;
+    let indexes = entries
+        .iter()
+        .map(|entry| entry.log_id.index)
+        .collect::<Vec<_>>();
+    assert_eq!(indexes, vec![1, 2]);
     Ok(())
 }
 
@@ -409,15 +450,11 @@ async fn idle_wait_joins_a_blocking_job_abandoned_by_its_async_caller() -> TestR
 
     pause.release();
     idle.await??;
-    let Harness {
-        directory,
-        store,
-        executor,
-    } = harness;
-    drop(store);
-    drop(executor);
-    let reopened = Database::builder(directory.path()).open()?;
-    drop(reopened);
+    let mut harness = harness.reopen().await?;
+    assert_eq!(
+        harness.store.get_log_state().await?.last_log_id,
+        Some(Harness::log_id(1))
+    );
     Ok(())
 }
 

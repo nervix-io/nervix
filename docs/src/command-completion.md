@@ -206,6 +206,7 @@ failure. Clients preserve the same reference through redirects, reconnects, and 
 outcomes. An expired reference produces an explicit result and never causes automatic re-execution
 under a new identity.
 
-The public behavior is specified in [NSPL command completion](../specifications/nspl-command-completion.md).
+The public behavior is specified in
+[NSPL command completion](https://github.com/nervix-io/nervix/blob/main/docs/specifications/nspl-command-completion.md).
 The corresponding public scenario inventory is maintained in the repository's command-completion
 acceptance ledger.
