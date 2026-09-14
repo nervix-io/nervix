@@ -160,7 +160,7 @@ pub(super) struct PreparedRuntimeStateSnapshot {
 
 #[derive(Debug, Clone)]
 pub(super) struct PreparedForcedRuntimeStateRecovery {
-    operation_id: String,
+    recovery: ForcedRuntimeStateRecoveryIdentity,
     destination_incarnation: ClusterNodeIncarnation,
     target_schedule_fingerprint: [u8; 32],
     checkpoints: Vec<(RuntimeStatePlacement, PersistedRuntimeStateEntry)>,
@@ -1265,26 +1265,27 @@ impl Runtime {
                         .cmp(&right.branch_key.as_ref().map(BranchKey::as_str))
                 })
         });
+        let entity_ref = entity.in_domain(domain);
+        let transition = ForcedRuntimeStateRecoveryTransition {
+            operation_id: &operation_id,
+            source,
+            destination,
+            destination_incarnation,
+            entity: &entity_ref,
+            target_schedule_fingerprint,
+        };
         if let Some(store) = self.inner.state_store.as_ref() {
-            let entity_ref = entity.in_domain(domain);
-            let transition = ForcedRuntimeStateRecoveryTransition {
-                operation_id: &operation_id,
-                source,
-                destination,
-                destination_incarnation,
-                entity: &entity_ref,
-                target_schedule_fingerprint,
-            };
             store
                 .persist_forced_recovery_preparation(&transition, &checkpoints)
                 .map_err(|error| {
                     OwnershipHandoffError::persistence(error.current_context().clone())
                 })?;
         }
+        let recovery = transition.identity();
         self.inner.prepared_forced_runtime_state_recoveries.insert(
-            DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone()),
+            entity_ref,
             PreparedForcedRuntimeStateRecovery {
-                operation_id,
+                recovery,
                 destination_incarnation,
                 target_schedule_fingerprint,
                 checkpoints,
@@ -2097,15 +2098,26 @@ impl Runtime {
         let Some(transition) = node.ownership_transition.as_ref() else {
             return Ok(());
         };
-        if transition.destination != *local_node_id
-            || transition.state_recovery == OwnershipStateRecoveryOutcome::Complete
-        {
+        if transition.destination != *local_node_id {
             return Ok(());
         }
+        let Some(authorization) =
+            ForcedRuntimeStateRecoveryAuthorization::for_scheduled_node(node, transition)?
+        else {
+            return Ok(());
+        };
         let entity = DomainNodeRef::node_in(domain.clone(), node.kind(), node.identifier.clone());
         let local_incarnation = *self.inner.remote_dispatch.local_node_incarnation.read();
         let Some(local_incarnation) = local_incarnation else {
             return Err(Report::new(RuntimePersistenceError::MissingNodeIncarnation));
+        };
+        let recovery = ForcedRuntimeStateRecoveryTransition {
+            operation_id: &transition.id,
+            source: &transition.source,
+            destination: &transition.destination,
+            destination_incarnation: local_incarnation,
+            entity: &entity,
+            target_schedule_fingerprint: schedule_fingerprint,
         };
         let prepared = self
             .inner
@@ -2113,28 +2125,35 @@ impl Runtime {
             .get(&entity)
             .map(|prepared| prepared.clone());
         let checkpoints = if let Some(store) = self.inner.state_store.as_ref() {
-            let recovery = ForcedRuntimeStateRecoveryTransition {
-                operation_id: &transition.id,
-                source: &transition.source,
-                destination: &transition.destination,
-                destination_incarnation: local_incarnation,
-                entity: &entity,
-                target_schedule_fingerprint: schedule_fingerprint,
-            };
-            let Some(checkpoints) = store.activate_forced_recovery(&recovery)? else {
+            let Some(checkpoints) = store.activate_forced_recovery(&recovery, authorization)?
+            else {
+                self.inner
+                    .prepared_forced_runtime_state_recoveries
+                    .remove_if(&entity, |_, current| current.recovery.matches(&recovery));
                 return Ok(());
             };
             checkpoints
         } else {
             match prepared.as_ref() {
                 Some(prepared)
-                    if prepared.operation_id == transition.id
+                    if prepared.recovery.matches(&recovery)
                         && prepared.destination_incarnation == local_incarnation
                         && prepared.target_schedule_fingerprint == schedule_fingerprint =>
                 {
                     prepared.checkpoints.clone()
                 }
-                Some(_) | None => Vec::new(),
+                Some(_) if authorization.recreates_without_preparation() => Vec::new(),
+                Some(_) => {
+                    return Err(Report::new(
+                        RuntimePersistenceError::ForcedRecoveryPreparationMismatch,
+                    ));
+                }
+                None if authorization.recreates_without_preparation() => Vec::new(),
+                None => {
+                    return Err(Report::new(
+                        RuntimePersistenceError::MissingForcedRecoveryPreparation,
+                    ));
+                }
             }
         };
         self.remove_runtime_state_for_entity(domain, node.kind(), &node.identifier);
@@ -2159,7 +2178,7 @@ impl Runtime {
         }
         self.inner
             .prepared_forced_runtime_state_recoveries
-            .remove_if(&entity, |_, current| current.operation_id == transition.id);
+            .remove_if(&entity, |_, current| current.recovery.matches(&recovery));
         Ok(())
     }
 
