@@ -938,6 +938,9 @@ impl Application {
                         .await;
                     #[cfg(not(feature = "testing"))]
                     drop(context);
+                    #[cfg(feature = "testing")]
+                    let local_health_identity =
+                        health_fault_injection.health_response_identity(local_health_identity);
                     local_health_identity
                 }
             }

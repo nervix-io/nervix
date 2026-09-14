@@ -19,7 +19,10 @@ use ahash::RandomState;
 use dashmap::DashMap;
 use meticulous::ResultExt as _;
 use nervix_execution::{CpuClass, Executor, MemoryClass};
-use nervix_models::{ClusterNodeName, DomainName, EmitterName, IngestorName};
+use nervix_models::{
+    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, DomainName, EmitterName,
+    IngestorName,
+};
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::{broadcast, watch};
@@ -54,6 +57,7 @@ struct FaultInjectionState {
     transaction_binding_drops: DashMap<ClusterNodeName, (), RandomState>,
     consensus_probes: DashMap<ClusterNodeName, ConsensusProbe, RandomState>,
     bulk_executions: DashMap<ClusterNodeName, NodeBulkExecution, RandomState>,
+    failed_health_responders: DashMap<ClusterNodeName, (), RandomState>,
     /// Application health handlers clone a pause so it remains alive after its map guard drops.
     health_response_pauses: DashMap<HealthResponsePauseKey, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
@@ -158,6 +162,7 @@ impl Default for FaultInjection {
                 transaction_binding_drops: DashMap::default(),
                 consensus_probes: DashMap::default(),
                 bulk_executions: DashMap::default(),
+                failed_health_responders: DashMap::default(),
                 health_response_pauses: DashMap::default(),
                 command_pauses: DashMap::default(),
                 entity_gate_pauses: DashMap::default(),
@@ -360,6 +365,12 @@ impl FaultInjection {
         );
     }
 
+    pub fn fail_health_responses_from(&self, responding_node: ClusterNodeName) {
+        self.inner
+            .failed_health_responders
+            .insert(responding_node, ());
+    }
+
     pub async fn wait_for_health_response_pause(
         &self,
         probing_node: &ClusterNodeName,
@@ -383,6 +394,7 @@ impl FaultInjection {
             pause.release();
         }
         self.inner.health_response_pauses.clear();
+        self.inner.failed_health_responders.clear();
     }
 
     pub fn pause_command_admission_on(&self, node_id: ClusterNodeName) {
@@ -770,6 +782,29 @@ impl FaultInjection {
         pause.reach();
         pause.wait_until_released().await;
         self.inner.health_response_pauses.remove(&key);
+    }
+
+    pub(crate) fn health_response_identity(
+        &self,
+        responding_node: ClusterNodeIdentity,
+    ) -> ClusterNodeIdentity {
+        if !self
+            .inner
+            .failed_health_responders
+            .contains_key(responding_node.node_id())
+        {
+            return responding_node;
+        }
+
+        let current_incarnation = responding_node.incarnation().get();
+        let failed_incarnation = match current_incarnation.checked_add(1) {
+            Some(incarnation) => incarnation,
+            None => 0,
+        };
+        ClusterNodeIdentity::new(
+            responding_node.node_id().clone(),
+            ClusterNodeIncarnation::new(failed_incarnation),
+        )
     }
 
     pub(crate) async fn pause_entity_gate_if_armed(&self, domain: &DomainName) {

@@ -145,6 +145,14 @@ impl SessionServiceImpl {
             );
         };
 
+        if let Err(error) = self.apply_current_cluster_state().await {
+            return command_error(format!(
+                "failed to prepare the current runtime schedule for relocation in domain '{}': \
+                 {error}",
+                domain.as_str()
+            ));
+        }
+
         let plan = match self.plan_relocation(domain, &relocation).await {
             Ok(plan) => plan,
             Err(message) => return command_error(message),

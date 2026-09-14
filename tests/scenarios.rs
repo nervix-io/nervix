@@ -3873,6 +3873,15 @@ async fn given_health_responses_are_paused(
         .arm_health_response_pause(&probing_node_id, &responding_node_id);
 }
 
+#[given(expr = "application health responses from node {string} fail")]
+#[when(expr = "application health responses from node {string} fail")]
+async fn given_health_responses_fail(world: &mut ScenarioWorld, responding_node_id: String) {
+    let responding_node_id = expand_placeholders(world, &responding_node_id);
+    world
+        .cluster()
+        .fail_health_responses_from(&responding_node_id);
+}
+
 #[then(expr = "the health response pause from node {string} to node {string} is reached")]
 async fn then_health_response_pause_is_reached(
     world: &mut ScenarioWorld,

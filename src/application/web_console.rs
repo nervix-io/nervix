@@ -267,7 +267,14 @@ async fn handle_web_console_request(
                                                             "the bounded session queue keeps the pending command count below usize::MAX",
                                                         );
                                                 }
-                                                if request_tx.send(request).await.is_err() {
+                                                let request_sent = tokio::select! {
+                                                    biased;
+                                                    _ = service.inner.shutdown.cancelled() => false,
+                                                    result = request_tx.send(request) => {
+                                                        result.is_ok()
+                                                    }
+                                                };
+                                                if !request_sent {
                                                     if is_command {
                                                         session_state
                                                             .pending_commands
@@ -969,8 +976,19 @@ impl SessionServiceImpl {
         state_refresh_tx: mpsc::Sender<()>,
     ) {
         let mut subscriptions = SessionSubscriptions::for_user(authenticated_user);
-        while let Some(request) = request_rx.recv().await {
+        let shutdown = self.inner.shutdown.clone();
+        loop {
             tokio::task::consume_budget().await;
+            let request = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                request = request_rx.recv() => {
+                    let Some(request) = request else {
+                        break;
+                    };
+                    request
+                }
+            };
             let is_command = matches!(
                 request.request.as_ref(),
                 Some(proto::session_request::Request::Command(_))
@@ -981,24 +999,34 @@ impl SessionServiceImpl {
                 }
                 _ => None,
             };
-            let (response, refresh_state) = if let Some(request) = active_domain_request {
-                let mut selected_domain = state.active_domain.read().clone();
-                match self
-                    .process_web_console_active_domain_request(request, &mut selected_domain)
-                    .await
-                {
-                    Ok(response) => {
-                        *state.active_domain.write() = selected_domain;
-                        (response, true)
+            let processing = async {
+                if let Some(request) = active_domain_request {
+                    let mut selected_domain = state.active_domain.read().clone();
+                    match self
+                        .process_web_console_active_domain_request(request, &mut selected_domain)
+                        .await
+                    {
+                        Ok(response) => {
+                            *state.active_domain.write() = selected_domain;
+                            (response, true)
+                        }
+                        Err(error) => (web_console_server_error_response(error.to_string()), false),
                     }
-                    Err(error) => (web_console_server_error_response(error.to_string()), false),
+                } else {
+                    (
+                        self.process_web_console_request(request, &tx, &mut subscriptions)
+                            .await,
+                        false,
+                    )
                 }
-            } else {
-                (
-                    self.process_web_console_request(request, &tx, &mut subscriptions)
-                        .await,
-                    false,
-                )
+            };
+            let processed = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => None,
+                processed = processing => Some(processed),
+            };
+            let Some((response, refresh_state)) = processed else {
+                break;
             };
             if is_command {
                 state
@@ -1008,11 +1036,23 @@ impl SessionServiceImpl {
                     })
                     .assured("every processed command was counted when its request was accepted");
             }
-            if tx.send(Ok(response)).await.is_err() {
+            let response_sent = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => false,
+                result = tx.send(Ok(response)) => result.is_ok(),
+            };
+            if !response_sent {
                 break;
             }
-            if refresh_state && state_refresh_tx.send(()).await.is_err() {
-                break;
+            if refresh_state {
+                let refresh_sent = tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => false,
+                    result = state_refresh_tx.send(()) => result.is_ok(),
+                };
+                if !refresh_sent {
+                    break;
+                }
             }
         }
 
@@ -1491,6 +1531,52 @@ mod tests {
         );
 
         subscriptions.stop_all(&service).await;
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn web_console_session_worker_stops_with_a_full_response_queue() {
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
+        let (tx, _response_rx) = mpsc::channel(1);
+        tx.send(Ok(SessionResponse::default()))
+            .await
+            .assured("the response receiver remains open for this test");
+        let (request_tx, request_rx) = mpsc::channel(1);
+        request_tx
+            .send(SessionRequest {
+                request: Some(proto::session_request::Request::ListDomains(
+                    proto::ListDomainsRequest {},
+                )),
+            })
+            .await
+            .assured("the session worker request receiver remains open for this test");
+        drop(request_tx);
+        let (state_refresh_tx, _state_refresh_rx) = mpsc::channel(1);
+        let state = Arc::new(WebConsoleSessionState::new());
+        let worker_service = service.clone();
+        let worker = tokio::spawn(async move {
+            worker_service
+                .run_web_console_session(
+                    request_rx,
+                    tx,
+                    named::<UserName>("console_user"),
+                    state,
+                    state_refresh_tx,
+                )
+                .await;
+        });
+
+        tokio::task::yield_now().await;
+        service.inner.shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), worker)
+            .await
+            .assured("shutdown interrupts a session worker blocked by response backpressure")
+            .assured("the session worker completes without panicking during shutdown");
+
         let _ = std::fs::remove_dir_all(&path);
     }
 }

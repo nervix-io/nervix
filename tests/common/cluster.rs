@@ -1785,6 +1785,11 @@ impl Cluster {
             .arm_health_response_pause(node_name(probing_node_id), node_name(responding_node_id));
     }
 
+    pub(crate) fn fail_health_responses_from(&self, responding_node_id: &str) {
+        self.fault_injection
+            .fail_health_responses_from(node_name(responding_node_id));
+    }
+
     pub(crate) async fn wait_for_health_response_pause(
         &self,
         probing_node_id: &str,

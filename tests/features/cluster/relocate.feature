@@ -1117,6 +1117,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
+    And node "node-1" eventually reports leader "node-1"
     When these NSPL commands are executed through the client on node "node-1"
       """
       CORDON NODE node-1;
@@ -1153,8 +1154,9 @@ Feature: Relocating runtime nodes onto a named cluster node
       - domain={{domain}} kind=junction name=failover_route owner=node-3
       """
     And the last cluster status owner for scheduled "junction" "failover_route" is saved as placeholder "failover_owner"
-    When node "node-3" is stopped
-    Then within "60s" node "node-1" eventually reports scheduled "junction" "failover_route" owner different from placeholder "failover_owner"
+    When application health responses from node "node-3" fail
+    Then node "node-1" eventually reports status containing "raft member 'node-3' is marked unavailable by application health"
+    And within "60s" node "node-1" eventually reports scheduled "junction" "failover_route" owner different from placeholder "failover_owner"
     When these NSPL commands are executed through the client on node "node-1"
       """
       RELOCATE JUNCTION failover_route ONTO NODE node-2 FOLLOW PREFERENCES;
