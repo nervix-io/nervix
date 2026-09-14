@@ -23,7 +23,7 @@ use openraft::{
     },
     type_config::alias::EntryOf,
 };
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use triomphe::Arc;
@@ -205,6 +205,28 @@ pub(super) struct StoreInner {
     shared: Arc<StoreState>,
 }
 
+/// The append caller and its detached storage job share callback ownership until submission is
+/// known to have succeeded. Exactly one of them completes it.
+#[derive(Clone)]
+struct AppendCompletion {
+    callback: Arc<Mutex<Option<IOFlushed<TypeConfig>>>>,
+}
+
+impl AppendCompletion {
+    fn new(callback: IOFlushed<TypeConfig>) -> Self {
+        Self {
+            callback: Arc::new(Mutex::new(Some(callback))),
+        }
+    }
+
+    fn complete(&self, result: io::Result<()>) {
+        let callback = self.callback.lock().take();
+        if let Some(callback) = callback {
+            callback.io_completed(result);
+        }
+    }
+}
+
 impl std::ops::Deref for StoreInner {
     type Target = StoreState;
     fn deref(&self) -> &Self::Target {
@@ -269,6 +291,45 @@ impl StoreInner {
             self.failed.store(true, Ordering::Release);
         }
         result
+    }
+
+    /// Encode and durably append all ready entries in the fewest reservation-bounded writes.
+    fn append_entries(
+        &self,
+        entries: Vec<EntryOf<TypeConfig>>,
+        reservation: &Reservation,
+    ) -> io::Result<()> {
+        let encoding_limit = reservation.bytes() / 2;
+        let mut batch = DurableBatch::new(reservation)?;
+        let mut batch_bytes = 0_u64;
+        for entry in entries {
+            let key = Self::log_key(entry.log_id.index);
+            let encoded = DurableBatch::encode(&entry, encoding_limit)?;
+            if batch.would_exceed_encoded_insert(&key, &encoded)? {
+                if batch.is_empty() {
+                    return Err(io::Error::other(StorageFailure::Capacity));
+                }
+                self.commit_append_batch(batch, batch_bytes)?;
+                batch = DurableBatch::new(reservation)?;
+                batch_bytes = 0;
+            }
+            let entry_bytes = u64::try_from(encoded.len()).map_err(io::Error::other)?;
+            batch_bytes = batch_bytes
+                .checked_add(entry_bytes)
+                .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
+            batch.insert_encoded(&self.logs, &key, encoded)?;
+        }
+        if !batch.is_empty() {
+            self.commit_append_batch(batch, batch_bytes)?;
+        }
+        Ok(())
+    }
+
+    fn commit_append_batch(&self, batch: DurableBatch<'_>, encoded_bytes: u64) -> io::Result<()> {
+        self.commit("append", batch)?;
+        self.log_bytes_since_snapshot
+            .fetch_add(encoded_bytes, Ordering::Relaxed);
+        Ok(())
     }
 
     fn publish(&self, state: StateMachineData, changes: &AppliedConsensusCommand) {
@@ -906,34 +967,43 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
         I: IntoIterator<Item = EntryOf<TypeConfig>> + openraft::OptionalSend,
         I::IntoIter: openraft::OptionalSend,
     {
-        // Each ready entry is one bounded atomic write. A vote already queued gets the next
-        // worker turn; this append never gathers newly arriving work in front of it.
-        for entry in entries {
-            tokio::task::consume_budget().await;
-            let result = self
-                .inner
-                .run(MemoryClass::Commands, move |inner, reservation| {
-                    let mut batch = DurableBatch::new(reservation)?;
-                    let entry_bytes = batch.insert_measured(
-                        &inner.logs,
-                        &StoreInner::log_key(entry.log_id.index),
-                        &entry,
-                    )?;
-                    inner.commit("append", batch)?;
-                    inner
-                        .log_bytes_since_snapshot
-                        .fetch_add(entry_bytes, Ordering::Relaxed);
-                    Ok(())
-                })
-                .await;
-            if let Err(error) = result {
+        let entries = entries.into_iter().collect::<Vec<_>>();
+        if entries.is_empty() {
+            callback.io_completed(Ok(()));
+            return Ok(());
+        }
+        // Ready entries share one reservation-bounded atomic write, with another only when that
+        // limit is full. A queued vote waits for one fsync per batch instead of one per entry.
+        let completion = AppendCompletion::new(callback);
+        let reservation =
+            match StoreInner::reserve(&self.inner.executor, MemoryClass::Commands).await {
+                Ok(reservation) => reservation,
+                Err(error) => {
+                    self.inner.failed.store(true, Ordering::Release);
+                    completion.complete(Err(io::Error::other(StorageFailure::Stopped)));
+                    return Err(error);
+                }
+            };
+        let executor = self.inner.executor.clone();
+        let inner = self.inner.clone();
+        let job_completion = completion.clone();
+        let submitted = executor
+            .submit_storage(StorageClass::Consensus, reservation, move |reservation| {
+                let result = inner.append_entries(entries, &reservation);
+                if result.is_err() {
+                    inner.failed.store(true, Ordering::Release);
+                }
+                job_completion.complete(result);
+            })
+            .await;
+        match submitted {
+            Ok(()) => Ok(()),
+            Err(error) => {
                 self.inner.failed.store(true, Ordering::Release);
-                callback.io_completed(Err(io::Error::other(StorageFailure::Stopped)));
-                return Err(error);
+                completion.complete(Err(io::Error::other(StorageFailure::Stopped)));
+                Err(io::Error::other(error))
             }
         }
-        callback.io_completed(Ok(()));
-        Ok(())
     }
     async fn truncate_after(&mut self, last_log_id: Option<LogIdOf>) -> io::Result<()> {
         let start = match last_log_id {
