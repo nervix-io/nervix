@@ -45,7 +45,7 @@ use futures_util::{
 use http_endpoint::{serve_http, serve_https};
 use interconnect_relay::InterconnectRelayPayloadLane;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_consensus::{Consensus, ConsensusSettings, RaftRetentionPolicy, TransactionState};
+use nervix_consensus::{ConsensusSettings, RaftRetentionPolicy, TransactionState};
 use nervix_interconnect::{
     ActivateOwnershipHandoffStateRequest as RemoteActivateOwnershipHandoffStateRequest,
     ApplicationHealthProbe,
@@ -857,22 +857,20 @@ impl Application {
         };
         startup.interconnect = Some(interconnect.clone());
 
-        let consensus_result = Consensus::from_database(
-            startup.db.clone(),
-            ConsensusSettings {
-                cluster_name: cluster_id.clone(),
-                node_id: node_id.clone(),
-                interconnect_advertise_addr: interconnect_advertise_addr.to_string(),
-                interconnect: interconnect.clone(),
-                executor: startup.runtime.executor().clone(),
-                raft_heartbeat_interval,
-                raft_election_timeout_min,
-                raft_election_timeout_max,
-                raft_retention,
-            },
-        )
-        .await
-        .change_context(AppError::StartConsensus);
+        let consensus_settings = ConsensusSettings {
+            cluster_name: cluster_id.clone(),
+            node_id: node_id.clone(),
+            interconnect_advertise_addr: interconnect_advertise_addr.to_string(),
+            interconnect: interconnect.clone(),
+            executor: startup.runtime.executor().clone(),
+            raft_heartbeat_interval,
+            raft_election_timeout_min,
+            raft_election_timeout_max,
+            raft_retention,
+        };
+        let consensus_result = startup
+            .open_consensus(consensus_settings, &fault_injection)
+            .await;
         let consensus = match consensus_result {
             Ok(consensus) => consensus,
             Err(error) => {
@@ -880,8 +878,6 @@ impl Application {
                 return Err(error);
             }
         };
-        #[cfg(feature = "testing")]
-        fault_injection.register_consensus(node_id.clone(), &consensus);
         startup.consensus = Some(consensus);
         let consensus = startup
             .consensus

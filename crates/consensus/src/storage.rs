@@ -522,6 +522,23 @@ pub(super) struct FjallStore {
 
 impl FjallStore {
     pub(super) async fn from_database(db: Database, executor: Executor) -> io::Result<Self> {
+        Self::from_database_with_fault(db, executor, StorageFault::default()).await
+    }
+
+    #[cfg(feature = "testing")]
+    pub(super) async fn from_database_with_storage_fault(
+        db: Database,
+        executor: Executor,
+        fault: StorageFault,
+    ) -> io::Result<Self> {
+        Self::from_database_with_fault(db, executor, fault).await
+    }
+
+    async fn from_database_with_fault(
+        db: Database,
+        executor: Executor,
+        fault: StorageFault,
+    ) -> io::Result<Self> {
         let reservation = StoreInner::reserve(&executor, MemoryClass::Commands).await?;
         let store_executor = executor.clone();
         let opened = executor
@@ -582,7 +599,7 @@ impl FjallStore {
                                 shared: Arc::new(StoreState {
                                     db,
                                     executor: store_executor,
-                                    faults: StorageFault::default(),
+                                    faults: fault,
                                     failed: AtomicBool::new(false),
                                     logs,
                                     meta,
