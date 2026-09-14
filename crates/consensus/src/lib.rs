@@ -383,6 +383,7 @@ pub struct ConsensusSettings {
 pub struct GossipNode {
     pub node_id: ClusterNodeName,
     pub incarnation: ClusterNodeIncarnation,
+    pub terminating: bool,
     pub grpc_advertise_addr: String,
     pub web_console_advertise_addr: String,
     pub interconnect_advertise_addr: String,
@@ -408,18 +409,25 @@ impl GossipState {
     }
 
     pub fn live_identities(&self) -> BTreeSet<ClusterNodeIdentity> {
-        let mut current = BTreeMap::<ClusterNodeName, ClusterNodeIdentity>::new();
-        for node in self.admission_candidates() {
-            let identity = node.identity();
-            let replace = match current.get(&node.node_id) {
-                Some(observed) => observed.incarnation() < identity.incarnation(),
-                None => true,
-            };
-            if replace {
-                current.insert(node.node_id.clone(), identity);
+        self.latest_admission_candidates()
+            .into_values()
+            .map(|node| node.identity())
+            .collect()
+    }
+
+    pub fn live_node_ids(&self) -> BTreeSet<ClusterNodeName> {
+        self.latest_admission_candidates().into_keys().collect()
+    }
+
+    pub fn placement_candidate_node_ids(&self) -> BTreeSet<ClusterNodeName> {
+        let current = self.latest_admission_candidates();
+        let mut candidates = BTreeSet::new();
+        for (node_id, node) in current {
+            if !node.terminating {
+                candidates.insert(node_id);
             }
         }
-        current.into_values().collect()
+        candidates
     }
 
     fn latest_admission_candidates(&self) -> BTreeMap<ClusterNodeName, GossipNode> {
@@ -3687,6 +3695,7 @@ mod tests {
                 GossipNode {
                     node_id: ClusterNodeName::parse("node-2").expect("valid name"),
                     incarnation: ClusterNodeIncarnation::new(2),
+                    terminating: false,
                     grpc_advertise_addr: String::new(),
                     web_console_advertise_addr: String::new(),
                     interconnect_advertise_addr: String::new(),
@@ -3694,6 +3703,7 @@ mod tests {
                 GossipNode {
                     node_id: ClusterNodeName::parse("node-3").expect("valid name"),
                     incarnation: ClusterNodeIncarnation::new(3),
+                    terminating: false,
                     grpc_advertise_addr: String::new(),
                     web_console_advertise_addr: String::new(),
                     interconnect_advertise_addr: String::new(),
@@ -3718,6 +3728,7 @@ mod tests {
         let gossip_node = |name: &str, incarnation| GossipNode {
             node_id: ClusterNodeName::parse(name).expect("valid node name"),
             incarnation: ClusterNodeIncarnation::new(incarnation),
+            terminating: false,
             grpc_advertise_addr: String::new(),
             web_console_advertise_addr: String::new(),
             interconnect_advertise_addr: String::new(),
@@ -3740,6 +3751,50 @@ mod tests {
     }
 
     #[test]
+    fn placement_candidates_exclude_only_the_newest_terminating_incarnation() {
+        let gossip_node = |name: &str, incarnation, terminating| GossipNode {
+            node_id: ClusterNodeName::parse(name).assured("the test node name is valid"),
+            incarnation: ClusterNodeIncarnation::new(incarnation),
+            terminating,
+            grpc_advertise_addr: String::new(),
+            web_console_advertise_addr: String::new(),
+            interconnect_advertise_addr: String::new(),
+        };
+        let mut state = GossipState {
+            live_nodes: vec![
+                gossip_node("node-1", 10, false),
+                gossip_node("node-1", 11, true),
+                gossip_node("node-2", 20, false),
+            ],
+            dead_node_ids: BTreeSet::new(),
+        };
+
+        assert_eq!(
+            state.live_node_ids(),
+            BTreeSet::from([
+                ClusterNodeName::parse("node-1").assured("the test node name is valid"),
+                ClusterNodeName::parse("node-2").assured("the test node name is valid"),
+            ])
+        );
+        assert_eq!(
+            state.placement_candidate_node_ids(),
+            BTreeSet::from([
+                ClusterNodeName::parse("node-2").assured("the test node name is valid")
+            ])
+        );
+
+        state.live_nodes.push(gossip_node("node-1", 12, false));
+
+        assert_eq!(
+            state.placement_candidate_node_ids(),
+            BTreeSet::from([
+                ClusterNodeName::parse("node-1").assured("the test node name is valid"),
+                ClusterNodeName::parse("node-2").assured("the test node name is valid"),
+            ])
+        );
+    }
+
+    #[test]
     fn observed_learner_retries_catch_up_before_promotion() {
         let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
         let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
@@ -3747,6 +3802,7 @@ mod tests {
             live_nodes: vec![GossipNode {
                 node_id: joining.clone(),
                 incarnation: ClusterNodeIncarnation::new(2),
+                terminating: false,
                 grpc_advertise_addr: String::new(),
                 web_console_advertise_addr: String::new(),
                 interconnect_advertise_addr: "https://node-2.test:7443".to_string(),
@@ -3786,6 +3842,7 @@ mod tests {
             live_nodes: vec![GossipNode {
                 node_id: joining.clone(),
                 incarnation: ClusterNodeIncarnation::new(3),
+                terminating: false,
                 grpc_advertise_addr: String::new(),
                 web_console_advertise_addr: String::new(),
                 interconnect_advertise_addr: replacement_address.clone(),

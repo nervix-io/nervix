@@ -5141,6 +5141,22 @@ async fn run_nspl_commands_on_node(
     Ok(last_output)
 }
 
+#[when(expr = "these NSPL commands are attempted on node {string}")]
+async fn when_these_nspl_commands_are_attempted_on_node(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    #[step] step: &Step,
+) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    let node_id = expand_placeholders(world, &node_id);
+    let commands = expand_placeholders(world, docstring(step));
+    match run_nspl_commands_on_node(world, &node_id, &commands).await {
+        Ok(output) => world.last_command_output = Some(output),
+        Err(error) => world.last_command_error = Some(error),
+    }
+}
+
 #[when("these NSPL commands begin executing in the background")]
 async fn when_these_nspl_commands_begin_executing_in_the_background(
     world: &mut ScenarioWorld,
@@ -5306,6 +5322,7 @@ fn commands_are_retry_safe_session_ops(commands: &str) -> bool {
     nspl_statements(commands).into_iter().all(|command| {
         let normalized = command.trim().to_ascii_uppercase();
         normalized == "DESCRIBE DOMAIN;"
+            || normalized.starts_with("DESCRIBE RELOCATION ")
             || normalized.starts_with("DESCRIBE ENDPOINT ")
             || normalized.starts_with("DESCRIBE RESOURCE ")
             || normalized.starts_with("DESCRIBE RELAY ")

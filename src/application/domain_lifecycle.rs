@@ -415,16 +415,14 @@ impl SessionServiceImpl {
 
         let current_schedule = self.inner.consensus.current_schedule().await;
         let previous_schedule = current_schedule.domain(domain).cloned();
-        let live_node_ids = self.inner.cluster.live_node_ids().await;
-        let live_voters = self
-            .inner
-            .consensus
-            .live_voter_ids(live_node_ids.clone())
-            .await;
+        let availability = self.inner.cluster.availability_state().await;
+        let live_node_ids = availability.live_node_ids();
+        let placement_candidate_node_ids = availability.placement_candidate_node_ids();
+        let live_voters = self.inner.consensus.live_voter_ids(live_node_ids).await;
         let cluster_nodes = self
             .inner
             .consensus
-            .schedulable_live_voter_ids(live_node_ids)
+            .schedulable_live_voter_ids(placement_candidate_node_ids)
             .await;
         let mut next_schedule = self.inner.registry.active_graph(domain).map(|graph| {
             #[cfg(feature = "testing")]
