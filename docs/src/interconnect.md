@@ -25,6 +25,11 @@ before it knows the remote node identifier, then obtains and authenticates that 
 peer certificate. Once discovered, a peer is addressed by its authenticated identity rather than by
 an unverified endpoint claim.
 
+Discovery also carries whether the advertised process incarnation has begun terminating. That state
+belongs to the incarnation rather than the stable node identifier: it keeps the process available to
+finish existing ownership handoffs and consensus work, but removes it from new placement
+destinations. A restarted process has a new incarnation and does not inherit the advertisement.
+
 Connections are directed. Both nodes in a pair build their own outbound connections because some
 operations, including relay acknowledgements and cluster events, travel back over the receiver's
 outbound management connection. A single connection never changes traffic class after it has been

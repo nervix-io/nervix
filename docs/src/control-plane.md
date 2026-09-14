@@ -366,6 +366,17 @@ independent units after one times out. Its result lists every successful move an
 unit makes the command unsuccessful, while a later `DRAIN NODE` retries the units still owned by the
 cordoned node. Endpoint and Syslog listeners bind on every live node and are not schedule units.
 
+When graceful shutdown begins, the process advertises that its current incarnation is terminating.
+The incarnation remains live for Raft and for ownership handoffs already in progress, while placement
+and explicit relocation exclude it as a new destination. The advertisement is transient state of
+that process incarnation, so a restarted incarnation is eligible again unless the stable node name
+is cordoned in Raft.
+
+Graceful shutdown records whether that stable node name was already cordoned before it invokes the
+drain. Its cleanup clears the drain cordon only when shutdown began with an uncordoned node, and it
+runs after a successful, failed, or timed-out drain attempt. A pre-existing operator cordon therefore
+remains set across shutdown and restart.
+
 `DROP NODE` records the stopped process incarnation before removing its Raft membership. Delayed
 gossip cannot admit that process again. Starting the node again creates a newer incarnation, which
 can join the cluster normally.

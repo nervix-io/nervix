@@ -249,3 +249,60 @@ impl TryFrom<Args> for Application {
             .build())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use fjall::Database;
+    use nervix_models::ClusterNodeName;
+
+    use super::Application;
+    use crate::application::test_fixtures::{test_addr, test_tls_files};
+
+    #[tokio::test]
+    async fn startup_failure_releases_the_shared_database_before_returning() {
+        let root = tempfile::tempdir().expect("temporary root should be created");
+        let db_path = root.path().join("db");
+        let listen_addr = test_addr(0);
+        let node_id = ClusterNodeName::parse("node-1").expect("valid name");
+        let tls_files = test_tls_files("startup-failure-test", &node_id);
+        let application = Application::builder()
+            .addr(listen_addr)
+            .http_listen_addr(listen_addr)
+            .https_listen_addr(listen_addr)
+            .observability_listen_addr(listen_addr)
+            .web_console_listen_addr(listen_addr)
+            .cluster_id("startup-failure-test".to_string())
+            .node_id(node_id)
+            .grpc_advertise_addr(listen_addr.into())
+            .interconnect_listen_addr(listen_addr)
+            .interconnect_advertise_addr(listen_addr.into())
+            .interconnect_tls_ca(tls_files.ca.clone())
+            .interconnect_tls_cert(tls_files.certificate.clone())
+            .interconnect_tls_key(tls_files.private_key.clone())
+            .allow_bootstrap(true)
+            .node_unavailability_timeout(Duration::from_secs(1))
+            .raft_heartbeat_interval(Duration::from_millis(100))
+            .raft_election_timeout_min(Duration::from_millis(300))
+            .raft_election_timeout_max(Duration::from_millis(600))
+            .cluster_bootstrap_host(Some("invalid host name:1".to_string()))
+            .db_path(db_path.clone())
+            .graceful_shutdown_drain(false)
+            .build();
+
+        let error = application
+            .run()
+            .await
+            .expect_err("invalid cluster advertise host should fail startup");
+        assert!(
+            format!("{error:?}").contains("failed to start cluster membership"),
+            "unexpected startup error: {error:?}"
+        );
+
+        tokio::task::spawn_blocking(move || Database::builder(db_path).open())
+            .await
+            .expect("database open task should join")
+            .expect("application startup failure must release the database lock");
+    }
+}

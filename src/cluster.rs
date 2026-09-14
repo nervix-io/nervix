@@ -51,6 +51,7 @@ const KEY_WEB_CONSOLE_ADVERTISE_ADDR: &str = "web_console_advertise_addr";
 const KEY_INTERCONNECT_LISTEN_ADDR: &str = "interconnect_listen_addr";
 const KEY_INTERCONNECT_ADVERTISE_ADDR: &str = "interconnect_advertise_addr";
 const KEY_BOOTSTRAP_HOST: &str = "bootstrap_host";
+const KEY_TERMINATING: &str = "terminating";
 const KEY_SUBSCRIPTION_INTEREST_PREFIX: &str = "subscription_interest:";
 const KEY_AUTHORITATIVE_REVISION_APPLIED: &str = "authoritative_revision_applied";
 const KEY_RUNTIME_REVISION_PREPARED: &str = "runtime_revision_prepared";
@@ -1204,13 +1205,19 @@ impl ClusterHandle {
 
     pub async fn live_node_ids(&self) -> Vec<ClusterNodeName> {
         let gossip = self.availability_state().await;
-        let dead_node_ids = gossip.dead_node_ids;
-        gossip
-            .live_nodes
-            .into_iter()
-            .filter(|node| !dead_node_ids.contains(&node.node_id))
-            .map(|node| node.node_id)
-            .collect()
+        gossip.live_node_ids().into_iter().collect()
+    }
+
+    pub async fn mark_local_terminating(&self) {
+        let chitchat_handle = self.chitchat.clone();
+        let mut chitchat = chitchat_handle.lock().await;
+        let local_id = chitchat.self_chitchat_id().clone();
+        chitchat.self_node_state().set(KEY_TERMINATING, "1");
+        info!(
+            node_id = local_id.node_id,
+            incarnation = local_id.generation_id,
+            "advertised terminating process incarnation"
+        );
     }
 
     pub async fn set_local_runtime_revision_ready(&self, revision: u64) {
@@ -1533,6 +1540,7 @@ fn render_node_state_lines(node_id: &ChitchatId, state: &NodeState) -> Vec<Strin
     vec![
         format!("- node_id: {}", node_id.node_id),
         format!("  gossip_addr: {}", node_id.gossip_advertise_addr),
+        format!("  terminating: {}", state.get(KEY_TERMINATING).is_some()),
         format!(
             "  grpc_listen_addr: {}",
             state.get(KEY_GRPC_LISTEN_ADDR).unwrap_or("<unknown>")
@@ -1598,6 +1606,7 @@ fn to_gossip_node(node_id: &ChitchatId, state: &NodeState) -> Option<GossipNode>
     Some(GossipNode {
         node_id: identity.node_id().clone(),
         incarnation: identity.incarnation(),
+        terminating: state.get(KEY_TERMINATING).is_some(),
         grpc_advertise_addr,
         web_console_advertise_addr,
         interconnect_advertise_addr,
