@@ -55,6 +55,7 @@
 - [Rust WASM Guest SDK](./wasm-guest-sdk.md)
 - [Architecture And Internals](./architecture-and-internals.md)
   - [Architecture Overview](./architecture.md)
+  - [Cluster Interconnect](./interconnect.md)
   - [Control Plane](./control-plane.md)
   - [Command Completion](./command-completion.md)
   - [Data Plane](./data-plane.md)

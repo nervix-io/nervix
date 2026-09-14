@@ -376,6 +376,16 @@ promotes a live replica or chooses a fresh owner. Failover does not wait for the
 If a former owner disappears while a planned hold is active, that hold aborts without publishing its
 candidate; ordinary failover then relocates from the last committed schedule.
 
+Forced recovery stages the destination's checkpoint inventory under the destination process
+incarnation and the complete target-schedule fingerprint. Applying staged checkpoints accepts only
+that exact preparation. A missing or mismatched preparation does not imply a reset; without an
+exhaustive reset outcome in the schedule, activation fails and leaves every saved checkpoint
+unchanged. After activation, the durable completion belongs to the ownership transition itself, so
+reapplying its retained schedule after a destination restart or a later domain rebuild preserves any
+newer checkpoints the destination has published. A state reset occurs only when the accepted recovery
+decision either stages the recreated checkpoint inventory or reports a reset outcome for every state
+component owned by the entity.
+
 Entity-gate leases are deadline-bound. They release their relay fences and ingestor holds at the
 configured entity-gate deadline even if the coordinator disappears. A node that joins during a hold
 applies the published schedule through its normal revision path.

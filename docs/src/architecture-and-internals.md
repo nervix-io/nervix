@@ -5,6 +5,7 @@ This section explains how Nervix is built and how it behaves internally.
 Use it for:
 
 - control-plane and data-plane structure
+- cluster interconnect security, traffic isolation, and delivery semantics
 - runtime semantics that are easier to understand from the implementation side
 - relay/state internals
 

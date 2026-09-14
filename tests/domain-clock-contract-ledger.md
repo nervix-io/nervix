@@ -1,10 +1,11 @@
 # Domain clock contract and regression ledger
 
-This ledger is the acceptance record for [Domain clocks 01](https://app.clickup.com/t/86bbwcrya)
-under the [domain clocks epic](https://app.clickup.com/t/86bbwcry1). The source audit was made at
+This ledger is the acceptance record for the [domain clocks
+epic](https://app.clickup.com/t/86bbwcry1). The source audit began in [Domain clocks
+01](https://app.clickup.com/t/86bbwcrya) at
 `fdd79a3cd7ed0d93be53f3710cf9ad67a87af574` on 8 September 2026. The four isolated failures from
-that audit are represented by the current-source regressions below. Tasks 02–05 repair their
-owning product paths.
+that audit are represented by the current-source regressions below. Tasks 02–13 repaired and
+documented their owning product paths; task 14 records the final contract qualification.
 
 The Cucumber scenarios exercise NSPL and runtime behavior through public endpoints and session
 subscriptions. The clock-contract scenarios and direct arithmetic regressions run in the ordinary
@@ -492,3 +493,60 @@ Recorded on 13 September 2026 against the task 13 worktree:
 
 No complete Cucumber-suite or final qualification result is claimed by this record. The full
 repository qualification remains owned by task 14.
+
+## Task 14 final qualification record
+
+Recorded on 13 September 2026 against
+`4ee61c68ddae54b0e99d0521365eea6a9d847600`, which was also the current `origin/main` revision.
+Tasks 01–13 were complete before this qualification began.
+
+Every finding in the original ledger is closed without a deferred clock-contract item:
+
+| Finding | Final result |
+| --- | --- |
+| F1 | Pass. A joining or restarted node installs the committed mapping before execution. Nonleader owner loss, owner movement, and leader or authority transfer preserve the mapping and advance the fence. |
+| F2 | Pass. One serialized authority produces progress for the committed generation. Generation, authority revision, incarnation, and authenticated peer are checked; stale progress is ignored, missing domains are not created, and one latest report is retained while an attempt is in flight. |
+| F3 | Pass. Node-local logical reads do not decrease within a generation. Delayed, reordered, duplicate, and superseded progress neither reanchors the mapping nor moves an observation backwards. |
+| F4 | Pass. Admission uses reached logical centers from the committed origin, retains exactly the newest 256, applies inclusive `SKEW`, rejects unreached future centers, and selects `TIMESTAMP NOW` when buffered intake is delivered. |
+| F5 | Pass. Collection, logical flush, emitter flush, and Iceberg commit cadence follow domain time. `FLUSH IMMEDIATE`, source idle, retry, acknowledgement keepalive, cancellation, and drain retain their physical clocks and independent state. |
+| F6 | Pass. Ingestion, processor, subscription, generator, inferencer, emitter, `VALUES`, SQS, Roto, and WASM expression paths receive the bound execution snapshot and expose no context-free clock lookup. |
+| F7 | Pass. Message errors retain their failing execution snapshot; generated rows and WASM callbacks receive their assigned execution time; omitted Sentry time is logical and OTEL observation time is actual UTC. |
+| F8 | Pass. HTTP and Prometheus polling, and generator recurrence, stay anchored to logical cadence, coalesce missed occurrences, bind to replacement generations, and distinguish the due instant from fresh execution time. |
+| F9 | Pass. Activity is sampled after accepted input, so two interleaved branches retain independent logical TTL and state while preserving their keys and fields. |
+| F10 | Pass. Origins, projections, periods, rates, deadline conversion, and cadence advancement enforce the signed Unix-nanosecond boundary. Reachable overflow and invalid rate or timestamp input return typed diagnostics. |
+
+The final execution record is:
+
+| Probe | Result |
+| --- | --- |
+| `RUSTC_WRAPPER=kache just test` | Pass. Every workspace target completed, including the complete public scenario target. Four scenarios needed their one configured retry: two clock setups encountered a transient leadership change, one three-node Protobuf setup encountered a runtime-readiness timeout, and one window assertion missed its two-second delivery bound. All four passed on retry. |
+| Complete public suite with retries disabled | 1,451 of 1,452 scenarios and 15,082 of 15,083 steps passed at concurrency 16. The sole miss was the three-node Protobuf delivery assertion, outside the clock contract. Its exact one- and three-node outline then passed all 2 scenarios and 20 steps at concurrency 1 with retries still disabled. This is recorded as a load-sensitive full-suite limitation rather than clock evidence. |
+| Core clock matrix with retries disabled | Pass; all 78 scenarios and all 855 steps across `branch_activity_sampling.feature`, `domain_buffer_timing.feature`, `domain_clock_contract.feature`, `domain_emitter_cadence.feature`, `domain_execution_time.feature`, `domain_ingestion_time.feature`, and `physical_infrastructure_deadlines.feature`. |
+| Engine and connector clock extensions with retries disabled | Pass; all 41 tagged scenarios and all 417 steps across HTTP polling, generators, inferencers, Roto, WASM, SQS, ClickHouse, PostgreSQL, MySQL, MongoDB, Iceberg, Sentry, and OTEL. The recipe supplied the ONNX runtime required by the inferencer cases. |
+| Bounded HTTP/2 progress selection with retries disabled | Pass; all 3 scenarios and all 63 steps covered slow and fast historical bulk load plus independent relay admission. Progress used its reserved management subquota without spending liveness capacity. |
+| Domain-clock unit suite | Pass; all 24 tests covered arithmetic bounds, admission origin, monotonic reads, lifecycle outcomes, generation binding, wait cancellation and revalidation, cadence coalescing, progress fencing, and retained latest progress. |
+| Interconnect unit suite | Pass; all 35 tests covered current request policy, independent progress and liveness reservations, bulk isolation, relay admission, cancellation, terminal outcomes, membership removal, shutdown, and request or streaming deadlines. |
+| Runtime capability compile failures | Pass; all 14 cases, including the three clock cases, prove that logical and physical deadline capabilities cannot be interchanged and a VM function injector requires an explicit execution context. |
+| `RUSTC_WRAPPER=kache just validate` | Pass. Formatting, all-feature workspace Clippy with warnings denied, skill publication validation, all executable NSPL documentation blocks, and the clock architecture boundary check completed successfully. |
+| `RUSTC_WRAPPER=kache just ratchet` | Pass. Every architecture-debt count is at or below its checked-in baseline. |
+
+The public matrix ran one- and three-node topologies, historical, unpaced, slow, and fast clocks,
+and two interleaved concrete branches where branch-local behavior matters. Generic cases used the
+random test scheduler. Authority and nonleader owner-loss cases selected the production sticky
+scheduler and asserted the concrete owner before inducing loss. The matrix covered late join,
+follower restart, nonleader owner loss, leadership and authority transfer, full cluster recovery,
+`STOP` and `START`, and delayed or reordered progress during occupied bulk execution.
+
+The dependency graph is acyclic: tasks 12 and 13 are direct prerequisites of task 14, task 14 is
+the sole remaining prerequisite of the domain-clock epic, and the interconnection qualification
+consumes task 12 without a return dependency. The interconnection ledger still records its separate
+shaped-link p99 and sustained-throughput benchmark limitation. That measurement belongs to the
+interconnection epic; the domain-clock dependency is the deterministic bounded-capacity contract,
+which passed here under both slow and fast bulk-load cases.
+
+Only the current stored and protocol shapes remain. Clock progress uses the typed HTTP/2 request
+and never serializes a process-local monotonic instant. Runtime batches, suspended work,
+acknowledgement guards, tokens, and maps remain in memory. The architecture, domain-time public
+documentation, and published NSPL skill describe the qualified clock classes and failure
+semantics. No product correction or additional clock work was required by this final run; F1–F10
+are qualified for closure.
