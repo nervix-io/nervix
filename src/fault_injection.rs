@@ -23,6 +23,7 @@ use nervix_models::{ClusterNodeName, DomainName, EmitterName, IngestorName};
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::{broadcast, watch};
+use tokio_util::sync::CancellationToken;
 use triomphe::Arc;
 
 use crate::registry::SchedulerMode;
@@ -839,6 +840,7 @@ impl FaultInjection {
         &self,
         domain: &DomainName,
         node: &ClusterNodeName,
+        shutdown: &CancellationToken,
     ) -> bool {
         let exact = DomainClockProgressPausePoint {
             domain: domain.as_str().to_ascii_lowercase(),
@@ -856,8 +858,10 @@ impl FaultInjection {
             return false;
         };
         pause.reach();
-        pause.wait_until_released().await;
-        true
+        tokio::select! {
+            _ = shutdown.cancelled() => false,
+            _ = pause.wait_until_released() => true,
+        }
     }
 
     pub(crate) fn mark_domain_clock_progress_delivered(

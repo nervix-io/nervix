@@ -259,7 +259,6 @@ pub enum RelayPayloadKind {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub enum ControlEnvelope {
     Terminate,
-    DomainClockProgress(DomainClockProgressEnvelope),
     StateReplicationAck(StateReplicationAck),
     StateCheckpointAvailable(StateCheckpointAvailable),
     Request(RequestEnvelope),
@@ -284,8 +283,13 @@ pub struct RuntimeErrorEvent {
     pub message: String,
 }
 
+/// One replaceable report from the committed authority for a domain clock.
+///
+/// The typed request contract assigns these reports to the bounded progress subquota. A response
+/// confirms that the authenticated receiver evaluated the report against its current fence; it
+/// does not establish or replace the receiver's committed clock mapping.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DomainClockProgressEnvelope {
+pub struct DomainClockProgressRequest {
     pub domain_id: DomainName,
     pub progress: DomainClockProgress,
 }
@@ -955,7 +959,7 @@ impl Envelope {
 impl ControlEnvelope {
     pub(crate) fn pool_class(&self) -> PoolClass {
         match self {
-            Self::DomainClockProgress(_) | Self::RuntimeErrorEvent(_) => PoolClass::Management,
+            Self::RuntimeErrorEvent(_) => PoolClass::Management,
             Self::StateReplicationAck(_) | Self::StateCheckpointAvailable(_) => {
                 PoolClass::Replication
             }

@@ -1,4 +1,99 @@
 Feature: Domain clock contract regressions
+  @domain_clock_http2
+  Scenario Outline: Fenced clock progress uses reserved HTTP2 capacity during historical bulk load
+    Given the production sticky scheduler is configured
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a 3 node nervix cluster is started
+    And the active domain is "authority_domain"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD <period> SKEW 100ms;
+      CREATE SCHEMA http2_clock_request (
+        sequence I64
+      );
+      CREATE SCHEMA http2_clock_observation (
+        sequence I64,
+        observed_at DATETIME
+      );
+      CREATE WIRE JSON SCHEMA http2_clock_request_wire MODE STRICT (
+        sequence integer
+      );
+      CREATE CODEC http2_clock_request_codec
+        FROM WIRE JSON SCHEMA http2_clock_request_wire
+        TO SCHEMA http2_clock_request;
+      CREATE RELAY http2_clock_observations
+        SCHEMA http2_clock_observation UNBRANCHED;
+      CREATE VHOST edge http2-clock-{{test_id}}.example.com;
+      CREATE ENDPOINT http2_clock_endpoint
+        ON edge
+        PATH '/clock'
+        TYPE HTTP;
+      CREATE INGESTOR http2_clock_source
+        FROM ENDPOINT http2_clock_endpoint MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING http2_clock_request_codec
+        TIMESTAMP NOW
+        TO http2_clock_observations
+          SET sequence = message.sequence,
+              observed_at = now()
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION http2_clock_subscription TO http2_clock_observations;
+      """
+    When bulk execution on node "node-2" is occupied
+    When these NSPL commands are executed
+      """
+      START AT '2000-01-01T00:00:00Z' TIME RATE <time_rate>;
+      """
+    Then node "node-2" observability metric "nervix_interconnect_requests_total" with labels eventually reaches at least 1
+      """
+      operation="progress"
+      outcome="answered"
+      """
+    And node "node-2" observability metric "nervix_interconnect_requests_total" with labels eventually reaches at least 1
+      """
+      operation="liveness"
+      outcome="answered"
+      """
+    And node "node-2" observability metric "nervix_interconnect_quota_failures_total" with labels eventually equals 0
+      """
+      direction="outbound"
+      operation="liveness"
+      """
+    And node "node-3" eventually accepts http traffic for host "http2-clock-{{test_id}}.example.com" path "/clock"
+      """
+      {"sequence":0}
+      """
+    And node "node-1" eventually accepts http traffic for host "http2-clock-{{test_id}}.example.com" path "/clock"
+      """
+      {"sequence":1}
+      """
+    And within "5s" the relay subscription receives a payload
+      """
+      "sequence":1
+      """
+    And the last relay subscription payload field "observed_at" is saved as timestamp placeholder "node_1_http2_clock"
+    When http payload is posted to node "node-3" with host "http2-clock-{{test_id}}.example.com" path "/clock"
+      """
+      {"sequence":2}
+      """
+    Then within "5s" the relay subscription receives a payload
+      """
+      "sequence":2
+      """
+    And the last relay subscription payload field "observed_at" is saved as timestamp placeholder "node_3_http2_clock"
+    And timestamp placeholder "node_1_http2_clock" is before "2000-01-01T01:00:00Z"
+    And timestamp placeholder "node_3_http2_clock" is before "2000-01-01T01:00:00Z"
+    And timestamp placeholders "node_1_http2_clock" and "node_3_http2_clock" differ by no more than <cross_node_bound>
+    When bulk execution on node "node-2" is released
+    Then node "node-2" eventually observes a stable leader
+
+    Examples:
+      | period | time_rate | cross_node_bound |
+      | 100us  | 0.0001    | "1s"             |
+      | 100ms  | 100.0     | "5m"             |
+
   @domain_clock_authority
   Scenario: One fenced authority emits coalesced progress for each clock generation
     Given the production sticky scheduler is configured

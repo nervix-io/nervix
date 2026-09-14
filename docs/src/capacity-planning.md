@@ -100,7 +100,7 @@ not pay for a window's state, and a window width does not bound a correlator.
   It reserves one unadmitted batch and one terminal outcome per active logical channel. Channels
   are concrete-branch local, so waiting work in one branch does not consume another branch's
   ordering slot. Management subquotas independently reserve streams for discovery, liveness,
-  acknowledgement progress, relay admission, cancellation, and terminal outcomes even when
+  replaceable domain-clock progress, relay admission, cancellation, and terminal outcomes even when
   ordinary management requests are full.
   Bulk subquotas independently reserve streams for resource transfer and for runtime and Raft
   snapshot transfer. A runtime state snapshot is described before it is fetched, so a node that

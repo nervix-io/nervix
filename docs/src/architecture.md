@@ -79,14 +79,15 @@ an endpoint SAN. A connection is accepted only when its CA trust, cluster identi
 advertised endpoint, and HTTP/2 ALPN all agree.
 
 Each peer has independent HTTP/2 pools for membership and management events, commands, Raft
-replication, Arrow relay batches, and bulk transfers. Relay progress, cancellation, status, and
-terminal admission acknowledgements use reserved management capacity. Application health probes
-also use management traffic through the reserved per-node liveness capacity. Every pool except bulk
-is connected before a peer is reported ready, with capacity reserved in both directions. This keeps
-gossip, heartbeats, elections, administrative operations, health checks, and the first remote batch
-and its acknowledgement from waiting behind another traffic class. Consensus log replication uses
-one ordered bidirectional stream per follower on the replication pool, so a leader can keep several
-batches in flight without either side reordering them. Gossip exchanges, Raft records,
+replication, Arrow relay batches, and bulk transfers. Relay admission, cancellation, status, and
+terminal acknowledgements use reserved management capacity. Application health probes use the
+reserved per-node liveness capacity, while replaceable domain-clock progress uses its own progress
+capacity and retains only the newest pending frontier for each domain and peer. Every pool except
+bulk is connected before a peer is reported ready, with capacity reserved in both directions. This
+keeps gossip, heartbeats, elections, administrative operations, health checks, and the first remote
+batch and its acknowledgement from waiting behind another traffic class. Consensus log replication
+uses one ordered bidirectional stream per follower on the replication pool, so a leader can keep
+several batches in flight without either side reordering them. Gossip exchanges, Raft records,
 resource chunks, and other non-Arrow messages use bounded, validated rkyv records. Relay payloads
 remain Arrow IPC end to end. Resource archives, runtime state snapshots, and Raft snapshots cross
 the bulk pool as bounded chunks rather than one whole in-memory wire message, so a transfer larger

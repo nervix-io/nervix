@@ -14249,6 +14249,53 @@ async fn then_timestamp_placeholder_equals(
     );
 }
 
+#[then(expr = "timestamp placeholders {string} and {string} differ by no more than {string}")]
+async fn then_timestamp_placeholders_differ_by_no_more_than(
+    world: &mut ScenarioWorld,
+    first_placeholder: String,
+    second_placeholder: String,
+    maximum_difference: String,
+) {
+    let first = world
+        .placeholders
+        .get(&first_placeholder)
+        .unwrap_or_else(|| panic!("timestamp placeholder '{first_placeholder}' is not defined"));
+    let second = world
+        .placeholders
+        .get(&second_placeholder)
+        .unwrap_or_else(|| panic!("timestamp placeholder '{second_placeholder}' is not defined"));
+    let first = chrono::DateTime::parse_from_rfc3339(first).unwrap_or_else(|error| {
+        panic!("timestamp placeholder '{first_placeholder}' is invalid: {error}")
+    });
+    let second = chrono::DateTime::parse_from_rfc3339(second).unwrap_or_else(|error| {
+        panic!("timestamp placeholder '{second_placeholder}' is invalid: {error}")
+    });
+    let first_nanos = first
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| panic!("timestamp placeholder '{first_placeholder}' is out of range"));
+    let second_nanos = second
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| panic!("timestamp placeholder '{second_placeholder}' is out of range"));
+    let measured_nanos = first_nanos.abs_diff(second_nanos);
+    let measured = Duration::from_nanos(measured_nanos);
+    let maximum = humantime::parse_duration(&maximum_difference)
+        .unwrap_or_else(|error| panic!("maximum timestamp difference is invalid: {error}"));
+
+    append_cucumber_log_line(&format!(
+        "measured cross-node logical-clock separation between '{first_placeholder}' and \
+         '{second_placeholder}': {} from sequential node-local samples; this is not a \
+         simultaneous clock-equality measurement",
+        humantime::format_duration(measured)
+    ));
+    assert!(
+        measured <= maximum,
+        "timestamp placeholders '{first_placeholder}' and '{second_placeholder}' differed by {}, \
+         expected no more than {}",
+        humantime::format_duration(measured),
+        humantime::format_duration(maximum)
+    );
+}
+
 #[then(expr = "timestamp placeholder {string} is before {string}")]
 async fn then_timestamp_placeholder_is_before(
     world: &mut ScenarioWorld,

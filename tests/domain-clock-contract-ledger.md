@@ -443,6 +443,34 @@ physical infrastructure owners imports or reads a domain clock to schedule its d
 
 No complete Cucumber-suite or final qualification result is claimed by this record.
 
+## Task 12 validation record
+
+Recorded on 13 September 2026 against the task 12 worktree:
+
+| Probe | Result |
+| --- | --- |
+| Public bulk-load reproducer before product changes | Expected red on both attempts; while bulk execution occupied the clock authority, node 2's `operation="progress", outcome="answered"` metric remained zero. This isolated the raw sequential control-envelope path before the typed HTTP/2 request was introduced. |
+| Bounded HTTP/2 clock progress | Pass; both three-node historical examples and all 42 steps at rates `0.0001` and `100.0` delivered typed progress and liveness through their reserved management subquotas while bulk execution remained occupied. Liveness reported no outbound quota failures, and node-local execution on nodes 1 and 3 remained near the committed year-2000 mapping. |
+| Cross-node observation | Pass; sequential node-local HTTP samples differed by 10.434 microseconds at rate `0.0001` and 10.469 seconds at rate `100.0`. The measurement includes sampling delay and records an observed bound; it makes no simultaneous equality claim. |
+| Relay-admission isolation | Pass; the historical slow-domain and fast-domain scenario and all 21 steps held both remote admissions independently, released the runnable domain first, and preserved the blocked domain's background publish. Together with the two bulk-load examples, the focused `@domain_clock_http2` selection passed all 3 scenarios and 63 steps with retries disabled. |
+| Authority, generation, join, restart, and reconnect | Pass; the complete clock-contract feature passed all 21 scenarios and 248 steps with retries disabled. The first complete run exposed a paused producer holding the node database during owner restart; making the pause observe clock-task cancellation restored the existing one-shot pause across restart, and the owner-loss scenario then passed all 26 steps. |
+| Current retained admission frontier | Pass; both one- and three-node cases and all 16 steps retained exactly 256 reached positions while delayed progress could not redefine the committed mapping. |
+| Stateful `REQUIRED WAIT` | Pass; all four one- and three-node examples and all 52 steps at rates `0.0001` and `100.0` retained two independent branches beyond 1200 milliseconds, resumed with the correct keys and fields, and cancelled a third branch within the 1500-millisecond physical stop bound. |
+| Logical branch expiry | Pass; both one- and three-node paced-expiration scenarios and all 16 steps expired branch-local processor state on logical time. |
+| Interconnect unit suite | Pass; all 35 tests covered progress and liveness reservations, bulk isolation, relay admission, cancellation, terminal outcomes, membership removal, shutdown, and request deadlines. The request-policy control fixes `DomainClockProgressRequest` to `Management/Progress`, a unit response, and a two-second physical timeout. |
+| Server library suite | Pass; all 848 tests covered current generation and authority fences, delayed and reordered progress, the newest accepted report, local nondecrease, placement, failover, recovery, and runtime shutdown. |
+| `just validate` with `RUSTC_WRAPPER=kache` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, all 140 executable NSPL documentation blocks, and the clock architecture boundary check. |
+| `just ratchet` with `RUSTC_WRAPPER=kache` | Pass; every architecture-debt count is at or below its checked-in baseline. |
+
+The transport carries only the current typed request. Its payload contains the domain and fenced
+progress model; no process-local monotonic instant is serialized. Physical request timeout, retry,
+reconnect, cancellation, and shutdown remain transport concerns. Logical generation, admission,
+branch expiry, and materialized `REQUIRED WAIT` remain driven by the installed domain clock and
+runtime lifecycle.
+
+No complete Cucumber-suite or final qualification result is claimed by this record. The full
+repository qualification remains owned by task 14.
+
 ## Task 13 validation record
 
 Recorded on 13 September 2026 against the task 13 worktree:
