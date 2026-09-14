@@ -1,8 +1,8 @@
-//! Stable cluster-node identities used by committed control-plane state.
+//! Stable cluster-node and per-process coordination identities.
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The identity of one concrete run of a named cluster node.
+//! - **Owns.** Identities for concrete node runs and their coordination operations.
 //! - **Depends on.** Validated node names and serialization primitives.
 //! - **Must not know.** Gossip membership, consensus, transport authentication or runtime tasks.
 
@@ -85,5 +85,61 @@ impl ClusterNodeIdentity {
 impl fmt::Display for ClusterNodeIdentity {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}#{}", self.node_id, self.incarnation)
+    }
+}
+
+/// The identity of one coordination operation issued by one running node process.
+///
+/// The node and process epoch keep equal local sequences from colliding across coordinators or
+/// restarts. The interconnect binds those two fields to the authenticated sending connection.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct CoordinationIdentity {
+    coordinator: ClusterNodeName,
+    process_epoch: u64,
+    sequence: u64,
+}
+
+impl CoordinationIdentity {
+    pub const fn new(coordinator: ClusterNodeName, process_epoch: u64, sequence: u64) -> Self {
+        Self {
+            coordinator,
+            process_epoch,
+            sequence,
+        }
+    }
+
+    pub const fn coordinator(&self) -> &ClusterNodeName {
+        &self.coordinator
+    }
+
+    pub const fn process_epoch(&self) -> u64 {
+        self.process_epoch
+    }
+
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+}
+
+impl fmt::Display for CoordinationIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}@{}:{}",
+            self.coordinator, self.process_epoch, self.sequence
+        )
     }
 }

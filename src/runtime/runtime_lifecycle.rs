@@ -46,6 +46,7 @@ impl Runtime {
                 prepared_runtime_state_handoffs.insert(
                     DomainNodeRef::node_in(persisted.domain, persisted.kind, persisted.identifier),
                     PreparedRuntimeStateHandoff {
+                        coordination: persisted.coordination,
                         operation_id: persisted.operation_id,
                         source: persisted.source,
                         destination: persisted.destination,

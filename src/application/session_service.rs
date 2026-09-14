@@ -8,7 +8,7 @@
 //!   client sends.
 //! - **Must not know.** How any use case reaches the rest of the cluster.
 
-use std::sync::{Arc as StdArc, atomic::AtomicU64};
+use std::sync::Arc as StdArc;
 
 use ahash::RandomState;
 use arch_into::ArchInto;
@@ -151,7 +151,6 @@ pub(in crate::application) struct SessionServiceInner {
     pub(in crate::application) subscription_interest_counts:
         DashMap<SubscriptionInterestKey, usize, RandomState>,
     pub(in crate::application) interconnect: Transport,
-    pub(in crate::application) next_entity_gate_operation_id: AtomicU64,
     pub(in crate::application) service_tasks: TaskTracker,
     pub(in crate::application) configured_basic_auth: Option<BasicAuthCredentials>,
     pub(in crate::application) auth_rate_limiter: AuthRateLimiter,

@@ -25,7 +25,7 @@ use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, Reservation};
-use nervix_models::{ClusterNodeIdentity, ClusterNodeName};
+use nervix_models::{ClusterNodeIdentity, ClusterNodeName, CoordinationIdentity};
 use rkyv::{
     Archive, Deserialize, Serialize,
     api::high::{HighDeserializer, HighSerializer},
@@ -91,6 +91,8 @@ pub enum RemoteRequestFailure {
     PayloadTooLarge { actual: u64, limit: u64 },
     #[error("the {subquota:?} request subquota is full")]
     AdmissionFull { subquota: RequestSubquota },
+    #[error("the coordination identity does not belong to the authenticated request sender")]
+    CoordinationIdentityMismatch,
 }
 
 /// The authenticated peer that submitted a request to a registered handler.
@@ -98,6 +100,7 @@ pub enum RemoteRequestFailure {
 pub struct RequestContext {
     peer_node_id: ClusterNodeName,
     peer_advertised_host: String,
+    peer_process_epoch: u64,
 }
 
 impl RequestContext {
@@ -108,6 +111,11 @@ impl RequestContext {
     /// The certificate-validated host named by the peer's connection hello.
     pub fn peer_advertised_host(&self) -> &str {
         &self.peer_advertised_host
+    }
+
+    fn authenticates(&self, identity: &CoordinationIdentity) -> bool {
+        identity.coordinator() == &self.peer_node_id
+            && identity.process_epoch() == self.peer_process_epoch
     }
 }
 
@@ -230,6 +238,12 @@ pub trait InterconnectRequest: RkyvMessage {
 
     /// Discovery requests are permitted before the first live-membership view exists.
     const REQUIRES_LIVE_TARGET: bool = true;
+
+    /// Coordination requests name their issuer so the transport can bind the identity to the
+    /// authenticated connection before application code sees the request.
+    fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -847,6 +861,11 @@ where
                 M::decode_rkyv(executor.clone(), M::CLASS, payload)
                     .await
                     .map_err(|error| RemoteRequestFailure::InvalidPayload(error.to_string()))?;
+            if let Some(identity) = request.coordination_identity()
+                && !context.authenticates(identity)
+            {
+                return Err(RemoteRequestFailure::CoordinationIdentityMismatch);
+            }
             let response = (handler)(context, request).await;
             response
                 .encode_rkyv(executor, M::CLASS, payload_limit)
@@ -970,6 +989,7 @@ impl RequestState {
         executor: &Executor,
         peer_node_id: ClusterNodeName,
         peer_advertised_host: String,
+        peer_process_epoch: u64,
         request: RequestEnvelope,
         frames: FrameReader,
     ) -> Result<HandledDuplexStream, RemoteRequestFailure> {
@@ -1006,6 +1026,7 @@ impl RequestState {
                 RequestContext {
                     peer_node_id,
                     peer_advertised_host,
+                    peer_process_epoch,
                 },
                 request.payload,
                 frames,
@@ -1022,6 +1043,7 @@ impl RequestState {
         executor: &Executor,
         peer_node_id: ClusterNodeName,
         peer_advertised_host: String,
+        peer_process_epoch: u64,
         request: RequestEnvelope,
     ) -> Result<HandledByteStream, RemoteRequestFailure> {
         let handler = self
@@ -1057,6 +1079,7 @@ impl RequestState {
                 RequestContext {
                     peer_node_id,
                     peer_advertised_host,
+                    peer_process_epoch,
                 },
                 request.payload,
             )
@@ -1072,6 +1095,7 @@ impl RequestState {
         executor: &Executor,
         peer_node_id: ClusterNodeName,
         peer_advertised_host: String,
+        peer_process_epoch: u64,
         request: RequestEnvelope,
     ) -> HandledResponse {
         let handler = self
@@ -1099,6 +1123,7 @@ impl RequestState {
                                 RequestContext {
                                     peer_node_id,
                                     peer_advertised_host,
+                                    peer_process_epoch,
                                 },
                                 request.payload,
                             )
@@ -1541,6 +1566,10 @@ impl InterconnectRequest for CaptureOwnershipHandoffStateRequest {
     const NAME: &'static str = "capture_ownership_handoff_state";
     const CLASS: PoolClass = PoolClass::Replication;
     const TIMEOUT: Duration = Duration::from_secs(60);
+
+    fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
+        Some(&self.coordination)
+    }
 }
 
 impl InterconnectRequest for PrepareOwnershipHandoffStateRequest {
@@ -1549,6 +1578,10 @@ impl InterconnectRequest for PrepareOwnershipHandoffStateRequest {
     const NAME: &'static str = "prepare_ownership_handoff_state";
     const CLASS: PoolClass = PoolClass::Replication;
     const TIMEOUT: Duration = Duration::from_secs(60);
+
+    fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
+        Some(&self.coordination)
+    }
 }
 
 impl InterconnectRequest for ConfirmOwnershipHandoffStateRequest {
@@ -1557,6 +1590,10 @@ impl InterconnectRequest for ConfirmOwnershipHandoffStateRequest {
     const NAME: &'static str = "confirm_ownership_handoff_state";
     const CLASS: PoolClass = PoolClass::Replication;
     const TIMEOUT: Duration = Duration::from_secs(60);
+
+    fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
+        Some(&self.coordination)
+    }
 }
 
 impl InterconnectRequest for PrepareForcedOwnershipRecoveryRequest {
@@ -1573,6 +1610,10 @@ impl InterconnectRequest for ActivateOwnershipHandoffStateRequest {
     const NAME: &'static str = "activate_ownership_handoff_state";
     const CLASS: PoolClass = PoolClass::Replication;
     const TIMEOUT: Duration = Duration::from_secs(60);
+
+    fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
+        Some(&self.coordination)
+    }
 }
 
 impl InterconnectRequest for DiscardOwnershipHandoffStateRequest {
@@ -1581,6 +1622,10 @@ impl InterconnectRequest for DiscardOwnershipHandoffStateRequest {
     const NAME: &'static str = "discard_ownership_handoff_state";
     const CLASS: PoolClass = PoolClass::Replication;
     const TIMEOUT: Duration = Duration::from_secs(60);
+
+    fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
+        Some(&self.coordination)
+    }
 }
 
 #[cfg(test)]

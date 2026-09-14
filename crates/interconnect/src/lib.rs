@@ -18,11 +18,11 @@ use std::{
 use error_stack::Report;
 use nervix_execution::{ChargedBytes, Executor, Reservation};
 use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CodecName, DomainClockProgress,
-    DomainName, EmitterName, FieldName, IngestorName, LookupName, ModelKind, ModelName, NodeRef,
-    OwnershipStateRecoveryOutcome, OwnershipStateReset, RelayName, RemoteAckRegistration,
-    RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata, ResourceName,
-    SubscriptionBinding,
+    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CodecName, CoordinationIdentity,
+    DomainClockProgress, DomainName, EmitterName, FieldName, IngestorName, LookupName, ModelKind,
+    ModelName, NodeRef, OwnershipStateRecoveryOutcome, OwnershipStateReset, RelayName,
+    RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata,
+    ResourceName, SubscriptionBinding,
 };
 use nervix_recovery::Discarded as _;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -375,6 +375,7 @@ pub struct OwnershipHandoffCheckpoint {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CaptureOwnershipHandoffStateRequest {
+    pub coordination: CoordinationIdentity,
     pub operation_id: String,
     pub source: ClusterNodeName,
     pub source_incarnation: ClusterNodeIncarnation,
@@ -385,6 +386,7 @@ pub struct CaptureOwnershipHandoffStateRequest {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub struct PrepareOwnershipHandoffStateRequest {
+    pub coordination: CoordinationIdentity,
     pub operation_id: String,
     pub source: ClusterNodeName,
     pub destination: ClusterNodeName,
@@ -399,6 +401,7 @@ pub struct PrepareOwnershipHandoffStateRequest {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfirmOwnershipHandoffStateRequest {
+    pub coordination: CoordinationIdentity,
     pub operation_id: String,
     pub source: ClusterNodeName,
     pub destination: ClusterNodeName,
@@ -446,6 +449,7 @@ pub type OwnershipHandoffResponse<T> = Result<T, OwnershipHandoffFailure>;
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivateOwnershipHandoffStateRequest {
+    pub coordination: CoordinationIdentity,
     pub operation_id: String,
     pub source: ClusterNodeName,
     pub destination: ClusterNodeName,
@@ -460,6 +464,7 @@ pub struct ActivateOwnershipHandoffStateRequest {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DiscardOwnershipHandoffStateRequest {
+    pub coordination: CoordinationIdentity,
     pub operation_id: String,
     pub domain: DomainName,
     pub entity: NodeRef,
@@ -571,7 +576,7 @@ impl EntityGatePurpose {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityGateRequest {
-    pub operation_id: u64,
+    pub coordination: CoordinationIdentity,
     pub domain: DomainName,
     pub relays: Vec<RelayName>,
     pub affected_entities: Vec<NodeRef>,
@@ -595,6 +600,7 @@ pub struct EntityDrainStatusEnvelope {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityDrainStatusRequest {
+    pub coordination: CoordinationIdentity,
     pub domain: DomainName,
     pub relays: Vec<RelayName>,
     pub affected_entities: Vec<NodeRef>,
@@ -608,7 +614,7 @@ pub struct EntityDrainStatusResponse {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityGateReleaseRequest {
-    pub operation_id: u64,
+    pub coordination: CoordinationIdentity,
     pub domain: DomainName,
 }
 
@@ -719,6 +725,10 @@ impl InterconnectRequest for EntityGateRequest {
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Admission;
     const TIMEOUT: Duration = Duration::from_secs(2);
+
+    fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
+        Some(&self.coordination)
+    }
 }
 
 impl InterconnectRequest for EntityDrainStatusRequest {
@@ -728,6 +738,10 @@ impl InterconnectRequest for EntityDrainStatusRequest {
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
     const TIMEOUT: Duration = Duration::from_secs(2);
+
+    fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
+        Some(&self.coordination)
+    }
 }
 
 impl InterconnectRequest for EntityGateReleaseRequest {
@@ -737,6 +751,10 @@ impl InterconnectRequest for EntityGateReleaseRequest {
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Cancellation;
     const TIMEOUT: Duration = Duration::from_secs(2);
+
+    fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
+        Some(&self.coordination)
+    }
 }
 
 impl InterconnectRequest for DescribeMetricsRequest {
@@ -827,6 +845,10 @@ pub struct Transport {
     pub(crate) inner: connection::TransportState,
 }
 
+#[derive(Debug, Error)]
+#[error("this process exhausted its coordination identity sequence")]
+pub struct CoordinationIdentityAllocationError;
+
 impl Transport {
     pub async fn bind(
         listen_addr: SocketAddr,
@@ -856,6 +878,13 @@ impl Transport {
 
     pub fn node_id(&self) -> &ClusterNodeName {
         self.inner.node_id()
+    }
+
+    /// Allocates one operation identity bound to this transport process.
+    pub fn next_coordination_identity(
+        &self,
+    ) -> Result<CoordinationIdentity, Report<CoordinationIdentityAllocationError>> {
+        self.inner.next_coordination_identity()
     }
 
     /// Send one operation. Its semantic type selects the pool; callers cannot select a class.

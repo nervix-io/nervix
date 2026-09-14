@@ -1,17 +1,42 @@
-//! Runtime-state snapshots awaiting handoff or forced recovery.
+//! Identities attached to runtime-state snapshots awaiting handoff or forced recovery.
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** Pending runtime-state snapshots and forced-recovery preparation.
-//! - **Depends on.** Persisted runtime-state entries.
-//! - **Must not know.** Schedule planning, interconnect transport, or activation policy.
+//! - **Owns.** The exact preparation that may supply one pending runtime-state snapshot.
+//! - **Depends on.** Shared coordination identities and persisted runtime-state entries.
+//! - **Must not know.** Schedule planning, interconnect transport, or state activation policy.
 
 use super::*;
 
 #[derive(Debug)]
 pub(in crate::runtime) struct PreparedRuntimeStateSnapshot {
-    pub(super) operation_id: String,
+    pub(super) preparation: RuntimeStatePreparationIdentity,
     pub(super) snapshot: PersistedRuntimeStateEntry,
+}
+
+#[derive(Debug)]
+pub(super) enum RuntimeStatePreparationIdentity {
+    OwnershipHandoff {
+        coordination: CoordinationIdentity,
+        operation_id: String,
+    },
+    ForcedRecovery,
+}
+
+impl RuntimeStatePreparationIdentity {
+    pub(super) fn is_ownership_handoff(
+        &self,
+        coordination: &CoordinationIdentity,
+        operation_id: &str,
+    ) -> bool {
+        match self {
+            Self::OwnershipHandoff {
+                coordination: prepared_coordination,
+                operation_id: prepared_operation_id,
+            } => prepared_coordination == coordination && prepared_operation_id == operation_id,
+            Self::ForcedRecovery => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

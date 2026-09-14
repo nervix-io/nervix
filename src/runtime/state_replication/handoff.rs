@@ -1,15 +1,16 @@
-//! Runtime-state ownership handoff and activation state.
+//! Runtime-state ownership handoff identities and activation state.
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** Prepared and activated ownership-handoff transitions.
-//! - **Depends on.** Schedules and persisted runtime state.
+//! - **Owns.** Exact prepared and activated ownership-handoff transitions.
+//! - **Depends on.** Shared coordination identities, schedules and persisted runtime state.
 //! - **Must not know.** Handoff transport, schedule planning or state-store key encoding.
 
 use super::*;
 
 #[derive(Debug, Clone)]
 pub(in crate::runtime) struct PreparedRuntimeStateHandoff {
+    pub(in crate::runtime) coordination: CoordinationIdentity,
     pub(in crate::runtime) operation_id: String,
     pub(in crate::runtime) source: ClusterNodeName,
     pub(in crate::runtime) destination: ClusterNodeName,
@@ -59,6 +60,7 @@ pub(in crate::runtime) enum OwnershipHandoffActivation {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct OwnershipHandoffTransitionRef<'a> {
+    pub(super) coordination: &'a CoordinationIdentity,
     pub(super) operation_id: &'a str,
     pub(super) source: &'a ClusterNodeName,
     pub(super) destination: &'a ClusterNodeName,
@@ -75,6 +77,7 @@ impl<'a> From<&'a nervix_interconnect::ActivateOwnershipHandoffStateRequest>
 {
     fn from(request: &'a nervix_interconnect::ActivateOwnershipHandoffStateRequest) -> Self {
         Self {
+            coordination: &request.coordination,
             operation_id: &request.operation_id,
             source: &request.source,
             destination: &request.destination,
@@ -93,6 +96,7 @@ impl<'a> From<&'a nervix_interconnect::ConfirmOwnershipHandoffStateRequest>
 {
     fn from(request: &'a nervix_interconnect::ConfirmOwnershipHandoffStateRequest) -> Self {
         Self {
+            coordination: &request.coordination,
             operation_id: &request.operation_id,
             source: &request.source,
             destination: &request.destination,
@@ -108,7 +112,8 @@ impl<'a> From<&'a nervix_interconnect::ConfirmOwnershipHandoffStateRequest>
 
 impl PreparedRuntimeStateHandoff {
     pub(super) fn matches(&self, transition: OwnershipHandoffTransitionRef<'_>) -> bool {
-        self.operation_id == transition.operation_id
+        self.coordination == *transition.coordination
+            && self.operation_id == transition.operation_id
             && self.source == *transition.source
             && self.destination == *transition.destination
             && self.source_incarnation == transition.source_incarnation
@@ -120,6 +125,7 @@ impl PreparedRuntimeStateHandoff {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::runtime) struct ActivatedRuntimeStateHandoff {
+    pub(super) coordination: CoordinationIdentity,
     pub(super) operation_id: String,
     pub(super) source: ClusterNodeName,
     pub(super) destination: ClusterNodeName,
@@ -131,7 +137,8 @@ pub(in crate::runtime) struct ActivatedRuntimeStateHandoff {
 
 impl ActivatedRuntimeStateHandoff {
     pub(super) fn matches(&self, transition: OwnershipHandoffTransitionRef<'_>) -> bool {
-        self.operation_id == transition.operation_id
+        self.coordination == *transition.coordination
+            && self.operation_id == transition.operation_id
             && self.source == *transition.source
             && self.destination == *transition.destination
             && self.source_incarnation == transition.source_incarnation
