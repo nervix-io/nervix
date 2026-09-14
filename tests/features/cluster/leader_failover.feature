@@ -26,6 +26,7 @@ Feature: Cluster leader failover
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE fraud_model;
       UPLOAD RESOURCE fraud_model VERSION '{{onnx_model}}';
+      BEGIN;
       CREATE SCHEMA notification (
         user_id I64,
         tenant STRING,
@@ -82,9 +83,6 @@ Feature: Cluster leader failover
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m;
       CREATE IF NOT EXISTS BRANCH by_notification_source SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_notification_source WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -94,13 +92,10 @@ Feature: Cluster leader failover
       CREATE RELAY errors_ss SCHEMA notification BRANCHED BY by_notification_source;
       CREATE RELAY info_ss SCHEMA notification BRANCHED BY by_notification_source;
       CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_notification_source;
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
       CREATE IF NOT EXISTS BRANCH by_notifications_a_source SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications_a SCHEMA notification BRANCHED BY by_notifications_a_source;
       CREATE RELAY notifications_b SCHEMA notification BRANCHED BY by_notifications_a_source;
       CREATE RELAY notifications_all SCHEMA notification BRANCHED BY by_notifications_a_source;
-      CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
       CREATE IF NOT EXISTS BRANCH by_transaction_source SCHEMA transaction_id_branch TTL 5m;
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_transaction_source;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_transaction_source;
@@ -182,6 +177,7 @@ Feature: Cluster leader failover
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       <create_statement>;
+      COMMIT;
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "<node_kind>" "<node_name>" is saved as placeholder "failed_primary_node"
@@ -212,6 +208,7 @@ Feature: Cluster leader failover
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE fraud_model;
       UPLOAD RESOURCE fraud_model VERSION '{{onnx_model}}';
+      BEGIN;
       CREATE SCHEMA notification (
         user_id I64,
         tenant STRING,
@@ -268,9 +265,6 @@ Feature: Cluster leader failover
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m;
       CREATE IF NOT EXISTS BRANCH by_notification_source SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_notification_source WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -280,13 +274,10 @@ Feature: Cluster leader failover
       CREATE RELAY errors_ss SCHEMA notification BRANCHED BY by_notification_source;
       CREATE RELAY info_ss SCHEMA notification BRANCHED BY by_notification_source;
       CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_notification_source;
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
       CREATE IF NOT EXISTS BRANCH by_notifications_a_source SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications_a SCHEMA notification BRANCHED BY by_notifications_a_source;
       CREATE RELAY notifications_b SCHEMA notification BRANCHED BY by_notifications_a_source;
       CREATE RELAY notifications_all SCHEMA notification BRANCHED BY by_notifications_a_source;
-      CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
       CREATE IF NOT EXISTS BRANCH by_transaction_source SCHEMA transaction_id_branch TTL 5m;
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_transaction_source;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_transaction_source;
@@ -368,6 +359,7 @@ Feature: Cluster leader failover
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       <create_statement>;
+      COMMIT;
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "<node_kind>" "<node_name>" is saved as placeholder "failed_primary_node"

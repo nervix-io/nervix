@@ -152,6 +152,158 @@ Feature: NSPL transactions
     When the transaction commit pause on node "{{old_leader}}" after 1 statement is released
     Then the background NSPL execution is discarded
 
+  @command_completion
+  Scenario: COMMIT remains applying until its durable model effect is activated
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Given client "owner" is connected to node "node-1"
+    And client "observer" is connected to node "node-1"
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE SCHEMA completion_record (value STRING);
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    Given transaction commit on node "node-1" pauses after 1 statement
+    When client "owner" begins executing these NSPL commands in the background
+      """
+      COMMIT;
+      """
+    Then the transaction commit pause on node "node-1" after 1 statement is reached
+    And transaction "{{transaction_id}}" eventually has state "COMMITTING"
+    When the transaction commit pause on node "node-1" after 1 statement is released
+    Then the background NSPL execution succeeds
+    When client "observer" executes these NSPL commands
+      """
+      SHOW CREATE SCHEMA completion_record;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA completion_record (
+        value STRING
+      );
+      """
+
+  @command_completion
+  Scenario: A held commit does not block a commit in another domain
+    Given a 1 node nervix cluster is started
+    And the active domain is "blocked_{{test_id}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN blocked_{{test_id}};
+      CREATE UNPACED DOMAIN runnable_{{test_id}};
+      """
+    Given client "blocked" is connected to node "node-1"
+    And client "runnable" is connected to node "node-1"
+    When client "blocked" selects domain "blocked_{{test_id}}"
+    And client "runnable" selects domain "runnable_{{test_id}}"
+    And client "blocked" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE SCHEMA blocked_record (value STRING);
+      """
+    Given transaction commit on node "node-1" pauses after 1 statement
+    When client "blocked" begins executing these NSPL commands in the background
+      """
+      COMMIT;
+      """
+    Then the transaction commit pause on node "node-1" after 1 statement is reached
+    When client "runnable" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE SCHEMA runnable_record (value STRING);
+      COMMIT;
+      SHOW CREATE SCHEMA runnable_record;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA runnable_record (
+        value STRING
+      );
+      """
+    Given the active domain is "blocked_{{test_id}}"
+    When the transaction commit pause on node "node-1" after 1 statement is released
+    Then the background NSPL execution succeeds
+    When client "blocked" executes these NSPL commands
+      """
+      SHOW CREATE SCHEMA blocked_record;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA blocked_record (
+        value STRING
+      );
+      """
+
+  @command_completion
+  Scenario: Transactional START and STOP remain applying through activation
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Given client "owner" is connected to node "node-1"
+    And client "observer" is connected to node "node-1"
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      START;
+      """
+    Then client "owner" transaction id is saved as placeholder "start_transaction_id"
+    Given transaction commit on node "node-1" pauses after 1 statement
+    When client "owner" begins executing these NSPL commands in the background
+      """
+      COMMIT;
+      """
+    Then the transaction commit pause on node "node-1" after 1 statement is reached
+    And transaction "{{start_transaction_id}}" eventually has state "COMMITTING"
+    Then the background NSPL execution is discarded
+    When client "owner" closes its session cleanly
+    Given client "resumed" is connected to node "node-1"
+    When client "resumed" attaches to transaction "{{start_transaction_id}}"
+    And client "resumed" begins executing these NSPL commands in the background
+      """
+      COMMIT;
+      """
+    And the transaction commit pause on node "node-1" after 1 statement is released
+    Then the background NSPL execution succeeds
+    When client "observer" executes these NSPL commands
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then the last command output contains
+      """
+      status: running
+      """
+    When client "resumed" executes these NSPL commands
+      """
+      BEGIN;
+      STOP;
+      """
+    Then client "resumed" transaction id is saved as placeholder "stop_transaction_id"
+    Given transaction commit on node "node-1" pauses after 1 statement
+    When client "resumed" begins executing these NSPL commands in the background
+      """
+      COMMIT;
+      """
+    Then the transaction commit pause on node "node-1" after 1 statement is reached
+    And transaction "{{stop_transaction_id}}" eventually has state "COMMITTING"
+    When the transaction commit pause on node "node-1" after 1 statement is released
+    Then the background NSPL execution succeeds
+    When client "observer" executes these NSPL commands
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then the last command output contains
+      """
+      status: stopped
+      """
+
   @transaction_failed_resume
   Scenario: A failing resumed commit records the failing step and preserves its prefix
     Given a 3 node nervix cluster is started

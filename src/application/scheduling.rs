@@ -15,7 +15,7 @@ use meticulous::OptionExt as _;
 use nervix_client_core::Client as NervixClient;
 use nervix_consensus::ConsensusError;
 use nervix_models::{
-    ClusterNodeName, DomainName, IngestSource, IngestorName, KafkaOffsetMode,
+    ClusterNodeIdentity, ClusterNodeName, DomainName, IngestSource, IngestorName, KafkaOffsetMode,
     KafkaPartitionSchedule, Model, ModelKind, ModelName, NodeRef, PlacementGroupSchedule,
     PlacementPolicy, QuiesceLevel, ScheduledNode,
 };
@@ -194,41 +194,65 @@ impl SessionServiceImpl {
         &self,
         node_id: ClusterNodeName,
     ) -> CommandResult {
+        let availability = self.inner.cluster.availability_state().await;
+        let mut latest_nodes = availability.latest_nodes_by_id();
+        let Some(node) = latest_nodes.remove(&node_id) else {
+            return command_error(format!(
+                "cannot identify the current incarnation of raft member '{node_id}'"
+            ));
+        };
+        let membership_nodes = self.inner.consensus.membership_nodes().await;
+        let member_at_admission = membership_nodes.contains_key(&node_id);
+        self.drop_admitted_node(node.identity(), member_at_admission)
+            .await
+    }
+
+    pub(in crate::application) async fn drop_admitted_node(
+        &self,
+        identity: ClusterNodeIdentity,
+        member_at_admission: bool,
+    ) -> CommandResult {
+        let node_id = identity.node_id().clone();
+        let membership_nodes = self.inner.consensus.membership_nodes().await;
+        let is_current_member = membership_nodes.contains_key(&node_id);
         let gossip = self.inner.cluster.availability_state().await;
-        let is_live = gossip
-            .live_nodes
-            .iter()
-            .any(|live_node| live_node.node_id == node_id);
-        if is_live && !gossip.dead_node_ids.contains(&node_id) {
+        let live_node_ids = gossip
+            .live_identities()
+            .into_iter()
+            .map(|identity| identity.node_id().clone())
+            .collect::<BTreeSet<_>>();
+        let is_live = live_node_ids.contains(&node_id);
+        let is_resuming_applied_removal = member_at_admission && !is_current_member;
+        if !is_resuming_applied_removal && is_live {
             return command_error(format!(
                 "cannot drop live node '{node_id}'; stop the node before removing it"
             ));
         }
 
-        let membership_nodes = self.inner.consensus.membership_nodes().await;
-        if membership_nodes.contains_key(&node_id) {
+        if is_current_member {
             let voters = self.inner.consensus.membership_voter_ids().await;
-            let live_node_ids = gossip
-                .live_nodes
-                .iter()
-                .filter(|live_node| !gossip.dead_node_ids.contains(&live_node.node_id))
-                .map(|live_node| live_node.node_id.clone())
-                .collect::<BTreeSet<_>>();
             if let Some(message) = Self::drop_node_quorum_error(&node_id, &voters, &live_node_ids) {
                 return command_error(message);
             }
         }
 
         let current_schedule = self.inner.consensus.current_schedule().await;
-        match self.inner.consensus_administrator.drop_node(&node_id).await {
-            Ok(()) => {}
-            Err(error) => {
-                return self
-                    .consensus_error_response(
-                        &error,
-                        format!("failed to drop node '{node_id}': {error}"),
-                    )
-                    .await;
+        if !is_resuming_applied_removal {
+            match self
+                .inner
+                .consensus_administrator
+                .drop_node(&identity, self.inner.cluster.availability_state())
+                .await
+            {
+                Ok(()) => {}
+                Err(error) => {
+                    return self
+                        .consensus_error_response(
+                            &error,
+                            format!("failed to drop node '{node_id}': {error}"),
+                        )
+                        .await;
+                }
             }
         }
 
@@ -283,6 +307,18 @@ impl SessionServiceImpl {
                     domain.as_str()
                 ));
             }
+        }
+
+        if let Err(error) = self.apply_current_cluster_state().await {
+            return command_error(format!(
+                "dropped node '{node_id}', but the resulting schedules failed to become usable: \
+                 {error}"
+            ));
+        }
+        if let Err(error) = self.wait_for_authoritative_visibility().await {
+            return command_error(format!(
+                "dropped node '{node_id}', but authoritative visibility did not complete: {error}"
+            ));
         }
 
         command_ok(format!("dropped node '{node_id}'"))
@@ -344,14 +380,19 @@ impl SessionServiceImpl {
             let action = if cordoned { "cordon" } else { "uncordon" };
             return self
                 .consensus_error_response(
-                    &error,
+                    error.current_context(),
                     format!("failed to {action} node '{node_id}': {error}"),
                 )
                 .await;
         }
 
         let action = if cordoned { "cordoned" } else { "uncordoned" };
-        command_ok(format!("{action} node '{node_id}'"))
+        match self.wait_for_authoritative_visibility().await {
+            Ok(()) => command_ok(format!("{action} node '{node_id}'")),
+            Err(error) => command_error(format!(
+                "{action} node '{node_id}', but authoritative visibility did not complete: {error}"
+            )),
+        }
     }
 
     pub(in crate::application) async fn drain_node(
@@ -371,7 +412,7 @@ impl SessionServiceImpl {
         {
             return self
                 .consensus_error_response(
-                    &error,
+                    error.current_context(),
                     format!("failed to cordon node '{node_id}' before drain: {error}"),
                 )
                 .await;

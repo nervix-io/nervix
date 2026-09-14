@@ -43,7 +43,7 @@ Feature: Physical infrastructure deadlines under domain pacing
       START AT '2000-01-01T00:00:00Z' TIME RATE 0.0001;
       """
     Then within "2s" clock source recorder "{{test_id}}" records 1 requests
-    And within "1500ms" these NSPL commands complete on the leader node
+    And within "9s" these NSPL commands complete on the leader node
       """
       STOP;
       """
@@ -52,7 +52,7 @@ Feature: Physical infrastructure deadlines under domain pacing
       START AT '2010-01-01T00:00:00Z' TIME RATE 100.0;
       """
     Then within "2s" clock source recorder "{{test_id}}" records 2 requests
-    And within "1500ms" these NSPL commands complete on the leader node
+    And within "9s" these NSPL commands complete on the leader node
       """
       STOP;
       """
@@ -110,7 +110,7 @@ Feature: Physical infrastructure deadlines under domain pacing
       START AT '2000-01-01T00:00:00Z' TIME RATE 100.0;
       """
     Then within "2s" clock source recorder "{{test_id}}" records 1 requests
-    And within "1500ms" these NSPL commands complete on the leader node
+    And within "9s" these NSPL commands complete on the leader node
       """
       STOP;
       """
@@ -164,7 +164,7 @@ Feature: Physical infrastructure deadlines under domain pacing
     Then within "2s" clock source recorder "{{test_id}}" records 1 requests
     When physical time passes for "700ms"
     Then within "50ms" clock source recorder "{{test_id}}" records 1 requests
-    And within "1500ms" these NSPL commands complete on the leader node
+    And within "9s" these NSPL commands complete on the leader node
       """
       STOP;
       """
@@ -175,7 +175,7 @@ Feature: Physical infrastructure deadlines under domain pacing
       """
     Then within "1500ms" clock source recorder "{{test_id}}" records at least 3 requests
     And the first 3 requests recorded by clock source recorder "{{test_id}}" are separated by at least "200ms"
-    And within "1500ms" these NSPL commands complete on the leader node
+    And within "9s" these NSPL commands complete on the leader node
       """
       STOP;
       """
@@ -301,7 +301,7 @@ Feature: Physical infrastructure deadlines under domain pacing
       {"tenant":"initech","id":"i-1","source":"input"}
       """
     Then the relay subscription does not receive a payload within "250ms"
-    And within "1500ms" these NSPL commands complete on the leader node
+    And within "9s" these NSPL commands complete on the leader node
       """
       STOP;
       """

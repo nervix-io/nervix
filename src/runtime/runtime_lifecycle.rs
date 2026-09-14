@@ -222,11 +222,12 @@ impl Runtime {
     pub(crate) async fn pause_transaction_commit_after_progress_if_armed(
         &self,
         node_id: &ClusterNodeName,
+        domain: &DomainName,
         completed_statements: usize,
     ) {
         self.inner
             .fault_injection
-            .pause_transaction_commit_after_progress_if_armed(node_id, completed_statements)
+            .pause_transaction_commit_after_progress_if_armed(node_id, domain, completed_statements)
             .await;
     }
 
@@ -235,6 +236,14 @@ impl Runtime {
         self.inner
             .fault_injection
             .pause_command_admission_if_armed(node_id)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_resource_installation_if_armed(&self, node_id: &ClusterNodeName) {
+        self.inner
+            .fault_injection
+            .pause_resource_installation_if_armed(node_id)
             .await;
     }
 

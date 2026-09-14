@@ -12,6 +12,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::Future,
     io::{self, Cursor},
     path::Path,
     sync::{
@@ -60,11 +61,17 @@ use tokio::{
 use tracing::{error, info};
 use triomphe::Arc;
 
+mod command_execution;
 mod durable_batch;
 mod records;
 mod replication;
 mod retention;
 mod snapshot;
+pub use command_execution::{
+    CommandExecution, CommandExecutionChildResult, CommandExecutionDiagnostic,
+    CommandExecutionEffect, CommandExecutionResult, CommandExecutionResultKind,
+    CommandExecutionState, CommandExecutionTransactionStatus,
+};
 pub use retention::RaftRetentionPolicy;
 pub use snapshot::{SealedSnapshot, SnapshotRetention};
 mod storage;
@@ -82,16 +89,31 @@ pub use storage_fault::{StorageBoundary, StorageFault, StoragePause};
 mod wire;
 
 pub use transaction::{
-    FinishedTransaction, ReplicatedTransaction, TransactionCommandResult, TransactionCommitAdvance,
-    TransactionCommitProgress, TransactionDiagnostic, TransactionMutationError,
-    TransactionMutationResponse, TransactionOutcome, TransactionQueueLimits, TransactionState,
-    TransactionStatement, TransactionStepEffect, TransactionStepResult,
+    FinishedTransaction, ReplicatedTransaction, TransactionApplyingStep, TransactionCommandResult,
+    TransactionCommitAdvance, TransactionCommitProgress, TransactionDiagnostic,
+    TransactionMutationError, TransactionMutationResponse, TransactionOutcome,
+    TransactionQueueLimits, TransactionState, TransactionStatement, TransactionStepEffect,
+    TransactionStepResult,
 };
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum ConsensusCommand {
+    AdmitCommandExecution {
+        execution: Box<CommandExecution>,
+    },
+    FinishCommandExecution {
+        reference: nervix_models::CommandExecutionReference,
+        owner: UserName,
+        request_digest: [u8; 32],
+        at: nervix_models::Timestamp,
+        result: Box<CommandExecutionResult>,
+    },
+    ExpireCommandExecutions {
+        finished_before: nervix_models::Timestamp,
+        at: nervix_models::Timestamp,
+    },
     ReplaceDomainSchedule {
         domain: DomainName,
         expected_schedule: Option<Box<DomainSchedule>>,
@@ -142,6 +164,7 @@ pub enum ConsensusCommand {
     },
     BeginResourceUpload {
         key: Box<ResourceUploadKey>,
+        root_checksum: String,
     },
     PublishResourceUpload {
         key: Box<ResourceUploadKey>,
@@ -151,9 +174,19 @@ pub enum ConsensusCommand {
     PutResourceReplica {
         replica: Box<ResourceNodeStatus>,
     },
+    CompleteResourceUpload {
+        key: Box<ResourceUploadKey>,
+    },
+    FailResourceUpload {
+        key: Box<ResourceUploadKey>,
+        reason: String,
+    },
     SetNodeCordoned {
         node_id: ClusterNodeName,
         cordoned: bool,
+    },
+    FenceNodeAdmission {
+        identity: ClusterNodeIdentity,
     },
     OpenTransaction {
         transaction: Box<ReplicatedTransaction>,
@@ -185,6 +218,12 @@ pub enum ConsensusCommand {
         result: Box<TransactionStepResult>,
         effect: Option<Box<TransactionStepEffect>>,
         completion: Option<TransactionOutcome>,
+    },
+    CompleteTransactionApplication {
+        id: String,
+        expected_next_statement: usize,
+        at: nervix_models::Timestamp,
+        application_failure: Option<String>,
     },
     FinishEmptyTransactionCommit {
         id: String,
@@ -225,6 +264,13 @@ pub struct UserCredentials {
 impl std::fmt::Display for ConsensusCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::AdmitCommandExecution { execution } => {
+                write!(f, "admit-command-execution:{}", execution.reference)
+            }
+            Self::FinishCommandExecution { reference, .. } => {
+                write!(f, "finish-command-execution:{reference}")
+            }
+            Self::ExpireCommandExecutions { .. } => f.write_str("expire-command-executions"),
             Self::ReplaceDomainSchedule {
                 domain, schedule, ..
             } => {
@@ -263,7 +309,7 @@ impl std::fmt::Display for ConsensusCommand {
                     identifier.as_str()
                 )
             }
-            Self::BeginResourceUpload { key } => {
+            Self::BeginResourceUpload { key, .. } => {
                 write!(
                     f,
                     "begin-resource-upload:{}.{}:{}:{}",
@@ -288,14 +334,23 @@ impl std::fmt::Display for ConsensusCommand {
                 replica.key.domain.as_str(),
                 replica.key.identifier.as_str(),
                 replica.key.version,
-                replica.key.node_id
+                replica.key.node
             ),
+            Self::CompleteResourceUpload { key } => {
+                write!(f, "complete-resource-upload:{}", key.identity)
+            }
+            Self::FailResourceUpload { key, .. } => {
+                write!(f, "fail-resource-upload:{}", key.identity)
+            }
             Self::SetNodeCordoned { node_id, cordoned } => {
                 if *cordoned {
                     write!(f, "cordon-node:{node_id}")
                 } else {
                     write!(f, "uncordon-node:{node_id}")
                 }
+            }
+            Self::FenceNodeAdmission { identity } => {
+                write!(f, "fence-node-admission:{identity}")
             }
             Self::OpenTransaction { transaction, .. } => {
                 write!(f, "open-transaction:{}", transaction.id)
@@ -315,6 +370,14 @@ impl std::fmt::Display for ConsensusCommand {
             } => write!(
                 f,
                 "advance-transaction-commit:{id}:{expected_next_statement}-{next_statement}"
+            ),
+            Self::CompleteTransactionApplication {
+                id,
+                expected_next_statement,
+                ..
+            } => write!(
+                f,
+                "complete-transaction-application:{id}:{expected_next_statement}"
             ),
             Self::FinishEmptyTransactionCommit { id, .. } => {
                 write!(f, "finish-empty-transaction-commit:{id}")
@@ -430,9 +493,16 @@ impl GossipState {
         candidates
     }
 
-    fn latest_admission_candidates(&self) -> BTreeMap<ClusterNodeName, GossipNode> {
+    pub fn latest_nodes_by_id(&self) -> BTreeMap<ClusterNodeName, GossipNode> {
+        self.latest_nodes(self.live_nodes.iter())
+    }
+
+    fn latest_nodes<'a>(
+        &self,
+        nodes: impl IntoIterator<Item = &'a GossipNode>,
+    ) -> BTreeMap<ClusterNodeName, GossipNode> {
         let mut current = BTreeMap::<ClusterNodeName, GossipNode>::new();
-        for node in self.admission_candidates() {
+        for node in nodes {
             let replace = match current.get(&node.node_id) {
                 Some(observed) => observed.incarnation < node.incarnation,
                 None => true,
@@ -442,6 +512,10 @@ impl GossipState {
             }
         }
         current
+    }
+
+    fn latest_admission_candidates(&self) -> BTreeMap<ClusterNodeName, GossipNode> {
+        self.latest_nodes(self.admission_candidates())
     }
 }
 
@@ -537,11 +611,22 @@ enum MembershipMutation {
 }
 
 impl MembershipSnapshot {
-    fn automatic_mutations(&self, gossip: &GossipState) -> Vec<MembershipMutation> {
+    fn automatic_mutations(
+        &self,
+        gossip: &GossipState,
+        admission_fences: &BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
+    ) -> Vec<MembershipMutation> {
         let mut mutations = Vec::new();
         let mut desired_voters = self.voters.clone();
         for node in gossip.latest_admission_candidates().into_values() {
             if node.interconnect_advertise_addr.is_empty() {
+                continue;
+            }
+            let is_fenced = match admission_fences.get(&node.node_id) {
+                Some(incarnation) => node.incarnation <= *incarnation,
+                None => false,
+            };
+            if is_fenced {
                 continue;
             }
 
@@ -580,7 +665,9 @@ struct StateMachineData {
     users: Records<UserName, UserCredentials>,
     resources: ResourceRecords,
     cordoned_node_ids: Records<ClusterNodeName, ()>,
+    node_admission_fences: Records<ClusterNodeName, ClusterNodeIncarnation>,
     transactions: Records<String, ReplicatedTransaction>,
+    command_executions: Records<nervix_models::CommandExecutionReference, CommandExecution>,
 }
 
 impl StateMachineData {
@@ -931,6 +1018,15 @@ pub enum ConsensusError {
     LeadershipLost { leader_id: Option<ClusterNodeName> },
     #[error("node '{0}' is not a raft member")]
     NodeNotFound(String),
+    #[error("cannot identify the current incarnation of raft member '{0}'")]
+    NodeIncarnationUnknown(String),
+    #[error("cannot drop process '{expected}' because the current process is '{observed}'")]
+    NodeIncarnationChanged {
+        expected: ClusterNodeIdentity,
+        observed: ClusterNodeIdentity,
+    },
+    #[error("cannot drop live node '{0}'; stop the node before removing it")]
+    RemoveLiveNode(String),
     #[error("cannot remove the local leader node '{0}'")]
     RemoveLocalLeader(String),
     #[error("cannot remove the last raft voter '{0}'")]
@@ -1570,6 +1666,10 @@ impl Observer {
         self.inner.store.inner.schedule_tx.subscribe()
     }
 
+    pub fn subscribe_applied(&self) -> watch::Receiver<u64> {
+        self.inner.store.inner.applied_tx.subscribe()
+    }
+
     pub fn subscribe_domains(&self) -> watch::Receiver<u64> {
         self.inner.store.inner.domain_tx.subscribe()
     }
@@ -1592,6 +1692,13 @@ impl Observer {
     pub async fn current_schedule(&self) -> ClusterSchedule {
         (&self.inner.store.inner.state().schedule).into()
     }
+    pub async fn current_revision(&self) -> u64 {
+        let state = self.inner.store.inner.state();
+        match &state.last_applied_log_id {
+            Some(log_id) => log_id.index,
+            None => 0,
+        }
+    }
     pub async fn current_domains(&self) -> BTreeMap<DomainName, DomainState> {
         (&self.inner.store.inner.state().domains).into()
     }
@@ -1600,6 +1707,23 @@ impl Observer {
     }
     pub async fn current_transaction(&self, id: &str) -> Option<ReplicatedTransaction> {
         self.inner.store.inner.state().transactions.get(id).cloned()
+    }
+    pub async fn current_command_execution(
+        &self,
+        reference: &nervix_models::CommandExecutionReference,
+    ) -> Option<CommandExecution> {
+        self.inner
+            .store
+            .inner
+            .state()
+            .command_executions
+            .get(reference)
+            .cloned()
+    }
+    pub async fn current_command_executions(
+        &self,
+    ) -> BTreeMap<nervix_models::CommandExecutionReference, CommandExecution> {
+        (&self.inner.store.inner.state().command_executions).into()
     }
     pub async fn current_runtime_state(&self) -> ConsensusRuntimeState {
         let state = self.inner.store.inner.state();
@@ -1784,6 +1908,78 @@ impl Observer {
 impl Proposer {
     pub fn observer(&self) -> Observer {
         self.observer.clone()
+    }
+
+    pub async fn admit_command_execution(
+        &self,
+        execution: CommandExecution,
+    ) -> Result<CommandExecution, Report<ConsensusError>> {
+        let reference = execution.reference.clone();
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::AdmitCommandExecution {
+                execution: Box::new(execution),
+            })
+            .await?;
+        match response.data {
+            ConsensusResponse::Applied => self
+                .current_command_execution(&reference)
+                .await
+                .ok_or_else(|| Report::new(ConsensusError::UnexpectedResponse)),
+            ConsensusResponse::Conflict(reason) => {
+                Err(Report::new(ConsensusError::Conflict(reason)))
+            }
+            ConsensusResponse::Transaction(_) => {
+                Err(Report::new(ConsensusError::UnexpectedResponse))
+            }
+        }
+    }
+
+    pub async fn finish_command_execution(
+        &self,
+        reference: nervix_models::CommandExecutionReference,
+        owner: UserName,
+        request_digest: [u8; 32],
+        at: nervix_models::Timestamp,
+        result: CommandExecutionResult,
+    ) -> Result<CommandExecution, Report<ConsensusError>> {
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::FinishCommandExecution {
+                reference: reference.clone(),
+                owner,
+                request_digest,
+                at,
+                result: Box::new(result),
+            })
+            .await?;
+        match response.data {
+            ConsensusResponse::Applied => self
+                .current_command_execution(&reference)
+                .await
+                .ok_or_else(|| Report::new(ConsensusError::UnexpectedResponse)),
+            ConsensusResponse::Conflict(reason) => {
+                Err(Report::new(ConsensusError::Conflict(reason)))
+            }
+            ConsensusResponse::Transaction(_) => {
+                Err(Report::new(ConsensusError::UnexpectedResponse))
+            }
+        }
+    }
+
+    pub async fn expire_command_executions(
+        &self,
+        finished_before: nervix_models::Timestamp,
+        at: nervix_models::Timestamp,
+    ) -> Result<(), Report<ConsensusError>> {
+        self.inner
+            .client_write(ConsensusCommand::ExpireCommandExecutions {
+                finished_before,
+                at,
+            })
+            .await
+            .map(|_| ())
+            .map_err(Report::new)
     }
 
     pub async fn automatic_schedule_input(
@@ -1988,11 +2184,13 @@ impl Proposer {
     pub async fn begin_resource_upload(
         &self,
         key: ResourceUploadKey,
+        root_checksum: String,
     ) -> Result<ResourceUpload, Report<ConsensusError>> {
         let response = self
             .inner
             .client_write(ConsensusCommand::BeginResourceUpload {
                 key: Box::new(key.clone()),
+                root_checksum,
             })
             .await?;
         match response.data {
@@ -2067,15 +2265,65 @@ impl Proposer {
             .map(|_| ())
     }
 
+    pub async fn complete_resource_upload(
+        &self,
+        key: ResourceUploadKey,
+    ) -> Result<ResourceUpload, Report<ConsensusError>> {
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::CompleteResourceUpload {
+                key: Box::new(key.clone()),
+            })
+            .await?;
+        self.resource_upload_response(response, &key).await
+    }
+
+    pub async fn fail_resource_upload(
+        &self,
+        key: ResourceUploadKey,
+        reason: String,
+    ) -> Result<ResourceUpload, Report<ConsensusError>> {
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::FailResourceUpload {
+                key: Box::new(key.clone()),
+                reason,
+            })
+            .await?;
+        self.resource_upload_response(response, &key).await
+    }
+
+    async fn resource_upload_response(
+        &self,
+        response: openraft::raft::ClientWriteResponse<TypeConfig>,
+        key: &ResourceUploadKey,
+    ) -> Result<ResourceUpload, Report<ConsensusError>> {
+        match response.data {
+            ConsensusResponse::Applied => self
+                .current_resources()
+                .await
+                .upload(key)
+                .cloned()
+                .ok_or_else(|| Report::new(ConsensusError::UnexpectedResponse)),
+            ConsensusResponse::Conflict(reason) => {
+                Err(Report::new(ConsensusError::Conflict(reason)))
+            }
+            ConsensusResponse::Transaction(_) => {
+                Err(Report::new(ConsensusError::UnexpectedResponse))
+            }
+        }
+    }
+
     pub async fn set_node_cordoned(
         &self,
         node_id: ClusterNodeName,
         cordoned: bool,
-    ) -> Result<(), ConsensusError> {
+    ) -> Result<(), Report<ConsensusError>> {
         self.inner
             .client_write(ConsensusCommand::SetNodeCordoned { node_id, cordoned })
             .await
             .map(|_| ())
+            .map_err(Report::new)
     }
 
     async fn write_transaction(
@@ -2166,6 +2414,22 @@ impl Proposer {
         .await
     }
 
+    pub async fn complete_transaction_application(
+        &self,
+        id: String,
+        expected_next_statement: usize,
+        at: nervix_models::Timestamp,
+        application_failure: Option<String>,
+    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+        self.write_transaction(ConsensusCommand::CompleteTransactionApplication {
+            id,
+            expected_next_statement,
+            at,
+            application_failure,
+        })
+        .await
+    }
+
     pub async fn finish_empty_transaction_commit(
         &self,
         id: String,
@@ -2202,11 +2466,12 @@ impl Proposer {
     pub async fn remove_finished_transactions(
         &self,
         finished_before: nervix_models::Timestamp,
-    ) -> Result<(), ConsensusError> {
+    ) -> Result<(), Report<ConsensusError>> {
         self.inner
             .client_write(ConsensusCommand::RemoveFinishedTransactions { finished_before })
             .await
             .map(|_| ())
+            .map_err(Report::new)
     }
 }
 
@@ -2247,15 +2512,21 @@ impl Administrator {
         Ok(true)
     }
 
-    pub async fn reconcile_nodes(&self, gossip: GossipState) -> Result<(), ConsensusError> {
+    pub async fn reconcile_nodes(
+        &self,
+        gossip: impl Future<Output = GossipState>,
+    ) -> Result<(), ConsensusError> {
         let _membership_mutation = self.inner.membership_mutation.lock().await;
+        let gossip = gossip.await;
         let leader = self.inner.raft.current_leader().await;
         if leader.as_ref() != Some(&self.inner.local_node_id) {
             return Ok(());
         }
 
         let before = self.effective_membership();
-        let mutations = before.automatic_mutations(&gossip);
+        let state = self.inner.store.inner.state();
+        let admission_fences = (&state.node_admission_fences).into();
+        let mutations = before.automatic_mutations(&gossip, &admission_fences);
         for mutation in mutations {
             tokio::task::consume_budget().await;
             match mutation {
@@ -2319,7 +2590,12 @@ impl Administrator {
         Ok(())
     }
 
-    pub async fn drop_node(&self, node_id: &ClusterNodeName) -> Result<(), ConsensusError> {
+    pub async fn drop_node(
+        &self,
+        identity: &ClusterNodeIdentity,
+        availability: impl Future<Output = GossipState>,
+    ) -> Result<(), ConsensusError> {
+        let node_id = identity.node_id();
         if *node_id == self.inner.local_node_id {
             return Err(ConsensusError::RemoveLocalLeader(node_id.to_string()));
         }
@@ -2334,6 +2610,31 @@ impl Administrator {
         let was_voter = desired_voters.remove(node_id);
         if was_voter && desired_voters.is_empty() {
             return Err(ConsensusError::RemoveLastVoter(node_id.to_string()));
+        }
+
+        let availability = availability.await;
+        if !availability.dead_node_ids.contains(node_id) {
+            return Err(ConsensusError::RemoveLiveNode(node_id.to_string()));
+        }
+        let mut latest_nodes = availability.latest_nodes_by_id();
+        let Some(node) = latest_nodes.remove(node_id) else {
+            return Err(ConsensusError::NodeIncarnationUnknown(node_id.to_string()));
+        };
+        let observed_identity = node.identity();
+        if &observed_identity != identity {
+            return Err(ConsensusError::NodeIncarnationChanged {
+                expected: identity.clone(),
+                observed: observed_identity,
+            });
+        }
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::FenceNodeAdmission {
+                identity: identity.clone(),
+            })
+            .await?;
+        if response.data != ConsensusResponse::Applied {
+            return Err(ConsensusError::UnexpectedResponse);
         }
 
         let operation = format!("remove node '{node_id}'");
@@ -2974,6 +3275,84 @@ fn apply_consensus_command_at(
 ) -> AppliedConsensusCommand {
     let mut changes = StateMachineChanges::default();
     match command {
+        ConsensusCommand::AdmitCommandExecution { execution } => {
+            if let Some(existing) = state.command_executions.get(&execution.reference) {
+                if !existing.same_request(execution) {
+                    return AppliedConsensusCommand::conflict(format!(
+                        "command execution reference '{}' is bound to a different owner, domain, \
+                         or request",
+                        execution.reference
+                    ));
+                }
+            } else {
+                state
+                    .command_executions
+                    .insert(execution.reference.clone(), execution.as_ref().clone());
+            }
+        }
+        ConsensusCommand::FinishCommandExecution {
+            reference,
+            owner,
+            request_digest,
+            at,
+            result,
+        } => {
+            let outcome_revision = match &state.last_applied_log_id {
+                Some(log_id) => log_id.index,
+                None => 0,
+            };
+            let Some(execution) = state.command_executions.get_mut(reference) else {
+                return AppliedConsensusCommand::conflict(format!(
+                    "command execution reference '{reference}' is unknown"
+                ));
+            };
+            if &execution.owner != owner || execution.request_digest != *request_digest {
+                return AppliedConsensusCommand::conflict(format!(
+                    "command execution reference '{reference}' is bound to a different owner or \
+                     request"
+                ));
+            }
+            match &execution.state {
+                CommandExecutionState::Applying => {
+                    execution.state = CommandExecutionState::Finished {
+                        outcome_revision,
+                        finished_at: *at,
+                        result: result.clone(),
+                    };
+                }
+                CommandExecutionState::Finished {
+                    result: existing, ..
+                } if existing.as_ref() == result.as_ref() => {}
+                CommandExecutionState::Finished { .. } => {
+                    return AppliedConsensusCommand::conflict(format!(
+                        "command execution reference '{reference}' already has a different \
+                         terminal result"
+                    ));
+                }
+                CommandExecutionState::Expired { .. } => {
+                    return AppliedConsensusCommand::conflict(format!(
+                        "command execution reference '{reference}' has expired"
+                    ));
+                }
+            }
+        }
+        ConsensusCommand::ExpireCommandExecutions {
+            finished_before,
+            at,
+        } => {
+            let references = state.command_executions.keys().cloned().collect::<Vec<_>>();
+            for reference in references {
+                let execution = state
+                    .command_executions
+                    .get_mut(&reference)
+                    .verified("the reference came from this same record set");
+                if let CommandExecutionState::Finished { finished_at, .. } = &execution.state
+                    && *finished_at <= *finished_before
+                {
+                    execution.state = CommandExecutionState::Expired { expired_at: *at };
+                }
+            }
+        }
         ConsensusCommand::ReplaceDomainSchedule {
             domain,
             expected_schedule,
@@ -3091,8 +3470,8 @@ fn apply_consensus_command_at(
             state.resources.ensure_catalog(domain, identifier);
             changes.resources_changed = true;
         }
-        ConsensusCommand::BeginResourceUpload { key } => {
-            if let Err(reason) = state.resources.begin_upload(key) {
+        ConsensusCommand::BeginResourceUpload { key, root_checksum } => {
+            if let Err(reason) = state.resources.begin_upload(key, root_checksum) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
             changes.resources_changed = true;
@@ -3114,11 +3493,42 @@ fn apply_consensus_command_at(
                 .insert(replica.key.clone(), replica.as_ref().clone());
             changes.resources_changed = true;
         }
+        ConsensusCommand::CompleteResourceUpload { key } => {
+            let outcome_revision = match &state.last_applied_log_id {
+                Some(log_id) => log_id.index,
+                None => 0,
+            };
+            if let Err(reason) = state.resources.complete_upload(key, outcome_revision) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
+            changes.resources_changed = true;
+        }
+        ConsensusCommand::FailResourceUpload { key, reason } => {
+            let outcome_revision = match &state.last_applied_log_id {
+                Some(log_id) => log_id.index,
+                None => 0,
+            };
+            if let Err(error) = state.resources.fail_upload(key, outcome_revision, reason) {
+                return AppliedConsensusCommand::conflict(error.to_string());
+            }
+            changes.resources_changed = true;
+        }
         ConsensusCommand::SetNodeCordoned { node_id, cordoned } => {
             if *cordoned {
                 state.cordoned_node_ids.insert(node_id.clone(), ());
             } else {
                 state.cordoned_node_ids.remove(node_id);
+            }
+        }
+        ConsensusCommand::FenceNodeAdmission { identity } => {
+            let replace = match state.node_admission_fences.get(identity.node_id()) {
+                Some(incarnation) => *incarnation < identity.incarnation(),
+                None => true,
+            };
+            if replace {
+                state
+                    .node_admission_fences
+                    .insert(identity.node_id().clone(), identity.incarnation());
             }
         }
         ConsensusCommand::OpenTransaction {
@@ -3193,14 +3603,25 @@ fn apply_consensus_command_at(
                     );
                 }
             };
-            if let Err(error) = transaction.advance(
-                *expected_next_statement,
-                *next_statement,
-                *at,
-                result.as_ref().clone(),
-                completion.clone(),
-            ) {
-                return AppliedConsensusCommand::transaction(Err(error), changes);
+            let effect_revision = match &state.last_applied_log_id {
+                Some(log_id) => log_id.index,
+                None => 0,
+            };
+            let requested_application = TransactionApplyingStep {
+                effect_revision,
+                next_statement: *next_statement,
+                result: result.as_ref().clone(),
+                effect: effect.as_deref().cloned(),
+                completion: completion.clone(),
+            };
+            if let TransactionState::Committing(progress) = &transaction.state
+                && let Some(current) = &progress.applying
+                && current.next_statement == requested_application.next_statement
+                && current.result == requested_application.result
+                && current.effect == requested_application.effect
+                && current.completion == requested_application.completion
+            {
+                return AppliedConsensusCommand::transaction(Ok(transaction), changes);
             }
             if let Some(effect) = effect {
                 if let Err(error) = validate_transaction_step_effect(
@@ -3217,7 +3638,6 @@ fn apply_consensus_command_at(
                 ) {
                     return AppliedConsensusCommand::transaction(Err(error), changes);
                 }
-                apply_transaction_step_effect(state, &transaction.domain, effect, &mut changes);
             } else if let Err(error) = validate_transaction_step_without_effect(
                 state.transactions.get(id).verified(
                     "the branch above resolved this transaction id in the same replicated state",
@@ -3229,20 +3649,58 @@ fn apply_consensus_command_at(
             ) {
                 return AppliedConsensusCommand::transaction(Err(error), changes);
             }
+            if let Err(error) =
+                transaction.begin_application(*expected_next_statement, *at, requested_application)
+            {
+                return AppliedConsensusCommand::transaction(Err(error), changes);
+            }
+            if let Some(effect) = effect {
+                apply_transaction_step_effect(state, &transaction.domain, effect, &mut changes);
+            }
             state.transactions.insert(id.clone(), transaction.clone());
             changes.transactions_changed = true;
             return AppliedConsensusCommand::transaction(Ok(transaction), changes);
         }
-        ConsensusCommand::FinishEmptyTransactionCommit { id, at } => {
+        ConsensusCommand::CompleteTransactionApplication {
+            id,
+            expected_next_statement,
+            at,
+            application_failure,
+        } => {
+            let outcome_revision = match &state.last_applied_log_id {
+                Some(log_id) => log_id.index,
+                None => 0,
+            };
             let result = mutate_transaction(state, id, |transaction| {
-                transaction.finish_empty_commit(*at)
+                transaction.complete_application(
+                    *expected_next_statement,
+                    *at,
+                    outcome_revision,
+                    application_failure.clone(),
+                )
+            });
+            changes.transactions_changed = result.is_ok();
+            return AppliedConsensusCommand::transaction(result, changes);
+        }
+        ConsensusCommand::FinishEmptyTransactionCommit { id, at } => {
+            let outcome_revision = match &state.last_applied_log_id {
+                Some(log_id) => log_id.index,
+                None => 0,
+            };
+            let result = mutate_transaction(state, id, |transaction| {
+                transaction.finish_empty_commit(*at, outcome_revision)
             });
             changes.transactions_changed = result.is_ok();
             return AppliedConsensusCommand::transaction(result, changes);
         }
         ConsensusCommand::RevertTransaction { id, owner, at } => {
-            let result =
-                mutate_transaction(state, id, |transaction| transaction.revert(owner, *at));
+            let outcome_revision = match &state.last_applied_log_id {
+                Some(log_id) => log_id.index,
+                None => 0,
+            };
+            let result = mutate_transaction(state, id, |transaction| {
+                transaction.revert(owner, *at, outcome_revision)
+            });
             changes.transactions_changed = result.is_ok();
             return AppliedConsensusCommand::transaction(result, changes);
         }
@@ -3251,13 +3709,17 @@ fn apply_consensus_command_at(
             at,
             idle_before,
         } => {
+            let outcome_revision = match &state.last_applied_log_id {
+                Some(log_id) => log_id.index,
+                None => 0,
+            };
             let Some(mut transaction) = state.transactions.get(id).cloned() else {
                 return AppliedConsensusCommand::transaction(
                     Err(TransactionMutationError::Unknown { id: id.clone() }),
                     changes,
                 );
             };
-            match transaction.expire(*at, *idle_before) {
+            match transaction.expire(*at, *idle_before, outcome_revision) {
                 Ok(expired) => {
                     if expired {
                         state.transactions.insert(id.clone(), transaction.clone());
@@ -3595,17 +4057,19 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AppliedEntryContext, AutomaticScheduleFence, ClusterSchedule, ConsensusCommand,
-        ConsensusResponse, FjallLogReader, FjallStore, GossipNode, GossipState, LeaderTenure,
-        MembershipMutation, MembershipSnapshot, ProtocolOriginError, ResourceRecords,
-        StateMachineChanges, StateMachineData, TransactionCommandResult, TransactionMutationError,
-        TransactionOutcome, TransactionStatement, TransactionStepEffect, TransactionStepResult,
-        TypeConfig, UserCredentials, apply_consensus_command, apply_consensus_command_at,
+        AppliedEntryContext, AutomaticScheduleFence, ClusterSchedule, CommandExecution,
+        CommandExecutionEffect, CommandExecutionResult, CommandExecutionResultKind,
+        CommandExecutionState, ConsensusCommand, ConsensusResponse, FjallLogReader, FjallStore,
+        GossipNode, GossipState, LeaderTenure, MembershipMutation, MembershipSnapshot,
+        ProtocolOriginError, ResourceRecords, StateMachineChanges, StateMachineData,
+        TransactionCommandResult, TransactionMutationError, TransactionOutcome,
+        TransactionStatement, TransactionStepEffect, TransactionStepResult, TypeConfig,
+        UserCredentials, apply_consensus_command, apply_consensus_command_at,
         apply_transaction_step_effect, io_error, storage_decode, validate_protocol_origin,
     };
     use crate::{
         ClusterNodeName, ConsensusError, LogIdOf, ReplicatedTransaction, TransactionQueueLimits,
-        UserName, VoteOf,
+        TransactionState, UserName, VoteOf,
     };
 
     fn domain(raw: &str) -> DomainName {
@@ -3816,9 +4280,10 @@ mod tests {
                 (joining.clone(), "https://node-2.test:7443".to_string()),
             ]),
         };
+        let admission_fences = BTreeMap::new();
 
         assert_eq!(
-            membership.automatic_mutations(&gossip),
+            membership.automatic_mutations(&gossip, &admission_fences),
             vec![
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
@@ -3856,14 +4321,63 @@ mod tests {
                 (joining.clone(), current_address),
             ]),
         };
+        let admission_fences = BTreeMap::new();
 
         assert_eq!(
-            membership.automatic_mutations(&gossip),
+            membership.automatic_mutations(&gossip, &admission_fences),
             vec![
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
                     address: replacement_address,
                     refresh: true,
+                },
+                MembershipMutation::ChangeVoters {
+                    voters: BTreeSet::from([first, joining]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn removed_node_requires_a_newer_incarnation_before_readmission() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![GossipNode {
+                node_id: joining.clone(),
+                incarnation: ClusterNodeIncarnation::new(2),
+                terminating: false,
+                grpc_advertise_addr: String::new(),
+                web_console_advertise_addr: String::new(),
+                interconnect_advertise_addr: "https://node-2.test:7443".to_string(),
+            }],
+            dead_node_ids: BTreeSet::new(),
+        };
+        let membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone()]),
+            nodes: BTreeMap::from([(first.clone(), "https://node-1.test:7443".to_string())]),
+        };
+        let admission_fences = BTreeMap::from([(joining.clone(), ClusterNodeIncarnation::new(2))]);
+
+        assert!(
+            membership
+                .automatic_mutations(&gossip, &admission_fences)
+                .is_empty()
+        );
+
+        let mut restarted = gossip.clone();
+        restarted
+            .live_nodes
+            .first_mut()
+            .assured("the test gossip has one observed node")
+            .incarnation = ClusterNodeIncarnation::new(3);
+        assert_eq!(
+            membership.automatic_mutations(&restarted, &admission_fences),
+            vec![
+                MembershipMutation::AddLearner {
+                    node_id: joining.clone(),
+                    address: "https://node-2.test:7443".to_string(),
+                    refresh: false,
                 },
                 MembershipMutation::ChangeVoters {
                     voters: BTreeSet::from([first, joining]),
@@ -4413,8 +4927,195 @@ mod tests {
     }
 
     #[test]
+    fn command_execution_identity_retains_one_terminal_outcome() {
+        let reference = nervix_models::CommandExecutionReference::parse("request-1")
+            .assured("the test reference contains only admitted characters");
+        let owner =
+            UserName::parse("app_user").assured("the test owner is an identifier-shaped literal");
+        let execution = CommandExecution::applying(
+            reference.clone(),
+            owner.clone(),
+            Some(domain("tenant")),
+            [7; 32],
+            Timestamp::from_unix_nanos(1),
+            CommandExecutionEffect::CreateUser {
+                if_not_exists: false,
+                name: UserName::parse("created_user")
+                    .assured("the created test user is an identifier-shaped literal"),
+                password_hash: "argon2-hash".to_string(),
+            },
+        );
+        let mut state = StateMachineData::default();
+
+        for admitted in [execution.clone(), execution.clone()] {
+            let response = apply_consensus_command(
+                &mut state,
+                &ConsensusCommand::AdmitCommandExecution {
+                    execution: Box::new(admitted),
+                },
+            );
+            assert!(matches!(response.response, ConsensusResponse::Applied));
+        }
+        assert_eq!(state.command_executions.len(), 1);
+
+        let mut conflicting = execution.clone();
+        conflicting.request_digest = [8; 32];
+        let conflict = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::AdmitCommandExecution {
+                execution: Box::new(conflicting),
+            },
+        );
+        assert!(matches!(conflict.response, ConsensusResponse::Conflict(_)));
+
+        let result = CommandExecutionResult {
+            success: true,
+            kind: CommandExecutionResultKind::Ok,
+            message: "created".to_string(),
+            diagnostics: Vec::new(),
+            already_existed: false,
+            results: Vec::new(),
+            transaction: None,
+        };
+        for terminal in [result.clone(), result.clone()] {
+            let response = apply_consensus_command(
+                &mut state,
+                &ConsensusCommand::FinishCommandExecution {
+                    reference: reference.clone(),
+                    owner: owner.clone(),
+                    request_digest: [7; 32],
+                    at: Timestamp::from_unix_nanos(2),
+                    result: Box::new(terminal),
+                },
+            );
+            assert!(matches!(response.response, ConsensusResponse::Applied));
+        }
+        assert!(matches!(
+            &state
+                .command_executions
+                .get(&reference)
+                .verified("the execution was admitted into this record set above")
+                .state,
+            CommandExecutionState::Finished { .. }
+        ));
+
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::ExpireCommandExecutions {
+                finished_before: Timestamp::from_unix_nanos(2),
+                at: Timestamp::from_unix_nanos(3),
+            },
+        );
+        let response = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::AdmitCommandExecution {
+                execution: Box::new(execution),
+            },
+        );
+        assert!(matches!(response.response, ConsensusResponse::Applied));
+        assert!(matches!(
+            &state
+                .command_executions
+                .get(&reference)
+                .verified("expiry retains the admitted execution identity")
+                .state,
+            CommandExecutionState::Expired { .. }
+        ));
+    }
+
+    #[test]
+    fn transaction_append_identity_and_position_are_exact() {
+        let owner =
+            UserName::parse("app_user").assured("the test owner is an identifier-shaped literal");
+        let domain_id = domain("tenant");
+        let mut transaction = ReplicatedTransaction::open(
+            "tx-append".to_string(),
+            domain_id.clone(),
+            owner.clone(),
+            Timestamp::from_unix_nanos(1),
+        );
+        let limits = TransactionQueueLimits {
+            max_statements: 4,
+            max_source_bytes: 1024,
+        };
+        let first = TransactionStatement {
+            request_reference: nervix_models::CommandExecutionReference::parse("append-1")
+                .assured("the test append reference contains only admitted characters"),
+            expected_position: 0,
+            source: "STOP".to_string(),
+            statement: Statement::StopDomain(nervix_models::StopDomain),
+        };
+        transaction
+            .queue(
+                &owner,
+                &domain_id,
+                Timestamp::from_unix_nanos(2),
+                first.clone(),
+                limits,
+            )
+            .assured("the first append has the transaction owner, domain, and position");
+        transaction
+            .queue(
+                &owner,
+                &domain_id,
+                Timestamp::from_unix_nanos(3),
+                first.clone(),
+                limits,
+            )
+            .assured("an exact duplicate joins the append already admitted above");
+        assert_eq!(transaction.statements.len(), 1);
+
+        let mut changed = first;
+        changed.source = "STOP;".to_string();
+        assert!(matches!(
+            transaction.queue(
+                &owner,
+                &domain_id,
+                Timestamp::from_unix_nanos(4),
+                changed,
+                limits,
+            ),
+            Err(TransactionMutationError::RequestConflict { .. })
+        ));
+
+        let mut second = TransactionStatement {
+            request_reference: nervix_models::CommandExecutionReference::parse("append-2")
+                .assured("the test append reference contains only admitted characters"),
+            expected_position: 0,
+            source: "STOP".to_string(),
+            statement: Statement::StopDomain(nervix_models::StopDomain),
+        };
+        assert!(matches!(
+            transaction.queue(
+                &owner,
+                &domain_id,
+                Timestamp::from_unix_nanos(5),
+                second.clone(),
+                limits,
+            ),
+            Err(TransactionMutationError::PositionConflict {
+                expected: 0,
+                actual: 1,
+                ..
+            })
+        ));
+        second.expected_position = 1;
+        transaction
+            .queue(
+                &owner,
+                &domain_id,
+                Timestamp::from_unix_nanos(6),
+                second,
+                limits,
+            )
+            .assured("the corrected append uses the current position and a new reference");
+        assert_eq!(transaction.statements.len(), 2);
+    }
+
+    #[test]
     fn transaction_step_effect_and_progress_are_applied_once() {
-        let owner = UserName::parse("app_user").expect("valid owner");
+        let owner =
+            UserName::parse("app_user").assured("the test owner is an identifier-shaped literal");
         let domain_id = domain("tenant");
         let mut stopped = running_domain_state("tenant");
         stopped.status = DomainStatus::Stopped;
@@ -4457,6 +5158,11 @@ mod tests {
                             .assured("the test clock counts from zero"),
                     ),
                     statement: Box::new(TransactionStatement {
+                        request_reference: nervix_models::CommandExecutionReference::parse(
+                            format!("request-{at}"),
+                        )
+                        .assured("the bounded test index produces an admitted reference"),
+                        expected_position: at,
                         source: "statement".to_string(),
                         statement,
                     }),
@@ -4506,23 +5212,44 @@ mod tests {
         let running = state.domains.get(&domain_id).expect("domain remains");
         assert_eq!(running.status, DomainStatus::Running);
         assert_eq!(running.start_version, 1);
-        let transaction = state.transactions.get("tx-1").expect("transaction remains");
-        assert_eq!(transaction.completed_statement_count(), 1);
+        let transaction = state
+            .transactions
+            .get("tx-1")
+            .verified("the transaction was opened and has not reached terminal cleanup");
+        assert_eq!(transaction.completed_statement_count(), 0);
+        let TransactionState::Committing(progress) = &transaction.state else {
+            panic!("transaction should remain committing during application");
+        };
+        assert!(progress.applying.is_some());
 
         let duplicate = apply_consensus_command(&mut state, &first_step);
         let ConsensusResponse::Transaction(response) = duplicate.response else {
             panic!("duplicate transaction step must return a transaction response");
         };
-        assert!(matches!(
-            response.result,
-            Err(TransactionMutationError::ProgressConflict { .. })
-        ));
+        assert!(response.result.is_ok());
         assert_eq!(
             state
                 .domains
                 .get(&domain_id)
                 .expect("domain remains")
                 .start_version,
+            1
+        );
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::CompleteTransactionApplication {
+                id: "tx-1".to_string(),
+                expected_next_statement: 0,
+                at: nervix_models::Timestamp::from_unix_nanos(6),
+                application_failure: None,
+            },
+        );
+        assert_eq!(
+            state
+                .transactions
+                .get("tx-1")
+                .verified("the completed application is still part of the open commit")
+                .completed_statement_count(),
             1
         );
 
@@ -4532,7 +5259,7 @@ mod tests {
                 id: "tx-1".to_string(),
                 expected_next_statement: 1,
                 next_statement: 2,
-                at: nervix_models::Timestamp::from_unix_nanos(6),
+                at: nervix_models::Timestamp::from_unix_nanos(7),
                 result: Box::new(TransactionStepResult {
                     first_statement: 1,
                     statement_count: 1,
@@ -4550,6 +5277,15 @@ mod tests {
                     failing_step: 1,
                     error: "validation failed".to_string(),
                 }),
+            },
+        );
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::CompleteTransactionApplication {
+                id: "tx-1".to_string(),
+                expected_next_statement: 1,
+                at: nervix_models::Timestamp::from_unix_nanos(8),
+                application_failure: None,
             },
         );
         let transaction = state.transactions.get("tx-1").expect("tombstone remains");
@@ -4617,6 +5353,7 @@ mod tests {
             &mut state,
             &ConsensusCommand::BeginResourceUpload {
                 key: Box::new(upload_key.clone()),
+                root_checksum: "root-1".to_string(),
             },
         );
         assert_eq!(
@@ -4645,12 +5382,20 @@ mod tests {
                 domain("tenant"),
                 ResourceName::parse("fraud_model").expect("valid resource name"),
                 1,
-                ClusterNodeName::parse("node-2").expect("valid name"),
+                ClusterNodeIdentity::new(
+                    ClusterNodeName::parse("node-2")
+                        .assured("the test node name is a valid identifier"),
+                    ClusterNodeIncarnation::new(2),
+                ),
             ),
             state: ResourceNodeState::Ready,
             root_checksum: Some("root-1".to_string()),
             last_verified_at: Some(nervix_models::Timestamp::from_unix_nanos(77)),
-            source_node_id: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+            source_node: Some(ClusterNodeIdentity::new(
+                ClusterNodeName::parse("node-1")
+                    .assured("the test node name is a valid identifier"),
+                ClusterNodeIncarnation::new(1),
+            )),
             error: None,
         };
         apply_consensus_command(
@@ -4659,6 +5404,12 @@ mod tests {
                 key: Box::new(upload_key.clone()),
                 resource: Box::new(version.clone()),
                 replica: Box::new(replica.clone()),
+            },
+        );
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::CompleteResourceUpload {
+                key: Box::new(upload_key.clone()),
             },
         );
         let resources = ResourceVersionStatus::from(&state.resources);
@@ -4676,8 +5427,9 @@ mod tests {
         assert_eq!(upload.version, 1);
         assert_eq!(
             upload.state,
-            ResourceUploadState::Published {
+            ResourceUploadState::Completed {
                 root_checksum: "root-1".to_string(),
+                outcome_revision: 0,
             }
         );
 
@@ -4685,6 +5437,7 @@ mod tests {
             &mut state,
             &ConsensusCommand::BeginResourceUpload {
                 key: Box::new(upload_key),
+                root_checksum: "root-1".to_string(),
             },
         );
         assert_eq!(
@@ -4715,6 +5468,25 @@ mod tests {
             },
         );
         assert!(!state.cordoned_node_ids.contains_key("node-2"));
+    }
+
+    #[test]
+    fn apply_consensus_command_advances_node_admission_fences() {
+        let mut state = StateMachineData::default();
+
+        for incarnation in [7, 5, 9] {
+            apply_consensus_command(
+                &mut state,
+                &ConsensusCommand::FenceNodeAdmission {
+                    identity: node_identity("node-2", incarnation),
+                },
+            );
+        }
+
+        assert_eq!(
+            state.node_admission_fences.get("node-2"),
+            Some(&ClusterNodeIncarnation::new(9))
+        );
     }
 
     #[test]

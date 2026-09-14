@@ -232,19 +232,19 @@ pub(crate) enum ResourceMutationError {
         assigned_version: u64,
         received_version: u64,
     },
-    #[error("resource upload replica does not describe a ready copy of the published version")]
+    #[error("resource upload replica does not describe a ready copy of the assigned version")]
     ReplicaMismatch,
     #[error(
-        "resource upload identity '{}' already published version {} with digest {}, not {}",
+        "resource upload identity '{}' is assigned version {} with digest {}, not {}",
         .key.identity,
         .version,
-        .published_checksum,
+        .expected_checksum,
         .received_checksum
     )]
     DigestConflict {
         key: Box<ResourceUploadKey>,
         version: u64,
-        published_checksum: String,
+        expected_checksum: String,
         received_checksum: String,
     },
 }
@@ -265,9 +265,18 @@ impl ResourceRecords {
     pub(crate) fn begin_upload(
         &mut self,
         key: &ResourceUploadKey,
+        root_checksum: &str,
     ) -> Result<(), Report<ResourceMutationError>> {
-        if self.uploads.contains_key(key) {
-            return Ok(());
+        if let Some(upload) = self.uploads.get(key) {
+            if upload.state.root_checksum() == root_checksum {
+                return Ok(());
+            }
+            return Err(Report::new(ResourceMutationError::DigestConflict {
+                key: Box::new(key.clone()),
+                version: upload.version,
+                expected_checksum: upload.state.root_checksum().to_string(),
+                received_checksum: root_checksum.to_string(),
+            }));
         }
         let catalog_key = ResourceCatalogKey::new(&key.domain, &key.identifier);
         let Some(version) = self.counters.get(&catalog_key).copied() else {
@@ -288,7 +297,9 @@ impl ResourceRecords {
             ResourceUpload {
                 key: key.clone(),
                 version,
-                state: ResourceUploadState::Receiving,
+                state: ResourceUploadState::Applying {
+                    root_checksum: root_checksum.to_string(),
+                },
             },
         );
         Ok(())
@@ -322,16 +333,20 @@ impl ResourceRecords {
             return Err(Report::new(ResourceMutationError::ReplicaMismatch));
         }
 
-        if let ResourceUploadState::Published { root_checksum } = &upload.state {
-            if root_checksum == &resource.root_checksum {
-                return Ok(());
-            }
+        if upload.state.root_checksum() != resource.root_checksum {
             return Err(Report::new(ResourceMutationError::DigestConflict {
                 key: Box::new(key.clone()),
                 version: upload.version,
-                published_checksum: root_checksum.clone(),
+                expected_checksum: upload.state.root_checksum().to_string(),
                 received_checksum: resource.root_checksum.clone(),
             }));
+        }
+
+        if matches!(
+            upload.state,
+            ResourceUploadState::Completed { .. } | ResourceUploadState::Failed { .. }
+        ) {
+            return Ok(());
         }
 
         self.versions.insert(resource.id.clone(), resource.clone());
@@ -341,11 +356,71 @@ impl ResourceRecords {
             ResourceUpload {
                 key: key.clone(),
                 version: upload.version,
-                state: ResourceUploadState::Published {
+                state: ResourceUploadState::Applying {
                     root_checksum: resource.root_checksum.clone(),
                 },
             },
         );
+        Ok(())
+    }
+
+    pub(crate) fn complete_upload(
+        &mut self,
+        key: &ResourceUploadKey,
+        outcome_revision: u64,
+    ) -> Result<(), Report<ResourceMutationError>> {
+        let Some(upload) = self.uploads.get(key).cloned() else {
+            return Err(Report::new(ResourceMutationError::MissingUpload(
+                key.clone(),
+            )));
+        };
+        match upload.state {
+            ResourceUploadState::Applying { root_checksum } => {
+                self.uploads.insert(
+                    key.clone(),
+                    ResourceUpload {
+                        key: key.clone(),
+                        version: upload.version,
+                        state: ResourceUploadState::Completed {
+                            root_checksum,
+                            outcome_revision,
+                        },
+                    },
+                );
+            }
+            ResourceUploadState::Completed { .. } | ResourceUploadState::Failed { .. } => {}
+        }
+        Ok(())
+    }
+
+    pub(crate) fn fail_upload(
+        &mut self,
+        key: &ResourceUploadKey,
+        outcome_revision: u64,
+        reason: &str,
+    ) -> Result<(), Report<ResourceMutationError>> {
+        let Some(upload) = self.uploads.get(key).cloned() else {
+            return Err(Report::new(ResourceMutationError::MissingUpload(
+                key.clone(),
+            )));
+        };
+        match upload.state {
+            ResourceUploadState::Applying { root_checksum } => {
+                self.uploads.insert(
+                    key.clone(),
+                    ResourceUpload {
+                        key: key.clone(),
+                        version: upload.version,
+                        state: ResourceUploadState::Failed {
+                            root_checksum,
+                            outcome_revision,
+                            reason: reason.to_string(),
+                        },
+                    },
+                );
+            }
+            ResourceUploadState::Completed { .. } | ResourceUploadState::Failed { .. } => {}
+        }
         Ok(())
     }
 }

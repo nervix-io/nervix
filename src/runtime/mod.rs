@@ -185,6 +185,7 @@ mod events;
 mod fault_injection;
 mod filter_map;
 mod force_flush;
+mod forced_recovery_decision;
 mod generator;
 mod http_client;
 mod inferencer;
@@ -444,6 +445,7 @@ use state_replication::{
     PreparedForcedRuntimeStateRecovery, PreparedRuntimeStateHandoff, PreparedRuntimeStateSnapshot,
 };
 pub(in crate::runtime) use state_store::{
+    ForcedRuntimeStateRecoveryAuthorization, ForcedRuntimeStateRecoveryIdentity,
     ForcedRuntimeStateRecoveryTransition, RuntimeStateHandoffTransition, RuntimeStateKind,
     RuntimeStateOperationError, RuntimeStateResult, RuntimeStateStore, StateAssignmentAuthority,
     StateAssignmentToken, StateAuthorityError, StateCapability, StateReplicationRoles,
