@@ -46,8 +46,8 @@ use super::{
     DiscardOwnershipHandoffStateRequest, DomainClockProgressRequest,
     ForcedOwnershipRecoveryPreparation, IngestorDescribeEnvelope, MAX_CONCURRENT_HEALTH_PROBES,
     OwnershipHandoffCheckpoint, OwnershipHandoffResponse, PoolClass,
-    PrepareForcedOwnershipRecoveryRequest, PrepareOwnershipHandoffStateRequest, Transport,
-    TransportError, wire,
+    PrepareForcedOwnershipRecoveryRequest, PrepareOwnershipHandoffStateRequest,
+    ReconcileOwnershipHandoffPreparationsRequest, Transport, TransportError, wire,
 };
 use crate::{
     connection::{
@@ -1642,6 +1642,18 @@ impl InterconnectRequest for DiscardOwnershipHandoffStateRequest {
     type Response = OwnershipHandoffResponse<()>;
 
     const NAME: &'static str = "discard_ownership_handoff_state";
+    const CLASS: PoolClass = PoolClass::Replication;
+    const TIMEOUT: Duration = Duration::from_secs(60);
+
+    fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
+        Some(&self.coordination)
+    }
+}
+
+impl InterconnectRequest for ReconcileOwnershipHandoffPreparationsRequest {
+    type Response = OwnershipHandoffResponse<u64>;
+
+    const NAME: &'static str = "reconcile_ownership_handoff_preparations";
     const CLASS: PoolClass = PoolClass::Replication;
     const TIMEOUT: Duration = Duration::from_secs(60);
 

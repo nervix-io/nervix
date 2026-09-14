@@ -175,6 +175,9 @@ pub(in crate::application) struct SessionServiceInner {
     /// independent domains continue applying.
     pub(in crate::application) transaction_domain_executions:
         DashMap<DomainName, StdArc<AsyncMutex<()>>, RandomState>,
+    /// Serializes destination preparation with authority reconciliation so a request from a
+    /// superseded leader cannot race a current leader's preparation into the runtime.
+    pub(in crate::application) ownership_handoff_operations: AsyncMutex<()>,
     /// Also held by a request while it installs. Calls with one durable identity share the lock,
     /// so only one of them can build and publish that assigned version on this leader.
     pub(in crate::application) resource_upload_executions:
@@ -590,15 +593,16 @@ pub(in crate::application) async fn apply_cluster_runtime_state(
     local_node_id: &ClusterNodeName,
     state: ConsensusRuntimeState,
 ) -> Result<(), crate::runtime::RuntimeError> {
-    runtime
-        .apply_cluster_state(
-            local_node_id,
-            state.revision,
-            &state.domains,
-            &state.domain_clock_authorities,
-            &state.schedule,
-        )
-        .await?;
+    // Runtime application and revision propagation are independent phases. Keeping their futures
+    // indirect bounds the stack used by callers that coordinate an entire durable command.
+    Box::pin(runtime.apply_cluster_state(
+        local_node_id,
+        state.revision,
+        &state.domains,
+        &state.domain_clock_authorities,
+        &state.schedule,
+    ))
+    .await?;
     cluster
         .set_local_runtime_revision_prepared(state.revision)
         .await;
@@ -625,13 +629,13 @@ pub(in crate::application) async fn apply_cluster_runtime_state(
             },
         );
     };
-    wait_for_application_revision(
+    Box::pin(wait_for_application_revision(
         cluster,
         interconnect,
         state.revision,
         ApplicationRevisionPhase::RuntimePrepared,
         deadline,
-    )
+    ))
     .await
     .map_err(
         |timeout| crate::runtime::RuntimeError::RuntimeRevisionPreparation {
@@ -640,17 +644,17 @@ pub(in crate::application) async fn apply_cluster_runtime_state(
         },
     )?;
 
-    runtime.start_running_domain_ingestors().await?;
+    Box::pin(runtime.start_running_domain_ingestors()).await?;
     cluster
         .set_local_runtime_revision_ready(state.revision)
         .await;
-    wait_for_application_revision(
+    Box::pin(wait_for_application_revision(
         cluster,
         interconnect,
         state.revision,
         ApplicationRevisionPhase::RuntimeReady,
         deadline,
-    )
+    ))
     .await
     .map_err(
         |timeout| crate::runtime::RuntimeError::RuntimeRevisionReadiness {
@@ -839,13 +843,13 @@ impl SessionServiceImpl {
         &self,
     ) -> Result<(), crate::runtime::RuntimeError> {
         let state = self.inner.consensus.current_runtime_state().await;
-        apply_cluster_runtime_state(
+        Box::pin(apply_cluster_runtime_state(
             &self.inner.runtime,
             &self.inner.cluster,
             &self.inner.interconnect,
             self.inner.consensus.local_node_id(),
             state,
-        )
+        ))
         .await
     }
 
@@ -1154,11 +1158,10 @@ impl SessionServiceImpl {
 
         let result = match persistent_execution.as_ref() {
             Some(execution) => {
-                self.execute_persistent_command(execution, tx, subscriptions)
-                    .await
+                Box::pin(self.execute_persistent_command(execution, tx, subscriptions)).await
             }
             None => {
-                self.process_session_command_operations(operations, tx, subscriptions)
+                Box::pin(self.process_session_command_operations(operations, tx, subscriptions))
                     .await
             }
         };

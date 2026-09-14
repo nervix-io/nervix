@@ -1701,6 +1701,7 @@ impl Application {
                 command_executions: DashMap::with_hasher(RandomState::new()),
                 transaction_executions: DashMap::with_hasher(RandomState::new()),
                 transaction_domain_executions: DashMap::with_hasher(RandomState::new()),
+                ownership_handoff_operations: tokio::sync::Mutex::new(()),
                 resource_upload_executions: DashMap::with_hasher(RandomState::new()),
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),
             }),
@@ -2122,6 +2123,8 @@ impl Application {
                 move |_context, request| {
                     let service = prepare_handoff_service.clone();
                     async move {
+                        #[cfg(feature = "testing")]
+                        let response_pause_domain = request.domain.clone();
                         let result: OwnershipHandoffResult<_> = async {
                             if request.destination != *service.inner.consensus.local_node_id() {
                                 return Err(OwnershipHandoffError::participant(format!(
@@ -2172,6 +2175,11 @@ impl Application {
                                     request.source
                                 )));
                             }
+                            let _operation =
+                                service.inner.ownership_handoff_operations.lock().await;
+                            service
+                                .verify_ownership_handoff_coordinator(&request.coordination)
+                                .await?;
                             service
                                 .inner
                                 .runtime
@@ -2179,6 +2187,16 @@ impl Application {
                                 .await
                         }
                         .await;
+                        #[cfg(feature = "testing")]
+                        if result.is_ok() {
+                            service
+                                .inner
+                                .runtime
+                                .pause_ownership_handoff_prepare_response_if_armed(
+                                    &response_pause_domain,
+                                )
+                                .await;
+                        }
                         match result {
                             Ok(()) => Ok(()),
                             Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
@@ -2285,6 +2303,17 @@ impl Application {
                 },
             )
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        service
+            .register_ownership_handoff_reconciliation_handler(&interconnect)
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let ownership_handoff_reconciliation_service = service.clone();
+        background_tasks.push(tokio::spawn(async move {
+            ownership_handoff_reconciliation_service
+                .run_ownership_handoff_preparation_reconciliation()
+                .await;
+        }));
 
         let transaction_service = service.clone();
         let transaction_shutdown = shutdown.clone();

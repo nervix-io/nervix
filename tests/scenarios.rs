@@ -4580,6 +4580,14 @@ async fn given_ownership_handoff_preparation_pause(world: &mut ScenarioWorld, do
         .pause_ownership_handoff_after_preparation(domain);
 }
 
+#[given(expr = "ownership handoff for domain {string} pauses before its prepare response")]
+async fn given_ownership_handoff_prepare_response_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .fault_injection
+        .pause_ownership_handoff_prepare_response(domain);
+}
+
 /// How long a gated cluster operation is given to engage its entity gates.
 ///
 /// The wait also ends the moment the command it gates finishes, so a command that failed before
@@ -4687,6 +4695,38 @@ async fn when_ownership_handoff_preparation_pause_is_released(
     world
         .fault_injection
         .release_ownership_handoff_preparation_pause(&domain);
+}
+
+#[then(expr = "the ownership handoff prepare response pause for domain {string} is reached")]
+async fn then_ownership_handoff_prepare_response_pause_is_reached(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    tokio::time::timeout(
+        ENTITY_GATE_PAUSE_TIMEOUT,
+        world
+            .fault_injection
+            .wait_for_ownership_handoff_prepare_response_pause(&domain),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "ownership handoff prepare response pause for domain '{domain}' was not reached: \
+             {error}"
+        )
+    });
+}
+
+#[when(expr = "the ownership handoff prepare response pause for domain {string} is released")]
+async fn when_ownership_handoff_prepare_response_pause_is_released(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .fault_injection
+        .release_ownership_handoff_prepare_response_pause(&domain);
 }
 
 #[given(expr = "domain clock progress for domain {string} is paused before delivery")]
@@ -5866,6 +5906,16 @@ async fn then_the_background_nspl_execution_is_discarded(world: &mut ScenarioWor
         .take()
         .expect("a background NSPL execution must be active");
     drop(task);
+}
+
+#[when("the background NSPL execution is canceled")]
+async fn when_the_background_nspl_execution_is_canceled(world: &mut ScenarioWorld) {
+    let task = world
+        .background_nspl
+        .take()
+        .expect("a background NSPL execution must be active");
+    drop(task);
+    tokio::task::yield_now().await;
 }
 
 fn commands_are_retry_safe_session_ops(commands: &str) -> bool {

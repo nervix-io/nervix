@@ -1675,70 +1675,114 @@ impl Runtime {
                         .cmp(&right.branch_key.as_ref().map(BranchKey::as_str))
                 })
         });
-        if let Some(existing) =
-            self.inner
-                .prepared_runtime_state_handoffs
-                .get(&DomainNodeRef::node_in(
-                    domain.clone(),
-                    entity.kind,
-                    entity.identifier.clone(),
-                ))
-        {
-            let same_preparation = existing.coordination == coordination
-                && existing.operation_id == operation_id
-                && existing.source == source
-                && existing.destination == destination
-                && existing.source_incarnation == source_incarnation
-                && existing.destination_incarnation == destination_incarnation
-                && existing.base_schedule_fingerprint == base_schedule_fingerprint
-                && existing.target_schedule_fingerprint == target_schedule_fingerprint
-                && existing.checkpoints == decoded;
-            if same_preparation {
-                return Ok(());
-            }
-            return Err(OwnershipHandoffError::participant(format!(
-                "{} '{}' already has a different ownership handoff preparation",
-                entity.kind.as_str(),
-                entity.identifier.as_str()
-            )));
-        }
-        if let Some(store) = self.inner.state_store.as_ref() {
-            let entity_ref = entity.in_domain(domain);
-            let transition = RuntimeStateHandoffTransition {
-                coordination: &coordination,
-                operation_id: &operation_id,
-                source: &source,
-                destination: &destination,
-                source_incarnation,
-                destination_incarnation,
-                entity: &entity_ref,
-                base_schedule_fingerprint,
-                target_schedule_fingerprint,
-            };
-            store
-                .persist_handoff_preparation(&transition, &decoded)
-                .map_err(|error| {
-                    OwnershipHandoffError::persistence(error.current_context().clone())
-                })?;
-        }
+        let entity_ref = entity.in_domain(domain);
         let (activation, _) = watch::channel(OwnershipHandoffActivation::Prepared);
-        self.inner.prepared_runtime_state_handoffs.insert(
-            DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone()),
-            PreparedRuntimeStateHandoff {
-                coordination,
-                operation_id,
-                source,
-                destination,
-                source_incarnation,
-                destination_incarnation,
-                base_schedule_fingerprint,
-                target_schedule_fingerprint,
-                activation_authorization:
-                    OwnershipHandoffActivationAuthorization::AuthorizedByPreparation,
-                activation,
-                checkpoints: decoded,
-            },
-        );
+        let replacement = PreparedRuntimeStateHandoff {
+            coordination,
+            operation_id,
+            source,
+            destination,
+            source_incarnation,
+            destination_incarnation,
+            base_schedule_fingerprint,
+            target_schedule_fingerprint,
+            activation_authorization:
+                OwnershipHandoffActivationAuthorization::AuthorizedByPreparation,
+            activation,
+            checkpoints: decoded,
+        };
+        match self
+            .inner
+            .prepared_runtime_state_handoffs
+            .entry(entity_ref.clone())
+        {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                let existing = entry.get();
+                let same_preparation = existing.coordination == replacement.coordination
+                    && existing.operation_id == replacement.operation_id
+                    && existing.source == replacement.source
+                    && existing.destination == replacement.destination
+                    && existing.source_incarnation == replacement.source_incarnation
+                    && existing.destination_incarnation == replacement.destination_incarnation
+                    && existing.base_schedule_fingerprint == replacement.base_schedule_fingerprint
+                    && existing.target_schedule_fingerprint
+                        == replacement.target_schedule_fingerprint
+                    && existing.checkpoints == replacement.checkpoints;
+                if same_preparation {
+                    return Ok(());
+                }
+
+                let existing_gate_is_held = self.entity_gate_operation_owns_entity(
+                    &existing.coordination,
+                    domain,
+                    entity,
+                    EntityGatePurpose::OwnershipHandoff,
+                );
+                if existing_gate_is_held {
+                    return Err(OwnershipHandoffError::participant(format!(
+                        "{} '{}' already has a different ownership handoff preparation",
+                        entity.kind.as_str(),
+                        entity.identifier.as_str()
+                    )));
+                }
+
+                if let Some(store) = self.inner.state_store.as_ref() {
+                    let replaced_transition = RuntimeStateHandoffTransition {
+                        coordination: &existing.coordination,
+                        operation_id: &existing.operation_id,
+                        source: &existing.source,
+                        destination: &existing.destination,
+                        source_incarnation: existing.source_incarnation,
+                        destination_incarnation: existing.destination_incarnation,
+                        entity: &entity_ref,
+                        base_schedule_fingerprint: existing.base_schedule_fingerprint,
+                        target_schedule_fingerprint: existing.target_schedule_fingerprint,
+                    };
+                    let replacement_transition = RuntimeStateHandoffTransition {
+                        coordination: &replacement.coordination,
+                        operation_id: &replacement.operation_id,
+                        source: &replacement.source,
+                        destination: &replacement.destination,
+                        source_incarnation: replacement.source_incarnation,
+                        destination_incarnation: replacement.destination_incarnation,
+                        entity: &entity_ref,
+                        base_schedule_fingerprint: replacement.base_schedule_fingerprint,
+                        target_schedule_fingerprint: replacement.target_schedule_fingerprint,
+                    };
+                    store
+                        .replace_handoff_preparation(
+                            &replaced_transition,
+                            &replacement_transition,
+                            &replacement.checkpoints,
+                        )
+                        .map_err(|error| {
+                            OwnershipHandoffError::persistence(error.current_context().clone())
+                        })?;
+                }
+                entry.insert(replacement);
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                if let Some(store) = self.inner.state_store.as_ref() {
+                    let transition = RuntimeStateHandoffTransition {
+                        coordination: &replacement.coordination,
+                        operation_id: &replacement.operation_id,
+                        source: &replacement.source,
+                        destination: &replacement.destination,
+                        source_incarnation: replacement.source_incarnation,
+                        destination_incarnation: replacement.destination_incarnation,
+                        entity: &entity_ref,
+                        base_schedule_fingerprint: replacement.base_schedule_fingerprint,
+                        target_schedule_fingerprint: replacement.target_schedule_fingerprint,
+                    };
+                    store
+                        .persist_handoff_preparation(&transition, &replacement.checkpoints)
+                        .map_err(|error| {
+                            OwnershipHandoffError::persistence(error.current_context().clone())
+                        })?;
+                }
+                entry.insert(replacement);
+            }
+        }
         Ok(())
     }
 
@@ -1926,7 +1970,9 @@ impl Runtime {
         if prepared.target_schedule_fingerprint != schedule_fingerprint {
             return Ok(());
         }
-        if !prepared.activation_authorization.is_authorized() {
+        let committed_transition =
+            prepared.belongs_to_committed_transition(node, schedule_fingerprint);
+        if !prepared.activation_authorization.is_authorized() && !committed_transition {
             return Ok(());
         }
         if let Some(store) = self.inner.state_store.as_ref() {
@@ -2328,26 +2374,16 @@ impl Runtime {
         entity: &NodeRef,
     ) -> Result<(), Report<RuntimePersistenceError>> {
         let key = DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone());
-        let remove = self
-            .inner
+        self.inner
             .prepared_runtime_state_handoffs
-            .get(&key)
-            .is_some_and(|prepared| {
+            .remove_if(&key, |_, prepared| {
                 &prepared.coordination == coordination && prepared.operation_id == operation_id
             });
-        if remove {
-            self.inner.prepared_runtime_state_handoffs.remove(&key);
-        }
-        let remove = self
-            .inner
+        self.inner
             .activated_runtime_state_handoffs
-            .get(&key)
-            .is_some_and(|activated| {
+            .remove_if(&key, |_, activated| {
                 &activated.coordination == coordination && activated.operation_id == operation_id
             });
-        if remove {
-            self.inner.activated_runtime_state_handoffs.remove(&key);
-        }
         self.inner
             .prepared_runtime_state_snapshots
             .retain(|_, prepared| {

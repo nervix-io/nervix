@@ -28,8 +28,7 @@ impl Runtime {
         schedule: &ClusterSchedule,
     ) -> Result<(), RuntimeError> {
         let _lock = self.inner.schedule_apply_lock.lock().await;
-        self.apply_cluster_schedule_locked(local_node_id, schedule, true)
-            .await
+        Box::pin(self.apply_cluster_schedule_locked(local_node_id, schedule, true)).await
     }
 
     pub(crate) async fn apply_cluster_state(
@@ -47,8 +46,7 @@ impl Runtime {
         }
 
         self.sync_committed_domains(domains, domain_clock_authorities);
-        self.apply_cluster_schedule_locked(local_node_id, schedule, false)
-            .await?;
+        Box::pin(self.apply_cluster_schedule_locked(local_node_id, schedule, false)).await?;
         self.inner
             .applied_cluster_revision
             .store(revision, Ordering::Release);
@@ -61,6 +59,8 @@ impl Runtime {
         schedule: &ClusterSchedule,
         start_ingestors: bool,
     ) -> Result<(), RuntimeError> {
+        // Delta application and full rebuild each own substantial state. Poll them indirectly so
+        // applying a cluster revision does not embed both state machines in this coordinator.
         let scheduled_domains = schedule
             .domains
             .keys()
@@ -96,9 +96,13 @@ impl Runtime {
         };
 
         for domain in existing_domains.difference(&scheduled_domains) {
-            match self
-                .rebuild_domain_from_schedule(local_node_id, domain, None, start_ingestors)
-                .await
+            match Box::pin(self.rebuild_domain_from_schedule(
+                local_node_id,
+                domain,
+                None,
+                start_ingestors,
+            ))
+            .await
             {
                 Ok(()) => {
                     self.inner.domain_instantiation_errors.remove(domain);
@@ -134,25 +138,24 @@ impl Runtime {
                     && existing_start_versions.get(&domain.domain) == Some(&desired_start_version)
                     && let Some(existing_schedule) = existing_schedules.get(&domain.domain)
                 {
-                    self.apply_schedule_delta(
+                    Box::pin(self.apply_schedule_delta(
                         local_node_id,
                         existing_schedule,
                         domain,
                         start_ingestors,
-                    )
+                    ))
                     .await?
                 } else {
                     false
                 };
                 if !applied_incrementally {
-                    match self
-                        .rebuild_domain_from_schedule(
-                            local_node_id,
-                            &domain.domain,
-                            Some(domain.clone()),
-                            start_ingestors,
-                        )
-                        .await
+                    match Box::pin(self.rebuild_domain_from_schedule(
+                        local_node_id,
+                        &domain.domain,
+                        Some(domain.clone()),
+                        start_ingestors,
+                    ))
+                    .await
                     {
                         Ok(()) => {
                             self.inner
@@ -176,7 +179,7 @@ impl Runtime {
                         reason: error.to_string(),
                     })?;
                 if start_ingestors {
-                    self.start_missing_domain_ingestors(&domain.domain).await?;
+                    Box::pin(self.start_missing_domain_ingestors(&domain.domain)).await?;
                 }
                 self.release_domain_ingestor_quiesce(&domain.domain);
             }
@@ -197,8 +200,12 @@ impl Runtime {
         match ScheduleDelta::classify(existing_schedule, desired) {
             ScheduleDelta::Unchanged => Ok(true),
             ScheduleDelta::Dynamic(updates) => {
-                self.apply_dynamic_schedule_update(&desired.domain, desired.clone(), &updates)
-                    .await?;
+                Box::pin(self.apply_dynamic_schedule_update(
+                    &desired.domain,
+                    desired.clone(),
+                    &updates,
+                ))
+                .await?;
                 Ok(true)
             }
             ScheduleDelta::EntitySwap {
@@ -206,27 +213,26 @@ impl Runtime {
                 reassignments,
                 dynamic_updates,
             } => {
-                if let Err(error) = self
-                    .swap_scheduled_nodes(
-                        &desired.domain,
-                        desired.clone(),
-                        &entities,
-                        &reassignments,
-                        &dynamic_updates,
-                    )
-                    .await
+                if let Err(error) = Box::pin(self.swap_scheduled_nodes(
+                    &desired.domain,
+                    desired.clone(),
+                    &entities,
+                    &reassignments,
+                    &dynamic_updates,
+                ))
+                .await
                 {
                     warn!(
                         domain = desired.domain.as_str(),
                         error = %error,
                         "entity-level schedule apply failed; rebuilding domain"
                     );
-                    self.rebuild_domain_from_schedule(
+                    Box::pin(self.rebuild_domain_from_schedule(
                         local_node_id,
                         &desired.domain,
                         Some(desired.clone()),
                         start_ingestors,
-                    )
+                    ))
                     .await?;
                 }
                 Ok(true)
