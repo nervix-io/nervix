@@ -2139,7 +2139,7 @@ impl Application {
                                         request.entity.identifier.as_str()
                                     ))
                                 })?;
-                            if scheduled.execution_node() != Some(&request.source) {
+                            if scheduled.primary_node() != Some(&request.source) {
                                 return Err(OwnershipHandoffError::participant(format!(
                                     "{} '{}' is no longer owned by source node '{}'",
                                     request.entity.kind.as_str(),
