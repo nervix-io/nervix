@@ -1,5 +1,6 @@
 Feature: Interconnect relay admission
-  Scenario: A waiting relay admission leaves another domain runnable
+  @domain_clock_http2
+  Scenario: A waiting historical slow-domain relay admission leaves a fast domain runnable
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
@@ -7,8 +8,8 @@ Feature: Interconnect relay admission
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
-      CREATE UNPACED DOMAIN blocked_{{test_id}};
-      CREATE UNPACED DOMAIN runnable_{{test_id}};
+      CREATE PACED DOMAIN blocked_{{test_id}} WITH PERIOD 100us SKEW 100ms;
+      CREATE PACED DOMAIN runnable_{{test_id}} WITH PERIOD 100ms SKEW 100ms;
       """
     Given the active domain is "blocked_{{test_id}}"
     When these NSPL commands are executed on the leader node
@@ -26,13 +27,14 @@ Feature: Interconnect relay admission
       CREATE INGESTOR source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TIMESTAMP NOW
         TO input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE EMITTER sink_output FROM input
         TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      START;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 0.0001;
       """
     Given the active domain is "runnable_{{test_id}}"
     When these NSPL commands are executed on the leader node
@@ -50,13 +52,14 @@ Feature: Interconnect relay admission
       CREATE INGESTOR source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TIMESTAMP NOW
         TO input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE EMITTER sink_output FROM input
         TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      START;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 100.0;
       """
     When these NSPL commands are executed through the client on node "node-1"
       """

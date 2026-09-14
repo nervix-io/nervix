@@ -24,8 +24,10 @@ Nothing in the node holds a global queue that every relay batch or every control
 through. Incoming relay payloads are handed to a lane that preserves arrival order inside one
 authenticated logical channel and runs different channels concurrently; typed requests are
 dispatched by the transport under its own bounded per-subquota admission. Management traffic —
-health, cancellation, terminal outcomes — keeps reserved stream and memory capacity that saturated
-relay or bulk work cannot consume.
+health, replaceable clock progress, cancellation, and terminal outcomes — uses separate reserved
+stream and memory capacity that saturated relay or bulk work cannot consume. A clock authority
+retains one latest report per domain and ready peer while the progress subquota bounds attempts
+across all of them.
 
 ## Finding coverage
 
@@ -73,6 +75,7 @@ carries a payload value.
 | Admission latency | `nervix_interconnect_relay_admission_wait_seconds_total` over `nervix_interconnect_relay_admissions_total` |
 | ACK age | `nervix_interconnect_unresolved_outcome_age_seconds` |
 | Health RTT | `nervix_interconnect_request_seconds_total{operation="liveness"}` over `nervix_interconnect_requests_total{operation="liveness"}` |
+| Clock progress | `nervix_interconnect_request_seconds_total{operation="progress"}` over `nervix_interconnect_requests_total{operation="progress"}` |
 | Reconnect and reset reasons | `nervix_interconnect_connections_established_total`, `nervix_interconnect_connection_failures_total`, `nervix_interconnect_stream_resets_total` |
 | Bulk progress | `nervix_interconnect_bulk_bytes_total` |
 | Snapshot pins | `nervix_consensus_snapshot_pinned_generations`, `nervix_consensus_snapshot_pinned_readers`, `nervix_consensus_snapshot_unreferenced_generations` |
@@ -99,9 +102,35 @@ Evidence: `cluster/resource_describe.feature`: *Uploaded resource is describable
 *Readiness deadline returns the published version while a replica is pending*, *Uploaded resources
 converge after a node rejoins the cluster*.
 
+## Domain-clock qualification
+
+[Domain clocks 12](https://app.clickup.com/t/86bbwct04) closes the clock prerequisite for this
+ledger. Clock mappings and authority fences remain committed semantic state. Only replaceable
+progress crosses the interconnection, as the typed `domain_clock_progress` request in the
+management progress subquota. Each domain-peer delivery owner holds one latest pending report and
+one attempt, while the transport's shared progress ceiling bounds the complete node.
+
+| Clock acceptance | Evidence |
+| --- | --- |
+| Join, restart, and reconnect install the committed generation before node-local execution | `runtime/domain_clock_contract.feature`: *A joining or restarted node installs the current clock generation before execution* |
+| Owner loss without leader loss and independent leadership/ownership transfer preserve the mapping and advance the authority fence | `runtime/domain_clock_contract.feature`: *Nonleader clock-owner loss preserves the committed mapping* and *One fenced authority emits coalesced progress for each clock generation* |
+| Delayed, reordered, duplicate, and superseded progress cannot regress logical time or replace the mapping | `runtime/domain_clock_contract.feature`: *Delayed clock progress cannot move observed logical time backwards*; `nervix-server`: `progress_requires_the_committed_generation_revision_identity_and_peer`, `stopped_and_restarted_generations_ignore_delayed_progress`, `progress_retains_the_latest_accepted_report`, and `delayed_progress_delivery_does_not_move_logical_time_backwards` |
+| Missed ticks and a delayed transport retain the current logical frontier | `nervix-models`: `missed_periods_coalesce_to_the_latest_due_boundary`; the authority's one-value delivery channel replaces a pending report while one typed attempt is in flight |
+| Progress has bounded HTTP/2 capacity and cannot consume health capacity during bulk saturation | `runtime/domain_clock_contract.feature`: both slow and fast examples of *Fenced clock progress uses reserved HTTP2 capacity during historical bulk load*; `nervix-interconnect`: `domain_clock_progress_uses_its_reserved_management_capacity` and `progress_work_cannot_consume_liveness_streams` |
+| Relay admission remains physical for historical slow and fast domains | `runtime/interconnect_admission.feature`: *A waiting historical slow-domain relay admission leaves a fast domain runnable* |
+| Logical generation, admission, and branch expiry remain driven by the installed clock while physical cancellation, retry, timeout, and shutdown budgets remain wall based | `runtime/domain_clock_contract.feature`; `runtime/domain_ingestion_time.feature`; `runtime/branched_expiration.feature`; and the complete `runtime/physical_infrastructure_deadlines.feature` matrix, including its two-branch `REQUIRED WAIT` cases |
+| The progress wire contract contains typed domain, generation, authority, logical timestamp, and UTC observation fields, with no process-local monotonic instant | `DomainClockProgressRequest` is the sole transport shape and its request policy test fixes `Management/Progress`; the clock architecture source check owns monotonic and UTC boundary imports |
+
+The bulk-load scenario also recorded sequential node-local logical-clock samples through node 1 and
+node 3. In the final focused run, their separation was 10.434 microseconds at rate `0.0001` and
+10.469 seconds at rate `100.0`. Those values include the time between the two HTTP samples; they are
+a measured upper bound on host-clock skew plus sampling delay, not a claim that the hosts were read
+simultaneously or that their clocks are equal. Both nodes remained near the committed year-2000
+mapping while the authority's bulk workers were occupied.
+
 ## Open qualification
 
-Two acceptance items in Step 11 are not closed by this ledger. They are recorded here rather than
+One acceptance item in Step 11 is not closed by this ledger. It is recorded here rather than
 omitted.
 
 **Shaped-link performance qualification.** The proposal's comparative measurement — a fixed
@@ -127,8 +156,3 @@ What the shaped environment adds is the distribution rather than the bound: a co
 a measured idle baseline, per-relay-channel progress under a sustained offered load, and the
 transport throughput comparison at identical record, admission and durability settings. The series
 above are what such a run would read.
-
-**Domain-clock evidence.** [Domain clocks 12](https://app.clickup.com/t/86bbwct04) owns committed
-clock installation on join and restart, one fenced authority across owner and leader changes,
-coalesced progress that cannot regress logical time, and correct logical execution under bulk
-saturation. Its results belong in this ledger once that task completes.

@@ -61,6 +61,7 @@ use nervix_interconnect::{
     DescribeRelayRequest as RemoteDescribeRelayRequest,
     DescribeRelayResponse as RemoteDescribeRelayResponse,
     DiscardOwnershipHandoffStateRequest as RemoteDiscardOwnershipHandoffStateRequest,
+    DomainClockProgressRequest as RemoteDomainClockProgressRequest,
     DomainDrainStatusRequest as RemoteDomainDrainStatusRequest,
     DomainDrainStatusResponse as RemoteDomainDrainStatusResponse,
     EntityDrainStatusRequest as RemoteEntityDrainStatusRequest,
@@ -1692,6 +1693,15 @@ impl Application {
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),
             }),
         };
+        let domain_clock_progress_service = service.clone();
+        interconnect
+            .register_handler::<RemoteDomainClockProgressRequest, _, _>(move |context, request| {
+                let service = domain_clock_progress_service.clone();
+                async move {
+                    service.handle_domain_clock_progress(context.peer_node_id(), request);
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
         let resource_archive_service = service.clone();
         interconnect
             .register_stream_handler::<FetchResourceArchive, _, _>(move |_context, request| {
@@ -2526,12 +2536,6 @@ impl Application {
                                 ControlEnvelope::Request(_) | ControlEnvelope::Response(_),
                             ) => {
                                 unreachable!("typed requests are consumed by the interconnect")
-                            }
-                            Envelope::Control(ControlEnvelope::DomainClockProgress(progress)) => {
-                                service_for_interconnect.handle_domain_clock_progress(
-                                    &message.peer_node_id,
-                                    progress,
-                                );
                             }
                             Envelope::Control(ControlEnvelope::StateReplicationAck(ack)) => {
                                 let placement = match crate::runtime::RuntimeStatePlacement::from_remote(

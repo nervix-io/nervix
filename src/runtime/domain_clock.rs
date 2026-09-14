@@ -794,10 +794,11 @@ impl Runtime {
         &self,
         domain: &DomainName,
         node: &nervix_models::ClusterNodeName,
+        shutdown: &CancellationToken,
     ) -> bool {
         self.inner
             .fault_injection
-            .pause_domain_clock_progress_if_armed(domain, node)
+            .pause_domain_clock_progress_if_armed(domain, node, shutdown)
             .await
     }
 

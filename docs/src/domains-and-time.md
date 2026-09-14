@@ -144,6 +144,21 @@ create a domain. `STOP` revokes the authority in the same replicated lifecycle t
 `START` commits a new generation and mapping. Automatic ALTER quiescing keeps the authority and
 clock running.
 
+Progress crosses the interconnection as a typed HTTP/2 management request in the reserved progress
+subquota. For each ready remote node and domain, the authority retains one replaceable pending
+report and permits one delivery attempt at a time. A newer frontier replaces an older pending
+frontier while connection capacity or a response is delayed. The interconnection bounds all
+in-flight progress requests independently of the stream and memory reservations for health,
+cancellation, admission, and terminal outcomes. A joining or reconnected node receives the newest
+retained frontier after it installs the required runtime revision.
+
+Each progress attempt has a two-second physical deadline. A failed attempt retries the newest
+frontier after a 200-millisecond physical backoff, and authority shutdown cancels both the request
+and that backoff. The response only confirms that the authenticated receiver evaluated the report;
+the committed generation and authority fence decide whether it is current. Progress never replaces
+the committed mapping or moves a node's logical clock. Its wire value contains typed logical and
+UTC timestamps and never contains a process-local monotonic instant.
+
 An explicit `START AT` timestamp must fit exactly in signed Unix nanoseconds. The inclusive range
 is `1677-09-21T00:12:43.145224192Z` through `2262-04-11T23:47:16.854775807Z`; valid RFC 3339 values
 immediately outside those endpoints are rejected by the command. Nervix converts accepted text to

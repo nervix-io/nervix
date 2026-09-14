@@ -138,7 +138,8 @@ Transport pools:
   full, by `direction` and `operation`
 - `nervix_interconnect_requests_total` and `nervix_interconnect_request_seconds_total`: typed
   requests completed and the round trip they took, by `operation`. Divide the seconds by the count
-  for average latency; `operation="liveness"` is the peer health probe, so that ratio is health RTT
+  for average latency; `operation="liveness"` is the peer health probe, so that ratio is health
+  RTT, and `operation="progress"` is replaceable fenced domain-clock progress
 - `nervix_interconnect_bulk_bytes_total`: bytes carried by streamed bodies, by `class` and
   `direction`. This rises while a transfer is running, so it reads as bulk progress
 
