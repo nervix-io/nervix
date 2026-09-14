@@ -39,7 +39,7 @@ use tokio::{
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tonic::{Request, Response, Status};
-use tracing::warn;
+use tracing::{debug, warn};
 use triomphe::Arc;
 
 use super::{
@@ -593,10 +593,18 @@ pub(in crate::application) async fn apply_current_cluster_runtime_state(
     admission: &RuntimeAdmission,
     shutdown: &CancellationToken,
 ) -> Result<(), crate::runtime::RuntimeError> {
+    let Some(installation) = admission.begin_installation(shutdown).await else {
+        return Ok(());
+    };
     let Some(state) = admission.runtime_state(consensus, shutdown).await else {
         return Ok(());
     };
     let local_node_id = consensus.local_node_id();
+    debug!(
+        %local_node_id,
+        revision = state.revision,
+        "installing admitted cluster runtime state"
+    );
     if let Err(error) = registry.synchronize_cluster_schedule(&state.schedule) {
         warn!(error = %error, "failed to synchronize registry from admitted cluster schedule");
     }
@@ -612,6 +620,12 @@ pub(in crate::application) async fn apply_current_cluster_runtime_state(
     cluster
         .set_local_runtime_revision_prepared(state.revision)
         .await;
+    debug!(
+        %local_node_id,
+        revision = state.revision,
+        "local runtime revision prepared"
+    );
+    drop(installation);
 
     let node_unavailability_timeout = cluster.node_unavailability_timeout();
     // Applying a revision gets one start-time operation budget: peer-failure detection followed
@@ -635,39 +649,68 @@ pub(in crate::application) async fn apply_current_cluster_runtime_state(
             },
         );
     };
-    wait_for_application_revision(
+    let preparation = wait_for_application_revision(
         cluster,
         interconnect,
         state.revision,
         ApplicationRevisionPhase::RuntimePrepared,
         deadline,
-    )
-    .await
-    .map_err(
-        |timeout| crate::runtime::RuntimeError::RuntimeRevisionPreparation {
+    );
+    tokio::pin!(preparation);
+    let preparation_result = tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => return Ok(()),
+        result = &mut preparation => result,
+    };
+    preparation_result.map_err(|timeout| {
+        crate::runtime::RuntimeError::RuntimeRevisionPreparation {
             revision: state.revision,
             pending_nodes: timeout.pending_nodes,
-        },
-    )?;
+        }
+    })?;
+    debug!(
+        %local_node_id,
+        revision = state.revision,
+        "cluster runtime revision prepared"
+    );
 
+    if shutdown.is_cancelled() {
+        return Ok(());
+    }
     runtime.start_running_domain_ingestors().await?;
+    debug!(
+        %local_node_id,
+        revision = state.revision,
+        "started running-domain ingestors"
+    );
     cluster
         .set_local_runtime_revision_ready(state.revision)
         .await;
-    wait_for_application_revision(
+    let readiness = wait_for_application_revision(
         cluster,
         interconnect,
         state.revision,
         ApplicationRevisionPhase::RuntimeReady,
         deadline,
-    )
-    .await
-    .map_err(
+    );
+    tokio::pin!(readiness);
+    let readiness_result = tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => return Ok(()),
+        result = &mut readiness => result,
+    };
+    readiness_result.map_err(
         |timeout| crate::runtime::RuntimeError::RuntimeRevisionReadiness {
             revision: state.revision,
             pending_nodes: timeout.pending_nodes,
         },
-    )
+    )?;
+    debug!(
+        %local_node_id,
+        revision = state.revision,
+        "cluster runtime revision ready"
+    );
+    Ok(())
 }
 
 fn error_response(kind: &str, diagnostics: &[ParseDiagnostic]) -> CommandResult {

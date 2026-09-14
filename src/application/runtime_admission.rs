@@ -1,9 +1,9 @@
-//! One-time admission of ownership-sensitive runtime execution after process startup.
+//! Admission and serialized installation of ownership-sensitive runtime execution.
 //!
 //! Layer: control plane.
 //!
-//! - **Owns.** The process-local proof that consensus established a linearizable read and applied
-//!   its committed log boundary before runtime state may be installed.
+//! - **Owns.** The process-local linearizable catch-up proof and ordering of coherent runtime-state
+//!   installations through local preparation after that proof.
 //! - **Depends on.** Consensus observation, Tokio synchronization, and process shutdown.
 //! - **Must not know.** Runtime graph internals, connector implementations, or scheduling policy.
 
@@ -11,16 +11,17 @@ use std::{sync::OnceLock, time::Duration};
 
 use meticulous::ResultExt as _;
 use nervix_consensus::{ConsensusRuntimeState, Observer};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 const ADMISSION_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 
-/// The one process-start barrier shared by every path that can install cluster runtime state.
+/// The process-start barrier and runtime-installation sequencer shared by every installation path.
 pub(in crate::application) struct RuntimeAdmission {
     committed_log_index: OnceLock<u64>,
     attempt: Mutex<()>,
+    installation: Mutex<()>,
 }
 
 impl RuntimeAdmission {
@@ -28,6 +29,21 @@ impl RuntimeAdmission {
         Self {
             committed_log_index: OnceLock::new(),
             attempt: Mutex::new(()),
+            installation: Mutex::new(()),
+        }
+    }
+
+    /// Serialize coherent state capture, runtime installation, and local preparation.
+    pub(in crate::application) async fn begin_installation(
+        &self,
+        shutdown: &CancellationToken,
+    ) -> Option<MutexGuard<'_, ()>> {
+        let installation = self.installation.lock();
+        tokio::pin!(installation);
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => None,
+            installation = &mut installation => Some(installation),
         }
     }
 
@@ -37,6 +53,9 @@ impl RuntimeAdmission {
         consensus: &Observer,
         shutdown: &CancellationToken,
     ) -> Option<ConsensusRuntimeState> {
+        if shutdown.is_cancelled() {
+            return None;
+        }
         if self.committed_log_index.get().is_some() {
             return Some(consensus.current_runtime_state().await);
         }
@@ -48,6 +67,9 @@ impl RuntimeAdmission {
             _ = shutdown.cancelled() => return None,
             attempt = &mut attempt => attempt,
         };
+        if shutdown.is_cancelled() {
+            return None;
+        }
         if self.committed_log_index.get().is_some() {
             return Some(consensus.current_runtime_state().await);
         }
