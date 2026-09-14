@@ -378,6 +378,13 @@ impl FaultInjection {
         pause.release();
     }
 
+    pub fn release_all_health_responses(&self) {
+        for pause in &self.inner.health_response_pauses {
+            pause.release();
+        }
+        self.inner.health_response_pauses.clear();
+    }
+
     pub fn pause_command_admission_on(&self, node_id: ClusterNodeName) {
         self.arm_command_pause(CommandPausePoint::Admission(node_id));
     }

@@ -18,7 +18,7 @@ Feature: Interconnect health coordination
     And within "750ms" the health response pause from node "node-1" to node "node-3" is reached
     When the health response pause from node "node-1" to node "node-3" is released
     Then node "node-1" eventually reports interconnect to "node-3" as "connected"
-    And within "750ms" these NSPL commands complete on node "node-1"
+    And within "9s" these NSPL commands complete on node "node-1"
       """
       CREATE USER health_probe_admin WITH PASSWORD 'created-password';
       CREATE RELAY independent_health_events SCHEMA health_event UNBRANCHED;

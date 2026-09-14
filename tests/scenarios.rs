@@ -16458,6 +16458,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
             Box::pin(async move {
                 append_cucumber_log_line("scenario finished");
                 if let Some(world) = world {
+                    world.fault_injection.release_all_health_responses();
                     world.fault_injection.release_all_domain_clock_progress();
                     append_cluster_statuses(world, "scenario teardown").await;
                     append_cucumber_log_line(&format!(
