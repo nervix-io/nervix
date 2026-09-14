@@ -19,157 +19,18 @@ pub(crate) struct StateSyncAck {
     pub(crate) lsm: u64,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct PreparedRuntimeStateHandoff {
-    pub(super) operation_id: String,
-    pub(super) source: ClusterNodeName,
-    pub(super) destination: ClusterNodeName,
-    pub(super) source_incarnation: ClusterNodeIncarnation,
-    pub(super) destination_incarnation: ClusterNodeIncarnation,
-    pub(super) base_schedule_fingerprint: [u8; 32],
-    pub(super) target_schedule_fingerprint: [u8; 32],
-    pub(super) activation_authorization: OwnershipHandoffActivationAuthorization,
-    pub(super) activation: watch::Sender<OwnershipHandoffActivation>,
-    pub(super) checkpoints: Vec<(RuntimeStatePlacement, PersistedRuntimeStateEntry)>,
-}
+mod handoff;
+mod preparation;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum OwnershipHandoffActivationAuthorization {
-    AuthorizedByPreparation,
-    RecoveredAwaitingRequest,
-    RecoveredAuthorized,
-}
-
-impl OwnershipHandoffActivationAuthorization {
-    fn is_authorized(self) -> bool {
-        self != Self::RecoveredAwaitingRequest
-    }
-
-    /// Authorizes activation and reports whether the recovered schedule must be rebuilt.
-    ///
-    /// A recovered preparation continues to request a rebuild until activation removes it. This
-    /// keeps a failed or cancelled rebuild retriable without making an ordinary handoff race its
-    /// normal schedule reconciliation with a second rebuild.
-    fn authorize(&mut self) -> bool {
-        match self {
-            Self::AuthorizedByPreparation => false,
-            Self::RecoveredAwaitingRequest => {
-                *self = Self::RecoveredAuthorized;
-                true
-            }
-            Self::RecoveredAuthorized => true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum OwnershipHandoffActivation {
-    Prepared,
-    Activated,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct OwnershipHandoffTransitionRef<'a> {
-    operation_id: &'a str,
-    source: &'a ClusterNodeName,
-    destination: &'a ClusterNodeName,
-    source_incarnation: ClusterNodeIncarnation,
-    destination_incarnation: ClusterNodeIncarnation,
-    domain: &'a DomainName,
-    entity: &'a NodeRef,
-    base_schedule_fingerprint: [u8; 32],
-    target_schedule_fingerprint: [u8; 32],
-}
-
-impl<'a> From<&'a nervix_interconnect::ActivateOwnershipHandoffStateRequest>
-    for OwnershipHandoffTransitionRef<'a>
-{
-    fn from(request: &'a nervix_interconnect::ActivateOwnershipHandoffStateRequest) -> Self {
-        Self {
-            operation_id: &request.operation_id,
-            source: &request.source,
-            destination: &request.destination,
-            source_incarnation: request.source_incarnation,
-            destination_incarnation: request.destination_incarnation,
-            domain: &request.domain,
-            entity: &request.entity,
-            base_schedule_fingerprint: request.base_schedule_fingerprint,
-            target_schedule_fingerprint: request.target_schedule_fingerprint,
-        }
-    }
-}
-
-impl<'a> From<&'a nervix_interconnect::ConfirmOwnershipHandoffStateRequest>
-    for OwnershipHandoffTransitionRef<'a>
-{
-    fn from(request: &'a nervix_interconnect::ConfirmOwnershipHandoffStateRequest) -> Self {
-        Self {
-            operation_id: &request.operation_id,
-            source: &request.source,
-            destination: &request.destination,
-            source_incarnation: request.source_incarnation,
-            destination_incarnation: request.destination_incarnation,
-            domain: &request.domain,
-            entity: &request.entity,
-            base_schedule_fingerprint: request.base_schedule_fingerprint,
-            target_schedule_fingerprint: request.target_schedule_fingerprint,
-        }
-    }
-}
-
-impl PreparedRuntimeStateHandoff {
-    fn matches(&self, transition: OwnershipHandoffTransitionRef<'_>) -> bool {
-        self.operation_id == transition.operation_id
-            && self.source == *transition.source
-            && self.destination == *transition.destination
-            && self.source_incarnation == transition.source_incarnation
-            && self.destination_incarnation == transition.destination_incarnation
-            && self.base_schedule_fingerprint == transition.base_schedule_fingerprint
-            && self.target_schedule_fingerprint == transition.target_schedule_fingerprint
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ActivatedRuntimeStateHandoff {
-    operation_id: String,
-    source: ClusterNodeName,
-    destination: ClusterNodeName,
-    source_incarnation: ClusterNodeIncarnation,
-    destination_incarnation: ClusterNodeIncarnation,
-    base_schedule_fingerprint: [u8; 32],
-    target_schedule_fingerprint: [u8; 32],
-}
-
-impl ActivatedRuntimeStateHandoff {
-    fn matches(&self, transition: OwnershipHandoffTransitionRef<'_>) -> bool {
-        self.operation_id == transition.operation_id
-            && self.source == *transition.source
-            && self.destination == *transition.destination
-            && self.source_incarnation == transition.source_incarnation
-            && self.destination_incarnation == transition.destination_incarnation
-            && self.base_schedule_fingerprint == transition.base_schedule_fingerprint
-            && self.target_schedule_fingerprint == transition.target_schedule_fingerprint
-    }
-}
-
-#[derive(Debug)]
-pub(super) struct PreparedRuntimeStateSnapshot {
-    operation_id: String,
-    snapshot: PersistedRuntimeStateEntry,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct PreparedForcedRuntimeStateRecovery {
-    operation_id: String,
-    destination_incarnation: ClusterNodeIncarnation,
-    target_schedule_fingerprint: [u8; 32],
-    checkpoints: Vec<(RuntimeStatePlacement, PersistedRuntimeStateEntry)>,
-}
-
-struct ForcedRecoveryCheckpoint {
-    snapshot: Option<PersistedRuntimeStateEntry>,
-    reset_cause: OwnershipStateResetCause,
-}
+use handoff::OwnershipHandoffTransitionRef;
+pub(in crate::runtime) use handoff::{
+    ActivatedRuntimeStateHandoff, OwnershipHandoffActivation,
+    OwnershipHandoffActivationAuthorization, PreparedRuntimeStateHandoff,
+};
+use preparation::ForcedRecoveryCheckpoint;
+pub(in crate::runtime) use preparation::{
+    PreparedForcedRuntimeStateRecovery, PreparedRuntimeStateSnapshot,
+};
 
 #[derive(Debug, Clone)]
 pub(super) struct PendingStateReplicaSync {
