@@ -300,7 +300,7 @@ use endpoint::{
 pub(in crate::runtime) use entity_gate::OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL;
 use entity_gate::{
     ActiveDomainAlter, BranchQuiesceGauges, DomainActivityGuard, EntityAlterHold,
-    EntityGateHoldKey, NodeQuiesceCounters, NodeQuiesceWorkGuard,
+    EntityGateHoldKey, NodeQuiesceCounters, NodeQuiesceWorkGuard, OutputBufferQuiesceGauge,
 };
 pub(in crate::runtime) use events::RuntimeEvents;
 pub(in crate::runtime) use filter_map::evaluate_sqs_fifo_group_program;
