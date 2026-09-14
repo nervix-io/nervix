@@ -1034,9 +1034,8 @@ impl Application {
                         }
                     }
                 }
-                let gossip = cluster_for_membership_reconcile.gossip_state().await;
                 if let Err(error) = administrator_for_membership_reconcile
-                    .reconcile_nodes(gossip)
+                    .reconcile_nodes(cluster_for_membership_reconcile.gossip_state())
                     .await
                 {
                     warn!(%error, "raft membership reconciliation failed");

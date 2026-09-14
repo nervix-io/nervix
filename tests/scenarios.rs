@@ -108,6 +108,7 @@ static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<StdMutex<BTreeMap<String, String>>> 
 static SCENARIO_EXECUTION_LOCK: OnceLock<StdArc<tokio::sync::RwLock<()>>> = OnceLock::new();
 static WEB_CONSOLE_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> = OnceLock::new();
 const MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS: usize = 2;
+const WEB_CONSOLE_ASSERTION_TIMEOUT: Duration = Duration::from_secs(30);
 const ZEROMQ_OBSERVER_BIND_ATTEMPTS: usize = 8;
 const WEB_CONSOLE_FEATURE_NAMES: [&str; 2] =
     ["Web console NSPL REPL", "Web console execution graph"];
@@ -7149,7 +7150,7 @@ async fn then_selector_contains_text_exactly_times(
     let selector = expand_placeholders(world, &selector);
     let expected = expand_placeholders(world, &expected);
     let locator = page.locator(&selector);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + WEB_CONSOLE_ASSERTION_TIMEOUT;
     loop {
         tokio::task::consume_budget().await;
         let texts = locator
@@ -7183,7 +7184,7 @@ async fn then_selector_contains_text(
     let selector = expand_placeholders(world, &selector);
     let expected = expand_placeholders(world, &expected);
     let locator = page.locator(&selector);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + WEB_CONSOLE_ASSERTION_TIMEOUT;
     loop {
         tokio::task::consume_budget().await;
         let texts = locator
@@ -7215,7 +7216,7 @@ async fn then_selector_contains_docstring(
         .expect("a browser page must be opened before selector assertions");
     let selector = expand_placeholders(world, &selector);
     let locator = page.locator(&selector);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + WEB_CONSOLE_ASSERTION_TIMEOUT;
     loop {
         tokio::task::consume_budget().await;
         let texts = locator

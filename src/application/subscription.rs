@@ -1185,6 +1185,20 @@ impl SessionServiceImpl {
         };
 
         let relay = subscription.relay.clone();
+        let runtime_revision = self.inner.consensus.current_runtime_state().await.revision;
+        if let Err(err) = self.wait_for_runtime_revision(runtime_revision).await {
+            return CommandResult {
+                success: false,
+                message: format!("failed to subscribe to relay '{}': {err}", relay.as_str()),
+                diagnostics: vec![Diagnostic {
+                    message: format!("failed to subscribe to relay '{}': {err}", relay.as_str()),
+                    span_start: 0,
+                    span_end: 0,
+                }],
+                kind: i32::from(CommandResultKind::Error),
+                ..Default::default()
+            };
+        }
         let receiver = match self.inner.runtime.subscribe_stream(domain, &relay).await {
             Ok(receiver) => receiver,
             Err(err) => {

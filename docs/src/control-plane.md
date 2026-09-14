@@ -366,6 +366,10 @@ independent units after one times out. Its result lists every successful move an
 unit makes the command unsuccessful, while a later `DRAIN NODE` retries the units still owned by the
 cordoned node. Endpoint and Syslog listeners bind on every live node and are not schedule units.
 
+`DROP NODE` records the stopped process incarnation before removing its Raft membership. Delayed
+gossip cannot admit that process again. Starting the node again creates a newer incarnation, which
+can join the cluster normally.
+
 Unexpected owner loss remains a termination and uses the failover path. The failed task and its
 volatile buffers disappear immediately, attached work is negatively acknowledged, and the scheduler
 promotes a live replica or chooses a fresh owner. Failover does not wait for the planned handoff gate.

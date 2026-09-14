@@ -12,6 +12,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::Future,
     io::{self, Cursor},
     path::Path,
     sync::{
@@ -184,6 +185,9 @@ pub enum ConsensusCommand {
         node_id: ClusterNodeName,
         cordoned: bool,
     },
+    FenceNodeAdmission {
+        identity: ClusterNodeIdentity,
+    },
     OpenTransaction {
         transaction: Box<ReplicatedTransaction>,
         max_open_transactions: usize,
@@ -345,6 +349,9 @@ impl std::fmt::Display for ConsensusCommand {
                     write!(f, "uncordon-node:{node_id}")
                 }
             }
+            Self::FenceNodeAdmission { identity } => {
+                write!(f, "fence-node-admission:{identity}")
+            }
             Self::OpenTransaction { transaction, .. } => {
                 write!(f, "open-transaction:{}", transaction.id)
             }
@@ -464,23 +471,22 @@ impl GossipState {
     }
 
     pub fn live_identities(&self) -> BTreeSet<ClusterNodeIdentity> {
-        let mut current = BTreeMap::<ClusterNodeName, ClusterNodeIdentity>::new();
-        for node in self.admission_candidates() {
-            let identity = node.identity();
-            let replace = match current.get(&node.node_id) {
-                Some(observed) => observed.incarnation() < identity.incarnation(),
-                None => true,
-            };
-            if replace {
-                current.insert(node.node_id.clone(), identity);
-            }
-        }
-        current.into_values().collect()
+        self.latest_admission_candidates()
+            .into_values()
+            .map(|node| node.identity())
+            .collect()
     }
 
-    fn latest_admission_candidates(&self) -> BTreeMap<ClusterNodeName, GossipNode> {
+    pub fn latest_nodes_by_id(&self) -> BTreeMap<ClusterNodeName, GossipNode> {
+        self.latest_nodes(self.live_nodes.iter())
+    }
+
+    fn latest_nodes<'a>(
+        &self,
+        nodes: impl IntoIterator<Item = &'a GossipNode>,
+    ) -> BTreeMap<ClusterNodeName, GossipNode> {
         let mut current = BTreeMap::<ClusterNodeName, GossipNode>::new();
-        for node in self.admission_candidates() {
+        for node in nodes {
             let replace = match current.get(&node.node_id) {
                 Some(observed) => observed.incarnation < node.incarnation,
                 None => true,
@@ -490,6 +496,10 @@ impl GossipState {
             }
         }
         current
+    }
+
+    fn latest_admission_candidates(&self) -> BTreeMap<ClusterNodeName, GossipNode> {
+        self.latest_nodes(self.admission_candidates())
     }
 }
 
@@ -585,11 +595,22 @@ enum MembershipMutation {
 }
 
 impl MembershipSnapshot {
-    fn automatic_mutations(&self, gossip: &GossipState) -> Vec<MembershipMutation> {
+    fn automatic_mutations(
+        &self,
+        gossip: &GossipState,
+        admission_fences: &BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
+    ) -> Vec<MembershipMutation> {
         let mut mutations = Vec::new();
         let mut desired_voters = self.voters.clone();
         for node in gossip.latest_admission_candidates().into_values() {
             if node.interconnect_advertise_addr.is_empty() {
+                continue;
+            }
+            let is_fenced = match admission_fences.get(&node.node_id) {
+                Some(incarnation) => node.incarnation <= *incarnation,
+                None => false,
+            };
+            if is_fenced {
                 continue;
             }
 
@@ -628,6 +649,7 @@ struct StateMachineData {
     users: Records<UserName, UserCredentials>,
     resources: ResourceRecords,
     cordoned_node_ids: Records<ClusterNodeName, ()>,
+    node_admission_fences: Records<ClusterNodeName, ClusterNodeIncarnation>,
     transactions: Records<String, ReplicatedTransaction>,
     command_executions: Records<nervix_models::CommandExecutionReference, CommandExecution>,
 }
@@ -980,6 +1002,15 @@ pub enum ConsensusError {
     LeadershipLost { leader_id: Option<ClusterNodeName> },
     #[error("node '{0}' is not a raft member")]
     NodeNotFound(String),
+    #[error("cannot identify the current incarnation of raft member '{0}'")]
+    NodeIncarnationUnknown(String),
+    #[error("cannot drop process '{expected}' because the current process is '{observed}'")]
+    NodeIncarnationChanged {
+        expected: ClusterNodeIdentity,
+        observed: ClusterNodeIdentity,
+    },
+    #[error("cannot drop live node '{0}'; stop the node before removing it")]
+    RemoveLiveNode(String),
     #[error("cannot remove the local leader node '{0}'")]
     RemoveLocalLeader(String),
     #[error("cannot remove the last raft voter '{0}'")]
@@ -2465,15 +2496,21 @@ impl Administrator {
         Ok(true)
     }
 
-    pub async fn reconcile_nodes(&self, gossip: GossipState) -> Result<(), ConsensusError> {
+    pub async fn reconcile_nodes(
+        &self,
+        gossip: impl Future<Output = GossipState>,
+    ) -> Result<(), ConsensusError> {
         let _membership_mutation = self.inner.membership_mutation.lock().await;
+        let gossip = gossip.await;
         let leader = self.inner.raft.current_leader().await;
         if leader.as_ref() != Some(&self.inner.local_node_id) {
             return Ok(());
         }
 
         let before = self.effective_membership();
-        let mutations = before.automatic_mutations(&gossip);
+        let state = self.inner.store.inner.state();
+        let admission_fences = (&state.node_admission_fences).into();
+        let mutations = before.automatic_mutations(&gossip, &admission_fences);
         for mutation in mutations {
             tokio::task::consume_budget().await;
             match mutation {
@@ -2537,7 +2574,12 @@ impl Administrator {
         Ok(())
     }
 
-    pub async fn drop_node(&self, node_id: &ClusterNodeName) -> Result<(), ConsensusError> {
+    pub async fn drop_node(
+        &self,
+        identity: &ClusterNodeIdentity,
+        availability: impl Future<Output = GossipState>,
+    ) -> Result<(), ConsensusError> {
+        let node_id = identity.node_id();
         if *node_id == self.inner.local_node_id {
             return Err(ConsensusError::RemoveLocalLeader(node_id.to_string()));
         }
@@ -2552,6 +2594,31 @@ impl Administrator {
         let was_voter = desired_voters.remove(node_id);
         if was_voter && desired_voters.is_empty() {
             return Err(ConsensusError::RemoveLastVoter(node_id.to_string()));
+        }
+
+        let availability = availability.await;
+        if !availability.dead_node_ids.contains(node_id) {
+            return Err(ConsensusError::RemoveLiveNode(node_id.to_string()));
+        }
+        let mut latest_nodes = availability.latest_nodes_by_id();
+        let Some(node) = latest_nodes.remove(node_id) else {
+            return Err(ConsensusError::NodeIncarnationUnknown(node_id.to_string()));
+        };
+        let observed_identity = node.identity();
+        if &observed_identity != identity {
+            return Err(ConsensusError::NodeIncarnationChanged {
+                expected: identity.clone(),
+                observed: observed_identity,
+            });
+        }
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::FenceNodeAdmission {
+                identity: identity.clone(),
+            })
+            .await?;
+        if response.data != ConsensusResponse::Applied {
+            return Err(ConsensusError::UnexpectedResponse);
         }
 
         let operation = format!("remove node '{node_id}'");
@@ -3437,6 +3504,17 @@ fn apply_consensus_command_at(
                 state.cordoned_node_ids.remove(node_id);
             }
         }
+        ConsensusCommand::FenceNodeAdmission { identity } => {
+            let replace = match state.node_admission_fences.get(identity.node_id()) {
+                Some(incarnation) => *incarnation < identity.incarnation(),
+                None => true,
+            };
+            if replace {
+                state
+                    .node_admission_fences
+                    .insert(identity.node_id().clone(), identity.incarnation());
+            }
+        }
         ConsensusCommand::OpenTransaction {
             transaction,
             max_open_transactions,
@@ -4138,9 +4216,10 @@ mod tests {
                 (joining.clone(), "https://node-2.test:7443".to_string()),
             ]),
         };
+        let admission_fences = BTreeMap::new();
 
         assert_eq!(
-            membership.automatic_mutations(&gossip),
+            membership.automatic_mutations(&gossip, &admission_fences),
             vec![
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
@@ -4177,14 +4256,62 @@ mod tests {
                 (joining.clone(), current_address),
             ]),
         };
+        let admission_fences = BTreeMap::new();
 
         assert_eq!(
-            membership.automatic_mutations(&gossip),
+            membership.automatic_mutations(&gossip, &admission_fences),
             vec![
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
                     address: replacement_address,
                     refresh: true,
+                },
+                MembershipMutation::ChangeVoters {
+                    voters: BTreeSet::from([first, joining]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn removed_node_requires_a_newer_incarnation_before_readmission() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![GossipNode {
+                node_id: joining.clone(),
+                incarnation: ClusterNodeIncarnation::new(2),
+                grpc_advertise_addr: String::new(),
+                web_console_advertise_addr: String::new(),
+                interconnect_advertise_addr: "https://node-2.test:7443".to_string(),
+            }],
+            dead_node_ids: BTreeSet::new(),
+        };
+        let membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone()]),
+            nodes: BTreeMap::from([(first.clone(), "https://node-1.test:7443".to_string())]),
+        };
+        let admission_fences = BTreeMap::from([(joining.clone(), ClusterNodeIncarnation::new(2))]);
+
+        assert!(
+            membership
+                .automatic_mutations(&gossip, &admission_fences)
+                .is_empty()
+        );
+
+        let mut restarted = gossip.clone();
+        restarted
+            .live_nodes
+            .first_mut()
+            .assured("the test gossip has one observed node")
+            .incarnation = ClusterNodeIncarnation::new(3);
+        assert_eq!(
+            membership.automatic_mutations(&restarted, &admission_fences),
+            vec![
+                MembershipMutation::AddLearner {
+                    node_id: joining.clone(),
+                    address: "https://node-2.test:7443".to_string(),
+                    refresh: false,
                 },
                 MembershipMutation::ChangeVoters {
                     voters: BTreeSet::from([first, joining]),
@@ -5275,6 +5402,25 @@ mod tests {
             },
         );
         assert!(!state.cordoned_node_ids.contains_key("node-2"));
+    }
+
+    #[test]
+    fn apply_consensus_command_advances_node_admission_fences() {
+        let mut state = StateMachineData::default();
+
+        for incarnation in [7, 5, 9] {
+            apply_consensus_command(
+                &mut state,
+                &ConsensusCommand::FenceNodeAdmission {
+                    identity: node_identity("node-2", incarnation),
+                },
+            );
+        }
+
+        assert_eq!(
+            state.node_admission_fences.get("node-2"),
+            Some(&ClusterNodeIncarnation::new(9))
+        );
     }
 
     #[test]

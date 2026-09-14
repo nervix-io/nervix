@@ -71,7 +71,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 
 #[derive(Debug, Serialize, Deserialize)]
 enum StateEncoding {
-    SemanticRecords,
+    NodeAdmissionFencedRecords,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -85,7 +85,7 @@ struct StateMetadata {
 impl From<&StateMachineData> for StateMetadata {
     fn from(state: &StateMachineData) -> Self {
         Self {
-            encoding: StateEncoding::SemanticRecords,
+            encoding: StateEncoding::NodeAdmissionFencedRecords,
             last_applied_log_id: state.last_applied_log_id.clone(),
             last_membership: state.last_membership.clone(),
             runtime_revision: state.runtime_revision,
@@ -96,7 +96,7 @@ impl From<&StateMachineData> for StateMetadata {
 impl StateMachineData {
     fn load(sm: &Keyspace, metadata: StateMetadata) -> io::Result<Self> {
         let StateMetadata {
-            encoding: StateEncoding::SemanticRecords,
+            encoding: StateEncoding::NodeAdmissionFencedRecords,
             last_applied_log_id,
             last_membership,
             runtime_revision,
@@ -118,6 +118,7 @@ impl StateMachineData {
                 uploads: Records::load(b'o', sm)?,
             },
             cordoned_node_ids: Records::load(b'n', sm)?,
+            node_admission_fences: Records::load(b'f', sm)?,
             transactions: Records::load(b't', sm)?,
             command_executions: Records::load(b'e', sm)?,
         })
@@ -156,6 +157,12 @@ impl StateMachineData {
             .write_changes(&preceding.resources.uploads, b'o', batch, sm)?;
         self.cordoned_node_ids
             .write_changes(&preceding.cordoned_node_ids, b'n', batch, sm)?;
+        self.node_admission_fences.write_changes(
+            &preceding.node_admission_fences,
+            b'f',
+            batch,
+            sm,
+        )?;
         self.transactions
             .write_changes(&preceding.transactions, b't', batch, sm)?;
         self.command_executions

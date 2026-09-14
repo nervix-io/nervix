@@ -220,17 +220,23 @@ impl SessionServiceImpl {
                 }
             }
             Statement::DropNode(drop) => {
+                let availability = self.inner.cluster.availability_state().await;
+                let mut latest_nodes = availability.latest_nodes_by_id();
+                let Some(node) = latest_nodes.remove(&drop.node_id) else {
+                    return Err(Box::new(command_error(format!(
+                        "cannot identify the current incarnation of raft member '{}'",
+                        drop.node_id
+                    ))));
+                };
                 let membership = self.inner.consensus.membership_nodes().await;
                 CommandExecutionEffect::DropNode {
-                    node_id: drop.node_id.clone(),
+                    identity: node.identity(),
                     member_at_admission: membership.contains_key(&drop.node_id),
                 }
             }
             statement if is_queueable_transaction_statement(statement) => {
                 request.domain.as_ref().ok_or_else(|| {
-                    Box::new(command_error(
-                        "durable configuration application requires a domain".to_string(),
-                    ))
+                    Box::new(command_error("no active domain selected".to_string()))
                 })?;
                 CommandExecutionEffect::Transaction {
                     transaction_id: format!("command.{}", reference.as_str()),
@@ -327,9 +333,9 @@ impl SessionServiceImpl {
                 .await
             }
             CommandExecutionEffect::DropNode {
-                node_id,
+                identity,
                 member_at_admission,
-            } => self.drop_admitted_node(node_id, member_at_admission).await,
+            } => self.drop_admitted_node(identity, member_at_admission).await,
         }
     }
 

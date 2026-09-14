@@ -141,6 +141,35 @@ impl Harness {
 }
 
 #[tokio::test]
+async fn node_admission_fence_recovers_after_reopen() -> TestResult {
+    let mut harness = Harness::new().await?;
+    let identity = ClusterNodeIdentity::new(
+        ClusterNodeName::parse("node-2")?,
+        ClusterNodeIncarnation::new(7),
+    );
+    harness
+        .apply(
+            1,
+            ConsensusCommand::FenceNodeAdmission {
+                identity: identity.clone(),
+            },
+        )
+        .await?;
+
+    let harness = harness.reopen().await?;
+    assert_eq!(
+        harness
+            .store
+            .inner
+            .state()
+            .node_admission_fences
+            .get(identity.node_id()),
+        Some(&identity.incarnation())
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn record_state_and_applied_position_recover_together_at_each_boundary() -> TestResult {
     for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
         tokio::task::consume_budget().await;

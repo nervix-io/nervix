@@ -1158,6 +1158,15 @@ impl SessionServiceImpl {
             if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
                 return self.not_leader_response(&req.query, leader).await;
             }
+            #[cfg(feature = "testing")]
+            self.inner
+                .runtime
+                .pause_command_admission_if_armed(self.inner.consensus.local_node_id())
+                .await;
+            let leader = self.inner.consensus.current_leader().await;
+            if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
+                return self.not_leader_response(&req.query, leader).await;
+            }
             let lock = self
                 .inner
                 .command_executions

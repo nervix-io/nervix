@@ -3121,6 +3121,7 @@ pub(crate) struct RawTestSession {
     request_tx: mpsc::Sender<SessionRequest>,
     response: tonic::Streaming<proto::SessionResponse>,
     pending_subscriptions: VecDeque<proto::SubscriptionEvent>,
+    pending_server_errors: VecDeque<TestServerEvent>,
 }
 
 pub(crate) enum TestSession {
@@ -3312,8 +3313,15 @@ impl RawTestSession {
                     self.pending_subscriptions.push_back(event);
                 }
                 Some(proto::SessionResponse {
-                    event: Some(Event::Server(_)),
-                }) => {}
+                    event: Some(Event::Server(event)),
+                }) => {
+                    if event.level == i32::from(ServerEventLevel::Error) {
+                        self.pending_server_errors.push_back(TestServerEvent {
+                            level: event.level,
+                            message: event.message,
+                        });
+                    }
+                }
                 Some(proto::SessionResponse {
                     event: Some(Event::Suggest(_)),
                 }) => {}
@@ -3362,8 +3370,15 @@ impl RawTestSession {
                             }));
                         }
                         Some(proto::SessionResponse {
-                            event: Some(Event::Server(_)),
-                        }) => {}
+                            event: Some(Event::Server(event)),
+                        }) => {
+                            if event.level == i32::from(ServerEventLevel::Error) {
+                                self.pending_server_errors.push_back(TestServerEvent {
+                                    level: event.level,
+                                    message: event.message,
+                                });
+                            }
+                        }
                         Some(proto::SessionResponse {
                             event: Some(Event::Suggest(_)),
                         })
@@ -3395,6 +3410,9 @@ impl RawTestSession {
         &mut self,
         timeout_duration: Duration,
     ) -> io::Result<Option<TestServerEvent>> {
+        if let Some(event) = self.pending_server_errors.pop_front() {
+            return Ok(Some(event));
+        }
         let deadline = sleep(timeout_duration);
         tokio::pin!(deadline);
         loop {
@@ -3626,6 +3644,7 @@ async fn open_raw_session(server: &str, domain: &str) -> io::Result<TestSession>
         request_tx,
         response,
         pending_subscriptions: VecDeque::new(),
+        pending_server_errors: VecDeque::new(),
     })))
 }
 

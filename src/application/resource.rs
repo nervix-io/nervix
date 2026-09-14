@@ -336,6 +336,35 @@ impl SessionServiceImpl {
             if holds_current_resource(&local_node) {
                 continue;
             }
+            let local_manifest = self.inner.resource_store.read_manifest(&resource.id).await;
+            let local_error = match local_manifest {
+                Ok(manifest) if manifest.resource == resource => {
+                    let replica = ResourceNodeStatus {
+                        key: local_key,
+                        state: ResourceNodeState::Ready,
+                        root_checksum: Some(manifest.resource.root_checksum),
+                        last_verified_at: Some(current_timestamp()),
+                        source_node: Some(local_node.clone()),
+                        error: None,
+                    };
+                    if let Err(error) = self.publish_resource_replica(replica).await {
+                        self.broadcast_error(error);
+                    }
+                    continue;
+                }
+                Ok(manifest) => format!(
+                    "installed manifest for resource '{}@{}' does not match its durable version; \
+                     found root checksum {}",
+                    resource.id.identifier.as_str(),
+                    resource.id.version,
+                    manifest.resource.root_checksum,
+                ),
+                Err(error) => format!(
+                    "failed to read the installed manifest for resource '{}@{}': {error}",
+                    resource.id.identifier.as_str(),
+                    resource.id.version,
+                ),
+            };
             let Some(source_node) = resource_replicas.and_then(|replicas| {
                 replicas.iter().find_map(|(node, replica)| {
                     (node != &local_node
@@ -346,6 +375,25 @@ impl SessionServiceImpl {
                     .then(|| node.clone())
                 })
             }) else {
+                let failed = ResourceNodeStatus {
+                    key: local_key,
+                    state: ResourceNodeState::Failed,
+                    root_checksum: None,
+                    last_verified_at: None,
+                    source_node: None,
+                    error: Some(local_error),
+                };
+                let already_reported = match resource_replicas {
+                    Some(replicas) => match replicas.get(&local_node) {
+                        Some(replica) => replica == &failed,
+                        None => false,
+                    },
+                    None => false,
+                };
+                if !already_reported && let Err(error) = self.publish_resource_replica(failed).await
+                {
+                    self.broadcast_error(error);
+                }
                 continue;
             };
             missing.push(ResourceReplication {

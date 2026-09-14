@@ -963,6 +963,12 @@ impl SessionServiceImpl {
                     let domain = domains
                         .get(domain_id)
                         .ok_or_else(|| format!("domain '{}' does not exist", domain_id.as_str()))?;
+                    if self.inner.runtime.domain_alter_is_active(domain_id) {
+                        return Err(DomainAlterError::ConcurrentAlter {
+                            domain: domain_id.clone(),
+                        }
+                        .to_string());
+                    }
                     if let DomainStatus::Paused = domain.status {
                         return Err(format!(
                             "domain '{}' is paused by a model alteration",

@@ -6,7 +6,7 @@
 //! - **Must not know.** NSPL parsing, sessions, runtime activation, or transport responses.
 
 use nervix_models::{
-    ClusterNodeName, CommandExecutionReference, DomainName, DomainState, Statement, Timestamp,
+    ClusterNodeIdentity, CommandExecutionReference, DomainName, DomainState, Statement, Timestamp,
     UserName,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -100,7 +100,7 @@ pub enum CommandExecutionEffect {
         password_hash: String,
     },
     DropNode {
-        node_id: ClusterNodeName,
+        identity: ClusterNodeIdentity,
         member_at_admission: bool,
     },
 }
