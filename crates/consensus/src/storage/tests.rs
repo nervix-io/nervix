@@ -518,6 +518,67 @@ async fn snapshots_recover_state_and_snapshot_metadata_atomically() -> TestResul
 }
 
 #[tokio::test]
+async fn an_interrupted_installation_finishes_on_the_next_start() -> TestResult {
+    let mut source = Harness::new().await?;
+    source
+        .apply(
+            1,
+            ConsensusCommand::PutDomain {
+                domain: Box::new(Harness::domain("source")),
+            },
+        )
+        .await?;
+    let built = source.store.build_snapshot().await?;
+    let expected = source.store.inner.state();
+    for operation in ["snapshot_clear", "snapshot_records", "snapshot_installed"] {
+        for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
+            tokio::task::consume_budget().await;
+            let mut target = Harness::new().await?;
+            target
+                .apply(
+                    1,
+                    ConsensusCommand::PutDomain {
+                        domain: Box::new(Harness::domain("target")),
+                    },
+                )
+                .await?;
+            let staged = target.receive(&built.snapshot).await?;
+            target
+                .store
+                .inner
+                .faults
+                .fail_next(operation.to_owned(), boundary);
+            assert!(
+                target
+                    .store
+                    .install_snapshot(&built.meta, staged)
+                    .await
+                    .is_err(),
+                "the injected {operation} failure must stop the installation"
+            );
+            let mut target = target.reopen().await?;
+            assert_eq!(
+                target.store.inner.state(),
+                expected,
+                "a node interrupted at {operation} starts on the generation it published"
+            );
+            let current = target
+                .store
+                .get_current_snapshot()
+                .await?
+                .ok_or("the published generation is missing after the interrupted install")?;
+            assert_eq!(current.meta, built.meta);
+            assert_eq!(
+                Harness::read_sections(&current.snapshot).await?,
+                Harness::read_sections(&built.snapshot).await?
+            );
+        }
+    }
+    drop(built);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_snapshot_is_sealed_as_bounded_sections() -> TestResult {
     let mut source = Harness::new().await?;
     for index in 1..=8 {

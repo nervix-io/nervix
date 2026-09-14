@@ -88,6 +88,10 @@ mod enabled {
                 effect: Effect::Fail,
             });
         }
+        /// Whether an armed failure is still waiting for the operation it names.
+        pub fn is_armed(&self) -> bool {
+            self.inner.lock().is_some()
+        }
         pub fn pause_next(&self, operation: String, boundary: StorageBoundary) -> StoragePause {
             let gate = Arc::new(Gate::default());
             *self.inner.lock() = Some(ArmedFault {
