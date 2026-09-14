@@ -49,9 +49,10 @@ committed revisions and may coalesce intermediate revisions; readers retrieve a 
 view. A storage failure stops that node's consensus writes and returns an error. An error does not
 prove that the command was uncommitted: the durable write may have completed before the failure
 was reported. On restart, recovery loads complete durable state and replays committed log entries.
-Inspect the resulting domain or transaction state before retrying an uncertain administrative
-operation. Persisted consensus records must have the current complete storage shape; incompatible
-or incomplete stored state fails startup and must be recreated.
+Persistent administrative requests carry stable execution references. Clients retain the same
+reference across an uncertain transport outcome and join the admitted execution or retrieve its
+retained terminal result. Persisted consensus records must have the current complete storage shape;
+incompatible or incomplete stored state fails startup and must be recreated.
 
 ## Replication And Log Retention
 
@@ -167,13 +168,18 @@ not swap the active registry state. This supports coordinated wire-schema, inter
 relay, processor, emitter, ingestor, generator, placement, and dependent-node migrations without
 exposing an invalid intermediate graph.
 
-Other eligible statements apply individually. `COMMIT` records each step's effect, executed
-quiesce level, and progress in one Raft operation and stops at the first failure. Its successful
-output is only the highest quiesce level actually executed across the transaction; it does not
-repeat the individual command outputs. A new leader automatically resumes every
-`COMMITTING` transaction from its recorded progress: completed steps are not repeated, and a
-failed remaining step records its statement number and error while preserving the applied prefix.
-Atomicity still does not span the whole transaction.
+Other eligible statements apply individually. `COMMIT` records authoritative effect progress and
+completed application separately and stops at the first definitive failure. A transaction remains
+`COMMITTING` after a step's authoritative state is durable while runtime activation, source
+readiness, remote stopping, ownership handoff, or gate release is outstanding. It becomes
+`COMMITTED` only after the final step is usable on the current live-node set and its outcome is
+authoritatively visible. Its successful output is only the highest quiesce level actually executed
+across the transaction; it does not repeat the individual command outputs.
+
+A new leader automatically resumes every `COMMITTING` transaction from its recorded applying step.
+Completed effects are not repeated, and a failed remaining step records its statement number and
+error while preserving the applied prefix. Repeating the outstanding `COMMIT` joins this execution
+and waits for the retained terminal result. Atomicity still does not span the whole transaction.
 
 Finished transactions remain as small tombstones containing the outcome, step progress, errors,
 and executed quiesce levels. During retention, attach reports the exact outcome and aggregate
@@ -359,6 +365,10 @@ forms, and the plan output.
 independent units after one times out. Its result lists every successful move and failure. Any failed
 unit makes the command unsuccessful, while a later `DRAIN NODE` retries the units still owned by the
 cordoned node. Endpoint and Syslog listeners bind on every live node and are not schedule units.
+
+`DROP NODE` records the stopped process incarnation before removing its Raft membership. Delayed
+gossip cannot admit that process again. Starting the node again creates a newer incarnation, which
+can join the cluster normally.
 
 Unexpected owner loss remains a termination and uses the failover path. The failed task and its
 volatile buffers disappear immediately, attached work is negatively acknowledged, and the scheduler

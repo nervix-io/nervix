@@ -5,12 +5,15 @@ package io.nervix.api.v1;
 service SessionService {
   rpc Session(stream SessionRequest) returns (stream SessionResponse);
   rpc UploadResource(stream UploadResourceRequest) returns (UploadResourceResponse);
-  rpc WaitForResourceReady(WaitForResourceReadyRequest) returns (WaitForResourceReadyResponse);
 }
 
 message CommandRequest {
   string query = 1;
   string domain = 2;
+  // Stable across redirects and reconnects for this logical command.
+  string execution_reference = 3;
+  // Required when this command appends to an already-open transaction.
+  optional uint64 expected_transaction_position = 4;
 }
 
 message Diagnostic {
@@ -40,6 +43,7 @@ message CommandResult {
   string leader_web_console_uri = 8;
   repeated CommandResult results = 9;
   TransactionStatus transaction = 10;
+  string execution_reference = 11;
 }
 
 enum TransactionState {
@@ -163,21 +167,7 @@ message UploadResourceResponse {
   CommandResultKind kind = 5;
   string leader = 6;
   string leader_grpc_uri = 7;
-  bool published = 8;
-  bool cluster_ready = 9;
-}
-
-message WaitForResourceReadyRequest {
-  string name = 1;
-  uint64 version = 2;
-  string domain = 3;
-  uint64 timeout_millis = 4;
-}
-
-message WaitForResourceReadyResponse {
-  uint64 version = 1;
-  bool cluster_ready = 2;
-  string message = 3;
+  string upload_identity = 8;
 }
 
 message SessionRequest {

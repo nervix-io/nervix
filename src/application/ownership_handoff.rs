@@ -1399,7 +1399,9 @@ impl SessionServiceImpl {
         }
         self.discard_ownership_handoff_state(&handoff.operation_id, domain, &handoff.moves)
             .await;
-        self.release_cluster_entity_gates(handoff.gate).await;
+        self.release_cluster_entity_gates_and_wait(handoff.gate)
+            .await
+            .map_err(OwnershipHandoffError::transport)?;
         Ok(())
     }
 

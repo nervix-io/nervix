@@ -635,6 +635,92 @@ Feature: Placement policies
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "consolidated_owner"
     And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "consolidated_owner"
 
+  @command_completion
+  Scenario: A disconnected standalone command resumes by execution reference
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}} PLACEMENT SUGGEST SEPARATION;
+      CREATE SCHEMA detached_event ( id I64 );
+      CREATE RELAY detached_input SCHEMA detached_event UNBRANCHED;
+      CREATE RELAY detached_stage SCHEMA detached_event UNBRANCHED;
+      CREATE RELAY detached_output SCHEMA detached_event UNBRANCHED;
+      CREATE JUNCTION detached_source FROM detached_input UNBRANCHED
+        TO detached_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE JUNCTION detached_sink FROM detached_stage UNBRANCHED
+        TO detached_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      """
+    Given the entity gate for domain "{{domain}}" pauses after engagement
+    When this NSPL command request with execution reference "detached-placement" begins executing in the background on the leader node
+      """
+      ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
+      """
+    Then the entity gate pause for domain "{{domain}}" is reached
+    When the background command request connection is dropped
+    And the entity gate pause for domain "{{domain}}" is released
+    And this NSPL command request with execution reference "detached-placement" is executed on the leader node
+      """
+      ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
+      """
+    Then the last command output contains
+      """
+      set domain '{{domain}}' placement to REQUIRE COLOCATION
+      """
+    When these NSPL commands are executed on node "node-2"
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then the last command output contains
+      """
+      default policy: REQUIRE COLOCATION
+      """
+
+  @command_completion
+  Scenario: A caller deadline detaches from standalone command execution
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}} PLACEMENT SUGGEST SEPARATION;
+      CREATE SCHEMA deadline_event ( id I64 );
+      CREATE RELAY deadline_input SCHEMA deadline_event UNBRANCHED;
+      CREATE RELAY deadline_stage SCHEMA deadline_event UNBRANCHED;
+      CREATE RELAY deadline_output SCHEMA deadline_event UNBRANCHED;
+      CREATE JUNCTION deadline_source FROM deadline_input UNBRANCHED
+        TO deadline_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE JUNCTION deadline_sink FROM deadline_stage UNBRANCHED
+        TO deadline_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      """
+    Given the entity gate for domain "{{domain}}" pauses after engagement
+    When this NSPL command request with execution reference "deadline-placement" begins executing in the background on the leader node
+      """
+      ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
+      """
+    Then the entity gate pause for domain "{{domain}}" is reached
+    When the background command caller deadline expires after "100ms"
+    And the entity gate pause for domain "{{domain}}" is released
+    And this NSPL command request with execution reference "deadline-placement" is executed on the leader node
+      """
+      ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
+      """
+    Then the last command output contains
+      """
+      set domain '{{domain}}' placement to REQUIRE COLOCATION
+      """
+    When these NSPL commands are executed on node "node-3"
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then the last command output contains
+      """
+      default policy: REQUIRE COLOCATION
+      """
+
   @transaction-planned-handoff
   Scenario: A transactional placement consolidation commits one gated schedule
     Given the production sticky scheduler is configured

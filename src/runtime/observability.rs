@@ -484,16 +484,17 @@ impl Runtime {
             None => IngestorQuiesceCounters::default(),
         };
         if !self.inner.executions.contains_key(domain) {
-            if let Some(error) = self.inner.domain_instantiation_errors.get(domain) {
-                return Err(error.value().clone());
-            }
+            let transient_error = match self.inner.domain_instantiation_errors.get(domain) {
+                Some(error) => Some(error.value().clone()),
+                None => self.ingestor_transient_error(domain, ingestor),
+            };
             return Ok(IngestorDescribe {
                 running: false,
                 ready: false,
                 quiesce_state: quiesce_state.clone(),
                 quiesce_counters,
                 memory_backpressure_paused,
-                transient_error: self.ingestor_transient_error(domain, ingestor),
+                transient_error,
                 reconnect_backoff: self.ingestor_reconnect_backoff(domain, ingestor),
                 reconnect_wait_millis: self.ingestor_reconnect_wait_millis(domain, ingestor),
                 kafka_domain_offsets: None,

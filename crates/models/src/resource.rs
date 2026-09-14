@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sorted_vec::SortedVec;
 use strum::{AsRefStr, EnumString, IntoStaticStr};
 
-use crate::{ClusterNodeName, DomainName, ResourceName, Timestamp, UserName};
+use crate::{ClusterNodeIdentity, ClusterNodeName, DomainName, ResourceName, Timestamp, UserName};
 
 const MAX_UPLOAD_IDENTITY_BYTES: usize = 128;
 
@@ -172,17 +172,43 @@ impl ResourceUploadKey {
     RkyvDeserialize,
 )]
 pub enum ResourceUploadState {
-    Receiving,
-    Published { root_checksum: String },
+    Applying {
+        root_checksum: String,
+    },
+    Completed {
+        root_checksum: String,
+        outcome_revision: u64,
+    },
+    Failed {
+        root_checksum: String,
+        outcome_revision: u64,
+        reason: String,
+    },
 }
 
 impl ResourceUploadState {
-    pub fn is_published(&self) -> bool {
-        matches!(self, Self::Published { .. })
+    pub fn root_checksum(&self) -> &str {
+        match self {
+            Self::Applying { root_checksum }
+            | Self::Completed { root_checksum, .. }
+            | Self::Failed { root_checksum, .. } => root_checksum,
+        }
+    }
+
+    pub fn outcome_revision(&self) -> Option<u64> {
+        match self {
+            Self::Applying { .. } => None,
+            Self::Completed {
+                outcome_revision, ..
+            }
+            | Self::Failed {
+                outcome_revision, ..
+            } => Some(*outcome_revision),
+        }
     }
 }
 
-/// The durable assignment and publication outcome of one administrative upload.
+/// The durable assignment and installation outcome of one administrative upload.
 #[derive(
     Debug,
     Clone,
@@ -279,7 +305,7 @@ pub struct ResourceReplicaKey {
     pub domain: DomainName,
     pub identifier: ResourceName,
     pub version: u64,
-    pub node_id: ClusterNodeName,
+    pub node: ClusterNodeIdentity,
 }
 
 impl ResourceReplicaKey {
@@ -287,13 +313,13 @@ impl ResourceReplicaKey {
         domain: DomainName,
         identifier: ResourceName,
         version: u64,
-        node_id: ClusterNodeName,
+        node: ClusterNodeIdentity,
     ) -> Self {
         Self {
             domain,
             identifier,
             version,
-            node_id,
+            node,
         }
     }
 
@@ -320,7 +346,7 @@ pub struct ResourceNodeStatus {
     pub state: ResourceNodeState,
     pub root_checksum: Option<String>,
     pub last_verified_at: Option<Timestamp>,
-    pub source_node_id: Option<ClusterNodeName>,
+    pub source_node: Option<ClusterNodeIdentity>,
     pub error: Option<String>,
 }
 
@@ -385,8 +411,8 @@ impl ResourceVersionStatus {
             .map(|counter| counter.next_version)
     }
 
-    /// Returns the highest published version of the named resource in `domain`, which is `None`
-    /// when the resource is declared but has no published version yet.
+    /// Returns the highest installed version of the named resource in `domain`, which is `None`
+    /// when the resource is declared but has no installed version yet.
     pub fn latest_version(&self, domain: &DomainName, identifier: &ResourceName) -> Option<u64> {
         let next = self.next_version(domain, identifier)?;
         let latest = next.checked_sub(1)?;

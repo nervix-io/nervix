@@ -244,6 +244,28 @@ impl InterconnectRequest for ApplicationHealthProbe {
     const TIMEOUT: Duration = Duration::from_secs(1);
 }
 
+/// The application progress one process incarnation has reached for control-plane completion.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApplicationRevisionResponse {
+    pub identity: ClusterNodeIdentity,
+    pub authoritative: u64,
+    pub runtime_prepared: u64,
+    pub runtime_ready: u64,
+}
+
+/// Requests the current application progress from one authenticated node.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApplicationRevisionRequest;
+
+impl InterconnectRequest for ApplicationRevisionRequest {
+    type Response = ApplicationRevisionResponse;
+
+    const NAME: &'static str = "application_revision";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
+    const TIMEOUT: Duration = Duration::from_secs(2);
+}
+
 impl InterconnectRequest for DomainClockProgressRequest {
     type Response = ();
 

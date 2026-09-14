@@ -11,10 +11,53 @@ Feature: Domain creation
       """
       created domain '{{domain}}'
       """
-    And node "node-1" eventually reports status containing "{{domain}} status=Stopped pace=UNPACED"
+    When these NSPL commands are executed on node "node-1"
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then the last command output contains
+      """
+      domain: {{domain}}
+      status: stopped
+      """
+    When these NSPL commands are executed on node "node-1"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      {{domain}} status=Stopped pace=UNPACED
+      """
 
     Examples:
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 0             |
       | 3            | 1             |
+
+  @command_completion
+  Scenario: A created stopped domain is immediately visible through every follower
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on node "node-2"
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then the last command output contains
+      """
+      domain: {{domain}}
+      status: stopped
+      """
+    When these NSPL commands are executed on node "node-3"
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then the last command output contains
+      """
+      domain: {{domain}}
+      status: stopped
+      """

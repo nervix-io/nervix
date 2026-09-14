@@ -191,7 +191,7 @@ Feature: Logical ingestion time and admission
         TO observations INHERIT ALL SET observed_at = now(), samples = 1
         UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WINDOW PROCESSOR delivered FROM buffered_events
-        WIDTH 2s DURATION STEP 2s DURATION UNBRANCHED
+        WIDTH 2 MESSAGES STEP 2 MESSAGES UNBRANCHED
         TO observations SET sequence = FIRST(input.sequence),
           occurred_at = FIRST(input.occurred_at),
           observed_at = FIRST(input.occurred_at), samples = COUNT(input.sequence)

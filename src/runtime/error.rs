@@ -27,6 +27,14 @@ pub enum RuntimeError {
     #[error("failed to build domain execution for '{domain}': {reason}")]
     BuildDomainExecution { domain: String, reason: String },
     #[error(
+        "timed out waiting for runtime revision {revision} to be prepared on nodes \
+         {pending_nodes:?}"
+    )]
+    RuntimeRevisionPreparation {
+        revision: u64,
+        pending_nodes: Vec<ClusterNodeName>,
+    },
+    #[error(
         "timed out waiting for runtime revision {revision} to become ready on nodes \
          {pending_nodes:?}"
     )]

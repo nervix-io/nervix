@@ -48,9 +48,10 @@ pub use observation::{
 };
 pub use pool::PoolClass;
 pub use request::{
-    ApplicationHealthProbe, HandlerRegistrationError, InterconnectDuplexRequest,
-    InterconnectRequest, InterconnectStreamRequest, RemoteRequestFailure, RequestContext,
-    RequestError, RequestSubquota, StreamHandlerError, StreamingResponse,
+    ApplicationHealthProbe, ApplicationRevisionRequest, ApplicationRevisionResponse,
+    HandlerRegistrationError, InterconnectDuplexRequest, InterconnectRequest,
+    InterconnectStreamRequest, RemoteRequestFailure, RequestContext, RequestError, RequestSubquota,
+    StreamHandlerError, StreamingResponse,
 };
 use request::{RequestEnvelope, RequestState, ResponseEnvelope};
 
