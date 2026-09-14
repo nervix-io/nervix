@@ -797,10 +797,7 @@ impl FaultInjection {
         }
 
         let current_incarnation = responding_node.incarnation().get();
-        let failed_incarnation = match current_incarnation.checked_add(1) {
-            Some(incarnation) => incarnation,
-            None => 0,
-        };
+        let failed_incarnation = if current_incarnation == 0 { 1 } else { 0 };
         ClusterNodeIdentity::new(
             responding_node.node_id().clone(),
             ClusterNodeIncarnation::new(failed_incarnation),
