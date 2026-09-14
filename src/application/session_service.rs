@@ -13,10 +13,10 @@ use std::sync::{Arc as StdArc, atomic::AtomicU64};
 use ahash::RandomState;
 use arch_into::ArchInto;
 use dashmap::DashMap;
-use nervix_consensus::{Administrator, ConsensusError, ConsensusRuntimeState, Proposer};
+use nervix_consensus::{Administrator, ConsensusError, Observer, Proposer};
 use nervix_interconnect::Transport;
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainStatus, ModelKind, ModelName, ResourceId, ResourceName,
+    DomainName, DomainStatus, ModelKind, ModelName, ResourceId, ResourceName,
     ResourceUploadIdentity, ResourceUploadKey,
 };
 use nervix_nspl::{
@@ -51,6 +51,7 @@ use super::{
         ResourceUploadError, requested_resource_versions, resource_ref_suggestions,
         resource_version_suggestions,
     },
+    runtime_admission::RuntimeAdmission,
     scheduling::RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
     subscription::{SessionSubscriptions, SubscriptionInterestKey},
 };
@@ -145,6 +146,8 @@ pub(in crate::application) struct SessionServiceInner {
     /// Also held by the HTTPS server, which reads the current certificate on every accept.
     pub(in crate::application) http_tls_server_config: Arc<RwLock<Option<StdArc<ServerConfig>>>>,
     pub(in crate::application) runtime: Runtime,
+    /// Also held by the initial schedule reconciliation task until process shutdown.
+    pub(in crate::application) runtime_admission: Arc<RuntimeAdmission>,
     pub(in crate::application) replica_count: usize,
     pub(in crate::application) shutdown: CancellationToken,
     pub(in crate::application) events: SessionEvents,
@@ -601,12 +604,21 @@ impl SessionService for SessionServiceImpl {
     }
 }
 
-pub(in crate::application) async fn apply_cluster_runtime_state(
+pub(in crate::application) async fn apply_current_cluster_runtime_state(
     runtime: &Runtime,
     cluster: &cluster::ClusterHandle,
-    local_node_id: &ClusterNodeName,
-    state: ConsensusRuntimeState,
+    registry: &Registry,
+    consensus: &Observer,
+    admission: &RuntimeAdmission,
+    shutdown: &CancellationToken,
 ) -> Result<(), crate::runtime::RuntimeError> {
+    let Some(state) = admission.runtime_state(consensus, shutdown).await else {
+        return Ok(());
+    };
+    let local_node_id = consensus.local_node_id();
+    if let Err(error) = registry.synchronize_cluster_schedule(&state.schedule) {
+        warn!(error = %error, "failed to synchronize registry from admitted cluster schedule");
+    }
     let mut cluster_state = cluster.subscribe_state_changes().await;
     let has_running_domain = state
         .domains
@@ -863,12 +875,13 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn apply_current_cluster_state(
         &self,
     ) -> Result<(), crate::runtime::RuntimeError> {
-        let state = self.inner.consensus.current_runtime_state().await;
-        apply_cluster_runtime_state(
+        apply_current_cluster_runtime_state(
             &self.inner.runtime,
             &self.inner.cluster,
-            self.inner.consensus.local_node_id(),
-            state,
+            &self.inner.registry,
+            &self.inner.consensus,
+            &self.inner.runtime_admission,
+            &self.inner.shutdown,
         )
         .await
     }

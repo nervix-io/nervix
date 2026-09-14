@@ -554,7 +554,11 @@ build and the existing tests, and nothing in it changes behavior.
   references may contain documentation routing, agent workflow, and concise correctness checks;
   detailed syntax, semantic explanations, rationale, examples, and tuning guidance belong in
   `docs/src` and should be read from there rather than restated in the skill.
-- Use `just validate` for formatting and validation; do not invoke Cargo formatting directly.
+- Always prefer a `just` command over invoking Cargo directly. Repository recipes establish the
+  required dependencies, environment, and ordering for builds, checks, lints, tests, benchmarks,
+  and formatting. When the needed invocation has no recipe, add a focused `justfile` recipe and use
+  it instead of running Cargo directly.
+- Use `just validate` for formatting and validation.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, `as`
   casts outside imports and qualified paths, bare `unwrap` and `expect`, outcomes dropped with
   `let _ =` instead of stating their class, `saturating_*` and `wrapping_*` calls outside the time

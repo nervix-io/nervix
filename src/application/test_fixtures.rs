@@ -214,6 +214,7 @@ fn test_session_service(
             resource_store,
             http_tls_server_config: Arc::new(RwLock::new(None)),
             runtime: Runtime::new(),
+            runtime_admission: Arc::new(super::runtime_admission::RuntimeAdmission::new()),
             replica_count: 0,
             shutdown: CancellationToken::new(),
             events: SessionEvents::new(16),

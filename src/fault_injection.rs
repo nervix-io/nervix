@@ -53,6 +53,7 @@ struct FaultInjectionState {
     forced_entity_drain_timeouts: DashMap<DomainName, (), RandomState>,
     transaction_binding_drops: DashMap<ClusterNodeName, (), RandomState>,
     consensus_probes: DashMap<ClusterNodeName, ConsensusProbe, RandomState>,
+    blocked_consensus_connectivity: DashMap<ClusterNodeName, (), RandomState>,
     bulk_executions: DashMap<ClusterNodeName, NodeBulkExecution, RandomState>,
     /// Application health handlers clone a pause so it remains alive after its map guard drops.
     health_response_pauses: DashMap<HealthResponsePauseKey, Arc<TestPause>, RandomState>,
@@ -82,6 +83,7 @@ struct FaultInjectionState {
 struct ConsensusProbe {
     observer: nervix_consensus::Observer,
     fault: nervix_consensus::StorageFault,
+    connectivity: nervix_consensus::ConnectivityFault,
 }
 
 impl std::fmt::Debug for ConsensusProbe {
@@ -155,6 +157,7 @@ impl Default for FaultInjection {
                 forced_entity_drain_timeouts: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
                 consensus_probes: DashMap::default(),
+                blocked_consensus_connectivity: DashMap::default(),
                 bulk_executions: DashMap::default(),
                 health_response_pauses: DashMap::default(),
                 command_pauses: DashMap::default(),
@@ -185,13 +188,38 @@ impl FaultInjection {
         node: ClusterNodeName,
         consensus: &nervix_consensus::Consensus,
     ) {
+        let connectivity = consensus.connectivity_fault();
+        if self
+            .inner
+            .blocked_consensus_connectivity
+            .contains_key(&node)
+        {
+            connectivity.block();
+        }
         self.inner.consensus_probes.insert(
             node,
             ConsensusProbe {
                 observer: consensus.observer(),
                 fault: consensus.storage_fault(),
+                connectivity,
             },
         );
+    }
+
+    pub fn block_consensus_connectivity(&self, node: ClusterNodeName) {
+        self.inner
+            .blocked_consensus_connectivity
+            .insert(node.clone(), ());
+        if let Some(probe) = self.inner.consensus_probes.get(&node) {
+            probe.connectivity.block();
+        }
+    }
+
+    pub fn restore_consensus_connectivity(&self, node: &ClusterNodeName) {
+        self.inner.blocked_consensus_connectivity.remove(node);
+        if let Some(probe) = self.inner.consensus_probes.get(node) {
+            probe.connectivity.restore();
+        }
     }
 
     pub fn consensus_observer(&self, node: &ClusterNodeName) -> nervix_consensus::Observer {

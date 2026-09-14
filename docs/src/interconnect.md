@@ -134,7 +134,7 @@ The management connection reserves its 64 outbound stream slots as follows:
 | Discovery | 4 |
 | Application liveness | 8 |
 | Progress reports and relay status | 8 |
-| Relay admission | 4 |
+| Runtime and relay admission | 4 |
 | Relay cancellation | 4 |
 | Relay terminal outcomes | 4 |
 
@@ -155,7 +155,7 @@ applied separately to incoming and outgoing work across all peers and connection
 | Discovery | 8 |
 | Application liveness | 32 |
 | Domain-clock progress | 8 |
-| Relay admission | 8 |
+| Runtime and relay admission | 8 |
 | Relay cancellation | 4 |
 | Relay terminal outcomes | 4 |
 
@@ -292,8 +292,8 @@ management-event bound, so discovery cannot allocate an arbitrary wire message.
 
 Consensus separates traffic according to the progress it protects:
 
-- heartbeats, votes, leadership notifications, and other small control exchanges use management
-  capacity
+- heartbeats, votes, leadership notifications, linearizable runtime-admission reads, and other
+  small control exchanges use management capacity
 - each leader-to-follower log uses one ordered duplex stream on the replication pool
 - runtime-state replication and ownership handoff use the remaining replication capacity
 - consensus snapshots use the snapshot reservation on the bulk pool
@@ -302,6 +302,20 @@ The ordered append stream can keep multiple batches in flight while preserving f
 consensus-level window bounds a follower to 16 outstanding batches and 16 MiB of unacknowledged log
 data. Heartbeats and elections remain on management capacity, so a full append window does not block
 leadership traffic.
+
+A process restart does not admit ownership-sensitive runtime execution from its recovered local
+state. The restarting node sends `raft_runtime_admission_read` to the leader through the reserved
+management admission capacity. The leader performs a strict Raft `ReadIndex`, which confirms its
+authority with a quorum and returns the inclusive committed log boundary for the read. A follower
+then waits until its own state machine has applied that exact log ID before it reads the coherent
+domain, clock-authority, and schedule state used to install runtime execution. The application
+discards any runtime-state snapshot taken before this proof.
+
+Admission retries on transport, leadership, and quorum failures without depending on a domain or
+schedule notification. Consensus, discovery, administration, shutdown, the interconnect listener,
+and configured application listeners continue running during the wait. Runtime routes remain
+absent, so listening connectors cannot hand payloads to recovered graph execution. The proof is
+process-start admission only; connectivity loss after admission does not revoke execution.
 
 Resource archives and runtime-state snapshots use streamed bulk responses with an exact declared
 length. Consensus snapshots use bounded begin, chunk, and finish operations on the same isolated

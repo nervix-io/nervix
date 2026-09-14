@@ -809,6 +809,11 @@ impl Cluster {
     }
 
     pub(crate) async fn start_node(&mut self, node_id: &str) -> io::Result<()> {
+        self.start_node_process(node_id).await?;
+        self.wait_for_node_consensus_catch_up(node_id).await
+    }
+
+    pub(crate) async fn start_node_process(&mut self, node_id: &str) -> io::Result<()> {
         let handle = self
             .nodes
             .get_mut(node_id)
@@ -839,6 +844,10 @@ impl Cluster {
         if let Some(error) = last_error {
             return Err(error);
         }
+        Ok(())
+    }
+
+    async fn wait_for_node_consensus_catch_up(&self, node_id: &str) -> io::Result<()> {
         let mut leader_applied = None;
         for probe_node_id in self
             .nodes

@@ -3992,6 +3992,33 @@ async fn when_node_is_started(world: &mut ScenarioWorld, node_id: String) {
         .expect("failed to start node");
 }
 
+#[when(expr = "node {string} is started while consensus connectivity is blocked")]
+async fn when_node_is_started_while_consensus_connectivity_is_blocked(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .block_consensus_connectivity(crate::common::cluster::node_name(&node_id));
+    world
+        .cluster_mut()
+        .start_node_process(&node_id)
+        .await
+        .expect("failed to start node with blocked consensus connectivity");
+}
+
+#[when(expr = "consensus connectivity for node {string} is restored")]
+async fn when_consensus_connectivity_for_node_is_restored(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .restore_consensus_connectivity(&crate::common::cluster::node_name(&node_id));
+}
+
 #[when(expr = "node {string} is added to the cluster")]
 async fn when_node_is_added_to_the_cluster(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -12791,6 +12818,32 @@ async fn when_http_payload_is_posted_to_node_and_fails(
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+#[when(
+    expr = "http payload is posted to node {string} with host {string} path {string} and is not \
+            routed"
+)]
+async fn when_http_payload_is_posted_to_node_and_is_not_routed(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let error = world
+        .cluster()
+        .publish_http(&node_id, &host, &path, &payload)
+        .await
+        .expect_err("expected http post to be unrouted");
+    let reported = error.to_string();
+    assert!(
+        reported.contains("404"),
+        "expected http post to node '{node_id}' to be unrouted, got: {reported}"
+    );
 }
 
 #[then("the relay subscription receives a payload")]

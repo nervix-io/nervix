@@ -109,7 +109,7 @@ impl From<LogIdOf> for LogIdRecord {
 }
 
 impl LogIdRecord {
-    fn into_log_id(self) -> LogIdOf {
+    pub(crate) fn into_log_id(self) -> LogIdOf {
         LogId::new(
             openraft::impls::leader_id_adv::LeaderId {
                 term: self.term,
@@ -118,6 +118,18 @@ impl LogIdRecord {
             self.index,
         )
     }
+}
+
+/// Ask the current leader to establish the committed boundary for process runtime admission.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RuntimeAdmissionRead;
+
+impl InterconnectRequest for RuntimeAdmissionRead {
+    type Response = Result<LogIdRecord, ConsensusRequestError>;
+    const NAME: &'static str = "raft_runtime_admission_read";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Admission;
+    const TIMEOUT: Duration = Duration::from_secs(5);
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]

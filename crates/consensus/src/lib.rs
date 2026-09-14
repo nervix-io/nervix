@@ -43,6 +43,10 @@ use openraft::{
     error::{ClientWriteError, RPCError, RaftError, StreamingError},
     metrics::RaftServerMetrics,
     network::{RPCOption, RaftNetworkV2},
+    raft::{
+        ReadPolicy,
+        linearizable_read::{Linearizer, ReadLogId},
+    },
     type_config::{
         alias::{CommittedLeaderIdOf, EntryOf, LeaderIdOf, WatchReceiverOf},
         async_runtime::watch::WatchReceiver,
@@ -60,6 +64,7 @@ use tokio::{
 use tracing::{error, info};
 use triomphe::Arc;
 
+mod connectivity_fault;
 mod durable_batch;
 mod records;
 mod replication;
@@ -77,6 +82,10 @@ use storage::FjallLogReader;
 use storage::FjallStore;
 mod transaction;
 
+#[cfg(any(test, feature = "testing"))]
+pub use connectivity_fault::ConnectivityFault;
+#[cfg(not(any(test, feature = "testing")))]
+use connectivity_fault::ConnectivityFault;
 #[cfg(any(test, feature = "testing"))]
 pub use storage_fault::{StorageBoundary, StorageFault, StoragePause};
 mod wire;
@@ -456,6 +465,23 @@ pub struct ConsensusRuntimeState {
     pub schedule: ClusterSchedule,
     pub domains: BTreeMap<DomainName, DomainState>,
     pub domain_clock_authorities: BTreeMap<DomainName, DomainClockAuthority>,
+}
+
+/// A coherent runtime state read after this process applied a quorum-confirmed Raft log boundary.
+#[derive(Debug, Clone)]
+pub struct AdmittedRuntimeState {
+    committed_log_index: u64,
+    runtime_state: ConsensusRuntimeState,
+}
+
+impl AdmittedRuntimeState {
+    pub fn committed_log_index(&self) -> u64 {
+        self.committed_log_index
+    }
+
+    pub fn into_runtime_state(self) -> ConsensusRuntimeState {
+        self.runtime_state
+    }
 }
 
 #[derive(
@@ -913,6 +939,8 @@ pub enum ConsensusError {
     Endpoint,
     #[error("raft transport failed")]
     Transport,
+    #[error("failed to establish a linearizable consensus read")]
+    LinearizableRead,
     #[error("{0}")]
     Write(String),
     #[error("consensus state changed: {0}")]
@@ -1158,6 +1186,7 @@ struct ConsensusState {
     local_node_id: ClusterNodeName,
     interconnect_advertise_addr: String,
     interconnect: Transport,
+    connectivity: ConnectivityFault,
     raft_retention: RaftRetentionPolicy,
     membership_mutation: AsyncMutex<()>,
     incoming_snapshots: Mutex<BTreeMap<ClusterNodeName, IncomingSnapshotTransfer>>,
@@ -1209,6 +1238,11 @@ impl Consensus {
     #[cfg(feature = "testing")]
     pub fn storage_fault(&self) -> StorageFault {
         self.inner.store.inner.faults.clone()
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn connectivity_fault(&self) -> ConnectivityFault {
+        self.inner.connectivity.clone()
     }
 
     pub fn observer(&self) -> Observer {
@@ -1293,10 +1327,12 @@ impl Consensus {
             .map_err(|_| ConsensusError::Startup)?,
         );
 
+        let connectivity = ConnectivityFault::default();
         let network = NetworkFactory {
             local_node_id: settings.node_id.clone(),
             interconnect: settings.interconnect.clone(),
             executor: settings.executor.clone(),
+            connectivity: connectivity.clone(),
         };
         let raft = Raft::new(
             settings.node_id.clone(),
@@ -1356,6 +1392,7 @@ impl Consensus {
                 local_node_id: settings.node_id,
                 interconnect_advertise_addr: settings.interconnect_advertise_addr,
                 interconnect: settings.interconnect,
+                connectivity,
                 raft_retention: retention,
                 membership_mutation: AsyncMutex::new(()),
                 incoming_snapshots: Mutex::new(BTreeMap::new()),
@@ -1374,9 +1411,33 @@ impl Consensus {
         let receiver = self.protocol_receiver();
         self.inner
             .interconnect
+            .register_handler::<wire::RuntimeAdmissionRead, _, _>(move |_context, _request| {
+                let receiver = receiver.clone();
+                async move {
+                    receiver
+                        .inner
+                        .connectivity
+                        .check()
+                        .map_err(wire::ConsensusRequestError::raft)?;
+                    receiver
+                        .runtime_admission_read()
+                        .await
+                        .map(|read_log_id| read_log_id.log_id().clone().into())
+                        .map_err(wire::ConsensusRequestError::raft)
+                }
+            })?;
+
+        let receiver = self.protocol_receiver();
+        self.inner
+            .interconnect
             .register_handler::<wire::HeartbeatRequest, _, _>(move |context, request| {
                 let receiver = receiver.clone();
                 async move {
+                    receiver
+                        .inner
+                        .connectivity
+                        .check()
+                        .map_err(wire::ConsensusRequestError::raft)?;
                     validate_protocol_origin(
                         context.peer_node_id(),
                         request.0.origin_node_id(),
@@ -1404,6 +1465,9 @@ impl Consensus {
                 move |context, request, items| {
                     let receiver = receiver.clone();
                     async move {
+                        receiver.inner.connectivity.check().map_err(|error| {
+                            nervix_interconnect::StreamHandlerError::new(error.to_string())
+                        })?;
                         validate_protocol_origin(
                             context.peer_node_id(),
                             &request.leader_node_id,
@@ -1425,6 +1489,11 @@ impl Consensus {
             .register_handler::<wire::RequestVote, _, _>(move |context, request| {
                 let receiver = receiver.clone();
                 async move {
+                    receiver
+                        .inner
+                        .connectivity
+                        .check()
+                        .map_err(wire::ConsensusRequestError::raft)?;
                     validate_protocol_origin(
                         context.peer_node_id(),
                         request.0.origin_node_id(),
@@ -1445,6 +1514,11 @@ impl Consensus {
             .register_handler::<wire::BeginSnapshotTransfer, _, _>(move |context, request| {
                 let receiver = receiver.clone();
                 async move {
+                    receiver
+                        .inner
+                        .connectivity
+                        .check()
+                        .map_err(wire::ConsensusRequestError::raft)?;
                     validate_protocol_origin(
                         context.peer_node_id(),
                         request.origin_node_id(),
@@ -1474,6 +1548,11 @@ impl Consensus {
                 let receiver = receiver.clone();
                 async move {
                     receiver
+                        .inner
+                        .connectivity
+                        .check()
+                        .map_err(wire::ConsensusRequestError::raft)?;
+                    receiver
                         .append_snapshot_chunk(
                             context.peer_node_id(),
                             request.transfer_id,
@@ -1496,6 +1575,11 @@ impl Consensus {
                 let receiver = receiver.clone();
                 async move {
                     receiver
+                        .inner
+                        .connectivity
+                        .check()
+                        .map_err(wire::ConsensusRequestError::raft)?;
+                    receiver
                         .finish_snapshot_transfer(context.peer_node_id(), request.transfer_id)
                         .await
                         .map(wire::SnapshotResponseRecord::from)
@@ -1509,6 +1593,11 @@ impl Consensus {
             .register_handler::<wire::TransferLeadership, _, _>(move |context, request| {
                 let receiver = receiver.clone();
                 async move {
+                    receiver
+                        .inner
+                        .connectivity
+                        .check()
+                        .map_err(wire::ConsensusRequestError::raft)?;
                     validate_protocol_origin(
                         context.peer_node_id(),
                         request.origin_node_id(),
@@ -1601,6 +1690,59 @@ impl Observer {
             domains: (&state.domains).into(),
             domain_clock_authorities: (&state.domain_clock_authorities).into(),
         }
+    }
+
+    /// Establish a strict read boundary with the current leader, apply through it locally, and
+    /// then take one coherent runtime-state snapshot.
+    pub async fn admitted_runtime_state(
+        &self,
+    ) -> Result<AdmittedRuntimeState, Report<ConsensusError>> {
+        let leader = self.inner.raft.current_leader().await.ok_or_else(|| {
+            Report::new(ConsensusError::LinearizableRead).attach_printable("no current leader")
+        })?;
+        let read_log_id = if leader == self.inner.local_node_id {
+            self.inner
+                .raft
+                .ensure_linearizable(ReadPolicy::ReadIndex)
+                .await
+                .map_err(|error| {
+                    Report::new(ConsensusError::LinearizableRead)
+                        .attach_printable(error.to_string())
+                })?
+        } else {
+            self.inner.connectivity.check().map_err(|error| {
+                Report::new(ConsensusError::LinearizableRead).attach_printable(error.to_string())
+            })?;
+            let response = self
+                .inner
+                .interconnect
+                .request(&leader, wire::RuntimeAdmissionRead)
+                .await
+                .map_err(|error| {
+                    Report::new(ConsensusError::LinearizableRead)
+                        .attach_printable(error.to_string())
+                })?;
+            let log_id = response
+                .map_err(|error| {
+                    Report::new(ConsensusError::LinearizableRead)
+                        .attach_printable(error.to_string())
+                })?
+                .into_log_id();
+            let read_log_id = ReadLogId::from_log_id(log_id);
+            Linearizer::new(leader, read_log_id.clone(), None)
+                .await_ready(&self.inner.raft)
+                .await
+                .map_err(|error| {
+                    Report::new(ConsensusError::LinearizableRead)
+                        .attach_printable(error.to_string())
+                })?;
+            read_log_id
+        };
+        let runtime_state = self.current_runtime_state().await;
+        Ok(AdmittedRuntimeState {
+            committed_log_index: read_log_id.index(),
+            runtime_state,
+        })
     }
     pub async fn current_domain(&self, domain_id: &DomainName) -> Option<DomainState> {
         self.inner
@@ -2436,6 +2578,18 @@ impl ConsensusState {
 }
 
 impl ProtocolReceiver {
+    async fn runtime_admission_read(
+        &self,
+    ) -> Result<
+        ReadLogId<TypeConfig>,
+        openraft::error::RaftError<TypeConfig, openraft::error::LinearizableReadError<TypeConfig>>,
+    > {
+        self.inner
+            .raft
+            .ensure_linearizable(ReadPolicy::ReadIndex)
+            .await
+    }
+
     pub async fn append_entries(
         &self,
         req: AppendEntriesRequest<TypeConfig>,
@@ -2570,6 +2724,7 @@ struct NetworkFactory {
     local_node_id: ClusterNodeName,
     interconnect: Transport,
     executor: nervix_execution::Executor,
+    connectivity: ConnectivityFault,
 }
 
 #[derive(Clone)]
@@ -2579,6 +2734,7 @@ struct NetworkClient {
     interconnect: Transport,
     executor: nervix_execution::Executor,
     append_path: AppendPath,
+    connectivity: ConnectivityFault,
 }
 
 impl NetworkFactory {
@@ -2589,6 +2745,7 @@ impl NetworkFactory {
             interconnect: self.interconnect.clone(),
             executor: self.executor.clone(),
             append_path,
+            connectivity: self.connectivity.clone(),
         }
     }
 }
@@ -2669,6 +2826,7 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
         rpc: AppendEntriesRequest<TypeConfig>,
         option: RPCOption,
     ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
+        self.connectivity.check().map_err(unreachable_err)?;
         let record = wire::AppendEntriesRecord::from_request(rpc);
         let response = self
             .interconnect
@@ -2710,6 +2868,9 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
             + Unpin
             + 'static,
     {
+        if let Err(error) = self.connectivity.check() {
+            return Box::pin(async move { Err(RPCError::Unreachable(unreachable_err(error))) });
+        }
         match self.append_path {
             AppendPath::Heartbeat => {
                 openraft::network::stream_append_sequential(self, input, option)
@@ -2740,6 +2901,7 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
         rpc: VoteRequest<TypeConfig>,
         option: RPCOption,
     ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
+        self.connectivity.check().map_err(unreachable_err)?;
         let rpc_timeout = option.hard_ttl();
         let response = self
             .interconnect
@@ -2773,6 +2935,10 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
         + 'static,
         option: RPCOption,
     ) -> Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
+        self.connectivity
+            .check()
+            .map_err(unreachable_err)
+            .map_err(StreamingError::from)?;
         let rpc_timeout = option.hard_ttl();
         let deadline = Instant::now().checked_add(rpc_timeout).ok_or_else(|| {
             StreamingError::from(unreachable_err(io::Error::other(
@@ -2866,6 +3032,7 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
         req: TransferLeaderRequest<TypeConfig>,
         option: RPCOption,
     ) -> Result<TransferLeaderResponse<TypeConfig>, RPCError<TypeConfig>> {
+        self.connectivity.check().map_err(unreachable_err)?;
         let rpc_timeout = option.hard_ttl();
         let response = self
             .interconnect

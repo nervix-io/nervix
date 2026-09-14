@@ -296,39 +296,12 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
     ) -> Result<(), String> {
-        let state = self.inner.consensus.current_runtime_state().await;
-        let Some(domain_state) = state.domains.get(domain) else {
-            return Ok(());
-        };
-        if !matches!(domain_state.status, DomainStatus::Running) {
-            return Ok(());
-        }
-        self.inner
-            .runtime
-            .apply_cluster_state(
-                self.inner.consensus.local_node_id(),
-                state.revision,
-                &state.domains,
-                &state.domain_clock_authorities,
-                &state.schedule,
+        self.apply_current_cluster_state().await.map_err(|error| {
+            format!(
+                "failed to restore runtime for running domain '{}': {error}",
+                domain.as_str()
             )
-            .await
-            .map_err(|error| {
-                format!(
-                    "failed to restore runtime for running domain '{}': {error}",
-                    domain.as_str()
-                )
-            })?;
-        self.inner
-            .runtime
-            .start_running_domain_ingestors()
-            .await
-            .map_err(|error| {
-                format!(
-                    "failed to restore runtime for running domain '{}': {error}",
-                    domain.as_str()
-                )
-            })
+        })
     }
 
     pub(in crate::application) async fn create_domain(
