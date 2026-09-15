@@ -207,6 +207,14 @@ applied separately to incoming and outgoing work across all peers and connection
 These reservations mean that ordinary management traffic cannot consume the capacity required to
 resolve already-started relay work or determine whether a peer is healthy.
 
+Leasing a stream slot takes no exclusive lock and allocates nothing once a pool is established.
+When an endpoint is registered for a peer, the transport builds the identity of every connection
+slot that endpoint can hold, and each lease reads the registration, its slots, and their connections
+through shared lookups. Only a slot that is not running yet, such as the first on-demand bulk
+connection, takes the exclusive path that starts it. A replaced endpoint gets a new registration
+with its own slot identities, so a lease can never select a connection that belongs to the endpoint
+it replaced.
+
 Memory and CPU execution are isolated by class:
 
 | Class | Memory budget | CPU execution class |
@@ -242,6 +250,12 @@ operation's domain semantics.
    for answers it is awaiting. Consensus append traffic uses this form.
 5. **Relay delivery.** A management-plane grant reserves receiver capacity before an Arrow body is
    sent, followed by explicit runtime admission and optional downstream record acknowledgements.
+
+Each handler registration publishes a complete replacement dispatch table, so an arriving operation
+finds its handler without taking a lock and registrations that race each other all take effect.
+Discovery likewise publishes the complete live-node set at once, and the live-target check a typed
+request makes reads that set without a lock. Until discovery publishes its first set, every target
+counts as live so that bootstrap discovery can reach its peers.
 
 Connection setup has a five-second deadline covering TCP, TLS, HTTP/2, and connection binding. The
 default bounded request deadline is ten seconds and includes time waiting for an admission or stream
@@ -309,8 +323,17 @@ the same identity with different content is rejected.
 After a connection loss, the sender first reconciles with the same receiver process. If the body was
 already received or the batch was admitted, the receiver returns that known state and the sender
 does not resend the body. Sequence watermarks reject reordering and duplicate enqueue. Inactive
-sender channels rotate after five minutes, while receiver watermarks remain available for about ten
-minutes so ordinary reconnects can still reconcile.
+sender channels rotate after five minutes. A receiver keeps a channel's watermark while a batch
+granted on that channel is unresolved, and for at least ten minutes after the watermark was last
+recorded or consulted by a grant, status, or cancellation request, so ordinary reconnects can still
+reconcile. A consultation reads the watermark through a shared lookup and refreshes its retention
+with one atomic maximum, so checking a delivery against its channel takes no exclusive lock on the
+watermark.
+
+Each attempt carries the channel and admission identities it was granted under. Once the receiver
+has delivered an attempt's terminal outcome, it retires that same attempt: it advances the channel
+watermark and releases the attempt, its channel occupancy, and its admission without rebuilding
+either identity or looking the admission up again.
 
 Relay attempts, grants, watermarks, admission state, and record-acknowledgement maps are in-memory
 hot-path state. A receiver process-epoch change therefore makes an unresolved delivery
@@ -454,6 +477,14 @@ After a valid replacement, new outbound pools use the new credentials and existi
 connections begin graceful shutdown. Certificate expiration is also mapped to a process-monotonic
 deadline when a connection is authenticated, so a connection cannot remain open beyond the validity
 of either peer certificate even if the wall clock later moves.
+
+A replacement publishes the new bundle before it advances the credential generation, and each
+connection records the generation it authenticated under. An inbound connection compares that
+record with the published generation, without a lock, whenever it accepts a stream and whenever a
+replacement is announced, and begins graceful shutdown once the published generation has moved past
+it. Because a connection reads the generation before the bundle, it can record a generation older
+than its credentials, which only drains it early, but never a newer one that would let replaced
+credentials outlive their replacement.
 
 Application shutdown has three ordered phases. A server process issues the stop request that
 starts them when it receives its first `SIGINT` or `SIGTERM`. The stop request first marks the local

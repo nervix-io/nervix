@@ -1139,6 +1139,10 @@ mod tests {
 
     use super::*;
 
+    /// Counts allocations per thread, so a test can prove that an operation allocates nothing.
+    #[global_allocator]
+    static ALLOCATIONS: alloc_count::AllocCounter = alloc_count::AllocCounter(std::alloc::System);
+
     fn tls_path(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tls/dev")
@@ -1607,6 +1611,8 @@ mod tests {
     }
 
     mod coordination;
+
+    mod lease;
 
     #[tokio::test]
     async fn resource_streams_leave_the_reserved_snapshot_slot_responsive() {

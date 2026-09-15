@@ -147,3 +147,16 @@ impl PoolClass {
         self.payload_limit(executor)
     }
 }
+
+// Per-class tables are built in `PoolClass::ALL` order and read back through `PoolClass::index`, so
+// the two orders must agree.
+const _: () = {
+    let mut position = 0;
+    while position < PoolClass::COUNT {
+        assert!(
+            PoolClass::ALL[position].index() == position,
+            "PoolClass::ALL must list every class at its index",
+        );
+        position += 1;
+    }
+};

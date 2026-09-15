@@ -21,6 +21,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use dashmap::{DashMap, mapref::entry::Entry};
 use error_stack::Report;
@@ -145,9 +146,87 @@ impl Drop for CancelOnDrop {
     }
 }
 
+/// One registered outbound endpoint of a peer, with the key of every connection slot it can hold.
+///
+/// The keys are built once when the endpoint is registered, so leasing a stream finds its slots
+/// and connections by reference instead of assembling a key for every operation.
+struct OutboundTarget {
+    target: PeerTarget,
+    slot_keys: [Box<[ConnectionSlotKey]>; PoolClass::COUNT],
+}
+
+impl OutboundTarget {
+    fn new(node_id: &ClusterNodeName, target: PeerTarget) -> Self {
+        let slot_keys = PoolClass::ALL.map(|class| Self::class_slot_keys(node_id, &target, class));
+        Self { target, slot_keys }
+    }
+
+    fn class_slot_keys(
+        node_id: &ClusterNodeName,
+        target: &PeerTarget,
+        class: PoolClass,
+    ) -> Box<[ConnectionSlotKey]> {
+        let mut keys = Vec::with_capacity(class.connections_per_peer());
+        for slot in 0..class.connections_per_peer() {
+            keys.push(ConnectionSlotKey {
+                node_id: node_id.clone(),
+                target: target.clone(),
+                class,
+                slot,
+            });
+        }
+        keys.into_boxed_slice()
+    }
+
+    /// The keys of this endpoint's connection slots in `class`, in slot order.
+    fn slot_keys(&self, class: PoolClass) -> &[ConnectionSlotKey] {
+        &self.slot_keys[class.index()]
+    }
+}
+
+/// The credentials new connections authenticate with, published without a lock.
+///
+/// Every connection records the generation it authenticated under and drains once the published
+/// generation moves past it. A replacement publishes its bundle before it advances the generation,
+/// and a reader loads the generation before the bundle. A connection can therefore record a
+/// generation older than the credentials it used, which only drains it early, but never a newer
+/// one, which would let replaced credentials outlive their replacement.
+struct PublishedTls {
+    generation: AtomicU64,
+    bundle: ArcSwap<TlsConfigBundle>,
+}
+
+/// The credentials one connection authenticates with, and the generation it records for them.
 struct ActiveTls {
     generation: u64,
-    bundle: TlsConfigBundle,
+    bundle: StdArc<TlsConfigBundle>,
+}
+
+impl PublishedTls {
+    fn new(bundle: TlsConfigBundle) -> Self {
+        Self {
+            generation: AtomicU64::new(1),
+            bundle: ArcSwap::from_pointee(bundle),
+        }
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn current(&self) -> ActiveTls {
+        let generation = self.generation();
+        let bundle = self.bundle.load_full();
+        ActiveTls { generation, bundle }
+    }
+
+    /// Publish `bundle` under `generation`, which the caller derived from the current generation.
+    /// The bundle is published first, and a race between replacements never moves the generation
+    /// backwards.
+    fn publish(&self, generation: u64, bundle: TlsConfigBundle) {
+        self.bundle.store(StdArc::new(bundle));
+        self.generation.fetch_max(generation, Ordering::AcqRel);
+    }
 }
 
 struct ClientConnection {
@@ -168,7 +247,7 @@ fn increment(total: usize, addition: usize) -> usize {
         .assured("configured connection, stream and slot limits are far inside usize")
 }
 
-struct StreamLease {
+pub(crate) struct StreamLease {
     connection: Arc<ClientConnection>,
     slot: Option<OwnedSemaphorePermit>,
     state: TransportState,
@@ -247,21 +326,21 @@ struct OutboundRelayKey {
     delivery: RelayDelivery,
 }
 
+/// One delivery attempt: a position in the receiver's view of a sender's relay channel.
+///
+/// The attempt holds its channel's key, so the channel bookkeeping an attempt touches never
+/// rebuilds that key.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct RelayAttemptKey {
-    peer_node_id: ClusterNodeName,
-    sender_epoch: u64,
-    receiver_epoch: u64,
-    delivery: RelayDelivery,
+    channel: RelayChannelKey,
+    sequence: u64,
 }
 
 impl RelayAttemptKey {
-    fn channel(&self) -> RelayChannelKey {
-        RelayChannelKey {
-            peer_node_id: self.peer_node_id.clone(),
-            sender_epoch: self.sender_epoch,
-            receiver_epoch: self.receiver_epoch,
-            channel_incarnation: self.delivery.channel_incarnation,
+    fn delivery(&self) -> RelayDelivery {
+        RelayDelivery {
+            channel_incarnation: self.channel.channel_incarnation,
+            sequence: self.sequence,
         }
     }
 }
@@ -274,11 +353,47 @@ struct RelayChannelKey {
     channel_incarnation: [u8; 16],
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct RelayChannelWatermark {
     sequence: u64,
     status: RelayAdmissionStatus,
-    reconciled_at: Instant,
+    /// When this watermark was recorded for its channel.
+    recorded_at: Instant,
+    /// How long after `recorded_at` the watermark last reconciled a delivery of its channel, in
+    /// nanoseconds. An atomic lets a shared map guard refresh it, so checking a delivery against
+    /// its channel never takes the exclusive shard lock.
+    reconciled_after_nanos: AtomicU64,
+}
+
+impl RelayChannelWatermark {
+    fn new(sequence: u64, status: RelayAdmissionStatus) -> Self {
+        Self {
+            sequence,
+            status,
+            recorded_at: Instant::now(),
+            reconciled_after_nanos: AtomicU64::new(0),
+        }
+    }
+
+    /// Record that the watermark reconciled a delivery now. Concurrent reconciliations keep the
+    /// latest.
+    fn mark_reconciled(&self) {
+        let reconciled_after = self.recorded_at.elapsed();
+        let reconciled_after_nanos = u64::try_from(reconciled_after.as_nanos()).assured(
+            "a transport process runs far less than the 584 years a u64 nanosecond offset spans",
+        );
+        self.reconciled_after_nanos
+            .fetch_max(reconciled_after_nanos, Ordering::AcqRel);
+    }
+
+    /// When the watermark last reconciled a delivery, or when it was recorded if it has not.
+    fn last_reconciled_at(&self) -> Instant {
+        let reconciled_after =
+            Duration::from_nanos(self.reconciled_after_nanos.load(Ordering::Acquire));
+        self.recorded_at.checked_add(reconciled_after).assured(
+            "the offset was measured on the monotonic clock, so it names an instant the clock read",
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -410,7 +525,7 @@ impl std::fmt::Debug for RelayAdmission {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RelayAdmission")
-            .field("delivery", &self.record.attempt.delivery)
+            .field("delivery", &self.record.attempt.delivery())
             .finish_non_exhaustive()
     }
 }
@@ -541,9 +656,9 @@ pub(crate) struct TransportStateInner {
     process_epoch: u64,
     next_coordination_sequence: AtomicU64,
     local_addr: SocketAddr,
-    tls: parking_lot::RwLock<ActiveTls>,
+    tls: PublishedTls,
     tls_changed: Notify,
-    targets: DashMap<ClusterNodeName, PeerTarget, RandomState>,
+    targets: DashMap<ClusterNodeName, Arc<OutboundTarget>, RandomState>,
     slots: DashMap<ConnectionSlotKey, SlotControl, RandomState>,
     connections: DashMap<ConnectionSlotKey, Arc<ClientConnection>, RandomState>,
     peer_connections: DashMap<ClusterNodeName, PeerConnections, RandomState>,
@@ -559,7 +674,8 @@ pub(crate) struct TransportStateInner {
     requests: super::RequestState,
     grants: DashMap<u64, RelayGrant, RandomState>,
     relay_attempts: DashMap<RelayAttemptKey, RelayAttemptEntry, RandomState>,
-    active_relay_channels: DashMap<RelayChannelKey, RelayAttemptKey, RandomState>,
+    /// The sequence of the batch each channel has granted and not yet retired.
+    active_relay_channels: DashMap<RelayChannelKey, u64, RandomState>,
     relay_admissions: DashMap<RelayAdmissionKey, StdArc<RelayAdmissionRecord>, RandomState>,
     relay_watermarks: DashMap<RelayChannelKey, RelayChannelWatermark, RandomState>,
     outbound_relay_epochs: DashMap<OutboundRelayKey, u64, RandomState>,
@@ -618,10 +734,7 @@ impl TransportState {
                 process_epoch,
                 next_coordination_sequence: AtomicU64::new(1),
                 local_addr,
-                tls: parking_lot::RwLock::new(ActiveTls {
-                    generation: 1,
-                    bundle: tls,
-                }),
+                tls: PublishedTls::new(tls),
                 tls_changed: Notify::new(),
                 targets: DashMap::default(),
                 slots: DashMap::default(),
@@ -776,18 +889,16 @@ impl TransportState {
     }
 
     pub(crate) fn is_connected_to(&self, node_id: &ClusterNodeName) -> bool {
-        let Some(target) = self.targets.get(node_id).map(|target| target.clone()) else {
+        let Some(target) = self
+            .targets
+            .get(node_id)
+            .map(|target| Arc::clone(target.value()))
+        else {
             return false;
         };
         for class in PoolClass::PRECONNECTED {
-            for slot in 0..class.connections_per_peer() {
-                let key = ConnectionSlotKey {
-                    node_id: node_id.clone(),
-                    target: target.clone(),
-                    class,
-                    slot,
-                };
-                if !self.connections.contains_key(&key) {
+            for key in target.slot_keys(class) {
+                if !self.connections.contains_key(key) {
                     return false;
                 }
             }
@@ -810,7 +921,7 @@ impl TransportState {
         let removed = self
             .targets
             .iter()
-            .filter(|entry| accepted.get(entry.key()) != Some(entry.value()))
+            .filter(|entry| accepted.get(entry.key()) != Some(&entry.value().target))
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for node in removed {
@@ -819,15 +930,8 @@ impl TransportState {
         }
 
         for (node, target) in accepted {
-            let changed = self
-                .targets
-                .get(&node)
-                .is_none_or(|current| *current != target);
-            if changed {
-                self.cancel_slots_for_node(&node);
-                self.targets.insert(node.clone(), target.clone());
-            }
-            self.ensure_preconnected_slots(&node, &target);
+            let outbound = self.install_outbound_target(node, target);
+            self.ensure_preconnected_slots(&outbound);
         }
     }
 
@@ -839,16 +943,31 @@ impl TransportState {
         if !self.targets.contains_key(&node_id) && self.targets.len() >= self.options.max_peers {
             return Err(TransportError::PoolExhausted);
         }
-        let changed = self
+        let outbound = self.install_outbound_target(node_id, target);
+        self.ensure_preconnected_slots(&outbound);
+        Ok(())
+    }
+
+    /// Make `target` the endpoint `node_id` is reached at, and return its registration. A different
+    /// endpoint replaces the registered one and cancels the slots that belonged to it.
+    fn install_outbound_target(
+        &self,
+        node_id: ClusterNodeName,
+        target: PeerTarget,
+    ) -> Arc<OutboundTarget> {
+        let current = self
             .targets
             .get(&node_id)
-            .is_none_or(|current| *current != target);
-        if changed {
-            self.cancel_slots_for_node(&node_id);
-            self.targets.insert(node_id.clone(), target.clone());
+            .map(|current| Arc::clone(current.value()));
+        if let Some(current) = current
+            && current.target == target
+        {
+            return current;
         }
-        self.ensure_preconnected_slots(&node_id, &target);
-        Ok(())
+        self.cancel_slots_for_node(&node_id);
+        let outbound = Arc::new(OutboundTarget::new(&node_id, target));
+        self.targets.insert(node_id, Arc::clone(&outbound));
+        outbound
     }
 
     pub(crate) async fn bootstrap_target(
@@ -875,7 +994,7 @@ impl TransportState {
             };
             let tcp = TcpStream::connect(target.addr).await?;
             tcp.set_nodelay(true)?;
-            let tls = self.tls.read().bundle.clone();
+            let tls = self.tls.current().bundle;
             ensure_current(&tls.certificate)
                 .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
             let server_name = ServerName::try_from(target.server_name.clone())
@@ -921,26 +1040,26 @@ impl TransportState {
         }
     }
 
-    fn ensure_class_slots(&self, node_id: &ClusterNodeName, target: &PeerTarget, class: PoolClass) {
-        for slot in 0..class.connections_per_peer() {
-            let key = ConnectionSlotKey {
-                node_id: node_id.clone(),
-                target: target.clone(),
-                class,
-                slot,
-            };
+    fn ensure_class_slots(&self, target: &OutboundTarget, class: PoolClass) {
+        for key in target.slot_keys(class) {
             self.ensure_slot(key);
         }
     }
 
-    fn ensure_preconnected_slots(&self, node_id: &ClusterNodeName, target: &PeerTarget) {
+    fn ensure_preconnected_slots(&self, target: &OutboundTarget) {
         for class in PoolClass::PRECONNECTED {
-            self.ensure_class_slots(node_id, target, class);
+            self.ensure_class_slots(target, class);
         }
     }
 
-    fn ensure_slot(&self, key: ConnectionSlotKey) {
+    fn ensure_slot(&self, key: &ConnectionSlotKey) {
         if self.admission_closed.is_cancelled() {
+            return;
+        }
+        // Every lease passes through here, and in the steady state its slot is already running. A
+        // shared lookup confirms that, so only a missing slot takes the exclusive entry and builds
+        // an owned key.
+        if self.slots.contains_key(key) {
             return;
         }
         match self.slots.entry(key.clone()) {
@@ -951,6 +1070,7 @@ impl TransportState {
                     cancel: cancel.clone(),
                 });
                 let state = self.clone();
+                let key = key.clone();
                 self.tasks.spawn(async move {
                     state.run_slot(key, cancel).await;
                 });
@@ -1165,10 +1285,10 @@ impl TransportState {
         let setup = async {
             let tcp = TcpStream::connect(key.target.addr).await?;
             tcp.set_nodelay(true)?;
-            let (generation, tls) = {
-                let active = self.tls.read();
-                (active.generation, active.bundle.clone())
-            };
+            let ActiveTls {
+                generation,
+                bundle: tls,
+            } = self.tls.current();
             ensure_current(&tls.certificate)
                 .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
             let server_name = ServerName::try_from(key.target.server_name.clone())
@@ -1267,7 +1387,7 @@ impl TransportState {
                 cancel: connection.cancel.clone(),
                 closed: connection.closed.clone(),
             });
-            let current_generation = self.tls.read().generation;
+            let current_generation = self.tls.generation();
             if current_generation != generation || slot_cancel.is_cancelled() {
                 connection.cancel.cancel();
                 return Err(TransportError::Closed(key.target.addr));
@@ -1284,7 +1404,7 @@ impl TransportState {
         }
     }
 
-    async fn lease(
+    pub(crate) async fn lease(
         &self,
         node_id: &ClusterNodeName,
         class: PoolClass,
@@ -1293,56 +1413,19 @@ impl TransportState {
     ) -> Result<StreamLease, TransportError> {
         loop {
             tokio::task::consume_budget().await;
-            let notified = self.connection_changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
             if self.admission_closed.is_cancelled() {
                 return Err(TransportError::ShuttingDown);
             }
-            if let Some(target) = self
-                .targets
-                .get(node_id)
-                .map(|target| target.value().clone())
-            {
-                self.ensure_class_slots(node_id, &target, class);
-
-                let count = class.connections_per_peer();
-                let start = self
-                    .next_connection
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                        Some(current.checked_add(1).unwrap_or_default())
-                    })
-                    .assured("the round-robin cursor update always returns a value")
-                    % count;
-                for offset in 0..count {
-                    let index = (start + offset) % count;
-                    let key = ConnectionSlotKey {
-                        node_id: node_id.clone(),
-                        target: target.clone(),
-                        class,
-                        slot: index,
-                    };
-                    let Some(connection) = self.connections.get(&key).map(|item| item.clone())
-                    else {
-                        continue;
-                    };
-                    let stream_slots = connection
-                        .stream_slots
-                        .for_subquota(subquota)
-                        .assured("reserved stream subquotas are assigned to their configured pool");
-                    let permit = match StdArc::clone(stream_slots).try_acquire_owned() {
-                        Ok(permit) => permit,
-                        Err(_) => continue,
-                    };
-                    if connection.closed.is_cancelled() || connection.retiring.is_cancelled() {
-                        continue;
-                    }
-                    return Ok(StreamLease {
-                        connection,
-                        slot: Some(permit),
-                        state: self.clone(),
-                    });
-                }
+            if let Some(lease) = self.try_lease(node_id, class, subquota) {
+                return Ok(lease);
+            }
+            // Only an operation that found no free stream registers to wait. It checks the pools
+            // again once registered, so a change between the two checks still wakes it.
+            let notified = self.connection_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(lease) = self.try_lease(node_id, class, subquota) {
+                return Ok(lease);
             }
 
             tokio::select! {
@@ -1360,6 +1443,54 @@ impl TransportState {
         }
     }
 
+    /// Lease a free stream on an established connection of `class` to `node_id`, starting any of
+    /// the peer's slots in that class that are not running. On an established pool every step reads
+    /// shared state, so the lease takes no exclusive lock.
+    fn try_lease(
+        &self,
+        node_id: &ClusterNodeName,
+        class: PoolClass,
+        subquota: RequestSubquota,
+    ) -> Option<StreamLease> {
+        let target = self
+            .targets
+            .get(node_id)
+            .map(|target| Arc::clone(target.value()))?;
+        self.ensure_class_slots(&target, class);
+
+        let slot_keys = target.slot_keys(class);
+        let start = self
+            .next_connection
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.checked_add(1).unwrap_or_default())
+            })
+            .assured("the round-robin cursor update always returns a value")
+            % slot_keys.len();
+        let (before_start, from_start) = slot_keys.split_at(start);
+        for key in from_start.iter().chain(before_start) {
+            let Some(connection) = self.connections.get(key).map(|item| item.clone()) else {
+                continue;
+            };
+            let stream_slots = connection
+                .stream_slots
+                .for_subquota(subquota)
+                .assured("reserved stream subquotas are assigned to their configured pool");
+            let permit = match StdArc::clone(stream_slots).try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => continue,
+            };
+            if connection.closed.is_cancelled() || connection.retiring.is_cancelled() {
+                continue;
+            }
+            return Some(StreamLease {
+                connection,
+                slot: Some(permit),
+                state: self.clone(),
+            });
+        }
+        None
+    }
+
     pub(crate) async fn send(
         &self,
         node_id: &ClusterNodeName,
@@ -1368,6 +1499,8 @@ impl TransportState {
         if let Envelope::RelayPayload(payload) = envelope {
             return self.send_relay(node_id, payload).await;
         }
+        // A terminal acknowledgement resolves the reserved admission it names. The resolved record
+        // is retired once the acknowledgement is delivered, without looking the admission up again.
         let completed_admission = if let Envelope::Ack(ack) = &envelope {
             if let RemoteAckOutcome::Alive = &ack.outcome {
                 None
@@ -1376,14 +1509,18 @@ impl TransportState {
                     peer_node_id: node_id.clone(),
                     ack_id: ack.ack_id,
                 };
-                if let Some(record) = self.relay_admissions.get(&key) {
+                let record = self
+                    .relay_admissions
+                    .get(&key)
+                    .map(|record| StdArc::clone(record.value()));
+                if let Some(record) = &record {
                     if let RemoteAckOutcome::NoAck(reason) = &ack.outcome {
                         record.reject(reason.clone());
                     } else {
                         record.mark_admitted();
                     }
                 }
-                Some(key)
+                record
             }
         } else {
             None
@@ -1471,9 +1608,9 @@ impl TransportState {
         }
         .await;
         if result.is_ok()
-            && let Some(key) = completed_admission
+            && let Some(record) = completed_admission
         {
-            self.retire_relay_admission(&key);
+            self.retire_relay_record(&record, record.status());
         }
         result
     }
@@ -1613,10 +1750,10 @@ impl TransportState {
         _connection_permit: OwnedSemaphorePermit,
     ) -> Result<(), Report<TransportError>> {
         tcp.set_nodelay(true).map_err(TransportError::from)?;
-        let (generation, tls) = {
-            let active = self.tls.read();
-            (active.generation, active.bundle.clone())
-        };
+        let ActiveTls {
+            generation,
+            bundle: tls,
+        } = self.tls.current();
         ensure_current(&tls.certificate)
             .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
         let stream = timeout(
@@ -1827,7 +1964,7 @@ impl TransportState {
                 let changed = self.tls_changed.notified();
                 tokio::pin!(changed);
                 changed.as_mut().enable();
-                if self.tls.read().generation != generation {
+                if self.tls.generation() != generation {
                     connection.graceful_shutdown();
                     draining = true;
                     drain_deadline = Some(
@@ -1862,7 +1999,7 @@ impl TransportState {
                         continue;
                     }
                     _ = &mut changed => {
-                        if self.tls.read().generation != generation {
+                        if self.tls.generation() != generation {
                             connection.graceful_shutdown();
                             draining = true;
                             drain_deadline = Some(
@@ -2267,24 +2404,23 @@ impl TransportState {
             .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
         ensure_current(&tls.certificate)
             .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-        let next_generation = self.tls.read().generation.checked_add(1).ok_or_else(|| {
-            TransportError::InvalidOptions {
-                reason: "TLS configuration generation is exhausted".to_string(),
-            }
-        })?;
+        let next_generation =
+            self.tls
+                .generation()
+                .checked_add(1)
+                .ok_or_else(|| TransportError::InvalidOptions {
+                    reason: "TLS configuration generation is exhausted".to_string(),
+                })?;
         self.cancel_all_slots();
-        *self.tls.write() = ActiveTls {
-            generation: next_generation,
-            bundle: tls,
-        };
+        self.tls.publish(next_generation, tls);
         self.tls_changed.notify_waiters();
-        let peers = self
+        let targets = self
             .targets
             .iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .map(|entry| Arc::clone(entry.value()))
             .collect::<Vec<_>>();
-        for (node, target) in peers {
-            self.ensure_preconnected_slots(&node, &target);
+        for target in targets {
+            self.ensure_preconnected_slots(&target);
         }
         Ok(())
     }
