@@ -17,7 +17,7 @@ use nervix_models::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use triomphe::Arc;
 
-use crate::durable_batch::DurableBatch;
+use crate::durable_batch::{DurableBatch, StorageDecode, StorageEncode};
 
 /// Each leaf shares its record too: copying a tree path never copies unrelated record contents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,7 +117,7 @@ impl<K: Ord + Clone, V: Clone> From<&Records<K, V>> for BTreeMap<K, V> {
 impl<K, V> Records<K, V>
 where
     K: Ord + Clone + Serialize + DeserializeOwned,
-    V: Clone + PartialEq + Serialize + DeserializeOwned,
+    V: Clone + PartialEq + StorageEncode + StorageDecode,
 {
     pub(crate) fn write_changes(
         &self,

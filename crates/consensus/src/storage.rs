@@ -24,7 +24,7 @@ use openraft::{
     type_config::alias::EntryOf,
 };
 use parking_lot::{Mutex, RwLock};
-use serde::{Deserialize, Serialize};
+use rkyv::{Archive, Deserialize, Serialize};
 use tokio::sync::watch;
 use triomphe::Arc;
 
@@ -34,13 +34,14 @@ use crate::{
     AppliedConsensusCommand, AppliedEntryContext, LogIdOf, SnapshotOf, StateMachineChanges,
     StateMachineData, StoredMembershipOf, TypeConfig, VoteOf, apply_consensus_command_at,
     durable_batch::{DurableBatch, StorageFailure},
+    raft_record::{EntryRecord, LogIdRecord, StoredMembershipRecord, VoteRecord},
     read_key,
     records::{Records, ResourceRecords, ScheduleRecords},
     replication::append_batch_target_bytes,
     snapshot::{
         KEY_MANIFEST, SealedSnapshot, SectionWriter, SnapshotGenerations, SnapshotManifest,
-        SnapshotRetention, SnapshotSection, StoredRecord, generation_prefix, section_generation,
-        section_key,
+        SnapshotManifestRecord, SnapshotRetention, SnapshotSection, StoredRecord,
+        generation_prefix, section_generation, section_key,
     },
     storage_decode,
     storage_fault::{StorageBoundary, StorageFault},
@@ -77,17 +78,54 @@ const KEYSPACE_NAMES: [&str; 4] = [
     KEYSPACE_SNAPSHOT,
 ];
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 enum StateEncoding {
     NodeAdmissionFencedRecords,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
 struct StateMetadata {
     encoding: StateEncoding,
     last_applied_log_id: Option<LogIdOf>,
     last_membership: Arc<StoredMembershipOf>,
     runtime_revision: u64,
+}
+
+#[derive(Debug, Archive, Serialize, Deserialize)]
+struct StateMetadataRecord {
+    encoding: StateEncoding,
+    last_applied_log_id: Option<LogIdRecord>,
+    last_membership: StoredMembershipRecord,
+    runtime_revision: u64,
+}
+
+impl From<&StateMetadata> for StateMetadataRecord {
+    fn from(value: &StateMetadata) -> Self {
+        Self {
+            encoding: value.encoding.clone(),
+            last_applied_log_id: value.last_applied_log_id.clone().map(Into::into),
+            last_membership: StoredMembershipRecord::from(value.last_membership.as_ref()),
+            runtime_revision: value.runtime_revision,
+        }
+    }
+}
+
+impl TryFrom<StateMetadataRecord> for StateMetadata {
+    type Error = io::Error;
+
+    fn try_from(value: StateMetadataRecord) -> Result<Self, Self::Error> {
+        Ok(Self {
+            encoding: value.encoding,
+            last_applied_log_id: value.last_applied_log_id.map(Into::into),
+            last_membership: Arc::new(
+                value
+                    .last_membership
+                    .try_into()
+                    .map_err(|_| io::Error::other(StorageFailure::InvalidState))?,
+            ),
+            runtime_revision: value.runtime_revision,
+        })
+    }
 }
 
 impl From<&StateMachineData> for StateMetadata {
@@ -98,6 +136,15 @@ impl From<&StateMachineData> for StateMetadata {
             last_membership: state.last_membership.clone(),
             runtime_revision: state.runtime_revision,
         }
+    }
+}
+
+impl StateMetadata {
+    fn read(sm: &Keyspace) -> io::Result<Option<Self>> {
+        let Some(record) = read_key::<StateMetadataRecord>(sm, KEY_METADATA)? else {
+            return Ok(None);
+        };
+        record.try_into().map(Some)
     }
 }
 
@@ -175,7 +222,8 @@ impl StateMachineData {
             .write_changes(&preceding.transactions, b't', batch, sm)?;
         self.command_executions
             .write_changes(&preceding.command_executions, b'e', batch, sm)?;
-        batch.insert(sm, KEY_METADATA, &StateMetadata::from(self))
+        let metadata = StateMetadata::from(self);
+        batch.insert(sm, KEY_METADATA, &StateMetadataRecord::from(&metadata))
     }
 }
 
@@ -307,7 +355,8 @@ impl StoreInner {
         let mut batch_bytes = 0_u64;
         for entry in entries {
             let key = Self::log_key(entry.log_id.index);
-            let encoded = DurableBatch::encode(&entry, encoding_limit)?;
+            let record = EntryRecord::from(entry);
+            let encoded = DurableBatch::encode(&record, encoding_limit)?;
             if batch.would_exceed_encoded_insert(&key, &encoded)? {
                 if batch.is_empty() {
                     return Err(io::Error::other(StorageFailure::Capacity));
@@ -452,7 +501,7 @@ impl StoreInner {
         let generation = self.snapshots.claim_generation();
         let sections = self
             .run(MemoryClass::Bulk, move |inner, _| {
-                let metadata: StateMetadata = read_key(&inner.sm, KEY_METADATA)?
+                let metadata = StateMetadata::read(&inner.sm)?
                     .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
                 let mut writer = SectionWriter::new(section_limit);
                 for item in inner.sm.iter() {
@@ -527,7 +576,11 @@ impl StoreInner {
     ) -> io::Result<()> {
         self.run(MemoryClass::Bulk, move |inner, reservation| {
             let mut batch = DurableBatch::new(reservation)?;
-            batch.insert(&inner.snapshot, KEY_MANIFEST, &manifest)?;
+            batch.insert(
+                &inner.snapshot,
+                KEY_MANIFEST,
+                &SnapshotManifestRecord::from(&manifest),
+            )?;
             match installing {
                 Some(generation) => {
                     batch.insert(&inner.snapshot, KEY_INSTALLING, &generation)?;
@@ -579,7 +632,7 @@ impl StoreInner {
             inner.snapshots.publish(manifest);
             inner.delete_unreferenced_generations(&mut batch)?;
             inner.commit("snapshot_installed", batch)?;
-            let metadata: StateMetadata = read_key(&inner.sm, KEY_METADATA)?
+            let metadata = StateMetadata::read(&inner.sm)?
                 .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
             StateMachineData::load(&inner.sm, metadata)
         })
@@ -615,8 +668,8 @@ impl StoreInner {
     }
 
     fn read_optional_log_id(&self, key: &[u8]) -> io::Result<Option<LogIdOf>> {
-        match read_key::<Option<LogIdOf>>(&self.meta, key)? {
-            Some(value) => Ok(value),
+        match read_key::<Option<LogIdRecord>>(&self.meta, key)? {
+            Some(value) => Ok(value.map(Into::into)),
             None => Ok(None),
         }
     }
@@ -675,9 +728,7 @@ impl FjallStore {
                     // An install that was cut short has already cleared the state-machine
                     // records, so the metadata naming them is absent until the replacement
                     // finishes. Only a database with no install pending can be a fresh one.
-                    if installing.is_none()
-                        && read_key::<StateMetadata>(&sm, KEY_METADATA)?.is_none()
-                    {
+                    if installing.is_none() && StateMetadata::read(&sm)?.is_none() {
                         if !sm.is_empty().map_err(io::Error::other)?
                             || !logs.is_empty().map_err(io::Error::other)?
                             || !meta.is_empty().map_err(io::Error::other)?
@@ -687,7 +738,7 @@ impl FjallStore {
                         }
                         let mut batch = DurableBatch::new(&reservation)?;
                         let metadata = StateMetadata::from(&StateMachineData::default());
-                        batch.insert(&sm, KEY_METADATA, &metadata)?;
+                        batch.insert(&sm, KEY_METADATA, &StateMetadataRecord::from(&metadata))?;
                         batch.commit(&db)?;
                     }
                     let mut retained_log_bytes = 0_u64;
@@ -698,7 +749,11 @@ impl FjallStore {
                             .checked_add(entry_bytes)
                             .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
                     }
-                    let manifest = read_key::<SnapshotManifest>(&snapshot, KEY_MANIFEST)?;
+                    let manifest =
+                        match read_key::<SnapshotManifestRecord>(&snapshot, KEY_MANIFEST)? {
+                            Some(record) => Some(record.try_into()?),
+                            None => None,
+                        };
                     let generations = SnapshotGenerations::new(manifest);
                     let mut stored_generations = BTreeSet::new();
                     for item in snapshot.iter() {
@@ -764,7 +819,7 @@ impl FjallStore {
             return self
                 .inner
                 .run(MemoryClass::Bulk, |inner, _| {
-                    let metadata = read_key(&inner.sm, KEY_METADATA)?
+                    let metadata = StateMetadata::read(&inner.sm)?
                         .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
                     StateMachineData::load(&inner.sm, metadata)
                 })
@@ -782,7 +837,7 @@ impl FjallStore {
     pub(super) async fn has_raft_state(&self) -> io::Result<bool> {
         self.inner
             .run(MemoryClass::Management, |inner, _| {
-                Ok(read_key::<VoteOf>(&inner.meta, KEY_VOTE)?.is_some()
+                Ok(read_key::<VoteRecord>(&inner.meta, KEY_VOTE)?.is_some()
                     || !inner.logs.is_empty().map_err(io::Error::other)?)
             })
             .await
@@ -914,7 +969,11 @@ impl RaftLogReader<TypeConfig> for FjallLogReader {
                     if bytes > reservation.bytes() / 2 {
                         return Err(io::Error::other(StorageFailure::Capacity));
                     }
-                    entries.push(storage_decode(&value)?);
+                    let record: EntryRecord = storage_decode(&value)?;
+                    let entry = record
+                        .into_entry()
+                        .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+                    entries.push(entry);
                 }
                 Ok(entries)
             })
@@ -924,7 +983,8 @@ impl RaftLogReader<TypeConfig> for FjallLogReader {
     async fn read_vote(&mut self) -> io::Result<Option<VoteOf>> {
         self.inner
             .run(MemoryClass::Management, |inner, _| {
-                read_key(&inner.meta, KEY_VOTE)
+                let vote = read_key::<VoteRecord>(&inner.meta, KEY_VOTE)?;
+                Ok(vote.map(Into::into))
             })
             .await
     }
@@ -960,7 +1020,11 @@ impl RaftLogReader<TypeConfig> for FjallLogReader {
                     bytes = bytes
                         .checked_add(length)
                         .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
-                    entries.push(storage_decode(&value)?);
+                    let record: EntryRecord = storage_decode(&value)?;
+                    let entry = record
+                        .into_entry()
+                        .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+                    entries.push(entry);
                 }
                 Ok(entries)
             })
@@ -977,7 +1041,11 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
                 let last_log_id = match inner.logs.iter().next_back() {
                     Some(item) => {
                         let (_, value) = item.into_inner().map_err(io::Error::other)?;
-                        Some(storage_decode::<EntryOf<TypeConfig>>(&value)?.log_id)
+                        let record: EntryRecord = storage_decode(&value)?;
+                        let entry = record
+                            .into_entry()
+                            .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+                        Some(entry.log_id)
                     }
                     None => last_purged_log_id.clone(),
                 };
@@ -992,7 +1060,7 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
         self.log_reader()
     }
     async fn save_vote(&mut self, vote: &VoteOf) -> io::Result<()> {
-        let vote = vote.clone();
+        let vote = VoteRecord::from(vote.clone());
         self.inner
             .run(MemoryClass::Management, move |inner, reservation| {
                 let mut batch = DurableBatch::new(reservation)?;
@@ -1002,6 +1070,7 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
             .await
     }
     async fn save_committed(&mut self, committed: Option<LogIdOf>) -> io::Result<()> {
+        let committed = committed.map(LogIdRecord::from);
         self.inner
             .run(MemoryClass::Management, move |inner, reservation| {
                 let mut batch = DurableBatch::new(reservation)?;
@@ -1080,7 +1149,11 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
                 let mut batch = DurableBatch::new(reservation)?;
                 let bounds = StoreInner::log_bounds(..=log_id.index);
                 let removed_bytes = inner.remove_log_entries(bounds, &mut batch)?;
-                batch.insert(&inner.meta, KEY_LAST_PURGED, &Some(log_id))?;
+                batch.insert(
+                    &inner.meta,
+                    KEY_LAST_PURGED,
+                    &Some(LogIdRecord::from(log_id)),
+                )?;
                 // Reclaiming covered log space is also when a generation nothing reads any more
                 // stops occupying storage.
                 inner.delete_unreferenced_generations(&mut batch)?;

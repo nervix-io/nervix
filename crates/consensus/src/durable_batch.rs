@@ -1,16 +1,33 @@
 //! Bounded atomic consensus writes and their full synchronization barrier.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** Encoding limits and the single data-and-metadata durable commit policy.
-//! - **Depends on.** Fjall, serialization, and an admitted execution reservation.
+//! - **Owns.** Bounded rkyv encoding, validated decoding, and the single data-and-metadata durable
+//!   commit policy.
+//! - **Depends on.** Fjall, rkyv, and an admitted execution reservation.
 //! - **Must not know.** Raft scheduling, observers, or the meaning of a stored record.
 
-use std::io::{self, Write};
+use std::{
+    io::{self, Write},
+    num::NonZeroUsize,
+};
 
 use fjall::{Database, Keyspace, PersistMode};
 use nervix_execution::Reservation;
-use serde::Serialize;
+use rkyv::{
+    Archive, Deserialize, Serialize,
+    api::{access_with_context, deserialize_using, high::HighSerializer},
+    de::pooling::Pool,
+    rancor::Error as RkyvError,
+    ser::{allocator::ArenaHandle, writer::IoWriter},
+    util::AlignedVec,
+    validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
+};
 use thiserror::Error;
+
+/// The durable archive ceiling matches the standard interconnect decoder depth.
+const STORAGE_ARCHIVE_MAX_DEPTH: usize = 64;
+/// Enough alignment for every archived primitive in the durable record vocabulary.
+const STORAGE_ARCHIVE_ALIGNMENT: usize = 16;
 
 #[derive(Debug, Error)]
 pub enum StorageFailure {
@@ -23,7 +40,7 @@ pub enum StorageFailure {
     #[error("the snapshot generation this transfer was reading has been superseded")]
     SnapshotSuperseded,
     #[error("failed to encode consensus record: {0}")]
-    Encode(#[source] ciborium::ser::Error<io::Error>),
+    Encode(#[source] RkyvError),
     #[error("consensus database write failed: {0}")]
     Write(#[source] fjall::Error),
 }
@@ -38,6 +55,54 @@ pub(crate) enum Mutation {
         keyspace: Keyspace,
         key: Vec<u8>,
     },
+}
+
+/// A value that can be written as the one current durable consensus archive shape.
+pub(crate) trait StorageEncode {
+    fn encode_record(&self, writer: RecordWriter) -> Result<RecordWriter, RkyvError>;
+}
+
+impl<T> StorageEncode for T
+where
+    T: for<'serializer> Serialize<
+        HighSerializer<IoWriter<RecordWriter>, ArenaHandle<'serializer>, RkyvError>,
+    >,
+{
+    fn encode_record(&self, writer: RecordWriter) -> Result<RecordWriter, RkyvError> {
+        rkyv::api::high::to_bytes_in::<_, RkyvError>(self, IoWriter::new(writer))
+            .map(IoWriter::into_inner)
+    }
+}
+
+/// A value that can be recovered from a validated current durable consensus archive.
+pub(crate) trait StorageDecode: Sized {
+    fn decode_record(bytes: &[u8]) -> io::Result<Self>;
+}
+
+impl<T> StorageDecode for T
+where
+    T: Archive,
+    T::Archived: for<'archive> rkyv::bytecheck::CheckBytes<
+            rkyv::api::high::HighValidator<'archive, RkyvError>,
+        > + Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
+{
+    fn decode_record(bytes: &[u8]) -> io::Result<Self> {
+        use meticulous::OptionExt as _;
+
+        let max_depth = NonZeroUsize::new(STORAGE_ARCHIVE_MAX_DEPTH)
+            .assured("the storage archive depth limit is nonzero");
+        let mut aligned = AlignedVec::<STORAGE_ARCHIVE_ALIGNMENT>::with_capacity(bytes.len());
+        aligned.extend_from_slice(bytes);
+        let mut validator = Validator::new(
+            ArchiveValidator::with_max_depth(&aligned, Some(max_depth)),
+            SharedValidator::new(),
+        );
+        let archived = access_with_context::<T::Archived, _, RkyvError>(&aligned, &mut validator)
+            .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+        let mut deserializer = Pool::default();
+        deserialize_using::<T, _, RkyvError>(archived, &mut deserializer)
+            .map_err(|_| io::Error::other(StorageFailure::InvalidState))
+    }
 }
 
 impl Mutation {
@@ -92,7 +157,7 @@ impl<'a> DurableBatch<'a> {
         })
     }
 
-    pub(crate) fn insert<T: Serialize>(
+    pub(crate) fn insert<T: StorageEncode>(
         &mut self,
         keyspace: &Keyspace,
         key: &[u8],
@@ -103,18 +168,19 @@ impl<'a> DurableBatch<'a> {
     }
 
     /// Insert one record and report how many bytes it encoded to.
-    pub(crate) fn insert_measured<T: Serialize>(
+    pub(crate) fn insert_measured<T: StorageEncode>(
         &mut self,
         keyspace: &Keyspace,
         key: &[u8],
         value: &T,
     ) -> io::Result<u64> {
         self.charge_key(key)?;
-        let mut writer = RecordWriter {
+        let writer = RecordWriter {
             bytes: Vec::new(),
             limit: self.remaining(),
         };
-        ciborium::ser::into_writer(value, &mut writer)
+        let mut writer = value
+            .encode_record(writer)
             .map_err(|error| io::Error::other(StorageFailure::Encode(error)))?;
         self.charge(writer.bytes.len())?;
         writer.bytes.shrink_to_fit();
@@ -170,14 +236,15 @@ impl<'a> DurableBatch<'a> {
         Ok(())
     }
 
-    pub(crate) fn encode<T: Serialize>(value: &T, limit: u64) -> io::Result<Vec<u8>> {
+    pub(crate) fn encode<T: StorageEncode>(value: &T, limit: u64) -> io::Result<Vec<u8>> {
         let limit =
             usize::try_from(limit).map_err(|_| io::Error::other(StorageFailure::Capacity))?;
-        let mut writer = RecordWriter {
+        let writer = RecordWriter {
             bytes: Vec::new(),
             limit,
         };
-        ciborium::ser::into_writer(value, &mut writer)
+        let mut writer = value
+            .encode_record(writer)
             .map_err(|error| io::Error::other(StorageFailure::Encode(error)))?;
         writer.bytes.shrink_to_fit();
         Ok(writer.bytes)
@@ -224,7 +291,7 @@ impl<'a> DurableBatch<'a> {
     }
 }
 
-struct RecordWriter {
+pub(crate) struct RecordWriter {
     bytes: Vec<u8>,
     limit: usize,
 }
