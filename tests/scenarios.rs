@@ -3049,17 +3049,41 @@ async fn then_leader_purged_covered_log_and_reduced_retained_bytes(
         .burst_raft_retention_peak
         .take()
         .verified("the preceding domain burst recorded its Raft retention peak");
-    let retention = await_covered_log_purge(&observer, &duration).await;
-    assert!(
-        retention.purged_index > retention_peak.purged_index,
-        "the leader did not advance its purged index after the retained-byte peak: \
-         peak={retention_peak:?} after={retention:?}"
-    );
-    assert!(
-        retention.retained_bytes < retention_peak.retained_bytes,
-        "the leader purged its covered log without reducing reported retained bytes: \
-         peak={retention_peak:?} after={retention:?}"
-    );
+    await_purge_beyond_retention_peak(&observer, &duration, &retention_peak).await;
+}
+
+/// Wait until the leader has purged past `peak` and reports fewer retained bytes than it did then.
+///
+/// A purge waits while any follower's replication is in flight. An attempt to open a stream to a
+/// stopped follower that is still listed as live stays in flight until its setup deadline, so the
+/// purge can trail the burst's last snapshot.
+async fn await_purge_beyond_retention_peak(
+    observer: &nervix_consensus::Observer,
+    duration: &str,
+    peak: &nervix_consensus::RaftLogRetention,
+) {
+    let deadline = Instant::now()
+        + humantime::parse_duration(duration).expect("step duration must be a valid duration");
+    loop {
+        tokio::task::consume_budget().await;
+        let retention = observer.raft_log_retention();
+        assert!(
+            retention.snapshot_index >= retention.purged_index,
+            "the leader purged entries its snapshot does not cover: {retention:?}"
+        );
+        let purged_beyond_peak = retention.purged_index > peak.purged_index;
+        let retained_fewer_bytes = retention.retained_bytes < peak.retained_bytes;
+        if purged_beyond_peak && retained_fewer_bytes {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "within {duration} the leader did not both purge past its retained-byte peak \
+             ({purged_beyond_peak}) and report fewer retained bytes ({retained_fewer_bytes}): \
+             peak={peak:?} last={retention:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 async fn await_covered_log_purge(

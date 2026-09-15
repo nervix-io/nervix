@@ -73,7 +73,7 @@ mod stream;
 pub(crate) mod stream_slots;
 
 pub(crate) use duplex::FrameReader;
-pub use duplex::{DuplexItems, DuplexReceiver, DuplexResponses, DuplexSender};
+pub use duplex::{DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress, DuplexSender};
 pub use stream::IncomingByteStream;
 pub(crate) use stream::OutboundByteStreamRequest;
 use stream_slots::StreamSlotQuotas;

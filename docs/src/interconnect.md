@@ -246,8 +246,11 @@ operation's domain semantics.
    sequence of chunks. The reader rejects early end, extra bytes, and a stalled chunk. Dropping the
    reader cancels the stream and releases its reservations.
 4. **Ordered duplex stream.** Each direction sends length-prefixed, validated frames in order and
-   may close independently. An idle established stream is valid; the owning protocol sets deadlines
-   for answers it is awaiting. Consensus append traffic uses this form.
+   may close independently. Opening the stream is bounded by the operation's declared setup
+   deadline. An idle established stream is valid; the owning protocol sets deadlines for answers it
+   is awaiting. The initiator's sender reports when the peer's flow control last accepted its
+   bytes, so that protocol can tell a slow answer from a peer that accepts nothing. Consensus append
+   traffic uses this form.
 5. **Relay delivery.** A management-plane grant reserves receiver capacity before an Arrow body is
    sent, followed by explicit runtime admission and optional downstream record acknowledgements.
 
@@ -377,6 +380,12 @@ The ordered append stream can keep multiple batches in flight while preserving f
 consensus-level window bounds a follower to 16 outstanding batches and 16 MiB of unacknowledged log
 data. Heartbeats and elections remain on management capacity, so a full append window does not block
 leadership traffic.
+
+The append stream opens under its five-second setup deadline. A follower answers a batch only after
+appending it durably, so the leader does not time out individual answers. While a batch is
+outstanding, it ends the stream only after five seconds in which no answer arrived and the
+follower's flow control accepted none of the leader's bytes. That bound is independent of the
+heartbeat interval, which still sets the deadline of each heartbeat.
 
 A process restart does not admit ownership-sensitive runtime execution from its recovered local
 state. The restarting node sends `raft_runtime_admission_read` to the leader through the reserved

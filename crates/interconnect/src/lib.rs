@@ -38,8 +38,8 @@ mod request;
 mod wire;
 
 pub use connection::{
-    DuplexItems, DuplexReceiver, DuplexResponses, DuplexSender, IncomingByteStream, RelayAdmission,
-    RelayCancellationGuard,
+    DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress, DuplexSender,
+    IncomingByteStream, RelayAdmission, RelayCancellationGuard,
 };
 pub use identity::TlsConfigBundle;
 pub use observation::{
