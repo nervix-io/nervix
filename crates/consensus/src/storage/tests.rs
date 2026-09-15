@@ -1032,10 +1032,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
             next_statement: 1,
             at,
             result: Box::new(TransactionStepResult {
-                first_statement: 0,
-                statement_count: 1,
-                quiesce_level: None,
-                planned_relocations: None,
+                impact: crate::transaction::test_step_impact(0, 1),
                 result: TransactionCommandResult {
                     success: true,
                     message: "started".into(),

@@ -5542,10 +5542,7 @@ mod tests {
             next_statement: 1,
             at: nervix_models::Timestamp::from_unix_nanos(5),
             result: Box::new(TransactionStepResult {
-                first_statement: 0,
-                statement_count: 1,
-                quiesce_level: None,
-                planned_relocations: None,
+                impact: crate::transaction::test_step_impact(0, 1),
                 result: TransactionCommandResult {
                     success: true,
                     message: "started".to_string(),
@@ -5598,14 +5595,15 @@ mod tests {
                 application_failure: None,
             },
         );
-        assert_eq!(
-            state
-                .transactions
-                .get("tx-1")
-                .verified("the completed application is still part of the open commit")
-                .completed_statement_count(),
-            1
-        );
+        let transaction = state
+            .transactions
+            .get("tx-1")
+            .verified("the completed application is still part of the open commit");
+        assert_eq!(transaction.completed_statement_count(), 1);
+        assert!(matches!(
+            transaction.commit_results()[0].impact.actual().outcome,
+            nervix_models::ExecutionStepOutcome::Applied
+        ));
 
         apply_consensus_command(
             &mut state,
@@ -5615,10 +5613,7 @@ mod tests {
                 next_statement: 2,
                 at: nervix_models::Timestamp::from_unix_nanos(7),
                 result: Box::new(TransactionStepResult {
-                    first_statement: 1,
-                    statement_count: 1,
-                    quiesce_level: None,
-                    planned_relocations: None,
+                    impact: crate::transaction::test_step_impact(1, 1),
                     result: TransactionCommandResult {
                         success: false,
                         message: "validation failed".to_string(),
@@ -5651,6 +5646,14 @@ mod tests {
             })
         ));
         assert_eq!(transaction.commit_results().len(), 2);
+        assert!(matches!(
+            transaction.commit_results()[0].impact.actual().outcome,
+            nervix_models::ExecutionStepOutcome::Applied
+        ));
+        assert!(matches!(
+            transaction.commit_results()[1].impact.actual().outcome,
+            nervix_models::ExecutionStepOutcome::Failed { .. }
+        ));
     }
 
     #[test]
