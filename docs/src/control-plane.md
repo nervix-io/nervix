@@ -36,6 +36,9 @@ Consensus acknowledges votes, appended log entries, and applied administrative w
 synchronizing both data and filesystem metadata. The storage device and filesystem must honor
 these synchronization requests. This uses Fjall's
 [full synchronization contract](https://docs.rs/fjall/latest/fjall/enum.PersistMode.html#variant.SyncAll).
+Durable log entries, votes, state-machine records, snapshot manifests, and snapshot sections use
+Nervix-owned `rkyv` shapes. Recovery validates each archive before converting it into OpenRaft or
+semantic state.
 
 Each applied command atomically stores its changed semantic records with its applied position,
 membership, transaction progress, and revision. Domain configuration and schedule changes within
@@ -51,8 +54,9 @@ prove that the command was uncommitted: the durable write may have completed bef
 was reported. On restart, recovery loads complete durable state and replays committed log entries.
 Persistent administrative requests carry stable execution references. Clients retain the same
 reference across an uncertain transport outcome and join the admitted execution or retrieve its
-retained terminal result. Persisted consensus records must have the current complete storage shape;
-incompatible or incomplete stored state fails startup and must be recreated.
+retained terminal result. Persisted consensus records have exactly one current complete storage
+shape. A malformed archive, an archive that fails current-shape validation, or incomplete stored
+state fails startup with a recreation error; recovery never defaults or reinterprets it.
 
 ## Replication And Log Retention
 
