@@ -1210,16 +1210,17 @@ fn branch_aggregated_state_snapshot_roundtrips_metrics() {
         None,
     )
     .expect("branch-aggregated state should initialize");
-    metrics.observe_global_node_sent(crate::metrics::NodeBatchObservation {
-        domain: &placement.domain,
-        kind: placement.kind,
-        node: &placement.identifier,
-        relay: &relay,
-        physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-        messages: 2,
-        bytes: 64,
-        domain_timestamp: None,
-    });
+    metrics
+        .resolve_node_batch_metrics(NodeBatchMetricsSpec {
+            domain: &placement.domain,
+            kind: placement.kind,
+            node: &placement.identifier,
+            relay: &relay,
+            physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+            direction: "sent",
+            branch_key: None,
+        })
+        .observe(2, 64, None);
     let lsm = state.mark_metrics_updated();
     let snapshot = state
         .latest_snapshot(&metrics)

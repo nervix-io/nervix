@@ -648,6 +648,80 @@ impl BranchInstanceTemplate {
                 ))
             })
             .collect::<Result<HashMap<_, _>, String>>()?;
+        let physical_node_id = runtime.inner.remote_dispatch.local_node_id.read().clone();
+        let branch_key = branch_key_display(&key);
+        let source_metrics =
+            runtime
+                .inner
+                .metrics
+                .resolve_node_batch_metrics(NodeBatchMetricsSpec {
+                    domain,
+                    kind: self.source_kind,
+                    node: &ModelName::from(&self.source),
+                    relay: &self.root_relay,
+                    physical_node_id: physical_node_id.as_ref(),
+                    direction: "sent",
+                    branch_key: Some(branch_key),
+                });
+        let source_input_metrics = if self.source_kind == ModelKind::Ingestor {
+            Some(runtime.inner.metrics.resolve_branch_node_message_metrics(
+                domain,
+                self.source_kind,
+                &ModelName::from(&self.source),
+                physical_node_id.as_ref(),
+                "received",
+                branch_key,
+            ))
+        } else {
+            None
+        };
+        let processor_inputs = processors
+            .iter()
+            .map(|(identifier, processor)| {
+                let inputs = processor
+                    .input_relays
+                    .iter()
+                    .map(|relay| {
+                        let metrics = runtime.inner.metrics.resolve_node_input_metrics(
+                            domain,
+                            processor.kind,
+                            &processor.processor,
+                            relay,
+                            physical_node_id.as_ref(),
+                            Some(branch_key),
+                        );
+                        (relay.clone(), metrics)
+                    })
+                    .collect();
+                (identifier.clone(), inputs)
+            })
+            .collect();
+        let processor_outputs = processors
+            .iter()
+            .map(|(identifier, processor)| {
+                let outputs = processor
+                    .operation
+                    .output_routes()
+                    .routes
+                    .iter()
+                    .map(|output| {
+                        let metrics = runtime.inner.metrics.resolve_node_batch_metrics(
+                            NodeBatchMetricsSpec {
+                                domain,
+                                kind: processor.kind,
+                                node: &processor.processor,
+                                relay: &output.relay,
+                                physical_node_id: physical_node_id.as_ref(),
+                                direction: "sent",
+                                branch_key: Some(branch_key),
+                            },
+                        );
+                        (output.relay.clone(), metrics)
+                    })
+                    .collect();
+                (identifier.clone(), outputs)
+            })
+            .collect();
         let domain_clock = runtime
             .bind_domain_clock(domain)
             .map_err(|error| format!("could not bind branch domain clock: {error}"))?;
@@ -664,6 +738,12 @@ impl BranchInstanceTemplate {
             relay_state_epoch: None,
             processors,
             error_policies: self.error_policies.clone(),
+            metrics: BranchRuntimeMetrics {
+                source: source_metrics,
+                source_input: source_input_metrics,
+                processor_inputs,
+                processor_outputs,
+            },
         }))
     }
 }

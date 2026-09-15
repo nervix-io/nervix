@@ -46,6 +46,7 @@ pub(super) struct EndpointIngestBinding {
     pub(super) output_routes: RelayProcessorOutputsNode,
     pub(super) filter_where: Option<CompiledProgramWithMaterializedInterest>,
     pub(super) codec: Arc<CompiledCodec>,
+    pub(super) metrics: MessageMetricsHandle,
     pub(super) branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
 }
 
@@ -268,7 +269,8 @@ impl Runtime {
     ) {
         // One request is one group, so its builders are sized for the single row this binding
         // decodes.
-        let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 1);
+        let mut collector =
+            IngestRouteCollector::new(IngestMetadataKind::Headers, 1, binding.metrics.clone());
         match collector
             .decode_payload(&binding.codec, Cow::Borrowed(payload.payload()))
             .await
