@@ -101,4 +101,8 @@ pub enum AppError {
     ServeWebConsole,
     #[error("failed to initialize tracing")]
     InitTracing,
+    #[error("failed to register termination signal handlers")]
+    RegisterTerminationSignals,
+    #[error("failed to start termination signal supervision")]
+    SuperviseTerminationSignals,
 }

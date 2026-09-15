@@ -166,6 +166,7 @@ rustls-pki-types = { workspace = true }
 sentry-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+signal-hook = { workspace = true }
 simd-json = { workspace = true }
 sorted-vec = { workspace = true }
 sqlx = { workspace = true }
@@ -197,9 +198,12 @@ zeromq = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 cucumber = { workspace = true, features = ["libtest"] }
+h2 = { workspace = true }
+http = { workspace = true }
 loom = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-test-environment = { workspace = true }
+nix = { workspace = true, features = ["signal"] }
 playwright-rs = { workspace = true }
 rcgen = { workspace = true }
 rstest = { workspace = true }
@@ -378,6 +382,7 @@ nervix-test-environment = { package = "nervix-test-environment", path = "crates/
 nervix-vm = { package = "nervix-vm", path = "crates/nervix-vm" }
 nervix-wasm = { package = "nervix-wasm", path = "crates/nervix-wasm" }
 nervix-wasm-protocol = { package = "nervix-wasm-protocol", path = "crates/nervix-wasm-protocol" }
+nix = "0.30"
 # Compile-time checked non-zero literals, so a constant that must not be zero is rejected by the
 # compiler rather than by a runtime guard.
 nonzero_ext = "0.3"
@@ -464,6 +469,7 @@ sentry-types = "0.48.5"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
 serde_json = "1.0.149"
+signal-hook = "0.4"
 simd-json = "0.17.0"
 sorted-vec = "0.8"
 sqlx = { version = "0.9", default-features = false, features = [

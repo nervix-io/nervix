@@ -255,7 +255,9 @@ spec:
       securityContext:
         fsGroup: 10001
         fsGroupChangePolicy: OnRootMismatch
-      terminationGracePeriodSeconds: 30
+      # SIGTERM starts graceful shutdown. Leave room for the default 30s drain timeout and for
+      # stopping the remaining services before the kubelet sends SIGKILL.
+      terminationGracePeriodSeconds: 60
       volumes:
         - name: interconnect-tls
           projected:
