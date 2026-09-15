@@ -7,6 +7,9 @@
 
 use std::borrow::Cow;
 
+use ahash::RandomState;
+use indexmap::{Equivalent, IndexMap};
+
 use super::*;
 
 /// Why an ingestor that keeps running discards the summary a flush returns.
@@ -329,7 +332,7 @@ pub(super) struct IngestRouteCollector {
     pub(super) row_bound: usize,
     pub(super) context: Option<IngestGroupContext>,
     pub(super) pending: PendingIngestGroup,
-    pub(super) routed: Vec<(RelayName, RelayMessage)>,
+    pub(super) routed: IndexMap<RoutedGroupKey, Vec<RelayMessage>, RandomState>,
     pub(super) flush_at: Option<Instant>,
 }
 
@@ -344,7 +347,7 @@ impl IngestRouteCollector {
             row_bound,
             context: None,
             pending: PendingIngestGroup::new(kind, row_bound),
-            routed: Vec::new(),
+            routed: IndexMap::with_hasher(RandomState::default()),
             flush_at: None,
         }
     }
@@ -441,8 +444,21 @@ impl IngestRouteCollector {
         Ok(Some((context, pending.into_rows()?)))
     }
 
-    pub(super) fn push(&mut self, relay: RelayName, message: RelayMessage) {
-        self.routed.push((relay, message));
+    pub(super) fn push(&mut self, relay: &RelayName, message: RelayMessage) {
+        let lookup = RoutedGroupLookup {
+            relay,
+            key: &message.key,
+        };
+        if let Some(messages) = self.routed.get_mut(&lookup) {
+            messages.push(message);
+            return;
+        }
+
+        let group_key = RoutedGroupKey {
+            relay: relay.clone(),
+            key: message.key.clone(),
+        };
+        self.routed.insert(group_key, vec![message]);
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -460,22 +476,13 @@ impl IngestRouteCollector {
     /// Groups by relay and branch key, preserving arrival order within each group.
     /// `RelayRecordBatch::from_messages` requires a uniform key per batch.
     pub(super) fn drain_groups(&mut self) -> Vec<RoutedGroup> {
-        let mut groups: Vec<RoutedGroup> = Vec::new();
-        let mut group_indices: HashMap<RoutedGroupKey, usize> = HashMap::default();
-        for (relay, message) in self.routed.drain(..) {
-            let group_key = RoutedGroupKey {
-                relay: relay.clone(),
-                key: message.key.clone(),
-            };
-            if let Some(index) = group_indices.get(&group_key).copied() {
-                groups[index].messages.push(message);
-            } else {
-                group_indices.insert(group_key, groups.len());
-                groups.push(RoutedGroup {
-                    relay,
-                    messages: vec![message],
-                });
-            }
+        let routed = std::mem::take(&mut self.routed);
+        let mut groups = Vec::with_capacity(routed.len());
+        for (key, messages) in routed {
+            groups.push(RoutedGroup {
+                relay: key.relay,
+                messages,
+            });
         }
         groups
     }
@@ -487,6 +494,19 @@ impl IngestRouteCollector {
 pub(super) struct RoutedGroupKey {
     pub(super) relay: RelayName,
     pub(super) key: Option<BranchKey>,
+}
+
+/// A borrowed grouping key avoids reference-count traffic while an existing group is found.
+#[derive(Hash)]
+struct RoutedGroupLookup<'a> {
+    relay: &'a RelayName,
+    key: &'a Option<BranchKey>,
+}
+
+impl Equivalent<RoutedGroupKey> for RoutedGroupLookup<'_> {
+    fn equivalent(&self, key: &RoutedGroupKey) -> bool {
+        self.relay == &key.relay && self.key == &key.key
+    }
 }
 
 /// Messages routed to one relay under one branch key, in arrival order.
@@ -518,7 +538,6 @@ pub(super) struct BranchedBranchSelection {
 
 pub(super) struct BranchedBranchPlan {
     pub(super) selections: Vec<BranchedBranchSelection>,
-    pub(super) valid_rows: Vec<(Option<BranchKey>, usize)>,
 }
 
 impl BranchedEntrypointBatch {
@@ -575,10 +594,8 @@ impl BranchedEntrypointBatch {
     pub(super) fn branch_selections(&self) -> Result<BranchedBranchPlan, String> {
         let mut selections = Vec::<BranchedBranchSelection>::new();
         let mut positions = HashMap::<Option<BranchKey>, usize>::default();
-        let mut valid_rows = Vec::new();
         for index in 0..self.metadata.len() {
             let key = self.keys.get(index).cloned().flatten();
-            valid_rows.push((key.clone(), index));
             if let Some(position) = positions.get(&key).copied() {
                 selections[position].rows.push(index);
                 continue;
@@ -590,10 +607,7 @@ impl BranchedEntrypointBatch {
             });
         }
 
-        Ok(BranchedBranchPlan {
-            selections,
-            valid_rows,
-        })
+        Ok(BranchedBranchPlan { selections })
     }
 
     pub(super) fn filter_branch(
@@ -947,8 +961,16 @@ impl Runtime {
         // Sources that do not track acks themselves still need a root for downstream
         // resolution to land on. Those completions are deliberately never observed.
         let mut _unobserved_completions = Vec::new();
+        let ack_root_trackers = if rows.acks.iter().any(AckSet::is_empty) {
+            Some(self.ingestor_ack_root_trackers(domain, ingestor))
+        } else {
+            None
+        };
         for slot in rows.acks.iter_mut().filter(|slot| slot.is_empty()) {
-            let (tracked, completion) = self.tracked_ingestor_ack_root(domain, ingestor);
+            let trackers = ack_root_trackers
+                .as_ref()
+                .verified("the tracker handle was acquired because this ACK set is empty");
+            let (tracked, completion) = trackers.tracked_root();
             *slot = tracked;
             _unobserved_completions.push(completion);
         }
@@ -1060,27 +1082,23 @@ impl Runtime {
                 )
             })
             .collect();
-        let physical_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
         let estimated_bytes = rows.batch.estimated_bytes();
         let row_count: u64 = rows.len().arch_into();
         let bytes_per_row = estimated_bytes.checked_div(row_count).unwrap_or_default();
         let extra_bytes = estimated_bytes.checked_rem(row_count).unwrap_or_default();
-        for (row, event_timestamp) in event_timestamps.iter().enumerate() {
-            let row: u64 = row.arch_into();
-            self.inner
-                .metrics
-                .observe_global_node_without_stream_received(NodeWithoutRelayObservation {
-                    domain,
-                    kind: ModelKind::Ingestor,
-                    node: &ModelName::from(ingestor),
-                    physical_node_id: physical_node_id.as_ref(),
-                    messages: 1,
-                    bytes: bytes_per_row
-                        .checked_add(u64::from(row < extra_bytes))
-                        .assured("a per-row byte share plus one remainder byte fits in u64"),
-                    domain_timestamp: Some(*event_timestamp),
-                });
-        }
+        let ingestor_node = ModelName::from(ingestor);
+        let physical_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
+        self.inner
+            .metrics
+            .observe_global_node_rows_without_stream_received(NodeRowsWithoutRelayObservation {
+                domain,
+                kind: ModelKind::Ingestor,
+                node: &ingestor_node,
+                physical_node_id: physical_node_id.as_ref(),
+                domain_timestamps: &event_timestamps,
+                bytes_per_row,
+                extra_bytes,
+            });
         self.mark_branch_aggregated_metrics_updated(domain, ModelKind::Ingestor, ingestor);
 
         // Every route filters the same surviving group in one VM execution. Outcomes are
@@ -1326,16 +1344,15 @@ impl Runtime {
                     .pop_front()
                     .verified("the queue above was filled with one ACK entry per route");
                 let output = &output_routes.routes[route_output.output_index];
-                let relay = output.relay.clone();
                 output.branch.as_ref().ok_or_else(|| {
                     format!(
                         "ingestor '{}' output '{}' has no branch declaration",
                         ingestor.as_str(),
-                        relay.as_str()
+                        output.relay.as_str()
                     )
                 })?;
                 collector.push(
-                    relay,
+                    &output.relay,
                     RelayMessage {
                         key: route_output.key,
                         record: route_output.record,

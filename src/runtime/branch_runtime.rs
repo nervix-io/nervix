@@ -582,32 +582,33 @@ impl BranchRuntime {
             processor.kind,
             &processor.processor,
         );
-        for seconds in delivery_observation.latency_seconds {
-            self.runtime
-                .inner
-                .metrics
-                .observe_global_delivery_latency_at_domain_time(NodeLatencyObservation {
-                    domain: &self.domain,
-                    kind: processor.kind,
-                    node: &processor.processor,
-                    relay: incoming_relay,
-                    physical_node_id: physical_node_id.as_ref(),
-                    seconds,
-                    domain_timestamp: delivery_observation.domain_timestamp,
-                });
-            self.runtime.inner.metrics.observe_branch_delivery_latency(
+        self.runtime
+            .inner
+            .metrics
+            .observe_global_delivery_latencies_at_domain_time(NodeLatenciesObservation {
+                domain: &self.domain,
+                kind: processor.kind,
+                node: &processor.processor,
+                relay: incoming_relay,
+                physical_node_id: physical_node_id.as_ref(),
+                seconds: &delivery_observation.latency_seconds,
+                domain_timestamp: delivery_observation.domain_timestamp,
+            });
+        self.runtime
+            .inner
+            .metrics
+            .observe_branch_delivery_latencies(
                 branch_key_display(&self.key),
-                NodeLatencyObservation {
+                NodeLatenciesObservation {
                     domain: &self.domain,
                     kind: processor.kind,
                     node: &processor.processor,
                     relay: incoming_relay,
                     physical_node_id: physical_node_id.as_ref(),
-                    seconds,
+                    seconds: &delivery_observation.latency_seconds,
                     domain_timestamp: delivery_observation.domain_timestamp,
                 },
             );
-        }
         processor
             .accept_input(graph, self, incoming_relay, batch, &snapshot)
             .await;
@@ -804,6 +805,7 @@ impl IngestorRouteTask {
             }
         };
         if self.template.branch.source_kind == ModelKind::Ingestor {
+            let source_node = ModelName::from(&self.template.branch.source);
             let row_count = input_batch.batch.batch().num_rows();
             let row_bytes = input_batch
                 .batch
@@ -819,35 +821,48 @@ impl IngestorRouteTask {
                 .fold(0_u64, u64::saturating_add)
                 .checked_div(row_count.arch_into())
                 .unwrap_or_default();
-            for (key, row) in &branch_plan.valid_rows {
-                let Some(metadata) = input_batch.metadata.get(*row) else {
-                    continue;
-                };
-                self.runtime_handle
+            let mut metrics_updated = false;
+            {
+                let physical_node_id = self
+                    .runtime_handle
                     .inner
-                    .metrics
-                    .observe_branch_node_without_stream_received(
-                        branch_key_display(key),
-                        NodeWithoutRelayObservation {
-                            domain: &self.domain,
-                            kind: self.template.branch.source_kind,
-                            node: &ModelName::from(&self.template.branch.source),
-                            physical_node_id: self
-                                .runtime_handle
-                                .inner
-                                .remote_dispatch
-                                .local_node_id
-                                .read()
-                                .as_ref(),
-                            messages: 1,
-                            bytes: row_bytes,
-                            domain_timestamp: Some(metadata.ingested_at_high_watermark()),
-                        },
-                    );
+                    .remote_dispatch
+                    .local_node_id
+                    .read();
+                for selection in &branch_plan.selections {
+                    let mut domain_timestamps = Vec::with_capacity(selection.rows.len());
+                    for row in &selection.rows {
+                        let Some(metadata) = input_batch.metadata.get(*row) else {
+                            continue;
+                        };
+                        domain_timestamps.push(metadata.ingested_at_high_watermark());
+                    }
+                    if domain_timestamps.is_empty() {
+                        continue;
+                    }
+                    self.runtime_handle
+                        .inner
+                        .metrics
+                        .observe_branch_node_rows_without_stream_received(
+                            branch_key_display(&selection.key),
+                            NodeRowsWithoutRelayObservation {
+                                domain: &self.domain,
+                                kind: self.template.branch.source_kind,
+                                node: &source_node,
+                                physical_node_id: physical_node_id.as_ref(),
+                                domain_timestamps: &domain_timestamps,
+                                bytes_per_row: row_bytes,
+                                extra_bytes: 0,
+                            },
+                        );
+                    metrics_updated = true;
+                }
+            }
+            if metrics_updated {
                 self.runtime_handle.mark_branch_aggregated_metrics_updated(
                     &self.domain,
                     self.template.branch.source_kind,
-                    &self.template.branch.source,
+                    &source_node,
                 );
             }
         }

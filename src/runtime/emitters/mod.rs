@@ -409,6 +409,7 @@ struct EmitterBatchContext<'a> {
     runtime: &'a Runtime,
     domain: &'a DomainName,
     emitter: &'a EmitterName,
+    node: &'a ModelName,
     metric_relay: Option<&'a RelayName>,
     error_policies: &'a ErrorPolicies,
     source_filters: &'a HashMap<RelayName, CompiledProgramWithMaterializedInterest>,
@@ -3558,10 +3559,12 @@ impl EmitterTask {
             } else {
                 runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
             }
+            let task_emitter_node = ModelName::from(&task_emitter);
             let batch_context = EmitterBatchContext {
                 runtime: &runtime,
                 domain: &task_domain,
                 emitter: &task_emitter,
+                node: &task_emitter_node,
                 metric_relay: task_metric_relay.as_ref(),
                 error_policies: &task_error_policies,
                 source_filters: &source_filters,
@@ -3993,7 +3996,7 @@ impl EmitterTask {
                             .observe_global_node_received(NodeBatchObservation {
                                 domain: &task_domain,
                                 kind: ModelKind::Emitter,
-                                node: &ModelName::from(&task_emitter),
+                                node: &task_emitter_node,
                                 relay: &input_relay,
                                 physical_node_id: physical_node_id.as_ref(),
                                 messages: batch.message_count(),
@@ -4005,22 +4008,20 @@ impl EmitterTask {
                             ModelKind::Emitter,
                             &task_emitter,
                         );
-                        for seconds in delivery_observation.latency_seconds {
-                            runtime
-                                .inner
-                                .metrics
-                                .observe_global_delivery_latency_at_domain_time(
-                                    NodeLatencyObservation {
-                                        domain: &task_domain,
-                                        kind: ModelKind::Emitter,
-                                        node: &ModelName::from(&task_emitter),
-                                        relay: &input_relay,
-                                        physical_node_id: physical_node_id.as_ref(),
-                                        seconds,
-                                        domain_timestamp: delivery_observation.domain_timestamp,
-                                    },
-                                );
-                        }
+                        runtime
+                            .inner
+                            .metrics
+                            .observe_global_delivery_latencies_at_domain_time(
+                                NodeLatenciesObservation {
+                                    domain: &task_domain,
+                                    kind: ModelKind::Emitter,
+                                    node: &task_emitter_node,
+                                    relay: &input_relay,
+                                    physical_node_id: physical_node_id.as_ref(),
+                                    seconds: &delivery_observation.latency_seconds,
+                                    domain_timestamp: delivery_observation.domain_timestamp,
+                                },
+                            );
                         let wait_for_required_state = !interaction.is_terminal_drain();
                         let publish_batch = match batch_context
                             .process(
@@ -4330,7 +4331,7 @@ impl EmitterBatchContext<'_> {
                 .observe_global_node_sent(NodeBatchObservation {
                     domain: self.domain,
                     kind: ModelKind::Emitter,
-                    node: &ModelName::from(self.emitter),
+                    node: self.node,
                     relay,
                     physical_node_id: self
                         .runtime
@@ -4350,7 +4351,7 @@ impl EmitterBatchContext<'_> {
                 .observe_global_node_without_stream_sent(NodeWithoutRelayObservation {
                     domain: self.domain,
                     kind: ModelKind::Emitter,
-                    node: &ModelName::from(self.emitter),
+                    node: self.node,
                     physical_node_id: self
                         .runtime
                         .inner
@@ -4366,7 +4367,7 @@ impl EmitterBatchContext<'_> {
         self.runtime.mark_branch_aggregated_metrics_updated(
             self.domain,
             ModelKind::Emitter,
-            self.emitter,
+            self.node,
         );
     }
 
@@ -4405,7 +4406,7 @@ impl EmitterBatchContext<'_> {
                 .handle_structured_message_error(MessageErrorHandling {
                     domain: self.domain,
                     node_kind: ModelKind::Emitter,
-                    node: &ModelName::from(self.emitter),
+                    node: self.node,
                     source_route: None,
                     policy: &self.error_policies.message,
                     message,

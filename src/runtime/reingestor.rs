@@ -1264,6 +1264,7 @@ impl Runtime {
                 task_output_routes.routes.len(),
                 quiesce_counters.clone(),
             );
+            let task_reingestor_node = ModelName::from(&task_reingestor);
             let output_flush_context = ReingestorOutputFlushContext {
                 domain: &task_domain,
                 reingestor: &task_reingestor,
@@ -1409,7 +1410,7 @@ impl Runtime {
                             .observe_global_node_received(NodeBatchObservation {
                                 domain: &task_domain,
                                 kind: ModelKind::Reingestor,
-                                node: &ModelName::from(&task_reingestor),
+                                node: &task_reingestor_node,
                                 relay: &task_from_relay,
                                 physical_node_id: physical_node_id.as_ref(),
                                 messages: batch.message_count(),
@@ -1419,24 +1420,22 @@ impl Runtime {
                         runtime.mark_branch_aggregated_metrics_updated(
                             &task_domain,
                             ModelKind::Reingestor,
-                            &task_reingestor,
+                            &task_reingestor_node,
                         );
-                        for seconds in delivery_observation.latency_seconds {
-                            runtime
-                                .inner
-                                .metrics
-                                .observe_global_delivery_latency_at_domain_time(
-                                    NodeLatencyObservation {
-                                        domain: &task_domain,
-                                        kind: ModelKind::Reingestor,
-                                        node: &ModelName::from(&task_reingestor),
-                                        relay: &task_from_relay,
-                                        physical_node_id: physical_node_id.as_ref(),
-                                        seconds,
-                                        domain_timestamp: delivery_observation.domain_timestamp,
-                                    },
-                                );
-                        }
+                        runtime
+                            .inner
+                            .metrics
+                            .observe_global_delivery_latencies_at_domain_time(
+                                NodeLatenciesObservation {
+                                    domain: &task_domain,
+                                    kind: ModelKind::Reingestor,
+                                    node: &task_reingestor_node,
+                                    relay: &task_from_relay,
+                                    physical_node_id: physical_node_id.as_ref(),
+                                    seconds: &delivery_observation.latency_seconds,
+                                    domain_timestamp: delivery_observation.domain_timestamp,
+                                },
+                            );
                         let dependency_error_acks = batch.acks.clone();
                         let wait_for_required_state = !interaction.is_terminal_drain();
                         let batch = match runtime

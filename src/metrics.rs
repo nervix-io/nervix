@@ -1608,6 +1608,12 @@ impl PrometheusMetrics {
         }
     }
 
+    fn observe_histograms(&self, key: &MetricKey, values: &[f64]) {
+        for value in values {
+            self.observe_histogram(key, *value);
+        }
+    }
+
     /// Withdraw one label set from the Prometheus registry.
     ///
     /// Removal reports an error when the label set was never registered, which happens whenever an
@@ -1861,6 +1867,17 @@ pub struct NodeWithoutRelayObservation<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct NodeRowsWithoutRelayObservation<'a> {
+    pub domain: &'a DomainName,
+    pub kind: ModelKind,
+    pub node: &'a ModelName,
+    pub physical_node_id: Option<&'a ClusterNodeName>,
+    pub domain_timestamps: &'a [Timestamp],
+    pub bytes_per_row: u64,
+    pub extra_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct RelayBatchObservation<'a> {
     pub domain: &'a DomainName,
     pub relay: &'a RelayName,
@@ -1888,6 +1905,17 @@ pub struct NodeLatencyObservation<'a> {
     pub relay: &'a RelayName,
     pub physical_node_id: Option<&'a ClusterNodeName>,
     pub seconds: f64,
+    pub domain_timestamp: Option<Timestamp>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NodeLatenciesObservation<'a> {
+    pub domain: &'a DomainName,
+    pub kind: ModelKind,
+    pub node: &'a ModelName,
+    pub relay: &'a RelayName,
+    pub physical_node_id: Option<&'a ClusterNodeName>,
+    pub seconds: &'a [f64],
     pub domain_timestamp: Option<Timestamp>,
 }
 
@@ -2256,15 +2284,36 @@ impl RuntimeMetrics {
             MESSAGES_TOTAL,
         );
         self.increment(
-            messages_key.clone(),
+            &messages_key,
             observation.messages,
             observation.domain_timestamp,
         );
-        self.increment(
-            with_metric(&messages_key, BYTES_TOTAL),
-            observation.bytes,
-            observation.domain_timestamp,
+        let bytes_key = with_metric(&messages_key, BYTES_TOTAL);
+        self.increment(&bytes_key, observation.bytes, observation.domain_timestamp);
+    }
+
+    pub fn observe_global_node_rows_without_stream_received(
+        &self,
+        observation: NodeRowsWithoutRelayObservation<'_>,
+    ) {
+        let messages_key = MetricKey::node_without_stream(
+            observation.domain,
+            observation.kind,
+            observation.node,
+            observation.physical_node_id,
+            "received",
+            MESSAGES_TOTAL,
         );
+        let bytes_key = with_metric(&messages_key, BYTES_TOTAL);
+        for (row, domain_timestamp) in observation.domain_timestamps.iter().enumerate() {
+            let row: u64 = row.arch_into();
+            let bytes = observation
+                .bytes_per_row
+                .checked_add(u64::from(row < observation.extra_bytes))
+                .assured("a per-row byte share plus one remainder byte fits in u64");
+            self.increment(&messages_key, 1, Some(*domain_timestamp));
+            self.increment(&bytes_key, bytes, Some(*domain_timestamp));
+        }
     }
 
     pub fn observe_global_node_without_stream_sent(
@@ -2280,15 +2329,12 @@ impl RuntimeMetrics {
             MESSAGES_TOTAL,
         );
         self.increment(
-            messages_key.clone(),
+            &messages_key,
             observation.messages,
             observation.domain_timestamp,
         );
-        self.increment(
-            with_metric(&messages_key, BYTES_TOTAL),
-            observation.bytes,
-            observation.domain_timestamp,
-        );
+        let bytes_key = with_metric(&messages_key, BYTES_TOTAL);
+        self.increment(&bytes_key, observation.bytes, observation.domain_timestamp);
     }
 
     pub fn observe_branch_node_without_stream_received(
@@ -2318,6 +2364,38 @@ impl RuntimeMetrics {
         );
     }
 
+    pub fn observe_branch_node_rows_without_stream_received(
+        &self,
+        branch_key: &str,
+        observation: NodeRowsWithoutRelayObservation<'_>,
+    ) {
+        let messages_key = MetricKey::node_without_stream(
+            observation.domain,
+            observation.kind,
+            observation.node,
+            observation.physical_node_id,
+            "received",
+            MESSAGES_TOTAL,
+        );
+        let messages_key = BranchMetricKey {
+            branch_key: branch_key.to_string(),
+            key: messages_key,
+        };
+        let bytes_key = BranchMetricKey {
+            branch_key: branch_key.to_string(),
+            key: with_metric(&messages_key.key, BYTES_TOTAL),
+        };
+        for (row, domain_timestamp) in observation.domain_timestamps.iter().enumerate() {
+            let row: u64 = row.arch_into();
+            let bytes = observation
+                .bytes_per_row
+                .checked_add(u64::from(row < observation.extra_bytes))
+                .assured("a per-row byte share plus one remainder byte fits in u64");
+            self.increment_branch_key(&messages_key, 1, Some(*domain_timestamp));
+            self.increment_branch_key(&bytes_key, bytes, Some(*domain_timestamp));
+        }
+    }
+
     pub fn observe_global_delivery_latency(
         &self,
         domain: &DomainName,
@@ -2344,6 +2422,22 @@ impl RuntimeMetrics {
         &self,
         observation: NodeLatencyObservation<'_>,
     ) {
+        let seconds = [observation.seconds];
+        self.observe_global_delivery_latencies_at_domain_time(NodeLatenciesObservation {
+            domain: observation.domain,
+            kind: observation.kind,
+            node: observation.node,
+            relay: observation.relay,
+            physical_node_id: observation.physical_node_id,
+            seconds: &seconds,
+            domain_timestamp: observation.domain_timestamp,
+        });
+    }
+
+    pub fn observe_global_delivery_latencies_at_domain_time(
+        &self,
+        observation: NodeLatenciesObservation<'_>,
+    ) {
         let key = MetricKey::node(
             observation.domain,
             observation.kind,
@@ -2353,14 +2447,10 @@ impl RuntimeMetrics {
             "received",
             DELIVERY_LATENCY_SECONDS,
         );
-        self.observe_histogram(
-            key.clone(),
-            observation.seconds,
-            observation.domain_timestamp,
-        );
+        self.observe_histograms(&key, observation.seconds, observation.domain_timestamp);
         self.series
             .prometheus
-            .observe_histogram(&key, observation.seconds);
+            .observe_histograms(&key, observation.seconds);
     }
 
     pub fn observe_branch_stream_received(
@@ -2432,20 +2522,42 @@ impl RuntimeMetrics {
         branch_key: &str,
         observation: NodeLatencyObservation<'_>,
     ) {
-        self.observe_branch_histogram(
+        let seconds = [observation.seconds];
+        self.observe_branch_delivery_latencies(
             branch_key,
-            MetricKey::node(
-                observation.domain,
-                observation.kind,
-                observation.node,
-                observation.physical_node_id,
-                observation.relay,
-                "received",
-                DELIVERY_LATENCY_SECONDS,
-            ),
-            observation.seconds,
-            observation.domain_timestamp,
+            NodeLatenciesObservation {
+                domain: observation.domain,
+                kind: observation.kind,
+                node: observation.node,
+                relay: observation.relay,
+                physical_node_id: observation.physical_node_id,
+                seconds: &seconds,
+                domain_timestamp: observation.domain_timestamp,
+            },
         );
+    }
+
+    pub fn observe_branch_delivery_latencies(
+        &self,
+        branch_key: &str,
+        observation: NodeLatenciesObservation<'_>,
+    ) {
+        let key = MetricKey::node(
+            observation.domain,
+            observation.kind,
+            observation.node,
+            observation.physical_node_id,
+            observation.relay,
+            "received",
+            DELIVERY_LATENCY_SECONDS,
+        );
+        let key = BranchMetricKey {
+            branch_key: branch_key.to_string(),
+            key,
+        };
+        for value in observation.seconds {
+            self.observe_branch_histogram_key(&key, *value, None, observation.domain_timestamp);
+        }
     }
 
     pub fn observe_global_relay_buffer_len(&self, observation: RelayBufferObservation<'_>) {
@@ -3166,17 +3278,11 @@ impl RuntimeMetrics {
         bytes: u64,
         domain_timestamp: Option<Timestamp>,
     ) {
-        self.increment(messages_key.clone(), messages, domain_timestamp);
-        self.increment(
-            with_metric(&messages_key, BATCHES_TOTAL),
-            1,
-            domain_timestamp,
-        );
-        self.increment(
-            with_metric(&messages_key, BYTES_TOTAL),
-            bytes,
-            domain_timestamp,
-        );
+        self.increment(&messages_key, messages, domain_timestamp);
+        let batches_key = with_metric(&messages_key, BATCHES_TOTAL);
+        self.increment(&batches_key, 1, domain_timestamp);
+        let bytes_key = with_metric(&messages_key, BYTES_TOTAL);
+        self.increment(&bytes_key, bytes, domain_timestamp);
         let batch_key = with_metric(&messages_key, MESSAGES_PER_BATCH);
         self.observe_histogram(batch_key.clone(), messages.approx_into(), domain_timestamp);
         self.series
@@ -3213,12 +3319,17 @@ impl RuntimeMetrics {
         );
     }
 
-    fn increment(&self, key: MetricKey, value: u64, domain_timestamp: Option<Timestamp>) {
-        self.register_counter(key.clone());
-        if let Some(series) = self.series.counters.get(&key) {
+    fn increment(&self, key: &MetricKey, value: u64, domain_timestamp: Option<Timestamp>) {
+        if let Some(series) = self.series.counters.get(key) {
             series.increment(value, domain_timestamp);
+        } else {
+            self.series
+                .counters
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(CounterSeries::default()))
+                .increment(value, domain_timestamp);
         }
-        self.series.prometheus.increment_counter(&key, value);
+        self.series.prometheus.increment_counter(key, value);
     }
 
     fn register_counter(&self, key: MetricKey) {
@@ -3230,7 +3341,21 @@ impl RuntimeMetrics {
     }
 
     fn observe_histogram(&self, key: MetricKey, value: f64, domain_timestamp: Option<Timestamp>) {
-        self.observe_histogram_with_capacity(key, value, None, domain_timestamp);
+        self.observe_histogram_key(&key, value, None, domain_timestamp);
+    }
+
+    fn observe_histograms(
+        &self,
+        key: &MetricKey,
+        values: &[f64],
+        domain_timestamp: Option<Timestamp>,
+    ) {
+        if values.is_empty() {
+            return;
+        }
+        for value in values {
+            self.observe_histogram_key(key, *value, None, domain_timestamp);
+        }
     }
 
     fn observe_histogram_with_capacity(
@@ -3240,16 +3365,27 @@ impl RuntimeMetrics {
         capacity: Option<usize>,
         domain_timestamp: Option<Timestamp>,
     ) {
-        let buckets = internal_buckets_for_metric(key.metric);
-        self.series
-            .histograms
-            .entry(key)
-            .or_insert_with(|| Arc::new(HistogramSeries::new(buckets)))
-            .observe_with_capacity(
-                value,
-                capacity.map(|capacity| capacity.arch_into()),
-                domain_timestamp,
-            );
+        self.observe_histogram_key(&key, value, capacity, domain_timestamp);
+    }
+
+    fn observe_histogram_key(
+        &self,
+        key: &MetricKey,
+        value: f64,
+        capacity: Option<usize>,
+        domain_timestamp: Option<Timestamp>,
+    ) {
+        let capacity = capacity.map(|capacity| capacity.arch_into());
+        if let Some(series) = self.series.histograms.get(key) {
+            series.observe_with_capacity(value, capacity, domain_timestamp);
+        } else {
+            let buckets = internal_buckets_for_metric(key.metric);
+            self.series
+                .histograms
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(HistogramSeries::new(buckets)))
+                .observe_with_capacity(value, capacity, domain_timestamp);
+        }
     }
 
     fn increment_branch(
@@ -3263,12 +3399,23 @@ impl RuntimeMetrics {
             branch_key: branch_key.to_string(),
             key,
         };
-        self.series
-            .branch_counters
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(CounterSeries::default()));
-        if let Some(series) = self.series.branch_counters.get(&key) {
+        self.increment_branch_key(&key, value, domain_timestamp);
+    }
+
+    fn increment_branch_key(
+        &self,
+        key: &BranchMetricKey,
+        value: u64,
+        domain_timestamp: Option<Timestamp>,
+    ) {
+        if let Some(series) = self.series.branch_counters.get(key) {
             series.increment(value, domain_timestamp);
+        } else {
+            self.series
+                .branch_counters
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(CounterSeries::default()))
+                .increment(value, domain_timestamp);
         }
     }
 
@@ -3290,19 +3437,31 @@ impl RuntimeMetrics {
         capacity: Option<usize>,
         domain_timestamp: Option<Timestamp>,
     ) {
-        let buckets = internal_buckets_for_metric(key.metric);
-        self.series
-            .branch_histograms
-            .entry(BranchMetricKey {
-                branch_key: branch_key.to_string(),
-                key,
-            })
-            .or_insert_with(|| Arc::new(HistogramSeries::new(buckets)))
-            .observe_with_capacity(
-                value,
-                capacity.map(|capacity| capacity.arch_into()),
-                domain_timestamp,
-            );
+        let key = BranchMetricKey {
+            branch_key: branch_key.to_string(),
+            key,
+        };
+        self.observe_branch_histogram_key(&key, value, capacity, domain_timestamp);
+    }
+
+    fn observe_branch_histogram_key(
+        &self,
+        key: &BranchMetricKey,
+        value: f64,
+        capacity: Option<usize>,
+        domain_timestamp: Option<Timestamp>,
+    ) {
+        let capacity = capacity.map(|capacity| capacity.arch_into());
+        if let Some(series) = self.series.branch_histograms.get(key) {
+            series.observe_with_capacity(value, capacity, domain_timestamp);
+        } else {
+            let buckets = internal_buckets_for_metric(key.key.metric);
+            self.series
+                .branch_histograms
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(HistogramSeries::new(buckets)))
+                .observe_with_capacity(value, capacity, domain_timestamp);
+        }
     }
 }
 
@@ -4078,23 +4237,29 @@ mod tests {
         let metrics = RuntimeMetrics::default();
         let domain = DomainName::parse("main").expect("valid domain");
         let ingestor = IngestorName::parse("ing").expect("valid identifier");
+        let node = ModelName::from(&ingestor);
+        let physical_node_id = ClusterNodeName::parse("node-1").expect("valid name");
+        let domain_timestamps = [
+            Timestamp::from_unix_nanos(1_000_000_000),
+            Timestamp::from_unix_nanos(1_000_000_001),
+        ];
 
-        metrics.observe_global_node_without_stream_received(NodeWithoutRelayObservation {
+        metrics.observe_global_node_rows_without_stream_received(NodeRowsWithoutRelayObservation {
             domain: &domain,
             kind: ModelKind::Ingestor,
-            node: &ModelName::from(&ingestor),
-            physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-            messages: 2,
-            bytes: 34,
-            domain_timestamp: None,
+            node: &node,
+            physical_node_id: Some(&physical_node_id),
+            domain_timestamps: &domain_timestamps,
+            bytes_per_row: 16,
+            extra_bytes: 2,
         });
         metrics.observe_branch_node_without_stream_received(
             r#"{"tenant":"alpha"}"#,
             NodeWithoutRelayObservation {
                 domain: &domain,
                 kind: ModelKind::Ingestor,
-                node: &ModelName::from(&ingestor),
-                physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+                node: &node,
+                physical_node_id: Some(&physical_node_id),
                 messages: 2,
                 bytes: 34,
                 domain_timestamp: None,

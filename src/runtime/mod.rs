@@ -146,8 +146,8 @@ use crate::{
     ConfiguredFaultInjection, cluster,
     metrics::{
         BranchEvictionReason, IngestorQuiesceMetricLabels, NodeBatchObservation,
-        NodeLatencyObservation, NodeWithoutRelayObservation, RelayBatchObservation,
-        RelayBufferObservation, RuntimeMetrics, RuntimeMetricsSnapshot,
+        NodeLatenciesObservation, NodeRowsWithoutRelayObservation, NodeWithoutRelayObservation,
+        RelayBatchObservation, RelayBufferObservation, RuntimeMetrics, RuntimeMetricsSnapshot,
     },
     registry::{ActiveGraph, RuntimeChange, RuntimeChanges},
     resource::ResourceStore,

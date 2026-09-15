@@ -195,6 +195,7 @@ webpki-roots = { workspace = true }
 zeromq = { workspace = true }
 
 [dev-dependencies]
+alloc_count = { workspace = true }
 criterion = { workspace = true }
 cucumber = { workspace = true, features = ["libtest"] }
 loom = { workspace = true }
@@ -257,6 +258,7 @@ ahash-compile-time = { package = "ahash", version = "0.8", default-features = fa
   "compile-time-rng",
   "std",
 ] }
+alloc_count = "0.3.1"
 anyhow = "1"
 apache-avro = "0.21.0"
 arc-swap = "1.9.1"
