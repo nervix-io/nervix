@@ -39,10 +39,10 @@ impl IngestorStarter {
         match plan {
             IngestorStartPlan::Http(plan) => HttpIngestor::start(runtime, plan).await,
             IngestorStartPlan::Kafka(plan) => {
-                let local_node_id = runtime.inner.remote_dispatch.local_node_id.read().clone();
+                let dispatcher = runtime.inner.remote_dispatcher.load_full();
+                let local_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
                 let kafka_offset_state = plan.offset_state_placement.as_ref().and_then(|planned| {
                     local_node_id
-                        .as_ref()
                         .is_some_and(|local| Some(local) == planned.primary_node.as_ref())
                         .then(|| {
                             runtime

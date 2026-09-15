@@ -17,11 +17,12 @@ pub(super) enum ScheduledIngestorStart {
 
 impl Runtime {
     pub(in crate::runtime) fn syslog_ingestor_bind_addr(&self, configured: &str) -> String {
-        if let Some(node_id) = self.inner.remote_dispatch.local_node_id.read().as_ref() {
+        let dispatcher = self.inner.remote_dispatcher.load();
+        if let Some(dispatcher) = dispatcher.as_deref() {
             return self
                 .inner
                 .fault_injection
-                .syslog_ingestor_bind_addr(node_id, configured);
+                .syslog_ingestor_bind_addr(dispatcher.local_node_id(), configured);
         }
 
         configured.to_string()
@@ -66,7 +67,8 @@ impl Runtime {
         &self,
         requested_domain: Option<&DomainName>,
     ) -> ScheduledIngestorStart {
-        let local_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
+        let dispatcher = self.inner.remote_dispatcher.load();
+        let local_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
         let mut domains = self
             .inner
             .executions
@@ -98,7 +100,7 @@ impl Runtime {
 
             for node in schedule.nodes.values() {
                 if node.kind() != ModelKind::Ingestor
-                    || !Self::scheduled_node_executes_locally(node, local_node_id.as_ref())
+                    || !Self::scheduled_node_executes_locally(node, local_node_id)
                 {
                     continue;
                 }
@@ -418,12 +420,13 @@ impl Runtime {
             }
         }
         drop(execution);
-        let physical_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
+        let dispatcher = self.inner.remote_dispatcher.load();
+        let physical_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
         let metrics = self.inner.metrics.resolve_global_node_message_metrics(
             domain,
             ModelKind::Ingestor,
             &ModelName::from(&ingestor.name),
-            physical_node_id.as_ref(),
+            physical_node_id,
             "received",
         );
         Ok(IngestorDependencies {
@@ -441,7 +444,7 @@ impl Runtime {
         lookup: CreateLookup,
         codec: Arc<CompiledCodec>,
     ) -> Result<LookupRuntime, String> {
-        let Some(resource_store) = self.inner.resource_store.read().clone() else {
+        let Some(resource_store) = self.inner.resource_store.load_full() else {
             return Err("resource store is not attached".to_string());
         };
         let Some(resource_version) = self
@@ -525,12 +528,13 @@ impl Runtime {
             entries.insert(value.to_key_fragment(), row);
         }
 
-        let physical_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
+        let dispatcher = self.inner.remote_dispatcher.load();
+        let physical_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
         let metrics = self.inner.metrics.resolve_global_node_message_metrics(
             domain,
             ModelKind::Lookup,
             &ModelName::from(&lookup.name),
-            physical_node_id.as_ref(),
+            physical_node_id,
             "received",
         );
         Ok(LookupRuntime {

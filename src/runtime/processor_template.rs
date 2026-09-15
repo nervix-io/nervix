@@ -651,7 +651,8 @@ impl BranchInstanceTemplate {
                 ))
             })
             .collect::<Result<HashMap<_, _>, String>>()?;
-        let physical_node_id = runtime.inner.remote_dispatch.local_node_id.read().clone();
+        let dispatcher = runtime.inner.remote_dispatcher.load();
+        let physical_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
         let branch_key = branch_key_display(&key);
         let source_metrics =
             runtime
@@ -662,7 +663,7 @@ impl BranchInstanceTemplate {
                     kind: self.source_kind,
                     node: &ModelName::from(&self.source),
                     relay: &self.root_relay,
-                    physical_node_id: physical_node_id.as_ref(),
+                    physical_node_id,
                     direction: "sent",
                     branch_key: Some(branch_key),
                 });
@@ -671,7 +672,7 @@ impl BranchInstanceTemplate {
                 domain,
                 self.source_kind,
                 &ModelName::from(&self.source),
-                physical_node_id.as_ref(),
+                physical_node_id,
                 "received",
                 branch_key,
             ))
@@ -690,7 +691,7 @@ impl BranchInstanceTemplate {
                             processor.kind,
                             &processor.processor,
                             relay,
-                            physical_node_id.as_ref(),
+                            physical_node_id,
                             Some(branch_key),
                         );
                         (relay.clone(), metrics)
@@ -714,7 +715,7 @@ impl BranchInstanceTemplate {
                                 kind: processor.kind,
                                 node: &processor.processor,
                                 relay: &output.relay,
-                                physical_node_id: physical_node_id.as_ref(),
+                                physical_node_id,
                                 direction: "sent",
                                 branch_key: Some(branch_key),
                             },

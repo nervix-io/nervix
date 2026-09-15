@@ -1247,13 +1247,13 @@ impl Runtime {
         let runtime = self.clone();
         let shutdown_rx = shutdown_tx.subscribe();
         let force_flush = self.force_flush_participant(domain, quiesce_counters.clone());
-        let physical_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
+        let dispatcher = self.inner.remote_dispatcher.load();
         let input_metrics = self.inner.metrics.resolve_node_input_metrics(
             domain,
             ModelKind::Reingestor,
             &ModelName::from(&reingestor.name),
             &task_from_relay,
-            physical_node_id.as_ref(),
+            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
             None,
         );
 
