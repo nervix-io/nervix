@@ -301,6 +301,18 @@ impl Drop for DomainForceFlushCompletion {
     }
 }
 
+/// The two independently owned counters every ingestor-created ACK root updates.
+pub(in crate::runtime) struct IngestorAckRootTrackers {
+    domain: Arc<AckRootTracker>,
+    ingestor: Arc<AckRootTracker>,
+}
+
+impl IngestorAckRootTrackers {
+    pub(in crate::runtime) fn tracked_root(&self) -> (AckSet, AckCompletion) {
+        AckSet::tracked_roots(vec![self.domain.clone(), self.ingestor.clone()])
+    }
+}
+
 impl Runtime {
     pub(in crate::runtime) fn tracked_ack_root(
         &self,
@@ -320,12 +332,24 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &IngestorName,
     ) -> (AckSet, AckCompletion) {
-        let domain_tracker = self
-            .inner
-            .in_flight_by_domain
-            .entry(domain.clone())
-            .or_insert_with(|| Arc::new(AckRootTracker::default()))
-            .clone();
+        self.ingestor_ack_root_trackers(domain, ingestor)
+            .tracked_root()
+    }
+
+    pub(in crate::runtime) fn ingestor_ack_root_trackers(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+    ) -> IngestorAckRootTrackers {
+        let domain_tracker = match self.inner.in_flight_by_domain.get(domain) {
+            Some(tracker) => tracker.value().clone(),
+            None => self
+                .inner
+                .in_flight_by_domain
+                .entry(domain.clone())
+                .or_insert_with(|| Arc::new(AckRootTracker::default()))
+                .clone(),
+        };
         let ingestor_tracker = self
             .inner
             .in_flight_by_ingestor
@@ -336,7 +360,10 @@ impl Runtime {
             ))
             .or_insert_with(|| Arc::new(AckRootTracker::default()))
             .clone();
-        AckSet::tracked_roots(vec![domain_tracker, ingestor_tracker])
+        IngestorAckRootTrackers {
+            domain: domain_tracker,
+            ingestor: ingestor_tracker,
+        }
     }
 
     pub(in crate::runtime) fn domain_outstanding_work(&self, domain: &DomainName) -> usize {

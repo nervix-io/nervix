@@ -295,6 +295,7 @@ impl KafkaIngestor {
             let task_runtime = runtime.clone();
             let task_domain = domain.clone();
             let task_ingestor = ingestor.name.clone();
+            let task_ingestor_key = key.clone();
             let task_timestamp_source = ingestor.timestamp_source.clone();
             let task_topic = topic.clone();
             let task_events = runtime.events().clone();
@@ -557,7 +558,7 @@ impl KafkaIngestor {
                             match message {
                                 Ok(message) => {
                                     task_runtime
-                                        .clear_ingestor_transient_error(&task_domain, &task_ingestor);
+                                        .clear_ingestor_transient_error_for(&task_ingestor_key);
                                     // Decoding appends one row to the group's own record builder,
                                     // so a poll group is one set of Arrow columns. The payload is
                                     // copied because the codec may leave the reactor while the

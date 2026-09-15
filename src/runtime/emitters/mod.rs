@@ -409,6 +409,7 @@ struct EmitterBatchContext<'a> {
     runtime: &'a Runtime,
     domain: &'a DomainName,
     emitter: &'a EmitterName,
+    node: &'a ModelName,
     output_metrics: &'a EmitterOutputMetrics,
     error_policies: &'a ErrorPolicies,
     source_filters: &'a HashMap<RelayName, CompiledProgramWithMaterializedInterest>,
@@ -3615,10 +3616,12 @@ impl EmitterTask {
             } else {
                 runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
             }
+            let task_emitter_node = ModelName::from(&task_emitter);
             let batch_context = EmitterBatchContext {
                 runtime: &runtime,
                 domain: &task_domain,
                 emitter: &task_emitter,
+                node: &task_emitter_node,
                 output_metrics: &task_output_metrics,
                 error_policies: &task_error_policies,
                 source_filters: &source_filters,
@@ -4367,7 +4370,7 @@ impl EmitterBatchContext<'_> {
         self.runtime.mark_branch_aggregated_metrics_updated(
             self.domain,
             ModelKind::Emitter,
-            self.emitter,
+            self.node,
         );
     }
 
@@ -4406,7 +4409,7 @@ impl EmitterBatchContext<'_> {
                 .handle_structured_message_error(MessageErrorHandling {
                     domain: self.domain,
                     node_kind: ModelKind::Emitter,
-                    node: &ModelName::from(self.emitter),
+                    node: self.node,
                     source_route: None,
                     policy: &self.error_policies.message,
                     message,
