@@ -125,6 +125,25 @@ impl Harness {
             payload: EntryPayload::Normal(command),
         }
     }
+    /// Admit one command execution whose stored record carries `bytes` of password hash, so the
+    /// write that stores it charges a known share of its batch.
+    fn admission(index: u64, bytes: usize) -> Result<ConsensusCommand, Box<dyn std::error::Error>> {
+        let owner = nervix_models::UserName::parse("operator")?;
+        Ok(ConsensusCommand::AdmitCommandExecution {
+            execution: Box::new(crate::CommandExecution::applying(
+                nervix_models::CommandExecutionReference::parse(format!("request-{index}"))?,
+                owner.clone(),
+                None,
+                [0; 32],
+                nervix_models::Timestamp::from_unix_nanos(1),
+                crate::CommandExecutionEffect::CreateUser {
+                    if_not_exists: false,
+                    name: owner,
+                    password_hash: "x".repeat(bytes),
+                },
+            )),
+        })
+    }
     async fn apply(&mut self, index: u64, command: ConsensusCommand) -> io::Result<()> {
         self.store
             .apply(futures_util::stream::iter([Ok((
@@ -362,6 +381,141 @@ async fn responses_and_notifications_wait_for_storage_on_a_single_async_worker()
         pause.release();
         task.await??;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_committed_range_is_published_once_after_its_single_durable_write() -> TestResult {
+    let harness = Harness::new().await?;
+    let mut entries = Vec::new();
+    for (index, name) in [(1, "first"), (2, "second"), (3, "third")] {
+        entries.push(Ok((
+            Harness::entry(
+                index,
+                ConsensusCommand::PutDomain {
+                    domain: Box::new(Harness::domain(name)),
+                },
+            ),
+            None,
+        )));
+    }
+    // Writing entry by entry would already have published the first two entries by the time the
+    // last entry's commit is held.
+    let pause = harness
+        .store
+        .inner
+        .faults
+        .pause_next("put-domain:third".to_owned(), StorageBoundary::BeforeCommit);
+    let notifications = harness.store.inner.domain_tx.subscribe();
+    let mut store = harness.store.clone();
+    let task = tokio::spawn(async move { store.apply(futures_util::stream::iter(entries)).await });
+    tokio::time::timeout(Duration::from_secs(10), pause.entered()).await?;
+    assert!(
+        !task.is_finished(),
+        "the range was acknowledged before its durable write"
+    );
+    assert_eq!(
+        harness.store.inner.state().last_applied_log_id,
+        None,
+        "an entry was published before the write that stores the whole range"
+    );
+    assert!(!notifications.has_changed()?);
+    pause.release();
+    task.await??;
+    let state = harness.store.inner.state();
+    assert_eq!(state.last_applied_log_id, Some(Harness::log_id(3)));
+    for name in ["first", "second", "third"] {
+        assert!(
+            state.domains.contains_key(&DomainName::try_from(name)?),
+            "domain {name} is missing from the published range"
+        );
+    }
+    assert!(notifications.has_changed()?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_range_is_split_where_the_next_entry_would_exceed_its_write() -> TestResult {
+    for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
+        tokio::task::consume_budget().await;
+        let mut harness = Harness::new().await?;
+        let reservation = StoreInner::reserve(&harness.executor, MemoryClass::Commands).await?;
+        let limit = DurableBatch::byte_limit(&reservation)?;
+        drop(reservation);
+        // Two small entries share a write, a large one does not fit beside both of them but fits
+        // beside one, so the range is written as entries 1 and 2, then 3 and 4, then 5.
+        let small = limit / 5;
+        let large = (limit / 10)
+            .checked_mul(7)
+            .ok_or("the large fixture entry size overflows usize")?;
+        let mut entries = Vec::new();
+        for (index, bytes) in [(1, small), (2, small), (3, large), (4, small), (5, small)] {
+            entries.push(Ok((
+                Harness::entry(index, Harness::admission(index, bytes)?),
+                None,
+            )));
+        }
+        // Entry 4 is the second entry of its write, so its failure fails the whole write.
+        harness
+            .store
+            .inner
+            .faults
+            .fail_next("admit-command-execution:request-4".to_owned(), boundary);
+        assert!(
+            harness
+                .store
+                .apply(futures_util::stream::iter(entries))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            harness.store.inner.state().last_applied_log_id,
+            Some(Harness::log_id(2)),
+            "the write holding entries 1 and 2 is published before the failed write"
+        );
+        let harness = harness.reopen().await?;
+        let recovered = harness.store.inner.state();
+        let durable = match boundary {
+            StorageBoundary::BeforeCommit => 2,
+            StorageBoundary::AfterSync => 4,
+        };
+        assert_eq!(
+            recovered.last_applied_log_id,
+            Some(Harness::log_id(durable))
+        );
+        assert_eq!(u64::try_from(recovered.command_executions.len())?, durable);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn entries_before_one_that_cannot_be_stored_are_written_first() -> TestResult {
+    let mut harness = Harness::new().await?;
+    let reservation = StoreInner::reserve(&harness.executor, MemoryClass::Commands).await?;
+    let limit = DurableBatch::byte_limit(&reservation)?;
+    drop(reservation);
+    let entries = vec![
+        Ok((Harness::entry(1, Harness::admission(1, limit / 5)?), None)),
+        Ok((Harness::entry(2, Harness::admission(2, limit)?), None)),
+    ];
+    assert!(
+        harness
+            .store
+            .apply(futures_util::stream::iter(entries))
+            .await
+            .is_err(),
+        "an entry larger than a whole write must fail"
+    );
+    assert_eq!(
+        harness.store.inner.state().last_applied_log_id,
+        Some(Harness::log_id(1)),
+        "the entry before the one that cannot be stored is published"
+    );
+    let harness = harness.reopen().await?;
+    assert_eq!(
+        harness.store.inner.state().last_applied_log_id,
+        Some(Harness::log_id(1))
+    );
     Ok(())
 }
 
