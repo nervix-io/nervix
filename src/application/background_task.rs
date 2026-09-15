@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** The handle the composition root keeps for each spawned task and the bounded wait
 //!   that shutdown gives it.
-//! - **Depends on.** The cancellation token the root cancels.
+//! - **Depends on.** The cancellation token or shutdown coordinator the root advances.
 //! - **Must not know.** What any supervised task does.
 
 use error_stack::Report;
@@ -12,7 +12,11 @@ use tokio::{task::JoinHandle, time::Duration};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use super::{error, error::AppError};
+use super::{
+    error,
+    error::AppError,
+    shutdown::{ShutdownCoordinator, ShutdownDeadline, ShutdownPhaseOutcome},
+};
 use crate::task_shutdown::JoinShutdown as _;
 
 const BACKGROUND_TASK_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
@@ -40,30 +44,31 @@ impl BackgroundTask {
     }
 }
 
-pub(in crate::application) async fn cancel_shutdown_on_completion<F>(
+pub(in crate::application) async fn request_shutdown_on_completion<F>(
     server: F,
-    shutdown: CancellationToken,
+    shutdown: ShutdownCoordinator,
 ) -> Result<(), Report<AppError>>
 where
     F: Future<Output = Result<(), Report<AppError>>>,
 {
     let result = server.await;
-    shutdown.cancel();
+    shutdown.request_stop(ShutdownDeadline::Unbounded);
     result
 }
 
 pub(in crate::application) async fn await_background_task_shutdown(
     mut task: JoinHandle<()>,
     task_kind: &'static str,
-) {
+) -> ShutdownPhaseOutcome {
     match tokio::time::timeout(BACKGROUND_TASK_SHUTDOWN_GRACE_PERIOD, &mut task).await {
-        Ok(Ok(())) => {}
+        Ok(Ok(())) => ShutdownPhaseOutcome::Completed,
         Ok(Err(error)) => {
             if error.is_cancelled() {
                 warn!(task_kind, "shutdown task was cancelled");
             } else {
                 error!(task_kind, error = %error, "shutdown task join failed");
             }
+            ShutdownPhaseOutcome::Abandoned
         }
         Err(_) => {
             warn!(
@@ -77,6 +82,7 @@ pub(in crate::application) async fn await_background_task_shutdown(
             {
                 error!(task_kind, error = %error, "aborted shutdown task join failed");
             }
+            ShutdownPhaseOutcome::Abandoned
         }
     }
 }

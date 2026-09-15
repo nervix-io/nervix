@@ -168,6 +168,13 @@ or reconnected target receives the producer's newest retained report when it bec
 request has a two-second physical deadline. Failure waits on a 200-millisecond physical backoff and
 then retries the newest report. Cancelling the authority stops an in-flight request and its backoff.
 
+A process stop request does not cancel clock authority reconciliation, progress production,
+progress delivery, or local installation. Those services remain active during application drain
+support so work admitted before listener shutdown can still take execution snapshots and wait on
+logical deadlines, and so a committed ownership handoff can install the schedule and clock state it
+needs. Terminal teardown cancels them only after drain support completes or explicitly reports
+abandonment.
+
 The receiver first gets the reporting node name from the mutually authenticated interconnect. It
 accepts progress only when the domain already exists and is not stopped, and the report matches the
 committed generation, authority revision, full authority identity, authenticated node name, and a

@@ -26,7 +26,7 @@ use std::{
 
 use ahash::{HashMap, HashMapExt, HashSet, RandomState};
 use authentication::{BasicAuthCredentials, DEFAULT_USER, user_credentials};
-use background_task::{await_background_task_shutdown, cancel_shutdown_on_completion};
+use background_task::{await_background_task_shutdown, request_shutdown_on_completion};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use dashmap::DashMap;
@@ -139,6 +139,7 @@ mod relocation;
 mod resource;
 mod scheduling;
 mod session_service;
+mod shutdown;
 mod startup;
 mod subscription;
 #[cfg(test)]
@@ -148,6 +149,10 @@ mod tracing_setup;
 mod transaction;
 mod web_console;
 
+pub use shutdown::{
+    ShutdownCoordinator, ShutdownDeadline, ShutdownOutcome, ShutdownPhase, ShutdownPhaseOutcome,
+    ShutdownRequest, ShutdownRequestOutcome,
+};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tonic::transport::Server;
 use tracing::{debug, error, info, warn};
@@ -531,11 +536,11 @@ pub struct Application {
     #[builder(default)]
     #[doc(hidden)]
     pub fault_injection: ConfiguredFaultInjection,
-    #[builder(default=CancellationToken::new())]
-    pub shutdown: CancellationToken,
+    #[builder(default)]
+    pub shutdown: ShutdownCoordinator,
     #[builder(default = true)]
     pub graceful_shutdown_drain: bool,
-    #[builder(default = DEFAULT_DRAIN_TIMEOUT)]
+    #[builder(default = shutdown::DEFAULT_DRAIN_TIMEOUT)]
     pub drain_timeout: Duration,
 }
 
@@ -570,25 +575,33 @@ fn encode_hex(bytes: &[u8]) -> String {
     out
 }
 
-const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
-
 pub async fn run_cli(args: Args) -> Result<(), Report<AppError>> {
     if let Some(Command::Completions { shell }) = args.subcommand.clone() {
         print_completions(shell);
         return Ok(());
     }
 
-    let shutdown = CancellationToken::new();
+    let mut application = Application::try_from(args)?;
+    let shutdown = ShutdownCoordinator::default();
     let signal_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            signal_shutdown.cancel();
+    let signal_task_shutdown = CancellationToken::new();
+    let signal_task_stop = signal_task_shutdown.clone();
+    let signal_task = tokio::spawn(async move {
+        tokio::select! {
+            _ = signal_task_stop.cancelled() => {}
+            signal = tokio::signal::ctrl_c() => {
+                if signal.is_ok() {
+                    signal_shutdown.request_stop(ShutdownDeadline::Unbounded);
+                }
+            }
         }
     });
 
-    let mut application = Application::try_from(args)?;
     application.shutdown = shutdown;
-    application.run().await
+    let result = application.run().await;
+    signal_task_shutdown.cancel();
+    await_background_task_shutdown(signal_task, "process signal task").await;
+    result
 }
 
 impl Application {
@@ -663,7 +676,8 @@ impl Application {
         let db_path = self.db_path.clone();
         let temp_dir = self.temp_dir.clone();
         let resource_store_limits = self.resource_store_limits;
-        let shutdown = self.shutdown.clone();
+        let shutdown_coordinator = self.shutdown.clone();
+        let shutdown = shutdown_coordinator.drain_support_token();
         let fault_injection = self.fault_injection.clone();
         let grpc_tls_server_config = if grpc_mode.is_tls() {
             Some(load_grpc_tls_server_config().await.map_err(|error| {
@@ -971,12 +985,13 @@ impl Application {
         runtime
             .metrics()
             .install_node_observations(node_observations.clone());
+        let mut background_tasks = Vec::new();
         let scheduler_delay_shutdown = shutdown.clone();
-        tokio::spawn(async move {
+        background_tasks.push(tokio::spawn(async move {
             node_observations
                 .sample_scheduler_delay(scheduler_delay_shutdown)
                 .await;
-        });
+        }));
         #[cfg(feature = "testing")]
         fault_injection.register_bulk_executor(node_id.clone(), runtime.executor().clone());
         #[cfg(feature = "testing")]
@@ -992,7 +1007,6 @@ impl Application {
         let cluster_for_membership_reconcile = cluster.clone();
         let administrator_for_membership_reconcile = consensus.administrator();
         let membership_reconcile_shutdown = shutdown.clone();
-        let mut background_tasks = Vec::new();
         let interconnect_tls_transport = interconnect.clone();
         let interconnect_tls_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
@@ -1684,7 +1698,8 @@ impl Application {
                 http_tls_server_config: Arc::new(RwLock::new(None)),
                 runtime: runtime.clone(),
                 replica_count,
-                shutdown: shutdown.clone(),
+                admission_shutdown: shutdown_coordinator.admission_token(),
+                drain_support_shutdown: shutdown.clone(),
                 events: events.clone(),
                 subscription_interest_counts: DashMap::with_hasher(RandomState::new()),
                 interconnect: interconnect.clone(),
@@ -2636,15 +2651,14 @@ impl Application {
             info!(addr = %addr, "nervix web console TLS server listening");
         }
 
-        let listener_shutdown = CancellationToken::new();
+        let listener_shutdown = shutdown_coordinator.admission_token();
         let termination_advertisement_task = tokio::spawn({
-            let shutdown = shutdown.clone();
-            let listener_shutdown = listener_shutdown.clone();
+            let shutdown = shutdown_coordinator.clone();
             let cluster = cluster.clone();
             async move {
-                shutdown.cancelled().await;
+                shutdown.requested().await;
                 cluster.mark_local_terminating().await;
-                listener_shutdown.cancel();
+                shutdown.stop_admission();
             }
         });
 
@@ -2719,7 +2733,7 @@ impl Application {
             }
         };
 
-        let server_shutdown = self.shutdown.clone();
+        let server_shutdown = shutdown_coordinator.clone();
         let (
             api_result,
             http_result,
@@ -2728,12 +2742,12 @@ impl Application {
             web_console_result,
             web_console_https_result,
         ) = tokio::join!(
-            cancel_shutdown_on_completion(api_server, server_shutdown.clone()),
-            cancel_shutdown_on_completion(http_server, server_shutdown.clone()),
-            cancel_shutdown_on_completion(https_server, server_shutdown.clone()),
-            cancel_shutdown_on_completion(observability_server, server_shutdown.clone()),
-            cancel_shutdown_on_completion(web_console_server, server_shutdown.clone()),
-            cancel_shutdown_on_completion(web_console_https_server, server_shutdown.clone()),
+            request_shutdown_on_completion(api_server, server_shutdown.clone()),
+            request_shutdown_on_completion(http_server, server_shutdown.clone()),
+            request_shutdown_on_completion(https_server, server_shutdown.clone()),
+            request_shutdown_on_completion(observability_server, server_shutdown.clone()),
+            request_shutdown_on_completion(web_console_server, server_shutdown.clone()),
+            request_shutdown_on_completion(web_console_https_server, server_shutdown.clone()),
         );
         let result = api_result
             .and(http_result)
@@ -2741,20 +2755,33 @@ impl Application {
             .and(observability_result)
             .and(web_console_result)
             .and(web_console_https_result);
-        await_background_task_shutdown(
+        let termination_advertisement_outcome = await_background_task_shutdown(
             termination_advertisement_task,
             "termination advertisement task",
         )
         .await;
+        let listener_outcome = if result.is_ok() {
+            ShutdownPhaseOutcome::Completed
+        } else {
+            ShutdownPhaseOutcome::Abandoned
+        };
+        let stop_admission_outcome = listener_outcome.combine(termination_advertisement_outcome);
+        shutdown_coordinator.begin_drain_support(stop_admission_outcome);
 
-        if graceful_shutdown_drain {
+        let drain_support_outcome = if graceful_shutdown_drain {
             service
                 .drain_local_node_before_shutdown(drain_timeout)
-                .await;
-        }
+                .await
+        } else {
+            ShutdownPhaseOutcome::Completed
+        };
+        shutdown_coordinator.begin_terminal_teardown(drain_support_outcome);
 
+        let mut terminal_teardown_outcome = ShutdownPhaseOutcome::Completed;
         for task in background_tasks {
-            await_background_task_shutdown(task, "application background task").await;
+            let task_outcome =
+                await_background_task_shutdown(task, "application background task").await;
+            terminal_teardown_outcome = terminal_teardown_outcome.combine(task_outcome);
         }
         service.inner.service_tasks.close();
         service.inner.service_tasks.wait().await;
@@ -2766,7 +2793,7 @@ impl Application {
             .change_context(AppError::ShutdownCluster);
         interconnect.shutdown().await;
 
-        tokio::task::spawn_blocking(move || {
+        let database_owner_outcome = tokio::task::spawn_blocking(move || {
             drop(service);
             drop(runtime);
             drop(consensus);
@@ -2778,10 +2805,16 @@ impl Application {
         .map_err(|error| {
             error!(error = %error, "failed to join database owner shutdown task");
             Report::new(AppError::OpenRegistry)
-        })?;
+        });
+
+        if cluster_shutdown_result.is_err() || database_owner_outcome.is_err() {
+            terminal_teardown_outcome = ShutdownPhaseOutcome::Abandoned;
+        }
+        shutdown_coordinator.finish(terminal_teardown_outcome);
 
         result?;
         cluster_shutdown_result?;
+        database_owner_outcome?;
 
         Ok(())
     }

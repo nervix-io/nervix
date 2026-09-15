@@ -456,7 +456,7 @@ impl SessionServiceImpl {
             for node in nodes {
                 tokio::task::consume_budget().await;
                 let result = tokio::select! {
-                    _ = self.inner.shutdown.cancelled() => return,
+                    _ = self.inner.drain_support_shutdown.cancelled() => return,
                     result = self.release_entity_gate_on_node(
                         &node,
                         &release.coordination,
@@ -482,7 +482,7 @@ impl SessionServiceImpl {
                 return;
             }
             tokio::select! {
-                _ = self.inner.shutdown.cancelled() => return,
+                _ = self.inner.drain_support_shutdown.cancelled() => return,
                 _ = sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL) => {}
             }
         }
@@ -733,7 +733,7 @@ impl SessionServiceImpl {
                 return Ok(());
             }
             tokio::select! {
-                _ = self.inner.shutdown.cancelled() => {
+                _ = self.inner.drain_support_shutdown.cancelled() => {
                     return Err(format!(
                         "server stopped while releasing entity gates in domain '{}'",
                         gate.domain.as_str()
@@ -809,7 +809,7 @@ mod tests {
         .await
         .expect("dropped coordinator guard should release its local durable hold");
 
-        service.inner.shutdown.cancel();
+        service.inner.drain_support_shutdown.cancel();
         service.inner.service_tasks.close();
         service.inner.service_tasks.wait().await;
         let _ = std::fs::remove_dir_all(path);
