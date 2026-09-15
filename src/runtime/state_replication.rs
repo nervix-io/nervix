@@ -2626,15 +2626,15 @@ impl Runtime {
         lsm: u64,
         payload: &[u8],
     ) -> Result<(), String> {
+        let read = state.read();
         if let Some(store) = &self.inner.state_store {
             store
-                .persist_latest_snapshot(state.read().placement(), lsm, payload)
+                .persist_latest_snapshot(read.placement(), lsm, payload)
                 .map_err(|error| error.to_string())?;
             state.record_persisted(lsm);
-            self.notify_runtime_state_replicas(state.read().placement(), lsm);
+            self.notify_runtime_state_replicas(read.placement(), lsm);
         }
-        self.wait_for_kafka_offset_replica_quorum(state.read(), lsm)
-            .await
+        self.wait_for_kafka_offset_replica_quorum(read, lsm).await
     }
 
     pub(in crate::runtime) async fn commit_domain_kafka_offset(

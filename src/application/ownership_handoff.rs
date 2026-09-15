@@ -1479,7 +1479,7 @@ impl SessionServiceImpl {
             for moved in attempts {
                 tokio::task::consume_budget().await;
                 let result = tokio::select! {
-                    _ = self.inner.shutdown.cancelled() => return,
+                    _ = self.inner.drain_support_shutdown.cancelled() => return,
                     result = self.discard_ownership_handoff_preparation_on_node(
                         &cleanup.coordination,
                         &cleanup.operation_id,
@@ -1507,7 +1507,7 @@ impl SessionServiceImpl {
                 return;
             }
             tokio::select! {
-                _ = self.inner.shutdown.cancelled() => return,
+                _ = self.inner.drain_support_shutdown.cancelled() => return,
                 _ = sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL) => {}
             }
         }
@@ -1537,6 +1537,96 @@ impl SessionServiceImpl {
         )?;
         Ok(u64::try_from(discarded)
             .assured("a preparation map indexed in memory cannot exceed the u64 range"))
+    }
+
+    pub(in crate::application) fn register_prepare_ownership_handoff_handler(
+        &self,
+        interconnect: &Transport,
+    ) -> Result<(), Report<HandlerRegistrationError>> {
+        let service = self.clone();
+        interconnect.register_handler::<RemotePrepareOwnershipHandoffStateRequest, _, _>(
+            move |_context, request| {
+                let service = service.clone();
+                async move {
+                    #[cfg(feature = "testing")]
+                    let response_pause_domain = request.domain.clone();
+                    let result: OwnershipHandoffResult<_> = async {
+                        if request.destination != *service.inner.consensus.local_node_id() {
+                            return Err(OwnershipHandoffError::participant(format!(
+                                "ownership handoff for {} '{}' targets node '{}' but reached '{}'",
+                                request.entity.kind.as_str(),
+                                request.entity.identifier.as_str(),
+                                request.destination,
+                                service.inner.consensus.local_node_id()
+                            )));
+                        }
+                        let current_incarnations = service.live_node_incarnations().await;
+                        Self::verify_ownership_handoff_node_incarnation(
+                            &current_incarnations,
+                            &request.source,
+                            request.source_incarnation,
+                            "source",
+                        )?;
+                        Self::verify_ownership_handoff_node_incarnation(
+                            &current_incarnations,
+                            &request.destination,
+                            request.destination_incarnation,
+                            "destination",
+                        )?;
+                        service
+                            .prepare_control_request_domain(&request.domain)
+                            .await
+                            .map_err(OwnershipHandoffError::schedule)?;
+                        let scheduled = service
+                            .scheduled_model_node(
+                                &request.domain,
+                                request.entity.kind,
+                                request.entity.identifier.clone(),
+                            )
+                            .await
+                            .ok_or_else(|| {
+                                OwnershipHandoffError::schedule(format!(
+                                    "{} '{}' is absent from the committed schedule",
+                                    request.entity.kind.as_str(),
+                                    request.entity.identifier.as_str()
+                                ))
+                            })?;
+                        if scheduled.primary_node() != Some(&request.source) {
+                            return Err(OwnershipHandoffError::participant(format!(
+                                "{} '{}' is no longer owned by source node '{}'",
+                                request.entity.kind.as_str(),
+                                request.entity.identifier.as_str(),
+                                request.source
+                            )));
+                        }
+                        let _operation = service.inner.ownership_handoff_operations.lock().await;
+                        service
+                            .verify_ownership_handoff_coordinator(&request.coordination)
+                            .await?;
+                        service
+                            .inner
+                            .runtime
+                            .prepare_ownership_handoff_state(request)
+                            .await
+                    }
+                    .await;
+                    #[cfg(feature = "testing")]
+                    if result.is_ok() {
+                        service
+                            .inner
+                            .runtime
+                            .pause_ownership_handoff_prepare_response_if_armed(
+                                &response_pause_domain,
+                            )
+                            .await;
+                    }
+                    match result {
+                        Ok(()) => Ok(()),
+                        Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                    }
+                }
+            },
+        )
     }
 
     pub(in crate::application) fn register_ownership_handoff_reconciliation_handler(
@@ -1638,7 +1728,7 @@ impl SessionServiceImpl {
         let mut followup_at = None;
         loop {
             tokio::task::consume_budget().await;
-            if self.inner.shutdown.is_cancelled() {
+            if self.inner.drain_support_shutdown.is_cancelled() {
                 return;
             }
             let input = self.inner.consensus.automatic_schedule_input().await;
@@ -1681,7 +1771,7 @@ impl SessionServiceImpl {
                 followup_at = None;
             }
             tokio::select! {
-                _ = self.inner.shutdown.cancelled() => return,
+                _ = self.inner.drain_support_shutdown.cancelled() => return,
                 _ = sleep(OWNERSHIP_HANDOFF_RECONCILIATION_POLL_INTERVAL) => {}
             }
         }
