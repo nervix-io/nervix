@@ -13,11 +13,11 @@ proto-fmt-check:
 proto-lint:
     buf lint
 
-test-loom: wasm-processor-guests
+test-loom: build-web-console wasm-processor-guests
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    RUSTFLAGS="--cfg runtime_ack_loom" cargo test -q --lib loom_tests
+    RUSTFLAGS="--cfg runtime_ack_loom --cfg relay_dispatch_gate_loom" cargo test -q --lib loom_tests -- --test-threads=1
 
 build-deps: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests
 
