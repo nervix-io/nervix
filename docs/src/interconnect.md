@@ -109,6 +109,21 @@ identity. Prepared handoff state persists it in the sole current stored shape an
 before activation or cleanup after a restart. The handoff's committed schedule-transition ID still
 names the schedule change; it does not authorize coordination traffic.
 
+The coordinator records every destination as an attempted participant before sending its prepare
+request. A timeout, cancellation, or missing response after the destination persisted the request
+therefore remains explicit cleanup work. Discard is exact and idempotent over the coordination
+identity, transition ID, domain, and entity; a delayed discard for one operation cannot remove a
+replacement prepared by another operation.
+
+The current leader reconciles durable preparations after leadership or live-incarnation changes.
+It first commits a consensus barrier and sends its log position with the reconciliation request on
+the replication pool. Each participant applies through that position before consulting its local
+committed schedule. An exact ownership transition in that schedule preserves its preparation even
+when the original coordinator or destination process has gone. An uncommitted preparation remains
+only while the original coordinator process and both bound participant incarnations are live and
+the exact ownership-handoff gate is still held; every other preparation is discarded durably. A
+second pass after the gate deadline reclaims work that was active during the first pass.
+
 After a receiver admits a new gate engagement or release, a receiver-owned task finishes that state
 transition even if the requesting connection disappears. Coordinator loss therefore cannot strand
 an operation in a partially engaged state or cancel cleanup after the receiver accepted it.
@@ -478,6 +493,10 @@ acknowledgement maps are never persisted. Durable control-plane state remains in
 selected runtime state remains in its owning snapshot or replication mechanism. This boundary is
 why process epochs are part of relay delivery identities and why an unresolved result across a
 receiver restart is reported as indeterminate.
+
+An ownership-handoff gate lease is also in-memory coordination state. Releasing or expiring that
+lease removes the runtime fence but does not report a persisted preparation as cleaned up. Only an
+exact durable discard, activation, or schedule-based reconciliation resolves that preparation.
 
 ## Observability
 

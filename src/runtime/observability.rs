@@ -132,10 +132,10 @@ impl Runtime {
         kind: ModelKind,
         identifier: impl Into<ModelName>,
     ) {
-        let identifier = identifier.into();
         if kind == ModelKind::Relay {
             return;
         }
+        let identifier = identifier.into();
         let placement = self.state_placement(
             domain,
             RuntimeStateKind::BranchAggregated,

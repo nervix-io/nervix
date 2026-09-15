@@ -314,9 +314,11 @@ impl Runtime {
         shutdown_tx: &watch::Sender<bool>,
         state: KafkaOffsetSnapshotInstaller,
     ) -> Option<JoinHandle<()>> {
-        let primary_node = state.read().primary_node()?;
+        let offsets = state.read();
+        let primary_node = offsets.primary_node()?;
+        let placement = offsets.placement().clone();
         let poll_interval = self.inner.state_replication_poll_interval;
-        let notification = self.state_checkpoint_notification(state.read().placement());
+        let notification = self.state_checkpoint_notification(&placement);
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         Some(tokio::spawn(async move {
@@ -339,7 +341,7 @@ impl Runtime {
                 match runtime
                     .request_state_sync_with_timeout(
                         &primary_node,
-                        state.read().placement(),
+                        &placement,
                         Some(after_lsm),
                         poll_interval,
                     )
@@ -364,7 +366,7 @@ impl Runtime {
                                     Envelope::Control(
                                         nervix_interconnect::ControlEnvelope::StateReplicationAck(
                                             nervix_interconnect::StateReplicationAck {
-                                                placement: state.read().placement().to_remote(),
+                                                placement: placement.to_remote(),
                                                 lsm: snapshot.lsm,
                                             },
                                         ),

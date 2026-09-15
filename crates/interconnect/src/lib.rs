@@ -472,6 +472,14 @@ pub struct DiscardOwnershipHandoffStateRequest {
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReconcileOwnershipHandoffPreparationsRequest {
+    pub coordination: CoordinationIdentity,
+    /// The leader's applied consensus position. Participants wait for this position before using
+    /// their local schedule as the committed authority for reconciliation.
+    pub authoritative_revision: u64,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KafkaDomainOffsetDescribeEnvelope {
     pub topic: String,
     pub instances: u64,

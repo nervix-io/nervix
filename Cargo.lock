@@ -91,6 +91,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloc_count"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59760639ddef8d1b9a7cb961f6f38bf7e52b0bd0bae4e7148db74bf1c12a6f59"
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6668,6 +6674,7 @@ dependencies = [
  "sorted-vec",
  "strum 0.26.3",
  "thiserror 2.0.20",
+ "triomphe",
  "uuid",
 ]
 
@@ -6762,6 +6769,7 @@ name = "nervix-server"
 version = "0.1.0-dev"
 dependencies = [
  "ahash",
+ "alloc_count",
  "anyhow",
  "apache-avro",
  "arc-swap",

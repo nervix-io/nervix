@@ -1,16 +1,26 @@
 use super::*;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct BranchKey {
-    pub(super) fields: BTreeMap<FieldName, RuntimeValue>,
-    pub(super) json: String,
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct BranchKeyInner {
+    fields: BTreeMap<FieldName, RuntimeValue>,
+    json: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct BranchKey(Arc<BranchKeyInner>);
+
+impl std::fmt::Debug for BranchKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BranchKey")
+            .field("fields", &self.0.fields)
+            .field("json", &self.0.json)
+            .finish()
+    }
 }
 
 impl BranchKey {
     pub(in crate::runtime) fn field_value(&self, name: &str) -> Option<&RuntimeValue> {
-        self.fields
-            .iter()
-            .find_map(|(field, value)| (field.as_str() == name).then_some(value))
+        self.0.fields.get(name)
     }
 
     pub(crate) fn from_fields(
@@ -25,7 +35,7 @@ impl BranchKey {
             object.insert(field.as_str().to_string(), value.to_json_value());
         }
         let json = serde_json::Value::Object(object).to_string();
-        Ok(Self { fields, json })
+        Ok(Self(Arc::new(BranchKeyInner { fields, json })))
     }
 
     pub(crate) fn from_remote_key(
@@ -49,7 +59,8 @@ impl BranchKey {
 
     pub(in crate::runtime) fn to_remote_key(key: &Option<Self>) -> Option<Vec<RemoteRuntimeField>> {
         key.as_ref().map(|key| {
-            key.fields
+            key.0
+                .fields
                 .iter()
                 .map(|(name, value)| RemoteRuntimeField {
                     name: name.as_str().to_string(),
@@ -60,7 +71,7 @@ impl BranchKey {
     }
 
     pub(crate) fn as_str(&self) -> &str {
-        self.json.as_str()
+        self.0.json.as_str()
     }
 }
 
@@ -84,5 +95,38 @@ mod tests {
     #[test]
     fn branch_key_rejects_empty_fields() {
         assert!(BranchKey::from_fields([]).is_err());
+    }
+
+    #[test]
+    fn cloning_names_and_branch_keys_does_not_allocate() {
+        let relay = RelayName::parse("orders")
+            .assured("the fixed test literal satisfies the relay name grammar");
+        let branch = BranchKey::from_fields([(
+            FieldName::parse("tenant")
+                .assured("the fixed test literal satisfies the field name grammar"),
+            RuntimeValue::String("acme".to_string()),
+        )])
+        .assured("the fixed field produces a non-empty branch key");
+
+        let (name_allocations, ()) = alloc_count::alloc_count!({
+            std::hint::black_box(relay.clone());
+        });
+        let (branch_allocations, ()) = alloc_count::alloc_count!({
+            std::hint::black_box(branch.clone());
+        });
+
+        assert_eq!(
+            (name_allocations.alloc_calls, name_allocations.realloc_calls),
+            (0, 0),
+            "cloning names must remain allocation-free"
+        );
+        assert_eq!(
+            (
+                branch_allocations.alloc_calls,
+                branch_allocations.realloc_calls
+            ),
+            (0, 0),
+            "cloning branch keys must remain allocation-free"
+        );
     }
 }

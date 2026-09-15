@@ -436,6 +436,21 @@ newer checkpoints the destination has published. A state reset occurs only when 
 decision either stages the recreated checkpoint inventory or reports a reset outcome for every state
 component owned by the entity.
 
+For a planned handoff, each prepare destination becomes a tracked participant before the
+side-effecting request is sent. A lost response and cancellation of the coordinating future are
+therefore cleaned up like acknowledged preparations. Cleanup retries an exact discard and never
+uses gate release as evidence that the durable preparation was removed.
+
+The surviving leader reconciles preparations after it orders all inherited schedule proposals with
+a committed consensus barrier. A destination preserves a preparation when its exact transition is
+the committed owner change, regardless of coordinator or participant restart, so normal schedule
+application can activate it. It also temporarily preserves uncommitted work from the same leader
+process while the bound source and destination incarnations remain live, the base schedule still
+owns the entity on the source, and the exact handoff gate remains held. It durably removes every
+other preparation. Replacement, discard, activation, and reconciliation compare the complete
+operation identity, so duplicate or reordered work is idempotent and cannot affect another
+operation's preparation.
+
 Entity-gate leases are deadline-bound. They release their relay fences and ingestor holds at the
 configured entity-gate deadline even if the coordinator disappears. A node that joins during a hold
 applies the published schedule through its normal revision path.

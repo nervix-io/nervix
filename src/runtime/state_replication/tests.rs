@@ -10,12 +10,15 @@ use std::{
 
 use ahash::HashMap;
 use fjall::Database;
+use nervix_interconnect::{
+    ActivateOwnershipHandoffStateRequest, EntityGatePurpose, PrepareOwnershipHandoffStateRequest,
+};
 use nervix_models::{
-    ClusterNodeIncarnation, ClusterNodeName, CreateRelay, CreateSchema, DomainNodeRef,
-    DomainSchedule, DomainStatus, MaterializedRelayState, ModelKind, ModelName, NodeRef,
-    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
-    OwnershipTransition, ParseAsType, RelayBranching, RelayName, ScheduledNode, SchemaField,
-    SchemaName, Timestamp,
+    ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule, CoordinationIdentity, CreateRelay,
+    CreateSchema, DomainNodeRef, DomainSchedule, DomainStatus, MaterializedRelayState, ModelKind,
+    ModelName, NodeRef, OwnershipStateRecoveryOutcome, OwnershipStateReset,
+    OwnershipStateResetCause, OwnershipTransition, ParseAsType, RelayBranching, RelayName,
+    ScheduledNode, SchemaField, SchemaName, Timestamp,
 };
 use nonzero_ext::nonzero;
 use tempfile::tempdir;
@@ -31,6 +34,130 @@ use crate::{
     runtime_schema::{RuntimeValue, test_runtime_row},
 };
 
+struct EmptyRelayHandoffFixture {
+    domain: DomainName,
+    source: ClusterNodeName,
+    destination: ClusterNodeName,
+    entity: NodeRef,
+    base_schedule: DomainSchedule,
+    target_schedule: DomainSchedule,
+    base_schedule_fingerprint: [u8; 32],
+    target_schedule_fingerprint: [u8; 32],
+    operation_id: String,
+}
+
+impl EmptyRelayHandoffFixture {
+    fn new(operation_id: &str) -> Self {
+        let domain = domain("default");
+        let source = named::<ClusterNodeName>("node-1");
+        let destination = named::<ClusterNodeName>("node-2");
+        let identifier = named::<ModelName>("moving_relay");
+        let entity = NodeRef::new(ModelKind::Relay, identifier.clone());
+        let schema = SchemaName::from(&identifier);
+        let schema_node = ScheduledNode::new(nervix_models::Model::Schema(CreateSchema {
+            name: schema.clone(),
+            fields: Vec::new(),
+        }));
+        let relay = ScheduledNode::new(nervix_models::Model::Relay(CreateRelay {
+            name: RelayName::from(&identifier),
+            schema,
+            buffer: nonzero!(4usize),
+            branching: RelayBranching::unbranched(),
+            materialized_state: None,
+        }))
+        .placed_on(Some(source.clone()), vec![source.clone()]);
+        let base_schedule = DomainSchedule::new(
+            domain.clone(),
+            vec![schema_node.clone(), relay.clone()],
+            Vec::new(),
+        );
+        let mut moved = relay.placed_on(Some(destination.clone()), vec![destination.clone()]);
+        moved.ownership_transition = Some(OwnershipTransition {
+            id: operation_id.to_string(),
+            source: source.clone(),
+            destination: destination.clone(),
+            state_recovery: OwnershipStateRecoveryOutcome::Complete,
+            resets: Vec::new(),
+        });
+        let target_schedule =
+            DomainSchedule::new(domain.clone(), vec![schema_node, moved], Vec::new());
+        let base_schedule_fingerprint =
+            Runtime::ownership_handoff_schedule_fingerprint(&base_schedule)
+                .expect("base schedule should have a fingerprint");
+        let target_schedule_fingerprint =
+            Runtime::ownership_handoff_schedule_fingerprint(&target_schedule)
+                .expect("target schedule should have a fingerprint");
+        Self {
+            domain,
+            source,
+            destination,
+            entity,
+            base_schedule,
+            target_schedule,
+            base_schedule_fingerprint,
+            target_schedule_fingerprint,
+            operation_id: operation_id.to_string(),
+        }
+    }
+
+    async fn rebuild_destination(
+        &self,
+        runtime: &Runtime,
+        schedule: DomainSchedule,
+        destination_incarnation: ClusterNodeIncarnation,
+    ) {
+        *runtime.inner.remote_dispatch.local_node_id.write() = Some(self.destination.clone());
+        *runtime.inner.remote_dispatch.local_node_incarnation.write() =
+            Some(destination_incarnation);
+        let mut domain_state = unpaced_domain_state(self.domain.as_str());
+        domain_state.status = DomainStatus::Stopped;
+        runtime.sync_domains(&BTreeMap::from([(self.domain.clone(), domain_state)]));
+        runtime
+            .rebuild_domain_from_schedule(&self.destination, &self.domain, Some(schedule), false)
+            .await
+            .expect("handoff test schedule should build on the destination");
+    }
+
+    async fn prepare(
+        &self,
+        runtime: &Runtime,
+        coordination: CoordinationIdentity,
+        source_incarnation: ClusterNodeIncarnation,
+        destination_incarnation: ClusterNodeIncarnation,
+    ) {
+        runtime
+            .engage_entity_gate_operation(
+                &coordination,
+                &self.domain,
+                &[],
+                std::slice::from_ref(&self.entity),
+                EntityGatePurpose::OwnershipHandoff,
+                EntityGateLease {
+                    deadline: tokio::time::Instant::now() + Duration::from_secs(30),
+                    reason: "prepare ownership handoff test fixture",
+                },
+            )
+            .await
+            .expect("ownership handoff gate should engage");
+        runtime
+            .prepare_ownership_handoff_state(PrepareOwnershipHandoffStateRequest {
+                coordination,
+                operation_id: self.operation_id.clone(),
+                source: self.source.clone(),
+                destination: self.destination.clone(),
+                source_incarnation,
+                destination_incarnation,
+                domain: self.domain.clone(),
+                entity: self.entity.clone(),
+                base_schedule_fingerprint: self.base_schedule_fingerprint,
+                target_schedule_fingerprint: self.target_schedule_fingerprint,
+                checkpoints: Vec::new(),
+            })
+            .await
+            .expect("ownership handoff preparation should persist");
+    }
+}
+
 #[test]
 fn recovered_handoff_retries_schedule_rebuild_until_activation() {
     let mut recovered = OwnershipHandoffActivationAuthorization::RecoveredAwaitingRequest;
@@ -45,6 +172,289 @@ fn recovered_handoff_retries_schedule_rebuild_until_activation() {
     let mut ordinary = OwnershipHandoffActivationAuthorization::AuthorizedByPreparation;
     assert!(!ordinary.authorize());
     assert!(ordinary.is_authorized());
+}
+
+#[tokio::test]
+async fn restarted_destination_reclaims_an_uncommitted_handoff_preparation() {
+    let dir = tempdir().expect("temporary runtime state directory should open");
+    let abandoned = EmptyRelayHandoffFixture::new("abandoned-operation");
+    let source_incarnation = ClusterNodeIncarnation::new(31);
+    {
+        let db = Database::builder(dir.path())
+            .open()
+            .expect("database should open");
+        let runtime = Runtime::with_persistence(Some(db), Duration::from_secs(3_600))
+            .expect("runtime should open persisted state");
+        let destination_incarnation = ClusterNodeIncarnation::new(32);
+        abandoned
+            .rebuild_destination(
+                &runtime,
+                abandoned.base_schedule.clone(),
+                destination_incarnation,
+            )
+            .await;
+        abandoned
+            .prepare(
+                &runtime,
+                CoordinationIdentity::new(named("coordinator-a"), 11, 1),
+                source_incarnation,
+                destination_incarnation,
+            )
+            .await;
+    }
+
+    let db = Database::builder(dir.path())
+        .open()
+        .expect("database should reopen after destination restart");
+    let runtime = Runtime::with_persistence(Some(db), Duration::from_secs(3_600))
+        .expect("restarted runtime should restore persisted state");
+    let replacement = EmptyRelayHandoffFixture::new("replacement-operation");
+    let destination_incarnation = ClusterNodeIncarnation::new(33);
+    replacement
+        .rebuild_destination(
+            &runtime,
+            replacement.base_schedule.clone(),
+            destination_incarnation,
+        )
+        .await;
+    let coordination = CoordinationIdentity::new(named("coordinator-b"), 12, 1);
+    replacement
+        .prepare(
+            &runtime,
+            coordination.clone(),
+            source_incarnation,
+            destination_incarnation,
+        )
+        .await;
+
+    let prepared = runtime
+        .inner
+        .prepared_runtime_state_handoffs
+        .get(&replacement.entity.in_domain(&replacement.domain))
+        .expect("replacement preparation should be cached");
+    assert_eq!(prepared.coordination, coordination);
+    assert_eq!(prepared.operation_id, replacement.operation_id);
+    let persisted = runtime
+        .inner
+        .state_store
+        .as_ref()
+        .expect("runtime should own a state store")
+        .handoff_preparations()
+        .expect("preparations should remain readable");
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].operation_id, replacement.operation_id);
+}
+
+#[tokio::test]
+async fn surviving_authority_reconciles_a_dead_coordinators_preparation() {
+    let fixture = EmptyRelayHandoffFixture::new("abandoned-operation");
+    let runtime = Runtime::new();
+    let source_incarnation = ClusterNodeIncarnation::new(31);
+    let destination_incarnation = ClusterNodeIncarnation::new(32);
+    fixture
+        .rebuild_destination(
+            &runtime,
+            fixture.base_schedule.clone(),
+            destination_incarnation,
+        )
+        .await;
+    let abandoned_coordination = CoordinationIdentity::new(named("coordinator-a"), 11, 1);
+    fixture
+        .prepare(
+            &runtime,
+            abandoned_coordination.clone(),
+            source_incarnation,
+            destination_incarnation,
+        )
+        .await;
+    runtime
+        .release_entity_gate_operation(&abandoned_coordination, &fixture.domain)
+        .await
+        .expect("the abandoned gate should release");
+    assert!(
+        runtime
+            .inner
+            .prepared_runtime_state_handoffs
+            .contains_key(&fixture.entity.in_domain(&fixture.domain)),
+        "gate release alone is not durable preparation cleanup"
+    );
+
+    let surviving_authority = CoordinationIdentity::new(named("coordinator-b"), 12, 1);
+    let schedule = ClusterSchedule::from_iter([fixture.base_schedule.clone()]);
+    let incarnations = BTreeMap::from([
+        (fixture.source.clone(), source_incarnation),
+        (fixture.destination.clone(), destination_incarnation),
+    ]);
+    assert_eq!(
+        runtime
+            .reconcile_prepared_ownership_handoffs(&surviving_authority, &schedule, &incarnations,)
+            .expect("the surviving authority should reconcile the abandoned operation"),
+        1
+    );
+    assert_eq!(
+        runtime
+            .reconcile_prepared_ownership_handoffs(&surviving_authority, &schedule, &incarnations,)
+            .expect("duplicate reconciliation should be idempotent"),
+        0
+    );
+
+    let replacement = EmptyRelayHandoffFixture::new("replacement-operation");
+    let replacement_coordination = CoordinationIdentity::new(named("coordinator-b"), 12, 2);
+    replacement
+        .prepare(
+            &runtime,
+            replacement_coordination.clone(),
+            source_incarnation,
+            destination_incarnation,
+        )
+        .await;
+    runtime
+        .discard_prepared_ownership_handoff_state(
+            &abandoned_coordination,
+            &fixture.operation_id,
+            &fixture.domain,
+            &fixture.entity,
+        )
+        .expect("a reordered stale discard should remain idempotent");
+    let prepared = runtime
+        .inner
+        .prepared_runtime_state_handoffs
+        .get(&fixture.entity.in_domain(&fixture.domain))
+        .expect("the replacement preparation should remain cached");
+    assert_eq!(prepared.coordination, replacement_coordination);
+    assert_eq!(prepared.operation_id, replacement.operation_id);
+}
+
+#[tokio::test]
+async fn committed_preparation_survives_coordinator_failure_and_destination_restart() {
+    let fixture = EmptyRelayHandoffFixture::new("committed-operation");
+    let dir = tempdir().expect("temporary runtime state directory should open");
+    let coordination = CoordinationIdentity::new(named("coordinator-a"), 11, 1);
+    let source_incarnation = ClusterNodeIncarnation::new(31);
+    {
+        let db = Database::builder(dir.path())
+            .open()
+            .expect("database should open");
+        let runtime = Runtime::with_persistence(Some(db), Duration::from_secs(3_600))
+            .expect("runtime should open persisted state");
+        fixture
+            .rebuild_destination(
+                &runtime,
+                fixture.base_schedule.clone(),
+                ClusterNodeIncarnation::new(32),
+            )
+            .await;
+        fixture
+            .prepare(
+                &runtime,
+                coordination.clone(),
+                source_incarnation,
+                ClusterNodeIncarnation::new(32),
+            )
+            .await;
+    }
+
+    let db = Database::builder(dir.path())
+        .open()
+        .expect("database should reopen after destination restart");
+    let runtime = Runtime::with_persistence(Some(db), Duration::from_secs(3_600))
+        .expect("restarted runtime should restore persisted state");
+    *runtime.inner.remote_dispatch.local_node_id.write() = Some(fixture.destination.clone());
+    *runtime.inner.remote_dispatch.local_node_incarnation.write() =
+        Some(ClusterNodeIncarnation::new(33));
+    let committed_schedule = ClusterSchedule::from_iter([fixture.target_schedule.clone()]);
+    let incarnations = BTreeMap::from([
+        (fixture.source.clone(), source_incarnation),
+        (fixture.destination.clone(), ClusterNodeIncarnation::new(33)),
+    ]);
+    let surviving_authority = CoordinationIdentity::new(named("coordinator-b"), 12, 1);
+    assert_eq!(
+        runtime
+            .reconcile_prepared_ownership_handoffs(
+                &surviving_authority,
+                &committed_schedule,
+                &incarnations,
+            )
+            .expect("committed preparation should survive reconciliation"),
+        0
+    );
+    assert!(
+        runtime
+            .inner
+            .prepared_runtime_state_handoffs
+            .contains_key(&fixture.entity.in_domain(&fixture.domain))
+    );
+
+    let mut domain_state = unpaced_domain_state(fixture.domain.as_str());
+    domain_state.status = DomainStatus::Stopped;
+    runtime.sync_domains(&BTreeMap::from([(fixture.domain.clone(), domain_state)]));
+    runtime
+        .rebuild_domain_from_schedule(
+            &fixture.destination,
+            &fixture.domain,
+            Some(fixture.target_schedule.clone()),
+            false,
+        )
+        .await
+        .expect("the committed restored preparation should activate");
+    assert!(
+        !runtime
+            .inner
+            .prepared_runtime_state_handoffs
+            .contains_key(&fixture.entity.in_domain(&fixture.domain))
+    );
+    runtime
+        .activate_persisted_ownership_handoff(
+            &fixture.destination,
+            &ActivateOwnershipHandoffStateRequest {
+                coordination: coordination.clone(),
+                operation_id: fixture.operation_id.clone(),
+                source: fixture.source.clone(),
+                destination: fixture.destination.clone(),
+                source_incarnation,
+                destination_incarnation: ClusterNodeIncarnation::new(32),
+                domain: fixture.domain.clone(),
+                entity: fixture.entity.clone(),
+                base_schedule_fingerprint: fixture.base_schedule_fingerprint,
+                target_schedule_fingerprint: fixture.target_schedule_fingerprint,
+                activation_budget: Duration::from_secs(1),
+            },
+            fixture.target_schedule.clone(),
+        )
+        .await
+        .expect("duplicate activation should be idempotent");
+    assert_eq!(
+        runtime
+            .reconcile_prepared_ownership_handoffs(
+                &surviving_authority,
+                &committed_schedule,
+                &incarnations,
+            )
+            .expect("reconciliation reordered after activation should be idempotent"),
+        0
+    );
+    let activated = runtime
+        .inner
+        .activated_runtime_state_handoffs
+        .get(&fixture.entity.in_domain(&fixture.domain))
+        .expect("committed handoff should be activated after restart");
+    assert_eq!(activated.coordination, coordination);
+    assert_eq!(activated.operation_id, fixture.operation_id);
+    let persisted = runtime
+        .inner
+        .state_store
+        .as_ref()
+        .expect("runtime should own a state store")
+        .handoff_activation(
+            &coordination,
+            &fixture.operation_id,
+            &fixture.domain,
+            fixture.entity.kind,
+            &fixture.entity.identifier,
+        )
+        .expect("activation should remain readable")
+        .expect("activation should be durable");
+    assert_eq!(persisted.destination, fixture.destination);
 }
 
 #[tokio::test]

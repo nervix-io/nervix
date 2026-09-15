@@ -86,6 +86,9 @@ struct FaultInjectionState {
         DashMap<RemoteRelayAdmissionPauseKey, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     ownership_handoff_preparation_pauses: DashMap<String, Arc<TestPause>, RandomState>,
+    /// A destination pauses after making a handoff preparation durable but before returning its
+    /// response, reproducing an ambiguous prepare RPC outcome.
+    ownership_handoff_prepare_response_pauses: DashMap<String, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     domain_clock_progress_pauses:
         DashMap<DomainClockProgressPausePoint, Arc<TestPause>, RandomState>,
@@ -192,6 +195,7 @@ impl Default for FaultInjection {
                 entity_gate_pauses: DashMap::default(),
                 remote_relay_admission_pauses: DashMap::default(),
                 ownership_handoff_preparation_pauses: DashMap::default(),
+                ownership_handoff_prepare_response_pauses: DashMap::default(),
                 domain_clock_progress_pauses: DashMap::default(),
                 domain_clock_initial_elapsed: DashMap::default(),
                 state_replica_polling_paused: AtomicBool::new(false),
@@ -689,6 +693,24 @@ impl FaultInjection {
         pause.release();
     }
 
+    pub fn pause_ownership_handoff_prepare_response(&self, domain: impl Into<String>) {
+        self.inner.ownership_handoff_prepare_response_pauses.insert(
+            domain.into().to_ascii_lowercase(),
+            Arc::new(TestPause::default()),
+        );
+    }
+
+    pub async fn wait_for_ownership_handoff_prepare_response_pause(&self, domain: &str) {
+        let key = domain.to_ascii_lowercase();
+        let pause = self.ownership_handoff_prepare_response_pause(&key);
+        pause.wait_until_reached().await;
+    }
+
+    pub fn release_ownership_handoff_prepare_response_pause(&self, domain: &str) {
+        let pause = self.ownership_handoff_prepare_response_pause(&domain.to_ascii_lowercase());
+        pause.release();
+    }
+
     pub fn pause_domain_clock_progress(&self, domain: impl Into<String>) {
         self.inner.domain_clock_progress_pauses.insert(
             DomainClockProgressPausePoint {
@@ -1012,6 +1034,26 @@ impl FaultInjection {
         self.inner.ownership_handoff_preparation_pauses.remove(&key);
     }
 
+    pub(crate) async fn pause_ownership_handoff_prepare_response_if_armed(
+        &self,
+        domain: &DomainName,
+    ) {
+        let key = domain.as_str().to_ascii_lowercase();
+        let Some(pause) = self
+            .inner
+            .ownership_handoff_prepare_response_pauses
+            .get(&key)
+            .map(|pause| pause.value().clone())
+        else {
+            return;
+        };
+        pause.reach();
+        pause.wait_until_released().await;
+        self.inner
+            .ownership_handoff_prepare_response_pauses
+            .remove(&key);
+    }
+
     pub(crate) async fn pause_domain_clock_progress_if_armed(
         &self,
         domain: &DomainName,
@@ -1186,6 +1228,17 @@ impl FaultInjection {
     fn ownership_handoff_preparation_pause(&self, key: &str) -> Arc<TestPause> {
         let Some(pause) = self.inner.ownership_handoff_preparation_pauses.get(key) else {
             panic!("ownership handoff preparation pause for domain '{key}' is not armed");
+        };
+        pause.value().clone()
+    }
+
+    fn ownership_handoff_prepare_response_pause(&self, key: &str) -> Arc<TestPause> {
+        let Some(pause) = self
+            .inner
+            .ownership_handoff_prepare_response_pauses
+            .get(key)
+        else {
+            panic!("ownership handoff prepare response pause for domain '{key}' is not armed");
         };
         pause.value().clone()
     }

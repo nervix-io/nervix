@@ -132,6 +132,11 @@ impl CoordinationIdentity {
     pub const fn sequence(&self) -> u64 {
         self.sequence
     }
+
+    /// Whether both identities were issued by the same running coordinator process.
+    pub fn same_process_as(&self, other: &Self) -> bool {
+        self.coordinator == other.coordinator && self.process_epoch == other.process_epoch
+    }
 }
 
 impl fmt::Display for CoordinationIdentity {

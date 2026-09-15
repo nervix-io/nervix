@@ -261,6 +261,17 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn pause_ownership_handoff_prepare_response_if_armed(
+        &self,
+        domain: &DomainName,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_ownership_handoff_prepare_response_if_armed(domain)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) fn scheduler_mode(&self) -> crate::registry::SchedulerMode {
         self.inner.fault_injection.scheduler_mode()
     }
