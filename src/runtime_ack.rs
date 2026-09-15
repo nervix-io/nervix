@@ -9,13 +9,22 @@
 //! - **Must not know.** What is being acknowledged. It counts outstanding work, and ack state is
 //!   hot-path memory that is never persisted.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+#[cfg(not(all(test, runtime_ack_loom)))]
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use meticulous::OptionExt as _;
 use nervix_recovery::NoReceiver as _;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, watch};
 use triomphe::Arc;
+
+#[cfg(all(test, runtime_ack_loom))]
+use loom::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+const HANDOFF_TRACKING_COMPLETE: usize = usize::MAX;
+const ACK_SHARES_FIT_IN_MEMORY: &str =
+    "every pending ACK share has an in-memory owner, so their count fits in usize";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AckOutcome {
@@ -54,21 +63,34 @@ pub(crate) struct AckRequiredWaitGuard {
     handles: Vec<AckHandle>,
 }
 
-#[derive(Debug)]
-struct AckHandoffState {
-    required_wait_shares: usize,
-    blocks_ownership_handoff: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AckShareResolution {
+    AlreadyComplete,
+    Pending,
+    Complete,
 }
 
 #[derive(Debug)]
 struct AckState {
+    /// Zero is terminal. Attaching a share reserves it here before publishing it as active below.
     pending: AtomicUsize,
-    completed: AtomicBool,
+    /// Pending shares that are not parked on `REQUIRED WAIT`. `usize::MAX` closes the counter once
+    /// the root completes, so a racing wait release or attachment cannot reactivate it.
+    ///
+    /// The root trackers count roots rather than shares. A zero-to-positive transition therefore
+    /// reserves one tracker count before publishing the active share count. A positive-to-zero
+    /// transition publishes zero before releasing the tracker count. The tracker may briefly
+    /// overcount either transition, but it never lets an ownership handoff miss active work.
+    handoff_active: AtomicUsize,
     alive_counter: AtomicU64,
     alive_tx: watch::Sender<u64>,
     sender: Mutex<Option<oneshot::Sender<AckOutcome>>>,
     root_trackers: Vec<Arc<AckRootTracker>>,
-    handoff: Mutex<AckHandoffState>,
+}
+
+struct OwnershipHandoffTrackerReservation<'a> {
+    handle: &'a AckHandle,
+    release_on_drop: bool,
 }
 
 impl AckRootTracker {
@@ -144,14 +166,10 @@ impl AckHandle {
         (
             Self(Arc::new(AckState {
                 pending: AtomicUsize::new(1),
-                completed: AtomicBool::new(false),
+                handoff_active: AtomicUsize::new(usize::from(!root_trackers.is_empty())),
                 alive_counter: AtomicU64::new(0),
                 alive_tx,
                 sender: Mutex::new(Some(sender)),
-                handoff: Mutex::new(AckHandoffState {
-                    required_wait_shares: 0,
-                    blocks_ownership_handoff: !root_trackers.is_empty(),
-                }),
                 root_trackers,
             })),
             AckCompletion { receiver, alive_rx },
@@ -178,47 +196,154 @@ impl AckHandle {
         }
     }
 
+    fn reserve_ownership_handoff_trackers(&self) -> OwnershipHandoffTrackerReservation<'_> {
+        self.increment_ownership_handoff_trackers();
+        OwnershipHandoffTrackerReservation {
+            handle: self,
+            release_on_drop: true,
+        }
+    }
+
+    fn reserve_pending_shares(&self, shares: usize) -> bool {
+        let mut current = self.0.pending.load(Ordering::Acquire);
+        loop {
+            if current == 0 {
+                return false;
+            }
+            let next = current
+                .checked_add(shares)
+                .assured(ACK_SHARES_FIT_IN_MEMORY);
+            match self.0.pending.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn resolve_pending_share(&self) -> AckShareResolution {
+        let mut current = self.0.pending.load(Ordering::Acquire);
+        loop {
+            if current == 0 {
+                return AckShareResolution::AlreadyComplete;
+            }
+            let next = current
+                .checked_sub(1)
+                .assured("a positive pending ACK share count can be decremented");
+            match self.0.pending.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) if next == 0 => return AckShareResolution::Complete,
+                Ok(_) => return AckShareResolution::Pending,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn claim_completion(&self) -> bool {
+        self.0.pending.swap(0, Ordering::AcqRel) != 0
+    }
+
+    fn publish_handoff_shares(
+        &self,
+        shares: usize,
+        reservation: OwnershipHandoffTrackerReservation<'_>,
+    ) -> bool {
+        let mut current = self.0.handoff_active.load(Ordering::Acquire);
+        loop {
+            if current == HANDOFF_TRACKING_COMPLETE {
+                return false;
+            }
+            let next = current.checked_add(shares);
+            let next = match next {
+                Some(HANDOFF_TRACKING_COMPLETE) | None => None,
+                Some(next) => Some(next),
+            };
+            let next = next.assured(ACK_SHARES_FIT_IN_MEMORY);
+            match self.0.handoff_active.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    if current == 0 {
+                        reservation.retain();
+                    }
+                    return true;
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn remove_handoff_share(&self) -> bool {
+        let mut current = self.0.handoff_active.load(Ordering::Acquire);
+        loop {
+            if current == HANDOFF_TRACKING_COMPLETE {
+                return false;
+            }
+            if current == 0 {
+                debug_assert!(
+                    current > 0,
+                    "an active ACK share must exist before it leaves"
+                );
+                return false;
+            }
+            let next = current
+                .checked_sub(1)
+                .assured("a positive active ACK share count can be decremented");
+            match self.0.handoff_active.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    if next == 0 {
+                        self.decrement_ownership_handoff_trackers();
+                    }
+                    return true;
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn finish_handoff_tracking(&self) {
+        let active = self
+            .0
+            .handoff_active
+            .swap(HANDOFF_TRACKING_COMPLETE, Ordering::AcqRel);
+        debug_assert_ne!(
+            active, HANDOFF_TRACKING_COMPLETE,
+            "ACK handoff tracking must complete only once"
+        );
+        if active != 0 && active != HANDOFF_TRACKING_COMPLETE {
+            self.decrement_ownership_handoff_trackers();
+        }
+    }
+
     fn mark_required_wait(&self) -> bool {
         if self.0.root_trackers.is_empty() {
             return false;
         }
-        let mut handoff = self.0.handoff.lock();
-        if self.0.completed.load(Ordering::Acquire) {
-            return false;
-        }
-        let pending = self.0.pending.load(Ordering::Acquire);
-        if handoff.required_wait_shares >= pending {
-            debug_assert!(
-                handoff.required_wait_shares < pending,
-                "required-wait ACK shares must not exceed pending shares"
-            );
-            return false;
-        }
-        handoff.required_wait_shares += 1;
-        if handoff.required_wait_shares == pending && handoff.blocks_ownership_handoff {
-            self.decrement_ownership_handoff_trackers();
-            handoff.blocks_ownership_handoff = false;
-        }
-        true
+        self.remove_handoff_share()
     }
 
     fn leave_required_wait(&self) {
         if self.0.root_trackers.is_empty() {
             return;
         }
-        let mut handoff = self.0.handoff.lock();
-        if handoff.required_wait_shares == 0 {
-            debug_assert!(
-                handoff.required_wait_shares > 0,
-                "required-wait ACK share must be marked before it is released"
-            );
-            return;
-        }
-        if !self.0.completed.load(Ordering::Acquire) && !handoff.blocks_ownership_handoff {
-            self.increment_ownership_handoff_trackers();
-            handoff.blocks_ownership_handoff = true;
-        }
-        handoff.required_wait_shares -= 1;
+        let reservation = self.reserve_ownership_handoff_trackers();
+        self.publish_handoff_shares(1, reservation);
     }
 
     fn finish_completion(&self, result: AckOutcome) {
@@ -227,53 +352,32 @@ impl AckHandle {
         }
     }
 
-    fn release_root_trackers(&self, blocks_ownership_handoff: bool) {
+    fn release_root_trackers(&self) {
         for tracker in &self.0.root_trackers {
             tracker.outstanding.fetch_sub(1, Ordering::AcqRel);
-            if blocks_ownership_handoff {
-                tracker
-                    .ownership_handoff_outstanding
-                    .fetch_sub(1, Ordering::AcqRel);
-            }
         }
     }
 
     fn ack_success_tracked(&self) {
-        let mut handoff = self.0.handoff.lock();
-        if self.0.completed.load(Ordering::Acquire) {
+        if !self.remove_handoff_share() {
             return;
         }
-        let previous = self.0.pending.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(previous > 0, "ack counter underflow");
-        if previous == 1 {
-            if self.0.completed.swap(true, Ordering::AcqRel) {
-                return;
+        match self.resolve_pending_share() {
+            AckShareResolution::Complete => {
+                self.finish_handoff_tracking();
+                self.release_root_trackers();
+                self.finish_completion(AckOutcome::Ack);
             }
-            self.release_root_trackers(handoff.blocks_ownership_handoff);
-            handoff.blocks_ownership_handoff = false;
-            drop(handoff);
-            self.finish_completion(AckOutcome::Ack);
-            return;
-        }
-        let pending = previous - 1;
-        debug_assert!(
-            handoff.required_wait_shares <= pending,
-            "an ACK share must leave required wait before completing"
-        );
-        if handoff.required_wait_shares == pending && handoff.blocks_ownership_handoff {
-            self.decrement_ownership_handoff_trackers();
-            handoff.blocks_ownership_handoff = false;
+            AckShareResolution::AlreadyComplete | AckShareResolution::Pending => {}
         }
     }
 
     fn complete_tracked(&self, result: AckOutcome) {
-        let mut handoff = self.0.handoff.lock();
-        if self.0.completed.swap(true, Ordering::AcqRel) {
+        if !self.claim_completion() {
             return;
         }
-        self.release_root_trackers(handoff.blocks_ownership_handoff);
-        handoff.blocks_ownership_handoff = false;
-        drop(handoff);
+        self.finish_handoff_tracking();
+        self.release_root_trackers();
         self.finish_completion(result);
     }
 
@@ -283,24 +387,19 @@ impl AckHandle {
             "attached clone requires at least one receiver"
         );
         if self.0.root_trackers.is_empty() {
-            self.0.pending.fetch_add(receivers, Ordering::AcqRel);
+            self.reserve_pending_shares(receivers);
             return self.clone();
         }
-        let mut handoff = self.0.handoff.lock();
-        if self.0.completed.load(Ordering::Acquire) {
+        let reservation = self.reserve_ownership_handoff_trackers();
+        if !self.reserve_pending_shares(receivers) {
             return self.clone();
         }
-        if !handoff.blocks_ownership_handoff {
-            self.increment_ownership_handoff_trackers();
-            handoff.blocks_ownership_handoff = true;
-        }
-        self.0.pending.fetch_add(receivers, Ordering::AcqRel);
-        drop(handoff);
+        self.publish_handoff_shares(receivers, reservation);
         self.clone()
     }
 
     pub fn ack_alive(&self) {
-        if self.0.completed.load(Ordering::Acquire) {
+        if self.0.pending.load(Ordering::Acquire) == 0 {
             return;
         }
 
@@ -309,17 +408,12 @@ impl AckHandle {
     }
 
     pub fn ack_success(&self) {
-        if self.0.completed.load(Ordering::Acquire) {
-            return;
-        }
         if !self.0.root_trackers.is_empty() {
             self.ack_success_tracked();
             return;
         }
-        let previous = self.0.pending.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(previous > 0, "ack counter underflow");
-        if previous == 1 {
-            self.complete(AckOutcome::Ack);
+        if self.resolve_pending_share() == AckShareResolution::Complete {
+            self.finish_completion(AckOutcome::Ack);
         }
     }
 
@@ -332,7 +426,7 @@ impl AckHandle {
             self.complete_tracked(result);
             return;
         }
-        if self.0.completed.swap(true, Ordering::AcqRel) {
+        if !self.claim_completion() {
             return;
         }
         self.finish_completion(result);
@@ -341,16 +435,30 @@ impl AckHandle {
 
 impl Drop for AckState {
     fn drop(&mut self) {
-        if !self.completed.load(Ordering::Acquire) && !self.root_trackers.is_empty() {
-            let blocks_ownership_handoff = self.handoff.get_mut().blocks_ownership_handoff;
+        if self.pending.load(Ordering::Acquire) != 0 && !self.root_trackers.is_empty() {
+            let handoff_active = self.handoff_active.load(Ordering::Acquire);
             for tracker in &self.root_trackers {
                 tracker.outstanding.fetch_sub(1, Ordering::AcqRel);
-                if blocks_ownership_handoff {
+                if handoff_active != 0 && handoff_active != HANDOFF_TRACKING_COMPLETE {
                     tracker
                         .ownership_handoff_outstanding
                         .fetch_sub(1, Ordering::AcqRel);
                 }
             }
+        }
+    }
+}
+
+impl OwnershipHandoffTrackerReservation<'_> {
+    fn retain(mut self) {
+        self.release_on_drop = false;
+    }
+}
+
+impl Drop for OwnershipHandoffTrackerReservation<'_> {
+    fn drop(&mut self) {
+        if self.release_on_drop {
+            self.handle.decrement_ownership_handoff_trackers();
         }
     }
 }
@@ -738,106 +846,118 @@ mod tests {
 
 #[cfg(all(test, runtime_ack_loom))]
 mod loom_tests {
-    use loom::{
-        model,
-        sync::{
-            Arc, Mutex,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-        },
-        thread,
-    };
+    use loom::{model, thread};
+    use triomphe::Arc;
 
-    #[derive(Clone)]
-    struct LoomAck(Arc<LoomAckState>);
+    use super::{AckRequiredWaitGuard, AckRootTracker, AckSet, HANDOFF_TRACKING_COMPLETE};
 
-    struct LoomAckState {
-        pending: AtomicUsize,
-        completed: AtomicBool,
-        result: Mutex<Option<bool>>,
-    }
+    fn assert_tracker_matches_root(root: &AckSet, tracker: &AckRootTracker) {
+        let handle = &root.handles[0];
+        let pending = handle.0.pending.load(super::Ordering::Acquire);
+        let handoff_active = handle.0.handoff_active.load(super::Ordering::Acquire);
+        let expected_outstanding = usize::from(pending != 0);
+        let expected_handoff_outstanding =
+            usize::from(handoff_active != 0 && handoff_active != HANDOFF_TRACKING_COMPLETE);
 
-    impl LoomAck {
-        fn root() -> Self {
-            Self(Arc::new(LoomAckState {
-                pending: AtomicUsize::new(1),
-                completed: AtomicBool::new(false),
-                result: Mutex::new(None),
-            }))
-        }
-
-        fn attached(&self) -> Self {
-            self.0.pending.fetch_add(1, Ordering::AcqRel);
-            self.clone()
-        }
-
-        fn ack_success(&self) {
-            if self.0.completed.load(Ordering::Acquire) {
-                return;
-            }
-
-            let previous = self.0.pending.fetch_sub(1, Ordering::AcqRel);
-            assert!(previous > 0, "ack counter underflow");
-            if previous == 1 {
-                self.complete(true);
-            }
-        }
-
-        fn no_ack(&self) {
-            self.complete(false);
-        }
-
-        fn complete(&self, result: bool) {
-            if self.0.completed.swap(true, Ordering::AcqRel) {
-                return;
-            }
-
-            let mut slot = self.0.result.lock().expect("lock should succeed");
-            assert!(slot.is_none(), "result must only be written once");
-            *slot = Some(result);
-        }
-
-        fn result(&self) -> Option<bool> {
-            *self.0.result.lock().expect("lock should succeed")
-        }
+        assert_eq!(tracker.outstanding(), expected_outstanding);
+        assert_eq!(
+            tracker.outstanding_for_ownership_handoff(),
+            expected_handoff_outstanding
+        );
     }
 
     #[test]
-    fn attached_branches_do_not_complete_early() {
+    fn concurrent_attachment_and_final_ack_leave_exact_tracking() {
         model(|| {
-            let root = LoomAck::root();
-            let attached = root.attached();
+            let tracker = Arc::new(AckRootTracker::default());
+            let (root, completion) = AckSet::tracked_root(tracker.clone());
+            let attachment_source = root.clone();
+            let observer = root.clone();
 
-            let root_thread = {
-                let root = root.clone();
-                thread::spawn(move || root.ack_success())
-            };
+            let attach_thread = thread::spawn(move || attachment_source.attached());
+            let ack_thread = thread::spawn(move || root.ack_success());
 
-            root_thread.join().expect("root thread should join");
-            assert_eq!(root.result(), None);
+            let attached = attach_thread.join().expect("attachment thread should join");
+            ack_thread.join().expect("ack thread should join");
+            assert_tracker_matches_root(&observer, &tracker);
 
-            let attached_thread = thread::spawn(move || attached.ack_success());
-            attached_thread.join().expect("attached thread should join");
-
-            assert_eq!(root.result(), Some(true));
+            attached.ack_success();
+            assert_tracker_matches_root(&observer, &tracker);
+            assert_eq!(tracker.outstanding(), 0);
+            drop(completion);
         });
     }
 
     #[test]
-    fn no_ack_is_single_winner_against_final_ack() {
+    fn concurrent_wait_and_active_ack_exempt_the_remaining_root() {
         model(|| {
-            let root = LoomAck::root();
+            let tracker = Arc::new(AckRootTracker::default());
+            let (root, completion) = AckSet::tracked_root(tracker.clone());
             let attached = root.attached();
+            let waiting = root.clone();
+            let observer = root.clone();
 
-            let ack_thread = {
-                let root = root.clone();
-                thread::spawn(move || root.ack_success())
-            };
-            let no_ack_thread = thread::spawn(move || attached.no_ack());
+            let wait_thread = thread::spawn(move || AckRequiredWaitGuard::new([&waiting]));
+            let ack_thread = thread::spawn(move || attached.ack_success());
+
+            let required_wait = wait_thread.join().expect("wait thread should join");
+            ack_thread.join().expect("ack thread should join");
+            assert_tracker_matches_root(&observer, &tracker);
+            assert_eq!(tracker.outstanding(), 1);
+            assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+
+            drop(required_wait);
+            assert_tracker_matches_root(&observer, &tracker);
+            assert_eq!(tracker.outstanding_for_ownership_handoff(), 1);
+
+            observer.no_ack("test completion");
+            assert_tracker_matches_root(&observer, &tracker);
+            assert_eq!(tracker.outstanding(), 0);
+            drop(completion);
+        });
+    }
+
+    #[test]
+    fn concurrent_wait_release_and_completion_leave_no_tracking() {
+        model(|| {
+            let tracker = Arc::new(AckRootTracker::default());
+            let (root, completion) = AckSet::tracked_root(tracker.clone());
+            let required_wait = AckRequiredWaitGuard::new([&root]);
+            let observer = root.clone();
+
+            let release_thread = thread::spawn(move || drop(required_wait));
+            let completion_thread = thread::spawn(move || root.no_ack("test completion"));
+
+            release_thread.join().expect("release thread should join");
+            completion_thread
+                .join()
+                .expect("completion thread should join");
+
+            assert_tracker_matches_root(&observer, &tracker);
+            assert_eq!(tracker.outstanding(), 0);
+            assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+            drop(completion);
+        });
+    }
+
+    #[test]
+    fn concurrent_success_and_failure_choose_one_terminal_transition() {
+        model(|| {
+            let tracker = Arc::new(AckRootTracker::default());
+            let (root, completion) = AckSet::tracked_root(tracker.clone());
+            let competing = root.clone();
+            let observer = root.clone();
+
+            let ack_thread = thread::spawn(move || root.ack_success());
+            let no_ack_thread = thread::spawn(move || competing.no_ack("test failure"));
 
             ack_thread.join().expect("ack thread should join");
             no_ack_thread.join().expect("no-ack thread should join");
 
-            assert!(root.result().is_some(), "one completion path must win");
+            assert_tracker_matches_root(&observer, &tracker);
+            assert_eq!(tracker.outstanding(), 0);
+            assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+            drop(completion);
         });
     }
 }
