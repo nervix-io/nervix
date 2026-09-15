@@ -40,7 +40,10 @@ pub(crate) fn node_name(raw: &str) -> ClusterNodeName {
 }
 use nervix_server::{
     FaultInjection, SchedulerMode,
-    application::{Application, InternalTransportMode, init_tracing_to_file},
+    application::{
+        Application, InternalTransportMode, ShutdownCoordinator, ShutdownDeadline,
+        init_tracing_to_file,
+    },
     memory_pressure::MemoryPressureConfig,
     runtime::{DEFAULT_DOMAIN_DRAIN_TIMEOUT, DEFAULT_TEMP_DIR, branch_task_stop_timeout},
 };
@@ -2405,7 +2408,7 @@ struct NodeHandle {
     config: TestClusterConfig,
     failure: Arc<Mutex<Option<String>>>,
     task: Option<JoinHandle<()>>,
-    shutdown: Option<CancellationToken>,
+    shutdown: Option<ShutdownCoordinator>,
 }
 
 impl NodeHandle {
@@ -2429,7 +2432,7 @@ impl NodeHandle {
         }
 
         *self.failure.lock() = None;
-        let shutdown = CancellationToken::new();
+        let shutdown = ShutdownCoordinator::default();
         let db_path = self.spec.db_path()?;
         let application_builder = Application::builder()
             .addr(parse_addr(&self.spec.grpc_addr())?)
@@ -2495,8 +2498,8 @@ impl NodeHandle {
     }
 
     fn request_stop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            shutdown.cancel();
+        if let Some(shutdown) = &self.shutdown {
+            shutdown.request_stop(ShutdownDeadline::Unbounded);
         }
     }
 
@@ -2540,6 +2543,7 @@ impl NodeHandle {
                 )))
             }
         };
+        self.shutdown = None;
         self.fault_injection
             .unregister_consensus(&node_name(&self.spec.node_id));
         if task_result.is_ok() {
