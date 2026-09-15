@@ -629,6 +629,11 @@ impl<T> RelayBroadcast<T> {
         self.inner.control.lock().target_capacity.get()
     }
 
+    #[cfg(test)]
+    pub(in crate::runtime) fn waiting_publishers(&self) -> usize {
+        self.inner.control.lock().waiting_publishers
+    }
+
     pub(in crate::runtime) fn set_capacity(&self, capacity: NonZeroUsize) {
         let was_dirty = self.inner.dirty.swap(true, Ordering::Relaxed);
         let is_dirty = {
