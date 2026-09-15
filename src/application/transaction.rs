@@ -86,6 +86,8 @@ pub(in crate::application) enum TransactionCommitError {
     PrepareSchedule { domain: DomainName, reason: String },
     #[error("transaction '{id}' commit task failed")]
     TaskJoin { id: String },
+    #[error("transaction '{id}' commit was cancelled because the node's shutdown deadline passed")]
+    ShutdownCancelled { id: String },
 }
 
 impl TransactionCommitError {
@@ -1133,13 +1135,16 @@ impl SessionServiceImpl {
             // model-mutation future off the session's poll stack as well.
             let service = self.clone();
             let commit_id = id.clone();
-            match self
+            let commit = self
                 .inner
                 .service_tasks
                 .spawn(async move { service.execute_replicated_commit(&commit_id).await })
-                .await
-            {
-                Ok(result) => result,
+                .await;
+            match commit {
+                Ok(Some(result)) => result,
+                Ok(None) => Err(Report::new(TransactionCommitError::ShutdownCancelled {
+                    id: id.clone(),
+                })),
                 Err(error) => Err(Report::new(error)
                     .change_context(TransactionCommitError::TaskJoin { id: id.clone() })),
             }

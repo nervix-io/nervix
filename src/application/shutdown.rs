@@ -3,7 +3,8 @@
 //! Layer: control plane.
 //!
 //! - **Owns.** The ordered transition from a stop request through admission shutdown, drain
-//!   support, terminal teardown, and the outcome reported to the process boundary.
+//!   support, terminal teardown, and the outcome reported to the process boundary, together with
+//!   the one deadline that bounds all of them.
 //! - **Depends on.** Tokio signaling primitives and monotonic time.
 //! - **Must not know.** Which listeners, control-plane services, or runtime tasks observe each
 //!   lifecycle signal.
@@ -18,25 +19,55 @@ use tracing::info;
 use triomphe::Arc;
 
 pub(super) const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a shutdown may take from its first stop request until the process exits. It covers
+/// the default drain timeout and leaves the rest to the services that stop after the drain.
+pub(super) const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(50);
+const _: () = assert!(
+    DEFAULT_DRAIN_TIMEOUT.as_nanos() < DEFAULT_SHUTDOWN_TIMEOUT.as_nanos(),
+    "the default shutdown timeout must leave terminal teardown time after the default drain"
+);
 
-/// The absolute monotonic deadline shared by every phase of one shutdown request.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ShutdownDeadline {
-    /// The caller did not impose a process-wide deadline.
-    #[default]
-    Unbounded,
-    /// Every phase must complete before this monotonic instant.
-    At(Instant),
+/// The one monotonic deadline that bounds every phase of a shutdown, fixed when its first stop
+/// request is accepted.
+///
+/// It keeps the instant of that request and the timeout measured from it rather than a single
+/// instant, so a configured timeout of any length cannot overflow the monotonic clock.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShutdownDeadline {
+    requested_at: Instant,
+    timeout: Duration,
 }
 
 impl ShutdownDeadline {
-    /// Returns the time left before the deadline, clamped at zero after it expires.
-    pub fn remaining(self) -> Option<Duration> {
-        match self {
-            Self::Unbounded => None,
-            Self::At(deadline) => Some(deadline.saturating_duration_since(Instant::now())),
+    /// The time left before the deadline, which is zero once it has passed.
+    pub fn remaining(self) -> Duration {
+        self.timeout
+            .checked_sub(self.requested_at.elapsed())
+            .unwrap_or(Duration::ZERO)
+    }
+
+    pub fn has_passed(self) -> bool {
+        self.requested_at.elapsed() >= self.timeout
+    }
+
+    /// Runs `work` until it finishes or the deadline passes, whichever comes first.
+    pub(in crate::application) async fn bound<F>(self, work: F) -> BeforeDeadline<F::Output>
+    where
+        F: Future,
+    {
+        let bounded = tokio::time::timeout(self.remaining(), work).await;
+        match bounded {
+            Ok(output) => BeforeDeadline::Finished(output),
+            Err(_) => BeforeDeadline::Expired,
         }
     }
+}
+
+/// Whether shutdown work finished before the deadline passed.
+#[derive(Debug, Eq, PartialEq)]
+pub(in crate::application) enum BeforeDeadline<T> {
+    Finished(T),
+    Expired,
 }
 
 /// The immutable request that starts one application shutdown lifecycle.
@@ -68,21 +99,34 @@ pub enum ShutdownPhase {
     Finished,
 }
 
-/// Whether a shutdown phase completed its contract or had to leave work behind.
+/// How a shutdown phase ended.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShutdownPhaseOutcome {
+    /// The phase finished its contract before the shutdown deadline.
     Completed,
+    /// The phase finished before the shutdown deadline but had to leave work behind.
     Abandoned,
+    /// The shutdown deadline passed before the phase finished, and the work it still owned was
+    /// cancelled.
+    Forced,
 }
 
 impl ShutdownPhaseOutcome {
     pub(in crate::application) fn combine(self, other: Self) -> Self {
         match (self, other) {
+            (Self::Forced, _) | (_, Self::Forced) => Self::Forced,
+            (Self::Abandoned, _) | (_, Self::Abandoned) => Self::Abandoned,
             (Self::Completed, Self::Completed) => Self::Completed,
-            (Self::Completed, Self::Abandoned)
-            | (Self::Abandoned, Self::Completed)
-            | (Self::Abandoned, Self::Abandoned) => Self::Abandoned,
         }
+    }
+
+    /// This outcome for a phase that finishes now, or `Forced` when the shutdown deadline has
+    /// already passed.
+    pub(in crate::application) fn unless_deadline_passed(self, deadline: ShutdownDeadline) -> Self {
+        if deadline.has_passed() {
+            return Self::Forced;
+        }
+        self
     }
 }
 
@@ -92,6 +136,15 @@ pub struct ShutdownOutcome {
     pub stop_admission: ShutdownPhaseOutcome,
     pub drain_support: ShutdownPhaseOutcome,
     pub terminal_teardown: ShutdownPhaseOutcome,
+}
+
+impl ShutdownOutcome {
+    /// Whether the shutdown deadline cut any phase short.
+    pub fn deadline_expired(self) -> bool {
+        self.stop_admission == ShutdownPhaseOutcome::Forced
+            || self.drain_support == ShutdownPhaseOutcome::Forced
+            || self.terminal_teardown == ShutdownPhaseOutcome::Forced
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -148,6 +201,8 @@ impl CoordinatorState {
 }
 
 struct ShutdownCoordinatorInner {
+    /// How long shutdown may take from its first stop request.
+    timeout: Duration,
     state: watch::Sender<CoordinatorState>,
     stop_requested: CancellationToken,
     admission_shutdown: CancellationToken,
@@ -164,6 +219,7 @@ impl std::fmt::Debug for ShutdownCoordinator {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ShutdownCoordinator")
+            .field("timeout", &self.inner.timeout)
             .field("phase", &self.phase())
             .field("deadline", &self.request().map(ShutdownRequest::deadline))
             .finish_non_exhaustive()
@@ -172,9 +228,17 @@ impl std::fmt::Debug for ShutdownCoordinator {
 
 impl Default for ShutdownCoordinator {
     fn default() -> Self {
+        Self::new(DEFAULT_SHUTDOWN_TIMEOUT)
+    }
+}
+
+impl ShutdownCoordinator {
+    /// A coordinator whose shutdown, once requested, must finish within `timeout`.
+    pub fn new(timeout: Duration) -> Self {
         let (state, _) = watch::channel(CoordinatorState::Serving);
         Self {
             inner: Arc::new(ShutdownCoordinatorInner {
+                timeout,
                 state,
                 stop_requested: CancellationToken::new(),
                 admission_shutdown: CancellationToken::new(),
@@ -182,12 +246,11 @@ impl Default for ShutdownCoordinator {
             }),
         }
     }
-}
 
-impl ShutdownCoordinator {
-    /// Starts shutdown exactly once. Repeated requests retain the first absolute deadline.
-    pub fn request_stop(&self, deadline: ShutdownDeadline) -> ShutdownRequestOutcome {
-        let requested = ShutdownRequest { deadline };
+    /// Starts shutdown exactly once and fixes its deadline at the configured timeout after this
+    /// first request. Every later request observes that same deadline, so none can restart or
+    /// extend it.
+    pub fn request_stop(&self) -> ShutdownRequestOutcome {
         let mut outcome = None;
         self.inner.state.send_if_modified(|state| {
             let existing = state.request();
@@ -197,6 +260,12 @@ impl ShutdownCoordinator {
                     false
                 }
                 None => {
+                    let requested = ShutdownRequest {
+                        deadline: ShutdownDeadline {
+                            requested_at: Instant::now(),
+                            timeout: self.inner.timeout,
+                        },
+                    };
                     *state = CoordinatorState::StopRequested { request: requested };
                     outcome = Some(ShutdownRequestOutcome::Accepted(requested));
                     true
@@ -350,28 +419,109 @@ impl ShutdownCoordinator {
 mod tests {
     use super::*;
 
-    #[test]
-    fn repeated_stop_requests_keep_the_first_deadline() {
-        let coordinator = ShutdownCoordinator::default();
-        let first_deadline = ShutdownDeadline::At(Instant::now() + Duration::from_secs(30));
-        let second_deadline = ShutdownDeadline::At(Instant::now() + Duration::from_secs(5));
+    fn requested_deadline(coordinator: &ShutdownCoordinator) -> ShutdownDeadline {
+        coordinator
+            .request()
+            .expect("the scenario requested shutdown first")
+            .deadline()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_stop_requests_keep_the_first_deadline() {
+        let coordinator = ShutdownCoordinator::new(Duration::from_secs(30));
+        let ShutdownRequestOutcome::Accepted(first) = coordinator.request_stop() else {
+            panic!("the first stop request must start shutdown");
+        };
+
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let repeated = coordinator.request_stop();
+
+        assert_eq!(repeated, ShutdownRequestOutcome::AlreadyRequested(first));
+        assert_eq!(first.deadline().remaining(), Duration::from_secs(20));
+        assert!(!first.deadline().has_passed());
+
+        tokio::time::advance(Duration::from_secs(20)).await;
+        let after_the_deadline = coordinator.request_stop();
 
         assert_eq!(
-            coordinator.request_stop(first_deadline),
-            ShutdownRequestOutcome::Accepted(ShutdownRequest {
-                deadline: first_deadline,
+            after_the_deadline,
+            ShutdownRequestOutcome::AlreadyRequested(first)
+        );
+        assert_eq!(first.deadline().remaining(), Duration::ZERO);
+        assert!(first.deadline().has_passed());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn work_still_running_at_the_deadline_is_cut_off_there() {
+        let coordinator = ShutdownCoordinator::new(Duration::from_secs(5));
+        coordinator.request_stop();
+        let deadline = requested_deadline(&coordinator);
+        let started = Instant::now();
+
+        let stalled = deadline.bound(std::future::pending::<()>()).await;
+
+        assert_eq!(stalled, BeforeDeadline::Expired);
+        assert_eq!(started.elapsed(), Duration::from_secs(5));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn work_that_finishes_before_the_deadline_reports_its_output() {
+        let coordinator = ShutdownCoordinator::new(Duration::from_secs(5));
+        coordinator.request_stop();
+        let deadline = requested_deadline(&coordinator);
+
+        let finished = deadline
+            .bound(async {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                7
             })
+            .await;
+
+        assert_eq!(finished, BeforeDeadline::Finished(7));
+        assert_eq!(deadline.remaining(), Duration::from_secs(4));
+    }
+
+    #[test]
+    fn a_forced_phase_outweighs_every_other_outcome() {
+        assert_eq!(
+            ShutdownPhaseOutcome::Completed.combine(ShutdownPhaseOutcome::Completed),
+            ShutdownPhaseOutcome::Completed
         );
         assert_eq!(
-            coordinator.request_stop(second_deadline),
-            ShutdownRequestOutcome::AlreadyRequested(ShutdownRequest {
-                deadline: first_deadline,
-            })
+            ShutdownPhaseOutcome::Completed.combine(ShutdownPhaseOutcome::Abandoned),
+            ShutdownPhaseOutcome::Abandoned
         );
         assert_eq!(
-            coordinator.request().map(ShutdownRequest::deadline),
-            Some(first_deadline)
+            ShutdownPhaseOutcome::Abandoned.combine(ShutdownPhaseOutcome::Forced),
+            ShutdownPhaseOutcome::Forced
         );
+        assert_eq!(
+            ShutdownPhaseOutcome::Forced.combine(ShutdownPhaseOutcome::Completed),
+            ShutdownPhaseOutcome::Forced
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_phase_that_finishes_after_the_deadline_is_forced() {
+        let coordinator = ShutdownCoordinator::new(Duration::from_secs(5));
+        coordinator.request_stop();
+        let deadline = requested_deadline(&coordinator);
+
+        assert_eq!(
+            ShutdownPhaseOutcome::Completed.unless_deadline_passed(deadline),
+            ShutdownPhaseOutcome::Completed
+        );
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(
+            ShutdownPhaseOutcome::Abandoned.unless_deadline_passed(deadline),
+            ShutdownPhaseOutcome::Forced
+        );
+        let outcome = ShutdownOutcome {
+            stop_admission: ShutdownPhaseOutcome::Completed,
+            drain_support: ShutdownPhaseOutcome::Forced,
+            terminal_teardown: ShutdownPhaseOutcome::Completed,
+        };
+        assert!(outcome.deadline_expired());
     }
 
     #[tokio::test]
@@ -380,7 +530,7 @@ mod tests {
         let admission = coordinator.admission_token();
         let drain_support = coordinator.drain_support_token();
 
-        coordinator.request_stop(ShutdownDeadline::Unbounded);
+        coordinator.request_stop();
         coordinator.stop_admission();
         assert!(admission.is_cancelled());
         assert!(!drain_support.is_cancelled());
@@ -393,13 +543,15 @@ mod tests {
         assert!(drain_support.is_cancelled());
         coordinator.finish(ShutdownPhaseOutcome::Completed);
 
+        let outcome = coordinator.completion().await;
         assert_eq!(
-            coordinator.completion().await,
+            outcome,
             ShutdownOutcome {
                 stop_admission: ShutdownPhaseOutcome::Completed,
                 drain_support: ShutdownPhaseOutcome::Completed,
                 terminal_teardown: ShutdownPhaseOutcome::Completed,
             }
         );
+        assert!(!outcome.deadline_expired());
     }
 }

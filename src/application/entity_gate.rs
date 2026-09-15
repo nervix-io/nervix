@@ -810,8 +810,13 @@ mod tests {
         .expect("dropped coordinator guard should release its local durable hold");
 
         service.inner.drain_support_shutdown.cancel();
-        service.inner.service_tasks.close();
-        service.inner.service_tasks.wait().await;
+        let shutdown = crate::application::ShutdownCoordinator::default();
+        shutdown.request_stop();
+        let deadline = shutdown
+            .request()
+            .expect("the stop request above was accepted")
+            .deadline();
+        service.inner.service_tasks.shut_down(deadline).await;
         let _ = std::fs::remove_dir_all(path);
     }
 }

@@ -146,15 +146,19 @@ pub(crate) struct DurableBatch<'a> {
 
 impl<'a> DurableBatch<'a> {
     pub(crate) fn new(reservation: &'a Reservation) -> io::Result<Self> {
-        // Reserve the other half for Fjall's journal encoding and the moving batch descriptors.
-        let limit = usize::try_from(reservation.bytes() / 2)
-            .map_err(|_| io::Error::other(StorageFailure::Capacity))?;
         Ok(Self {
             mutations: Vec::new(),
             used: 0,
-            limit,
+            limit: Self::byte_limit(reservation)?,
             _reservation: reservation,
         })
+    }
+
+    /// The bytes one batch may charge against `reservation`. The other half is kept for Fjall's
+    /// journal encoding and the moving batch descriptors.
+    pub(crate) fn byte_limit(reservation: &Reservation) -> io::Result<usize> {
+        usize::try_from(reservation.bytes() / 2)
+            .map_err(|_| io::Error::other(StorageFailure::Capacity))
     }
 
     pub(crate) fn insert<T: StorageEncode>(
@@ -225,6 +229,11 @@ impl<'a> DurableBatch<'a> {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.mutations.is_empty()
+    }
+
+    /// The bytes this batch has charged against its limit so far.
+    pub(crate) fn charged(&self) -> usize {
+        self.used
     }
 
     pub(crate) fn remove(&mut self, keyspace: &Keyspace, key: &[u8]) -> io::Result<()> {

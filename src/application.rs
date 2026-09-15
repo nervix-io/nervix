@@ -24,9 +24,12 @@ use std::{
     path::PathBuf,
 };
 
+use admitted_connection::AdmittingListener;
 use ahash::{HashMap, HashMapExt, HashSet, RandomState};
 use authentication::{BasicAuthCredentials, DEFAULT_USER, user_credentials};
-use background_task::{await_background_task_shutdown, request_shutdown_on_completion};
+use background_task::{
+    await_background_task_shutdown, join_public_listeners, request_shutdown_on_completion,
+};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use dashmap::DashMap;
@@ -39,6 +42,7 @@ use error_stack::{Report, ResultExt};
 use fjall::Database;
 use futures_util::{
     StreamExt,
+    future::join_all,
     stream::{self},
 };
 use http_endpoint::{serve_http, serve_https};
@@ -78,7 +82,6 @@ use nervix_interconnect::{
     Transport,
 };
 use nervix_models::{ClusterNodeName, DomainName, DomainStatus, ModelKind, UserName};
-use nervix_recovery::Reported as _;
 use observability_http::serve_observability_http;
 use ownership_handoff::{FORCED_OWNERSHIP_RECOVERY_BUDGET, ForcedOwnershipRecoveryCoordinator};
 use parking_lot::RwLock;
@@ -116,6 +119,7 @@ use crate::{
     runtime::{DescribeStateSnapshot, DescribedStateSnapshot, FetchStateSnapshot},
 };
 
+mod admitted_connection;
 mod authentication;
 mod background_task;
 mod cluster_status;
@@ -138,6 +142,7 @@ mod relocation;
 mod resource;
 mod runtime_admission;
 mod scheduling;
+mod service_tasks;
 mod session_service;
 mod shutdown;
 mod startup;
@@ -150,11 +155,12 @@ mod tracing_setup;
 mod transaction;
 mod web_console;
 
+use service_tasks::ServiceTasks;
+use shutdown::BeforeDeadline;
 pub use shutdown::{
     ShutdownCoordinator, ShutdownDeadline, ShutdownOutcome, ShutdownPhase, ShutdownPhaseOutcome,
     ShutdownRequest, ShutdownRequestOutcome,
 };
-use tokio_util::task::TaskTracker;
 use tonic::transport::Server;
 use tracing::{debug, error, info, warn};
 use triomphe::Arc;
@@ -381,6 +387,14 @@ pub struct Args {
         help = "Maximum time to wait for drain operations before continuing"
     )]
     pub drain_timeout: Duration,
+    #[arg(
+        long,
+        env = "NERVIX_SHUTDOWN_TIMEOUT",
+        default_value = "50s",
+        value_parser = parse_human_duration,
+        help = "Maximum time from the first stop request until the process exits"
+    )]
+    pub shutdown_timeout: Duration,
     #[arg(long, env = "NERVIX_CLUSTER_BOOTSTRAP_HOST")]
     pub cluster_bootstrap_host: Option<String>,
     #[arg(long, env = "NERVIX_DB_PATH", default_value = "./.nervix-db")]
@@ -593,10 +607,8 @@ pub async fn run_cli(
         return Ok(());
     }
 
-    let mut application = Application::try_from(args)?;
-    let shutdown = ShutdownCoordinator::default();
-    termination_signals.supervise(shutdown.clone())?;
-    application.shutdown = shutdown;
+    let application = Application::try_from(args)?;
+    termination_signals.supervise(application.shutdown.clone())?;
     application.run().await
 }
 
@@ -1681,7 +1693,7 @@ impl Application {
                 events: events.clone(),
                 subscription_interest_counts: DashMap::with_hasher(RandomState::new()),
                 interconnect: interconnect.clone(),
-                service_tasks: TaskTracker::new(),
+                service_tasks: ServiceTasks::default(),
                 configured_basic_auth,
                 auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
                 failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),
@@ -2574,15 +2586,6 @@ impl Application {
         }
 
         let listener_shutdown = shutdown_coordinator.admission_token();
-        let termination_advertisement_task = tokio::spawn({
-            let shutdown = shutdown_coordinator.clone();
-            let cluster = cluster.clone();
-            async move {
-                shutdown.requested().await;
-                cluster.mark_local_terminating().await;
-                shutdown.stop_admission();
-            }
-        });
 
         let grpc_service = service.clone();
         let grpc_shutdown = listener_shutdown.clone();
@@ -2597,15 +2600,10 @@ impl Application {
             } else {
                 builder
             };
-            let grpc_incoming = stream::unfold(grpc_listener, |listener| async {
-                let accepted = listener.accept().await.map(|(relay, _)| {
-                    relay
-                        .set_nodelay(true)
-                        .reported("disabling Nagle on an accepted gRPC connection");
-                    relay
-                });
-                Some((accepted, listener))
-            });
+            // Closing admission ends every connection this listener accepted, so the server's
+            // graceful shutdown never waits for a client to finish or abandon a request.
+            let grpc_incoming =
+                AdmittingListener::new(grpc_listener, grpc_shutdown.clone()).into_connections();
             builder
                 .add_service(SessionServiceServer::new(grpc_service.clone()))
                 .serve_with_incoming_shutdown(grpc_incoming, grpc_shutdown.cancelled_owned())
@@ -2655,58 +2653,91 @@ impl Application {
             }
         };
 
-        let server_shutdown = shutdown_coordinator.clone();
-        let (
-            api_result,
-            http_result,
-            https_result,
-            observability_result,
-            web_console_result,
-            web_console_https_result,
-        ) = tokio::join!(
-            request_shutdown_on_completion(api_server, server_shutdown.clone()),
-            request_shutdown_on_completion(http_server, server_shutdown.clone()),
-            request_shutdown_on_completion(https_server, server_shutdown.clone()),
-            request_shutdown_on_completion(observability_server, server_shutdown.clone()),
-            request_shutdown_on_completion(web_console_server, server_shutdown.clone()),
-            request_shutdown_on_completion(web_console_https_server, server_shutdown.clone()),
-        );
-        let result = api_result
-            .and(http_result)
-            .and(https_result)
-            .and(observability_result)
-            .and(web_console_result)
-            .and(web_console_https_result);
-        let termination_advertisement_outcome = await_background_task_shutdown(
-            termination_advertisement_task,
-            "termination advertisement task",
-        )
-        .await;
-        let listener_outcome = if result.is_ok() {
-            ShutdownPhaseOutcome::Completed
-        } else {
-            ShutdownPhaseOutcome::Abandoned
+        let public_listeners_shutdown = shutdown_coordinator.clone();
+        let public_listeners = tokio::spawn(async move {
+            let (
+                api_result,
+                http_result,
+                https_result,
+                observability_result,
+                web_console_result,
+                web_console_https_result,
+            ) = tokio::join!(
+                request_shutdown_on_completion(api_server, public_listeners_shutdown.clone()),
+                request_shutdown_on_completion(http_server, public_listeners_shutdown.clone()),
+                request_shutdown_on_completion(https_server, public_listeners_shutdown.clone()),
+                request_shutdown_on_completion(
+                    observability_server,
+                    public_listeners_shutdown.clone()
+                ),
+                request_shutdown_on_completion(
+                    web_console_server,
+                    public_listeners_shutdown.clone()
+                ),
+                request_shutdown_on_completion(
+                    web_console_https_server,
+                    public_listeners_shutdown.clone()
+                ),
+            );
+            api_result
+                .and(http_result)
+                .and(https_result)
+                .and(observability_result)
+                .and(web_console_result)
+                .and(web_console_https_result)
+        });
+
+        // The node serves until its first stop request, whether a termination signal, the caller
+        // embedding the application, or a failed listener made it. That request's deadline bounds
+        // everything that follows.
+        let deadline = shutdown_coordinator.requested().await.deadline();
+
+        let advertisement = deadline.bound(cluster.mark_local_terminating()).await;
+        let advertisement_outcome = match advertisement {
+            BeforeDeadline::Finished(()) => ShutdownPhaseOutcome::Completed,
+            BeforeDeadline::Expired => {
+                warn!(
+                    "shutdown deadline expired before this node advertised that it is terminating"
+                );
+                ShutdownPhaseOutcome::Forced
+            }
         };
-        let stop_admission_outcome = listener_outcome.combine(termination_advertisement_outcome);
+        shutdown_coordinator.stop_admission();
+        let listeners = join_public_listeners(public_listeners, deadline).await;
+        let stop_admission_outcome = advertisement_outcome
+            .combine(listeners.outcome)
+            .unless_deadline_passed(deadline);
         shutdown_coordinator.begin_drain_support(stop_admission_outcome);
 
         let drain_support_outcome = if graceful_shutdown_drain {
-            service
-                .drain_local_node_before_shutdown(drain_timeout)
-                .await
+            let drain = service.drain_local_node_before_shutdown(drain_timeout, deadline);
+            let drained = deadline.bound(drain).await;
+            match drained {
+                BeforeDeadline::Finished(outcome) => outcome.unless_deadline_passed(deadline),
+                BeforeDeadline::Expired => {
+                    warn!("shutdown deadline expired while this node drained its admitted work");
+                    ShutdownPhaseOutcome::Forced
+                }
+            }
         } else {
-            ShutdownPhaseOutcome::Completed
+            ShutdownPhaseOutcome::Completed.unless_deadline_passed(deadline)
         };
         shutdown_coordinator.begin_terminal_teardown(drain_support_outcome);
 
+        let background_task_shutdowns = background_tasks.into_iter().map(|task| {
+            await_background_task_shutdown(task, "application background task", deadline)
+        });
+        let background_task_outcomes = join_all(background_task_shutdowns).await;
         let mut terminal_teardown_outcome = ShutdownPhaseOutcome::Completed;
-        for task in background_tasks {
-            let task_outcome =
-                await_background_task_shutdown(task, "application background task").await;
+        for task_outcome in background_task_outcomes {
             terminal_teardown_outcome = terminal_teardown_outcome.combine(task_outcome);
         }
-        service.inner.service_tasks.close();
-        service.inner.service_tasks.wait().await;
+        let service_tasks_outcome = service.inner.service_tasks.shut_down(deadline).await;
+        terminal_teardown_outcome = terminal_teardown_outcome.combine(service_tasks_outcome);
+        // The services below own this node's remaining tasks, connections, and storage, and
+        // stopping them is what releases those, so each stop runs to completion rather than being
+        // abandoned at the deadline. A server process whose deadline passes meanwhile is ended by
+        // its deadline supervision.
         runtime.shutdown().await;
         consensus.shutdown().await;
         let cluster_shutdown_result = cluster
@@ -2730,13 +2761,20 @@ impl Application {
         });
 
         if cluster_shutdown_result.is_err() || database_owner_outcome.is_err() {
-            terminal_teardown_outcome = ShutdownPhaseOutcome::Abandoned;
+            terminal_teardown_outcome =
+                terminal_teardown_outcome.combine(ShutdownPhaseOutcome::Abandoned);
         }
-        shutdown_coordinator.finish(terminal_teardown_outcome);
+        shutdown_coordinator.finish(terminal_teardown_outcome.unless_deadline_passed(deadline));
 
-        result?;
+        listeners.result?;
         cluster_shutdown_result?;
         database_owner_outcome?;
+        let outcome = shutdown_coordinator
+            .outcome()
+            .verified("the terminal-teardown phase finished above");
+        if outcome.deadline_expired() {
+            return Err(Report::new(AppError::ShutdownDeadlineExpired));
+        }
 
         Ok(())
     }
@@ -2769,6 +2807,21 @@ mod tests {
         let args = test_args(&["--observability-listen-addr", "127.0.0.1:19090"]);
         let app = Application::try_from(args).expect("args should parse");
         assert_eq!(app.observability_listen_addr, test_addr(19090));
+    }
+
+    #[test]
+    fn args_default_to_the_application_shutdown_timeouts() {
+        let args = test_args(&[]);
+
+        assert_eq!(args.drain_timeout, shutdown::DEFAULT_DRAIN_TIMEOUT);
+        assert_eq!(args.shutdown_timeout, shutdown::DEFAULT_SHUTDOWN_TIMEOUT);
+    }
+
+    #[test]
+    fn args_parse_shutdown_timeout() {
+        let args = test_args(&["--shutdown-timeout", "2m"]);
+
+        assert_eq!(args.shutdown_timeout, Duration::from_secs(120));
     }
 
     #[test]

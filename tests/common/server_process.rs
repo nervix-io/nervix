@@ -3,11 +3,13 @@
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
 //! - **Owns.** One isolated server process: its ports, database directory, interconnect
-//!   credentials, captured log, the signals delivered to it, and the status it exits with.
+//!   credentials, command-line options, captured log, the signals delivered to it, the clients a
+//!   scenario holds open against it, and the status it exits with.
 //! - **Depends on.** The executable Cargo builds beside this test target, the shared test port
-//!   reservations, and the test interconnect certificate authority.
+//!   reservations, the test interconnect certificate authority, and the session client.
 //! - **Must not know.** Server internals. Everything it observes crosses the process boundary: the
-//!   gRPC API, HTTP/2 frames, the log the process writes, and how the process exits.
+//!   gRPC API, HTTP/2 frames, the files the process writes, the log the process writes, and how
+//!   the process exits.
 //!
 //! The in-process cluster fixture runs nodes as Tokio tasks and stops them through their shutdown
 //! coordinator, so it cannot show whether the process boundary delivers a signal to that
@@ -18,17 +20,19 @@ use std::{
     fs::File,
     io,
     os::unix::process::ExitStatusExt as _,
-    path::{Path, PathBuf},
+    path::Path,
     process::{ExitStatus, Stdio},
     time::Duration,
 };
 
-use bytes::Bytes;
+use bytes::{BufMut as _, Bytes, BytesMut};
 use nervix_recovery::Discarded as _;
+use nervix_server::proto::{UploadResourceRequest, UploadResourceStart, upload_resource_request};
 use nix::{
     sys::signal::{Signal, kill},
     unistd::Pid,
 };
+use prost::Message as _;
 use tempfile::TempDir;
 use tokio::{
     net::TcpStream,
@@ -39,7 +43,8 @@ use tokio_util::task::AbortOnDropHandle;
 
 use super::cluster::{
     InterconnectTestCa, TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestCertificateValidity, next_port,
-    release_test_ports, server_accepts_commands, test_basic_authorization,
+    publish_http_uri_with_headers, release_test_ports, run_command_via_client,
+    server_accepts_commands, test_basic_authorization,
 };
 
 /// The identity the process runs as and its certificate names. Each process forms its own
@@ -54,6 +59,15 @@ const LOG_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const LOG_TAIL_LINES: usize = 80;
 const UPLOAD_RESOURCE_PATH: &str = "/io.nervix.api.v1.SessionService/UploadResource";
+const HELD_UPLOAD_IDENTITY: &str = "held-upload";
+/// The archive size a held upload declares. A slow upload sends one byte per interval, so it
+/// would take far longer than any scenario to finish.
+const HELD_UPLOAD_DECLARED_BYTES: u64 = 1024 * 1024;
+const SLOW_UPLOAD_CHUNK_INTERVAL: Duration = Duration::from_millis(100);
+/// gRPC prefixes every message on a stream with a compression flag byte and a four-byte big-endian
+/// message length.
+const GRPC_MESSAGE_PREFIX_BYTES: usize = 5;
+const UNCOMPRESSED_GRPC_MESSAGE: u8 = 0;
 
 /// How a scenario executes the server binary.
 #[derive(Clone, Copy, Debug)]
@@ -84,6 +98,44 @@ impl ServerProcessLaunch {
             }
         }
     }
+}
+
+/// A command-line option a scenario sets on the server process in addition to the fixture's own.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ServerProcessOption {
+    /// `--drain-timeout`.
+    DrainTimeout(Duration),
+    /// `--shutdown-timeout`.
+    ShutdownTimeout(Duration),
+}
+
+impl ServerProcessOption {
+    fn apply_to(self, command: &mut Command) {
+        match self {
+            Self::DrainTimeout(timeout) => {
+                command
+                    .arg("--drain-timeout")
+                    .arg(humantime::format_duration(timeout).to_string());
+            }
+            Self::ShutdownTimeout(timeout) => {
+                command
+                    .arg("--shutdown-timeout")
+                    .arg(humantime::format_duration(timeout).to_string());
+            }
+        }
+    }
+}
+
+/// How far a held upload has gone when its client stops making progress.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum HeldUploadProgress {
+    /// The stream is open and nothing was sent, so the server waits for the first message.
+    AwaitingFirstMessage,
+    /// The archive was declared and one byte of it sent, so the server waits for the next chunk.
+    AwaitingNextChunk,
+    /// The archive was declared and one byte of it arrives per interval, so the upload is always
+    /// in progress and never finishes.
+    SendingSlowly,
 }
 
 /// The listeners one server process binds, reserved against other scenarios while it owns them.
@@ -135,12 +187,14 @@ pub(crate) struct ServerProcess {
     child: Child,
     exit_status: Option<ExitStatus>,
     ports: ServerProcessPorts,
-    log_path: PathBuf,
-    _root: TempDir,
+    root: TempDir,
 }
 
 impl ServerProcess {
-    pub(crate) fn start(launch: ServerProcessLaunch) -> io::Result<Self> {
+    pub(crate) fn start(
+        launch: ServerProcessLaunch,
+        options: &[ServerProcessOption],
+    ) -> io::Result<Self> {
         let root = tempfile::Builder::new()
             .prefix("nervix-server-process-")
             .tempdir()?;
@@ -154,8 +208,7 @@ impl ServerProcess {
         let temp_dir = root.path().join("temp");
         std::fs::create_dir_all(&temp_dir)?;
         let ports = ServerProcessPorts::allocate()?;
-        let log_path = root.path().join("server.log");
-        let log = File::create(&log_path)?;
+        let log = File::create(root.path().join("server.log"))?;
         let error_log = log.try_clone()?;
 
         let mut command = launch.command();
@@ -199,6 +252,9 @@ impl ServerProcess {
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(error_log))
             .kill_on_drop(true);
+        for option in options {
+            option.apply_to(&mut command);
+        }
         // Any `NERVIX_*` variable the scenario runner carries would silently reconfigure the
         // server, and `RUST_LOG` would replace the log filter the server ships with.
         for (name, _) in std::env::vars_os() {
@@ -213,8 +269,7 @@ impl ServerProcess {
             child,
             exit_status: None,
             ports,
-            log_path,
-            _root: root,
+            root,
         })
     }
 
@@ -233,7 +288,7 @@ impl ServerProcess {
     }
 
     async fn poll_until_ready(&mut self) -> io::Result<()> {
-        let grpc_uri = format!("http://{}", loopback(self.ports.grpc));
+        let grpc_uri = self.grpc_uri();
         loop {
             tokio::task::consume_budget().await;
             if let Some(status) = self.observe_exit()? {
@@ -248,6 +303,23 @@ impl ServerProcess {
             }
             sleep(POLL_INTERVAL).await;
         }
+    }
+
+    /// Runs NSPL through an authenticated session whose active domain is `domain`.
+    pub(crate) async fn run_commands(&self, domain: &str, commands: &str) -> io::Result<String> {
+        run_command_via_client(&self.grpc_uri(), domain, commands).await
+    }
+
+    /// Posts `payload` to an HTTP endpoint the process serves for virtual host `host`, returning
+    /// once the endpoint has admitted it.
+    pub(crate) async fn publish_http(
+        &self,
+        host: &str,
+        path: &str,
+        payload: &str,
+    ) -> io::Result<()> {
+        let uri = format!("http://{}{path}", loopback(self.ports.http));
+        publish_http_uri_with_headers(uri, host, payload.as_bytes(), "application/json", &[]).await
     }
 
     pub(crate) fn send_signal(&self, signal: Signal) -> io::Result<()> {
@@ -294,7 +366,7 @@ impl ServerProcess {
 
     /// Everything the process has written to standard output and standard error so far.
     pub(crate) fn log(&self) -> io::Result<String> {
-        let bytes = std::fs::read(&self.log_path)?;
+        let bytes = std::fs::read(self.root.path().join("server.log"))?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
@@ -340,12 +412,17 @@ impl ServerProcess {
         format!("last {} server log lines:\n{}", tail.len(), tail.join("\n"))
     }
 
-    /// Opens an authenticated `UploadResource` stream whose request body never arrives.
+    /// Opens an authenticated `UploadResource` stream for `resource` in `domain` and leaves it at
+    /// `progress`.
     ///
-    /// The server's handler waits for the first upload message, and graceful shutdown of the gRPC
-    /// listener waits for that handler, so the stream holds shutdown open for as long as the
-    /// returned value lives.
-    pub(crate) async fn hold_resource_upload(&self) -> io::Result<HeldResourceUpload> {
+    /// The server's handler waits on this client for as long as the returned value lives: for the
+    /// first upload message, or for the next archive chunk.
+    pub(crate) async fn hold_resource_upload(
+        &mut self,
+        domain: &str,
+        resource: &str,
+        progress: HeldUploadProgress,
+    ) -> io::Result<HeldResourceUpload> {
         let stream = TcpStream::connect(loopback(self.ports.grpc)).await?;
         let (send_request, mut connection) = h2::client::handshake(stream)
             .await
@@ -370,28 +447,160 @@ impl ServerProcess {
             .header(http::header::AUTHORIZATION, test_basic_authorization())
             .body(())
             .map_err(io::Error::other)?;
-        let (response, request_body) = send_request
+        let (response, mut request_body) = send_request
             .send_request(request, false)
             .map_err(io::Error::other)?;
-        // A connection processes its frames in order, so the server's answer to this ping proves
-        // it has already accepted the upload stream opened before it.
-        ping_pong
-            .ping(h2::Ping::opaque())
-            .await
-            .map_err(io::Error::other)?;
+        let body = match progress {
+            HeldUploadProgress::AwaitingFirstMessage => {
+                // A connection processes its frames in order, so the server's answer to this ping
+                // proves it has already accepted the upload stream opened before it.
+                ping_pong
+                    .ping(h2::Ping::opaque())
+                    .await
+                    .map_err(io::Error::other)?;
+                HeldUploadBody::Idle {
+                    _stream: request_body,
+                }
+            }
+            HeldUploadProgress::AwaitingNextChunk => {
+                request_body
+                    .send_data(upload_start_frame(domain, resource)?, false)
+                    .map_err(io::Error::other)?;
+                request_body
+                    .send_data(upload_chunk_frame()?, false)
+                    .map_err(io::Error::other)?;
+                self.wait_for_staged_upload_archive().await?;
+                HeldUploadBody::Idle {
+                    _stream: request_body,
+                }
+            }
+            HeldUploadProgress::SendingSlowly => {
+                request_body
+                    .send_data(upload_start_frame(domain, resource)?, false)
+                    .map_err(io::Error::other)?;
+                self.wait_for_staged_upload_archive().await?;
+                let sender =
+                    tokio::spawn(trickle_upload_chunks(request_body, upload_chunk_frame()?));
+                HeldUploadBody::Trickling {
+                    _sender: AbortOnDropHandle::new(sender),
+                }
+            }
+        };
         Ok(HeldResourceUpload {
-            _request_body: request_body,
+            _body: body,
             _response: response,
             _connection: connection,
         })
+    }
+
+    /// Waits until the server has staged an upload archive, which it creates only after it read
+    /// and accepted the upload's first message.
+    async fn wait_for_staged_upload_archive(&mut self) -> io::Result<()> {
+        let staged = timeout(LOG_TIMEOUT, self.poll_for_staged_upload_archive()).await;
+        match staged {
+            Ok(result) => result,
+            Err(_) => Err(io::Error::other(format!(
+                "nervix-server did not stage an upload archive within {}\n{}",
+                humantime::format_duration(LOG_TIMEOUT),
+                self.log_tail()
+            ))),
+        }
+    }
+
+    async fn poll_for_staged_upload_archive(&mut self) -> io::Result<()> {
+        let resources = self.root.path().join("db").join("resources");
+        loop {
+            tokio::task::consume_budget().await;
+            if let Some(status) = self.observe_exit()? {
+                return Err(io::Error::other(format!(
+                    "nervix-server exited with {} before it staged an upload archive\n{}",
+                    describe_exit(status),
+                    self.log_tail()
+                )));
+            }
+            if staged_upload_archive_exists(&resources)? {
+                return Ok(());
+            }
+            sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    fn grpc_uri(&self) -> String {
+        format!("http://{}", loopback(self.ports.grpc))
     }
 }
 
 /// An accepted upload stream kept open until it is dropped.
 pub(crate) struct HeldResourceUpload {
-    _request_body: h2::SendStream<Bytes>,
+    _body: HeldUploadBody,
     _response: h2::client::ResponseFuture,
     _connection: AbortOnDropHandle<()>,
+}
+
+/// The client half of a held upload's request stream.
+enum HeldUploadBody {
+    /// The stream stays open and sends nothing more.
+    Idle { _stream: h2::SendStream<Bytes> },
+    /// A task keeps sending chunks until the upload is dropped.
+    Trickling { _sender: AbortOnDropHandle<()> },
+}
+
+/// Sends one chunk per interval until the server closes the stream or the upload is dropped.
+async fn trickle_upload_chunks(mut body: h2::SendStream<Bytes>, chunk: Bytes) {
+    loop {
+        tokio::task::consume_budget().await;
+        sleep(SLOW_UPLOAD_CHUNK_INTERVAL).await;
+        if body.send_data(chunk.clone(), false).is_err() {
+            return;
+        }
+    }
+}
+
+fn staged_upload_archive_exists(resources: &Path) -> io::Result<bool> {
+    let entries = match std::fs::read_dir(resources) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let name = entry?.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(".archive-") && name.ends_with(".staging") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn upload_start_frame(domain: &str, resource: &str) -> io::Result<Bytes> {
+    grpc_message_frame(&UploadResourceRequest {
+        event: Some(upload_resource_request::Event::Start(UploadResourceStart {
+            name: resource.to_string(),
+            total_bytes: HELD_UPLOAD_DECLARED_BYTES,
+            domain: domain.to_string(),
+            upload_identity: HELD_UPLOAD_IDENTITY.to_string(),
+        })),
+    })
+}
+
+fn upload_chunk_frame() -> io::Result<Bytes> {
+    grpc_message_frame(&UploadResourceRequest {
+        event: Some(upload_resource_request::Event::Chunk(vec![0].into())),
+    })
+}
+
+/// Frames one message the way gRPC carries it on an HTTP/2 stream.
+fn grpc_message_frame(message: &UploadResourceRequest) -> io::Result<Bytes> {
+    let encoded = message.encode_to_vec();
+    let length = u32::try_from(encoded.len()).map_err(io::Error::other)?;
+    let capacity = GRPC_MESSAGE_PREFIX_BYTES
+        .checked_add(encoded.len())
+        .ok_or_else(|| io::Error::other("an upload message frame does not fit in memory"))?;
+    let mut frame = BytesMut::with_capacity(capacity);
+    frame.put_u8(UNCOMPRESSED_GRPC_MESSAGE);
+    frame.put_u32(length);
+    frame.put_slice(&encoded);
+    Ok(frame.freeze())
 }
 
 pub(crate) fn describe_exit(status: ExitStatus) -> String {
