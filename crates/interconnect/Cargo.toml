@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 ahash = { workspace = true }
+arc-swap = { workspace = true }
 arch-into = { workspace = true }
 bytes = { workspace = true }
 dashmap = { workspace = true }
@@ -39,6 +40,7 @@ url = { workspace = true }
 x509-parser = { workspace = true }
 
 [dev-dependencies]
+alloc_count = { workspace = true }
 rcgen = { workspace = true }
 tempfile = { workspace = true }
 ubyte = { workspace = true }

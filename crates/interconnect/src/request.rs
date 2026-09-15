@@ -8,19 +8,12 @@
 //! - **Must not know.** The runtime meaning of a request or response.
 
 use std::{
-    collections::BTreeSet,
-    future::Future,
-    hash::RandomState,
-    marker::PhantomData,
-    pin::Pin,
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicBool, Ordering},
-    },
+    collections::BTreeSet, future::Future, marker::PhantomData, pin::Pin, sync::Arc as StdArc,
     time::Duration,
 };
 
-use dashmap::{DashMap, mapref::entry::Entry};
+use ahash::HashMap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -468,12 +461,63 @@ impl HandledResponse {
     }
 }
 
+/// Every registered handler, by operation name within each exchange form.
+#[derive(Clone, Default)]
+struct HandlerTable {
+    requests: HashMap<&'static str, Arc<Box<dyn ErasedRequestHandler>>>,
+    streams: HashMap<&'static str, Arc<Box<dyn ErasedStreamHandler>>>,
+    duplexes: HashMap<&'static str, Arc<Box<dyn ErasedDuplexHandler>>>,
+}
+
+/// One handler waiting to be published, in the exchange form it answers.
+enum HandlerRegistration {
+    Request(Arc<Box<dyn ErasedRequestHandler>>),
+    Stream(Arc<Box<dyn ErasedStreamHandler>>),
+    Duplex(Arc<Box<dyn ErasedDuplexHandler>>),
+}
+
+impl HandlerTable {
+    /// Whether `registration` would reuse a name this table already holds. A request handler's
+    /// name is checked against request handlers, a stream handler's also against stream handlers,
+    /// and a duplex handler's against all three forms.
+    fn conflicts_with(&self, name: &str, registration: &HandlerRegistration) -> bool {
+        match registration {
+            HandlerRegistration::Request(_) => self.requests.contains_key(name),
+            HandlerRegistration::Stream(_) => {
+                self.requests.contains_key(name) || self.streams.contains_key(name)
+            }
+            HandlerRegistration::Duplex(_) => {
+                self.requests.contains_key(name)
+                    || self.streams.contains_key(name)
+                    || self.duplexes.contains_key(name)
+            }
+        }
+    }
+
+    /// A copy of this table that also holds `registration` under `name`.
+    fn with(&self, name: &'static str, registration: &HandlerRegistration) -> Self {
+        let mut table = self.clone();
+        match registration {
+            HandlerRegistration::Request(handler) => {
+                table.requests.insert(name, Arc::clone(handler));
+            }
+            HandlerRegistration::Stream(handler) => {
+                table.streams.insert(name, Arc::clone(handler));
+            }
+            HandlerRegistration::Duplex(handler) => {
+                table.duplexes.insert(name, Arc::clone(handler));
+            }
+        }
+        table
+    }
+}
+
 pub(crate) struct RequestState {
-    handlers: DashMap<&'static str, Arc<Box<dyn ErasedRequestHandler>>, RandomState>,
-    stream_handlers: DashMap<&'static str, Arc<Box<dyn ErasedStreamHandler>>, RandomState>,
-    duplex_handlers: DashMap<&'static str, Arc<Box<dyn ErasedDuplexHandler>>, RandomState>,
-    live_nodes: DashMap<ClusterNodeName, (), RandomState>,
-    live_nodes_observed: AtomicBool,
+    /// Registration publishes a complete replacement table, so dispatch reads it without a lock.
+    handlers: ArcSwap<HandlerTable>,
+    /// The live membership discovery published last, or `None` before its first view, while every
+    /// target counts as live so bootstrap discovery can reach its peers.
+    live_nodes: ArcSwapOption<BTreeSet<ClusterNodeName>>,
     membership_changed: Notify,
     outbound: RequestQuotas,
     inbound: RequestQuotas,
@@ -635,11 +679,8 @@ fn subquota_belongs_to_class(subquota: RequestSubquota, class: PoolClass) -> boo
 impl RequestState {
     pub(crate) fn new(capacity: usize, observations: Arc<TransportObservations>) -> Self {
         Self {
-            handlers: DashMap::default(),
-            stream_handlers: DashMap::default(),
-            duplex_handlers: DashMap::default(),
-            live_nodes: DashMap::default(),
-            live_nodes_observed: AtomicBool::new(false),
+            handlers: ArcSwap::from_pointee(HandlerTable::default()),
+            live_nodes: ArcSwapOption::empty(),
             membership_changed: Notify::new(),
             outbound: RequestQuotas::new(capacity),
             inbound: RequestQuotas::new(capacity),
@@ -919,15 +960,7 @@ impl RequestState {
             handler: Arc::new(handler),
             request: PhantomData,
         });
-        match self.handlers.entry(M::NAME) {
-            Entry::Occupied(_) => Err(Report::new(HandlerRegistrationError::AlreadyRegistered {
-                request: M::NAME,
-            })),
-            Entry::Vacant(entry) => {
-                entry.insert(Arc::new(erased));
-                Ok(())
-            }
-        }
+        self.publish_handler(M::NAME, HandlerRegistration::Request(Arc::new(erased)))
     }
 
     pub(crate) fn register_stream<M, H, F>(
@@ -947,22 +980,31 @@ impl RequestState {
                 },
             ));
         }
-        if self.handlers.contains_key(M::NAME) {
-            return Err(Report::new(HandlerRegistrationError::AlreadyRegistered {
-                request: M::NAME,
-            }));
-        }
         let erased: Box<dyn ErasedStreamHandler> = Box::new(TypedStreamHandler::<M, H> {
             handler: Arc::new(handler),
             request: PhantomData,
         });
-        match self.stream_handlers.entry(M::NAME) {
-            Entry::Occupied(_) => Err(Report::new(HandlerRegistrationError::AlreadyRegistered {
-                request: M::NAME,
-            })),
-            Entry::Vacant(entry) => {
-                entry.insert(Arc::new(erased));
-                Ok(())
+        self.publish_handler(M::NAME, HandlerRegistration::Stream(Arc::new(erased)))
+    }
+
+    /// Publish a handler table that adds `registration` under `name`. A registration racing
+    /// another rebuilds from whichever table was published first, so neither one is lost.
+    fn publish_handler(
+        &self,
+        name: &'static str,
+        registration: HandlerRegistration,
+    ) -> Result<(), Report<HandlerRegistrationError>> {
+        loop {
+            let current = self.handlers.load_full();
+            if current.conflicts_with(name, &registration) {
+                return Err(Report::new(HandlerRegistrationError::AlreadyRegistered {
+                    request: name,
+                }));
+            }
+            let replacement = StdArc::new(current.with(name, &registration));
+            let previous = self.handlers.compare_and_swap(&current, replacement);
+            if StdArc::ptr_eq(&previous, &current) {
+                return Ok(());
             }
         }
     }
@@ -986,24 +1028,11 @@ impl RequestState {
                 },
             ));
         }
-        if self.handlers.contains_key(M::NAME) || self.stream_handlers.contains_key(M::NAME) {
-            return Err(Report::new(HandlerRegistrationError::AlreadyRegistered {
-                request: M::NAME,
-            }));
-        }
         let erased: Box<dyn ErasedDuplexHandler> = Box::new(TypedDuplexHandler::<M, H> {
             handler: Arc::new(handler),
             request: PhantomData,
         });
-        match self.duplex_handlers.entry(M::NAME) {
-            Entry::Occupied(_) => Err(Report::new(HandlerRegistrationError::AlreadyRegistered {
-                request: M::NAME,
-            })),
-            Entry::Vacant(entry) => {
-                entry.insert(Arc::new(erased));
-                Ok(())
-            }
-        }
+        self.publish_handler(M::NAME, HandlerRegistration::Duplex(Arc::new(erased)))
     }
 
     pub(crate) async fn handle_duplex(
@@ -1016,9 +1045,11 @@ impl RequestState {
         frames: FrameReader,
     ) -> Result<HandledDuplexStream, RemoteRequestFailure> {
         let handler = self
-            .duplex_handlers
+            .handlers
+            .load()
+            .duplexes
             .get(request.request.as_str())
-            .map(|handler| handler.value().clone());
+            .cloned();
         let payload_limit = request.class.payload_limit(executor);
         let payload_bytes = u64::try_from(request.payload.len())
             .assured("supported targets have a pointer width no larger than u64");
@@ -1069,9 +1100,11 @@ impl RequestState {
         request: RequestEnvelope,
     ) -> Result<HandledByteStream, RemoteRequestFailure> {
         let handler = self
-            .stream_handlers
+            .handlers
+            .load()
+            .streams
             .get(request.request.as_str())
-            .map(|handler| handler.value().clone());
+            .cloned();
         let payload_limit = request.class.payload_limit(executor);
         let payload_bytes = u64::try_from(request.payload.len())
             .assured("supported targets have a pointer width no larger than u64");
@@ -1122,8 +1155,10 @@ impl RequestState {
     ) -> HandledResponse {
         let handler = self
             .handlers
+            .load()
+            .requests
             .get(request.request.as_str())
-            .map(|handler| handler.value().clone());
+            .cloned();
         let payload_limit = request.class.payload_limit(executor);
         let payload_bytes = u64::try_from(request.payload.len())
             .assured("supported targets have a pointer width no larger than u64");
@@ -1175,23 +1210,15 @@ impl RequestState {
     }
 
     pub(crate) fn target_is_live(&self, node: &ClusterNodeName) -> bool {
-        !self.live_nodes_observed.load(Ordering::Acquire) || self.live_nodes.contains_key(node)
+        let live_nodes = self.live_nodes.load();
+        match &*live_nodes {
+            Some(nodes) => nodes.contains(node),
+            None => true,
+        }
     }
 
     pub(crate) fn replace_live_nodes(&self, live_nodes: &BTreeSet<ClusterNodeName>) {
-        for node in live_nodes {
-            self.live_nodes.insert(node.clone(), ());
-        }
-        let departed = self
-            .live_nodes
-            .iter()
-            .filter(|node| !live_nodes.contains(node.key()))
-            .map(|node| node.key().clone())
-            .collect::<Vec<_>>();
-        for node in departed {
-            self.live_nodes.remove(&node);
-        }
-        self.live_nodes_observed.store(true, Ordering::Release);
+        self.live_nodes.store(Some(StdArc::new(live_nodes.clone())));
         self.membership_changed.notify_waiters();
     }
 
@@ -1209,9 +1236,7 @@ impl RequestState {
     }
 
     pub(crate) fn shutdown(&self) {
-        self.handlers.clear();
-        self.stream_handlers.clear();
-        self.duplex_handlers.clear();
+        self.handlers.store(StdArc::new(HandlerTable::default()));
         self.membership_changed.notify_waiters();
     }
 }
@@ -1738,6 +1763,92 @@ mod tests {
             quotas.liveness.available_permits(),
             super::super::MAX_CONCURRENT_HEALTH_PROBES,
             "health capacity must not shrink with the general incoming request queue"
+        );
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct Ping;
+
+    impl InterconnectRequest for Ping {
+        type Response = ();
+
+        const NAME: &'static str = "test_ping";
+        const TIMEOUT: Duration = Duration::from_secs(1);
+    }
+
+    #[test]
+    fn every_target_is_live_until_membership_is_published() {
+        let requests = RequestState::new(1, Arc::new(TransportObservations::default()));
+        let node_a = ClusterNodeName::parse("node-a")
+            .assured("the test node name follows the public node-name grammar");
+        let node_b = ClusterNodeName::parse("node-b")
+            .assured("the test node name follows the public node-name grammar");
+
+        assert!(requests.target_is_live(&node_a));
+        assert!(requests.target_is_live(&node_b));
+
+        requests.replace_live_nodes(&BTreeSet::from([node_a.clone()]));
+        assert!(requests.target_is_live(&node_a));
+        assert!(!requests.target_is_live(&node_b));
+
+        requests.replace_live_nodes(&BTreeSet::new());
+        assert!(
+            !requests.target_is_live(&node_a),
+            "a published empty membership has no live target"
+        );
+    }
+
+    #[test]
+    fn concurrent_registrations_publish_every_handler() {
+        const NAMES: [&str; 8] = [
+            "test_first",
+            "test_second",
+            "test_third",
+            "test_fourth",
+            "test_fifth",
+            "test_sixth",
+            "test_seventh",
+            "test_eighth",
+        ];
+        let requests = StdArc::new(RequestState::new(
+            1,
+            Arc::new(TransportObservations::default()),
+        ));
+        let erased: Box<dyn ErasedRequestHandler> = Box::new(TypedRequestHandler::<Ping, _> {
+            handler: Arc::new(|_context: RequestContext, _request: Ping| async {}),
+            request: PhantomData,
+        });
+        let handler = Arc::new(erased);
+        let start = StdArc::new(std::sync::Barrier::new(NAMES.len()));
+        let mut registrations = Vec::with_capacity(NAMES.len());
+        for name in NAMES {
+            let requests = StdArc::clone(&requests);
+            let registration = HandlerRegistration::Request(Arc::clone(&handler));
+            let start = StdArc::clone(&start);
+            registrations.push(std::thread::spawn(move || {
+                start.wait();
+                requests.publish_handler(name, registration)
+            }));
+        }
+        for registration in registrations {
+            registration
+                .join()
+                .assured("a registration thread only publishes a handler table")
+                .assured("every concurrent registration uses a distinct name");
+        }
+
+        let table = requests.handlers.load();
+        for name in NAMES {
+            assert!(
+                table.requests.contains_key(name),
+                "the {name} registration was lost to a concurrent publication"
+            );
+        }
+        assert!(
+            requests
+                .publish_handler(NAMES[0], HandlerRegistration::Request(Arc::clone(&handler)))
+                .is_err(),
+            "a published name cannot be registered again"
         );
     }
 }
