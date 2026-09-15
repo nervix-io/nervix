@@ -6559,7 +6559,6 @@ name = "nervix-consensus"
 version = "0.1.0-dev"
 dependencies = [
  "arch-into",
- "ciborium",
  "error-stack",
  "fjall",
  "futures-util",
@@ -6810,7 +6809,9 @@ dependencies = [
  "flate2",
  "futures-util",
  "governor",
+ "h2",
  "hdrhistogram",
+ "http 1.5.0",
  "http-body-util",
  "humantime",
  "hyper",
@@ -6845,6 +6846,7 @@ dependencies = [
  "nervix-test-environment",
  "nervix-vm",
  "nervix-wasm",
+ "nix",
  "nonzero_ext",
  "opendal 0.56.0",
  "opentelemetry",
@@ -6878,6 +6880,7 @@ dependencies = [
  "sentry-types",
  "serde",
  "serde_json",
+ "signal-hook 0.4.4",
  "simd-json",
  "sorted-vec",
  "sqlx",
@@ -7623,7 +7626,6 @@ dependencies = [
  "backoff-series",
  "base2histogram",
  "chrono",
- "clap",
  "derive_more",
  "display-more",
  "futures-util",
@@ -7632,10 +7634,8 @@ dependencies = [
  "openraft-macros",
  "openraft-rt",
  "openraft-rt-tokio",
- "parse-size",
  "peel-off",
  "rand 0.10.2",
- "serde",
  "smallvec",
  "thiserror 2.0.20",
  "tracing",
@@ -7924,12 +7924,6 @@ dependencies = [
  "structmeta",
  "syn 2.0.119",
 ]
-
-[[package]]
-name = "parse-size"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "487f2ccd1e17ce8c1bfab3a65c89525af41cfad4c8659021a1e9a2aacd73b89b"
 
 [[package]]
 name = "parse-zoneinfo"

@@ -143,6 +143,7 @@ mod session_service;
 mod shutdown;
 mod startup;
 mod subscription;
+mod termination_signals;
 #[cfg(test)]
 mod test_fixtures;
 mod tls;
@@ -154,7 +155,7 @@ pub use shutdown::{
     ShutdownCoordinator, ShutdownDeadline, ShutdownOutcome, ShutdownPhase, ShutdownPhaseOutcome,
     ShutdownRequest, ShutdownRequestOutcome,
 };
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::task::TaskTracker;
 use tonic::transport::Server;
 use tracing::{debug, error, info, warn};
 use triomphe::Arc;
@@ -582,7 +583,12 @@ fn encode_hex(bytes: &[u8]) -> String {
     out
 }
 
-pub async fn run_cli(args: Args) -> Result<(), Report<AppError>> {
+/// Runs the server command line with termination signals the caller has already registered, so
+/// neither signal can end the process by its default action while the application starts.
+pub async fn run_cli(
+    args: Args,
+    termination_signals: TerminationSignals,
+) -> Result<(), Report<AppError>> {
     if let Some(Command::Completions { shell }) = args.subcommand.clone() {
         print_completions(shell);
         return Ok(());
@@ -590,25 +596,9 @@ pub async fn run_cli(args: Args) -> Result<(), Report<AppError>> {
 
     let mut application = Application::try_from(args)?;
     let shutdown = ShutdownCoordinator::default();
-    let signal_shutdown = shutdown.clone();
-    let signal_task_shutdown = CancellationToken::new();
-    let signal_task_stop = signal_task_shutdown.clone();
-    let signal_task = tokio::spawn(async move {
-        tokio::select! {
-            _ = signal_task_stop.cancelled() => {}
-            signal = tokio::signal::ctrl_c() => {
-                if signal.is_ok() {
-                    signal_shutdown.request_stop(ShutdownDeadline::Unbounded);
-                }
-            }
-        }
-    });
-
+    termination_signals.supervise(shutdown.clone())?;
     application.shutdown = shutdown;
-    let result = application.run().await;
-    signal_task_shutdown.cancel();
-    await_background_task_shutdown(signal_task, "process signal task").await;
-    result
+    application.run().await
 }
 
 impl Application {
@@ -1106,12 +1096,15 @@ impl Application {
             let mut missing_init_default_user_password_warned = false;
             loop {
                 tokio::task::consume_budget().await;
-                if reconcile_shutdown.is_cancelled() {
-                    break;
-                }
-                if consensus_for_reconcile.current_leader().await.as_ref()
-                    == Some(consensus_for_reconcile.local_node_id())
-                {
+                // A pass waits on consensus writes and on requests to peers, and neither completes
+                // once the peers have stopped. The pass therefore ends with drain support rather
+                // than holding terminal teardown until the grace period aborts the whole task.
+                let reconcile_pass = async {
+                    if consensus_for_reconcile.current_leader().await.as_ref()
+                        != Some(consensus_for_reconcile.local_node_id())
+                    {
+                        return;
+                    }
                     let orphaned_alter_committing_domains = consensus_for_reconcile
                         .current_transactions()
                         .await
@@ -1433,7 +1426,10 @@ impl Application {
                             break;
                         }
                     }
-                }
+                };
+                let Some(()) = reconcile_shutdown.run_until_cancelled(reconcile_pass).await else {
+                    break;
+                };
                 tokio::select! {
                     _ = reconcile_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_secs(1)) => {}
@@ -2813,6 +2809,7 @@ fn print_completions(shell: Shell) {
 /// `pub(in crate::application)` or narrower, so the binary and the test harness reach the server
 /// only through the names below.
 pub use error::AppError;
+pub use termination_signals::TerminationSignals;
 pub use tracing_setup::{TracingGuard, init_tracing, init_tracing_to_file};
 
 #[cfg(test)]
