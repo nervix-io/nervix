@@ -3,11 +3,18 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Opening one ordered frame stream per caller, frame length validation, per-frame
-//!   memory admission, and the half-close that ends a stream.
+//!   memory admission, when the peer last accepted a sender's bytes, and the half-close that ends
+//!   a stream.
 //! - **Depends on.** The authenticated connection lease and bounded execution admission.
 //! - **Must not know.** What the frames carry, or why a caller keeps a stream open.
 
-use std::{future::poll_fn, marker::PhantomData, pin::Pin, time::Duration};
+use std::{
+    future::poll_fn,
+    marker::PhantomData,
+    pin::Pin,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 use arch_into::ArchInto as _;
 use bytes::Bytes;
@@ -180,6 +187,7 @@ impl FrameReader {
 struct FrameWriter {
     stream: SendStream<Bytes>,
     progress_timeout: Duration,
+    send_progress: DuplexSendProgress,
 }
 
 /// The two directions of a duplex stream the peer has accepted.
@@ -193,6 +201,7 @@ impl FrameWriter {
         Self {
             stream,
             progress_timeout,
+            send_progress: DuplexSendProgress::new(),
         }
     }
 
@@ -254,6 +263,9 @@ impl FrameWriter {
             self.stream
                 .send_data(body.split_to(ready), false)
                 .map_err(TransportError::from)?;
+            // Capacity is assigned only once the peer's flow-control window has room for these
+            // bytes, so this records the peer accepting them rather than this side wanting to send.
+            self.send_progress.record_accepted();
         }
         self.stream.reserve_capacity(0);
         Ok(())
@@ -272,6 +284,53 @@ impl FrameWriter {
 struct DuplexHold {
     _lease: StreamLease,
     _admission: RequestAdmission,
+}
+
+/// When the peer last accepted bytes from one direction of a duplex stream.
+///
+/// The writer records it each time the peer's flow-control window takes more of a frame. It stays
+/// where it is while that direction has nothing to send or waits for the peer to read, so a caller
+/// awaiting answers can tell a slow answer from a peer that accepts nothing.
+#[derive(Clone)]
+pub struct DuplexSendProgress {
+    state: Arc<SendProgressState>,
+}
+
+struct SendProgressState {
+    opened_at: Instant,
+    /// How long after `opened_at` the peer last accepted bytes. An offset in an atomic lets the
+    /// writer record without a lock while the task awaiting answers reads it.
+    accepted_after_nanos: AtomicU64,
+}
+
+impl DuplexSendProgress {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(SendProgressState {
+                opened_at: Instant::now(),
+                accepted_after_nanos: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    /// When the peer last accepted bytes from this direction, or when the direction opened if the
+    /// peer has accepted none yet.
+    pub fn last_accepted_at(&self) -> Instant {
+        let accepted_after =
+            Duration::from_nanos(self.state.accepted_after_nanos.load(Ordering::Relaxed));
+        self.state
+            .opened_at
+            .checked_add(accepted_after)
+            .assured("an offset measured from this instant lands on an instant already observed")
+    }
+
+    fn record_accepted(&self) {
+        let accepted_after = u64::try_from(self.state.opened_at.elapsed().as_nanos())
+            .assured("u64 nanoseconds span 584 years, longer than any process keeps a stream open");
+        self.state
+            .accepted_after_nanos
+            .store(accepted_after, Ordering::Relaxed);
+    }
 }
 
 /// The frames a caller submits, in the order it submits them.
@@ -323,6 +382,14 @@ impl<M: InterconnectDuplexRequest> DuplexSender<M> {
             })
         })
     }
+
+    /// When the peer last accepted bytes from this sender.
+    ///
+    /// The handle keeps reporting after the sender moves to another task, so whoever awaits the
+    /// answers can see whether the peer still accepts what is sent.
+    pub fn progress(&self) -> DuplexSendProgress {
+        self.writer.send_progress.clone()
+    }
 }
 
 /// The answers a peer produced, in the order it produced them.
@@ -338,7 +405,8 @@ impl<M: InterconnectDuplexRequest> DuplexReceiver<M> {
     /// The next answer, or `None` once the peer ended its direction.
     ///
     /// This waits as long as the stream stays open. A caller with work outstanding owns the
-    /// deadline for that work and applies it here.
+    /// deadline for that work and applies it here, and [`DuplexSender::progress`] tells it whether
+    /// the peer still accepts what it sends.
     pub async fn next(&mut self) -> Result<Option<M::Response>, Report<RequestError>> {
         let frame = self.reader.next_frame().await.map_err(|error| {
             Report::new(RequestError::Stream {
