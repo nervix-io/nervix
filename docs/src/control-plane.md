@@ -40,9 +40,12 @@ Durable log entries, votes, state-machine records, snapshot manifests, and snaps
 Nervix-owned `rkyv` shapes. Recovery validates each archive before converting it into OpenRaft or
 semantic state.
 
-Each applied command atomically stores its changed semantic records with its applied position,
-membership, transaction progress, and revision. Domain configuration and schedule changes within
-one command therefore recover together. Transaction effects recover with the corresponding commit
+Consecutive committed commands are applied by one atomic write that stores their changed semantic
+records with the applied position, membership, transaction progress, and revision the last of them
+leaves behind. A write takes further commands until the next one's changes would exceed its
+admitted byte budget, so a run of commands shares one synchronization, and recovery finds every
+command of a write or none of them. Domain configuration and schedule changes within one command
+therefore recover together. Transaction effects recover with the corresponding commit
 progress. Updating a resource replica writes that replica and application metadata; it does not
 rewrite unrelated domains or schedules. Log purging atomically stores its deletion boundary with
 the deleted entries.
