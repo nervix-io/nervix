@@ -44,9 +44,15 @@ The server exposes:
 
 Press `Ctrl-C`, or send the process `SIGTERM`, to stop the node. The first `SIGINT` or `SIGTERM`
 starts graceful shutdown: the node advertises that its process is terminating, stops admitting new
-work, and runs its shutdown phases, logging whether each one completed or abandoned work. The
-process exits with status `0` once graceful shutdown finishes, or prints the error and exits with
-status `1` when a listener or a shutdown step failed.
+work, closes the client connections it had accepted, and runs its shutdown phases, logging whether
+each one completed or abandoned work. The process exits with status `0` once graceful shutdown
+finishes, or prints the error and exits with status `1` when a listener or a shutdown step failed.
+
+Graceful shutdown must finish within the shutdown timeout, `--shutdown-timeout`
+(`NERVIX_SHUTDOWN_TIMEOUT`), which defaults to `50s` and is measured from the first signal. When it
+passes, the process logs the shutdown phase it had reached and exits at once with status `1`.
+Nothing extends that deadline: a client that holds an upload or a session open does not, and a
+later signal can only end the process sooner.
 
 A second `SIGINT` or `SIGTERM` abandons graceful shutdown and ends the process immediately, without
 running the phases that remain. The process exits with status `130` when the second signal is
@@ -55,8 +61,8 @@ terminate. Work still in progress is lost exactly as it is when the process cras
 always ends the process that way.
 
 The server registers both signals before it starts anything else. A signal that arrives while the
-node is still starting takes effect as soon as startup completes, and a node that cannot register
-the signals refuses to start.
+node is still starting takes effect as soon as startup completes, while its shutdown deadline runs
+from the moment the signal arrived. A node that cannot register the signals refuses to start.
 
 ## Connect A Client
 

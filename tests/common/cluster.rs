@@ -40,10 +40,7 @@ pub(crate) fn node_name(raw: &str) -> ClusterNodeName {
 }
 use nervix_server::{
     FaultInjection, SchedulerMode,
-    application::{
-        Application, InternalTransportMode, ShutdownCoordinator, ShutdownDeadline,
-        init_tracing_to_file,
-    },
+    application::{Application, InternalTransportMode, ShutdownCoordinator, init_tracing_to_file},
     memory_pressure::MemoryPressureConfig,
     runtime::{DEFAULT_DOMAIN_DRAIN_TIMEOUT, DEFAULT_TEMP_DIR, branch_task_stop_timeout},
 };
@@ -140,6 +137,18 @@ const _: () = assert!(
 const _: () = assert!(
     NODE_SHUTDOWN_LIVENESS_WATCHDOG.as_nanos() >= DEFAULT_GRACEFUL_SHUTDOWN_PHASE_FLOOR.as_nanos(),
     "the node shutdown watchdog must cover the default bounded shutdown phases"
+);
+/// A node's shutdown deadline unless a scenario configures its own. It leaves the bounded phases
+/// that scenarios configure by default room to finish, so only a scenario about the deadline
+/// reaches it.
+const DEFAULT_TEST_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(4 * 60);
+const _: () = assert!(
+    DEFAULT_GRACEFUL_SHUTDOWN_PHASE_FLOOR.as_nanos() < DEFAULT_TEST_SHUTDOWN_TIMEOUT.as_nanos(),
+    "the default test shutdown timeout must cover the default bounded shutdown phases"
+);
+const _: () = assert!(
+    DEFAULT_TEST_SHUTDOWN_TIMEOUT.as_nanos() < NODE_SHUTDOWN_LIVENESS_WATCHDOG.as_nanos(),
+    "the node shutdown watchdog must outlast the default test shutdown timeout"
 );
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const NODE_START_ATTEMPTS: usize = 8;
@@ -688,6 +697,7 @@ pub(crate) struct TestClusterConfig {
     pub grpc_mode: InternalTransportMode,
     pub graceful_shutdown_drain: bool,
     pub drain_timeout: Duration,
+    pub shutdown_timeout: Duration,
     pub memory_pressure: Option<MemoryPressureConfig>,
     pub raft_retention: RaftRetentionPolicy,
     pub temp_dir: Option<PathBuf>,
@@ -709,6 +719,7 @@ impl Default for TestClusterConfig {
             grpc_mode: InternalTransportMode::Http,
             graceful_shutdown_drain: false,
             drain_timeout: DEFAULT_TEST_DRAIN_TIMEOUT,
+            shutdown_timeout: DEFAULT_TEST_SHUTDOWN_TIMEOUT,
             memory_pressure: None,
             raft_retention: RaftRetentionPolicy::default(),
             temp_dir: None,
@@ -963,6 +974,15 @@ impl Cluster {
             .spec
             .syslog_ingestor_host;
         Ok(SocketAddr::new(host, configured.port()).to_string())
+    }
+
+    /// The error the node's last run of the application returned, if it returned one.
+    pub(crate) fn node_run_failure(&self, node_id: &str) -> Option<String> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        handle.failure.lock().clone()
     }
 
     pub(crate) async fn stop_node(&mut self, node_id: &str) -> io::Result<()> {
@@ -2440,7 +2460,7 @@ impl NodeHandle {
         }
 
         *self.failure.lock() = None;
-        let shutdown = ShutdownCoordinator::default();
+        let shutdown = ShutdownCoordinator::new(self.config.shutdown_timeout);
         let db_path = self.spec.db_path()?;
         let application_builder = Application::builder()
             .addr(parse_addr(&self.spec.grpc_addr())?)
@@ -2507,7 +2527,7 @@ impl NodeHandle {
 
     fn request_stop(&mut self) {
         if let Some(shutdown) = &self.shutdown {
-            shutdown.request_stop(ShutdownDeadline::Unbounded);
+            shutdown.request_stop();
         }
     }
 
@@ -2529,7 +2549,9 @@ impl NodeHandle {
                     "configured bounded node shutdown phases exceed Duration::MAX",
                 )
             })?;
-        Ok(NODE_SHUTDOWN_LIVENESS_WATCHDOG.max(configured_phase_floor))
+        Ok(NODE_SHUTDOWN_LIVENESS_WATCHDOG
+            .max(configured_phase_floor)
+            .max(self.config.shutdown_timeout))
     }
 
     async fn wait_stopped(&mut self) -> io::Result<()> {
@@ -3034,7 +3056,7 @@ async fn publish_http_bytes_with_headers(
     publish_http_uri_with_headers(spec.http_uri(path), host, payload, content_type, headers).await
 }
 
-async fn publish_http_uri_with_headers(
+pub(crate) async fn publish_http_uri_with_headers(
     uri: String,
     host: &str,
     payload: &[u8],
@@ -3618,7 +3640,11 @@ fn flatten_outcome_messages(outcome: &nervix_client_core::CommandOutcome) -> Str
         .join("\n")
 }
 
-async fn run_command_via_client(server: &str, domain: &str, query: &str) -> io::Result<String> {
+pub(crate) async fn run_command_via_client(
+    server: &str,
+    domain: &str,
+    query: &str,
+) -> io::Result<String> {
     let client =
         Client::connect_with_options(server, domain.to_string(), client_connect_options(server)?)
             .await

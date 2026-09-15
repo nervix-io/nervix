@@ -154,10 +154,12 @@ The cluster status should show one local node, two live peer nodes, and all thre
 membership. The CLI follows leader redirects through the three published gRPC ports.
 
 `docker stop` sends each node `SIGTERM`, which starts graceful shutdown, and kills a container only
-if its node is still running when the stop timeout ends. The `--stop-timeout 60` above leaves room
-for the default 30-second drain timeout and for the services that stop after it; with Docker's
-default of ten seconds, a node could be killed partway through its drain. Stop the nodes, then
-remove the containers and private network:
+if its node is still running when the stop timeout ends. A node ends its own shutdown within its
+shutdown timeout, 50 seconds by default, which covers the 30-second default drain timeout and the
+services that stop after it. The `--stop-timeout 60` above keeps Docker waiting longer than that,
+so a node that cannot finish shutting down exits with status `1` on its own rather than being
+killed; with Docker's default of ten seconds, a node could be killed partway through its drain.
+Stop the nodes, then remove the containers and private network:
 
 ```bash
 docker stop nervix-1 nervix-2 nervix-3
@@ -290,5 +292,5 @@ docker compose down
 ```
 
 `docker compose down` sends each node `SIGTERM` and waits up to the file's `stop_grace_period` of 60
-seconds for graceful shutdown to finish before it kills a container. To permanently delete all
-three nodes' persisted state, add `--volumes`.
+seconds, longer than each node's 50-second shutdown timeout, for graceful shutdown to finish before
+it kills a container. To permanently delete all three nodes' persisted state, add `--volumes`.

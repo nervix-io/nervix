@@ -93,7 +93,10 @@ use crate::common::{
         MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR,
         RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
     },
-    server_process::{HeldResourceUpload, ServerProcess, ServerProcessLaunch, describe_exit},
+    server_process::{
+        HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessLaunch,
+        ServerProcessOption, describe_exit,
+    },
 };
 
 mod common;
@@ -1244,11 +1247,47 @@ fn when_nervix_server_help_is_requested(world: &mut ScenarioWorld) {
 
 #[given("a nervix-server process is started")]
 async fn given_nervix_server_process_is_started(world: &mut ScenarioWorld) {
+    start_ready_server_process(world, &[]).await;
+}
+
+#[given(expr = "a nervix-server process is started with drain timeout {string}")]
+async fn given_nervix_server_process_is_started_with_drain_timeout(
+    world: &mut ScenarioWorld,
+    drain_timeout: String,
+) {
+    let drain_timeout =
+        humantime::parse_duration(&drain_timeout).expect("drain timeout must be a valid duration");
+    start_ready_server_process(world, &[ServerProcessOption::DrainTimeout(drain_timeout)]).await;
+}
+
+#[given(
+    expr = "a nervix-server process is started with drain timeout {string} and shutdown timeout \
+            {string}"
+)]
+async fn given_nervix_server_process_is_started_with_shutdown_timeouts(
+    world: &mut ScenarioWorld,
+    drain_timeout: String,
+    shutdown_timeout: String,
+) {
+    let drain_timeout =
+        humantime::parse_duration(&drain_timeout).expect("drain timeout must be a valid duration");
+    let shutdown_timeout = humantime::parse_duration(&shutdown_timeout)
+        .expect("shutdown timeout must be a valid duration");
+    let options = [
+        ServerProcessOption::DrainTimeout(drain_timeout),
+        ServerProcessOption::ShutdownTimeout(shutdown_timeout),
+    ];
+    start_ready_server_process(world, &options).await;
+}
+
+/// Starts the scenario's server process with `options` and waits until it accepts commands.
+async fn start_ready_server_process(world: &mut ScenarioWorld, options: &[ServerProcessOption]) {
     assert!(
         world.server_process.is_none(),
         "a scenario starts at most one nervix-server process"
     );
-    let mut process = ServerProcess::start(ServerProcessLaunch::Direct)
+    initialize_scenario_identity(world);
+    let mut process = ServerProcess::start(ServerProcessLaunch::Direct, options)
         .unwrap_or_else(|error| panic!("failed to launch nervix-server: {error}"));
     process
         .wait_until_ready()
@@ -1266,19 +1305,74 @@ async fn given_nervix_server_process_is_started_with_open_file_limit(
         world.server_process.is_none(),
         "a scenario starts at most one nervix-server process"
     );
-    let process = ServerProcess::start(ServerProcessLaunch::OpenFileLimit(limit))
+    let process = ServerProcess::start(ServerProcessLaunch::OpenFileLimit(limit), &[])
         .unwrap_or_else(|error| panic!("failed to launch nervix-server: {error}"));
     world.server_process = Some(process);
 }
 
-#[given("an authenticated resource upload is held open on the server process")]
-async fn given_authenticated_resource_upload_is_held_open(world: &mut ScenarioWorld) {
+#[given("the server process is configured with these NSPL commands")]
+async fn given_server_process_is_configured_with_nspl_commands(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let commands = expand_placeholders(world, docstring(step));
     let process = world
         .server_process
         .as_ref()
         .expect("a nervix-server process must be started first");
+    for statement in nspl_statements(&commands) {
+        if let Err(error) = process.run_commands(&world.domain, &statement).await {
+            panic!(
+                "nervix-server rejected {statement:?}: {error}\n{}",
+                process.log_tail()
+            );
+        }
+    }
+}
+
+#[when(expr = "http payload is posted to the server process with host {string} path {string}")]
+async fn when_http_payload_is_posted_to_server_process(
+    world: &mut ScenarioWorld,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let process = world
+        .server_process
+        .as_ref()
+        .expect("a nervix-server process must be started first");
+    if let Err(error) = process.publish_http(&host, &path, &payload).await {
+        panic!(
+            "nervix-server did not admit the http payload: {error}\n{}",
+            process.log_tail()
+        );
+    }
+}
+
+#[given(
+    regex = r#"^an authenticated upload of resource "([^"]+)" (waiting for its first message|waiting for its next chunk|sending chunks slowly) is held open on the server process$"#
+)]
+async fn given_authenticated_resource_upload_is_held_open(
+    world: &mut ScenarioWorld,
+    resource: String,
+    progress: String,
+) {
+    let progress = match progress.as_str() {
+        "waiting for its first message" => HeldUploadProgress::AwaitingFirstMessage,
+        "waiting for its next chunk" => HeldUploadProgress::AwaitingNextChunk,
+        "sending chunks slowly" => HeldUploadProgress::SendingSlowly,
+        other => panic!("unsupported held upload progress '{other}'"),
+    };
+    let domain = world.domain.clone();
+    let process = world
+        .server_process
+        .as_mut()
+        .expect("a nervix-server process must be started first");
     let upload = process
-        .hold_resource_upload()
+        .hold_resource_upload(&domain, &resource, progress)
         .await
         .unwrap_or_else(|error| panic!("failed to hold a resource upload open: {error}"));
     world.held_resource_upload = Some(upload);
@@ -1326,6 +1420,57 @@ async fn then_server_process_exits_with_status_within(
     bound: String,
 ) {
     let bound = humantime::parse_duration(&bound).expect("step duration must be a valid duration");
+    let elapsed = server_process_exit_after_last_signal(world, expected).await;
+    let process = world
+        .server_process
+        .as_ref()
+        .expect("a nervix-server process must be started first");
+    assert!(
+        elapsed <= bound,
+        "nervix-server exited {elapsed:?} after the last signal, beyond {bound:?}\n{}",
+        process.log_tail()
+    );
+}
+
+#[then(
+    expr = "the server process exits with status {int} no sooner than {string} and within \
+            {string} of the last signal"
+)]
+async fn then_server_process_exits_with_status_between(
+    world: &mut ScenarioWorld,
+    expected: i32,
+    earliest: String,
+    bound: String,
+) {
+    let earliest =
+        humantime::parse_duration(&earliest).expect("step duration must be a valid duration");
+    let bound = humantime::parse_duration(&bound).expect("step duration must be a valid duration");
+    let elapsed = server_process_exit_after_last_signal(world, expected).await;
+    let process = world
+        .server_process
+        .as_ref()
+        .expect("a nervix-server process must be started first");
+    assert!(
+        elapsed >= earliest,
+        "nervix-server exited {elapsed:?} after the last signal, sooner than {earliest:?}\n{}",
+        process.log_tail()
+    );
+    assert!(
+        elapsed <= bound,
+        "nervix-server exited {elapsed:?} after the last signal, beyond {bound:?}\n{}",
+        process.log_tail()
+    );
+}
+
+/// Waits for the server process to exit with `expected` and returns how long after the last
+/// signal it exited.
+///
+/// The signal instant was taken before the signal was delivered, so the interval can only read
+/// longer than the process actually took, never shorter.
+async fn server_process_exit_after_last_signal(
+    world: &mut ScenarioWorld,
+    expected: i32,
+) -> Duration {
     let signalled_at = world
         .last_server_signal_at
         .expect("a signal must be delivered to the server process first");
@@ -1345,11 +1490,7 @@ async fn then_server_process_exits_with_status_within(
         describe_exit(status),
         process.log_tail()
     );
-    assert!(
-        elapsed <= bound,
-        "nervix-server exited {elapsed:?} after the last signal, beyond {bound:?}\n{}",
-        process.log_tail()
-    );
+    elapsed
 }
 
 #[then(expr = "the server process log eventually contains {string}")]
@@ -3356,6 +3497,16 @@ async fn given_drain_timeout_is_configured(world: &mut ScenarioWorld, timeout: S
         humantime::parse_duration(&timeout).expect("shutdown drain timeout must be valid");
 }
 
+#[given(expr = "shutdown timeout is configured as {string}")]
+async fn given_shutdown_timeout_is_configured(world: &mut ScenarioWorld, timeout: String) {
+    assert!(
+        world.cluster.is_none(),
+        "shutdown timeout must be configured before cluster startup"
+    );
+    world.cluster_config.shutdown_timeout =
+        humantime::parse_duration(&timeout).expect("shutdown timeout must be valid");
+}
+
 #[given(expr = "schema change drain timeout is configured as {string}")]
 async fn given_schema_change_drain_timeout_is_configured(
     world: &mut ScenarioWorld,
@@ -5193,6 +5344,34 @@ async fn then_last_cluster_operation_completes_within(world: &mut ScenarioWorld,
         "expected cluster operation to complete within {:?}, took {:?}",
         max_duration,
         elapsed
+    );
+}
+
+#[then(expr = "the last cluster operation takes at least {string}")]
+async fn then_last_cluster_operation_takes_at_least(world: &mut ScenarioWorld, duration: String) {
+    let min_duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let elapsed = world
+        .last_cluster_operation_elapsed
+        .expect("a timed cluster operation must run before assertion");
+    assert!(
+        elapsed >= min_duration,
+        "expected cluster operation to take at least {min_duration:?}, took {elapsed:?}"
+    );
+}
+
+#[then(expr = "node {string} reports that its last shutdown passed its deadline")]
+async fn then_node_reports_that_its_last_shutdown_passed_its_deadline(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let Some(failure) = world.cluster().node_run_failure(&node_id) else {
+        panic!("node '{node_id}' stopped without reporting that its shutdown deadline passed");
+    };
+    assert!(
+        failure.contains("did not finish before its shutdown deadline"),
+        "node '{node_id}' stopped with an unrelated failure: {failure}"
     );
 }
 
