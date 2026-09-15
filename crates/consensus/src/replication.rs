@@ -2,8 +2,8 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Outstanding-batch admission, submission and acknowledgement order, per-response
-//!   progress deadlines, and the point at which a failed stream stops submitting.
+//! - **Owns.** Outstanding-batch admission, submission and acknowledgement order, the liveness
+//!   contract of each append path, and the point at which a failed stream stops submitting.
 //! - **Depends on.** OpenRaft's append contract and the interconnect duplex stream.
 //! - **Must not know.** What a replicated command means, or which node should lead.
 //!
@@ -11,13 +11,22 @@
 //! materialize it, and it counts against this follower's outstanding budget from the moment it is
 //! submitted until its answer arrives. The encoded copy is charged separately by the transport for
 //! as long as it exists. Nothing here waits for the final network send to discover the bound.
+//!
+//! A follower answers a batch only after appending it durably, so how long one answer takes says
+//! nothing about whether the stream still works. A stream with a batch outstanding stalls only when,
+//! for the whole idle bound, no answer arrives and the follower accepts none of the leader's bytes.
+//! The bound belongs to this crate rather than to OpenRaft's soft TTL, which follows the heartbeat
+//! interval and so measures leader liveness instead of follower storage.
 
-use std::time::Duration;
+use std::{pin::pin, time::Duration};
 
 use futures_util::{Stream, StreamExt as _, stream::BoxStream};
 use meticulous::OptionExt as _;
 use nervix_execution::Executor;
-use nervix_interconnect::{DuplexItems, DuplexReceiver, DuplexSender, Transport};
+use nervix_interconnect::{
+    DuplexItems, DuplexReceiver, DuplexSendProgress, DuplexSender, InterconnectDuplexRequest as _,
+    Transport,
+};
 use nervix_models::ClusterNodeName;
 use nervix_recovery::Discarded as _;
 use openraft::{
@@ -28,7 +37,7 @@ use openraft::{
 use thiserror::Error;
 use tokio::{
     sync::mpsc,
-    time::{Instant, timeout},
+    time::{Instant, sleep_until, timeout},
 };
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::debug;
@@ -42,12 +51,17 @@ pub(crate) const MAX_OUTSTANDING_APPEND_BATCHES: usize = 16;
 /// How many submitted bytes one follower may leave unacknowledged. The node's aggregate command
 /// budget bounds the encoded copies across all followers independently.
 pub(crate) const MAX_OUTSTANDING_APPEND_BYTES: u64 = 16 * 1024 * 1024;
-/// The ceiling on setup and per-response deadlines. OpenRaft's soft TTL is usually far shorter,
-/// and the shorter of the two always wins.
-const APPEND_DEADLINE_CEILING: Duration = Duration::from_secs(5);
+/// How long an append stream with a batch outstanding may go without an answer while its follower
+/// also accepts none of the leader's bytes.
+const APPEND_STREAM_IDLE_BOUND: Duration = Duration::from_secs(5);
+/// The ceiling on a heartbeat's deadline. OpenRaft's soft TTL is usually far shorter, and the
+/// shorter of the two always wins.
+const HEARTBEAT_DEADLINE_CEILING: Duration = Duration::from_secs(5);
 
 const _: () = assert!(
-    MAX_OUTSTANDING_APPEND_BATCHES > 0 && MAX_APPEND_BATCH_ENTRIES > 0,
+    MAX_OUTSTANDING_APPEND_BATCHES > 0
+        && MAX_APPEND_BATCH_ENTRIES > 0
+        && !APPEND_STREAM_IDLE_BOUND.is_zero(),
     "append pipeline policy inputs must be nonzero",
 );
 
@@ -70,17 +84,17 @@ pub(crate) enum AppendPath {
     Replication,
 }
 
-/// The effective deadline for one step of an append stream: whichever of OpenRaft's soft TTL and
-/// this crate's own ceiling expires first.
-pub(crate) fn append_deadline(option: &RPCOption) -> Duration {
-    option.soft_ttl().min(APPEND_DEADLINE_CEILING)
+/// The deadline for one heartbeat or leadership probe: whichever of OpenRaft's soft TTL and this
+/// crate's ceiling expires first.
+pub(crate) fn heartbeat_deadline(option: &RPCOption) -> Duration {
+    option.soft_ttl().min(HEARTBEAT_DEADLINE_CEILING)
 }
 
 #[derive(Debug, Error)]
-#[error("append stream to node '{target}' made no progress for {deadline:?}")]
+#[error("append stream to node '{target}' neither answered nor accepted bytes for {idle_bound:?}")]
 struct AppendStreamStalled {
     target: ClusterNodeName,
-    deadline: Duration,
+    idle_bound: Duration,
 }
 
 #[derive(Debug, Error)]
@@ -166,15 +180,73 @@ impl AppendSubmission {
     }
 }
 
+/// Decides when an append stream with a batch outstanding has stalled.
+///
+/// Nothing is measured while no batch is outstanding, so a healthy stream with nothing to carry
+/// stays open however long it idles.
+struct AppendStreamIdleBound {
+    bound: Duration,
+    last_answer_at: Instant,
+}
+
+impl AppendStreamIdleBound {
+    fn new(bound: Duration) -> Self {
+        Self {
+            bound,
+            last_answer_at: Instant::now(),
+        }
+    }
+
+    /// Wait for the answer to an outstanding batch, or return `None` once the stream has stalled.
+    ///
+    /// `sender_accepted_at` reports when the follower last accepted the leader's bytes. The wait
+    /// gives up only after a whole bound in which neither an answer nor accepted bytes moved the
+    /// stream, however long the answer itself has been outstanding.
+    async fn answer<F: Future>(
+        &mut self,
+        answer: F,
+        sender_accepted_at: impl Fn() -> Instant,
+    ) -> Option<F::Output> {
+        let mut answer = pin!(answer);
+        let mut stall = pin!(sleep_until(self.stalls_at(sender_accepted_at())));
+        loop {
+            tokio::task::consume_budget().await;
+            tokio::select! {
+                biased;
+                output = &mut answer => {
+                    self.last_answer_at = Instant::now();
+                    return Some(output);
+                }
+                () = &mut stall => {
+                    let stalls_at = self.stalls_at(sender_accepted_at());
+                    if stalls_at <= Instant::now() {
+                        return None;
+                    }
+                    stall.as_mut().reset(stalls_at);
+                }
+            }
+        }
+    }
+
+    /// When the stream stalls unless an answer arrives or the follower accepts bytes first.
+    fn stalls_at(&self, sender_accepted_at: Instant) -> Instant {
+        let last_movement = self.last_answer_at.max(sender_accepted_at);
+        last_movement
+            .checked_add(self.bound)
+            .assured("the monotonic clock's range reaches far past a recent instant plus seconds")
+    }
+}
+
 /// Everything one append stream generation owns while it is live.
 ///
 /// A generation delivers its first failure and then stops: no later answer belonging to it can
 /// advance OpenRaft past the batch that failed.
 struct AppendStreamGeneration {
     receiver: DuplexReceiver<wire::OpenAppendStream>,
+    sender_progress: DuplexSendProgress,
     outstanding: mpsc::Receiver<OutstandingBatch>,
     acknowledge: mpsc::UnboundedSender<u64>,
-    response_deadline: Duration,
+    idle_bound: AppendStreamIdleBound,
     target: ClusterNodeName,
     finished: bool,
     _submission: DropGuard,
@@ -188,19 +260,22 @@ impl AppendStreamGeneration {
             return None;
         }
         let outstanding = self.outstanding.recv().await?;
-        // The deadline is armed only while this batch is outstanding, so a healthy stream with
-        // nothing to carry is never cut short.
-        let answer = match timeout(self.response_deadline, self.receiver.next()).await {
-            Ok(Ok(Some(answer))) => answer,
-            Ok(Ok(None)) => {
+        let sender_progress = &self.sender_progress;
+        let answer = self
+            .idle_bound
+            .answer(self.receiver.next(), || sender_progress.last_accepted_at())
+            .await;
+        let answer = match answer {
+            Some(Ok(Some(answer))) => answer,
+            Some(Ok(None)) => {
                 return self.fail(stream_failed(&self.target, "the follower ended the stream"));
             }
-            Ok(Err(error)) => return self.fail(stream_failed(&self.target, error)),
-            Err(_) => {
+            Some(Err(error)) => return self.fail(stream_failed(&self.target, error)),
+            None => {
                 return self.fail(RPCError::Unreachable(Unreachable::new(
                     &AppendStreamStalled {
                         target: self.target.clone(),
-                        deadline: self.response_deadline,
+                        idle_bound: self.idle_bound.bound,
                     },
                 )));
             }
@@ -239,7 +314,6 @@ pub(crate) async fn open_append_stream<S>(
     local_node_id: &ClusterNodeName,
     target: &ClusterNodeName,
     input: S,
-    option: RPCOption,
 ) -> Result<
     BoxStream<'static, Result<StreamAppendResult<TypeConfig>, RPCError<TypeConfig>>>,
     RPCError<TypeConfig>,
@@ -247,15 +321,11 @@ pub(crate) async fn open_append_stream<S>(
 where
     S: Stream<Item = AppendEntriesRequest<TypeConfig>> + Send + Unpin + 'static,
 {
-    let deadline = append_deadline(&option);
-    let setup_deadline = Instant::now().checked_add(deadline).ok_or_else(|| {
-        stream_failed(
-            target,
-            "the setup deadline exceeds the monotonic clock range",
-        )
-    })?;
+    // The follower's handler accepts the stream before its Raft core sees any batch, so opening
+    // takes the stream's own setup deadline rather than one sized for a heartbeat. Applying it here
+    // also bounds the local admission the transport performs outside its peer-facing deadline.
     let opened = timeout(
-        setup_deadline.saturating_duration_since(Instant::now()),
+        wire::OpenAppendStream::SETUP_TIMEOUT,
         interconnect.open_duplex_stream(
             target,
             wire::OpenAppendStream {
@@ -274,6 +344,7 @@ where
             ));
         }
     };
+    let sender_progress = sender.progress();
 
     let (outstanding_tx, outstanding_rx) = mpsc::channel(MAX_OUTSTANDING_APPEND_BATCHES);
     let (acknowledge_tx, acknowledge_rx) = mpsc::unbounded_channel();
@@ -311,9 +382,10 @@ where
 
     let generation = AppendStreamGeneration {
         receiver,
+        sender_progress,
         outstanding: outstanding_rx,
         acknowledge: acknowledge_tx,
-        response_deadline: deadline,
+        idle_bound: AppendStreamIdleBound::new(APPEND_STREAM_IDLE_BOUND),
         target: target.clone(),
         finished: false,
         _submission: submission_guard,
@@ -365,5 +437,120 @@ impl ProtocolReceiver {
             Ok(result) => Ok(wire::StreamAppendResultRecord::from(result)),
             Err(fatal) => Err(wire::ConsensusRequestError::raft(fatal)),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, future::pending};
+
+    use tokio::time::sleep;
+
+    use super::*;
+
+    /// How often a follower that keeps reading accepts more of the leader's bytes.
+    const ACCEPTANCE_CADENCE: Duration = Duration::from_millis(2_500);
+    /// How long a follower that keeps reading takes to answer.
+    const SLOW_ANSWER: Duration = Duration::from_secs(15);
+    /// How long each answer takes from a follower that accepts no further bytes.
+    const PROMPT_ANSWER: Duration = Duration::from_secs(4);
+
+    const _: () = assert!(
+        ACCEPTANCE_CADENCE.as_nanos() < APPEND_STREAM_IDLE_BOUND.as_nanos()
+            && PROMPT_ANSWER.as_nanos() < APPEND_STREAM_IDLE_BOUND.as_nanos(),
+        "every step of a healthy stream must fit inside one idle bound",
+    );
+    const _: () = assert!(
+        SLOW_ANSWER.as_nanos() > 2 * APPEND_STREAM_IDLE_BOUND.as_nanos()
+            && 2 * PROMPT_ANSWER.as_nanos() > APPEND_STREAM_IDLE_BOUND.as_nanos(),
+        "each healthy stream must outlast the idle bound it would miss if nothing moved",
+    );
+
+    #[tokio::test(start_paused = true)]
+    async fn a_follower_that_keeps_accepting_bytes_is_not_cut_while_its_answer_is_outstanding() {
+        let mut idle_bound = AppendStreamIdleBound::new(APPEND_STREAM_IDLE_BOUND);
+        let started_at = Instant::now();
+        let sender_accepted_at = Cell::new(started_at);
+        // The follower keeps taking the leader's bytes and answers only after several bounds.
+        let answer = async {
+            while started_at.elapsed() < SLOW_ANSWER {
+                tokio::task::consume_budget().await;
+                sleep(ACCEPTANCE_CADENCE).await;
+                sender_accepted_at.set(Instant::now());
+            }
+        };
+
+        let answered = idle_bound.answer(answer, || sender_accepted_at.get()).await;
+
+        assert!(
+            answered.is_some(),
+            "a follower that keeps accepting bytes must not be cut while its answer is outstanding"
+        );
+        assert!(
+            started_at.elapsed() >= SLOW_ANSWER,
+            "the answer must have outlasted several idle bounds"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_outstanding_batch_with_neither_an_answer_nor_accepted_bytes_is_cut_after_the_bound()
+    {
+        let mut idle_bound = AppendStreamIdleBound::new(APPEND_STREAM_IDLE_BOUND);
+        let started_at = Instant::now();
+
+        let answered = idle_bound.answer(pending::<()>(), || started_at).await;
+
+        assert!(
+            answered.is_none(),
+            "a stream that neither answered nor accepted bytes for the bound must be cut"
+        );
+        assert!(
+            started_at.elapsed() >= APPEND_STREAM_IDLE_BOUND,
+            "the stream must not be cut before the whole bound passed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_follower_that_stops_accepting_bytes_is_cut_one_bound_after_its_last_acceptance() {
+        let mut idle_bound = AppendStreamIdleBound::new(APPEND_STREAM_IDLE_BOUND);
+        let started_at = Instant::now();
+        let sender_accepted_at = Cell::new(started_at);
+        let answer = async {
+            sleep(ACCEPTANCE_CADENCE).await;
+            sender_accepted_at.set(Instant::now());
+            pending::<()>().await;
+        };
+
+        let answered = idle_bound.answer(answer, || sender_accepted_at.get()).await;
+
+        assert!(
+            answered.is_none(),
+            "a follower that stopped accepting bytes and never answered must be cut"
+        );
+        let since_last_acceptance = sender_accepted_at.get().elapsed();
+        let noticed_late = APPEND_STREAM_IDLE_BOUND
+            .checked_add(ACCEPTANCE_CADENCE)
+            .assured("an idle bound plus an acceptance cadence of seconds fits in a Duration");
+        assert!(
+            since_last_acceptance >= APPEND_STREAM_IDLE_BOUND
+                && since_last_acceptance < noticed_late,
+            "the stream must be cut one whole bound after the last acceptance, not \
+             {since_last_acceptance:?} after it"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn each_answer_restarts_the_bound_for_the_next_outstanding_batch() {
+        let mut idle_bound = AppendStreamIdleBound::new(APPEND_STREAM_IDLE_BOUND);
+        let started_at = Instant::now();
+
+        let first = idle_bound.answer(sleep(PROMPT_ANSWER), || started_at).await;
+        let second = idle_bound.answer(sleep(PROMPT_ANSWER), || started_at).await;
+
+        assert!(
+            first.is_some() && second.is_some(),
+            "answers that each arrive within the bound must keep the stream open, even once the \
+             stream has carried them for longer than one bound"
+        );
     }
 }
