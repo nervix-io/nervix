@@ -2,33 +2,27 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Lossless conversion between OpenRaft values and bounded rkyv request records.
-//! - **Depends on.** OpenRaft, the replicated command vocabulary, and the interconnect request
-//!   primitive.
-//! - **Must not know.** HTTP/2 framing, peer addresses, or control-plane policy.
+//! - **Owns.** Lossless conversion between OpenRaft requests and Nervix interconnect records.
+//! - **Depends on.** OpenRaft, shared Raft records, and the interconnect request primitive.
+//! - **Must not know.** HTTP/2 framing, durable storage, peer addresses, or control-plane policy.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    io,
-    time::Duration,
-};
+use std::{io, time::Duration};
 
 use nervix_interconnect::{
     InterconnectDuplexRequest, InterconnectRequest, PoolClass, RequestSubquota,
 };
 use nervix_models::ClusterNodeName;
 use openraft::{
-    BasicNode, Entry, LogId, Membership, SnapshotMeta, StoredMembership, Vote,
-    entry::EntryPayload,
+    BasicNode, SnapshotMeta,
     raft::{StreamAppendError, StreamAppendResult, TransferLeaderError},
 };
 use rkyv::{Archive, Deserialize, Serialize};
 use thiserror::Error;
 
-use super::{
-    AppendEntriesRequest, AppendEntriesResponse, ConsensusCommand, EntryOf, LogIdOf,
-    SnapshotResponse, StoredMembershipOf, TransferLeaderRequest, TransferLeaderResponse,
-    TypeConfig, VoteOf, VoteRequest, VoteResponse,
+use crate::{
+    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, TransferLeaderRequest,
+    TransferLeaderResponse, TypeConfig, VoteOf, VoteRequest, VoteResponse,
+    raft_record::{EntryRecord, LogIdRecord, StoredMembershipRecord, VoteRecord},
 };
 
 type SnapshotMetaOf =
@@ -64,62 +58,6 @@ impl ConsensusRequestError {
     }
 }
 
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct VoteRecord {
-    term: u64,
-    node_id: ClusterNodeName,
-    committed: bool,
-}
-
-impl From<VoteOf> for VoteRecord {
-    fn from(value: VoteOf) -> Self {
-        Self {
-            term: value.leader_id.term,
-            node_id: value.leader_id.node_id,
-            committed: value.committed,
-        }
-    }
-}
-
-impl VoteRecord {
-    fn into_vote(self) -> VoteOf {
-        if self.committed {
-            Vote::new_committed(self.term, self.node_id)
-        } else {
-            Vote::new(self.term, self.node_id)
-        }
-    }
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct LogIdRecord {
-    term: u64,
-    node_id: ClusterNodeName,
-    index: u64,
-}
-
-impl From<LogIdOf> for LogIdRecord {
-    fn from(value: LogIdOf) -> Self {
-        Self {
-            term: value.leader_id.term,
-            node_id: value.leader_id.node_id,
-            index: value.index,
-        }
-    }
-}
-
-impl LogIdRecord {
-    pub(crate) fn into_log_id(self) -> LogIdOf {
-        LogId::new(
-            openraft::impls::leader_id_adv::LeaderId {
-                term: self.term,
-                node_id: self.node_id,
-            },
-            self.index,
-        )
-    }
-}
-
 /// Ask the current leader to establish the committed boundary for process runtime admission.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct RuntimeAdmissionRead;
@@ -130,94 +68,6 @@ impl InterconnectRequest for RuntimeAdmissionRead {
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Admission;
     const TIMEOUT: Duration = Duration::from_secs(5);
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-struct MembershipNodeRecord {
-    node_id: ClusterNodeName,
-    address: String,
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-struct MembershipRecord {
-    configurations: Vec<Vec<ClusterNodeName>>,
-    nodes: Vec<MembershipNodeRecord>,
-}
-
-impl MembershipRecord {
-    fn from_membership(value: &Membership<ClusterNodeName, BasicNode>) -> Self {
-        Self {
-            configurations: value
-                .get_joint_config()
-                .iter()
-                .map(|configuration| configuration.iter().cloned().collect())
-                .collect(),
-            nodes: value
-                .nodes()
-                .map(|(node_id, node)| MembershipNodeRecord {
-                    node_id: node_id.clone(),
-                    address: node.addr.clone(),
-                })
-                .collect(),
-        }
-    }
-
-    fn into_membership(self) -> io::Result<Membership<ClusterNodeName, BasicNode>> {
-        let configurations = self
-            .configurations
-            .into_iter()
-            .map(|configuration| configuration.into_iter().collect::<BTreeSet<_>>())
-            .collect();
-        let nodes = self
-            .nodes
-            .into_iter()
-            .map(|node| (node.node_id, BasicNode::new(node.address)))
-            .collect::<BTreeMap<_, _>>();
-        Membership::new(configurations, nodes).map_err(io::Error::other)
-    }
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-enum EntryPayloadRecord {
-    Blank,
-    Normal(ConsensusCommand),
-    Membership(MembershipRecord),
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-struct EntryRecord {
-    log_id: LogIdRecord,
-    payload: EntryPayloadRecord,
-}
-
-impl EntryRecord {
-    fn from_entry(value: EntryOf<TypeConfig>) -> Self {
-        let payload = match value.payload {
-            EntryPayload::Blank => EntryPayloadRecord::Blank,
-            EntryPayload::Normal(command) => EntryPayloadRecord::Normal(command),
-            EntryPayload::Membership(membership) => {
-                EntryPayloadRecord::Membership(MembershipRecord::from_membership(&membership))
-            }
-        };
-        Self {
-            log_id: value.log_id.into(),
-            payload,
-        }
-    }
-
-    fn into_entry(self) -> io::Result<EntryOf<TypeConfig>> {
-        let payload = match self.payload {
-            EntryPayloadRecord::Blank => EntryPayload::Blank,
-            EntryPayloadRecord::Normal(command) => EntryPayload::Normal(command),
-            EntryPayloadRecord::Membership(membership) => {
-                EntryPayload::Membership(membership.into_membership()?)
-            }
-        };
-        Ok(Entry {
-            log_id: self.log_id.into_log_id(),
-            payload,
-        })
-    }
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -233,17 +83,13 @@ impl AppendEntriesRecord {
         Self {
             vote: value.vote.into(),
             previous_log_id: value.prev_log_id.map(Into::into),
-            entries: value
-                .entries
-                .into_iter()
-                .map(EntryRecord::from_entry)
-                .collect(),
+            entries: value.entries.into_iter().map(EntryRecord::from).collect(),
             leader_commit: value.leader_commit.map(Into::into),
         }
     }
 
     pub(crate) fn origin_node_id(&self) -> &ClusterNodeName {
-        &self.vote.node_id
+        self.vote.node_id()
     }
 
     pub(crate) fn into_request(self) -> io::Result<AppendEntriesRequest<TypeConfig>> {
@@ -373,7 +219,7 @@ impl VoteRequestRecord {
     }
 
     pub(crate) fn origin_node_id(&self) -> &ClusterNodeName {
-        &self.vote.node_id
+        self.vote.node_id()
     }
 }
 
@@ -412,28 +258,6 @@ impl InterconnectRequest for RequestVote {
     const NAME: &'static str = "raft_vote";
     const CLASS: PoolClass = PoolClass::Management;
     const TIMEOUT: Duration = Duration::from_secs(5);
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-struct StoredMembershipRecord {
-    log_id: Option<LogIdRecord>,
-    membership: MembershipRecord,
-}
-
-impl StoredMembershipRecord {
-    fn from_stored(value: &StoredMembershipOf) -> Self {
-        Self {
-            log_id: value.log_id().clone().map(Into::into),
-            membership: MembershipRecord::from_membership(value.membership()),
-        }
-    }
-
-    fn into_stored(self) -> io::Result<StoredMembershipOf> {
-        Ok(StoredMembership::new(
-            self.log_id.map(LogIdRecord::into_log_id),
-            self.membership.into_membership()?,
-        ))
-    }
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -503,7 +327,7 @@ impl BeginSnapshotTransfer {
     }
 
     pub(crate) fn origin_node_id(&self) -> &ClusterNodeName {
-        &self.vote.node_id
+        self.vote.node_id()
     }
 }
 
@@ -585,7 +409,7 @@ impl TransferLeadership {
     }
 
     pub(crate) fn origin_node_id(&self) -> &ClusterNodeName {
-        &self.from_leader.node_id
+        self.from_leader.node_id()
     }
 }
 

@@ -42,6 +42,7 @@ impl ZeroMqIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
+        let metrics = dependencies.metrics;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
             .verified(
@@ -55,8 +56,11 @@ impl ZeroMqIngestor {
         let task_events = runtime.events().clone();
         let task = tokio::spawn(async move {
             let mut backoff = RuntimeReconnectBackoff::default();
-            let mut collector =
-                IngestRouteCollector::new(IngestMetadataKind::Headers, INGEST_GROUP_MAX_ROWS);
+            let mut collector = IngestRouteCollector::new(
+                IngestMetadataKind::Headers,
+                INGEST_GROUP_MAX_ROWS,
+                metrics,
+            );
             info!(
                 domain = task_domain.as_str(),
                 ingestor = task_ingestor.as_str(),

@@ -296,6 +296,14 @@ pub(crate) fn next_port() -> io::Result<u16> {
     Ok(ports.remove(0))
 }
 
+/// Returns ports a stopped fixture no longer binds to the reservation set every scenario shares.
+pub(crate) fn release_test_ports(ports: &[u16]) {
+    let mut reserved = RESERVED_TEST_PORTS.lock();
+    for port in ports {
+        reserved.remove(port);
+    }
+}
+
 pub(crate) fn test_basic_auth_token_for_password(password: &str) -> String {
     BASE64_STANDARD.encode(format!("{TEST_AUTH_USERNAME}:{password}"))
 }
@@ -559,14 +567,14 @@ pub(crate) fn client_connect_options(server: &str) -> io::Result<ConnectOptions>
     }
 }
 
-struct InterconnectTestCa {
+pub(crate) struct InterconnectTestCa {
     certificate: rcgen::Certificate,
     key: KeyPair,
-    path: PathBuf,
+    pub(crate) path: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TestCertificateValidity {
+pub(crate) enum TestCertificateValidity {
     Current,
     Expired,
 }
@@ -581,7 +589,7 @@ impl std::fmt::Debug for InterconnectTestCa {
 }
 
 impl InterconnectTestCa {
-    fn new(root: &TempDir) -> io::Result<Self> {
+    pub(crate) fn new(root: &TempDir) -> io::Result<Self> {
         let mut params = CertificateParams::default();
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         params.key_usages = vec![
@@ -613,7 +621,7 @@ impl InterconnectTestCa {
         )
     }
 
-    fn issue_node_with_identity(
+    pub(crate) fn issue_node_with_identity(
         &self,
         cluster_id: &str,
         node_id: &str,
@@ -2750,8 +2758,7 @@ impl NodeSpec {
     /// the release safe, not the stop itself, so a caller that releases while a peer may still dial
     /// the address belongs elsewhere.
     fn release_ports(&mut self) {
-        let mut reserved = RESERVED_TEST_PORTS.lock();
-        for port in [
+        release_test_ports(&[
             self.grpc_port,
             self.grpc_https_port,
             self.http_port,
@@ -2759,9 +2766,7 @@ impl NodeSpec {
             self.observability_port,
             self.web_console_port,
             self.interconnect_port,
-        ] {
-            reserved.remove(&port);
-        }
+        ]);
     }
 
     fn grpc_addr(&self) -> String {
@@ -3632,7 +3637,7 @@ async fn run_command_via_client(server: &str, domain: &str, query: &str) -> io::
     }
 }
 
-async fn server_accepts_commands(server: &str) -> io::Result<bool> {
+pub(crate) async fn server_accepts_commands(server: &str) -> io::Result<bool> {
     let client = match Client::connect_with_options(
         server,
         "default".to_string(),
