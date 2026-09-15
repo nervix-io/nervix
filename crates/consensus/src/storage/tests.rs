@@ -506,6 +506,35 @@ async fn purge_and_truncation_recover_with_their_position_metadata() -> TestResu
 }
 
 #[tokio::test]
+async fn retained_log_bytes_follow_purge_truncation_and_reopen_without_flushing() -> TestResult {
+    let mut harness = Harness::new().await?;
+    harness.append(6).await?;
+    let appended_bytes = harness.store.retained_log_bytes();
+    assert!(appended_bytes > 0, "the appended log must occupy bytes");
+
+    harness.store.purge(Harness::log_id(2)).await?;
+    let purged_bytes = harness.store.retained_log_bytes();
+    assert!(
+        purged_bytes < appended_bytes,
+        "purging entries must reduce retained bytes before a memtable flush"
+    );
+
+    harness
+        .store
+        .truncate_after(Some(Harness::log_id(4)))
+        .await?;
+    let truncated_bytes = harness.store.retained_log_bytes();
+    assert!(
+        truncated_bytes < purged_bytes,
+        "truncating entries must reduce retained bytes before a memtable flush"
+    );
+
+    let harness = harness.reopen().await?;
+    assert_eq!(harness.store.retained_log_bytes(), truncated_bytes);
+    Ok(())
+}
+
+#[tokio::test]
 async fn snapshots_recover_state_and_snapshot_metadata_atomically() -> TestResult {
     let mut source = Harness::new().await?;
     source

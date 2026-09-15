@@ -193,6 +193,9 @@ pub(super) struct StoreState {
     /// Appended entry bytes since the last completed snapshot, which is what the byte-based
     /// snapshot cadence watches. Truncation leaves it high, so the cadence only ever fires early.
     log_bytes_since_snapshot: AtomicU64,
+    /// Encoded value bytes held by the current Raft log. The ordered storage worker updates this
+    /// with each append, purge and truncation; opening the store rebuilds it from the log.
+    retained_log_bytes: AtomicU64,
     pub(super) applied_tx: watch::Sender<u64>,
     pub(super) schedule_tx: watch::Sender<u64>,
     pub(super) domain_tx: watch::Sender<u64>,
@@ -326,9 +329,52 @@ impl StoreInner {
     }
 
     fn commit_append_batch(&self, batch: DurableBatch<'_>, encoded_bytes: u64) -> io::Result<()> {
+        let retained_log_bytes = self
+            .retained_log_bytes
+            .load(Ordering::Relaxed)
+            .checked_add(encoded_bytes)
+            .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
         self.commit("append", batch)?;
+        self.retained_log_bytes
+            .store(retained_log_bytes, Ordering::Relaxed);
         self.log_bytes_since_snapshot
             .fetch_add(encoded_bytes, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Add removals for one log range to `batch` and return their encoded value bytes.
+    fn remove_log_entries(
+        &self,
+        bounds: (Bound<Vec<u8>>, Bound<Vec<u8>>),
+        batch: &mut DurableBatch<'_>,
+    ) -> io::Result<u64> {
+        let mut removed_bytes = 0_u64;
+        for item in self.logs.range(bounds) {
+            let (key, value) = item.into_inner().map_err(io::Error::other)?;
+            let entry_bytes = u64::try_from(value.len()).map_err(io::Error::other)?;
+            removed_bytes = removed_bytes
+                .checked_add(entry_bytes)
+                .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
+            batch.remove(&self.logs, &key)?;
+        }
+        Ok(removed_bytes)
+    }
+
+    /// Commit one log removal and publish the resulting retained byte count.
+    fn commit_log_removal(
+        &self,
+        operation: &str,
+        batch: DurableBatch<'_>,
+        removed_bytes: u64,
+    ) -> io::Result<()> {
+        let retained_log_bytes = self
+            .retained_log_bytes
+            .load(Ordering::Relaxed)
+            .checked_sub(removed_bytes)
+            .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
+        self.commit(operation, batch)?;
+        self.retained_log_bytes
+            .store(retained_log_bytes, Ordering::Relaxed);
         Ok(())
     }
 
@@ -644,6 +690,14 @@ impl FjallStore {
                         batch.insert(&sm, KEY_METADATA, &metadata)?;
                         batch.commit(&db)?;
                     }
+                    let mut retained_log_bytes = 0_u64;
+                    for item in logs.iter() {
+                        let (_, value) = item.into_inner().map_err(io::Error::other)?;
+                        let entry_bytes = u64::try_from(value.len()).map_err(io::Error::other)?;
+                        retained_log_bytes = retained_log_bytes
+                            .checked_add(entry_bytes)
+                            .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
+                    }
                     let manifest = read_key::<SnapshotManifest>(&snapshot, KEY_MANIFEST)?;
                     let generations = SnapshotGenerations::new(manifest);
                     let mut stored_generations = BTreeSet::new();
@@ -669,6 +723,7 @@ impl FjallStore {
                                     state_machine: RwLock::new(StateMachineData::default()),
                                     snapshots: generations,
                                     log_bytes_since_snapshot: AtomicU64::new(0),
+                                    retained_log_bytes: AtomicU64::new(retained_log_bytes),
                                     applied_tx: watch::channel(0).0,
                                     schedule_tx: watch::channel(0).0,
                                     domain_tx: watch::channel(0).0,
@@ -748,9 +803,9 @@ impl FjallStore {
         self.inner.log_bytes_since_snapshot.load(Ordering::Relaxed)
     }
 
-    /// What the retained Raft log occupies on disk.
+    /// Encoded value bytes held by the current Raft log.
     pub(super) fn retained_log_bytes(&self) -> u64 {
-        self.inner.logs.disk_space()
+        self.inner.retained_log_bytes.load(Ordering::Relaxed)
     }
 
     /// What this node is keeping in snapshot storage.
@@ -1013,10 +1068,9 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
         self.inner
             .run(MemoryClass::Commands, move |inner, reservation| {
                 let mut batch = DurableBatch::new(reservation)?;
-                for item in inner.logs.range((start, Bound::Unbounded)) {
-                    batch.remove(&inner.logs, &item.key().map_err(io::Error::other)?)?;
-                }
-                inner.commit("truncate", batch)
+                let removed_bytes =
+                    inner.remove_log_entries((start, Bound::Unbounded), &mut batch)?;
+                inner.commit_log_removal("truncate", batch, removed_bytes)
             })
             .await
     }
@@ -1024,14 +1078,13 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
         self.inner
             .run(MemoryClass::Commands, move |inner, reservation| {
                 let mut batch = DurableBatch::new(reservation)?;
-                for item in inner.logs.range(..=StoreInner::log_key(log_id.index)) {
-                    batch.remove(&inner.logs, &item.key().map_err(io::Error::other)?)?;
-                }
+                let bounds = StoreInner::log_bounds(..=log_id.index);
+                let removed_bytes = inner.remove_log_entries(bounds, &mut batch)?;
                 batch.insert(&inner.meta, KEY_LAST_PURGED, &Some(log_id))?;
                 // Reclaiming covered log space is also when a generation nothing reads any more
                 // stops occupying storage.
                 inner.delete_unreferenced_generations(&mut batch)?;
-                inner.commit("purge", batch)
+                inner.commit_log_removal("purge", batch, removed_bytes)
             })
             .await
     }
