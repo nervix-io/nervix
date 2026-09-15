@@ -409,12 +409,30 @@ struct EmitterBatchContext<'a> {
     runtime: &'a Runtime,
     domain: &'a DomainName,
     emitter: &'a EmitterName,
-    metric_relay: Option<&'a RelayName>,
+    output_metrics: &'a EmitterOutputMetrics,
     error_policies: &'a ErrorPolicies,
     source_filters: &'a HashMap<RelayName, CompiledProgramWithMaterializedInterest>,
     filter_map: Option<&'a CompiledEmitterFilterMapProgram>,
     sqs_fifo_group: Option<&'a CompiledSqsFifoGroup>,
     materialized_state: &'a [nervix_models::MaterializedStateDependency],
+}
+
+enum EmitterOutputMetrics {
+    Relay(BatchMetricsHandle),
+    WithoutRelay(MessageMetricsHandle),
+}
+
+impl EmitterOutputMetrics {
+    fn observe(&self, report: &PublishReport) {
+        match self {
+            Self::Relay(metrics) => {
+                metrics.observe(report.messages, report.bytes, Some(report.domain_timestamp))
+            }
+            Self::WithoutRelay(metrics) => {
+                metrics.observe(report.messages, report.bytes, Some(report.domain_timestamp))
+            }
+        }
+    }
 }
 
 /// A source batch whose node-wide materialized dependencies are resolved.
@@ -3412,6 +3430,45 @@ impl EmitterTask {
         } else {
             None
         };
+        let physical_node_id = runtime.inner.remote_dispatch.local_node_id.read().clone();
+        let task_input_metrics = inputs
+            .iter()
+            .map(|(relay, _)| {
+                let metrics = runtime.inner.metrics.resolve_node_input_metrics(
+                    domain,
+                    ModelKind::Emitter,
+                    &ModelName::from(&emitter.name),
+                    relay,
+                    physical_node_id.as_ref(),
+                    None,
+                );
+                (relay.clone(), metrics)
+            })
+            .collect::<HashMap<_, _>>();
+        let task_output_metrics = match &task_metric_relay {
+            Some(relay) => {
+                EmitterOutputMetrics::Relay(runtime.inner.metrics.resolve_node_batch_metrics(
+                    NodeBatchMetricsSpec {
+                        domain,
+                        kind: ModelKind::Emitter,
+                        node: &ModelName::from(&emitter.name),
+                        relay,
+                        physical_node_id: physical_node_id.as_ref(),
+                        direction: "sent",
+                        branch_key: None,
+                    },
+                ))
+            }
+            None => EmitterOutputMetrics::WithoutRelay(
+                runtime.inner.metrics.resolve_global_node_message_metrics(
+                    domain,
+                    ModelKind::Emitter,
+                    &ModelName::from(&emitter.name),
+                    physical_node_id.as_ref(),
+                    "sent",
+                ),
+            ),
+        };
         let task_sink = emitter.sink.clone();
         let task_publishing = EmitterPublishingSettings::parse(
             domain,
@@ -3562,7 +3619,7 @@ impl EmitterTask {
                 runtime: &runtime,
                 domain: &task_domain,
                 emitter: &task_emitter,
-                metric_relay: task_metric_relay.as_ref(),
+                output_metrics: &task_output_metrics,
                 error_policies: &task_error_policies,
                 source_filters: &source_filters,
                 filter_map: filter_map.as_ref(),
@@ -3985,41 +4042,24 @@ impl EmitterTask {
                         batch,
                     } => {
                         let delivery_observation = batch.delivery_observation(actual_utc_now());
-                        let physical_node_id =
-                            runtime.inner.remote_dispatch.local_node_id.read().clone();
-                        runtime
-                            .inner
-                            .metrics
-                            .observe_global_node_received(NodeBatchObservation {
-                                domain: &task_domain,
-                                kind: ModelKind::Emitter,
-                                node: &ModelName::from(&task_emitter),
-                                relay: &input_relay,
-                                physical_node_id: physical_node_id.as_ref(),
-                                messages: batch.message_count(),
-                                bytes: batch.estimated_bytes(),
-                                domain_timestamp: delivery_observation.domain_timestamp,
-                            });
+                        let input_metrics = task_input_metrics
+                            .get(&input_relay)
+                            .verified("the task resolves metrics for every declared emitter input");
+                        input_metrics.observe_batch(
+                            batch.message_count(),
+                            batch.estimated_bytes(),
+                            delivery_observation.domain_timestamp,
+                        );
                         runtime.mark_branch_aggregated_metrics_updated(
                             &task_domain,
                             ModelKind::Emitter,
                             &task_emitter,
                         );
                         for seconds in delivery_observation.latency_seconds {
-                            runtime
-                                .inner
-                                .metrics
-                                .observe_global_delivery_latency_at_domain_time(
-                                    NodeLatencyObservation {
-                                        domain: &task_domain,
-                                        kind: ModelKind::Emitter,
-                                        node: &ModelName::from(&task_emitter),
-                                        relay: &input_relay,
-                                        physical_node_id: physical_node_id.as_ref(),
-                                        seconds,
-                                        domain_timestamp: delivery_observation.domain_timestamp,
-                                    },
-                                );
+                            input_metrics.observe_delivery_latency(
+                                seconds,
+                                delivery_observation.domain_timestamp,
+                            );
                         }
                         let wait_for_required_state = !interaction.is_terminal_drain();
                         let publish_batch = match batch_context
@@ -4323,46 +4363,7 @@ fn resolve_emitter_catalog_client(
 
 impl EmitterBatchContext<'_> {
     fn observe_sent(&self, report: &PublishReport) {
-        if let Some(relay) = self.metric_relay {
-            self.runtime
-                .inner
-                .metrics
-                .observe_global_node_sent(NodeBatchObservation {
-                    domain: self.domain,
-                    kind: ModelKind::Emitter,
-                    node: &ModelName::from(self.emitter),
-                    relay,
-                    physical_node_id: self
-                        .runtime
-                        .inner
-                        .remote_dispatch
-                        .local_node_id
-                        .read()
-                        .as_ref(),
-                    messages: report.messages,
-                    bytes: report.bytes,
-                    domain_timestamp: Some(report.domain_timestamp),
-                });
-        } else {
-            self.runtime
-                .inner
-                .metrics
-                .observe_global_node_without_stream_sent(NodeWithoutRelayObservation {
-                    domain: self.domain,
-                    kind: ModelKind::Emitter,
-                    node: &ModelName::from(self.emitter),
-                    physical_node_id: self
-                        .runtime
-                        .inner
-                        .remote_dispatch
-                        .local_node_id
-                        .read()
-                        .as_ref(),
-                    messages: report.messages,
-                    bytes: report.bytes,
-                    domain_timestamp: Some(report.domain_timestamp),
-                });
-        }
+        self.output_metrics.observe(report);
         self.runtime.mark_branch_aggregated_metrics_updated(
             self.domain,
             ModelKind::Emitter,

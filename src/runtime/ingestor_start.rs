@@ -417,11 +417,21 @@ impl Runtime {
                     .insert(spec.root_relay.clone(), (execution.graph.clone(), template));
             }
         }
+        drop(execution);
+        let physical_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
+        let metrics = self.inner.metrics.resolve_global_node_message_metrics(
+            domain,
+            ModelKind::Ingestor,
+            &ModelName::from(&ingestor.name),
+            physical_node_id.as_ref(),
+            "received",
+        );
         Ok(IngestorDependencies {
             output_routes,
             filter_where,
             codec,
             branched_templates,
+            metrics,
         })
     }
 
@@ -515,12 +525,21 @@ impl Runtime {
             entries.insert(value.to_key_fragment(), row);
         }
 
+        let physical_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
+        let metrics = self.inner.metrics.resolve_global_node_message_metrics(
+            domain,
+            ModelKind::Lookup,
+            &ModelName::from(&lookup.name),
+            physical_node_id.as_ref(),
+            "received",
+        );
         Ok(LookupRuntime {
             model: lookup,
             resource_version,
             schema,
             batch: Arc::new(batch),
             entries: Arc::new(entries),
+            metrics,
         })
     }
 }

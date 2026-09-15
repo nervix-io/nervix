@@ -40,6 +40,7 @@ struct MqttTaskContext {
     output_routes: RelayProcessorOutputsNode,
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
     codec: Arc<CompiledCodec>,
+    metrics: MessageMetricsHandle,
     branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     quiesce: Arc<IngestorQuiesceControl>,
 }
@@ -169,6 +170,7 @@ impl MqttIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
+        let metrics = dependencies.metrics;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
             .verified(
@@ -196,6 +198,7 @@ impl MqttIngestor {
                 output_routes: output_routes.clone(),
                 filter_where: filter_where.clone(),
                 codec: codec.clone(),
+                metrics: metrics.clone(),
                 branched_senders: branched_senders.clone(),
                 quiesce: quiesce.clone(),
             };
@@ -214,8 +217,11 @@ impl MqttIngestor {
             let task = tokio::spawn(async move {
                 let qos = Self::qos(task_mode.qos());
                 let mut backoff = RuntimeReconnectBackoff::default();
-                let mut ingest_collector =
-                    IngestRouteCollector::new(IngestMetadataKind::Headers, INGEST_GROUP_MAX_ROWS);
+                let mut ingest_collector = IngestRouteCollector::new(
+                    IngestMetadataKind::Headers,
+                    INGEST_GROUP_MAX_ROWS,
+                    task_context.metrics.clone(),
+                );
 
                 info!(
                     domain = task_context.domain.as_str(),
@@ -462,6 +468,7 @@ impl MqttIngestor {
                                 let mut collector = IngestRouteCollector::new(
                                     IngestMetadataKind::Headers,
                                     addressable_count(*max).get(),
+                                    task_context.metrics.clone(),
                                 );
                                 if !Self::decode_publish(&task_context, &mut collector, &publish)
                                     .await
@@ -808,7 +815,8 @@ impl MqttIngestor {
             tokio::task::consume_budget().await;
             // One acknowledged message is one group, and a replay decodes into the group it
             // replays into.
-            let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 1);
+            let mut collector =
+                IngestRouteCollector::new(IngestMetadataKind::Headers, 1, context.metrics.clone());
             if !Self::decode_publish(context, &mut collector, &publish).await {
                 return backoff.wait(shutdown_rx).await;
             }
@@ -905,8 +913,11 @@ impl MqttIngestor {
             let mut collector = match decoded.take() {
                 Some(collector) => collector,
                 None => {
-                    let mut collector =
-                        IngestRouteCollector::new(IngestMetadataKind::Headers, publishes.len());
+                    let mut collector = IngestRouteCollector::new(
+                        IngestMetadataKind::Headers,
+                        publishes.len(),
+                        context.metrics.clone(),
+                    );
                     for publish in &publishes {
                         tokio::task::consume_budget().await;
                         if !Self::decode_publish(context, &mut collector, publish).await {

@@ -1,6 +1,6 @@
 use std::sync::{
     Arc as StdArc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
 };
 
 use ahash::RandomState;
@@ -26,6 +26,8 @@ pub(super) struct ReplicatedMaterializedRelayState {
     placement: RuntimeStatePlacement,
     schema: StdArc<arrow_schema::Schema>,
     assignment: StateAssignmentAuthority,
+    /// Each branch's latest record. Branches are added and removed only under the assignment
+    /// barrier; replacing the record of a branch already held is admitted without it.
     entries: DashMap<Option<BranchKey>, RuntimeRow, RandomState>,
     /// Advances whenever a branch appears in or leaves this state. A capture records it, so a
     /// snapshot sealed before an eviction cannot resurrect the branch that eviction dropped.
@@ -36,7 +38,6 @@ pub(super) struct ReplicatedMaterializedRelayState {
     installed_fence: AtomicU64,
     current_lsm: LsmSequence,
     last_persisted_lsm: AtomicU64,
-    dirty: AtomicBool,
     /// The most recent generation sealed here, retained so that a requester already holding this
     /// revision, or a second requester arriving for it, is answered without scanning or encoding
     /// the state again. Exactly one generation is retained, so no build pins unbounded history;
@@ -90,6 +91,16 @@ pub(crate) struct MaterializedRecordReport {
     pub(crate) ingested_at_high_watermark: nervix_models::Timestamp,
 }
 
+/// What admitting one record did to the branch it belongs to.
+enum RecordReplacement {
+    /// The branch held an older record, which this one replaced at the returned revision.
+    Replaced(u64),
+    /// The branch already holds a record at least as new.
+    NotNewer,
+    /// The branch holds no record, so keeping this one changes which branches exist.
+    BranchAbsent(RuntimeRow),
+}
+
 impl ReplicatedMaterializedRelayState {
     /// Build this state from a snapshot that has already been opened, or empty when there is none.
     ///
@@ -133,7 +144,6 @@ impl ReplicatedMaterializedRelayState {
             installed_fence: AtomicU64::new(0),
             current_lsm: LsmSequence::restored(0),
             last_persisted_lsm: AtomicU64::new(0),
-            dirty: AtomicBool::new(false),
             sealed: parking_lot::Mutex::new(None),
             build: tokio::sync::Mutex::new(()),
         }
@@ -199,17 +209,25 @@ impl MaterializedRelayStateRead {
     }
 
     pub(super) fn primary_node(&self) -> Option<ClusterNodeName> {
-        self.state.assignment.roles().primary_node
+        self.state.assignment.roles().primary_node.clone()
     }
 
     /// Take one immutable generation of this state: its records, the revision they stand at, the
-    /// assignment that owns them, and the branch lifecycle they belong to, all read together.
+    /// assignment that owns them, and the branch lifecycle they belong to.
+    ///
+    /// The barrier excludes every change to which branches exist, so the records and the branch
+    /// lifecycle describe the same moment exactly. Replacing an existing branch's record is
+    /// admitted without the barrier and may land while the records are read. The revision is read
+    /// first, so such a replacement is either inside that revision or ahead of it, and a later
+    /// generation carries it again.
     ///
     /// The barrier is held only for the clone of the row views, which share the carrier columns
     /// rather than copying them. Encoding happens afterwards, against a value no later update can
     /// change, so updates and deletions proceed while a snapshot is being written out.
     pub(super) fn capture(&self) -> MaterializedGeneration {
         self.state.assignment.serialize_with(|binding| {
+            let revision = self.state.current_lsm.current();
+            let branch_generation = self.state.branch_generation.load(Ordering::SeqCst);
             let mut records = self
                 .state
                 .entries
@@ -224,9 +242,9 @@ impl MaterializedRelayStateRead {
                     .cmp(super::branch_key_display(&right.branch))
             });
             MaterializedGeneration::new(
-                self.state.current_lsm.current(),
+                revision,
                 binding.fence(),
-                self.state.branch_generation.load(Ordering::SeqCst),
+                branch_generation,
                 self.state.placement.schema_fingerprint,
                 self.state.schema.clone(),
                 records,
@@ -345,56 +363,92 @@ impl MaterializedRelayStateOriginator {
         &self.read
     }
 
+    /// Keep `record` as its branch's record when it is newer than the one held, returning the
+    /// revision the change is stamped with.
+    ///
+    /// Replacing an existing branch's record is admitted without the barrier. A branch's first
+    /// record changes which branches exist, so it is kept under the barrier, where no capture can
+    /// observe the branch apart from the branch lifecycle it belongs to.
     pub(super) fn update_last_by_timestamp(
         &self,
         key: &Option<BranchKey>,
-        record: &RuntimeRow,
+        record: RuntimeRow,
     ) -> Result<Option<u64>, Report<super::StateAuthorityError>> {
-        self.read
-            .state
-            .assignment
-            .authorize(self.assignment, StateCapability::Originate, || {
-                let existing =
-                    self.read.state.entries.get(key).map(|existing| {
-                        record.metadata().is_newer_than(existing.value().metadata())
-                    });
-                match existing {
-                    Some(false) => return None,
-                    Some(true) => {}
-                    None => {
-                        self.read.state.advance_branch_generation();
-                    }
-                }
-                self.read.state.entries.insert(key.clone(), record.clone());
-                Some(self.read.state.advance_revision())
-            })
+        let state = &self.read.state;
+        let replacement =
+            state
+                .assignment
+                .authorize(self.assignment, StateCapability::Originate, || {
+                    state.replace_existing_record(key, record)
+                })?;
+        match replacement {
+            RecordReplacement::Replaced(revision) => Ok(Some(revision)),
+            RecordReplacement::NotNewer => Ok(None),
+            RecordReplacement::BranchAbsent(record) => state.assignment.authorize_exclusive(
+                self.assignment,
+                StateCapability::Originate,
+                || state.add_branch_record(key, record),
+            ),
+        }
     }
 
     pub(super) fn remove_key(
         &self,
         key: &Option<BranchKey>,
     ) -> Result<Option<u64>, Report<super::StateAuthorityError>> {
-        self.read
-            .state
+        let state = &self.read.state;
+        state
             .assignment
-            .authorize(self.assignment, StateCapability::Originate, || {
-                self.read.state.entries.remove(key)?;
-                self.read.state.advance_branch_generation();
-                Some(self.read.state.advance_revision())
+            .authorize_exclusive(self.assignment, StateCapability::Originate, || {
+                state.entries.remove(key)?;
+                state.advance_branch_generation();
+                Some(state.advance_revision())
             })
     }
 }
 
 impl ReplicatedMaterializedRelayState {
     fn advance_revision(&self) -> u64 {
-        let lsm = self.current_lsm.advance();
-        self.dirty.store(true, Ordering::SeqCst);
-        lsm
+        self.current_lsm.advance()
     }
 
     fn advance_branch_generation(&self) {
         self.branch_generation
             .checked_advance("one process cannot apply 2^64 branch lifecycle changes to one relay");
+    }
+
+    /// Replace the record of a branch this state already holds when `record` is newer, or hand
+    /// `record` back when the branch holds none.
+    fn replace_existing_record(
+        &self,
+        key: &Option<BranchKey>,
+        record: RuntimeRow,
+    ) -> RecordReplacement {
+        let Some(mut existing) = self.entries.get_mut(key) else {
+            return RecordReplacement::BranchAbsent(record);
+        };
+        if !record.metadata().is_newer_than(existing.metadata()) {
+            return RecordReplacement::NotNewer;
+        }
+        *existing = record;
+        drop(existing);
+        RecordReplacement::Replaced(self.advance_revision())
+    }
+
+    /// Keep a branch's first record, or replace the record of a branch that appeared meanwhile.
+    ///
+    /// Branches are only added and removed under the barrier, which this runs under, so a branch
+    /// found absent here stays absent until this record adds it.
+    fn add_branch_record(&self, key: &Option<BranchKey>, record: RuntimeRow) -> Option<u64> {
+        match self.replace_existing_record(key, record) {
+            RecordReplacement::Replaced(revision) => Some(revision),
+            RecordReplacement::NotNewer => None,
+            RecordReplacement::BranchAbsent(record) => {
+                self.advance_branch_generation();
+                self.entries.insert(key.clone(), record);
+                Some(self.advance_revision())
+            }
+        }
     }
 }
 
@@ -433,7 +487,7 @@ impl MaterializedRelaySnapshotInstaller {
         &self,
         restored: RestoredMaterializedSnapshot,
     ) -> Result<(), RuntimeStateOperationError> {
-        self.read.state.assignment.authorize(
+        self.read.state.assignment.authorize_exclusive(
             self.assignment,
             StateCapability::InstallSnapshot,
             || {
@@ -467,7 +521,6 @@ impl MaterializedRelaySnapshotInstaller {
                     .installed_fence
                     .fetch_max(restored.fence, Ordering::SeqCst);
                 self.read.state.current_lsm.adopt(restored.revision);
-                self.read.state.dirty.store(true, Ordering::SeqCst);
                 *self.read.state.sealed.lock() = None;
                 Ok(())
             },
@@ -481,17 +534,10 @@ impl MaterializedRelayStatePersistence {
         &self.read
     }
 
-    pub(super) fn take_dirty(&self) -> bool {
-        self.read.state.dirty.swap(false, Ordering::SeqCst)
-    }
-
-    #[cfg(test)]
+    /// Whether this state holds a revision it has not persisted yet.
     pub(super) fn is_dirty(&self) -> bool {
-        self.read.state.dirty.load(Ordering::SeqCst)
-    }
-
-    pub(super) fn restore_dirty(&self) {
-        self.read.state.dirty.store(true, Ordering::SeqCst);
+        self.read.state.current_lsm.current()
+            > self.read.state.last_persisted_lsm.load(Ordering::SeqCst)
     }
 
     pub(super) fn last_persisted_lsm(&self) -> u64 {
@@ -499,15 +545,10 @@ impl MaterializedRelayStatePersistence {
     }
 
     pub(super) fn record_persisted(&self, lsm: u64) {
-        self.read.state.assignment.serialize(|| {
-            self.read
-                .state
-                .last_persisted_lsm
-                .fetch_max(lsm, Ordering::SeqCst);
-            if self.read.state.current_lsm.current() <= lsm {
-                self.read.state.dirty.store(false, Ordering::SeqCst);
-            }
-        });
+        self.read
+            .state
+            .last_persisted_lsm
+            .fetch_max(lsm, Ordering::SeqCst);
     }
 }
 
@@ -558,7 +599,7 @@ mod tests {
             .assured("branch-local state is authoritative in this process");
 
         originator
-            .update_last_by_timestamp(&None, &record)
+            .update_last_by_timestamp(&None, record)
             .assured("the assignment remains authoritative")
             .assured("the first record should update state");
         let sealed = originator
@@ -617,7 +658,7 @@ mod tests {
             .assured("branch-local state is authoritative in this process");
         assert!(
             originator
-                .update_last_by_timestamp(&None, &record)
+                .update_last_by_timestamp(&None, record)
                 .assured("the assignment remains authoritative")
                 .is_some()
         );
@@ -669,7 +710,7 @@ mod tests {
         )])
         .assured("a one-field branch key is well formed");
         originator
-            .update_last_by_timestamp(&Some(branch.clone()), &first)
+            .update_last_by_timestamp(&Some(branch.clone()), first)
             .assured("the assignment remains authoritative")
             .assured("the first record should update state");
 
@@ -712,7 +753,7 @@ mod tests {
             .take()
             .assured("branch-local state is authoritative in this process");
         let revision = originator
-            .update_last_by_timestamp(&None, &record)
+            .update_last_by_timestamp(&None, record)
             .assured("the assignment remains authoritative")
             .assured("the first record should update state");
 
@@ -756,7 +797,7 @@ mod tests {
         )])
         .assured("a one-field branch key is well formed");
         originator
-            .update_last_by_timestamp(&Some(branch.clone()), &record)
+            .update_last_by_timestamp(&Some(branch.clone()), record)
             .assured("the assignment remains authoritative")
             .assured("the first record should update state");
         let earlier = originator
@@ -804,5 +845,69 @@ mod tests {
         .assured("the sealed generation should open");
 
         assert!(installer.install(restored).is_err());
+    }
+
+    /// A capture holds the assignment barrier while it reads every record. An originator update
+    /// that queued behind that barrier would stall the relay-state task for the whole capture.
+    #[test]
+    fn an_originator_update_proceeds_while_the_assignment_barrier_is_held() {
+        let record = test_runtime_row([(
+            "value".to_string(),
+            RuntimeValue::String("ready".to_string()),
+        )]);
+        let state = Arc::new(ReplicatedMaterializedRelayState::new(
+            test_placement("tenant_state"),
+            record.arrow_schema(),
+        ));
+        let mut assignment = ReplicatedMaterializedRelayState::bind(
+            &state,
+            StateReplicationRoles::owned_by(None),
+            None,
+        );
+        let originator = assignment
+            .originator
+            .take()
+            .assured("branch-local state is authoritative in this process");
+        // A branch's first record adds the branch itself; the updates after it only replace that
+        // branch's record.
+        originator
+            .update_last_by_timestamp(&None, record.clone())
+            .assured("the assignment remains authoritative");
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let barrier_state = state.clone();
+        let barrier = std::thread::spawn(move || {
+            barrier_state.assignment.serialize(|| {
+                held_tx
+                    .send(())
+                    .assured("the test keeps the receiver until the barrier is held");
+                release_rx
+                    .recv()
+                    .assured("the test releases the barrier before it finishes");
+            });
+        });
+        held_rx
+            .recv()
+            .assured("the barrier thread reports once it holds the barrier");
+
+        let (updated_tx, updated_rx) = std::sync::mpsc::channel();
+        let updater = std::thread::spawn(move || {
+            let updated = originator.update_last_by_timestamp(&None, record).is_ok();
+            updated_tx
+                .send(updated)
+                .assured("the test keeps the receiver until the update is reported");
+        });
+        let updated = updated_rx.recv_timeout(std::time::Duration::from_secs(10));
+        release_tx
+            .send(())
+            .assured("the barrier thread waits for its release");
+        barrier.join().assured("the barrier thread completes");
+        updater.join().assured("the updating thread completes");
+
+        assert_eq!(
+            updated,
+            Ok(true),
+            "the originator update waited for the assignment barrier"
+        );
     }
 }

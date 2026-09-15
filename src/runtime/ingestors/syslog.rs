@@ -38,6 +38,7 @@ struct SyslogIngestContext {
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
     branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     codec: Arc<CompiledCodec>,
+    metrics: MessageMetricsHandle,
     quiesce: Arc<IngestorQuiesceControl>,
 }
 
@@ -165,6 +166,7 @@ impl SyslogIngestor {
             filter_where: dependencies.filter_where,
             branched_senders: branched_runtime.senders.clone(),
             codec: dependencies.codec,
+            metrics: dependencies.metrics,
             quiesce: runtime
                 .ingestor_quiesce_control(domain, &ingestor.name)
                 .verified(
@@ -287,8 +289,11 @@ impl SyslogIngestor {
             .runtime
             .clear_ingestor_transient_error(&context.domain, &context.ingestor);
         backoff.reset();
-        let mut collector =
-            IngestRouteCollector::new(IngestMetadataKind::Syslog, INGEST_GROUP_MAX_ROWS);
+        let mut collector = IngestRouteCollector::new(
+            IngestMetadataKind::Syslog,
+            INGEST_GROUP_MAX_ROWS,
+            context.metrics.clone(),
+        );
         let mut datagram = vec![0_u8; 65_535];
         loop {
             tokio::task::consume_budget().await;
@@ -372,8 +377,11 @@ impl SyslogIngestor {
         backoff.reset();
         let (frame_tx, mut frame_rx) = mpsc::channel(STREAM_INTAKE_QUEUE_CAPACITY);
         let mut connections = JoinSet::new();
-        let mut collector =
-            IngestRouteCollector::new(IngestMetadataKind::Syslog, INGEST_GROUP_MAX_ROWS);
+        let mut collector = IngestRouteCollector::new(
+            IngestMetadataKind::Syslog,
+            INGEST_GROUP_MAX_ROWS,
+            context.metrics.clone(),
+        );
         loop {
             tokio::task::consume_budget().await;
             if Self::dispatch_buffered(context, &mut collector).await {

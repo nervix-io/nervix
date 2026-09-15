@@ -627,17 +627,7 @@ impl Runtime {
                 domain.as_str()
             ));
         };
-        self.inner
-            .metrics
-            .observe_global_node_without_stream_received(NodeWithoutRelayObservation {
-                domain,
-                kind: ModelKind::Lookup,
-                node: &ModelName::from(name),
-                physical_node_id: self.inner.remote_dispatch.local_node_id.read().as_ref(),
-                messages: 1,
-                bytes: key.len().arch_into(),
-                domain_timestamp: None,
-            });
+        lookup.metrics.observe(1, key.len().arch_into(), None);
         self.mark_branch_aggregated_metrics_updated(domain, ModelKind::Lookup, name);
         lookup
             .entries
@@ -723,16 +713,17 @@ mod tests {
                 .expect("db should open");
             let store = RuntimeStateStore::from_database(db).expect("state store should open");
             let metrics = RuntimeMetrics::default();
-            metrics.observe_global_node_sent(crate::metrics::NodeBatchObservation {
-                domain: &domain,
-                kind: ModelKind::Ingestor,
-                node: &ModelName::from(&ingestor),
-                relay: &named("notifications"),
-                physical_node_id: Some(&ClusterNodeName::parse("node-3").expect("valid name")),
-                messages: 19,
-                bytes: 1900,
-                domain_timestamp: None,
-            });
+            metrics
+                .resolve_node_batch_metrics(NodeBatchMetricsSpec {
+                    domain: &domain,
+                    kind: ModelKind::Ingestor,
+                    node: &ModelName::from(&ingestor),
+                    relay: &named("notifications"),
+                    physical_node_id: Some(&ClusterNodeName::parse("node-3").expect("valid name")),
+                    direction: "sent",
+                    branch_key: None,
+                })
+                .observe(19, 1900, None);
             let snapshot = BranchAggregatedRuntimeStateSnapshot {
                 metrics: metrics.snapshot_global_target(
                     &domain,
@@ -787,16 +778,17 @@ mod tests {
             .expect("db should open");
         let store = RuntimeStateStore::from_database(db.clone()).expect("state store should open");
         let persisted_metrics = RuntimeMetrics::default();
-        persisted_metrics.observe_global_node_sent(crate::metrics::NodeBatchObservation {
-            domain: &domain,
-            kind: ModelKind::Ingestor,
-            node: &ModelName::from(&ingestor),
-            relay: &named("notifications"),
-            physical_node_id: Some(&ClusterNodeName::parse("node-3").expect("valid name")),
-            messages: 19,
-            bytes: 1900,
-            domain_timestamp: None,
-        });
+        persisted_metrics
+            .resolve_node_batch_metrics(NodeBatchMetricsSpec {
+                domain: &domain,
+                kind: ModelKind::Ingestor,
+                node: &ModelName::from(&ingestor),
+                relay: &named("notifications"),
+                physical_node_id: Some(&ClusterNodeName::parse("node-3").expect("valid name")),
+                direction: "sent",
+                branch_key: None,
+            })
+            .observe(19, 1900, None);
         let snapshot = BranchAggregatedRuntimeStateSnapshot {
             metrics: persisted_metrics.snapshot_global_target(
                 &domain,
@@ -867,16 +859,17 @@ mod tests {
             .expect("db should open");
         let store = RuntimeStateStore::from_database(db.clone()).expect("state store should open");
         let persisted_metrics = RuntimeMetrics::default();
-        persisted_metrics.observe_global_node_sent(crate::metrics::NodeBatchObservation {
-            domain: &domain,
-            kind: ModelKind::Ingestor,
-            node: &ModelName::from(&ingestor),
-            relay: &named("notifications"),
-            physical_node_id: Some(&ClusterNodeName::parse("node-3").expect("valid name")),
-            messages: 19,
-            bytes: 1900,
-            domain_timestamp: None,
-        });
+        persisted_metrics
+            .resolve_node_batch_metrics(NodeBatchMetricsSpec {
+                domain: &domain,
+                kind: ModelKind::Ingestor,
+                node: &ModelName::from(&ingestor),
+                relay: &named("notifications"),
+                physical_node_id: Some(&ClusterNodeName::parse("node-3").expect("valid name")),
+                direction: "sent",
+                branch_key: None,
+            })
+            .observe(19, 1900, None);
         let snapshot = BranchAggregatedRuntimeStateSnapshot {
             metrics: persisted_metrics.snapshot_global_target(
                 &domain,
@@ -914,16 +907,16 @@ mod tests {
         runtime
             .inner
             .metrics
-            .observe_global_node_sent(crate::metrics::NodeBatchObservation {
+            .resolve_node_batch_metrics(NodeBatchMetricsSpec {
                 domain: &domain,
                 kind: ModelKind::Ingestor,
                 node: &ModelName::from(&ingestor),
                 relay: &named("notifications"),
                 physical_node_id: Some(&ClusterNodeName::parse("node-3").expect("valid name")),
-                messages: 1,
-                bytes: 100,
-                domain_timestamp: None,
-            });
+                direction: "sent",
+                branch_key: None,
+            })
+            .observe(1, 100, None);
 
         let rendered = runtime.describe_metrics_for(&domain, "INGESTOR", &ingestor);
         assert!(

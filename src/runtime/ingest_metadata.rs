@@ -209,6 +209,7 @@ impl IngestMetadataBuilders {
     /// Opens a builder set for `kind`, sizing the integration fields for `row_bound` rows.
     ///
     /// Header builders start empty because most sources carry no headers at all.
+    #[inline(never)]
     pub(super) fn new(kind: IngestMetadataKind, row_bound: usize) -> Self {
         #[cfg(test)]
         INGEST_METADATA_BUILDER_SETS_OPENED.with(|count| count.set(count.get() + 1));
@@ -236,6 +237,9 @@ impl IngestMetadataBuilders {
         }
     }
 
+    // Keep Arrow's builder machinery behind this boundary. Inlining it into the source collector
+    // doubles that per-message function's machine code and measurably reduces ingest throughput.
+    #[inline(never)]
     pub(super) fn append(&mut self, row: &IngestMetadataRow<'_>) -> Result<(), String> {
         let headers = match (&mut self.integration, row) {
             (
@@ -290,6 +294,7 @@ impl IngestMetadataBuilders {
         Ok(())
     }
 
+    #[inline(never)]
     pub(super) fn finish(mut self) -> Result<IngestFilterMapMetadata, String> {
         #[cfg(test)]
         INGEST_METADATA_COLUMN_SETS_BUILT.with(|count| count.set(count.get() + 1));

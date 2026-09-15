@@ -523,6 +523,13 @@ mod tests {
             schema: lookup_schema,
             batch: Arc::new(lookup_batch),
             entries: Arc::new(HashMap::from_iter([("mr".to_string(), 0)])),
+            metrics: RuntimeMetrics::default().resolve_global_node_message_metrics(
+                &domain("default"),
+                ModelKind::Lookup,
+                &named("titles_by_normalized"),
+                None,
+                "received",
+            ),
         });
         let lookups = HashMap::from_iter([(named("titles_by_normalized"), lookup)]);
         let output_schema = Arc::new(compile_schema(&CreateSchema {

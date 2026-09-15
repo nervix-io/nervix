@@ -31,6 +31,16 @@ use crate::{
     runtime_schema::{RuntimeValue, test_runtime_row},
 };
 
+fn relay_metrics(runtime: &Runtime, domain: &DomainName, relay: &RelayName) -> RelayMetricsHandle {
+    runtime.inner.metrics.resolve_relay_metrics(
+        domain,
+        relay,
+        None,
+        RELAY_BUFFER_DIRECTION_CONCRETE,
+        None,
+    )
+}
+
 #[test]
 fn idle_relay_channel_reopens_with_a_fresh_incarnation() {
     let slot = RelayOutboundSlot::new();
@@ -99,19 +109,13 @@ async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
     let domain = domain("default");
     let relay = named::<RelayName>("orders");
     let services = test_relay_boundary_services();
-    let _owner_receiver = services.activate_owner_buffer();
+    let _owner_receiver = services.activate_owner_buffer(relay_metrics(&runtime, &domain, &relay));
     runtime.inner.relay_boundary_fanouts.insert(
         DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
         services.fanout.clone(),
     );
     services
-        .enqueue_owner_batch(
-            &runtime.inner.metrics,
-            &domain,
-            &relay,
-            None,
-            &quiesce_test_batch(),
-        )
+        .enqueue_owner_batch(&quiesce_test_batch())
         .await
         .expect("the relay owner buffer should admit the batch");
 
@@ -130,9 +134,10 @@ async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
 async fn relay_owner_buffer_retains_the_upstream_ack_until_fanout() {
     let runtime = Runtime::default();
     let domain = domain("default");
-    let relay = named("orders");
+    let relay = named::<RelayName>("orders");
     let services = test_relay_boundary_services();
-    let mut owner_receiver = services.activate_owner_buffer();
+    let mut owner_receiver =
+        services.activate_owner_buffer(relay_metrics(&runtime, &domain, &relay));
     let (acks, completion) = AckSet::root();
     let batch = RelayRecordBatch::single(
         test_schema(&[("value", ParseAsType::I64)]),
@@ -143,7 +148,7 @@ async fn relay_owner_buffer_retains_the_upstream_ack_until_fanout() {
     .expect("relay owner ACK test batch should build");
 
     services
-        .enqueue_owner_batch(&runtime.inner.metrics, &domain, &relay, None, &batch)
+        .enqueue_owner_batch(&batch)
         .await
         .expect("the relay owner buffer should admit the batch");
     let completion = completion.wait();
@@ -868,7 +873,7 @@ async fn relay_owner_enforces_branch_capacity_across_batches() {
         )
         .expect("relay batch should build");
         services
-            .enqueue_owner_batch(&runtime.inner.metrics, &domain, &relay, None, &batch)
+            .enqueue_owner_batch(&batch)
             .await
             .expect("owner should admit the batch");
     }
@@ -929,7 +934,7 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
     )
     .expect("relay batch should build");
     services
-        .enqueue_owner_batch(&runtime.inner.metrics, &domain, &relay, None, &batch)
+        .enqueue_owner_batch(&batch)
         .await
         .expect("owner should admit the batch");
 
@@ -1088,10 +1093,11 @@ async fn direct_fanout_owner_buffer_uses_configured_capacity() {
     let fanout = runtime
         .relay_boundary_fanout_with_capacity(&domain, &relay, false, nonzero_capacity(1))
         .await;
-    let mut receiver = fanout.activate_owner_buffer();
+    let mut receiver = fanout.activate_owner_buffer(relay_metrics(&runtime, &domain, &relay));
     let owner_buffer = fanout.owner_buffer().expect("owner buffer must be active");
 
     owner_buffer
+        .batches
         .broadcast(
             RelayRecordBatch::single(
                 schema.clone(),
@@ -1108,6 +1114,7 @@ async fn direct_fanout_owner_buffer_uses_configured_capacity() {
         let owner_buffer = owner_buffer.clone();
         async move {
             owner_buffer
+                .batches
                 .broadcast(
                     RelayRecordBatch::single(
                         schema,
@@ -1154,7 +1161,7 @@ async fn relay_boundary_fanout_resize_preserves_existing_owner_receiver() {
     let fanout = runtime
         .relay_boundary_fanout_with_capacity(&domain, &relay, false, nonzero_capacity(1))
         .await;
-    let mut receiver = fanout.activate_owner_buffer();
+    let mut receiver = fanout.activate_owner_buffer(relay_metrics(&runtime, &domain, &relay));
     let resized = runtime
         .relay_boundary_fanout_with_capacity(&domain, &relay, false, nonzero_capacity(5))
         .await;
@@ -1174,6 +1181,7 @@ async fn relay_boundary_fanout_resize_preserves_existing_owner_receiver() {
     };
 
     broadcast
+        .batches
         .broadcast(
             RelayRecordBatch::single(
                 schema,

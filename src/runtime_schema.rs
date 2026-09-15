@@ -72,7 +72,6 @@ mod jaq_unfold;
 mod syslog;
 
 pub use jaq_unfold::UnfoldPosition;
-use jaq_unfold::UnfoldedPayload;
 
 #[derive(Debug, Clone)]
 pub struct CompiledSchema {
@@ -627,40 +626,6 @@ fn test_runtime_value_arrow_type(value: &RuntimeValue) -> Result<ArrowDataType, 
 impl CompiledCodec {
     pub(crate) fn schema(&self) -> Arc<CompiledSchema> {
         self.schema.clone()
-    }
-
-    /// Unfolds a payload through the ON INGESTION program that [`Self::requires_blocking_decode`]
-    /// selects, without touching a single Arrow column.
-    ///
-    /// jaq and protobuf decoding is the CPU-bound half of those codecs, and it produces the JSON
-    /// object of every message before any column is written. Naming that half separately is what
-    /// lets a caller run it off the reactor and then [`Self::append_unfolded`] on the task that
-    /// owns the batch builder, instead of sending the builder to another thread.
-    pub(crate) fn unfold_on_ingestion(
-        &self,
-        payload: Bytes,
-    ) -> Result<UnfoldedPayload, CodecError> {
-        match &self.wire_schema {
-            CompiledWireSchema::JaqNative(native) => native.unfold(self, &payload),
-            CompiledWireSchema::Protobuf(protobuf) => protobuf.unfold(self, &payload),
-            CompiledWireSchema::Json(_)
-            | CompiledWireSchema::Cbor(_)
-            | CompiledWireSchema::Avro(_)
-            | CompiledWireSchema::Syslog => Err(CodecError::InvalidCodec {
-                codec: self.name.as_str().to_string(),
-                reason: "codec declares no ON INGESTION transformation to run".to_string(),
-            }),
-        }
-    }
-
-    /// Appends every message of [`Self::unfold_on_ingestion`] to `builder`, or none of them, and
-    /// answers how many it appended.
-    pub(crate) fn append_unfolded(
-        &self,
-        unfolded: UnfoldedPayload,
-        builder: &mut RuntimeRecordBatchBuilder,
-    ) -> Result<usize, CodecError> {
-        unfolded.append_to(self, builder)
     }
 
     pub fn requires_blocking_decode(&self) -> bool {
@@ -1940,7 +1905,7 @@ pub(crate) fn decode_with_codec(
         CompiledWireSchema::Syslog => syslog::decode(codec, &payload, builder),
         CompiledWireSchema::JaqNative(_) | CompiledWireSchema::Protobuf(_) => {
             let unfolded = codec.unfold_on_ingestion(Bytes::from(payload.into_owned()))?;
-            return codec.append_unfolded(unfolded, builder);
+            return unfolded.append_to(codec, builder);
         }
     };
     finish_decoded_row(codec, builder, appended)?;

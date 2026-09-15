@@ -17,27 +17,23 @@ impl Runtime {
         let mut shutdown_rx = shutdown_tx.subscribe();
         Some(tokio::spawn(async move {
             let flush_latest_snapshot =
-                |state: &KafkaOffsetStatePersistence, store: &RuntimeStateStore| {
-                    if !state.take_dirty() {
+                |state: &KafkaOffsetStatePersistence,
+                 store: &RuntimeStateStore|
+                 -> Result<Option<u64>, RuntimePersistenceError> {
+                    if !state.is_dirty() {
                         return Ok(None);
                     }
-                    let result = (|| {
-                        let snapshot = state.read().latest_snapshot()?;
-                        if snapshot.lsm <= state.last_persisted_lsm() {
-                            return Ok(None);
-                        }
-                        store.persist_latest_snapshot(
-                            state.read().placement(),
-                            snapshot.lsm,
-                            &snapshot.payload,
-                        )?;
-                        state.record_persisted(snapshot.lsm);
-                        Ok::<Option<u64>, RuntimePersistenceError>(Some(snapshot.lsm))
-                    })();
-                    if result.is_err() {
-                        state.restore_dirty();
+                    let snapshot = state.read().latest_snapshot()?;
+                    if snapshot.lsm <= state.last_persisted_lsm() {
+                        return Ok(None);
                     }
-                    result
+                    store.persist_latest_snapshot(
+                        state.read().placement(),
+                        snapshot.lsm,
+                        &snapshot.payload,
+                    )?;
+                    state.record_persisted(snapshot.lsm);
+                    Ok(Some(snapshot.lsm))
                 };
             loop {
                 tokio::task::consume_budget().await;
@@ -131,59 +127,48 @@ impl Runtime {
             let flush_latest_snapshot =
                 async |state: &MaterializedRelayStatePersistence,
                        store: &Arc<RuntimeStateStore>| {
-                    if !state.take_dirty() {
+                    if !state.is_dirty() {
                         return Ok(None);
                     }
                     let last_persisted = state.last_persisted_lsm();
-                    let result = async {
-                        let sealed = state
-                            .read()
-                            .seal_after(&executor, Some(last_persisted))
-                            .await;
-                        let sealed = match sealed {
-                            Ok(Some(sealed)) => sealed,
-                            Ok(None) => return Ok(None),
-                            Err(error) => {
-                                return Err(RuntimePersistenceError::EncodeState(
-                                    error.to_string(),
-                                ));
-                            }
-                        };
-                        let revision = sealed.descriptor.revision;
-                        let placement = state.read().placement().clone();
-                        let store = store.clone();
-                        // Publishing a generation is filesystem work with a durability barrier, so it
-                        // runs on the storage workers rather than on the async worker this task holds.
-                        let reservation = executor
-                            .reserve(nervix_execution::MemoryClass::Bulk, 1)
-                            .await
-                            .map_err(|error| {
-                                RuntimePersistenceError::EncodeState(error.to_string())
-                            })?;
-                        executor
-                            .run_storage(
-                                nervix_execution::StorageClass::Filesystem,
-                                reservation,
-                                move |_charge, _cancellation| {
-                                    store.publish_sealed_snapshot(
-                                        &placement,
-                                        revision,
-                                        sealed.bytes.as_ref(),
-                                    )
-                                },
-                            )
-                            .await
-                            .map_err(|error| {
-                                RuntimePersistenceError::EncodeState(error.to_string())
-                            })??;
-                        state.record_persisted(revision);
-                        Ok::<Option<u64>, RuntimePersistenceError>(Some(revision))
-                    }
-                    .await;
-                    if result.is_err() {
-                        state.restore_dirty();
-                    }
-                    result
+                    let sealed = state
+                        .read()
+                        .seal_after(&executor, Some(last_persisted))
+                        .await;
+                    let sealed = match sealed {
+                        Ok(Some(sealed)) => sealed,
+                        Ok(None) => return Ok(None),
+                        Err(error) => {
+                            return Err(RuntimePersistenceError::EncodeState(error.to_string()));
+                        }
+                    };
+                    let revision = sealed.descriptor.revision;
+                    let placement = state.read().placement().clone();
+                    let store = store.clone();
+                    // Publishing a generation is filesystem work with a durability barrier, so it
+                    // runs on the storage workers rather than on the async worker this task holds.
+                    let reservation = executor
+                        .reserve(nervix_execution::MemoryClass::Bulk, 1)
+                        .await
+                        .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
+                    executor
+                        .run_storage(
+                            nervix_execution::StorageClass::Filesystem,
+                            reservation,
+                            move |_charge, _cancellation| {
+                                store.publish_sealed_snapshot(
+                                    &placement,
+                                    revision,
+                                    sealed.bytes.as_ref(),
+                                )
+                            },
+                        )
+                        .await
+                        .map_err(|error| {
+                            RuntimePersistenceError::EncodeState(error.to_string())
+                        })??;
+                    state.record_persisted(revision);
+                    Ok::<Option<u64>, RuntimePersistenceError>(Some(revision))
                 };
             loop {
                 tokio::task::consume_budget().await;

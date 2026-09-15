@@ -90,6 +90,7 @@ impl PulsarIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
+        let metrics = dependencies.metrics;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
             .verified(
@@ -145,6 +146,7 @@ impl PulsarIngestor {
             let task_output_routes = output_routes.clone();
             let task_filter_where = filter_where.clone();
             let task_codec = codec.clone();
+            let task_metrics = metrics.clone();
             let task_branched_senders = branched_runtime.senders.clone();
             let task_ack_mode = ack_mode.clone();
             let task_ack_timeout = ack_timeout;
@@ -179,8 +181,11 @@ impl PulsarIngestor {
                 let retry_policy = task_retry_policy;
                 let batch_timeout = task_batch_timeout;
                 let mut retry_delay = retry_policy.backoff;
-                let mut ingest_collector =
-                    IngestRouteCollector::new(IngestMetadataKind::Headers, INGEST_GROUP_MAX_ROWS);
+                let mut ingest_collector = IngestRouteCollector::new(
+                    IngestMetadataKind::Headers,
+                    INGEST_GROUP_MAX_ROWS,
+                    task_metrics.clone(),
+                );
                 let mut no_ack_messages = Vec::new();
 
                 'ingest: loop {
@@ -428,6 +433,7 @@ impl PulsarIngestor {
                                                 let mut collector = IngestRouteCollector::new(
                                                     IngestMetadataKind::Headers,
                                                     1,
+                                                    task_metrics.clone(),
                                                 );
                                                 if let Err(error) = Self::decode_message(
                                                     &mut collector,
@@ -563,6 +569,7 @@ impl PulsarIngestor {
                                             let mut collector = IngestRouteCollector::new(
                                                 IngestMetadataKind::Headers,
                                                 ack_parallel_limit.get(),
+                                                task_metrics.clone(),
                                             );
                                             let mut messages = Vec::with_capacity(ack_parallel_limit.get());
                                             match Self::decode_message(

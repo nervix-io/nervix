@@ -16,7 +16,7 @@ use serde_json::Value as JsonValue;
 use tracing::trace;
 
 use super::{
-    CodecError, CompiledCodec, CompiledJaqNativeCodec, CompiledProtobufCodec,
+    CodecError, CompiledCodec, CompiledJaqNativeCodec, CompiledWireSchema,
     RuntimeRecordBatchBuilder, decode_json_value, decode_protobuf_payload, finish_decoded_row,
 };
 use crate::jaq_program::{CompiledJaqProgram, JaqFormatError, JaqInput, JaqProgramError};
@@ -119,7 +119,7 @@ impl UnfoldedPayload {
     ///
     /// A message that does not fit the schema closes the row it started and drops the rows of the
     /// payload's earlier messages, so the builder keeps exactly the rows it held before.
-    pub(super) fn append_to(
+    pub(crate) fn append_to(
         self,
         codec: &CompiledCodec,
         builder: &mut RuntimeRecordBatchBuilder,
@@ -153,6 +153,66 @@ impl CodecError {
 }
 
 impl CompiledCodec {
+    /// Unfolds a payload through the ON INGESTION program that
+    /// [`CompiledCodec::requires_blocking_decode`] selects, without touching a single Arrow column.
+    ///
+    /// jaq and protobuf decoding is the CPU-bound half of those codecs, and it produces the JSON
+    /// object of every message before any column is written. Naming that half separately is what
+    /// lets a caller run it off the reactor and then [`UnfoldedPayload::append_to`] on the task
+    /// that owns the batch builder, instead of sending the builder to another thread.
+    pub(crate) fn unfold_on_ingestion(
+        &self,
+        payload: Bytes,
+    ) -> Result<UnfoldedPayload, CodecError> {
+        match &self.wire_schema {
+            CompiledWireSchema::JaqNative(native) => {
+                let Some(program) = native.transformations.on_ingestion.as_deref() else {
+                    return Err(CodecError::InvalidCodec {
+                        codec: self.name.as_str().to_string(),
+                        reason: "JAQ-native codec used for decoding must declare ON INGESTION \
+                                 transformation"
+                            .to_string(),
+                    });
+                };
+                let values = native.format.read_values(&payload);
+                let inputs =
+                    values.map(|value| value.map_err(|error| native.read_failure(self, error)));
+                UnfoldedPayload::unfold(self, program, inputs)
+            }
+            CompiledWireSchema::Protobuf(protobuf) => {
+                let Some(program) = protobuf.transformations.on_ingestion.as_deref() else {
+                    return Err(CodecError::InvalidCodec {
+                        codec: self.name.as_str().to_string(),
+                        reason: "protobuf codec used for decoding must declare ON INGESTION \
+                                 transformation"
+                            .to_string(),
+                    });
+                };
+                // A protobuf payload holds exactly one message, which is its one input value.
+                let input = match decode_protobuf_payload(&protobuf.message, &payload) {
+                    Ok(value) => {
+                        JaqInput::try_from(value).map_err(|error| CodecError::ProtobufDecode {
+                            codec: self.name.as_str().to_string(),
+                            reason: error.to_string(),
+                        })
+                    }
+                    Err(reason) => Err(CodecError::ProtobufDecode {
+                        codec: self.name.as_str().to_string(),
+                        reason,
+                    }),
+                };
+                UnfoldedPayload::unfold(self, program, std::iter::once(input))
+            }
+            CompiledWireSchema::Json(_)
+            | CompiledWireSchema::Cbor(_)
+            | CompiledWireSchema::Avro(_)
+            | CompiledWireSchema::Syslog => Err(CodecError::InvalidCodec {
+                codec: self.name.as_str().to_string(),
+                reason: "codec declares no ON INGESTION transformation to run".to_string(),
+            }),
+        }
+    }
+
     /// The failure of the ON INGESTION program on one input value.
     ///
     /// The evaluator's own message quotes the values it failed on, so the diagnostic names only the
@@ -173,71 +233,12 @@ impl CompiledCodec {
 }
 
 impl CompiledJaqNativeCodec {
-    /// Unfolds a payload of this codec's format through its ON INGESTION program.
-    pub(super) fn unfold(
-        &self,
-        codec: &CompiledCodec,
-        payload: &Bytes,
-    ) -> Result<UnfoldedPayload, CodecError> {
-        let Some(program) = self.transformations.on_ingestion.as_deref() else {
-            return Err(CodecError::InvalidCodec {
-                codec: codec.name.as_str().to_string(),
-                reason: "JAQ-native codec used for decoding must declare ON INGESTION \
-                         transformation"
-                    .to_string(),
-            });
-        };
-        // A text payload that is not valid UTF-8 is malformed before its first value is read.
-        let values = match self.format.read_values(payload) {
-            Ok(values) => values,
-            Err(error) => {
-                let cause = self.read_failure(codec, error);
-                return Err(cause.at(UnfoldPosition::Input { input: 0 }));
-            }
-        };
-        let inputs = values.map(|value| value.map_err(|error| self.read_failure(codec, error)));
-        UnfoldedPayload::unfold(codec, program, inputs)
-    }
-
     fn read_failure(&self, codec: &CompiledCodec, error: JaqFormatError) -> CodecError {
         CodecError::JaqNativeDecode {
             codec: codec.name.as_str().to_string(),
             format: self.format.name(),
             reason: error.to_string(),
         }
-    }
-}
-
-impl CompiledProtobufCodec {
-    /// Unfolds a payload holding one message of this codec's type through its ON INGESTION program.
-    pub(super) fn unfold(
-        &self,
-        codec: &CompiledCodec,
-        payload: &[u8],
-    ) -> Result<UnfoldedPayload, CodecError> {
-        let Some(program) = self.transformations.on_ingestion.as_deref() else {
-            return Err(CodecError::InvalidCodec {
-                codec: codec.name.as_str().to_string(),
-                reason: "protobuf codec used for decoding must declare ON INGESTION transformation"
-                    .to_string(),
-            });
-        };
-        let input = self.read_input(codec, payload);
-        UnfoldedPayload::unfold(codec, program, std::iter::once(input))
-    }
-
-    /// Decodes the one message a protobuf payload holds into the value the program runs on.
-    fn read_input(&self, codec: &CompiledCodec, payload: &[u8]) -> Result<JaqInput, CodecError> {
-        let value = decode_protobuf_payload(&self.message, payload).map_err(|reason| {
-            CodecError::ProtobufDecode {
-                codec: codec.name.as_str().to_string(),
-                reason,
-            }
-        })?;
-        JaqInput::try_from(value).map_err(|error| CodecError::ProtobufDecode {
-            codec: codec.name.as_str().to_string(),
-            reason: error.to_string(),
-        })
     }
 }
 
