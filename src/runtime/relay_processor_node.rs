@@ -598,7 +598,7 @@ impl RelayProcessorNode {
                     deduplicate_on,
                     max_time,
                     compiled_key_program,
-                    state,
+                    keyspace,
                 } => {
                     let input_arrow_schema = batch.arrow_schema();
                     let key_input_batch = batch.batch.clone();
@@ -712,7 +712,7 @@ impl RelayProcessorNode {
                                 })
                                 .collect(),
                         );
-                        if state.reserve_new_key(dedup_key.clone(), execution_now, *max_time) {
+                        if keyspace.reserve_new_key(dedup_key.clone(), execution_now, *max_time) {
                             dedup_keys.push(dedup_key);
                             forwarded_rows.push(row);
                         } else {
@@ -767,7 +767,7 @@ impl RelayProcessorNode {
                     )
                     .await
                     else {
-                        state.remove_reserved_keys(&dedup_keys);
+                        keyspace.remove_reserved_keys(&dedup_keys);
                         return;
                     };
 
@@ -930,12 +930,10 @@ impl RelayProcessorNode {
                                 ),
                             );
                             state.clear(aggregate);
-                            replicated_state.mark_live_dirty();
+                            replicated_state.generations.mark_live_dirty();
                             continue;
                         }
-                        replicated_state.mark_live_dirty();
-                        let due =
-                            window_width_met(state, *width_messages, *width_duration, timestamp);
+                        replicated_state.generations.mark_live_dirty();
                         let changed = flush_ready_window_processor(
                             WindowFlushContext {
                                 graph,
@@ -959,24 +957,8 @@ impl RelayProcessorNode {
                             timestamp,
                         )
                         .await;
-                        if due || changed {
-                            replicated_state.mark_live_dirty();
-                            if let Err(error) = snapshot_window_processor_live_state(
-                                &self.processor,
-                                replicated_state,
-                                state,
-                            ) {
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind,
-                                    &self.processor,
-                                    &self.error_policies,
-                                    state.entries.iter().map(|entry| &entry.message.acks),
-                                    error,
-                                );
-                                state.clear(aggregate);
-                                replicated_state.mark_live_dirty();
-                            }
+                        if changed {
+                            replicated_state.generations.mark_live_dirty();
                         }
                     }
                 }
@@ -1903,7 +1885,6 @@ impl RelayProcessorNode {
                     state,
                     replicated_state,
                 } => {
-                    let due = window_width_met(state, *width_messages, *width_duration, now);
                     let changed = flush_ready_window_processor(
                         WindowFlushContext {
                             graph,
@@ -1927,24 +1908,8 @@ impl RelayProcessorNode {
                         now,
                     )
                     .await;
-                    if due || changed {
-                        replicated_state.mark_live_dirty();
-                        if let Err(error) = snapshot_window_processor_live_state(
-                            &self.processor,
-                            replicated_state,
-                            state,
-                        ) {
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind,
-                                &self.processor,
-                                &self.error_policies,
-                                state.entries.iter().map(|entry| &entry.message.acks),
-                                error,
-                            );
-                            state.clear(aggregate);
-                            replicated_state.mark_live_dirty();
-                        }
+                    if changed {
+                        replicated_state.generations.mark_live_dirty();
                     }
                 }
                 RelayProcessorOperationNode::Junction { .. } => {}
@@ -2373,35 +2338,45 @@ impl RelayProcessorNode {
         })
     }
 
+    /// Publish the live state this branch task owns for everything outside the task to read.
     pub(super) fn snapshot_live_state(&mut self, branch: &mut BranchRuntime) -> Result<(), String> {
-        let RelayProcessorOperationNode::WindowProcessor {
-            aggregate,
-            state,
-            replicated_state,
-            ..
-        } = &mut self.operation
-        else {
-            return Ok(());
-        };
-        if !replicated_state.live_dirty.load(Ordering::SeqCst) {
-            return Ok(());
+        match &mut self.operation {
+            RelayProcessorOperationNode::Deduplicator { keyspace, .. } => {
+                keyspace.publish();
+                Ok(())
+            }
+            RelayProcessorOperationNode::WindowProcessor {
+                aggregate,
+                state,
+                replicated_state,
+                ..
+            } => {
+                if !replicated_state.generations.is_live_dirty() {
+                    return Ok(());
+                }
+                if let Err(error) =
+                    snapshot_window_processor_live_state(&self.processor, replicated_state, state)
+                {
+                    branch.runtime.handle_internal_processor_error_for_acks(
+                        &branch.domain,
+                        self.kind,
+                        &self.processor,
+                        &self.error_policies,
+                        state.entries.iter().map(|entry| &entry.message.acks),
+                        error.clone(),
+                    );
+                    state.clear(aggregate);
+                    replicated_state.generations.mark_live_dirty();
+                    return Err(error);
+                }
+                Ok(())
+            }
+            RelayProcessorOperationNode::Junction { .. }
+            | RelayProcessorOperationNode::Reorderer { .. }
+            | RelayProcessorOperationNode::Correlator { .. }
+            | RelayProcessorOperationNode::Inferencer { .. }
+            | RelayProcessorOperationNode::WasmProcessor { .. } => Ok(()),
         }
-        if let Err(error) =
-            snapshot_window_processor_live_state(&self.processor, replicated_state, state)
-        {
-            branch.runtime.handle_internal_processor_error_for_acks(
-                &branch.domain,
-                self.kind,
-                &self.processor,
-                &self.error_policies,
-                state.entries.iter().map(|entry| &entry.message.acks),
-                error.clone(),
-            );
-            state.clear(aggregate);
-            replicated_state.mark_live_dirty();
-            return Err(error);
-        }
-        Ok(())
     }
 
     pub(super) async fn checkpoint_live_state(
@@ -2410,12 +2385,16 @@ impl RelayProcessorNode {
         execution_now: Timestamp,
     ) -> OwnershipHandoffResult<()> {
         match &mut self.operation {
+            RelayProcessorOperationNode::Deduplicator { keyspace, .. } => {
+                keyspace.publish();
+                Ok(())
+            }
             RelayProcessorOperationNode::WindowProcessor {
                 state,
                 replicated_state,
                 ..
             } => {
-                if !replicated_state.live_dirty.load(Ordering::SeqCst) {
+                if !replicated_state.generations.is_live_dirty() {
                     return Ok(());
                 }
                 snapshot_window_processor_live_state(&self.processor, replicated_state, state)
@@ -2447,32 +2426,29 @@ impl RelayProcessorNode {
         runtime: &Runtime,
         shutdown_tx: &watch::Sender<bool>,
     ) -> SpawnedSnapshotTask {
-        match &self.operation {
-            RelayProcessorOperationNode::Deduplicator { state, .. } => SpawnedSnapshotTask {
-                task: runtime.spawn_deduplicator_snapshot_task(shutdown_tx, state.clone()),
-                requests: None,
-            },
+        let published = match &self.operation {
+            RelayProcessorOperationNode::Deduplicator { keyspace, .. } => {
+                PublishedBranchState::Deduplicator(keyspace.state().clone())
+            }
             RelayProcessorOperationNode::WindowProcessor {
                 replicated_state, ..
-            } => {
-                let (request_tx, request_rx) = mpsc::channel(1);
-                let task = runtime.spawn_window_processor_snapshot_task(
-                    shutdown_tx,
-                    replicated_state.clone(),
-                    request_tx,
-                );
-                let requests = task.is_some().then_some(request_rx);
-                SpawnedSnapshotTask { task, requests }
-            }
+            } => PublishedBranchState::WindowProcessor(replicated_state.clone()),
             RelayProcessorOperationNode::Junction { .. }
             | RelayProcessorOperationNode::Reorderer { .. }
             | RelayProcessorOperationNode::Correlator { .. }
             | RelayProcessorOperationNode::Inferencer { .. }
-            | RelayProcessorOperationNode::WasmProcessor { .. } => SpawnedSnapshotTask {
-                task: None,
-                requests: None,
-            },
-        }
+            | RelayProcessorOperationNode::WasmProcessor { .. } => {
+                return SpawnedSnapshotTask {
+                    task: None,
+                    requests: None,
+                };
+            }
+        };
+        let (request_tx, request_rx) = mpsc::channel(1);
+        let task =
+            runtime.spawn_published_branch_state_snapshot_task(shutdown_tx, published, request_tx);
+        let requests = task.is_some().then_some(request_rx);
+        SpawnedSnapshotTask { task, requests }
     }
 
     pub(super) fn next_deadline(&self) -> Option<Timestamp> {

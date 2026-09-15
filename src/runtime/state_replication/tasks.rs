@@ -64,48 +64,74 @@ impl Runtime {
         }))
     }
 
-    pub(in crate::runtime) fn spawn_deduplicator_snapshot_task(
+    /// Spawn the task that keeps one branch state current for its replicas and on disk.
+    ///
+    /// At least once per replication poll interval it asks the branch task to publish state that
+    /// changed, so replicas follow the branch without anything reading its live state. On every
+    /// snapshot interval, and once more when the branch stops, it also persists what was published
+    /// last, including when the branch task is gone and can no longer publish.
+    pub(in crate::runtime) fn spawn_published_branch_state_snapshot_task(
         &self,
         shutdown_tx: &watch::Sender<bool>,
-        state: Arc<ReplicatedDeduplicatorState>,
+        state: PublishedBranchState,
+        snapshot_requests: mpsc::Sender<ProcessorSnapshotRequest>,
     ) -> Option<JoinHandle<()>> {
         let store = self.inner.state_store.as_ref()?.clone();
         let snapshot_interval = self.inner.state_snapshot_interval;
+        let publication_interval =
+            snapshot_interval.min(self.inner.state_replication_poll_interval);
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         Some(tokio::spawn(async move {
-            let flush_latest_snapshot =
-                |state: &ReplicatedDeduplicatorState, store: &RuntimeStateStore| {
-                    persist_dirty_runtime_state_snapshot(
-                        store,
-                        &state.placement,
-                        &state.last_persisted_lsm,
-                        &state.dirty,
-                        || state.latest_snapshot(),
-                    )
-                };
+            let mut next_persist = Instant::now() + snapshot_interval;
             loop {
                 tokio::task::consume_budget().await;
                 tokio::select! {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
-                            match flush_latest_snapshot(&state, &store) {
+                            if let Err(error) = state.request_publication(&snapshot_requests).await {
+                                warn!(
+                                    kind = state.placement().kind.as_str(),
+                                    error = %error,
+                                    "failed to publish branch state during shutdown"
+                                );
+                            }
+                            match state.persist_published(&store) {
                                 Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
-                                    &state.placement, lsm,
+                                    state.placement(), lsm,
                                 ),
                                 Ok(None) => {}
-                                Err(error) => warn!(error = %error, "failed to flush deduplicator snapshot during shutdown"),
+                                Err(error) => warn!(
+                                    kind = state.placement().kind.as_str(),
+                                    error = %error,
+                                    "failed to flush branch state snapshot during shutdown"
+                                ),
                             }
                             break;
                         }
                     }
-                    _ = sleep(snapshot_interval) => {
-                        match flush_latest_snapshot(&state, &store) {
+                    _ = sleep(publication_interval) => {
+                        if let Err(error) = state.request_publication(&snapshot_requests).await {
+                            warn!(
+                                kind = state.placement().kind.as_str(),
+                                error = %error,
+                                "failed to publish branch state"
+                            );
+                        }
+                        if Instant::now() < next_persist {
+                            continue;
+                        }
+                        next_persist = Instant::now() + snapshot_interval;
+                        match state.persist_published(&store) {
                             Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
-                                &state.placement, lsm,
+                                state.placement(), lsm,
                             ),
                             Ok(None) => {}
-                            Err(error) => warn!(error = %error, "failed to persist deduplicator snapshot"),
+                            Err(error) => warn!(
+                                kind = state.placement().kind.as_str(),
+                                error = %error,
+                                "failed to persist branch state snapshot"
+                            ),
                         }
                     }
                 }
@@ -192,54 +218,6 @@ impl Runtime {
                             ),
                             Ok(None) => {}
                             Err(error) => warn!(error = %error, "failed to persist materialized relay snapshot"),
-                        }
-                    }
-                }
-            }
-        }))
-    }
-
-    pub(in crate::runtime) fn spawn_window_processor_snapshot_task(
-        &self,
-        shutdown_tx: &watch::Sender<bool>,
-        state: Arc<ReplicatedWindowProcessorState>,
-        snapshot_requests: mpsc::Sender<WindowProcessorSnapshotRequest>,
-    ) -> Option<JoinHandle<()>> {
-        let store = self.inner.state_store.as_ref()?.clone();
-        let snapshot_interval = self.inner.state_snapshot_interval;
-        let runtime = self.clone();
-        let mut shutdown_rx = shutdown_tx.subscribe();
-        Some(tokio::spawn(async move {
-            loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
-                    changed = shutdown_rx.changed() => {
-                        if changed.is_err() || *shutdown_rx.borrow() {
-                            match persist_window_processor_state_snapshot(
-                                &store,
-                                &state,
-                                &snapshot_requests,
-                            ).await {
-                                Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
-                                    &state.placement, lsm,
-                                ),
-                                Ok(None) => {}
-                                Err(error) => warn!(error = %error, "failed to flush window processor snapshot during shutdown"),
-                            }
-                            break;
-                        }
-                    }
-                    _ = sleep(snapshot_interval) => {
-                        match persist_window_processor_state_snapshot(
-                            &store,
-                            &state,
-                            &snapshot_requests,
-                        ).await {
-                            Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
-                                &state.placement, lsm,
-                            ),
-                            Ok(None) => {}
-                            Err(error) => warn!(error = %error, "failed to persist window processor snapshot"),
                         }
                     }
                 }
