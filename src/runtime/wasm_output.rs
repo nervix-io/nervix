@@ -1497,11 +1497,9 @@ async fn persist_wasm_guest_state_with_failure_mode(
             return Err(OwnershipHandoffError::checkpoint(reason));
         }
     };
-    let (lsm, payload) = replicated_state
-        .replace_guest_state(guest_state)
-        .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?;
+    let saved = replicated_state.replace_guest_state(guest_state);
     runtime
-        .persist_wasm_processor_snapshot(replicated_state, lsm, &payload)
+        .persist_wasm_processor_snapshot(replicated_state, &saved)
         .await
         .map_err(OwnershipHandoffError::checkpoint)
 }

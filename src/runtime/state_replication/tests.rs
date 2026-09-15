@@ -732,15 +732,19 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         branch_key: string_branch_key("tenant", "globex"),
         ..deduplicator_placement.clone()
     };
-    let deduplicator_state = ReplicatedDeduplicatorState::new(deduplicator_placement.clone(), None)
-        .expect("deduplicator state should initialize");
+    let deduplicator_state = Arc::new(
+        ReplicatedDeduplicatorState::new(deduplicator_placement.clone(), None)
+            .expect("deduplicator state should initialize"),
+    );
     let deduplicator_key =
         DeduplicatorKey::new(vec![ReorderKeyPart::Utf8("order-123".to_string())]);
-    assert!(deduplicator_state.reserve_new_key(
+    let mut deduplicator_keyspace = ReplicatedDeduplicatorState::keyspace(&deduplicator_state);
+    assert!(deduplicator_keyspace.reserve_new_key(
         deduplicator_key.clone(),
         Timestamp::from_unix_nanos(1),
         Duration::from_secs(600),
     ));
+    deduplicator_keyspace.publish();
     let deduplicator_payload = deduplicator_state
         .latest_snapshot()
         .expect("deduplicator state should snapshot")
@@ -909,10 +913,12 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
             .expect("branch checkpoint should load")
             .expect("branch checkpoint should remain");
         assert_eq!(deduplicator_snapshot.lsm, 6);
-        let restored_deduplicator =
+        let restored_deduplicator = Arc::new(
             ReplicatedDeduplicatorState::new(deduplicator_placement, Some(deduplicator_snapshot))
-                .expect("preserved branch checkpoint should decode");
-        assert!(!restored_deduplicator.reserve_new_key(
+                .expect("preserved branch checkpoint should decode"),
+        );
+        let mut restored_keyspace = ReplicatedDeduplicatorState::keyspace(&restored_deduplicator);
+        assert!(!restored_keyspace.reserve_new_key(
             deduplicator_key,
             Timestamp::from_unix_nanos(2),
             Duration::from_secs(600),
@@ -1103,7 +1109,7 @@ fn runtime_state_store_persists_latest_snapshot_with_monotonic_lsm() {
 }
 
 #[tokio::test]
-async fn deduplicator_snapshot_task_persists_dirty_state_on_interval() {
+async fn deduplicator_snapshot_task_persists_published_keys_on_interval() {
     let dir = tempdir().expect("temp dir should open");
     let db = Database::builder(dir.path())
         .open()
@@ -1122,26 +1128,101 @@ async fn deduplicator_snapshot_task_persists_dirty_state_on_interval() {
         .replicated_deduplicator_state(placement.clone())
         .expect("deduplicator state should initialize");
     let (shutdown_tx, _) = watch::channel(false);
+    let (snapshot_request_tx, mut snapshot_requests) = mpsc::channel(1);
     let task = runtime
-        .spawn_deduplicator_snapshot_task(&shutdown_tx, state.clone())
+        .spawn_published_branch_state_snapshot_task(
+            &shutdown_tx,
+            PublishedBranchState::Deduplicator(state.clone()),
+            snapshot_request_tx,
+        )
         .expect("persisted runtime should spawn a snapshot task");
-
-    assert!(state.reserve_new_key(
+    let mut keyspace = ReplicatedDeduplicatorState::keyspace(&state);
+    assert!(keyspace.reserve_new_key(
         DeduplicatorKey::new(vec![ReorderKeyPart::Utf8("txn-1".to_string())]),
         Timestamp::from_unix_nanos(1),
         Duration::from_secs(600),
     ));
-    let expected_lsm = state.current_lsm.current();
+    let snapshot_owner = tokio::spawn(async move {
+        let response = timeout(Duration::from_secs(1), snapshot_requests.recv())
+            .await
+            .expect("snapshot task should ask the branch task to publish")
+            .expect("snapshot request channel should remain open");
+        keyspace.publish();
+        response
+            .send(Ok(()))
+            .expect("the snapshot task waits for the publication it asked for");
+    });
+    let expected_lsm = 1;
 
     wait_for_persisted_runtime_state_lsm(&runtime, &placement, expected_lsm).await;
-    assert_eq!(
-        state.last_persisted_lsm.load(Ordering::SeqCst),
-        expected_lsm
-    );
-    assert!(!state.dirty.load(Ordering::SeqCst));
+    snapshot_owner
+        .await
+        .expect("snapshot owner should stop cleanly");
+    assert_eq!(state.generations.last_persisted_lsm(), expected_lsm);
+    assert!(!state.generations.is_live_dirty());
 
     shutdown_tx.send_replace(true);
     task.await.expect("snapshot task should stop cleanly");
+}
+
+/// A branch task that is gone, such as one aborted past its shutdown grace, can no longer publish.
+/// What it published before is then the newest state anyone can restore, so the snapshot task still
+/// persists it.
+#[tokio::test]
+async fn deduplicator_snapshot_task_persists_published_keys_after_the_branch_task_is_gone() {
+    let dir = tempdir().expect("temp dir should open");
+    let db = Database::builder(dir.path())
+        .open()
+        .expect("db should open");
+    let runtime = Runtime::with_persistence(Some(db), Duration::from_secs(3_600))
+        .expect("runtime should open persisted state");
+    let placement = RuntimeStatePlacement {
+        domain: domain("default"),
+        state: RuntimeStateKind::Deduplicator,
+        kind: ModelKind::Deduplicator,
+        identifier: named("dedup_orders"),
+        schema_fingerprint: [0; 32],
+        branch_key: string_branch_key("tenant", "acme"),
+    };
+    let state = runtime
+        .replicated_deduplicator_state(placement.clone())
+        .expect("deduplicator state should initialize");
+    let (shutdown_tx, _) = watch::channel(false);
+    let (snapshot_request_tx, snapshot_requests) = mpsc::channel(1);
+    let task = runtime
+        .spawn_published_branch_state_snapshot_task(
+            &shutdown_tx,
+            PublishedBranchState::Deduplicator(state.clone()),
+            snapshot_request_tx,
+        )
+        .expect("persisted runtime should spawn a snapshot task");
+    let mut keyspace = ReplicatedDeduplicatorState::keyspace(&state);
+    assert!(keyspace.reserve_new_key(
+        DeduplicatorKey::new(vec![ReorderKeyPart::Utf8("txn-1".to_string())]),
+        Timestamp::from_unix_nanos(1),
+        Duration::from_secs(600),
+    ));
+    keyspace.publish();
+    assert!(keyspace.reserve_new_key(
+        DeduplicatorKey::new(vec![ReorderKeyPart::Utf8("txn-2".to_string())]),
+        Timestamp::from_unix_nanos(2),
+        Duration::from_secs(600),
+    ));
+    drop(keyspace);
+    drop(snapshot_requests);
+
+    shutdown_tx.send_replace(true);
+    task.await.expect("snapshot task should stop cleanly");
+
+    let persisted = runtime
+        .inner
+        .state_store
+        .as_ref()
+        .expect("test runtime should have a state store")
+        .latest_snapshot(&placement)
+        .expect("snapshot lookup should succeed")
+        .expect("the keys the branch task published should be persisted after it is gone");
+    assert_eq!(persisted.lsm, 1);
 }
 
 #[tokio::test]
@@ -1288,7 +1369,7 @@ async fn kafka_offset_snapshot_task_owns_persistence() {
 }
 
 #[tokio::test]
-async fn window_processor_snapshot_task_persists_dirty_state_on_interval() {
+async fn window_processor_snapshot_task_persists_published_state_on_interval() {
     let dir = tempdir().expect("temp dir should open");
     let db = Database::builder(dir.path())
         .open()
@@ -1309,7 +1390,11 @@ async fn window_processor_snapshot_task_persists_dirty_state_on_interval() {
     let (shutdown_tx, _) = watch::channel(false);
     let (snapshot_request_tx, mut snapshot_requests) = mpsc::channel(1);
     let task = runtime
-        .spawn_window_processor_snapshot_task(&shutdown_tx, state.clone(), snapshot_request_tx)
+        .spawn_published_branch_state_snapshot_task(
+            &shutdown_tx,
+            PublishedBranchState::WindowProcessor(state.clone()),
+            snapshot_request_tx,
+        )
         .expect("persisted runtime should spawn a snapshot task");
     let live_state =
         WindowProcessorState::new(&window_aggregate("SET count = COUNT(input.latency)"));
@@ -1317,30 +1402,64 @@ async fn window_processor_snapshot_task_persists_dirty_state_on_interval() {
     let snapshot_owner = tokio::spawn(async move {
         let response = timeout(Duration::from_secs(1), snapshot_requests.recv())
             .await
-            .expect("snapshot task should request live state")
+            .expect("snapshot task should ask the branch task to publish")
             .expect("snapshot request channel should remain open");
-        let result = snapshot_state
+        let published = snapshot_state
             .replace_state(&live_state)
-            .map(|_| ())
             .map_err(|error| error.to_string());
-        let _ = response.send(result);
+        response
+            .send(published)
+            .expect("the snapshot task waits for the publication it asked for");
     });
 
-    state.mark_live_dirty();
+    state.generations.mark_live_dirty();
     let expected_lsm = 1;
 
     wait_for_persisted_runtime_state_lsm(&runtime, &placement, expected_lsm).await;
     snapshot_owner
         .await
         .expect("snapshot owner should stop cleanly");
-    assert_eq!(
-        state.last_persisted_lsm.load(Ordering::SeqCst),
-        expected_lsm
-    );
-    assert!(!state.dirty.load(Ordering::SeqCst));
+    assert_eq!(state.generations.last_persisted_lsm(), expected_lsm);
+    assert!(!state.generations.is_live_dirty());
 
     shutdown_tx.send_replace(true);
     task.await.expect("snapshot task should stop cleanly");
+}
+
+/// The snapshot task, replicas and ownership handoff read the window a branch published for as
+/// long as encoding it takes. The branch keeps publishing meanwhile, and the window they read stays
+/// the generation they loaded.
+#[test]
+fn a_window_state_publication_proceeds_while_a_snapshot_reads_the_previous_one() {
+    let placement = RuntimeStatePlacement {
+        domain: domain("default"),
+        state: RuntimeStateKind::WindowProcessor,
+        kind: ModelKind::WindowProcessor,
+        identifier: named("latency_window"),
+        schema_fingerprint: [0; 32],
+        branch_key: string_branch_key("tenant", "acme"),
+    };
+    let state = ReplicatedWindowProcessorState::new(placement, None)
+        .expect("window processor state should initialize");
+    let live_state =
+        WindowProcessorState::new(&window_aggregate("SET count = COUNT(input.latency)"));
+    state
+        .replace_state(&live_state)
+        .expect("the first window state should publish");
+    let snapshot_read = state.generations.load();
+
+    state
+        .replace_state(&live_state)
+        .expect("a later window state should publish while the first one is read");
+
+    let latest = state.generations.load();
+    assert_eq!(snapshot_read.revision, 1);
+    assert!(snapshot_read.value.is_some());
+    assert_eq!(latest.revision, 2);
+    assert!(
+        !std::sync::Arc::ptr_eq(&snapshot_read, &latest),
+        "publishing replaced the window a snapshot was reading in place"
+    );
 }
 
 #[test]
@@ -1663,12 +1782,22 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
         .await
         .expect("state sync request at the initial LSM should succeed");
     assert!(unchanged_initial.is_none());
-    assert!(state.reserve_new_key(
+    let mut keyspace = ReplicatedDeduplicatorState::keyspace(&state);
+    assert!(keyspace.reserve_new_key(
         DeduplicatorKey::new(vec![ReorderKeyPart::Utf8("txn-1".to_string())]),
         Timestamp::from_unix_nanos(1),
         Duration::from_secs(600),
     ));
-    let lsm = state.current_lsm.current();
+    let unpublished = runtime
+        .handle_state_sync_request(&placement, Some(0))
+        .await
+        .expect("state sync request before the branch publishes should succeed");
+    assert!(
+        unpublished.is_none(),
+        "a state sync request serves only what the branch task published"
+    );
+    keyspace.publish();
+    let lsm = state.generations.load().revision;
 
     let first = runtime
         .handle_state_sync_request(&placement, Some(0))
@@ -1694,15 +1823,23 @@ fn deduplicator_key_reservation_reports_new_and_duplicate_keys() {
         schema_fingerprint: [0; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
-    let state = ReplicatedDeduplicatorState::new(placement, None)
-        .expect("deduplicator state should initialize");
+    let state = Arc::new(
+        ReplicatedDeduplicatorState::new(placement, None)
+            .expect("deduplicator state should initialize"),
+    );
+    let mut keyspace = ReplicatedDeduplicatorState::keyspace(&state);
     let seen_at = Timestamp::from_unix_nanos(1);
     let max_time = Duration::from_secs(600);
 
     let key = DeduplicatorKey::new(vec![ReorderKeyPart::Utf8("txn-1".to_string())]);
-    assert!(state.reserve_new_key(key.clone(), seen_at, max_time));
-    assert!(!state.reserve_new_key(key, seen_at, max_time));
-    assert_eq!(state.current_lsm.current(), 1);
+    assert!(keyspace.reserve_new_key(key.clone(), seen_at, max_time));
+    keyspace.publish();
+    assert!(!keyspace.reserve_new_key(key, seen_at, max_time));
+    assert!(
+        !state.generations.is_live_dirty(),
+        "a duplicate key changed the keyspace"
+    );
+    assert_eq!(state.generations.load().revision, 1);
 }
 
 #[test]

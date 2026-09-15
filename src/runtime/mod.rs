@@ -215,6 +215,7 @@ mod processor_branch_task;
 mod processor_output;
 mod processor_template;
 mod processors;
+mod published_generation;
 mod reconnect_backoff;
 mod reingestor;
 mod relay_batch;
@@ -277,8 +278,8 @@ use correlator::{
     handle_correlator_timeout_action,
 };
 use deduplicator::{
-    CompiledDeduplicatorKeyProgram, DeduplicatorKey, ReplicatedDeduplicatorState,
-    compile_deduplicator_key_program,
+    CompiledDeduplicatorKeyProgram, DeduplicatorKey, DeduplicatorKeyspace,
+    ReplicatedDeduplicatorState, compile_deduplicator_key_program,
 };
 use domain_clock::{
     DomainCadenceOccurrence, DomainCadenceStart, DomainClock, DomainClockAccessResult,
@@ -382,7 +383,7 @@ use planning::{
 };
 use processor_branch_task::{
     PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, ProcessorBranchHandoff, ProcessorNodeCommand,
-    SpawnedSnapshotTask, WindowProcessorSnapshotRequest,
+    ProcessorSnapshotRequest, SpawnedSnapshotTask,
 };
 pub(in crate::runtime) use processor_branch_task::{
     ProcessorRuntimeContext, spawn_processor_node_runtime,
@@ -444,6 +445,7 @@ use state_replication::{
     ActivatedRuntimeStateHandoff, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
     DEFAULT_STATE_SNAPSHOT_INTERVAL, PendingStateCheckpointAnnouncement, PendingStateReplicaSync,
     PreparedForcedRuntimeStateRecovery, PreparedRuntimeStateHandoff, PreparedRuntimeStateSnapshot,
+    PublishedBranchState,
 };
 pub(in crate::runtime) use state_store::{
     ForcedRuntimeStateRecoveryAuthorization, ForcedRuntimeStateRecoveryIdentity,
@@ -497,12 +499,12 @@ use wasm_output::{
     persist_wasm_guest_state,
 };
 use wasm_processor::flush_branch_wasm_processor;
-use wasm_state::ReplicatedWasmProcessorState;
+use wasm_state::{ReplicatedWasmProcessorState, WasmGuestState};
 pub(in crate::runtime) use websocket_signaling::SignalingProtobufDescriptors;
 use window_processor::{
     WindowAggregateInput, WindowProcessorState, evaluate_window_aggregate_inputs,
     flush_ready_window_processor, message_timestamp, snapshot_window_processor_live_state,
-    window_next_deadline, window_width_met,
+    window_next_deadline,
 };
 use window_state::{
     LinearHistogramDelayedRemovalSnapshot, ReplicatedWindowProcessorState,

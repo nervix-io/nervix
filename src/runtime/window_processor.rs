@@ -438,25 +438,27 @@ impl WindowAggregateAccumulator {
         }
     }
 
-    pub(super) fn from_snapshot(snapshot: WindowAggregateAccumulatorSnapshot) -> Self {
+    pub(super) fn from_snapshot(snapshot: &WindowAggregateAccumulatorSnapshot) -> Self {
         match snapshot {
-            WindowAggregateAccumulatorSnapshot::Counter { count } => Self::Counter { count },
+            WindowAggregateAccumulatorSnapshot::Counter { count } => {
+                Self::Counter { count: *count }
+            }
             WindowAggregateAccumulatorSnapshot::Sequence { values } => Self::Sequence {
                 values: values
-                    .into_iter()
+                    .iter()
                     .map(|snapshot| WindowSequenceValue {
                         timestamp: snapshot.timestamp,
                         sequence: snapshot.sequence,
-                        value: RuntimeValue::from_remote(snapshot.value),
+                        value: RuntimeValue::from_remote(snapshot.value.clone()),
                     })
                     .collect(),
             },
             WindowAggregateAccumulatorSnapshot::SortedMap { counts } => Self::SortedMap {
                 counts: counts
-                    .into_iter()
+                    .iter()
                     .map(|entry| {
                         (
-                            RuntimeValueSortKey(RuntimeValue::from_remote(entry.value)),
+                            RuntimeValueSortKey(RuntimeValue::from_remote(entry.value.clone())),
                             entry.count,
                         )
                     })
@@ -471,14 +473,14 @@ impl WindowAggregateAccumulator {
                 delay_nanos,
                 delayed_removals,
             } => Self::LinearHistogram {
-                buckets,
-                total,
-                min,
-                max,
-                width,
-                delay: Duration::from_nanos(delay_nanos),
+                buckets: buckets.clone(),
+                total: *total,
+                min: *min,
+                max: *max,
+                width: *width,
+                delay: Duration::from_nanos(*delay_nanos),
                 delayed_removals: delayed_removals
-                    .into_iter()
+                    .iter()
                     .map(|removal| LinearHistogramDelayedRemoval {
                         expires_at: removal.expires_at,
                         bucket: removal.bucket,
@@ -486,7 +488,7 @@ impl WindowAggregateAccumulator {
                     .collect(),
             },
             WindowAggregateAccumulatorSnapshot::Sum { total } => Self::Sum {
-                total: total.map(RuntimeValue::from_remote),
+                total: total.clone().map(RuntimeValue::from_remote),
             },
         }
     }
@@ -787,10 +789,12 @@ impl WindowProcessorState {
         })
     }
 
+    /// Rebuild a branch's live window from a published snapshot, which stays shared with every
+    /// other reader and is only read here.
     pub(super) fn from_snapshot(
         program: &WindowAggregateProgram,
         input_schema: &CompiledSchema,
-        snapshot: WindowProcessorStateSnapshot,
+        snapshot: &WindowProcessorStateSnapshot,
     ) -> Result<Self, String> {
         if snapshot.accumulators.len() != program.demands().len() {
             return Err(format!(
@@ -802,21 +806,21 @@ impl WindowProcessorState {
         Ok(Self {
             entries: snapshot
                 .entries
-                .into_iter()
+                .iter()
                 .map(|entry| {
                     Ok(WindowEntry {
                         sequence: entry.sequence,
                         timestamp: entry.timestamp,
                         message: RelayMessage {
-                            key: BranchKey::from_remote_key(entry.key)?,
-                            record: input_schema.runtime_row_from_remote(entry.record)?,
+                            key: BranchKey::from_remote_key(entry.key.clone())?,
+                            record: input_schema.runtime_row_from_remote(&entry.record)?,
                             acks: AckSet::empty(),
                         },
                         aggregate_inputs: entry
                             .aggregate_inputs
-                            .into_iter()
+                            .iter()
                             .map(|value| WindowAggregateInput {
-                                value: value.map(RuntimeValue::from_remote),
+                                value: value.clone().map(RuntimeValue::from_remote),
                             })
                             .collect(),
                     })
@@ -825,7 +829,7 @@ impl WindowProcessorState {
             next_sequence: snapshot.next_sequence,
             accumulators: snapshot
                 .accumulators
-                .into_iter()
+                .iter()
                 .map(WindowAggregateAccumulator::from_snapshot)
                 .collect(),
         })
@@ -2259,12 +2263,10 @@ mod tests {
         }
 
         let input_schema = test_schema(&[("latency", ParseAsType::I64)]);
-        let restored = WindowProcessorState::from_snapshot(
-            &aggregate,
-            input_schema.as_ref(),
-            state.to_snapshot().expect("snapshot should encode"),
-        )
-        .expect("snapshot should restore");
+        let snapshot = state.to_snapshot().expect("snapshot should encode");
+        let restored =
+            WindowProcessorState::from_snapshot(&aggregate, input_schema.as_ref(), &snapshot)
+                .expect("snapshot should restore");
         let compiled =
             compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
         let record = evaluate_window_aggregate(

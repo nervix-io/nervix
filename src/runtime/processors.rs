@@ -31,8 +31,8 @@ use triomphe::Arc;
 use super::{
     BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingResult, BranchRuntime,
     CompiledBranchProgram, CompiledDeduplicatorKeyProgram, CompiledProgramWithMaterializedInterest,
-    DomainClock, DomainExecutionSnapshot, PendingMaterializedBatch, RelayBoundaryServices,
-    RelayMessage, RelayRecordBatch, RelayRegistry, ReplicatedDeduplicatorState,
+    DeduplicatorKeyspace, DomainClock, DomainExecutionSnapshot, PendingMaterializedBatch,
+    RelayBoundaryServices, RelayMessage, RelayRecordBatch, RelayRegistry,
     ReplicatedWasmProcessorState, ReplicatedWindowProcessorState, RuntimeFlushPolicy,
     RuntimeInputCollectPolicy, RuntimeInputCollector, SharedActiveGraph, WindowProcessorState,
     inferencer::OnnxInferencerSession, relay_batch::RelayRecordBatchReorderError,
@@ -344,7 +344,7 @@ pub(super) enum RelayProcessorOperationNode {
         deduplicate_on: Vec<nervix_models::Expression>,
         max_time: Duration,
         compiled_key_program: Option<Box<CompiledDeduplicatorKeyProgram>>,
-        state: Arc<ReplicatedDeduplicatorState>,
+        keyspace: DeduplicatorKeyspace,
     },
     WindowProcessor {
         output_routes: RelayProcessorOutputsNode,

@@ -264,31 +264,39 @@ Feature: Window processor runtime behavior
       """
       {"tenant":"acme","latency":10}
       """
-    And within "5s" DESCRIBE DOMAIN section "processed" metric "messages_total" "received" relay "metrics" across physical nodes totals 1
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"beta","latency":100}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"acme","latency":20}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"beta","latency":200}
+      """
+    Then within "5s" DESCRIBE DOMAIN section "processed" metric "messages_total" "received" relay "metrics" across physical nodes totals 4
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
     When these NSPL commands are executed on the leader node
       """
-      CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE tenant = 'acme';
+      CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries;
       """
-    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
       """
-      {"tenant":"acme","latency":20}
+      {"tenant":"beta","latency":300}
       """
-    Then the relay subscription does not receive a payload within "500ms"
-    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
       """
       {"tenant":"acme","latency":30}
       """
-    Then the relay subscription receives a payload
+    Then within "10s" the relay subscription receives payloads containing all fragments
       """
-      "sample_count":3
+      key={"tenant":"acme"} | "tenant":"acme" | "sample_count":3 | "total_latency":60
+      key={"tenant":"beta"} | "tenant":"beta" | "sample_count":3 | "total_latency":600
       """
-    And the last relay subscription payload contains
-      """
-      "total_latency":60
-      """
-    And the last relay subscription payload contains key fragment '{"tenant":"acme"}'
+    And the relay subscription does not receive a payload within "500ms"
 
     Examples:
       | cluster_size | replica_count |

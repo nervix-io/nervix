@@ -13,18 +13,20 @@ Feature: Deduplicator state replication
     When these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA transaction (
+        tenant STRING,
         transaction_id STRING,
         amount I64
       );
         CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
+        tenant string,
         transaction_id string,
         amount integer
       );
         CREATE CODEC transaction_codec
         FROM WIRE JSON SCHEMA transaction_wire
         TO SCHEMA transaction;
-        CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-        CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA transaction_id_branch TTL 5m;
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA tenant_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -38,7 +40,7 @@ Feature: Deduplicator state replication
         TO ss1
         INHERIT ALL
         BRANCHED BY by_source_txns
-        SET transaction_id = message.transaction_id
+        SET tenant = message.tenant
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -65,24 +67,52 @@ Feature: Deduplicator state replication
       """
     Then within "10s" repeatedly posting http payload to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup" yields an observed broker payload
       """
-      {"transaction_id":"warmup","amount":1}
+      {"tenant":"acme","transaction_id":"warmup","amount":1}
       """
     And within "10s" repeatedly posting http payload to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup" yields an observed broker payload
       """
-      {"transaction_id":"txn-1","amount":10}
+      {"tenant":"acme","transaction_id":"txn-1","amount":10}
+      """
+    And within "10s" repeatedly posting http payload to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup" yields an observed broker payload
+      """
+      {"tenant":"beta","transaction_id":"txn-1","amount":20}
+      """
+    And within "10s" repeatedly posting http payload to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup" yields an observed broker payload
+      """
+      {"tenant":"acme","transaction_id":"txn-2","amount":30}
+      """
+    And within "10s" repeatedly posting http payload to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup" yields an observed broker payload
+      """
+      {"tenant":"beta","transaction_id":"txn-2","amount":40}
       """
     And the observed broker does not receive a payload within "300ms"
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
     And node "node-1" eventually accepts http traffic for host "http-{{test_id}}.example.com" path "/dedup"
       """
-      {"transaction_id":"txn-1","amount":10}
+      {"tenant":"acme","transaction_id":"txn-1","amount":10}
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup"
       """
-      {"transaction_id":"txn-1","amount":10}
+      {"tenant":"beta","transaction_id":"txn-1","amount":20}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup"
+      """
+      {"tenant":"acme","transaction_id":"txn-2","amount":30}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup"
+      """
+      {"tenant":"beta","transaction_id":"txn-2","amount":40}
       """
     Then the observed broker does not receive a payload within "1s"
+    And within "10s" repeatedly posting http payload to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup" yields an observed broker payload
+      """
+      {"tenant":"beta","transaction_id":"txn-3","amount":50}
+      """
+    And within "10s" repeatedly posting http payload to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup" yields an observed broker payload
+      """
+      {"tenant":"acme","transaction_id":"txn-3","amount":60}
+      """
 
     Examples:
       | cluster_size | replica_count |

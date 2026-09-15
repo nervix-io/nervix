@@ -411,12 +411,8 @@ impl RelayProcessorTemplate {
                     output_routes,
                     deduplicate_on,
                     max_time,
-                } => RelayProcessorOperationNode::Deduplicator {
-                    output_routes: Self::instantiate_outputs(output_routes),
-                    deduplicate_on: deduplicate_on.clone(),
-                    max_time: *max_time,
-                    compiled_key_program: None,
-                    state: runtime
+                } => {
+                    let state = runtime
                         .replicated_deduplicator_state(runtime.state_placement(
                             domain,
                             RuntimeStateKind::Deduplicator,
@@ -424,8 +420,15 @@ impl RelayProcessorTemplate {
                             &self.processor,
                             key.clone(),
                         ))
-                        .map_err(|error| error.to_string())?,
-                },
+                        .map_err(|error| error.to_string())?;
+                    RelayProcessorOperationNode::Deduplicator {
+                        output_routes: Self::instantiate_outputs(output_routes),
+                        deduplicate_on: deduplicate_on.clone(),
+                        max_time: *max_time,
+                        compiled_key_program: None,
+                        keyspace: ReplicatedDeduplicatorState::keyspace(&state),
+                    }
+                }
                 RelayProcessorOperationTemplate::WindowProcessor {
                     output_routes,
                     width_messages,

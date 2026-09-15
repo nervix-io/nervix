@@ -77,7 +77,17 @@ where
     /// Returns `false` and leaves the existing entry unchanged when the key is
     /// already present.
     pub fn insert(&mut self, key: K, value: V) -> bool {
-        let key = SharedKey(Arc::new(key));
+        self.insert_shared(Arc::new(key), value)
+    }
+
+    /// Inserts a new entry at the newest end of the expiration order, keeping
+    /// the key in the allocation the caller already shares.
+    ///
+    /// A key read through [`Self::iter_shared`] therefore enters another map
+    /// without being copied. Returns `false` and leaves the existing entry
+    /// unchanged when the key is already present.
+    pub fn insert_shared(&mut self, key: Arc<K>, value: V) -> bool {
+        let key = SharedKey(key);
         let std::collections::hash_map::Entry::Vacant(slot) = self.entries.entry(key) else {
             return false;
         };
@@ -179,6 +189,15 @@ where
         self.order
             .iter()
             .map(|entry| (entry.key.as_ref(), &entry.value))
+    }
+
+    /// Iterates from the oldest entry to the newest, yielding each key as the
+    /// allocation the map shares it through.
+    ///
+    /// Cloning a yielded key shares it rather than copying it. Keys are
+    /// immutable, so a holder outside the map sees the key the map stored.
+    pub fn iter_shared(&self) -> impl Iterator<Item = (&Arc<K>, &V)> {
+        self.order.iter().map(|entry| (&entry.key, &entry.value))
     }
 
     /// Removes every entry.
@@ -415,6 +434,35 @@ mod tests {
                 expected.first().copied()
             );
         }
+    }
+
+    #[test]
+    fn shared_keys_move_between_maps_without_being_copied() {
+        let mut original = ExpiryMap::default();
+        assert!(original.insert("first".to_string(), 10));
+        assert!(original.insert("second".to_string(), 20));
+
+        let mut shared = ExpiryMap::default();
+        for (key, value) in original.iter_shared() {
+            assert!(shared.insert_shared(key.clone(), *value));
+        }
+        assert!(!shared.insert_shared(triomphe::Arc::new("first".to_string()), 100));
+
+        for ((original_key, _), (shared_key, _)) in original.iter_shared().zip(shared.iter_shared())
+        {
+            assert!(triomphe::Arc::ptr_eq(original_key, shared_key));
+        }
+        drop(original);
+        assert_eq!(
+            shared
+                .iter()
+                .map(|(key, value)| (key.as_str(), *value))
+                .collect::<Vec<_>>(),
+            vec![("first", 10), ("second", 20)]
+        );
+        assert_eq!(shared.remove(&"second".to_string()), Some(20));
+        assert_eq!(shared.remove_oldest(), Some(10));
+        assert!(shared.is_empty());
     }
 
     #[test]
