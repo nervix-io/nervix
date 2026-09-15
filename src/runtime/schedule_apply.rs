@@ -252,9 +252,11 @@ impl Runtime {
         desired: &DomainSchedule,
         reassignments: &[NodeRef],
     ) -> Vec<NodeRef> {
-        let Some(local_node_id) = self.inner.remote_dispatch.local_node_id.read().clone() else {
+        let dispatcher = self.inner.remote_dispatcher.load();
+        let Some(dispatcher) = dispatcher.as_deref() else {
             return Vec::new();
         };
+        let local_node_id = dispatcher.local_node_id();
         let Some(execution) = self.inner.executions.get(domain) else {
             return Vec::new();
         };
@@ -265,8 +267,8 @@ impl Runtime {
                     && entity.kind != ModelKind::Lookup
                     && Self::scheduled_node(&execution.schedule, entity).is_some_and(|existing| {
                         Self::scheduled_node(desired, entity).is_some_and(|desired_node| {
-                            existing.executes_on(&local_node_id)
-                                != desired_node.executes_on(&local_node_id)
+                            existing.executes_on(local_node_id)
+                                != desired_node.executes_on(local_node_id)
                         })
                     })
             })
@@ -617,7 +619,8 @@ impl Runtime {
         reassignments: &[NodeRef],
         dynamic_updates: &[nervix_models::DynamicModelUpdate],
     ) -> Result<(), RuntimeError> {
-        let local_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
+        let dispatcher = self.inner.remote_dispatcher.load_full();
+        let local_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
         // A reassignment only replaces this cluster node's runtime when the node stopped or
         // started executing here. A node that keeps executing here, such as a server-side ingestor
         // that merely lost one of its other placements, is left running.
@@ -683,7 +686,7 @@ impl Runtime {
         // desired fingerprints before constructing state so the post-swap stale-state purge does
         // not discard the newly attached state instance.
         self.install_state_schema_fingerprints(&schedule);
-        self.rebind_reassigned_nodes(domain, &schedule, reassignments, local_node_id.as_ref())
+        self.rebind_reassigned_nodes(domain, &schedule, reassignments, local_node_id)
             .await?;
 
         for entity in entities {
@@ -795,16 +798,13 @@ impl Runtime {
                         domain,
                         &shutdown,
                         desired_node,
-                        local_node_id.as_ref().ok_or_else(|| {
-                            RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: "local node id is unavailable for relay transition"
-                                    .to_string(),
-                            }
+                        local_node_id.ok_or_else(|| RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: "local node id is unavailable for relay transition".to_string(),
                         })?,
                         Some(schema.arrow_schema()),
                     )?;
-                    let state_task = if desired_node.executes_on(local_node_id.as_ref().verified(
+                    let state_task = if desired_node.executes_on(local_node_id.verified(
                         "the resolution above returned an error unless the local node id is \
                          present",
                     )) {
@@ -896,7 +896,7 @@ impl Runtime {
                     }
                 }
 
-                if Self::scheduled_node_executes_locally(desired_node, local_node_id.as_ref()) {
+                if Self::scheduled_node_executes_locally(desired_node, local_node_id) {
                     let source_model =
                         Self::source_model_for_scheduled_ingestor(&schedule, desired_ingestor)
                             .ok_or_else(|| RuntimeError::BuildDomainExecution {
@@ -976,9 +976,8 @@ impl Runtime {
                     });
                 }
 
-                let executes_locally = local_node_id
-                    .as_ref()
-                    .is_some_and(|node_id| desired_node.executes_on(node_id));
+                let executes_locally =
+                    local_node_id.is_some_and(|node_id| desired_node.executes_on(node_id));
                 /// What spawning the swapped emitter's task needs from the domain execution,
                 /// taken while it is borrowed so the spawn itself runs without holding that
                 /// borrow.
@@ -1171,7 +1170,7 @@ impl Runtime {
                     runtime.shutdown().await;
                 }
 
-                if Self::scheduled_node_executes_locally(desired_node, local_node_id.as_ref()) {
+                if Self::scheduled_node_executes_locally(desired_node, local_node_id) {
                     let desired_entrypoint_specs = desired_specs
                         .entrypoints
                         .iter()
@@ -1322,7 +1321,7 @@ impl Runtime {
                     task.join_after_shutdown("generator").await;
                 }
 
-                if Self::scheduled_node_executes_locally(desired_node, local_node_id.as_ref()) {
+                if Self::scheduled_node_executes_locally(desired_node, local_node_id) {
                     let (shutdown, spec) = {
                         let execution = self.inner.executions.get(domain).ok_or_else(|| {
                             RuntimeError::BuildDomainExecution {
@@ -1566,9 +1565,8 @@ impl Runtime {
                 }
             }
 
-            let executes_locally = local_node_id
-                .as_ref()
-                .is_some_and(|node_id| desired_node.executes_on(node_id));
+            let executes_locally =
+                local_node_id.is_some_and(|node_id| desired_node.executes_on(node_id));
             if executes_locally {
                 let mut inputs = Vec::with_capacity(desired_spec.spec.input_relays.len());
                 for relay in &desired_spec.spec.input_relays {
@@ -1605,7 +1603,7 @@ impl Runtime {
         self.apply_dynamic_model_updates(domain, dynamic_updates)
             .await?;
         if let Some(mut execution) = self.inner.executions.get_mut(domain) {
-            if let Some(local_node_id) = local_node_id.as_ref() {
+            if let Some(local_node_id) = local_node_id {
                 let remote_consumers =
                     Self::remote_runtime_consumers_for_schedule(&schedule, local_node_id);
                 for (relay, services) in &execution.relay_services {
@@ -2272,8 +2270,11 @@ mod tests {
     #[tokio::test]
     async fn scheduled_processor_entity_swap_is_not_junction_specific() {
         let runtime = Runtime::default();
-        *runtime.inner.remote_dispatch.local_node_id.write() =
-            Some(ClusterNodeName::parse("node-1").expect("valid name"));
+        attach_loopback_cluster(
+            &runtime,
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+        )
+        .await;
         let domain = domain("default");
         runtime.sync_domains(&BTreeMap::from([(
             domain.clone(),
@@ -2379,8 +2380,11 @@ mod tests {
     #[tokio::test]
     async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
         let runtime = Runtime::default();
-        *runtime.inner.remote_dispatch.local_node_id.write() =
-            Some(ClusterNodeName::parse("node-1").expect("valid name"));
+        attach_loopback_cluster(
+            &runtime,
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+        )
+        .await;
         let domain = domain("default");
         runtime.sync_domains(&BTreeMap::from([(
             domain.clone(),

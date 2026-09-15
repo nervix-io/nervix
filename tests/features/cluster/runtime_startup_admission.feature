@@ -1,3 +1,4 @@
+@shutdown_qualification
 Feature: Runtime startup admission
 
   Scenario: A restarting node waits for linearizable consensus catch-up before executing persisted ownership

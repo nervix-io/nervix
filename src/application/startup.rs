@@ -7,7 +7,7 @@
 //! - **Depends on.** The argument definition and the stores it opens.
 //! - **Must not know.** What the configured node goes on to run.
 
-use std::{net::SocketAddr, path::PathBuf};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc as StdArc};
 
 use error_stack::{Report, ResultExt};
 use fjall::Database;
@@ -27,7 +27,8 @@ use crate::{
 
 pub(in crate::application) struct ApplicationStartup {
     pub(in crate::application) db: Database,
-    pub(in crate::application) resource_store: Arc<ResourceStore>,
+    /// A `std` reference count because the runtime publishes the same store through `ArcSwap`.
+    pub(in crate::application) resource_store: StdArc<ResourceStore>,
     pub(in crate::application) registry: Arc<Registry>,
     pub(in crate::application) runtime: Runtime,
     pub(in crate::application) consensus: Option<Consensus>,

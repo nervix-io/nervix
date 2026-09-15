@@ -22,6 +22,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     net::SocketAddr,
     path::PathBuf,
+    sync::Arc as StdArc,
 };
 
 use admitted_connection::AdmittingListener;
@@ -149,7 +150,7 @@ mod startup;
 mod subscription;
 mod termination_signals;
 #[cfg(test)]
-mod test_fixtures;
+pub(crate) mod test_fixtures;
 mod tls;
 mod tracing_setup;
 mod transaction;
@@ -812,7 +813,7 @@ impl Application {
             error!(error = %error, "failed to initialize runtime persistence");
             Report::new(AppError::OpenRuntimeState)
         })?;
-        let resource_store = Arc::new(
+        let resource_store = StdArc::new(
             ResourceStore::open_with_limits(
                 db_path.join("resources"),
                 runtime.executor().clone(),
@@ -977,7 +978,7 @@ impl Application {
             interconnect.verified("startup assigns this handle before it reaches this point");
         let mut interconnect_rx = interconnect_rx;
         let runtime_admission = Arc::new(runtime_admission::RuntimeAdmission::new());
-        runtime.attach_remote_dispatcher(node_id.clone(), cluster.clone(), interconnect.clone());
+        runtime.attach_remote_dispatcher(cluster.clone(), interconnect.clone());
         let node_observations = NodeObservations::new(
             runtime.executor().clone(),
             interconnect.clone(),

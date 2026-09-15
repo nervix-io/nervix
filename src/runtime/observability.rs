@@ -55,10 +55,11 @@ impl Runtime {
         branch: Option<&BranchName>,
     ) {
         if let Some(branch) = branch {
+            let dispatcher = self.inner.remote_dispatcher.load();
             self.inner.metrics.register_branch(
                 domain,
                 branch,
-                self.inner.remote_dispatch.local_node_id.read().as_ref(),
+                dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
             );
         }
     }
@@ -70,10 +71,11 @@ impl Runtime {
         key: &Option<BranchKey>,
     ) {
         if let Some(branch) = branch {
+            let dispatcher = self.inner.remote_dispatcher.load();
             self.inner.metrics.observe_branch_instance_created(
                 domain,
                 branch,
-                self.inner.remote_dispatch.local_node_id.read().as_ref(),
+                dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
                 branch_key_display(key),
             );
         }
@@ -89,12 +91,13 @@ impl Runtime {
         let Some(branch) = branch else {
             return;
         };
-        let physical_node_id = self.inner.remote_dispatch.local_node_id.read();
+        let dispatcher = self.inner.remote_dispatcher.load();
+        let physical_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
         if let Some(reason) = reason {
             self.inner.metrics.observe_branch_instance_removed(
                 domain,
                 branch,
-                physical_node_id.as_ref(),
+                physical_node_id,
                 branch_key_display(key),
                 reason,
             );
@@ -102,7 +105,7 @@ impl Runtime {
             self.inner.metrics.observe_branch_instance_detached(
                 domain,
                 branch,
-                physical_node_id.as_ref(),
+                physical_node_id,
                 branch_key_display(key),
             );
         }

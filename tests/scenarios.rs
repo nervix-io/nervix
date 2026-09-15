@@ -3,6 +3,7 @@ use std::{
     fmt,
     fs::{OpenOptions, create_dir_all},
     io::Write,
+    os::unix::process::ExitStatusExt as _,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
     process::Command,
@@ -94,8 +95,8 @@ use crate::common::{
         RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
     },
     server_process::{
-        HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessLaunch,
-        ServerProcessOption, describe_exit,
+        HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
+        ServerProcessLaunch, ServerProcessOption, describe_exit,
     },
 };
 
@@ -220,6 +221,7 @@ struct ScenarioWorld {
     silent_interconnect_peers: Vec<tokio::net::TcpStream>,
     last_interconnect_attempt_error: Option<String>,
     server_process: Option<ServerProcess>,
+    server_process_http_load: Option<ServerProcessHttpLoad>,
     held_resource_upload: Option<HeldResourceUpload>,
     /// When the last signal was sent to the server process, taken before the signal is delivered
     /// so an exit measured against it can only look later, never earlier.
@@ -311,6 +313,7 @@ impl fmt::Debug for ScenarioWorld {
                 &self.last_interconnect_attempt_error,
             )
             .field("server_process", &self.server_process)
+            .field("server_process_http_load", &self.server_process_http_load)
             .field("held_resource_upload", &self.held_resource_upload.is_some())
             .field("last_server_signal_at", &self.last_server_signal_at)
             .finish()
@@ -1260,6 +1263,20 @@ async fn given_nervix_server_process_is_started_with_drain_timeout(
     start_ready_server_process(world, &[ServerProcessOption::DrainTimeout(drain_timeout)]).await;
 }
 
+#[given(expr = "a nervix-server process is started with state snapshot interval {string}")]
+async fn given_nervix_server_process_is_started_with_state_snapshot_interval(
+    world: &mut ScenarioWorld,
+    interval: String,
+) {
+    let interval = humantime::parse_duration(&interval)
+        .expect("state snapshot interval must be a valid duration");
+    start_ready_server_process(
+        world,
+        &[ServerProcessOption::StateSnapshotInterval(interval)],
+    )
+    .await;
+}
+
 #[given(
     expr = "a nervix-server process is started with drain timeout {string} and shutdown timeout \
             {string}"
@@ -1352,6 +1369,70 @@ async fn when_http_payload_is_posted_to_server_process(
     }
 }
 
+#[when(
+    expr = "the server process eventually accepts http payload with host {string} path {string}"
+)]
+async fn when_server_process_eventually_accepts_http_payload(
+    world: &mut ScenarioWorld,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    world
+        .server_process
+        .as_mut()
+        .expect("a nervix-server process must be started first")
+        .publish_http_eventually(&host, &path, &payload)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[when(
+    expr = "HTTP load against the server process begins at id {int} with host {string} path \
+            {string}"
+)]
+fn when_http_load_against_server_process_begins(
+    world: &mut ScenarioWorld,
+    first_id: u64,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    assert!(
+        world.server_process_http_load.is_none(),
+        "a scenario starts at most one server process HTTP load"
+    );
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload_templates = expand_placeholders(world, docstring(step))
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let load = world
+        .server_process
+        .as_ref()
+        .expect("a nervix-server process must be started first")
+        .start_http_load(&host, &path, first_id, payload_templates)
+        .unwrap_or_else(|error| panic!("failed to start server process HTTP load: {error}"));
+    world.server_process_http_load = Some(load);
+}
+
+#[then(expr = "the server process load admits at least {int} payloads")]
+async fn then_server_process_load_admits_at_least(world: &mut ScenarioWorld, expected: u64) {
+    world
+        .server_process_http_load
+        .as_mut()
+        .expect("server process HTTP load must be started first")
+        .wait_for_admissions(expected)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
 #[given(
     regex = r#"^an authenticated upload of resource "([^"]+)" (waiting for its first message|waiting for its next chunk|sending chunks slowly) is held open on the server process$"#
 )]
@@ -1392,6 +1473,62 @@ async fn when_server_process_receives_signal(world: &mut ScenarioWorld, signal: 
         .send_signal(signal)
         .unwrap_or_else(|error| panic!("{error}"));
     world.last_server_signal_at = Some(signalled_at);
+}
+
+#[then(expr = "the server process is terminated by {word} within {string} of the last signal")]
+async fn then_server_process_is_terminated_by_signal_within(
+    world: &mut ScenarioWorld,
+    expected_signal: String,
+    bound: String,
+) {
+    let expected_signal = expected_signal
+        .parse::<nix::sys::signal::Signal>()
+        .expect("the scenario names a signal such as SIGKILL");
+    let bound = humantime::parse_duration(&bound).expect("step duration must be a valid duration");
+    let signalled_at = world
+        .last_server_signal_at
+        .expect("a signal must be delivered to the server process first");
+    world.server_process_http_load = None;
+    let process = world
+        .server_process
+        .as_mut()
+        .expect("a nervix-server process must be started first");
+    let status = process
+        .wait_for_exit()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let elapsed = signalled_at.elapsed();
+    let actual_signal = match status.signal() {
+        Some(signal) => nix::sys::signal::Signal::try_from(signal).ok(),
+        None => None,
+    };
+    assert_eq!(
+        actual_signal,
+        Some(expected_signal),
+        "nervix-server ended with {}, expected termination by {expected_signal}\n{}",
+        describe_exit(status),
+        process.log_tail()
+    );
+    assert!(
+        elapsed <= bound,
+        "nervix-server exited {elapsed:?} after the last signal, beyond {bound:?}\n{}",
+        process.log_tail()
+    );
+}
+
+#[when("the server process is restarted from its existing database")]
+async fn when_server_process_is_restarted_from_existing_database(world: &mut ScenarioWorld) {
+    assert!(
+        world.server_process_http_load.is_none(),
+        "server process HTTP load must stop before the process restarts"
+    );
+    world
+        .server_process
+        .as_mut()
+        .expect("a nervix-server process must be started first")
+        .restart()
+        .await
+        .unwrap_or_else(|error| panic!("failed to restart nervix-server: {error}"));
 }
 
 #[then(expr = "the server process exits with status {int}")]
@@ -15872,6 +16009,56 @@ async fn then_postgres_table_eventually_contains_exactly_rows(
     }
 }
 
+#[then("the Postgres table contains exactly one row for each of these user ids")]
+async fn then_postgres_table_contains_exactly_one_row_for_each_user_id(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let expected_ids = expand_placeholders(world, docstring(step))
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            line.parse::<i32>()
+                .unwrap_or_else(|error| panic!("invalid Postgres user id {line:?}: {error}"))
+        })
+        .collect::<BTreeSet<_>>();
+    assert!(
+        !expected_ids.is_empty(),
+        "the Postgres user id assertion requires at least one id"
+    );
+    let table = world
+        .postgres_table
+        .as_ref()
+        .expect("a Postgres table must be prepared before assertion")
+        .clone();
+    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
+        .await
+        .expect("failed to connect to Postgres");
+    let rows = sqlx::query(SqlxAssertSqlSafe(format!(
+        "SELECT postgres_user_id, count(*) FROM {table} GROUP BY postgres_user_id"
+    )))
+    .fetch_all(&client)
+    .await
+    .expect("failed to count Postgres rows by user id");
+    let observed_counts = rows
+        .iter()
+        .map(|row| {
+            let user_id: i32 = row.get(0);
+            let count: i64 = row.get(1);
+            (user_id, count)
+        })
+        .collect::<BTreeMap<_, _>>();
+    for user_id in expected_ids {
+        let observed = observed_counts.get(&user_id).copied().unwrap_or(0);
+        assert_eq!(
+            observed, 1,
+            "expected exactly one Postgres row for user id {user_id}; observed counts: \
+             {observed_counts:?}"
+        );
+    }
+}
+
 #[then(
     expr = "the Postgres table eventually contains {int} rows across at least {int} inserts of at \
             most {int} rows"
@@ -17422,6 +17609,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
                         world.last_subscription_payload,
                         world.last_broker_payload
                     ));
+                    world.server_process_http_load = None;
                     world.held_resource_upload = None;
                     world.server_process = None;
                     world.broker_observer = None;
