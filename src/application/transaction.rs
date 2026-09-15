@@ -11,7 +11,7 @@ use std::{collections::BTreeSet, sync::Arc as StdArc};
 
 use arch_into::ArchInto;
 use error_stack::{Report, ResultExt};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
     ConsensusError, ConsensusTransactionError, ReplicatedTransaction, TransactionApplyingStep,
     TransactionCommandResult, TransactionCommitAdvance, TransactionDiagnostic, TransactionOutcome,
@@ -19,8 +19,13 @@ use nervix_consensus::{
     TransactionStepResult,
 };
 use nervix_models::{
-    CommandExecutionReference, DomainName, DomainStatus, QuiesceLevel, ResourceName, Statement,
-    UserName,
+    ActualExecutionStepImpact, CanonicalImpactSet, CommandExecutionReference,
+    DomainLifecycleAction, DomainLifecycleImpact, DomainName, DomainStatus,
+    ExecutionStepImpactReport, ImpactAttribution, ImpactDiagnostic, ImpactDiagnosticKind,
+    ImpactEffects, ImpactNodeCoverage, ImpactReportCompleteness, OwnershipMoveImpact,
+    PauseRequirement, PlannedExecutionStepImpact, QuiesceLevel, QuiesceSubgraph,
+    ResourceCatalogAction, ResourceCatalogImpact, ResourceName, Statement,
+    TransactionOperationRange, UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
 use parking_lot::Mutex as ParkingMutex;
@@ -245,12 +250,12 @@ fn transaction_commit_result(transaction: &ReplicatedTransaction) -> CommandResu
     let quiesce_level = transaction
         .commit_results()
         .iter()
-        .filter_map(|step| step.quiesce_level)
+        .map(|step| step.impact.planned().pause.level())
         .max();
     let planned_relocations = transaction
         .commit_results()
         .iter()
-        .filter_map(|step| step.planned_relocations)
+        .map(|step| step.impact.planned().effects.ownership_moves.len())
         .sum::<usize>();
     let mut message = match transaction.finished_outcome() {
         Some(TransactionOutcome::Committed) => String::new(),
@@ -1396,22 +1401,16 @@ impl SessionServiceImpl {
                                 "transaction '{}' committed the effect beginning at statement {}, \
                                  but it failed to become usable: {error}",
                                 transaction.id,
-                                applying.result.first_statement.checked_add(1).assured(
-                                    "an applying result begins at a queued transaction statement"
-                                )
+                                applying.result.operation_range().first()
                             )),
                         }
                     }
-                    Err(error) => {
-                        Some(format!(
-                            "transaction '{}' committed the effect beginning at statement {}, but \
-                             it failed to become usable: {error}",
-                            transaction.id,
-                            applying.result.first_statement.checked_add(1).assured(
-                                "an applying result begins at a queued transaction statement"
-                            )
-                        ))
-                    }
+                    Err(error) => Some(format!(
+                        "transaction '{}' committed the effect beginning at statement {}, but it \
+                         failed to become usable: {error}",
+                        transaction.id,
+                        applying.result.operation_range().first()
+                    )),
                 },
             }
         };
@@ -1443,7 +1442,7 @@ impl SessionServiceImpl {
             .consensus
             .complete_transaction_application(
                 transaction.id.clone(),
-                applying.result.first_statement,
+                applying.result.first_statement(),
                 current_timestamp(),
                 application_failure,
             )
@@ -1518,9 +1517,9 @@ impl SessionServiceImpl {
         for result in transaction.commit_results() {
             tokio::task::consume_budget().await;
             let Some(statements) = result
-                .first_statement
-                .checked_add(result.statement_count)
-                .and_then(|end| transaction.statements.get(result.first_statement..end))
+                .first_statement()
+                .checked_add(result.statement_count())
+                .and_then(|end| transaction.statements.get(result.first_statement()..end))
             else {
                 return Err(Report::new(TransactionCommitError::InvalidProgress {
                     id: transaction.id.clone(),
@@ -1584,26 +1583,13 @@ impl SessionServiceImpl {
             })
         };
         let effect = if result.success { effect } else { None };
-        let planned_relocations = match effect.as_ref() {
-            Some(
-                TransactionStepEffect::ReplaceDomainSchedule {
-                    expected_schedule,
-                    schedule,
-                    ..
-                }
-                | TransactionStepEffect::PutDomainAndSchedule {
-                    expected_schedule,
-                    schedule,
-                    ..
-                },
-            ) => {
-                let count =
-                    planned_ownership_moves(expected_schedule.as_deref(), schedule.as_deref())
-                        .len();
-                (count > 0).then_some(count)
-            }
-            _ => None,
-        };
+        let impact = Self::transaction_step_impact(
+            transaction,
+            first_statement,
+            statement_count,
+            quiesce_level,
+            effect.as_ref(),
+        );
         self.inner
             .consensus
             .advance_transaction_commit(TransactionCommitAdvance {
@@ -1612,10 +1598,7 @@ impl SessionServiceImpl {
                 next_statement,
                 at: current_timestamp(),
                 result: TransactionStepResult {
-                    first_statement,
-                    statement_count,
-                    quiesce_level,
-                    planned_relocations,
+                    impact,
                     result: replicated_command_result(&result),
                 },
                 effect,
@@ -1623,6 +1606,144 @@ impl SessionServiceImpl {
             })
             .await
             .map_err(|error| Report::new(TransactionCommitError::Proposal(error)))
+    }
+
+    fn transaction_step_impact(
+        transaction: &ReplicatedTransaction,
+        first_statement: usize,
+        statement_count: usize,
+        quiesce_level: Option<QuiesceLevel>,
+        effect: Option<&TransactionStepEffect>,
+    ) -> ExecutionStepImpactReport {
+        let operations =
+            TransactionOperationRange::from_index_and_count(first_statement, statement_count)
+                .assured(
+                    "a transaction execution step contains queued statements in its addressable \
+                     range",
+                );
+        let attribution = ImpactAttribution::for_range(operations);
+        let statements = transaction
+            .statements
+            .get(first_statement..operations.end_index())
+            .assured("the recorded execution step is a range of this transaction's statements");
+        let contains_model_mutation = statements
+            .iter()
+            .any(|queued| queued.statement.is_model_mutation());
+        let needs_classified_pause = contains_model_mutation
+            || statements
+                .iter()
+                .any(|queued| matches!(queued.statement, Statement::AlterDomain(_)));
+        let pause = match quiesce_level {
+            Some(QuiesceLevel::Dynamic) => PauseRequirement::NoPause,
+            Some(QuiesceLevel::EntityPause) => PauseRequirement::Subgraph {
+                scope: QuiesceSubgraph::new(transaction.domain.clone(), [], []),
+            },
+            Some(QuiesceLevel::DomainPause) => PauseRequirement::Domain {
+                domain: transaction.domain.clone(),
+            },
+            None => PauseRequirement::NoPause,
+        };
+        let mut diagnostics = Vec::new();
+        if quiesce_level.is_none() && needs_classified_pause {
+            diagnostics.push(ImpactDiagnostic {
+                kind: ImpactDiagnosticKind::Planning,
+                operation: Some(operations.first()),
+                message: "the step failed before its pause scope was fully established".to_string(),
+            });
+        }
+        if let PauseRequirement::Subgraph { .. } = &pause {
+            diagnostics.push(ImpactDiagnostic {
+                kind: ImpactDiagnosticKind::Topology,
+                operation: Some(operations.first()),
+                message: "the execution result does not contain its subgraph and gate boundaries"
+                    .to_string(),
+            });
+        }
+        if contains_model_mutation {
+            diagnostics.push(ImpactDiagnostic {
+                kind: ImpactDiagnosticKind::Topology,
+                operation: Some(operations.first()),
+                message: "the execution result does not contain operation contributions and the \
+                          complete before/after topology"
+                    .to_string(),
+            });
+        }
+        let completeness = if diagnostics.is_empty() {
+            ImpactReportCompleteness::Complete
+        } else {
+            ImpactReportCompleteness::incomplete(diagnostics)
+                .assured("the incomplete step collected at least one diagnostic")
+        };
+
+        let lifecycle = statements
+            .iter()
+            .filter_map(|queued| match queued.statement {
+                Statement::StartDomain(_) => Some(DomainLifecycleImpact {
+                    domain: transaction.domain.clone(),
+                    action: DomainLifecycleAction::Start,
+                    attribution: attribution.clone(),
+                }),
+                Statement::StopDomain(_) => Some(DomainLifecycleImpact {
+                    domain: transaction.domain.clone(),
+                    action: DomainLifecycleAction::Stop,
+                    attribution: attribution.clone(),
+                }),
+                _ => None,
+            });
+        let lifecycle = CanonicalImpactSet::new(lifecycle);
+        let resources = statements.iter().filter_map(|queued| {
+            let Statement::CreateResource(create) = &queued.statement else {
+                return None;
+            };
+            Some(ResourceCatalogImpact {
+                resource: create.identifier.clone(),
+                action: ResourceCatalogAction::Create,
+                attribution: attribution.clone(),
+            })
+        });
+        let resource_catalog = CanonicalImpactSet::new(resources);
+        let ownership_moves = if let Some(
+            TransactionStepEffect::ReplaceDomainSchedule {
+                expected_schedule,
+                schedule,
+                ..
+            }
+            | TransactionStepEffect::PutDomainAndSchedule {
+                expected_schedule,
+                schedule,
+                ..
+            },
+        ) = effect
+        {
+            let ownership_moves =
+                planned_ownership_moves(expected_schedule.as_deref(), schedule.as_deref())
+                    .into_iter()
+                    .map(|moved| OwnershipMoveImpact {
+                        node: ImpactNodeCoverage::all_executions(moved.entity),
+                        source: moved.former_owner,
+                        destination: moved.destination,
+                        attribution: attribution.clone(),
+                    });
+            CanonicalImpactSet::new(ownership_moves)
+        } else {
+            CanonicalImpactSet::default()
+        };
+        let effects = ImpactEffects {
+            lifecycle,
+            ownership_moves,
+            resource_catalog,
+            ..ImpactEffects::default()
+        };
+
+        ExecutionStepImpactReport::new(
+            operations,
+            PlannedExecutionStepImpact {
+                completeness,
+                pause,
+                effects,
+            },
+            ActualExecutionStepImpact::applying(),
+        )
     }
 
     async fn execute_transaction_configuration_step(
@@ -2148,7 +2269,10 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{CreateRelay, CreateSchema, DomainName, ModelName};
+    use nervix_models::{
+        CreateRelay, CreateSchema, DomainName, ExecutionStepOutcome, ImpactReportCompleteness,
+        ModelName,
+    };
     use tokio::sync::mpsc;
 
     use super::super::{
@@ -2199,6 +2323,30 @@ mod tests {
             .last()
             .expect("COMMIT result must be retained");
         assert_eq!(commit.message, "quiesce level: DYNAMIC");
+        let Some(status) = &result.transaction else {
+            panic!("the committed command must carry its transaction status");
+        };
+        let Some(transaction) = service
+            .inner
+            .consensus
+            .current_transaction(&status.id)
+            .await
+        else {
+            panic!("the committed transaction must remain as a retained tombstone");
+        };
+        let [step] = transaction.commit_results() else {
+            panic!("both consecutive model operations must execute as one atomic step");
+        };
+        assert_eq!(step.operation_range().first().get(), 1);
+        assert_eq!(step.operation_range().last().get(), 2);
+        assert!(matches!(
+            step.impact.planned().completeness,
+            ImpactReportCompleteness::Incomplete { .. }
+        ));
+        assert!(matches!(
+            step.impact.actual().outcome,
+            ExecutionStepOutcome::Applied
+        ));
 
         let schema = registry
             .get::<CreateSchema>(

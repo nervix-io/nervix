@@ -411,14 +411,17 @@ impl TransportState {
                 _ = self.admission_closed.cancelled() => break,
                 _ = interval.tick() => {}
             }
-            let now = Instant::now();
             self.relay_watermarks.retain(|channel, watermark| {
                 if self.active_relay_channels.contains_key(channel) {
                     return true;
                 }
-                now.checked_duration_since(watermark.reconciled_at)
-                    .assured("a relay channel's reconciliation time does not move backwards")
-                    < RELAY_CHANNEL_RETENTION
+                let idle = Instant::now()
+                    .checked_duration_since(watermark.last_reconciled_at())
+                    .assured(
+                        "retain holds the watermark's shard exclusively, so every reconciliation \
+                         read the clock before this read",
+                    );
+                idle < RELAY_CHANNEL_RETENTION
             });
         }
     }
@@ -483,7 +486,7 @@ impl TransportState {
                 if let Some(status) = self.retired_relay_status(&attempt) {
                     status
                 } else if cancel
-                    && !self.active_relay_channels.contains_key(&attempt.channel())
+                    && !self.active_relay_channels.contains_key(&attempt.channel)
                     && self.relay_sequence_follows_watermark(&attempt)
                 {
                     let fence = entry.insert(RelayAttemptEntry::CancellationFence);
@@ -622,7 +625,7 @@ impl TransportState {
             peer_node_id: peer_node_id.clone(),
             ack_id: admission.ack_id,
         };
-        let attempt = self.relay_attempt_key(peer_node_id.clone(), peer_epoch, grant.delivery);
+        let attempt = self.relay_attempt_key(peer_node_id, peer_epoch, grant.delivery);
         if let Some(status) = self.retired_relay_status(&attempt) {
             let disposition = match status {
                 RelayAdmissionStatus::Admitted => RelayGrantDisposition::Admitted,
@@ -667,12 +670,15 @@ impl TransportState {
             }
             return Ok(());
         }
-        let channel = attempt.channel();
-        if let Some(active_attempt) = self
+        let active_sequence = self
             .active_relay_channels
-            .get(&channel)
-            .map(|entry| entry.value().clone())
-        {
+            .get(&attempt.channel)
+            .map(|entry| *entry.value());
+        if let Some(active_sequence) = active_sequence {
+            let active_attempt = RelayAttemptKey {
+                channel: attempt.channel.clone(),
+                sequence: active_sequence,
+            };
             let still_unadmitted = self
                 .relay_attempts
                 .get(&active_attempt)
@@ -688,7 +694,7 @@ impl TransportState {
                 return Ok(());
             }
             self.active_relay_channels
-                .remove_if(&channel, |_, current| current == &active_attempt);
+                .remove_if(&attempt.channel, |_, sequence| *sequence == active_sequence);
         }
         if !self.relay_sequence_follows_watermark(&attempt) {
             send_static_error(
@@ -856,8 +862,13 @@ impl TransportState {
                 entry.insert(RelayAttemptEntry::Active(StdArc::clone(&record)))
             }
         };
-        match self.active_relay_channels.entry(record.attempt.channel()) {
-            Entry::Occupied(_) => {
+        match self
+            .active_relay_channels
+            .entry(record.attempt.channel.clone())
+        {
+            Entry::Occupied(occupied) => {
+                // Release the channel's shard before touching another map or awaiting the peer.
+                drop(occupied);
                 drop(attempt_entry);
                 self.relay_attempts.remove(&record.attempt);
                 self.grants.remove(&grant_id);
@@ -871,16 +882,18 @@ impl TransportState {
                 return Ok(());
             }
             Entry::Vacant(entry) => {
-                entry.insert(record.attempt.clone());
+                entry.insert(record.attempt.sequence);
             }
         }
         match self.relay_admissions.entry(admission_key) {
-            Entry::Occupied(_) => {
+            Entry::Occupied(occupied) => {
+                // Release the admission's shard before touching another map or awaiting the peer.
+                drop(occupied);
                 drop(attempt_entry);
                 self.relay_attempts.remove(&record.attempt);
                 self.active_relay_channels
-                    .remove_if(&record.attempt.channel(), |_, attempt| {
-                        attempt == &record.attempt
+                    .remove_if(&record.attempt.channel, |_, sequence| {
+                        *sequence == record.attempt.sequence
                     });
                 self.grants.remove(&grant_id);
                 send_static_error(
@@ -932,10 +945,13 @@ impl TransportState {
         delivery: RelayDelivery,
     ) -> RelayAttemptKey {
         RelayAttemptKey {
-            peer_node_id,
-            sender_epoch,
-            receiver_epoch: self.process_epoch,
-            delivery,
+            channel: RelayChannelKey {
+                peer_node_id,
+                sender_epoch,
+                receiver_epoch: self.process_epoch,
+                channel_incarnation: delivery.channel_incarnation,
+            },
+            sequence: delivery.sequence,
         }
     }
 
@@ -946,55 +962,52 @@ impl TransportState {
     }
 
     pub(super) fn retire_outbound_relay_admission(&self, admission_key: &RelayAdmissionKey) {
+        // A terminal acknowledgement for a downstream record names no relay admission, so a shared
+        // lookup settles it without the exclusive lock a removal takes.
+        if !self.outbound_relay_admissions.contains_key(admission_key) {
+            return;
+        }
         if let Some((_, key)) = self.outbound_relay_admissions.remove(admission_key) {
             self.outbound_relay_epochs.remove(&key);
         }
     }
 
     fn retired_relay_status(&self, attempt: &RelayAttemptKey) -> Option<RelayAdmissionStatus> {
-        let mut watermark = self.relay_watermarks.get_mut(&attempt.channel())?;
-        watermark.reconciled_at = Instant::now();
-        if attempt.delivery.sequence < watermark.sequence {
+        let watermark = self.relay_watermarks.get(&attempt.channel)?;
+        watermark.mark_reconciled();
+        if attempt.sequence < watermark.sequence {
             return Some(RelayAdmissionStatus::Retired);
         }
-        if attempt.delivery.sequence == watermark.sequence {
+        if attempt.sequence == watermark.sequence {
             return Some(watermark.status.clone());
         }
         None
     }
 
     fn relay_sequence_follows_watermark(&self, attempt: &RelayAttemptKey) -> bool {
-        let Some(watermark) = self.relay_watermarks.get(&attempt.channel()) else {
-            return attempt.delivery.sequence == 0;
+        let Some(watermark) = self.relay_watermarks.get(&attempt.channel) else {
+            return attempt.sequence == 0;
         };
         let Some(next_sequence) = watermark.sequence.checked_add(1) else {
             return false;
         };
-        attempt.delivery.sequence == next_sequence
+        attempt.sequence == next_sequence
     }
 
     fn record_relay_watermark(&self, attempt: &RelayAttemptKey, status: RelayAdmissionStatus) {
-        match self.relay_watermarks.entry(attempt.channel()) {
+        match self.relay_watermarks.entry(attempt.channel.clone()) {
             Entry::Occupied(mut entry) => {
-                if attempt.delivery.sequence >= entry.get().sequence {
-                    entry.insert(RelayChannelWatermark {
-                        sequence: attempt.delivery.sequence,
-                        status,
-                        reconciled_at: Instant::now(),
-                    });
+                if attempt.sequence >= entry.get().sequence {
+                    entry.insert(RelayChannelWatermark::new(attempt.sequence, status));
                 }
             }
             Entry::Vacant(entry) => {
-                entry.insert(RelayChannelWatermark {
-                    sequence: attempt.delivery.sequence,
-                    status,
-                    reconciled_at: Instant::now(),
-                });
+                entry.insert(RelayChannelWatermark::new(attempt.sequence, status));
             }
         }
     }
 
-    fn retire_relay_record(
+    pub(super) fn retire_relay_record(
         &self,
         record: &StdArc<RelayAdmissionRecord>,
         status: RelayAdmissionStatus,
@@ -1009,24 +1022,13 @@ impl TransportState {
                 }
             });
         self.active_relay_channels
-            .remove_if(&record.attempt.channel(), |_, attempt| {
-                attempt == &record.attempt
+            .remove_if(&record.attempt.channel, |_, sequence| {
+                *sequence == record.attempt.sequence
             });
         self.relay_admissions
             .remove_if(&record.admission_key, |_, candidate| {
                 StdArc::ptr_eq(candidate, record)
             });
-    }
-
-    pub(super) fn retire_relay_admission(&self, admission_key: &RelayAdmissionKey) {
-        let Some(record) = self
-            .relay_admissions
-            .get(admission_key)
-            .map(|record| StdArc::clone(record.value()))
-        else {
-            return;
-        };
-        self.retire_relay_record(&record, record.status());
     }
 
     pub(super) async fn handle_relay_body(
@@ -1041,10 +1043,10 @@ impl TransportState {
         let sender_epoch = header_u64(&request, "x-nervix-sender-epoch")?;
         let receiver_epoch = header_u64(&request, "x-nervix-receiver-epoch")?;
         let claimed = self.grants.remove_if(&grant_id, |_, grant| {
-            grant.admission.attempt.peer_node_id == peer_node_id
-                && grant.admission.attempt.sender_epoch == sender_epoch
-                && grant.admission.attempt.sender_epoch == peer_epoch
-                && grant.admission.attempt.receiver_epoch == receiver_epoch
+            grant.admission.attempt.channel.peer_node_id == peer_node_id
+                && grant.admission.attempt.channel.sender_epoch == sender_epoch
+                && grant.admission.attempt.channel.sender_epoch == peer_epoch
+                && grant.admission.attempt.channel.receiver_epoch == receiver_epoch
                 && Instant::now() < grant.expires_at
         });
         let Some((_, grant)) = claimed else {
@@ -1096,7 +1098,7 @@ impl TransportState {
             .admission
             .metadata
             .clone()
-            .into_payload(grant.admission.attempt.delivery, body);
+            .into_payload(grant.admission.attempt.delivery(), body);
         if !grant.admission.mark_body_received() {
             respond.send_reset(Reason::CANCEL);
             return Ok(());
