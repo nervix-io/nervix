@@ -388,7 +388,9 @@ opendal = { version = "0.56.0", features = [
   "services-azdls",
 ] }
 # OpenRaft prereleases change snapshot APIs without semver compatibility.
-openraft = { version = "=0.10.0-alpha.33", default-features = false, features = ["tokio-rt"] }
+openraft = { version = "=0.10.0-alpha.33", default-features = false, features = [
+  "tokio-rt",
+] }
 opentelemetry = "0.31"
 opentelemetry-otlp = { version = "0.31", default-features = false }
 opentelemetry-proto = { version = "0.31", default-features = false }
