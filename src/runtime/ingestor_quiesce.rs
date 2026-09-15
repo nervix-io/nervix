@@ -655,20 +655,13 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &IngestorName,
     ) {
-        self.inner
-            .ingestor_transient_errors
-            .remove(&DomainNodeRef::node_in(
-                domain.clone(),
-                ModelKind::Ingestor,
-                ingestor.clone(),
-            ));
-        self.inner
-            .ingestor_reconnect_backoffs
-            .remove(&DomainNodeRef::node_in(
-                domain.clone(),
-                ModelKind::Ingestor,
-                ingestor.clone(),
-            ));
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        self.clear_ingestor_transient_error_for(&key);
+    }
+
+    pub(in crate::runtime) fn clear_ingestor_transient_error_for(&self, key: &DomainNodeRef) {
+        self.inner.ingestor_transient_errors.remove(key);
+        self.inner.ingestor_reconnect_backoffs.remove(key);
     }
 
     pub(in crate::runtime) fn prepare_ingestor_readiness(

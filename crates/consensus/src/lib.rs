@@ -13,7 +13,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
-    io::{self, Cursor},
+    io,
     path::Path,
     sync::{
         Arc as StdArc,
@@ -55,7 +55,7 @@ use openraft::{
 };
 use parking_lot::Mutex;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     sync::{Mutex as AsyncMutex, broadcast, watch},
@@ -68,6 +68,7 @@ use triomphe::Arc;
 mod command_execution;
 mod connectivity_fault;
 mod durable_batch;
+mod raft_record;
 mod records;
 mod replication;
 mod retention;
@@ -676,7 +677,7 @@ impl MembershipSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct StateMachineData {
     last_applied_log_id: Option<LogIdOf>,
     // Independently retained revisions share unchanged membership.
@@ -3246,8 +3247,8 @@ fn snapshot_request_timeout(deadline: Instant) -> io::Result<Duration> {
     Ok(remaining)
 }
 
-fn storage_decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, io::Error> {
-    ciborium::from_reader(Cursor::new(bytes)).map_err(io_error)
+fn storage_decode<T: durable_batch::StorageDecode>(bytes: &[u8]) -> Result<T, io::Error> {
+    T::decode_record(bytes)
 }
 
 fn unreachable_err<E: std::error::Error + Send + Sync + 'static>(
@@ -4325,7 +4326,10 @@ struct RaftTransition {
     leader: Option<ClusterNodeName>,
 }
 
-fn read_key<T: DeserializeOwned>(keyspace: &Keyspace, key: &[u8]) -> io::Result<Option<T>> {
+fn read_key<T: durable_batch::StorageDecode>(
+    keyspace: &Keyspace,
+    key: &[u8],
+) -> io::Result<Option<T>> {
     let Some(bytes) = keyspace.get(key).map_err(io_error)? else {
         return Ok(None);
     };
@@ -4979,8 +4983,8 @@ mod tests {
         let decoded: ConsensusCommand = storage_decode(&bytes).expect("command should decode");
         assert_eq!(decoded, command);
 
-        let err =
-            storage_decode::<ConsensusCommand>(b"not-cbor").expect_err("invalid bytes must fail");
+        let err = storage_decode::<ConsensusCommand>(b"invalid archive")
+            .expect_err("invalid bytes must fail");
         assert!(!err.to_string().is_empty());
     }
 

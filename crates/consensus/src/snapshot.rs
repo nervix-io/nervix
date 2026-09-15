@@ -20,23 +20,27 @@ use std::{
 
 use meticulous::OptionExt as _;
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
+use rkyv::{Archive, Deserialize, Serialize};
 use triomphe::Arc;
 
-use crate::{LogIdOf, StoredMembershipOf};
+use crate::{
+    LogIdOf, StoredMembershipOf,
+    durable_batch::StorageFailure,
+    raft_record::{LogIdRecord, StoredMembershipRecord},
+};
 
 pub(crate) const KEY_MANIFEST: &[u8] = b"manifest";
 const SECTION_TAG: u8 = b's';
 
 /// One keyed state-machine record inside a snapshot section.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub(crate) struct StoredRecord {
     pub(crate) key: Vec<u8>,
     pub(crate) value: Vec<u8>,
 }
 
 /// One bounded part of a snapshot generation.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Archive, Serialize, Deserialize)]
 pub(crate) struct SnapshotSection {
     pub(crate) records: Vec<StoredRecord>,
 }
@@ -45,13 +49,52 @@ pub(crate) struct SnapshotSection {
 ///
 /// Publishing this record is the moment the generation becomes the node's snapshot: it switches
 /// the active generation, the applied index, the membership and the snapshot identity together.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub(crate) struct SnapshotManifest {
     pub(crate) generation: u64,
     pub(crate) last_applied_log_id: Option<LogIdOf>,
     pub(crate) last_membership: Arc<StoredMembershipOf>,
     pub(crate) section_count: u32,
     pub(crate) total_bytes: u64,
+}
+
+/// The Nervix-owned archive shape of a published snapshot manifest.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+pub(crate) struct SnapshotManifestRecord {
+    generation: u64,
+    last_applied_log_id: Option<LogIdRecord>,
+    last_membership: StoredMembershipRecord,
+    section_count: u32,
+    total_bytes: u64,
+}
+
+impl From<&SnapshotManifest> for SnapshotManifestRecord {
+    fn from(value: &SnapshotManifest) -> Self {
+        Self {
+            generation: value.generation,
+            last_applied_log_id: value.last_applied_log_id.clone().map(Into::into),
+            last_membership: StoredMembershipRecord::from(value.last_membership.as_ref()),
+            section_count: value.section_count,
+            total_bytes: value.total_bytes,
+        }
+    }
+}
+
+impl TryFrom<SnapshotManifestRecord> for SnapshotManifest {
+    type Error = io::Error;
+
+    fn try_from(value: SnapshotManifestRecord) -> Result<Self, Self::Error> {
+        Ok(Self {
+            generation: value.generation,
+            last_applied_log_id: value.last_applied_log_id.map(LogIdRecord::into_log_id),
+            last_membership: Arc::new(
+                StoredMembershipOf::try_from(value.last_membership)
+                    .map_err(|_| io::Error::other(StorageFailure::InvalidState))?,
+            ),
+            section_count: value.section_count,
+            total_bytes: value.total_bytes,
+        })
+    }
 }
 
 impl SnapshotManifest {

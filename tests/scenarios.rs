@@ -93,6 +93,7 @@ use crate::common::{
         MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR,
         RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
     },
+    server_process::{HeldResourceUpload, ServerProcess, ServerProcessLaunch, describe_exit},
 };
 
 mod common;
@@ -215,6 +216,11 @@ struct ScenarioWorld {
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
     silent_interconnect_peers: Vec<tokio::net::TcpStream>,
     last_interconnect_attempt_error: Option<String>,
+    server_process: Option<ServerProcess>,
+    held_resource_upload: Option<HeldResourceUpload>,
+    /// When the last signal was sent to the server process, taken before the signal is delivered
+    /// so an exit measured against it can only look later, never earlier.
+    last_server_signal_at: Option<Instant>,
 }
 
 impl fmt::Debug for ScenarioWorld {
@@ -301,6 +307,9 @@ impl fmt::Debug for ScenarioWorld {
                 "last_interconnect_attempt_error",
                 &self.last_interconnect_attempt_error,
             )
+            .field("server_process", &self.server_process)
+            .field("held_resource_upload", &self.held_resource_upload.is_some())
+            .field("last_server_signal_at", &self.last_server_signal_at)
             .finish()
     }
 }
@@ -1231,6 +1240,163 @@ fn when_nervix_server_help_is_requested(world: &mut ScenarioWorld) {
     );
     world.last_command_output =
         Some(String::from_utf8(output.stdout).expect("nervix-server help output must be UTF-8"));
+}
+
+#[given("a nervix-server process is started")]
+async fn given_nervix_server_process_is_started(world: &mut ScenarioWorld) {
+    assert!(
+        world.server_process.is_none(),
+        "a scenario starts at most one nervix-server process"
+    );
+    let mut process = ServerProcess::start(ServerProcessLaunch::Direct)
+        .unwrap_or_else(|error| panic!("failed to launch nervix-server: {error}"));
+    process
+        .wait_until_ready()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    world.server_process = Some(process);
+}
+
+#[given(expr = "a nervix-server process is started with an open file limit of {int}")]
+async fn given_nervix_server_process_is_started_with_open_file_limit(
+    world: &mut ScenarioWorld,
+    limit: u32,
+) {
+    assert!(
+        world.server_process.is_none(),
+        "a scenario starts at most one nervix-server process"
+    );
+    let process = ServerProcess::start(ServerProcessLaunch::OpenFileLimit(limit))
+        .unwrap_or_else(|error| panic!("failed to launch nervix-server: {error}"));
+    world.server_process = Some(process);
+}
+
+#[given("an authenticated resource upload is held open on the server process")]
+async fn given_authenticated_resource_upload_is_held_open(world: &mut ScenarioWorld) {
+    let process = world
+        .server_process
+        .as_ref()
+        .expect("a nervix-server process must be started first");
+    let upload = process
+        .hold_resource_upload()
+        .await
+        .unwrap_or_else(|error| panic!("failed to hold a resource upload open: {error}"));
+    world.held_resource_upload = Some(upload);
+}
+
+#[when(expr = "the server process receives {word}")]
+async fn when_server_process_receives_signal(world: &mut ScenarioWorld, signal: String) {
+    let signal = signal
+        .parse::<nix::sys::signal::Signal>()
+        .expect("the scenario names a signal such as SIGTERM");
+    let process = world
+        .server_process
+        .as_ref()
+        .expect("a nervix-server process must be started first");
+    let signalled_at = Instant::now();
+    process
+        .send_signal(signal)
+        .unwrap_or_else(|error| panic!("{error}"));
+    world.last_server_signal_at = Some(signalled_at);
+}
+
+#[then(expr = "the server process exits with status {int}")]
+async fn then_server_process_exits_with_status(world: &mut ScenarioWorld, expected: i32) {
+    let process = world
+        .server_process
+        .as_mut()
+        .expect("a nervix-server process must be started first");
+    let status = process
+        .wait_for_exit()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        status.code(),
+        Some(expected),
+        "nervix-server ended with {}, expected exit status {expected}\n{}",
+        describe_exit(status),
+        process.log_tail()
+    );
+}
+
+#[then(expr = "the server process exits with status {int} within {string} of the last signal")]
+async fn then_server_process_exits_with_status_within(
+    world: &mut ScenarioWorld,
+    expected: i32,
+    bound: String,
+) {
+    let bound = humantime::parse_duration(&bound).expect("step duration must be a valid duration");
+    let signalled_at = world
+        .last_server_signal_at
+        .expect("a signal must be delivered to the server process first");
+    let process = world
+        .server_process
+        .as_mut()
+        .expect("a nervix-server process must be started first");
+    let status = process
+        .wait_for_exit()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let elapsed = signalled_at.elapsed();
+    assert_eq!(
+        status.code(),
+        Some(expected),
+        "nervix-server ended with {}, expected exit status {expected}\n{}",
+        describe_exit(status),
+        process.log_tail()
+    );
+    assert!(
+        elapsed <= bound,
+        "nervix-server exited {elapsed:?} after the last signal, beyond {bound:?}\n{}",
+        process.log_tail()
+    );
+}
+
+#[then(expr = "the server process log eventually contains {string}")]
+async fn then_server_process_log_eventually_contains(world: &mut ScenarioWorld, fragment: String) {
+    world
+        .server_process
+        .as_mut()
+        .expect("a nervix-server process must be started first")
+        .wait_for_log(&fragment)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[then(expr = "the server process log contains {string}")]
+fn then_server_process_log_contains(world: &mut ScenarioWorld, fragment: String) {
+    let process = world
+        .server_process
+        .as_ref()
+        .expect("a nervix-server process must be started first");
+    let log = process
+        .log()
+        .unwrap_or_else(|error| panic!("the server process log is unreadable: {error}"));
+    assert!(
+        log.contains(&fragment),
+        "nervix-server did not log {fragment:?}\n{}",
+        process.log_tail()
+    );
+}
+
+#[then(expr = "the server process log does not contain {string}")]
+fn then_server_process_log_does_not_contain(world: &mut ScenarioWorld, fragment: String) {
+    let process = world
+        .server_process
+        .as_ref()
+        .expect("a nervix-server process must be started first");
+    assert!(
+        process.has_exited(),
+        "a line is only known to be absent from the log of a process that has exited"
+    );
+    let log = process
+        .log()
+        .unwrap_or_else(|error| panic!("the server process log is unreadable: {error}"));
+    assert!(
+        !log.contains(&fragment),
+        "nervix-server logged {fragment:?}\n{}",
+        process.log_tail()
+    );
 }
 
 /// Resolves the formatter beside the server binary.
@@ -17003,6 +17169,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
                         world.last_subscription_payload,
                         world.last_broker_payload
                     ));
+                    world.held_resource_upload = None;
+                    world.server_process = None;
                     world.broker_observer = None;
                     close_browser(world).await;
                     world.active_session = None;

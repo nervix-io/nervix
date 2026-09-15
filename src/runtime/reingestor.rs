@@ -1273,6 +1273,7 @@ impl Runtime {
                 task_output_routes.routes.len(),
                 quiesce_counters.clone(),
             );
+            let task_reingestor_node = ModelName::from(&task_reingestor);
             let output_flush_context = ReingestorOutputFlushContext {
                 domain: &task_domain,
                 reingestor: &task_reingestor,
@@ -1418,7 +1419,7 @@ impl Runtime {
                         runtime.mark_branch_aggregated_metrics_updated(
                             &task_domain,
                             ModelKind::Reingestor,
-                            &task_reingestor,
+                            &task_reingestor_node,
                         );
                         for seconds in delivery_observation.latency_seconds {
                             input_metrics.observe_delivery_latency(
