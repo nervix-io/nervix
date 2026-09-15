@@ -56,6 +56,12 @@ DATA_PLANE_PLANNERS = frozenset(
     {"src/runtime/planning.rs", "src/runtime/ingestor_start_plan.rs"}
 )
 
+# Lock acquisitions in these files are the contention debt on the data-plane hot path. The method
+# spellings are deliberately counted textually: the selected files make the ownership boundary,
+# while later hot-path work removes the sites and lowers the baseline.
+DATA_PLANE_LOCK_PREFIXES = (DATA_PLANE, "crates/interconnect/src/")
+DATA_PLANE_LOCK_FILES = frozenset({"src/runtime_ack.rs", "src/metrics.rs"})
+
 
 @dataclass(frozen=True)
 class Site:
@@ -642,6 +648,69 @@ def count_model_matches_in_data_plane(files: Sequence[RustFile]) -> list[Site]:
     return sites
 
 
+_DATA_PLANE_LOCK_ACQUISITION = re.compile(
+    r"\.\s*(?:lock|read|write|entry)\s*\("
+)
+
+
+def count_data_plane_lock_acquisitions(files: Sequence[RustFile]) -> list[Site]:
+    """Count lock-taking method calls in the files that execute the data plane."""
+
+    sites: list[Site] = []
+    for file in product_files(files):
+        in_prefix = file.path.startswith(DATA_PLANE_LOCK_PREFIXES)
+        if not in_prefix and file.path not in DATA_PLANE_LOCK_FILES:
+            continue
+        for match in _DATA_PLANE_LOCK_ACQUISITION.finditer(file.product):
+            sites.append(file.site(match.start(), file.source_line(match.start())))
+    return sites
+
+
+_RWLOCK_FIELD = re.compile(
+    r"\b[A-Za-z_][A-Za-z0-9_]*\s*:\s*"
+    r"(?:(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)RwLock\s*<"
+)
+_OPTION_TYPE = re.compile(
+    r"^\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)Option\s*<"
+)
+_ARC_TYPE = re.compile(
+    r"^\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)Arc\s*<"
+)
+_NAME_TYPE = re.compile(
+    r"(?:(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)"
+    r"[A-Za-z_][A-Za-z0-9_]*Name\b"
+)
+
+
+def count_write_once_rwlock_fields(files: Sequence[RustFile]) -> list[Site]:
+    """Count write-once names and shared references stored behind an `RwLock`."""
+
+    sites: list[Site] = []
+    for file in product_files(files):
+        for structure in _STRUCT.finditer(file.product):
+            body = _struct_body(file.product, structure.end())
+            if body is None:
+                continue
+            start, end = body
+            for field in _RWLOCK_FIELD.finditer(file.product, start, end):
+                lock_arguments = _generic_arguments(file.product, field.end() - 1)
+                if lock_arguments is None or len(lock_arguments) != 1:
+                    continue
+                option = lock_arguments[0]
+                option_match = _OPTION_TYPE.match(option)
+                if option_match is None:
+                    continue
+                option_arguments = _generic_arguments(option, option_match.end() - 1)
+                if option_arguments is None or len(option_arguments) != 1:
+                    continue
+                value = option_arguments[0].strip()
+                is_arc = _ARC_TYPE.match(value) is not None
+                is_name = _NAME_TYPE.fullmatch(value) is not None
+                if is_arc or is_name:
+                    sites.append(file.site(field.start(), file.source_line(field.start())))
+    return sites
+
+
 _NODE_ID_BINDING = re.compile(
     r"\b[A-Za-z0-9_]*[Nn]ode[A-Za-z0-9_]*\s*:\s*[^,;)\n{}]*\bString\b(?!\s*::)"
 )
@@ -761,6 +830,16 @@ COUNTS: tuple[Count, ...] = (
         "model_matches_in_data_plane",
         f"`Model::` references under {DATA_PLANE} outside the planner",
         count_model_matches_in_data_plane,
+    ),
+    Count(
+        "data_plane_lock_acquisitions",
+        "lock acquisitions and `DashMap::entry` calls in data-plane files",
+        count_data_plane_lock_acquisitions,
+    ),
+    Count(
+        "write_once_rwlock_fields",
+        "write-once names and shared references stored behind `RwLock`",
+        count_write_once_rwlock_fields,
     ),
 )
 
