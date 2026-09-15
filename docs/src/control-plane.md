@@ -366,6 +366,13 @@ independent units after one times out. Its result lists every successful move an
 unit makes the command unsuccessful, while a later `DRAIN NODE` retries the units still owned by the
 cordoned node. Endpoint and Syslog listeners bind on every live node and are not schedule units.
 
+A server process begins graceful shutdown when it receives its first `SIGINT` or `SIGTERM`. It
+registers both signals before it starts any other work and supervises them until it exits, so a
+signal received during startup takes effect once startup completes. Every later `SIGINT` or
+`SIGTERM` abandons graceful shutdown: the process logs the phase it had reached and exits at once
+with status 128 plus the number of the signal that forced it, without running its remaining
+phases. The rest of the cluster observes that exit exactly as it observes a crash.
+
 When graceful shutdown begins, the process advertises that its current incarnation is terminating.
 The incarnation remains live for Raft and for ownership handoffs already in progress, while placement
 and explicit relocation exclude it as a new destination. The advertisement is transient state of
