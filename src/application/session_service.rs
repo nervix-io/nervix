@@ -968,7 +968,7 @@ impl SessionServiceImpl {
             &self.inner.registry,
             &self.inner.consensus,
             &self.inner.runtime_admission,
-            &self.inner.shutdown,
+            &self.inner.drain_support_shutdown,
         )
         .await
     }
