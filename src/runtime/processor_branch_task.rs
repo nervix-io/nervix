@@ -40,19 +40,20 @@ pub(super) struct ProcessorBranchInput {
     pub(super) work: NodeQuiesceWorkGuard,
 }
 
-pub(super) type WindowProcessorSnapshotRequest = oneshot::Sender<Result<(), String>>;
+/// A snapshot task asking the branch task to publish the live state it owns.
+pub(super) type ProcessorSnapshotRequest = oneshot::Sender<Result<(), String>>;
 
 pub(super) struct ProcessorSnapshotTask {
     pub(super) shutdown_tx: watch::Sender<bool>,
     pub(super) task: Option<JoinHandle<()>>,
-    pub(super) requests: Option<mpsc::Receiver<WindowProcessorSnapshotRequest>>,
+    pub(super) requests: Option<mpsc::Receiver<ProcessorSnapshotRequest>>,
 }
 
-/// What spawning a processor's snapshot task produced. Only the window processor answers snapshot
-/// requests, so a processor without them still reports the task it spawned.
+/// What spawning a processor's snapshot task produced. Only deduplicators and window processors
+/// answer snapshot requests, so a processor without them still reports the task it spawned.
 pub(super) struct SpawnedSnapshotTask {
     pub(super) task: Option<JoinHandle<()>>,
-    pub(super) requests: Option<mpsc::Receiver<WindowProcessorSnapshotRequest>>,
+    pub(super) requests: Option<mpsc::Receiver<ProcessorSnapshotRequest>>,
 }
 
 #[derive(Debug)]
@@ -640,13 +641,14 @@ pub(super) async fn stop_processor_snapshot_task(
                 .means_peer_left("processor snapshot requester");
         }
     }
-    // A failed snapshot routes the entries it could not store through the processor's error policy
-    // and clears them, so the second attempt is what persists that cleared state: without it a
-    // replacement node would restore entries this branch has already failed. The first failure is
-    // reported by the error policy; the second one leaves the earlier snapshot as the last state
-    // anyone can restore, and this is the only place that fact exists.
-    if snapshot.task.is_some()
-        && branch.snapshot_processor_live_state(processor).is_err()
+    // The branch publishes its live state as it stops, whether or not this node persists it: the
+    // next task for this branch restores from what was published, and the snapshot task's final
+    // flush persists it. A failed snapshot routes the entries it could not store through the
+    // processor's error policy and clears them, so the second attempt is what publishes that
+    // cleared state: without it a replacement would restore entries this branch has already
+    // failed. The first failure is reported by the error policy; the second one leaves the earlier
+    // publication as the last state anyone can restore, and this is the only place that fact exists.
+    if branch.snapshot_processor_live_state(processor).is_err()
         && let Err(error) = branch.snapshot_processor_live_state(processor)
     {
         warn!(

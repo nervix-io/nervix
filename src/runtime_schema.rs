@@ -484,9 +484,9 @@ impl CompiledSchema {
     /// entries have not been converted yet, so this conversion remains for them alone.
     pub(crate) fn runtime_row_from_remote(
         &self,
-        record: RemoteRuntimeRecord,
+        record: &RemoteRuntimeRecord,
     ) -> Result<RuntimeRow, String> {
-        let metadata = RuntimeRecordMetadata::from_remote(record.metadata);
+        let metadata = RuntimeRecordMetadata::from_remote(record.metadata.clone());
         let mut seen = HashSet::default();
         for field in &record.fields {
             if !seen.insert(field.name.as_str()) {

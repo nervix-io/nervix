@@ -218,11 +218,10 @@ impl Runtime {
                 continue;
             }
             branch_count += 1;
-            if state.dirty.load(Ordering::SeqCst) {
+            if state.is_dirty() {
                 dirty_count += 1;
             }
-            let current_lsm = state.current_lsm.current();
-            if !state.replica_quorum_satisfied(current_lsm) {
+            if !state.replica_quorum_satisfied(state.saved_revision()) {
                 pending_replica_count += 1;
             }
         }
