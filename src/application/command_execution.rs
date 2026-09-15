@@ -292,14 +292,20 @@ impl SessionServiceImpl {
         tx: &mpsc::Sender<Result<SessionResponse, Status>>,
         subscriptions: &mut SessionSubscriptions,
     ) -> CommandResult {
+        // Keep the independently owned command paths out of this dispatcher's poll frame. In a
+        // debug build their combined state exceeds the stack available to an ordinary session.
         match execution.effect.clone() {
             CommandExecutionEffect::CreateDomain {
                 if_not_exists,
                 existed_at_admission,
                 state,
             } => {
-                self.apply_persistent_domain_creation(if_not_exists, existed_at_admission, *state)
-                    .await
+                Box::pin(self.apply_persistent_domain_creation(
+                    if_not_exists,
+                    existed_at_admission,
+                    *state,
+                ))
+                .await
             }
             CommandExecutionEffect::Transaction {
                 transaction_id,
@@ -345,19 +351,19 @@ impl SessionServiceImpl {
                 name,
                 password_hash,
             } => {
-                self.apply_persistent_user_creation(
+                Box::pin(self.apply_persistent_user_creation(
                     if_not_exists,
                     nervix_consensus::UserCredentials {
                         name,
                         password_hash,
                     },
-                )
+                ))
                 .await
             }
             CommandExecutionEffect::DropNode {
                 identity,
                 member_at_admission,
-            } => self.drop_admitted_node(identity, member_at_admission).await,
+            } => Box::pin(self.drop_admitted_node(identity, member_at_admission)).await,
         }
     }
 

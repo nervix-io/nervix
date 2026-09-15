@@ -207,21 +207,23 @@ impl Runtime {
         schedule: Option<DomainSchedule>,
         start_ingestors: bool,
     ) -> Result<(), RuntimeError> {
-        self.stop_domain_ingestors(domain).await;
+        // Domain teardown, compilation, restoration, and startup are separate rebuild phases.
+        // Their futures stay indirect to bound this coordinator's debug poll frame.
+        Box::pin(self.stop_domain_ingestors(domain)).await;
 
         let desired_start_version = match self.inner.domains.get(domain) {
             Some(state) => state.start_version,
             None => 0,
         };
         if let Some((_, existing)) = self.inner.executions.remove(domain) {
-            self.stop_domain_execution(domain, existing).await;
+            Box::pin(self.stop_domain_execution(domain, existing)).await;
         }
 
         let Some(schedule) = schedule else {
             self.clear_domain_ingestor_quiescence(domain);
             self.inner.compiled_domain_udfs.remove(domain);
             self.clear_state_schema_fingerprints(domain);
-            self.clear_domain_graph_handle(domain).await;
+            Box::pin(self.clear_domain_graph_handle(domain)).await;
             self.clear_expiring_stream_states_for_domain(domain);
             return Ok(());
         };
@@ -271,11 +273,10 @@ impl Runtime {
         if stopped {
             self.clear_domain_ingestor_quiescence(domain);
             self.clear_expiring_stream_states_for_domain(domain);
-            let execution = self
-                .build_passive_execution_from_schedule(domain, &schedule)
-                .await?;
+            let execution =
+                Box::pin(self.build_passive_execution_from_schedule(domain, &schedule)).await?;
             self.install_domain_execution(domain, execution);
-            self.clear_domain_graph_handle(domain).await;
+            Box::pin(self.clear_domain_graph_handle(domain)).await;
             return Ok(());
         }
         let domain_clock =
@@ -284,7 +285,7 @@ impl Runtime {
                     domain: domain.as_str().to_string(),
                     reason: error.to_string(),
                 })?;
-        let domain_graph = self.domain_graph_handle(domain).await;
+        let domain_graph = Box::pin(self.domain_graph_handle(domain)).await;
         domain_graph.store(None);
         let (shutdown_tx, _) = watch::channel(false);
         let mut relay_builders = HashMap::new();
@@ -330,13 +331,13 @@ impl Runtime {
                     }
                 }
                 Model::WasmProcessor(processor) => {
-                    self.compile_wasm_processor_module(
+                    Box::pin(self.compile_wasm_processor_module(
                         domain,
                         &processor.name,
                         &processor.resource,
                         processor.resource_version,
                         &processor.file,
-                    )
+                    ))
                     .await
                     .map_err(|reason| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
@@ -346,8 +347,8 @@ impl Runtime {
                 _ => {}
             }
         }
-        let udf_executor = self
-            .compile_domain_udfs(
+        let udf_executor = Box::pin(
+            self.compile_domain_udfs(
                 domain,
                 model_index
                     .models()
@@ -359,12 +360,13 @@ impl Runtime {
                         }
                     })
                     .collect(),
-            )
-            .await
-            .map_err(|error| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!("failed to compile domain UDFs: {error}"),
-            })?;
+            ),
+        )
+        .await
+        .map_err(|error| RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason: format!("failed to compile domain UDFs: {error}"),
+        })?;
         let all_branched_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
         let branch_relays = branch_relays_from_branched_specs(&all_branched_specs);
         let branched_specs = all_branched_specs
@@ -408,7 +410,7 @@ impl Runtime {
                 Model::SignalingProtocol(protocol) => {
                     signaling_protocols.insert(
                         protocol.name.clone(),
-                        self.compile_signaling_protocol(domain, protocol).await?,
+                        Box::pin(self.compile_signaling_protocol(domain, protocol)).await?,
                     );
                 }
                 Model::Generator(_) => {}
@@ -463,9 +465,8 @@ impl Runtime {
                     });
                 };
                 let wire_format = wire_schemas.resolve(domain, &codec.wire_format)?;
-                let compiled = self
-                    .compile_domain_codec(domain, codec, schema, wire_format)
-                    .await?;
+                let compiled =
+                    Box::pin(self.compile_domain_codec(domain, codec, schema, wire_format)).await?;
                 codecs.insert(codec.name.clone(), compiled);
             }
         }
@@ -485,14 +486,13 @@ impl Runtime {
                 let expiring_state = (node.executes_on(local_node_id)
                     && branch_relays.contains(&relay.name))
                 .then(|| self.expiring_stream_state(domain, &relay.name));
-                let fanout = self
-                    .relay_boundary_fanout_with_capacity(
-                        domain,
-                        &relay.name,
-                        !relay.branching.is_unbranched(),
-                        relay.buffer,
-                    )
-                    .await;
+                let fanout = Box::pin(self.relay_boundary_fanout_with_capacity(
+                    domain,
+                    &relay.name,
+                    !relay.branching.is_unbranched(),
+                    relay.buffer,
+                ))
+                .await;
                 let registry = match expiring_state.as_ref() {
                     Some(state) => state.registry.clone(),
                     None => RelayRegistry::new(),
@@ -567,7 +567,7 @@ impl Runtime {
                     RelayName::from(&node.identifier),
                     None,
                 );
-                self.prepare_materialized_stream_restore(&state_placement, schema)
+                Box::pin(self.prepare_materialized_stream_restore(&state_placement, schema))
                     .await
                     .map_err(|error| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
@@ -686,8 +686,7 @@ impl Runtime {
                             ),
                         });
                     };
-                    let runtime = self
-                        .load_lookup_runtime(domain, lookup.clone(), codec)
+                    let runtime = Box::pin(self.load_lookup_runtime(domain, lookup.clone(), codec))
                         .await
                         .map_err(|reason| RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
@@ -910,8 +909,7 @@ impl Runtime {
                 domain: domain.as_str().to_string(),
                 reason,
             })?;
-            template
-                .prepare_wasm_processors(self, domain)
+            Box::pin(template.prepare_wasm_processors(self, domain))
                 .await
                 .map_err(|reason| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
@@ -1120,9 +1118,9 @@ impl Runtime {
                     }
                 })?;
             self.clear_ingestor_transient_error(domain, &ingestor_name);
-            if let Err(error) = self.start_ingestor(plan).await {
+            if let Err(error) = Box::pin(self.start_ingestor(plan)).await {
                 self.record_ingestor_transient_error(domain, &ingestor_name, error.to_string());
-                self.abort_domain_execution_start(domain).await;
+                Box::pin(self.abort_domain_execution_start(domain)).await;
                 return Err(error);
             }
         }

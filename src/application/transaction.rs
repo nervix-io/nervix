@@ -857,7 +857,7 @@ impl SessionServiceImpl {
         let finished = if matches!(committing.state, TransactionState::Finished(_)) {
             Ok(committing)
         } else {
-            self.execute_replicated_commit(&transaction_id).await
+            Box::pin(self.execute_replicated_commit(&transaction_id)).await
         };
         match finished {
             Ok(transaction) => standalone_transaction_result(&transaction),
@@ -1202,7 +1202,7 @@ impl SessionServiceImpl {
             .or_insert_with(|| StdArc::new(tokio::sync::Mutex::new(())))
             .clone();
         let _domain_execution_guard = domain_execution.lock().await;
-        let result = self.run_replicated_commit(id).await;
+        let result = Box::pin(self.run_replicated_commit(id)).await;
         if result
             .as_ref()
             .is_ok_and(|transaction| matches!(transaction.state, TransactionState::Finished(_)))
@@ -1216,13 +1216,15 @@ impl SessionServiceImpl {
         &self,
         id: &str,
     ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
+        // Each commit phase has its own state machine. Poll them indirectly so this recovery loop
+        // does not embed every phase's future state in its own debug poll frame.
         self.inner
             .registry
-            .synchronize_cluster_schedule(&self.inner.consensus.current_schedule().await)
+            .synchronize_cluster_schedule(&Box::pin(self.inner.consensus.current_schedule()).await)
             .change_context(TransactionCommitError::SynchronizeRegistry { id: id.to_string() })?;
         loop {
             tokio::task::consume_budget().await;
-            let leader_id = self.inner.consensus.current_leader().await;
+            let leader_id = Box::pin(self.inner.consensus.current_leader()).await;
             if leader_id.as_ref() != Some(self.inner.consensus.local_node_id()) {
                 return Err(Report::new(TransactionCommitError::Proposal(
                     ConsensusTransactionError::Consensus(ConsensusError::LeadershipLost {
@@ -1230,10 +1232,7 @@ impl SessionServiceImpl {
                     }),
                 )));
             }
-            let transaction = self
-                .inner
-                .consensus
-                .current_transaction(id)
+            let transaction = Box::pin(self.inner.consensus.current_transaction(id))
                 .await
                 .ok_or_else(|| {
                     Report::new(TransactionCommitError::UnknownTransaction { id: id.to_string() })
@@ -1248,8 +1247,7 @@ impl SessionServiceImpl {
                 }
             };
             if let Some(applying) = progress.applying.clone() {
-                match self
-                    .complete_transaction_application(&transaction, &applying)
+                match Box::pin(self.complete_transaction_application(&transaction, &applying))
                     .await?
                 {
                     TransactionApplicationAttempt::Retry => continue,
@@ -1263,15 +1261,15 @@ impl SessionServiceImpl {
             }
             let first_statement = progress.next_statement;
             let Some(first) = transaction.statements.get(first_statement) else {
-                return self
-                    .inner
-                    .consensus
-                    .finish_empty_transaction_commit(id.to_string(), current_timestamp())
-                    .await
-                    .map_err(|error| Report::new(TransactionCommitError::Proposal(error)));
+                return Box::pin(
+                    self.inner
+                        .consensus
+                        .finish_empty_transaction_commit(id.to_string(), current_timestamp()),
+                )
+                .await
+                .map_err(|error| Report::new(TransactionCommitError::Proposal(error)));
             };
-            self.recover_transaction_quiescence(&transaction, first_statement)
-                .await?;
+            Box::pin(self.recover_transaction_quiescence(&transaction, first_statement)).await?;
 
             if first.statement.is_model_mutation() {
                 let domain = transaction.domain.clone();
@@ -1286,19 +1284,18 @@ impl SessionServiceImpl {
                 }
                 let statement_count = statements.len();
                 let outcome = ParkingMutex::new(None);
-                let result = self
-                    .process_model_mutation_batch_with_transaction(
-                        statements,
-                        &sources.join("; "),
-                        domain.as_str(),
-                        Some(TransactionModelStepContext {
-                            transaction: &transaction,
-                            first_statement,
-                            statement_count,
-                            outcome: &outcome,
-                        }),
-                    )
-                    .await;
+                let result = Box::pin(self.process_model_mutation_batch_with_transaction(
+                    statements,
+                    &sources.join("; "),
+                    domain.as_str(),
+                    Some(TransactionModelStepContext {
+                        transaction: &transaction,
+                        first_statement,
+                        statement_count,
+                        outcome: &outcome,
+                    }),
+                ))
+                .await;
                 let recorded = outcome.lock().take();
                 let advanced = match recorded {
                     Some(Ok(transaction)) => transaction,
@@ -1306,19 +1303,19 @@ impl SessionServiceImpl {
                     None if result.kind == i32::from(CommandResultKind::NotLeader) => {
                         return Err(Report::new(TransactionCommitError::Proposal(
                             ConsensusTransactionError::Consensus(ConsensusError::LeadershipLost {
-                                leader_id: self.inner.consensus.current_leader().await,
+                                leader_id: Box::pin(self.inner.consensus.current_leader()).await,
                             }),
                         )));
                     }
                     None if !result.success => {
-                        self.record_transaction_step(
+                        Box::pin(self.record_transaction_step(
                             &transaction,
                             first_statement,
                             statement_count,
                             result,
                             None,
                             None,
-                        )
+                        ))
                         .await?
                     }
                     None => {
@@ -1333,9 +1330,10 @@ impl SessionServiceImpl {
                 continue;
             }
 
-            let advanced = self
-                .execute_transaction_configuration_step(&transaction, first_statement)
-                .await?;
+            let advanced = Box::pin(
+                self.execute_transaction_configuration_step(&transaction, first_statement),
+            )
+            .await?;
             if matches!(advanced.state, TransactionState::Finished(_)) {
                 return Ok(advanced);
             }

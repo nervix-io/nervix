@@ -17,9 +17,11 @@ use nervix_interconnect::{
     CaptureOwnershipHandoffStateRequest as RemoteCaptureOwnershipHandoffStateRequest,
     ConfirmOwnershipHandoffStateRequest as RemoteConfirmOwnershipHandoffStateRequest,
     DiscardOwnershipHandoffStateRequest as RemoteDiscardOwnershipHandoffStateRequest,
-    EntityGatePurpose,
+    EntityGatePurpose, HandlerRegistrationError, OwnershipHandoffFailure,
     PrepareForcedOwnershipRecoveryRequest as RemotePrepareForcedOwnershipRecoveryRequest,
-    PrepareOwnershipHandoffStateRequest as RemotePrepareOwnershipHandoffStateRequest, Transport,
+    PrepareOwnershipHandoffStateRequest as RemotePrepareOwnershipHandoffStateRequest,
+    ReconcileOwnershipHandoffPreparationsRequest as RemoteReconcileOwnershipHandoffPreparationsRequest,
+    Transport,
 };
 use nervix_models::{
     ClusterNodeIncarnation, ClusterNodeName, CoordinationIdentity, DomainName, NodeRef,
@@ -38,17 +40,39 @@ use crate::runtime::{OwnershipHandoffError, OwnershipHandoffResult, Runtime};
 
 pub(in crate::application) const FORCED_OWNERSHIP_RECOVERY_BUDGET: Duration =
     Duration::from_secs(5);
+pub(in crate::application) const OWNERSHIP_HANDOFF_RECONCILIATION_POLL_INTERVAL: Duration =
+    Duration::from_millis(250);
 
 pub(in crate::application) struct PlannedOwnershipHandoff {
     operation_id: String,
     base_schedule_fingerprint: [u8; 32],
     target_schedule_fingerprint: [u8; 32],
     node_incarnations: BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
+    preparations: ClusterOwnershipHandoffPreparations,
     gate: ClusterEntityGate,
     pub(in crate::application) moves: Vec<PlannedOwnershipMove>,
     pub(in crate::application) started_at: tokio::time::Instant,
     preparation_deadline: tokio::time::Instant,
     activation_deadline: tokio::time::Instant,
+}
+
+struct ClusterOwnershipHandoffPreparations {
+    coordination: CoordinationIdentity,
+    operation_id: String,
+    domain: DomainName,
+    target_schedule_fingerprint: [u8; 32],
+    attempts: BTreeMap<NodeRef, PlannedOwnershipMove>,
+    publication_may_be_in_flight: bool,
+    cleanup_owner: Option<SessionServiceImpl>,
+}
+
+struct PendingOwnershipHandoffPreparationCleanup {
+    coordination: CoordinationIdentity,
+    operation_id: String,
+    domain: DomainName,
+    target_schedule_fingerprint: [u8; 32],
+    attempts: BTreeMap<NodeRef, PlannedOwnershipMove>,
+    publication_may_be_in_flight: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,6 +200,98 @@ pub(in crate::application) struct PlannedOwnershipMove {
     pub(in crate::application) destination: ClusterNodeName,
     replicas: Vec<ClusterNodeName>,
     promoted_replica: bool,
+}
+
+impl PlannedOwnershipMove {
+    fn belongs_to_committed_transition(
+        &self,
+        schedule: &nervix_models::DomainSchedule,
+        operation_id: &str,
+        target_schedule_fingerprint: [u8; 32],
+    ) -> OwnershipHandoffResult<bool> {
+        if Runtime::ownership_handoff_schedule_fingerprint(schedule)? != target_schedule_fingerprint
+        {
+            return Ok(false);
+        }
+        let Some(node) = schedule.nodes.get(&self.entity) else {
+            return Ok(false);
+        };
+        if !node.is_primary_on(&self.destination) {
+            return Ok(false);
+        }
+        let Some(transition) = node.ownership_transition.as_ref() else {
+            return Ok(false);
+        };
+        Ok(transition.id == operation_id
+            && transition.source == self.former_owner
+            && transition.destination == self.destination
+            && transition.state_recovery == OwnershipStateRecoveryOutcome::Complete
+            && transition.resets.is_empty())
+    }
+}
+
+impl ClusterOwnershipHandoffPreparations {
+    fn new(
+        service: &SessionServiceImpl,
+        coordination: CoordinationIdentity,
+        operation_id: String,
+        domain: &DomainName,
+        target_schedule_fingerprint: [u8; 32],
+    ) -> Self {
+        Self {
+            coordination,
+            operation_id,
+            domain: domain.clone(),
+            target_schedule_fingerprint,
+            attempts: BTreeMap::new(),
+            publication_may_be_in_flight: false,
+            cleanup_owner: Some(service.clone()),
+        }
+    }
+
+    /// Records the destination before its prepare RPC can persist anything. A missing response is
+    /// therefore cleanup work, just like a successful response.
+    fn record_attempt(&mut self, moved: &PlannedOwnershipMove) {
+        self.attempts.insert(moved.entity.clone(), moved.clone());
+    }
+
+    fn mark_discarded(&mut self, entity: &NodeRef) {
+        self.attempts.remove(entity);
+    }
+
+    fn mark_publication_may_be_in_flight(&mut self) {
+        self.publication_may_be_in_flight = true;
+    }
+
+    fn require_discard(&mut self) {
+        self.publication_may_be_in_flight = false;
+    }
+
+    fn schedule_remaining_cleanup(&mut self) {
+        if self.attempts.is_empty() {
+            self.cleanup_owner = None;
+            return;
+        }
+        let Some(owner) = self.cleanup_owner.take() else {
+            return;
+        };
+        owner.schedule_ownership_handoff_preparation_cleanup(
+            PendingOwnershipHandoffPreparationCleanup {
+                coordination: self.coordination.clone(),
+                operation_id: self.operation_id.clone(),
+                domain: self.domain.clone(),
+                target_schedule_fingerprint: self.target_schedule_fingerprint,
+                attempts: std::mem::take(&mut self.attempts),
+                publication_may_be_in_flight: self.publication_may_be_in_flight,
+            },
+        );
+    }
+}
+
+impl Drop for ClusterOwnershipHandoffPreparations {
+    fn drop(&mut self) {
+        self.schedule_remaining_cleanup();
+    }
 }
 
 pub(in crate::application) struct ForcedOwnershipRecoveryCoordinator<'a> {
@@ -523,11 +639,11 @@ impl SessionServiceImpl {
         &self,
     ) -> BTreeMap<ClusterNodeName, ClusterNodeIncarnation> {
         let gossip = self.inner.cluster.availability_state().await;
-        gossip
-            .live_nodes
+        let nodes = gossip.latest_nodes_by_id();
+        nodes
             .into_iter()
-            .filter(|node| !gossip.dead_node_ids.contains(&node.node_id))
-            .map(|node| (node.node_id, node.incarnation))
+            .filter(|(node_id, _)| !gossip.dead_node_ids.contains(node_id))
+            .map(|(node_id, node)| (node_id, node.incarnation))
             .collect()
     }
 
@@ -538,9 +654,9 @@ impl SessionServiceImpl {
             .cluster
             .gossip_state()
             .await
-            .live_nodes
+            .latest_nodes_by_id()
             .into_iter()
-            .map(|node| (node.node_id, node.incarnation))
+            .map(|(node_id, node)| (node_id, node.incarnation))
             .collect()
     }
 
@@ -558,6 +674,20 @@ impl SessionServiceImpl {
         if *actual != expected {
             return Err(OwnershipHandoffError::participant(format!(
                 "{role} node '{node}' changed process incarnation during ownership handoff"
+            )));
+        }
+        Ok(())
+    }
+
+    pub(in crate::application) async fn verify_ownership_handoff_coordinator(
+        &self,
+        coordination: &CoordinationIdentity,
+    ) -> OwnershipHandoffResult<()> {
+        let leader = self.inner.consensus.current_leader().await;
+        if leader.as_ref() != Some(coordination.coordinator()) {
+            return Err(OwnershipHandoffError::participant(format!(
+                "coordination identity '{coordination}' was not issued by the current cluster \
+                 leader"
             )));
         }
         Ok(())
@@ -759,22 +889,66 @@ impl SessionServiceImpl {
             self.release_cluster_entity_gates(gate).await;
             return Err(error);
         }
-        let mut prepared = Vec::new();
+        let mut preparations = ClusterOwnershipHandoffPreparations::new(
+            self,
+            coordination.clone(),
+            operation_id.clone(),
+            domain,
+            target_schedule_fingerprint,
+        );
         for moved in &moves {
             tokio::task::consume_budget().await;
-            let result = tokio::time::timeout_at(preparation_deadline, async {
-                let checkpoints = self
-                    .capture_ownership_handoff_state(
-                        &coordination,
-                        &operation_id,
-                        domain,
-                        moved,
-                        *node_incarnations
-                            .get(&moved.former_owner)
-                            .verified("every former owner was found in live gossip above"),
-                        base_schedule_fingerprint,
-                    )
-                    .await?;
+            let capture = tokio::time::timeout_at(
+                preparation_deadline,
+                self.capture_ownership_handoff_state(
+                    &coordination,
+                    &operation_id,
+                    domain,
+                    moved,
+                    *node_incarnations
+                        .get(&moved.former_owner)
+                        .verified("every former owner was found in live gossip above"),
+                    base_schedule_fingerprint,
+                ),
+            )
+            .await;
+            let checkpoints = match capture {
+                Ok(Ok(checkpoints)) => checkpoints,
+                Ok(Err(reason)) => {
+                    self.discard_attempted_ownership_handoff_preparations(&mut preparations)
+                        .await;
+                    self.release_cluster_entity_gates(gate).await;
+                    return Err(Report::new(DomainAlterError::EntityGate {
+                        domain: domain.clone(),
+                        operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
+                        reason: format!(
+                            "failed to capture {} '{}' on source node '{}': {reason}",
+                            moved.entity.kind.as_str(),
+                            moved.entity.identifier.as_str(),
+                            moved.former_owner
+                        ),
+                    }));
+                }
+                Err(_) => {
+                    self.discard_attempted_ownership_handoff_preparations(&mut preparations)
+                        .await;
+                    self.release_cluster_entity_gates(gate).await;
+                    return Err(Report::new(DomainAlterError::EntityGate {
+                        domain: domain.clone(),
+                        operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
+                        reason: format!(
+                            "timed out capturing {} '{}' on source node '{}'",
+                            moved.entity.kind.as_str(),
+                            moved.entity.identifier.as_str(),
+                            moved.former_owner
+                        ),
+                    }));
+                }
+            };
+
+            preparations.record_attempt(moved);
+            let result = tokio::time::timeout_at(
+                preparation_deadline,
                 self.prepare_ownership_handoff_state(RemotePrepareOwnershipHandoffStateRequest {
                     coordination: coordination.clone(),
                     operation_id: operation_id.clone(),
@@ -791,20 +965,14 @@ impl SessionServiceImpl {
                     base_schedule_fingerprint,
                     target_schedule_fingerprint,
                     checkpoints,
-                })
-                .await
-            })
+                }),
+            )
             .await;
             match result {
-                Ok(Ok(())) => prepared.push(moved.clone()),
+                Ok(Ok(())) => {}
                 Ok(Err(reason)) => {
-                    self.discard_ownership_handoff_state(
-                        &coordination,
-                        &operation_id,
-                        domain,
-                        &prepared,
-                    )
-                    .await;
+                    self.discard_attempted_ownership_handoff_preparations(&mut preparations)
+                        .await;
                     self.release_cluster_entity_gates(gate).await;
                     return Err(Report::new(DomainAlterError::EntityGate {
                         domain: domain.clone(),
@@ -819,13 +987,8 @@ impl SessionServiceImpl {
                     }));
                 }
                 Err(_) => {
-                    self.discard_ownership_handoff_state(
-                        &coordination,
-                        &operation_id,
-                        domain,
-                        &prepared,
-                    )
-                    .await;
+                    self.discard_attempted_ownership_handoff_preparations(&mut preparations)
+                        .await;
                     self.release_cluster_entity_gates(gate).await;
                     return Err(Report::new(DomainAlterError::EntityGate {
                         domain: domain.clone(),
@@ -846,11 +1009,12 @@ impl SessionServiceImpl {
             .runtime
             .pause_ownership_handoff_after_preparation_if_armed(domain)
             .await;
-        let handoff = PlannedOwnershipHandoff {
+        let mut handoff = PlannedOwnershipHandoff {
             operation_id,
             base_schedule_fingerprint,
             target_schedule_fingerprint,
             node_incarnations,
+            preparations,
             gate,
             moves,
             started_at,
@@ -876,6 +1040,7 @@ impl SessionServiceImpl {
                 reason: reason.to_string(),
             }));
         }
+        handoff.preparations.mark_publication_may_be_in_flight();
         Ok(Some(handoff))
     }
 
@@ -946,6 +1111,8 @@ impl SessionServiceImpl {
         &self,
         request: RemotePrepareOwnershipHandoffStateRequest,
     ) -> OwnershipHandoffResult<()> {
+        self.verify_ownership_handoff_coordinator(&request.coordination)
+            .await?;
         let current_incarnations = self.live_node_incarnations().await;
         Self::verify_ownership_handoff_node_incarnation(
             &current_incarnations,
@@ -982,6 +1149,9 @@ impl SessionServiceImpl {
             )));
         }
         if request.destination == *self.inner.consensus.local_node_id() {
+            let _operation = self.inner.ownership_handoff_operations.lock().await;
+            self.verify_ownership_handoff_coordinator(&request.coordination)
+                .await?;
             return self
                 .inner
                 .runtime
@@ -1152,72 +1322,472 @@ impl SessionServiceImpl {
         )))
     }
 
-    async fn discard_ownership_handoff_state(
+    async fn discard_ownership_handoff_preparation_on_node(
         &self,
         coordination: &CoordinationIdentity,
         operation_id: &str,
         domain: &DomainName,
-        moves: &[PlannedOwnershipMove],
-    ) {
-        for moved in moves {
-            tokio::task::consume_budget().await;
-            if moved.destination == *self.inner.consensus.local_node_id() {
-                if let Err(error) = self.inner.runtime.discard_prepared_ownership_handoff_state(
+        moved: &PlannedOwnershipMove,
+    ) -> OwnershipHandoffResult<()> {
+        if moved.destination == *self.inner.consensus.local_node_id() {
+            return self
+                .inner
+                .runtime
+                .discard_prepared_ownership_handoff_state(
                     coordination,
                     operation_id,
                     domain,
                     &moved.entity,
-                ) {
+                )
+                .map_err(|error| {
+                    OwnershipHandoffError::persistence(error.current_context().clone())
+                });
+        }
+        self.inner
+            .interconnect
+            .request(
+                &moved.destination,
+                RemoteDiscardOwnershipHandoffStateRequest {
+                    coordination: coordination.clone(),
+                    operation_id: operation_id.to_string(),
+                    domain: domain.clone(),
+                    entity: moved.entity.clone(),
+                },
+            )
+            .await
+            .map_err(|error| OwnershipHandoffError::transport(error.to_string()))?
+            .map_err(|error| OwnershipHandoffError::participant(error.to_string()))
+    }
+
+    async fn discard_attempted_ownership_handoff_preparations(
+        &self,
+        preparations: &mut ClusterOwnershipHandoffPreparations,
+    ) {
+        preparations.require_discard();
+        let attempts = preparations.attempts.values().cloned().collect::<Vec<_>>();
+        for moved in attempts {
+            tokio::task::consume_budget().await;
+            match self
+                .discard_ownership_handoff_preparation_on_node(
+                    &preparations.coordination,
+                    &preparations.operation_id,
+                    &preparations.domain,
+                    &moved,
+                )
+                .await
+            {
+                Ok(()) => preparations.mark_discarded(&moved.entity),
+                Err(error) => {
                     warn!(
-                        domain = domain.as_str(),
+                        domain = preparations.domain.as_str(),
                         destination = %moved.destination,
+                        coordination = %preparations.coordination,
+                        operation_id = preparations.operation_id,
                         error = %error,
-                        "failed to discard abandoned ownership handoff state"
+                        "durable ownership handoff preparation discard remains pending"
                     );
                 }
-                continue;
             }
-            let result = self
-                .inner
-                .interconnect
-                .request(
-                    &moved.destination,
-                    RemoteDiscardOwnershipHandoffStateRequest {
-                        coordination: coordination.clone(),
-                        operation_id: operation_id.to_string(),
-                        domain: domain.clone(),
-                        entity: moved.entity.clone(),
-                    },
-                )
+        }
+    }
+
+    fn schedule_ownership_handoff_preparation_cleanup(
+        &self,
+        cleanup: PendingOwnershipHandoffPreparationCleanup,
+    ) {
+        let service = self.clone();
+        self.inner.service_tasks.spawn(async move {
+            service
+                .retry_ownership_handoff_preparation_cleanup(cleanup)
                 .await;
-            let error = match result {
-                Ok(Ok(())) => None,
-                Ok(Err(error)) => Some(error.to_string()),
-                Err(error) => Some(error.to_string()),
+        });
+    }
+
+    async fn retry_ownership_handoff_preparation_cleanup(
+        &self,
+        mut cleanup: PendingOwnershipHandoffPreparationCleanup,
+    ) {
+        if cleanup.publication_may_be_in_flight {
+            if self.inner.consensus.current_leader().await.as_ref()
+                != Some(self.inner.consensus.local_node_id())
+            {
+                return;
+            }
+            let authority = match self.inner.interconnect.next_coordination_identity() {
+                Ok(authority) => authority,
+                Err(error) => {
+                    warn!(
+                        domain = cleanup.domain.as_str(),
+                        coordination = %cleanup.coordination,
+                        operation_id = cleanup.operation_id,
+                        error = %error,
+                        "could not allocate an authority for ambiguous ownership handoff cleanup"
+                    );
+                    return;
+                }
             };
-            if let Some(error) = error {
-                warn!(
-                    domain = domain.as_str(),
-                    destination = %moved.destination,
+            if let Err(error) = self
+                .inner
+                .consensus
+                .establish_ownership_handoff_reconciliation(authority)
+                .await
+            {
+                debug!(
+                    domain = cleanup.domain.as_str(),
+                    coordination = %cleanup.coordination,
+                    operation_id = cleanup.operation_id,
                     error = %error,
-                    "failed to discard abandoned ownership handoff state"
+                    "ambiguous ownership handoff cleanup passed to the surviving authority"
                 );
+                return;
+            }
+            let schedule = self.inner.consensus.current_schedule().await;
+            if let Some(domain_schedule) = schedule.domain(&cleanup.domain) {
+                let attempts = cleanup.attempts.values().cloned().collect::<Vec<_>>();
+                for moved in attempts {
+                    tokio::task::consume_budget().await;
+                    let committed = moved.belongs_to_committed_transition(
+                        domain_schedule,
+                        &cleanup.operation_id,
+                        cleanup.target_schedule_fingerprint,
+                    );
+                    match committed {
+                        Ok(true) => {
+                            cleanup.attempts.remove(&moved.entity);
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            warn!(
+                                domain = cleanup.domain.as_str(),
+                                coordination = %cleanup.coordination,
+                                operation_id = cleanup.operation_id,
+                                error = %error,
+                                "could not classify an ambiguous durable ownership handoff \
+                                 preparation"
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+            cleanup.publication_may_be_in_flight = false;
+        }
+
+        while !cleanup.attempts.is_empty() {
+            tokio::task::consume_budget().await;
+            let attempts = cleanup.attempts.values().cloned().collect::<Vec<_>>();
+            for moved in attempts {
+                tokio::task::consume_budget().await;
+                let result = tokio::select! {
+                    _ = self.inner.drain_support_shutdown.cancelled() => return,
+                    result = self.discard_ownership_handoff_preparation_on_node(
+                        &cleanup.coordination,
+                        &cleanup.operation_id,
+                        &cleanup.domain,
+                        &moved,
+                    ) => result,
+                };
+                match result {
+                    Ok(()) => {
+                        cleanup.attempts.remove(&moved.entity);
+                    }
+                    Err(error) => {
+                        debug!(
+                            domain = cleanup.domain.as_str(),
+                            destination = %moved.destination,
+                            coordination = %cleanup.coordination,
+                            operation_id = cleanup.operation_id,
+                            error = %error,
+                            "durable ownership handoff preparation discard retry remains pending"
+                        );
+                    }
+                }
+            }
+            if cleanup.attempts.is_empty() {
+                return;
+            }
+            tokio::select! {
+                _ = self.inner.drain_support_shutdown.cancelled() => return,
+                _ = sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL) => {}
+            }
+        }
+    }
+
+    pub(in crate::application) async fn reconcile_local_ownership_handoff_preparations(
+        &self,
+        request: &RemoteReconcileOwnershipHandoffPreparationsRequest,
+    ) -> OwnershipHandoffResult<u64> {
+        let mut applied = self.inner.consensus.subscribe_applied();
+        while self.inner.consensus.current_revision().await < request.authoritative_revision {
+            tokio::task::consume_budget().await;
+            applied.changed().await.assured(
+                "the consensus observer retains its applied-revision sender for the server \
+                 lifetime",
+            );
+        }
+        let _operation = self.inner.ownership_handoff_operations.lock().await;
+        self.verify_ownership_handoff_coordinator(&request.coordination)
+            .await?;
+        let schedule = self.inner.consensus.current_schedule().await;
+        let node_incarnations = self.available_node_incarnations().await;
+        let discarded = self.inner.runtime.reconcile_prepared_ownership_handoffs(
+            &request.coordination,
+            &schedule,
+            &node_incarnations,
+        )?;
+        Ok(u64::try_from(discarded)
+            .assured("a preparation map indexed in memory cannot exceed the u64 range"))
+    }
+
+    pub(in crate::application) fn register_prepare_ownership_handoff_handler(
+        &self,
+        interconnect: &Transport,
+    ) -> Result<(), Report<HandlerRegistrationError>> {
+        let service = self.clone();
+        interconnect.register_handler::<RemotePrepareOwnershipHandoffStateRequest, _, _>(
+            move |_context, request| {
+                let service = service.clone();
+                async move {
+                    #[cfg(feature = "testing")]
+                    let response_pause_domain = request.domain.clone();
+                    let result: OwnershipHandoffResult<_> = async {
+                        if request.destination != *service.inner.consensus.local_node_id() {
+                            return Err(OwnershipHandoffError::participant(format!(
+                                "ownership handoff for {} '{}' targets node '{}' but reached '{}'",
+                                request.entity.kind.as_str(),
+                                request.entity.identifier.as_str(),
+                                request.destination,
+                                service.inner.consensus.local_node_id()
+                            )));
+                        }
+                        let current_incarnations = service.live_node_incarnations().await;
+                        Self::verify_ownership_handoff_node_incarnation(
+                            &current_incarnations,
+                            &request.source,
+                            request.source_incarnation,
+                            "source",
+                        )?;
+                        Self::verify_ownership_handoff_node_incarnation(
+                            &current_incarnations,
+                            &request.destination,
+                            request.destination_incarnation,
+                            "destination",
+                        )?;
+                        service
+                            .prepare_control_request_domain(&request.domain)
+                            .await
+                            .map_err(OwnershipHandoffError::schedule)?;
+                        let scheduled = service
+                            .scheduled_model_node(
+                                &request.domain,
+                                request.entity.kind,
+                                request.entity.identifier.clone(),
+                            )
+                            .await
+                            .ok_or_else(|| {
+                                OwnershipHandoffError::schedule(format!(
+                                    "{} '{}' is absent from the committed schedule",
+                                    request.entity.kind.as_str(),
+                                    request.entity.identifier.as_str()
+                                ))
+                            })?;
+                        if scheduled.primary_node() != Some(&request.source) {
+                            return Err(OwnershipHandoffError::participant(format!(
+                                "{} '{}' is no longer owned by source node '{}'",
+                                request.entity.kind.as_str(),
+                                request.entity.identifier.as_str(),
+                                request.source
+                            )));
+                        }
+                        let _operation = service.inner.ownership_handoff_operations.lock().await;
+                        service
+                            .verify_ownership_handoff_coordinator(&request.coordination)
+                            .await?;
+                        service
+                            .inner
+                            .runtime
+                            .prepare_ownership_handoff_state(request)
+                            .await
+                    }
+                    .await;
+                    #[cfg(feature = "testing")]
+                    if result.is_ok() {
+                        service
+                            .inner
+                            .runtime
+                            .pause_ownership_handoff_prepare_response_if_armed(
+                                &response_pause_domain,
+                            )
+                            .await;
+                    }
+                    match result {
+                        Ok(()) => Ok(()),
+                        Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                    }
+                }
+            },
+        )
+    }
+
+    pub(in crate::application) fn register_ownership_handoff_reconciliation_handler(
+        &self,
+        interconnect: &Transport,
+    ) -> Result<(), Report<HandlerRegistrationError>> {
+        let service = self.clone();
+        interconnect.register_handler::<RemoteReconcileOwnershipHandoffPreparationsRequest, _, _>(
+            move |_context, request| {
+                let service = service.clone();
+                async move {
+                    match service
+                        .reconcile_local_ownership_handoff_preparations(&request)
+                        .await
+                    {
+                        Ok(discarded) => Ok(discarded),
+                        Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                    }
+                }
+            },
+        )
+    }
+
+    async fn reconcile_cluster_ownership_handoff_preparations(&self) -> OwnershipHandoffResult<()> {
+        let authority = self
+            .inner
+            .interconnect
+            .next_coordination_identity()
+            .map_err(|error| OwnershipHandoffError::transport(error.to_string()))?;
+        let authoritative_revision = self
+            .inner
+            .consensus
+            .establish_ownership_handoff_reconciliation(authority.clone())
+            .await
+            .map_err(|error| OwnershipHandoffError::schedule(error.to_string()))?;
+        let request = RemoteReconcileOwnershipHandoffPreparationsRequest {
+            coordination: authority,
+            authoritative_revision,
+        };
+        let mut nodes = self.available_node_ids().await;
+        if !nodes
+            .iter()
+            .any(|node| node == self.inner.consensus.local_node_id())
+        {
+            nodes.push(self.inner.consensus.local_node_id().clone());
+        }
+        nodes.sort();
+        nodes.dedup();
+
+        let mut requests = FuturesUnordered::new();
+        for node in nodes {
+            let service = self.clone();
+            let request = request.clone();
+            requests.push(async move {
+                let result = if node == *service.inner.consensus.local_node_id() {
+                    service
+                        .reconcile_local_ownership_handoff_preparations(&request)
+                        .await
+                } else {
+                    let response = service
+                        .inner
+                        .interconnect
+                        .request_with_timeout(&node, request, Duration::from_secs(2))
+                        .await;
+                    match response {
+                        Ok(response) => response
+                            .map_err(|error| OwnershipHandoffError::participant(error.to_string())),
+                        Err(error) => Err(OwnershipHandoffError::transport(error.to_string())),
+                    }
+                };
+                (node, result)
+            });
+        }
+        let mut failure = None;
+        while let Some((node, result)) = requests.next().await {
+            tokio::task::consume_budget().await;
+            if let Err(error) = result {
+                debug!(
+                    %node,
+                    error = %error,
+                    "ownership handoff preparation reconciliation remains pending"
+                );
+                if failure.is_none() {
+                    failure = Some(OwnershipHandoffError::participant(format!(
+                        "node '{node}' did not reconcile ownership handoff preparations: {error}"
+                    )));
+                }
+            }
+        }
+        match failure {
+            Some(failure) => Err(failure),
+            None => Ok(()),
+        }
+    }
+
+    pub(in crate::application) async fn run_ownership_handoff_preparation_reconciliation(&self) {
+        sleep(Duration::from_millis(500)).await;
+        let mut observed = None;
+        let mut followup_at = None;
+        loop {
+            tokio::task::consume_budget().await;
+            if self.inner.drain_support_shutdown.is_cancelled() {
+                return;
+            }
+            let input = self.inner.consensus.automatic_schedule_input().await;
+            if let Ok(input) = input {
+                let fence = input.fence();
+                let tenure = fence.leader_tenure().clone();
+                let incarnations = self.available_node_incarnations().await;
+                let observation = (tenure, incarnations);
+                let changed = observed.as_ref() != Some(&observation);
+                let followup_due =
+                    followup_at.is_some_and(|deadline| tokio::time::Instant::now() >= deadline);
+                if changed || followup_due {
+                    match self
+                        .reconcile_cluster_ownership_handoff_preparations()
+                        .await
+                    {
+                        Ok(()) => {
+                            observed = Some(observation);
+                            if changed {
+                                let followup_delay =
+                                    self.inner.runtime.entity_gate_deadline().checked_mul(2);
+                                followup_at = match followup_delay {
+                                    Some(delay) => tokio::time::Instant::now().checked_add(delay),
+                                    None => None,
+                                };
+                            } else {
+                                followup_at = None;
+                            }
+                        }
+                        Err(error) => {
+                            debug!(
+                                error = %error,
+                                "ownership handoff preparation reconciliation will retry"
+                            );
+                        }
+                    }
+                }
+            } else {
+                observed = None;
+                followup_at = None;
+            }
+            tokio::select! {
+                _ = self.inner.drain_support_shutdown.cancelled() => return,
+                _ = sleep(OWNERSHIP_HANDOFF_RECONCILIATION_POLL_INTERVAL) => {}
             }
         }
     }
 
     pub(in crate::application) async fn abort_planned_ownership_handoff(
         &self,
-        domain: &DomainName,
-        handoff: PlannedOwnershipHandoff,
+        _domain: &DomainName,
+        mut handoff: PlannedOwnershipHandoff,
     ) {
-        self.discard_ownership_handoff_state(
-            &handoff.gate.coordination,
-            &handoff.operation_id,
-            domain,
-            &handoff.moves,
-        )
-        .await;
+        if handoff.preparations.publication_may_be_in_flight {
+            handoff.preparations.schedule_remaining_cleanup();
+        } else {
+            self.discard_attempted_ownership_handoff_preparations(&mut handoff.preparations)
+                .await;
+        }
         self.release_cluster_entity_gates(handoff.gate).await;
     }
 
@@ -1382,7 +1952,7 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn finish_planned_ownership_handoff(
         &self,
         domain: &DomainName,
-        handoff: PlannedOwnershipHandoff,
+        mut handoff: PlannedOwnershipHandoff,
     ) -> OwnershipHandoffResult<()> {
         let activation = self
             .activate_planned_ownership_handoff(domain, &handoff)
@@ -1428,13 +1998,8 @@ impl SessionServiceImpl {
                 );
             }
         }
-        self.discard_ownership_handoff_state(
-            &handoff.gate.coordination,
-            &handoff.operation_id,
-            domain,
-            &handoff.moves,
-        )
-        .await;
+        self.discard_attempted_ownership_handoff_preparations(&mut handoff.preparations)
+            .await;
         self.release_cluster_entity_gates_and_wait(handoff.gate)
             .await
             .map_err(OwnershipHandoffError::transport)?;

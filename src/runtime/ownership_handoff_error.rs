@@ -59,7 +59,7 @@ impl OwnershipHandoffError {
         Report::new(Self::WasmRestore(reason.into()))
     }
 
-    pub(in crate::runtime) fn persistence(error: RuntimePersistenceError) -> Report<Self> {
+    pub(crate) fn persistence(error: RuntimePersistenceError) -> Report<Self> {
         Report::new(Self::Persistence(error))
     }
 }

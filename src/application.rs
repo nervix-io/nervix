@@ -71,7 +71,6 @@ use nervix_interconnect::{
     Envelope, LookupRequest as RemoteLookupRequest, LookupResponse as RemoteLookupResponse,
     MAX_CONCURRENT_HEALTH_PROBES, OwnershipHandoffFailure, PeerTarget,
     PrepareForcedOwnershipRecoveryRequest as RemotePrepareForcedOwnershipRecoveryRequest,
-    PrepareOwnershipHandoffStateRequest as RemotePrepareOwnershipHandoffStateRequest,
     RuntimeErrorEvent as RemoteRuntimeErrorEvent, StateSyncRequest as RemoteStateSyncRequest,
     StateSyncResponse as RemoteStateSyncResponse, StreamHandlerError, StreamingResponse,
     SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest,
@@ -1695,6 +1694,7 @@ impl Application {
                 command_executions: DashMap::with_hasher(RandomState::new()),
                 transaction_executions: DashMap::with_hasher(RandomState::new()),
                 transaction_domain_executions: DashMap::with_hasher(RandomState::new()),
+                ownership_handoff_operations: tokio::sync::Mutex::new(()),
                 resource_upload_executions: DashMap::with_hasher(RandomState::new()),
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),
             }),
@@ -2110,76 +2110,8 @@ impl Application {
             )
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
-        let prepare_handoff_service = service.clone();
-        interconnect
-            .register_handler::<RemotePrepareOwnershipHandoffStateRequest, _, _>(
-                move |_context, request| {
-                    let service = prepare_handoff_service.clone();
-                    async move {
-                        let result: OwnershipHandoffResult<_> = async {
-                            if request.destination != *service.inner.consensus.local_node_id() {
-                                return Err(OwnershipHandoffError::participant(format!(
-                                    "ownership handoff for {} '{}' targets node '{}' but reached \
-                                     '{}'",
-                                    request.entity.kind.as_str(),
-                                    request.entity.identifier.as_str(),
-                                    request.destination,
-                                    service.inner.consensus.local_node_id()
-                                )));
-                            }
-                            let current_incarnations = service.live_node_incarnations().await;
-                            SessionServiceImpl::verify_ownership_handoff_node_incarnation(
-                                &current_incarnations,
-                                &request.source,
-                                request.source_incarnation,
-                                "source",
-                            )?;
-                            SessionServiceImpl::verify_ownership_handoff_node_incarnation(
-                                &current_incarnations,
-                                &request.destination,
-                                request.destination_incarnation,
-                                "destination",
-                            )?;
-                            service
-                                .prepare_control_request_domain(&request.domain)
-                                .await
-                                .map_err(OwnershipHandoffError::schedule)?;
-                            let scheduled = service
-                                .scheduled_model_node(
-                                    &request.domain,
-                                    request.entity.kind,
-                                    request.entity.identifier.clone(),
-                                )
-                                .await
-                                .ok_or_else(|| {
-                                    OwnershipHandoffError::schedule(format!(
-                                        "{} '{}' is absent from the committed schedule",
-                                        request.entity.kind.as_str(),
-                                        request.entity.identifier.as_str()
-                                    ))
-                                })?;
-                            if scheduled.primary_node() != Some(&request.source) {
-                                return Err(OwnershipHandoffError::participant(format!(
-                                    "{} '{}' is no longer owned by source node '{}'",
-                                    request.entity.kind.as_str(),
-                                    request.entity.identifier.as_str(),
-                                    request.source
-                                )));
-                            }
-                            service
-                                .inner
-                                .runtime
-                                .prepare_ownership_handoff_state(request)
-                                .await
-                        }
-                        .await;
-                        match result {
-                            Ok(()) => Ok(()),
-                            Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
-                        }
-                    }
-                },
-            )
+        service
+            .register_prepare_ownership_handoff_handler(&interconnect)
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
         let forced_recovery_service = service.clone();
@@ -2279,6 +2211,17 @@ impl Application {
                 },
             )
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        service
+            .register_ownership_handoff_reconciliation_handler(&interconnect)
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let ownership_handoff_reconciliation_service = service.clone();
+        background_tasks.push(tokio::spawn(async move {
+            ownership_handoff_reconciliation_service
+                .run_ownership_handoff_preparation_reconciliation()
+                .await;
+        }));
 
         let transaction_service = service.clone();
         let transaction_shutdown = shutdown.clone();

@@ -29,9 +29,9 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_interconnect::{HandlerRegistrationError, Transport};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule,
-    DomainClockAuthority, DomainClockState, DomainName, DomainSchedule, DomainStartPoint,
-    DomainState, DomainStatus, ResourceName, ResourceNodeStatus, ResourceUpload, ResourceUploadKey,
-    ResourceVersion, ResourceVersionStatus, Statement, UserName,
+    CoordinationIdentity, DomainClockAuthority, DomainClockState, DomainName, DomainSchedule,
+    DomainStartPoint, DomainState, DomainStatus, ResourceName, ResourceNodeStatus, ResourceUpload,
+    ResourceUploadKey, ResourceVersion, ResourceVersionStatus, Statement, UserName,
 };
 use nervix_recovery::Discarded as _;
 pub use openraft::raft::{
@@ -131,6 +131,12 @@ pub enum ConsensusCommand {
         domain: DomainName,
         expected_schedule: Option<Box<DomainSchedule>>,
         schedule: Option<Box<DomainSchedule>>,
+    },
+    /// Orders ownership-handoff reconciliation after every schedule proposal inherited by this
+    /// leader. The command intentionally changes no model; its committed log position is the
+    /// authority participants wait to apply before classifying durable preparations.
+    ReconcileOwnershipHandoffPreparations {
+        authority: CoordinationIdentity,
     },
     PutDomainAndSchedule {
         expected_domain: Option<Box<DomainState>>,
@@ -295,6 +301,9 @@ impl std::fmt::Display for ConsensusCommand {
                 } else {
                     write!(f, "clear-automatic-domain-schedule:{}", domain.as_str())
                 }
+            }
+            Self::ReconcileOwnershipHandoffPreparations { authority } => {
+                write!(f, "reconcile-ownership-handoff-preparations:{authority}")
             }
             Self::PutDomainAndSchedule { domain, .. } => {
                 write!(f, "put-domain-and-schedule:{}", domain.id.as_str())
@@ -2245,6 +2254,33 @@ impl Proposer {
             .map_err(Report::new)
     }
 
+    /// Commits a barrier after schedule proposals this leader may have inherited, returning the
+    /// revision participants must apply before classifying ownership-handoff preparations.
+    pub async fn establish_ownership_handoff_reconciliation(
+        &self,
+        authority: CoordinationIdentity,
+    ) -> Result<u64, Report<ConsensusError>> {
+        if authority.coordinator() != &self.inner.local_node_id {
+            return Err(Report::new(ConsensusError::Conflict(
+                "ownership handoff reconciliation authority is not the local node".to_string(),
+            )));
+        }
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::ReconcileOwnershipHandoffPreparations { authority })
+            .await?;
+        let revision = response.log_id.index;
+        match response.data {
+            ConsensusResponse::Applied => Ok(revision),
+            ConsensusResponse::Conflict(reason) => {
+                Err(Report::new(ConsensusError::Conflict(reason)))
+            }
+            ConsensusResponse::Transaction(_) => {
+                Err(Report::new(ConsensusError::UnexpectedResponse))
+            }
+        }
+    }
+
     pub async fn automatic_schedule_input(
         &self,
     ) -> Result<AutomaticScheduleInput, Report<ConsensusError>> {
@@ -3694,6 +3730,7 @@ fn apply_consensus_command_at(
             state.replace_domain_schedule(domain, schedule.as_deref());
             changes.schedule_changed = true;
         }
+        ConsensusCommand::ReconcileOwnershipHandoffPreparations { .. } => {}
         ConsensusCommand::PutDomainAndSchedule {
             expected_domain,
             expected_schedule,
