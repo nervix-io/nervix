@@ -433,9 +433,26 @@ connections begin graceful shutdown. Certificate expiration is also mapped to a 
 deadline when a connection is authenticated, so a connection cannot remain open beyond the validity
 of either peer certificate even if the wall clock later moves.
 
-Node shutdown first rejects new admission, cancels pool and operation waiters, and starts graceful
-HTTP/2 shutdown. Active work receives up to ten seconds to drain; remaining connections and handlers
-are then closed. Connection setup and incomplete TLS handshakes remain inside this bound.
+Application shutdown has three ordered phases. A stop request first marks the local process
+incarnation as terminating and then closes admission on its public gRPC, connector, observability,
+and console listeners. Its interconnect listener and registered handlers remain available on that
+live node throughout the drain-support phase. They continue carrying queued and active relay
+payloads, admission and record acknowledgements, runtime-state replication and checkpoints,
+ownership-handoff coordination, domain-clock progress, and the schedule revisions that activate
+committed ownership.
+
+The relay payload lane retains its transport admission guard for every queued or active payload.
+Sender-side runtime drain accounting retains the tracked root until admission and every requested
+record acknowledgement resolve; this includes roots created for `NO_ACK` sources. Ownership
+handoff does not complete until its replication acknowledgement and committed activation have been
+observed. These owners keep admitted work visible while the supporting interconnect consumers are
+still running.
+
+Only after drain support completes or reports abandonment does terminal teardown call transport
+shutdown. Transport shutdown rejects new interconnect admission, cancels pool and operation
+waiters, and starts graceful HTTP/2 shutdown. Active transport work receives up to ten seconds to
+drain; remaining connections and handlers are then closed. Connection setup and incomplete TLS
+handshakes remain inside this bound.
 
 ## Failure Ownership And Persistence
 

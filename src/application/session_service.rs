@@ -151,7 +151,10 @@ pub(in crate::application) struct SessionServiceInner {
     /// Also held by the initial schedule reconciliation task until process shutdown.
     pub(in crate::application) runtime_admission: Arc<RuntimeAdmission>,
     pub(in crate::application) replica_count: usize,
-    pub(in crate::application) shutdown: CancellationToken,
+    /// Stops external sessions after this node has advertised termination.
+    pub(in crate::application) admission_shutdown: CancellationToken,
+    /// Keeps internal coordination available until admitted work has drained.
+    pub(in crate::application) drain_support_shutdown: CancellationToken,
     pub(in crate::application) events: SessionEvents,
     pub(in crate::application) subscription_interest_counts:
         DashMap<SubscriptionInterestKey, usize, RandomState>,
@@ -211,7 +214,7 @@ impl SessionService for SessionServiceImpl {
             loop {
                 tokio::task::consume_budget().await;
                 tokio::select! {
-                    _ = event_service.inner.shutdown.cancelled() => break,
+                    _ = event_service.inner.admission_shutdown.cancelled() => break,
                     _ = event_session_done.cancelled() => break,
                     server_event = event_rx.recv() => {
                         match server_event {
@@ -262,7 +265,7 @@ impl SessionService for SessionServiceImpl {
             let _session_done_guard = session_done_guard;
             let mut subscriptions = SessionSubscriptions::for_user(authenticated_user);
             let mut clean_close = false;
-            let shutdown = service.inner.shutdown.clone();
+            let shutdown = service.inner.admission_shutdown.clone();
             loop {
                 tokio::task::consume_budget().await;
                 tokio::select! {

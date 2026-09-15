@@ -203,7 +203,7 @@ async fn handle_web_console_request(
         let service_tasks = service.inner.service_tasks.clone();
         service_tasks.spawn(async move {
             let upgraded = tokio::select! {
-                _ = service.inner.shutdown.cancelled() => return,
+                _ = service.inner.admission_shutdown.cancelled() => return,
                 upgraded = on_upgrade => upgraded,
             };
             match upgraded {
@@ -242,7 +242,7 @@ async fn handle_web_console_request(
                         tokio::task::consume_budget().await;
                         tokio::select! {
                             biased;
-                            _ = service.inner.shutdown.cancelled() => break,
+                            _ = service.inner.admission_shutdown.cancelled() => break,
                             message = futures_util::StreamExt::next(&mut websocket) => {
                                 let Some(message) = message else {
                                     break;
@@ -269,7 +269,7 @@ async fn handle_web_console_request(
                                                 }
                                                 let request_sent = tokio::select! {
                                                     biased;
-                                                    _ = service.inner.shutdown.cancelled() => false,
+                                                    _ = service.inner.admission_shutdown.cancelled() => false,
                                                     result = request_tx.send(request) => {
                                                         result.is_ok()
                                                     }
@@ -976,7 +976,7 @@ impl SessionServiceImpl {
         state_refresh_tx: mpsc::Sender<()>,
     ) {
         let mut subscriptions = SessionSubscriptions::for_user(authenticated_user);
-        let shutdown = self.inner.shutdown.clone();
+        let shutdown = self.inner.admission_shutdown.clone();
         loop {
             tokio::task::consume_budget().await;
             let request = tokio::select! {
@@ -1571,7 +1571,7 @@ mod tests {
         });
 
         tokio::task::yield_now().await;
-        service.inner.shutdown.cancel();
+        service.inner.admission_shutdown.cancel();
         tokio::time::timeout(Duration::from_secs(1), worker)
             .await
             .assured("shutdown interrupts a session worker blocked by response backpressure")
