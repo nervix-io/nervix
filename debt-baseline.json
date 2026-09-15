@@ -1,14 +1,16 @@
 {
   "as_casts": 3,
-  "bare_error_signatures": 832,
+  "bare_error_signatures": 831,
   "bare_unwrap_and_expect": 0,
   "clamped_arithmetic": 11,
   "combinator_control_flow": 0,
+  "data_plane_lock_acquisitions": 287,
   "discarded_results": 0,
   "files_over_3000_lines": 11,
   "model_matches_in_data_plane": 125,
   "parser_imports_outside_edges": 0,
   "result_string_errors": 480,
   "string_node_ids": 0,
-  "testing_feature_struct_fields": 0
+  "testing_feature_struct_fields": 0,
+  "write_once_rwlock_fields": 6
 }

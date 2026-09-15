@@ -819,23 +819,26 @@ impl Runtime {
         remote: RelayPayload,
         admission: Option<RemoteRelayAdmissionContext<'_>>,
     ) -> Result<(), RuntimeError> {
-        let Some(execution) = self.inner.executions.get(&remote.domain) else {
-            return Err(RuntimeError::RelayNotInstantiated {
-                domain: remote.domain.as_str().to_string(),
-                relay: remote.relay.as_str().to_string(),
-            });
-        };
-        let Some(services) = execution.relay_services.get(&remote.relay) else {
-            return Err(RuntimeError::RelayNotInstantiated {
-                domain: remote.domain.as_str().to_string(),
-                relay: remote.relay.as_str().to_string(),
-            });
-        };
-        let Some(schema) = execution.relay_schemas.get(&remote.relay).cloned() else {
-            return Err(RuntimeError::RelayNotInstantiated {
-                domain: remote.domain.as_str().to_string(),
-                relay: remote.relay.as_str().to_string(),
-            });
+        let (services, schema) = {
+            let Some(execution) = self.inner.executions.get(&remote.domain) else {
+                return Err(RuntimeError::RelayNotInstantiated {
+                    domain: remote.domain.as_str().to_string(),
+                    relay: remote.relay.as_str().to_string(),
+                });
+            };
+            let Some(services) = execution.relay_services.get(&remote.relay).cloned() else {
+                return Err(RuntimeError::RelayNotInstantiated {
+                    domain: remote.domain.as_str().to_string(),
+                    relay: remote.relay.as_str().to_string(),
+                });
+            };
+            let Some(schema) = execution.relay_schemas.get(&remote.relay).cloned() else {
+                return Err(RuntimeError::RelayNotInstantiated {
+                    domain: remote.domain.as_str().to_string(),
+                    relay: remote.relay.as_str().to_string(),
+                });
+            };
+            (services, schema)
         };
         let decoded_batch = schema
             .decode_arrow_body(self.executor(), remote.batch_ipc.clone())
@@ -912,6 +915,16 @@ impl Runtime {
         }
         dispatch.await;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) async fn handle_remote_subscription_payload(
+        &self,
+        remote: RelayPayload,
+    ) -> Result<(), Report<RuntimeError>> {
+        self.handle_remote_subscription_payload_with_admission(remote, None)
+            .await
+            .map_err(Report::new)
     }
 
     pub(crate) fn handle_remote_ack_resolution(&self, ack: RemoteAckResolution) {

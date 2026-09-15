@@ -358,6 +358,73 @@ impl Runtime {
 
             self.assertEqual(count(root, "model_matches_in_data_plane"), 1)
 
+    def test_data_plane_lock_acquisitions_cover_owned_files_and_exclude_tests(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(
+                root,
+                {
+                    "src/runtime/worker.rs": """
+async fn process(state: State, entries: Entries, key: Key) {
+    state.lock();
+    state.read();
+    state.write();
+    state.lock().await;
+    entries.entry(key);
+    let example = "state.lock()";
+    // state.write();
+}
+
+#[cfg(test)]
+mod tests {
+    fn locks(state: State) {
+        state.lock();
+    }
+}
+""",
+                    "src/runtime/tests.rs": "fn locks(state: State) { state.lock(); }\n",
+                    "src/runtime_ack.rs": "fn ack(state: State) { state.lock(); }\n",
+                    "src/metrics.rs": "fn metric(map: Map) { map.entry(Key); }\n",
+                    "crates/interconnect/src/lib.rs": "fn tls(state: State) { state.read(); }\n",
+                    "src/control_plane.rs": "fn update(state: State) { state.write(); }\n",
+                    "src/metrics/helper.rs": "fn update(state: State) { state.lock(); }\n",
+                    "crates/interconnect/tests/session.rs": "fn read(state: State) { state.read(); }\n",
+                },
+            )
+
+            self.assertEqual(count(root, "data_plane_lock_acquisitions"), 8)
+
+    def test_write_once_rwlocks_count_only_arc_and_name_struct_fields(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(
+                root,
+                {
+                    "src/lib.rs": """
+struct Runtime {
+    resource: RwLock<Option<Arc<ResourceStore>>>,
+    owner: parking_lot::RwLock<
+        Option<names::ClusterNodeName>,
+    >,
+    optional_duration: RwLock<Option<Duration>>,
+    required_resource: RwLock<Arc<ResourceStore>>,
+    wrapped: Option<RwLock<Option<Arc<ResourceStore>>>>,
+}
+
+fn local() {
+    let resource: RwLock<Option<Arc<ResourceStore>>>;
+}
+
+#[cfg(test)]
+struct TestRuntime {
+    owner: RwLock<Option<ClusterNodeName>>,
+}
+""",
+                },
+            )
+
+            self.assertEqual(count(root, "write_once_rwlock_fields"), 2)
+
     def test_files_over_3000_lines_count_in_crate_tests_but_not_the_test_tree(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

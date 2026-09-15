@@ -192,6 +192,7 @@ struct ScenarioWorld {
     avro_http_optional_fields: BTreeSet<String>,
     fault_injection: FaultInjection,
     consensus_commit_delays: BTreeMap<String, Duration>,
+    burst_raft_retention_peak: Option<nervix_consensus::RaftLogRetention>,
     durable_catch_up: Option<DurableCatchUpObservation>,
     durable_catch_up_writer: Option<DurableCatchUpWriter>,
     cluster_config: TestClusterConfig,
@@ -280,6 +281,7 @@ impl fmt::Debug for ScenarioWorld {
                 "avro_http_optional_field_count",
                 &self.avro_http_optional_fields.len(),
             )
+            .field("burst_raft_retention_peak", &self.burst_raft_retention_peak)
             .field("temp_root_initialized", &self.temp_root.is_some())
             .field("browser_initialized", &self.browser.is_some())
             .field(
@@ -2503,6 +2505,10 @@ async fn when_domains_are_created_in_a_burst(
     prefix: String,
 ) {
     let leader = running_leader_node(world).await;
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&leader));
+    let mut retention_peak = observer.raft_log_retention();
     let mut session = world
         .cluster()
         .open_session(&leader, &world.domain)
@@ -2515,7 +2521,12 @@ async fn when_domains_are_created_in_a_burst(
             .run_command(&format!("CREATE DOMAIN {name};"))
             .await
             .unwrap_or_else(|error| panic!("creating domain '{name}' failed: {error}"));
+        let retention = observer.raft_log_retention();
+        if retention.retained_bytes > retention_peak.retained_bytes {
+            retention_peak = retention;
+        }
     }
+    world.burst_raft_retention_peak = Some(retention_peak);
 }
 
 fn burst_domain_name(prefix: &str, index: usize) -> String {
@@ -2850,11 +2861,47 @@ async fn await_burst_domains(
 #[then(expr = "within {string} the leader node has purged its covered raft log")]
 async fn then_leader_purged_covered_log(world: &mut ScenarioWorld, duration: String) {
     let leader = running_leader_node(world).await;
-    let deadline = Instant::now()
-        + humantime::parse_duration(&duration).expect("step duration must be a valid duration");
     let observer = world
         .fault_injection
         .consensus_observer(&crate::common::cluster::node_name(&leader));
+    await_covered_log_purge(&observer, &duration).await;
+}
+
+#[then(
+    expr = "within {string} the leader node has purged its covered raft log and reports fewer \
+            retained bytes"
+)]
+async fn then_leader_purged_covered_log_and_reduced_retained_bytes(
+    world: &mut ScenarioWorld,
+    duration: String,
+) {
+    let leader = running_leader_node(world).await;
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&leader));
+    let retention_peak = world
+        .burst_raft_retention_peak
+        .take()
+        .verified("the preceding domain burst recorded its Raft retention peak");
+    let retention = await_covered_log_purge(&observer, &duration).await;
+    assert!(
+        retention.purged_index > retention_peak.purged_index,
+        "the leader did not advance its purged index after the retained-byte peak: \
+         peak={retention_peak:?} after={retention:?}"
+    );
+    assert!(
+        retention.retained_bytes < retention_peak.retained_bytes,
+        "the leader purged its covered log without reducing reported retained bytes: \
+         peak={retention_peak:?} after={retention:?}"
+    );
+}
+
+async fn await_covered_log_purge(
+    observer: &nervix_consensus::Observer,
+    duration: &str,
+) -> nervix_consensus::RaftLogRetention {
+    let deadline = Instant::now()
+        + humantime::parse_duration(duration).expect("step duration must be a valid duration");
     loop {
         tokio::task::consume_budget().await;
         let retention = observer.raft_log_retention();
@@ -2863,7 +2910,7 @@ async fn then_leader_purged_covered_log(world: &mut ScenarioWorld, duration: Str
                 retention.snapshot_index >= retention.purged_index,
                 "the leader purged entries its snapshot does not cover: {retention:?}"
             );
-            return;
+            return retention;
         }
         assert!(
             Instant::now() < deadline,
@@ -2975,6 +3022,7 @@ async fn given_cluster_is_started(world: &mut ScenarioWorld, node_count: usize) 
     world.broker_observer = None;
     world.last_broker_payload = None;
     world.last_broker_headers.clear();
+    world.burst_raft_retention_peak = None;
     append_cucumber_log_line(&format!(
         "cluster start requested: nodes={node_count} domain={} test_id={}",
         world.domain, world.test_id
@@ -4360,6 +4408,33 @@ async fn when_node_is_started(world: &mut ScenarioWorld, node_id: String) {
         .start_node(&node_id)
         .await
         .expect("failed to start node");
+}
+
+#[when(expr = "node {string} is started while consensus connectivity is blocked")]
+async fn when_node_is_started_while_consensus_connectivity_is_blocked(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .block_consensus_connectivity(crate::common::cluster::node_name(&node_id));
+    world
+        .cluster_mut()
+        .start_node_without_waiting_for_raft_catch_up(&node_id)
+        .await
+        .expect("failed to start node with blocked consensus connectivity");
+}
+
+#[when(expr = "consensus connectivity for node {string} is restored")]
+async fn when_consensus_connectivity_for_node_is_restored(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .restore_consensus_connectivity(&crate::common::cluster::node_name(&node_id));
 }
 
 #[when(expr = "node {string} is added to the cluster")]
@@ -13353,6 +13428,32 @@ async fn when_http_payload_is_posted_to_node_and_fails(
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+#[when(
+    expr = "http payload is posted to node {string} with host {string} path {string} and is not \
+            routed"
+)]
+async fn when_http_payload_is_posted_to_node_and_is_not_routed(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let error = world
+        .cluster()
+        .publish_http(&node_id, &host, &path, &payload)
+        .await
+        .expect_err("expected http post to be unrouted");
+    let reported = error.to_string();
+    assert!(
+        reported.contains("404"),
+        "expected http post to node '{node_id}' to be unrouted, got: {reported}"
+    );
 }
 
 #[then("the relay subscription receives a payload")]

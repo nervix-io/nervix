@@ -67,6 +67,77 @@ Feature: Graceful shutdown
       relocation onto node '{{terminating_owner}}'
       """
 
+  Scenario: A delayed remote acknowledgement completes while its source owner drains
+    Given graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA shutdown_ack_event ( id I64 );
+      CREATE WIRE JSON SCHEMA shutdown_ack_wire MODE STRICT ( id integer );
+      CREATE CODEC shutdown_ack_codec
+        FROM WIRE JSON SCHEMA shutdown_ack_wire
+        TO SCHEMA shutdown_ack_event;
+      CREATE RELAY shutdown_ack_input SCHEMA shutdown_ack_event UNBRANCHED;
+      CREATE RELAY shutdown_ack_output SCHEMA shutdown_ack_event UNBRANCHED;
+      CREATE VHOST edge shutdown-ack-{{test_id}}.example.com;
+      CREATE ENDPOINT shutdown_ack_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR shutdown_ack_source
+        FROM ENDPOINT shutdown_ack_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING shutdown_ack_codec
+        TO shutdown_ack_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE JUNCTION shutdown_ack_route FROM shutdown_ack_input UNBRANCHED
+        TO shutdown_ack_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE CLIENT shutdown_ack_sink TYPE ZEROMQ CONFIG {
+        'addr' = '{{zeromq_emit_addr}}',
+        'bind' = 'false'
+      };
+      CREATE EMITTER shutdown_ack_output_sink FROM shutdown_ack_output
+        TO ZEROMQ shutdown_ack_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+        ENCODE USING shutdown_ack_codec INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE PLACEMENT keep_shutdown_ack_downstream_local
+        FROM shutdown_ack_route TO shutdown_ack_output_sink REQUIRE COLOCATION;
+      START;
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      SHOW CLUSTER STATUS;
+      """
+    Then node "node-1" eventually reports status containing "kind=ingestor name=shutdown_ack_source owner=- replicas=node"
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the first replica for scheduled "ingestor" "shutdown_ack_source" in the last cluster status is saved as placeholder "shutdown_ack_source_owner"
+    And a node other than placeholder "shutdown_ack_source_owner" is saved as placeholder "shutdown_ack_downstream_owner"
+    When these NSPL commands are executed on the leader node
+      """
+      RELOCATE JUNCTION shutdown_ack_route
+        ONTO NODE {{shutdown_ack_downstream_owner}} IGNORE PREFERENCES;
+      """
+    Then within "10s" node "node-1" eventually reports scheduled "junction" "shutdown_ack_route" owner equals placeholder "shutdown_ack_downstream_owner"
+    Given remote relay admission for domain "{{domain}}" is paused
+    When http payload begins posting in the background to node "{{shutdown_ack_source_owner}}" with host "shutdown-ack-{{test_id}}.example.com" path "/events"
+      """
+      {"id":7}
+      """
+    Then the remote relay admission pause for domain "{{domain}}" is reached
+    When node "{{shutdown_ack_source_owner}}" begins stopping
+    Then node "{{shutdown_ack_downstream_owner}}" eventually reports status containing "terminating: true"
+    When the remote relay admission pause for domain "{{domain}}" is released
+    Then the observed broker receives a payload
+      """
+      "id":7
+      """
+    When node "{{shutdown_ack_source_owner}}" is stopped while timing shutdown
+    Then the last cluster operation completes within "5s"
+
   Scenario: Graceful shutdown skips drain when no replacement node exists
     Given graceful shutdown drain is enabled
     And drain timeout is configured as "5s"

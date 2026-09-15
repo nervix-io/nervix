@@ -250,6 +250,16 @@ impl FaultInjection {
         test_probe
     }
 
+    pub fn block_consensus_connectivity(&self, node: ClusterNodeName) {
+        let state = self.inner.consensus_probes.entry(node).or_default();
+        state.test_probe.block_connectivity();
+    }
+
+    pub fn restore_consensus_connectivity(&self, node: &ClusterNodeName) {
+        let state = self.inner.consensus_probes.entry(node.clone()).or_default();
+        state.test_probe.restore_connectivity();
+    }
+
     pub fn consensus_observer(&self, node: &ClusterNodeName) -> nervix_consensus::Observer {
         use meticulous::OptionExt as _;
         let state = self

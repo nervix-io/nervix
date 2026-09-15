@@ -63,8 +63,6 @@ pub enum AppError {
     OpenResourceStore,
     #[error("failed to start consensus")]
     StartConsensus,
-    #[error("failed to synchronize registry from consensus schedule: {0}")]
-    SynchronizeRegistry(String),
     #[error("failed to apply startup runtime changes: {0}")]
     ApplyStartupRuntime(String),
     #[error("failed to open runtime state store")]
