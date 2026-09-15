@@ -74,6 +74,12 @@ models, schedules, clocks, resource bindings, and stopped or running lifecycle s
 listeners start. Each node then reports `ready`, and success waits for the readiness barrier. This
 prevents a source from publishing into a peer that still has the preceding graph.
 
+Revision progress is cumulative. If a newer runtime revision arrives while a node is waiting at
+either barrier, that node applies the newer coherent state instead of waiting to finish the older
+revision first. Preparing or becoming ready at the newer revision also completes every earlier
+revision for that process incarnation. This lets a newly admitted process catch up to the current
+state without forming a cycle with peers that entered adjacent revision barriers before it joined.
+
 ```mermaid
 sequenceDiagram
     participant C as Client
@@ -206,6 +212,7 @@ failure. Clients preserve the same reference through redirects, reconnects, and 
 outcomes. An expired reference produces an explicit result and never causes automatic re-execution
 under a new identity.
 
-The public behavior is specified in [NSPL command completion](../specifications/nspl-command-completion.md).
+The public behavior is specified in
+[NSPL command completion](https://github.com/nervix-io/nervix/blob/main/docs/specifications/nspl-command-completion.md).
 The corresponding public scenario inventory is maintained in the repository's command-completion
 acceptance ledger.

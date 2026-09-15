@@ -134,14 +134,31 @@ impl<'a> DurableBatch<'a> {
         key: &[u8],
         value: Vec<u8>,
     ) -> io::Result<()> {
-        self.charge_key(key)?;
-        self.charge(value.len())?;
+        let charged = Self::encoded_insert_bytes(key, value.len())?;
+        self.charge(charged)?;
+        self.mutations
+            .try_reserve_exact(1)
+            .map_err(io::Error::other)?;
         self.mutations.push(Mutation::Put {
             keyspace: keyspace.clone(),
             key: key.to_vec(),
             value,
         });
         Ok(())
+    }
+
+    /// Whether one already encoded record would cross this batch's reservation-backed limit.
+    pub(crate) fn would_exceed_encoded_insert(&self, key: &[u8], value: &[u8]) -> io::Result<bool> {
+        let charged = Self::encoded_insert_bytes(key, value.len())?;
+        let used = self
+            .used
+            .checked_add(charged)
+            .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
+        Ok(used > self.limit)
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.mutations.is_empty()
     }
 
     pub(crate) fn remove(&mut self, keyspace: &Keyspace, key: &[u8]) -> io::Result<()> {
@@ -176,6 +193,15 @@ impl<'a> DurableBatch<'a> {
         self.mutations
             .try_reserve_exact(1)
             .map_err(io::Error::other)
+    }
+
+    fn encoded_insert_bytes(key: &[u8], value_len: usize) -> io::Result<usize> {
+        let with_key = std::mem::size_of::<Mutation>()
+            .checked_add(key.len())
+            .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
+        with_key
+            .checked_add(value_len)
+            .ok_or_else(|| io::Error::other(StorageFailure::Capacity))
     }
 
     fn charge(&mut self, bytes: usize) -> io::Result<()> {
