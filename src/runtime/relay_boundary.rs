@@ -1933,21 +1933,18 @@ impl Runtime {
                         continue;
                     }
                 };
-                for message in messages {
-                    tokio::task::consume_budget().await;
-                    if let Err(error) = runtime.update_materialized_stream_last_by_timestamp(
-                        &state,
-                        &branch_key,
-                        &message.record,
-                    ) {
-                        warn!(
-                            domain = domain.as_str(),
-                            relay = relay.as_str(),
-                            error = %error,
-                            "materialized relay assignment changed while applying a batch"
-                        );
-                        break 'state_task;
-                    }
+                let records = messages.into_iter().map(|message| message.record);
+                if let Err(error) = runtime
+                    .apply_materialized_stream_records(&state, &branch_key, records)
+                    .await
+                {
+                    warn!(
+                        domain = domain.as_str(),
+                        relay = relay.as_str(),
+                        error = %error,
+                        "materialized relay assignment changed while applying a batch"
+                    );
+                    break 'state_task;
                 }
             }
         });
