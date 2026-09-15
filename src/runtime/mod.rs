@@ -121,7 +121,6 @@ use nervix_wasm::{
     WasmOutputColumnRef, WasmOutputRow, WasmRoutedOutput, WasmRuntime, WasmRuntimeConfig,
 };
 use ordered_float::OrderedFloat;
-use parking_lot::RwLock;
 use sorted_vec::SortedSet;
 use tempfile::TempDir;
 use thiserror::Error;
