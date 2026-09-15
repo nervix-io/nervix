@@ -5,12 +5,7 @@
 //! the temporary store a test opens. A fixture used by one module belongs in that
 //! module's own test module instead.
 
-use std::{
-    fs,
-    num::NonZeroU64,
-    path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{fs, num::NonZeroU64, path::PathBuf};
 
 use nervix_models::{
     AckMode, Assignment, AssignmentTarget, AssignmentTargetScope, BranchName, BranchSelection,
@@ -35,11 +30,11 @@ use nonzero_ext::nonzero;
 use crate::registry::storage::Registry;
 
 pub(in crate::registry) fn temp_db_path() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    std::env::temp_dir().join(format!("nervix-server-registry-test-{nanos}"))
+    tempfile::Builder::new()
+        .prefix("nervix-server-registry-test-")
+        .tempdir()
+        .expect("temporary registry directory should be created")
+        .keep()
 }
 
 pub(in crate::registry) fn sample_transport_model(name: &str) -> Model {
