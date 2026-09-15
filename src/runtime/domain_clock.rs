@@ -7,8 +7,15 @@
 //! - **Depends on.** Vocabulary clock models and branch-local runtime state.
 //! - **Must not know.** NSPL parsing, consensus decisions or clock-authority selection.
 
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc as StdArc,
+        atomic::{AtomicI64, Ordering},
+    },
+    time::Duration,
+};
 
+use arc_swap::ArcSwap;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 #[cfg(test)]
@@ -155,26 +162,102 @@ impl DomainClockInstallation {
             | Self::Installed { generation, .. } => Some(*generation),
         }
     }
+
+    /// The generation bound handles can read through this installation, if it is readable.
+    const fn installed_generation(&self) -> Option<u64> {
+        match self {
+            Self::Installed { generation, .. } => Some(*generation),
+            Self::Missing | Self::Stopped { .. } | Self::Uninstalled { .. } => None,
+        }
+    }
 }
 
+/// The latest time this node's reads have returned through the publications that share it.
+///
+/// Concurrent reads raise it with one atomic maximum instead of serializing on a lock. The cell
+/// stores the signed Unix-nanosecond boundary form of a timestamp and accepts and returns only
+/// typed timestamps.
 #[derive(Debug)]
-struct DomainClockSharedState {
+struct DomainClockReadWatermark {
+    unix_nanos: AtomicI64,
+}
+
+impl DomainClockReadWatermark {
+    /// Starts at the earliest representable timestamp, the identity of the maximum, so the first
+    /// read returns its projection unchanged.
+    const fn new() -> Self {
+        Self {
+            unix_nanos: AtomicI64::new(i64::MIN),
+        }
+    }
+
+    /// Raises the watermark to `projected` and returns the raised watermark.
+    ///
+    /// Every read that returned through this watermark before this call had already raised it to
+    /// its own result, so the returned time is never earlier than any of those results.
+    fn raise(&self, projected: Timestamp) -> Timestamp {
+        let projected_nanos = projected.unix_nanos();
+        let previous_nanos = self
+            .unix_nanos
+            .fetch_max(projected_nanos, Ordering::Relaxed);
+        Timestamp::from_unix_nanos(previous_nanos.max(projected_nanos))
+    }
+}
+
+/// One domain-clock installation as bound handles read it.
+///
+/// Every lifecycle change publishes a replacement whole. A read therefore loads one consistent
+/// installation without taking a lock, and a replacement never alters a publication that an
+/// in-flight read already holds.
+#[derive(Debug)]
+struct DomainClockPublication {
     installation: DomainClockInstallation,
-    last_read: Option<DomainExecutionSnapshot>,
-    change_version: u64,
+    /// Shared with a replacement only when that replacement keeps the same generation installed,
+    /// so reads of that generation cannot decrease even when they race the replacement. Every
+    /// other replacement starts a new watermark, which a read still holding an earlier publication
+    /// cannot raise.
+    watermark: Arc<DomainClockReadWatermark>,
+}
+
+impl DomainClockPublication {
+    fn new(installation: DomainClockInstallation) -> Self {
+        Self {
+            installation,
+            watermark: Arc::new(DomainClockReadWatermark::new()),
+        }
+    }
+
+    /// The publication that installs `installation` in place of this one, or `None` when this
+    /// publication already installs it.
+    fn successor(&self, installation: &DomainClockInstallation) -> Option<Self> {
+        if self.installation == *installation {
+            return None;
+        }
+        if let Some(generation) = self.installation.installed_generation()
+            && installation.installed_generation() == Some(generation)
+        {
+            return Some(Self {
+                installation: installation.clone(),
+                watermark: self.watermark.clone(),
+            });
+        }
+        Some(Self::new(installation.clone()))
+    }
 }
 
 #[derive(Debug)]
 struct DomainClockInner {
     domain: DomainName,
-    state: parking_lot::Mutex<DomainClockSharedState>,
-    changes: watch::Sender<u64>,
+    published: ArcSwap<DomainClockPublication>,
+    /// Wakes logical waiters after every published replacement.
+    changes: watch::Sender<()>,
 }
 
 /// The lifecycle owner for one domain clock on one runtime node.
 ///
-/// Bound execution capabilities and lifecycle updates share this one allocation. Updating the
-/// installation therefore wakes every waiter without copying a mapping into task-local state.
+/// Bound execution capabilities and lifecycle updates share this one allocation. Publishing an
+/// installation therefore reaches every bound handle and wakes every waiter without copying a
+/// mapping into task-local state.
 #[derive(Debug, Clone)]
 pub(in crate::runtime) struct DomainClockLifecycle {
     inner: Arc<DomainClockInner>,
@@ -182,15 +265,14 @@ pub(in crate::runtime) struct DomainClockLifecycle {
 
 impl DomainClockLifecycle {
     pub(in crate::runtime) fn new(domain: DomainName) -> Self {
-        let (changes, _) = watch::channel(0);
+        let (changes, _) = watch::channel(());
+        let published = ArcSwap::from_pointee(DomainClockPublication::new(
+            DomainClockInstallation::Missing,
+        ));
         Self {
             inner: Arc::new(DomainClockInner {
                 domain,
-                state: parking_lot::Mutex::new(DomainClockSharedState {
-                    installation: DomainClockInstallation::Missing,
-                    last_read: None,
-                    change_version: 0,
-                }),
+                published,
                 changes,
             }),
         }
@@ -206,9 +288,9 @@ impl DomainClockLifecycle {
             && state.clock.is_none()
             && authority.owner().is_some()
         {
-            let shared = self.inner.state.lock();
+            let published = self.inner.published.load();
             if matches!(
-                &shared.installation,
+                &published.installation,
                 DomainClockInstallation::Installed {
                     generation,
                     source: DomainClockSource::Paced { .. },
@@ -282,8 +364,8 @@ impl DomainClockLifecycle {
     }
 
     fn bind_for(&self, binding: DomainClockBinding) -> DomainClockAccessResult<DomainClock> {
-        let shared = self.inner.state.lock();
-        let generation = match shared.installation {
+        let published = self.inner.published.load();
+        let generation = match published.installation {
             DomainClockInstallation::Missing => {
                 return Err(Report::new(DomainClockAccessError::Missing {
                     domain: self.inner.domain.clone(),
@@ -312,26 +394,26 @@ impl DomainClockLifecycle {
         })
     }
 
+    /// Publishes `installation` unless it is already the published installation.
+    ///
+    /// The successor is derived from the publication it replaces and stored only while that
+    /// publication is still current, so an unchanged installation wakes no waiter and a watermark
+    /// is shared only across the replacement it was derived for.
     fn replace(&self, installation: DomainClockInstallation) {
-        let mut shared = self.inner.state.lock();
-        if shared.installation == installation {
-            return;
+        loop {
+            let current = self.inner.published.load();
+            let Some(successor) = current.successor(&installation) else {
+                return;
+            };
+            let previous = self
+                .inner
+                .published
+                .compare_and_swap(&*current, StdArc::new(successor));
+            if StdArc::ptr_eq(&*previous, &*current) {
+                break;
+            }
         }
-        let generation_changed = shared.installation.generation() != installation.generation();
-        shared.installation = installation;
-        if generation_changed
-            || !matches!(
-                shared.installation,
-                DomainClockInstallation::Installed { .. }
-            )
-        {
-            shared.last_read = None;
-        }
-        shared.change_version = shared
-            .change_version
-            .checked_add(1)
-            .assured("a runtime cannot install 2^64 domain clock lifecycle changes");
-        self.inner.changes.send_replace(shared.change_version);
+        self.inner.changes.send_replace(());
     }
 }
 
@@ -344,37 +426,32 @@ pub struct DomainClock {
 
 impl DomainClock {
     pub(in crate::runtime) fn snapshot(&self) -> DomainClockAccessResult<DomainExecutionSnapshot> {
-        let mut shared = self.inner.state.lock();
-        self.read(&mut shared)
+        let published = self.inner.published.load();
+        let source = self.source(&published.installation)?;
+        self.observe(source, &published.watermark)
     }
 
-    fn read(
+    /// Projects actual UTC through a source validated for this handle's generation and raises the
+    /// watermark published with that source to the projection.
+    fn observe(
         &self,
-        shared: &mut DomainClockSharedState,
+        source: &DomainClockSource,
+        watermark: &DomainClockReadWatermark,
     ) -> DomainClockAccessResult<DomainExecutionSnapshot> {
         let wall_now = actual_utc_now();
-        let source = self.source(&shared.installation)?;
         let projected = source.now(&self.inner.domain, wall_now)?;
-        let now = match &shared.last_read {
-            Some(previous)
-                if previous.generation == self.generation && previous.now > projected =>
-            {
-                previous.now
-            }
-            _ => projected,
-        };
-        let snapshot = DomainExecutionSnapshot {
+        let now = watermark.raise(projected);
+        Ok(DomainExecutionSnapshot {
             generation: self.generation,
             now,
-        };
-        shared.last_read = Some(snapshot.clone());
-        Ok(snapshot)
+        })
     }
 
     pub(super) fn ingestion_snapshot(&self) -> DomainClockAccessResult<DomainIngestionSnapshot> {
-        let mut shared = self.inner.state.lock();
-        let snapshot = self.read(&mut shared)?;
-        let window = match self.source(&shared.installation)? {
+        let published = self.inner.published.load();
+        let source = self.source(&published.installation)?;
+        let snapshot = self.observe(source, &published.watermark)?;
+        let window = match source {
             DomainClockSource::Unpaced => None,
             DomainClockSource::Paced {
                 mapping,
@@ -384,8 +461,8 @@ impl DomainClock {
                 DomainAdmissionWindow::reached(
                     mapping.logical_start(),
                     snapshot.now(),
-                    period,
-                    skew,
+                    *period,
+                    *skew,
                 )
                 .assured(
                     "a projected, nondecreasing clock read never precedes its generation's origin",
@@ -439,17 +516,14 @@ impl DomainClock {
         current: Timestamp,
         target: Timestamp,
     ) -> DomainClockAccessResult<Duration> {
-        let shared = self.inner.state.lock();
-        self.source(&shared.installation)?.physical_duration_until(
-            &self.inner.domain,
-            current,
-            target,
-        )
+        let published = self.inner.published.load();
+        let source = self.source(&published.installation)?;
+        source.physical_duration_until(&self.inner.domain, current, target)
     }
 
     fn revalidate(&self) -> DomainClockAccessResult<()> {
-        let shared = self.inner.state.lock();
-        self.source(&shared.installation)?;
+        let published = self.inner.published.load();
+        self.source(&published.installation)?;
         Ok(())
     }
 
@@ -519,10 +593,11 @@ impl DomainClock {
         }
     }
 
-    fn source(
+    /// Validates an installation for this handle's generation and borrows its source.
+    fn source<'installation>(
         &self,
-        installation: &DomainClockInstallation,
-    ) -> DomainClockAccessResult<DomainClockSource> {
+        installation: &'installation DomainClockInstallation,
+    ) -> DomainClockAccessResult<&'installation DomainClockSource> {
         if let Some(current_generation) = installation.generation()
             && current_generation != self.generation
         {
@@ -548,7 +623,7 @@ impl DomainClock {
                     generation: *generation,
                 }))
             }
-            DomainClockInstallation::Installed { source, .. } => Ok(source.clone()),
+            DomainClockInstallation::Installed { source, .. } => Ok(source),
         }
     }
 }
@@ -1112,7 +1187,7 @@ mod tests {
             .get(&domain_id)
             .expect("the restarted domain remains installed");
         assert!(observed.progress.lock().is_none());
-        let installed = observed.clock.inner.state.lock();
+        let installed = observed.clock.inner.published.load();
         assert!(matches!(
             &installed.installation,
             DomainClockInstallation::Installed {
@@ -1449,6 +1524,91 @@ mod tests {
             .assured("the replacement mapping fits the timestamp range");
 
         assert!(after.now() >= before.now());
+    }
+
+    #[test]
+    fn a_read_racing_a_same_generation_replacement_bounds_later_reads() {
+        let lifecycle = DomainClockLifecycle::new(domain("paced"));
+        lifecycle.install_paced(
+            1,
+            DomainClockState::new(
+                Timestamp::from_unix_nanos(0),
+                Timestamp::from_unix_nanos(0),
+                DomainTimeRate::ONE,
+            ),
+        );
+        let bound = lifecycle
+            .bind()
+            .assured("the fixture installed generation one");
+        let racing_publication = lifecycle.inner.published.load_full();
+
+        lifecycle.install_paced(
+            1,
+            DomainClockState::new(
+                Timestamp::now(),
+                Timestamp::from_unix_nanos(0),
+                DomainTimeRate::ONE,
+            ),
+        );
+        let racing_read = racing_publication.watermark.raise(
+            "2200-01-01T00:00:00Z"
+                .parse::<Timestamp>()
+                .assured("the fixture timestamp is valid RFC 3339"),
+        );
+        let later = bound
+            .snapshot()
+            .assured("the replacement mapping fits the timestamp range");
+
+        assert!(
+            later.now() >= racing_read,
+            "a read after the replacement returned {} before the racing read {racing_read}",
+            later.now()
+        );
+    }
+
+    #[test]
+    fn a_read_racing_a_generation_change_cannot_clamp_the_next_generation() {
+        let lifecycle = DomainClockLifecycle::new(domain("paced"));
+        lifecycle.install_paced(
+            1,
+            DomainClockState::new(
+                Timestamp::now(),
+                "2010-01-01T00:00:00Z"
+                    .parse()
+                    .assured("the fixture timestamp is valid RFC 3339"),
+                DomainTimeRate::ONE,
+            ),
+        );
+        let racing_publication = lifecycle.inner.published.load_full();
+
+        lifecycle.install_paced(
+            2,
+            DomainClockState::new(
+                Timestamp::now(),
+                "2000-01-01T00:00:00Z"
+                    .parse()
+                    .assured("the fixture timestamp is valid RFC 3339"),
+                DomainTimeRate::ONE,
+            ),
+        );
+        let bound = lifecycle
+            .bind()
+            .assured("the fixture installed generation two");
+        racing_publication
+            .watermark
+            .raise(Timestamp::from_unix_nanos(i64::MAX));
+        let snapshot = bound
+            .snapshot()
+            .assured("the second mapping fits the timestamp range");
+
+        let generation_two_bound = "2001-01-01T00:00:00Z"
+            .parse::<Timestamp>()
+            .assured("the fixture timestamp is valid RFC 3339");
+        assert!(
+            snapshot.now() < generation_two_bound,
+            "generation two read {} was clamped by a generation one read",
+            snapshot.now()
+        );
     }
 
     #[test]

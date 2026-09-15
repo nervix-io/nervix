@@ -4,7 +4,7 @@
   "bare_unwrap_and_expect": 0,
   "clamped_arithmetic": 11,
   "combinator_control_flow": 0,
-  "data_plane_lock_acquisitions": 312,
+  "data_plane_lock_acquisitions": 303,
   "discarded_results": 0,
   "files_over_3000_lines": 11,
   "model_matches_in_data_plane": 125,
