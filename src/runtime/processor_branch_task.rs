@@ -1543,6 +1543,23 @@ mod tests {
             output.clone(),
             RelayProcessorRelayTemplate { registry, services },
         );
+        let junction = template
+            .processors
+            .get_mut(&processor)
+            .expect("the fixture declares its junction");
+        let RelayProcessorOperationTemplate::Junction { output_routes } = &mut junction.operation
+        else {
+            panic!("the fixture must declare a junction");
+        };
+        output_routes.routes.push(RelayProcessorOutputTemplate {
+            output_relay: output.clone(),
+            construction: nervix_models::RouteConstruction::default(),
+            flush_policy: Some(RuntimeFlushPolicy::Each {
+                interval: Duration::from_secs(3600),
+                max_batch_size: 1024 * 1024,
+            }),
+            message_error_policy: MessageErrorPolicy::Log,
+        });
         let domain_clock = runtime
             .bind_domain_clock(&domain)
             .expect("the fixture installs a running unpaced clock");
@@ -1557,20 +1574,10 @@ mod tests {
         let RelayProcessorOperationNode::Junction { output_routes } = &mut node.operation else {
             panic!("the fixture must instantiate a junction");
         };
-        let mut route = RelayProcessorOutputNode {
-            relay: output.clone(),
-            construction: nervix_models::RouteConstruction::default(),
-            branch: None,
-            flush_policy: Some(RuntimeFlushPolicy::Each {
-                interval: Duration::from_secs(3600),
-                max_batch_size: 1024 * 1024,
-            }),
-            message_error_policy: MessageErrorPolicy::Log,
-            pending: Vec::new(),
-            flush_timer: BranchBufferTimer::default(),
-            compiled_program: None,
-            compiled_branch_program: None,
-        };
+        let route = output_routes
+            .routes
+            .first_mut()
+            .expect("the junction instantiates the route its template declares");
         let flush_due = route
             .enqueue(
                 quiesce_test_batch(),
@@ -1584,7 +1591,6 @@ mod tests {
             !flush_due,
             "an hour-long cadence must hold the accepted output"
         );
-        output_routes.routes.push(route);
 
         let (_input_sender, input) = mpsc::channel(1);
         let (commands, command_rx) = mpsc::channel(1);
