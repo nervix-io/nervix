@@ -12,15 +12,14 @@
 #[cfg(not(all(test, runtime_ack_loom)))]
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+#[cfg(all(test, runtime_ack_loom))]
+use loom::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use meticulous::OptionExt as _;
 use nervix_recovery::NoReceiver as _;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, watch};
 use triomphe::Arc;
-
-#[cfg(all(test, runtime_ack_loom))]
-use loom::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 const HANDOFF_TRACKING_COMPLETE: usize = usize::MAX;
 const ACK_SHARES_FIT_IN_MEMORY: &str =
