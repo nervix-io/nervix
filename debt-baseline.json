@@ -1,10 +1,10 @@
 {
   "as_casts": 3,
-  "bare_error_signatures": 830,
+  "bare_error_signatures": 825,
   "bare_unwrap_and_expect": 0,
   "clamped_arithmetic": 11,
   "combinator_control_flow": 0,
-  "data_plane_lock_acquisitions": 253,
+  "data_plane_lock_acquisitions": 244,
   "discarded_results": 0,
   "files_over_3000_lines": 11,
   "model_matches_in_data_plane": 125,

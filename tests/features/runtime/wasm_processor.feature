@@ -748,6 +748,7 @@ Feature: WASM processor runtime behavior
 
   Scenario Outline: WASM processor restores guest state after cluster restart
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
     And the leader node is configured with these NSPL commands
@@ -764,19 +765,23 @@ Feature: WASM processor runtime behavior
 
 
       CREATE SCHEMA metric (
-        value I32
+        value I32,
+        tenant STRING
       );
 
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
-        value integer
+        value integer,
+        tenant string
       );
 
       CREATE CODEC metric_codec
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric;
 
-      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
-      CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
@@ -790,7 +795,8 @@ Feature: WASM processor runtime behavior
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
-        UNBRANCHED
+        BRANCHED BY by_tenant
+        SET tenant = message.tenant
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -800,9 +806,9 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
-        UNBRANCHED
+        BRANCHED BY by_tenant
         TO filtered_metrics
-        SET value = value
+        SET value = value, tenant = tenant
         ON MESSAGE ERROR LOG
         ON GLOBAL ERROR LOG;
 
@@ -811,7 +817,11 @@ Feature: WASM processor runtime behavior
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
       """
-      {"value":1}
+      {"value":1,"tenant":"acme"}
+      """
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":11,"tenant":"beta"}
       """
     Then the relay subscription does not receive a payload within "1500ms"
     When the cluster is restarted
@@ -822,11 +832,20 @@ Feature: WASM processor runtime behavior
       """
     Then within "10s" repeatedly posting http payload to host "http-{{test_id}}.example.com" path "/metrics" yields a relay subscription payload
       """
-      {"value":2}
+      {"value":2,"tenant":"probe"}
       """
-    And the last relay subscription payload contains
+    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
       """
-      "value":2
+      {"value":12,"tenant":"beta"}
+      """
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":2,"tenant":"acme"}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"acme"} | "tenant":"acme" | "value":2
+      key={"tenant":"beta"} | "tenant":"beta" | "value":12
       """
 
     Examples:

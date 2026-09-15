@@ -401,7 +401,7 @@ pub(super) async fn ensure_wasm_processor_instance(
                     limits,
                     init,
                     nervix_wasm::WasmExecutionContext::new(execution_now),
-                    restored_guest_state.as_deref(),
+                    restored_guest_state.restorable(),
                 )
                 .await
                 .map_err(|error| {
