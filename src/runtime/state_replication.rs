@@ -2590,17 +2590,23 @@ impl Runtime {
         lsm: u64,
         payload: &[u8],
     ) -> Result<(), String> {
+        let offsets = state.read();
         if let Some(store) = &self.inner.state_store {
             store
-                .persist_latest_snapshot(state.read().placement(), lsm, payload)
+                .persist_latest_snapshot(offsets.placement(), lsm, payload)
                 .map_err(|error| error.to_string())?;
             state.record_persisted(lsm);
-            self.notify_runtime_state_replicas(state.read().placement(), lsm);
+            self.notify_runtime_state_replicas(offsets.placement(), lsm);
         }
-        self.wait_for_kafka_offset_replica_quorum(state.read(), lsm)
+        self.wait_for_kafka_offset_replica_quorum(offsets, lsm)
             .await
     }
 
+    /// Record a committed Kafka offset and wait until the offset state's replicas hold it.
+    ///
+    /// The commit only moves the partition's offset in memory. The offset state's snapshot task
+    /// persists it on the snapshot interval and when the domain's execution stops, so a crash
+    /// resumes from the last persisted or replicated offsets.
     pub(in crate::runtime) async fn commit_domain_kafka_offset(
         &self,
         state: &KafkaOffsetStateOriginator,
@@ -2608,10 +2614,15 @@ impl Runtime {
         partition: i32,
         next_offset: i64,
     ) -> Result<(), String> {
-        let (lsm, payload) = state
+        let lsm = state
             .apply_committed_offset(topic, partition, next_offset)
             .map_err(|error| error.to_string())?;
-        self.persist_kafka_offset_snapshot(&state.persistence(), lsm, &payload)
+        let offsets = state.read();
+        if offsets.required_replica_acks() == 0 {
+            return Ok(());
+        }
+        self.notify_runtime_state_replicas(offsets.placement(), lsm);
+        self.wait_for_kafka_offset_replica_quorum(offsets, lsm)
             .await
     }
 
@@ -2645,16 +2656,33 @@ impl Runtime {
             .await
     }
 
-    pub(in crate::runtime) fn update_materialized_stream_last_by_timestamp(
+    /// Apply one branch's records to materialized relay state, keeping that branch's latest record
+    /// by timestamp, and wake the readers waiting on materialized state once for all of them.
+    ///
+    /// The records applied before an assignment refusal still wake those readers.
+    pub(in crate::runtime) async fn apply_materialized_stream_records(
         &self,
         state: &MaterializedRelayStateOriginator,
         key: &Option<BranchKey>,
-        record: &RuntimeRow,
+        records: impl IntoIterator<Item = RuntimeRow>,
     ) -> Result<(), error_stack::Report<StateAuthorityError>> {
-        if state.update_last_by_timestamp(key, record)?.is_some() {
+        let mut changed = false;
+        let mut outcome = Ok(());
+        for record in records {
+            tokio::task::consume_budget().await;
+            match state.update_last_by_timestamp(key, record) {
+                Ok(Some(_)) => changed = true,
+                Ok(None) => {}
+                Err(error) => {
+                    outcome = Err(error);
+                    break;
+                }
+            }
+        }
+        if changed {
             self.inner.materialized_state_changed.notify_waiters();
         }
-        Ok(())
+        outcome
     }
 
     pub(in crate::runtime) fn delete_materialized_stream_key(
