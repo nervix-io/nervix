@@ -145,9 +145,9 @@ use crate::runtime_schema::test_runtime_row;
 use crate::{
     ConfiguredFaultInjection, cluster,
     metrics::{
-        BranchEvictionReason, IngestorQuiesceMetricLabels, NodeBatchObservation,
-        NodeLatencyObservation, NodeWithoutRelayObservation, RelayBatchObservation,
-        RelayBufferObservation, RuntimeMetrics, RuntimeMetricsSnapshot,
+        BatchMetricsHandle, BranchEvictionReason, IngestorQuiesceMetricLabels,
+        MessageMetricsHandle, NodeBatchMetricsSpec, NodeInputMetricsHandle, RelayMetricRecorders,
+        RelayMetricsHandle, RuntimeMetrics, RuntimeMetricsSnapshot,
     },
     registry::{ActiveGraph, RuntimeChange, RuntimeChanges},
     resource::ResourceStore,
@@ -261,10 +261,10 @@ use branch_instance_registry::BranchInstanceRegistry;
 use branch_key::branch_key_display;
 use branch_lru_state::{decode_branch_lru_snapshot, encode_branch_lru_snapshot};
 use branch_runtime::{
-    BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL, BranchRuntime, IngestorRouteRuntime,
-    MaterializedBatchWaitContext, PendingMaterializedBatch, branch_lru_placement,
-    flush_branch_junction, internal_processor_error_policies, output_error_policies,
-    persist_branch_instance_lru_snapshot,
+    BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL, BranchRuntime, BranchRuntimeMetrics,
+    IngestorRouteRuntime, MaterializedBatchWaitContext, PendingMaterializedBatch,
+    branch_lru_placement, flush_branch_junction, internal_processor_error_policies,
+    output_error_policies, persist_branch_instance_lru_snapshot,
 };
 use client_config::{
     ParsedRetryPolicy, client_config_entries, client_config_value, client_tls_paths,

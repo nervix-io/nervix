@@ -40,6 +40,24 @@ The server exposes:
 - health and metrics endpoints on port `9090`: `/livez`, `/readyz`, and `/metrics`
   ([Metrics And Observability](metrics-and-observability.md#observability-server))
 
+## Stop The Server
+
+Press `Ctrl-C`, or send the process `SIGTERM`, to stop the node. The first `SIGINT` or `SIGTERM`
+starts graceful shutdown: the node advertises that its process is terminating, stops admitting new
+work, and runs its shutdown phases, logging whether each one completed or abandoned work. The
+process exits with status `0` once graceful shutdown finishes, or prints the error and exits with
+status `1` when a listener or a shutdown step failed.
+
+A second `SIGINT` or `SIGTERM` abandons graceful shutdown and ends the process immediately, without
+running the phases that remain. The process exits with status `130` when the second signal is
+`SIGINT` and `143` when it is `SIGTERM`, the statuses a shell reports for a process those signals
+terminate. Work still in progress is lost exactly as it is when the process crashes; `SIGKILL`
+always ends the process that way.
+
+The server registers both signals before it starts anything else. A signal that arrives while the
+node is still starting takes effect as soon as startup completes, and a node that cannot register
+the signals refuses to start.
+
 ## Connect A Client
 
 [`nervix-cli`](client-tools-cli.md) is the interactive NSPL client. With no arguments it connects

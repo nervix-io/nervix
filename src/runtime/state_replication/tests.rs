@@ -800,7 +800,8 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
     )]);
 
     runtime
-        .update_materialized_stream_last_by_timestamp(&state, &None, &record)
+        .apply_materialized_stream_records(&state, &None, [record])
+        .await
         .expect("the materialized state assignment should remain authoritative");
 
     assert_eq!(state.read().current_lsm(), 1);
@@ -831,6 +832,73 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
             .expect("shutdown should flush the dirty snapshot")
             .lsm,
         1
+    );
+}
+
+#[tokio::test]
+async fn kafka_offset_snapshot_task_owns_persistence() {
+    let dir = tempdir().expect("temp dir should open");
+    let db = Database::builder(dir.path())
+        .open()
+        .expect("db should open");
+    let runtime = Runtime::with_persistence(Some(db), Duration::from_secs(3_600))
+        .expect("runtime should open persisted state");
+    let placement = RuntimeStatePlacement {
+        domain: domain("default"),
+        state: RuntimeStateKind::KafkaOffset,
+        kind: ModelKind::Ingestor,
+        identifier: named("orders_source"),
+        schema_fingerprint: [0; 32],
+        branch_key: None,
+    };
+    let mut assignment = runtime
+        .replicated_kafka_offset_state(placement.clone(), None, Vec::new(), 0, None)
+        .expect("Kafka offset state should initialize");
+    let originator = assignment
+        .originator
+        .take()
+        .expect("local Kafka state should grant authoritative access");
+    let persistence = assignment.persistence;
+    let (shutdown_tx, _) = watch::channel(false);
+    let task = runtime
+        .spawn_kafka_offset_snapshot_task(&shutdown_tx, persistence.clone())
+        .expect("persisted runtime should spawn a snapshot task");
+    let store = runtime
+        .inner
+        .state_store
+        .as_ref()
+        .expect("test runtime should have a state store")
+        .clone();
+
+    runtime
+        .commit_domain_kafka_offset(&originator, "orders", 3, 43)
+        .await
+        .expect("the Kafka offset assignment should remain authoritative");
+
+    assert!(
+        store
+            .latest_snapshot(&placement)
+            .expect("snapshot lookup should succeed")
+            .is_none(),
+        "the offset commit path must not encode or persist a snapshot"
+    );
+    assert_eq!(originator.read().current_lsm(), 1);
+    assert_eq!(persistence.last_persisted_lsm(), 0);
+
+    shutdown_tx.send_replace(true);
+    task.await.expect("snapshot task should stop cleanly");
+    let flushed = store
+        .latest_snapshot(&placement)
+        .expect("snapshot lookup should succeed")
+        .expect("shutdown should flush the committed offset");
+    assert_eq!(flushed.lsm, 1);
+    let restored = Arc::new(
+        ReplicatedKafkaOffsetState::new(placement, Some(flushed))
+            .expect("the flushed offset snapshot should decode"),
+    );
+    assert_eq!(
+        ReplicatedKafkaOffsetState::read(&restored).next_offset("orders", 3),
+        Some(43)
     );
 }
 
@@ -1142,16 +1210,17 @@ fn branch_aggregated_state_snapshot_roundtrips_metrics() {
         None,
     )
     .expect("branch-aggregated state should initialize");
-    metrics.observe_global_node_sent(crate::metrics::NodeBatchObservation {
-        domain: &placement.domain,
-        kind: placement.kind,
-        node: &placement.identifier,
-        relay: &relay,
-        physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-        messages: 2,
-        bytes: 64,
-        domain_timestamp: None,
-    });
+    metrics
+        .resolve_node_batch_metrics(NodeBatchMetricsSpec {
+            domain: &placement.domain,
+            kind: placement.kind,
+            node: &placement.identifier,
+            relay: &relay,
+            physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+            direction: "sent",
+            branch_key: None,
+        })
+        .observe(2, 64, None);
     let lsm = state.mark_metrics_updated();
     let snapshot = state
         .latest_snapshot(&metrics)

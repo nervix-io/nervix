@@ -46,6 +46,7 @@ docker run --detach \
   --hostname nervix-1 \
   --network nervix \
   --restart unless-stopped \
+  --stop-timeout 60 \
   --volume nervix-node-1-data:/var/lib/nervix \
   --volume "$PWD/tls/ca.pem:/etc/nervix/interconnect/ca.pem:ro" \
   --volume "$PWD/tls/node-1.pem:/etc/nervix/interconnect/node.pem:ro" \
@@ -80,6 +81,7 @@ docker run --detach \
   --hostname nervix-2 \
   --network nervix \
   --restart unless-stopped \
+  --stop-timeout 60 \
   --volume nervix-node-2-data:/var/lib/nervix \
   --volume "$PWD/tls/ca.pem:/etc/nervix/interconnect/ca.pem:ro" \
   --volume "$PWD/tls/node-2.pem:/etc/nervix/interconnect/node.pem:ro" \
@@ -108,6 +110,7 @@ docker run --detach \
   --hostname nervix-3 \
   --network nervix \
   --restart unless-stopped \
+  --stop-timeout 60 \
   --volume nervix-node-3-data:/var/lib/nervix \
   --volume "$PWD/tls/ca.pem:/etc/nervix/interconnect/ca.pem:ro" \
   --volume "$PWD/tls/node-3.pem:/etc/nervix/interconnect/node.pem:ro" \
@@ -150,10 +153,15 @@ SHOW CLUSTER STATUS;
 The cluster status should show one local node, two live peer nodes, and all three nodes in the Raft
 membership. The CLI follows leader redirects through the three published gRPC ports.
 
-Stop and remove the containers and private network with:
+`docker stop` sends each node `SIGTERM`, which starts graceful shutdown, and kills a container only
+if its node is still running when the stop timeout ends. The `--stop-timeout 60` above leaves room
+for the default 30-second drain timeout and for the services that stop after it; with Docker's
+default of ten seconds, a node could be killed partway through its drain. Stop the nodes, then
+remove the containers and private network:
 
 ```bash
-docker rm --force nervix-1 nervix-2 nervix-3
+docker stop nervix-1 nervix-2 nervix-3
+docker rm nervix-1 nervix-2 nervix-3
 docker network rm nervix
 ```
 
@@ -169,6 +177,7 @@ Save the following as `docker-compose.yml`:
 x-nervix-common: &nervix-common
   image: ${NERVIX_IMAGE:-ghcr.io/nervix-io/nervix:debian-latest}
   restart: unless-stopped
+  stop_grace_period: 60s
   environment: &nervix-environment
     NERVIX_ADDR: 0.0.0.0:47391
     NERVIX_WEB_CONSOLE_LISTEN_ADDR: 0.0.0.0:47420
@@ -280,4 +289,6 @@ Use the same host ports in the table above. Stop the cluster while preserving it
 docker compose down
 ```
 
-To permanently delete all three nodes' persisted state, add `--volumes`.
+`docker compose down` sends each node `SIGTERM` and waits up to the file's `stop_grace_period` of 60
+seconds for graceful shutdown to finish before it kills a container. To permanently delete all
+three nodes' persisted state, add `--volumes`.

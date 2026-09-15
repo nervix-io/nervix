@@ -322,6 +322,11 @@ management-event bound, so discovery cannot allocate an arbitrary wire message. 
 shutting down closes its gossip transport before it stops gossip, so an exchange still waiting on a
 peer that stopped first ends at once instead of holding shutdown until its one-second deadline.
 
+Terminal teardown closes the gossip exchange path before it asks the gossip loop to stop. The loop
+reads its stop request only between rounds, and a round exchanges with each selected peer in turn
+under a one-second request timeout. Closing the path first makes an exchange still waiting on a
+peer that is itself stopping fail at once, instead of holding teardown for the rest of the round.
+
 Consensus separates traffic according to the progress it protects:
 
 - heartbeats, votes, leadership notifications, linearizable runtime-admission reads, and other
@@ -435,15 +440,16 @@ connections begin graceful shutdown. Certificate expiration is also mapped to a 
 deadline when a connection is authenticated, so a connection cannot remain open beyond the validity
 of either peer certificate even if the wall clock later moves.
 
-Application shutdown has three ordered phases. A stop request first marks the local process
-incarnation as terminating and then closes admission on its public gRPC, connector, observability,
-and console listeners. Its interconnect listener and registered handlers remain available on that
-live node throughout the drain-support phase. They continue carrying queued and active relay
-payloads, admission and record acknowledgements, runtime-state replication and checkpoints,
-ownership-handoff coordination, domain-clock progress, and the schedule revisions that activate
-committed ownership. Drain support first moves scheduled work to a live replacement node when one
-exists and then completes the work the node already admitted in place, so these consumers remain
-available until the node's own graphs are quiescent.
+Application shutdown has three ordered phases. A server process issues the stop request that
+starts them when it receives its first `SIGINT` or `SIGTERM`. The stop request first marks the local
+process incarnation as terminating and then closes admission on its public gRPC, connector,
+observability, and console listeners. Its interconnect listener and registered handlers remain
+available on that live node throughout the drain-support phase. They continue carrying queued and
+active relay payloads, admission and record acknowledgements, runtime-state replication and
+checkpoints, ownership-handoff coordination, domain-clock progress, and the schedule revisions that
+activate committed ownership. Drain support first moves scheduled work to a live replacement node
+when one exists and then completes the work the node already admitted in place, so these consumers
+remain available until the node's own graphs are quiescent.
 
 The relay payload lane retains its transport admission guard for every queued or active payload.
 Sender-side runtime drain accounting retains the tracked root until admission and every requested
@@ -456,7 +462,9 @@ Only after drain support completes or reports abandonment does terminal teardown
 shutdown. Transport shutdown rejects new interconnect admission, cancels pool and operation
 waiters, and starts graceful HTTP/2 shutdown. Active transport work receives up to ten seconds to
 drain; remaining connections and handlers are then closed. Connection setup and incomplete TLS
-handshakes remain inside this bound.
+handshakes remain inside this bound. A repeated `SIGINT` or `SIGTERM` ends the process without
+running terminal teardown, so its peers observe its connections ending exactly as they do when the
+process crashes.
 
 ## Failure Ownership And Persistence
 

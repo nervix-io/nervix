@@ -53,9 +53,9 @@ logical_now = logical_start + floor(elapsed * time_rate)
 ```
 
 Rounding down prevents a read from claiming a logical nanosecond that has not been reached. A UTC
-observation before the physical anchor contributes zero elapsed time. The runtime then compares
-the projection with its preceding read for the same installed generation and returns the greater
-value, so a local clock adjustment cannot make normal reads move backward.
+observation before the physical anchor contributes zero elapsed time. The runtime then raises the
+node's read watermark for the installed generation to the projection and returns the watermark, so
+a local clock adjustment cannot make normal reads move backward.
 
 The inverse operation converts a future logical target into a physical duration:
 
@@ -189,9 +189,10 @@ that the report established time. Progress can never create a missing domain.
 
 ## Local Installation And Bound Capabilities
 
-Each runtime node keeps one shared lifecycle allocation per domain. Control-plane synchronization
-updates that allocation in place, while graph tasks hold thin clock handles bound to its domain and
-lifecycle generation. This makes a lifecycle change visible to every existing user and gives
+Each runtime node keeps one shared lifecycle allocation per domain, and graph tasks hold thin clock
+handles bound to its domain and lifecycle generation. Control-plane synchronization publishes each
+installation change into that allocation by atomically replacing the complete installation, then
+notifies logical waiters. This makes a lifecycle change visible to every existing handle and gives
 logical waiters one notification source to observe.
 
 The local installation states have explicit meanings:
@@ -209,6 +210,22 @@ before a later `START` fails with a stale-generation result. Reads and logical w
 shared installation; no failure path substitutes wall time for a paced clock. Passive graph state
 for a stopped domain may retain a generation-bound handle for ownership purposes, but attempts to
 read it still fail as stopped.
+
+Reads take no lock. A read loads the published installation, validates the handle's generation and
+the installation state against it, projects actual UTC through the source that installation holds,
+and raises the read watermark published with it using one atomic maximum. A concurrent read
+therefore observes either the complete preceding installation or the complete replacement, and a
+replacement never alters an installation that an in-flight read already holds. Synchronization
+derives each replacement from the installation it replaces and publishes it only while that
+installation is still current; synchronizing an unchanged installation publishes nothing and wakes
+no waiter.
+
+Each read watermark covers one uninterrupted installation of a generation. A replacement that keeps
+the same generation installed shares its predecessor's watermark, so reads of that generation do not
+decrease even when they race the replacement. Any other replacement starts a new watermark. A read
+that loaded an earlier generation can therefore raise only that generation's watermark and cannot
+clamp reads of a later generation, and a generation that becomes uninstalled starts from a new
+watermark when its mapping and authority are installed again.
 
 Applying a cluster revision synchronizes all domain lifecycles before applying its schedule. A
 joining node therefore cannot instantiate work and then discover that its clock mapping is absent.
