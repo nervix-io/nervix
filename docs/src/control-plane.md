@@ -375,7 +375,8 @@ is cordoned in Raft.
 Graceful shutdown records whether that stable node name was already cordoned before it invokes the
 drain. Its cleanup clears the drain cordon only when shutdown began with an uncordoned node, and it
 runs after a successful, failed, or timed-out drain attempt. A pre-existing operator cordon therefore
-remains set across shutdown and restart.
+remains set across shutdown and restart. When the drain timeout passes, or the leader cannot be
+reached, before the node requests its drain, nothing was cordoned and no cleanup runs.
 
 A graceful-shutdown drain has two parts that share one drain timeout. When another live, schedulable
 Raft voter exists, the node first moves its scheduled work there through the planned handoff above.

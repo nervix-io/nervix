@@ -41,6 +41,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 const KEY_CLUSTER_ID: &str = "cluster_id";
@@ -65,6 +66,9 @@ const MAX_GOSSIP_MESSAGE_BYTES: usize = 60 * 1024;
 pub struct ClusterHandle {
     local_incarnation: nervix_models::ClusterNodeIncarnation,
     chitchat: Arc<tokio::sync::Mutex<Chitchat>>,
+    /// The transport the gossip server and the membership task also hold, kept here so shutdown
+    /// can close it before it asks the gossip server to stop.
+    gossip_transport: InterconnectGossipTransport,
     chitchat_server: Mutex<Option<ChitchatHandle>>,
     events: ClusterEvents,
     peer_health_state: watch::Sender<PeerHealthStateSnapshot>,
@@ -761,6 +765,9 @@ struct InterconnectGossipTransportInner {
     routes: DashMap<SocketAddr, GossipRoute>,
     incoming_tx: mpsc::Sender<GossipDatagram>,
     incoming_rx: Mutex<Option<mpsc::Receiver<GossipDatagram>>>,
+    /// Cancelled by [`InterconnectGossipTransport::close`]; every exchange in flight or started
+    /// afterwards fails at once.
+    closed: CancellationToken,
 }
 
 struct GossipDatagram {
@@ -799,6 +806,7 @@ impl InterconnectGossipTransport {
                 routes,
                 incoming_tx,
                 incoming_rx: Mutex::new(Some(incoming_rx)),
+                closed: CancellationToken::new(),
             }),
         };
         let handler_transport = transport.clone();
@@ -877,6 +885,58 @@ impl InterconnectGossipTransport {
             }
         }
     }
+
+    /// Makes every gossip exchange in flight, and every exchange started afterwards, fail at once.
+    ///
+    /// The gossip server reads its stop command only between rounds, and a round exchanges with
+    /// each selected peer in turn under a one-second request timeout. Closing the transport before
+    /// the server is asked to stop ends a round that is still waiting on peers which are stopping
+    /// themselves, instead of holding shutdown for as long as that round takes.
+    fn close(&self) {
+        self.inner.closed.cancel();
+    }
+
+    async fn exchange(&self, to: SocketAddr, payload: Vec<u8>) -> anyhow::Result<()> {
+        let route = match self.inner.routes.get(&to) {
+            Some(route) => route.clone(),
+            None => GossipRoute {
+                node_id: None,
+                target: PeerTarget::new(to, to.ip().to_string()),
+            },
+        };
+        let node_id = match route.node_id {
+            Some(node_id) => node_id,
+            None => {
+                let node_id = self
+                    .inner
+                    .interconnect
+                    .bootstrap_target(route.target.clone())
+                    .await?;
+                self.inner.routes.insert(
+                    to,
+                    GossipRoute {
+                        node_id: Some(node_id.clone()),
+                        target: route.target,
+                    },
+                );
+                node_id
+            }
+        };
+        let response = self
+            .inner
+            .interconnect
+            .request(
+                &node_id,
+                GossipExchange {
+                    from: self.inner.advertise_addr,
+                    payload,
+                },
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        response.map_err(anyhow::Error::msg)?;
+        Ok(())
+    }
 }
 
 struct InterconnectGossipSocket {
@@ -911,47 +971,17 @@ impl GossipSocket for InterconnectGossipSocket {
         if payload.len() > MAX_GOSSIP_MESSAGE_BYTES {
             anyhow::bail!("gossip message exceeds {MAX_GOSSIP_MESSAGE_BYTES} bytes");
         }
-        let route = match self.transport.inner.routes.get(&to) {
-            Some(route) => route.clone(),
-            None => GossipRoute {
-                node_id: None,
-                target: PeerTarget::new(to, to.ip().to_string()),
-            },
-        };
-        let node_id = match route.node_id {
-            Some(node_id) => node_id,
-            None => {
-                let node_id = self
-                    .transport
-                    .inner
-                    .interconnect
-                    .bootstrap_target(route.target.clone())
-                    .await?;
-                self.transport.inner.routes.insert(
-                    to,
-                    GossipRoute {
-                        node_id: Some(node_id.clone()),
-                        target: route.target,
-                    },
-                );
-                node_id
-            }
-        };
-        let response = self
+        let exchange = self.transport.exchange(to, payload);
+        let Some(result) = self
             .transport
             .inner
-            .interconnect
-            .request(
-                &node_id,
-                GossipExchange {
-                    from: self.transport.inner.advertise_addr,
-                    payload,
-                },
-            )
+            .closed
+            .run_until_cancelled(exchange)
             .await
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        response.map_err(anyhow::Error::msg)?;
-        Ok(())
+        else {
+            anyhow::bail!("interconnect gossip transport is closed");
+        };
+        result
     }
 
     async fn recv(&mut self) -> anyhow::Result<(SocketAddr, ChitchatMessage)> {
@@ -1073,6 +1103,7 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
     Ok(ClusterHandle {
         local_incarnation: nervix_models::ClusterNodeIncarnation::new(generation_id),
         chitchat: chitchat_state,
+        gossip_transport: transport,
         chitchat_server: Mutex::new(Some(chitchat)),
         events,
         peer_health_state: watch::channel(PeerHealthStateSnapshot::default()).0,
@@ -1087,6 +1118,7 @@ impl ClusterHandle {
     }
 
     pub async fn shutdown(&self) -> io::Result<()> {
+        self.gossip_transport.close();
         let chitchat_server = self.chitchat_server.lock().take();
         let result = match chitchat_server {
             Some(chitchat_server) => chitchat_server.shutdown().await.map_err(io::Error::other),

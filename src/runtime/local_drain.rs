@@ -101,6 +101,36 @@ impl LocalDomainDrainStatus {
             || self.buffered_emitter_messages != 0
             || self.publishing_emitters != 0
     }
+
+    /// Reports a domain the drain timeout left behind. A domain that still showed admitted work
+    /// names that work. One that showed none ran out of time only for the flush that confirms
+    /// nothing is still moving, which is what a timeout too short for a single flush looks like.
+    fn report_timeout(&self, timeout: Duration) {
+        if self.holds_admitted_work() {
+            warn!(
+                domain = self.domain.as_str(),
+                admitting_ingestors = self.admitting_ingestors,
+                active_generators = self.active_generators,
+                outstanding_acks = self.outstanding_acks,
+                buffered_relay_batches = self.buffered_relay_batches,
+                node_work_items = self.node_work_items,
+                buffered_emitter_messages = self.buffered_emitter_messages,
+                publishing_emitters = self.publishing_emitters,
+                required_waits = self.required_waits,
+                force_flush_obligations = self.force_flush_obligations,
+                timeout = ?timeout,
+                "local graph drain timed out with admitted work outstanding"
+            );
+            return;
+        }
+        warn!(
+            domain = self.domain.as_str(),
+            required_waits = self.required_waits,
+            force_flush_obligations = self.force_flush_obligations,
+            timeout = ?timeout,
+            "local graph drain timed out before confirming that no admitted work is still moving"
+        );
+    }
 }
 
 /// Where one domain's local drain stands between two observations.
@@ -195,20 +225,7 @@ impl Runtime {
                 .unwrap_or(Duration::ZERO);
             if remaining.is_zero() {
                 for status in &outstanding {
-                    warn!(
-                        domain = status.domain.as_str(),
-                        admitting_ingestors = status.admitting_ingestors,
-                        active_generators = status.active_generators,
-                        outstanding_acks = status.outstanding_acks,
-                        buffered_relay_batches = status.buffered_relay_batches,
-                        node_work_items = status.node_work_items,
-                        buffered_emitter_messages = status.buffered_emitter_messages,
-                        publishing_emitters = status.publishing_emitters,
-                        required_waits = status.required_waits,
-                        force_flush_obligations = status.force_flush_obligations,
-                        timeout = ?timeout,
-                        "local graph drain timed out with admitted work outstanding"
-                    );
+                    status.report_timeout(timeout);
                 }
                 return LocalGraphDrainOutcome::Abandoned;
             }
