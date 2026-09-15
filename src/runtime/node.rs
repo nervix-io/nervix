@@ -60,6 +60,9 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) domain_instantiation_errors: DashMap<DomainName, String, RandomState>,
     pub(in crate::runtime) domains: DashMap<DomainName, RuntimeDomainState, RandomState>,
     pub(in crate::runtime) domain_status_changed: watch::Sender<u64>,
+    /// Whether this node still admits new work. A terminating node closes it once, and ingestors
+    /// and generators observe the change.
+    pub(in crate::runtime) local_intake: watch::Sender<LocalIntake>,
     pub(in crate::runtime) in_flight_by_domain:
         DashMap<DomainName, Arc<AckRootTracker>, RandomState>,
     pub(in crate::runtime) in_flight_by_ingestor:

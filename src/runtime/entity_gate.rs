@@ -252,6 +252,19 @@ impl NodeQuiesceCounters {
         .assured("every count totals work items this node already holds in memory")
     }
 
+    /// The admitted work this node holds, apart from messages parked on `REQUIRED WAIT` and
+    /// outstanding force-flush obligations, which a local drain weighs on their own.
+    pub(super) fn admitted_work(&self) -> usize {
+        [
+            self.mailbox_and_in_flight.load(Ordering::Acquire),
+            self.collected_inputs.load(Ordering::Acquire),
+            self.output_buffers.load(Ordering::Acquire),
+        ]
+        .into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .assured("every count totals work items this node already holds in memory")
+    }
+
     pub(super) fn outstanding_work_for(&self, purpose: EntityGatePurpose) -> usize {
         let outstanding = self.outstanding_work();
         if purpose == EntityGatePurpose::OwnershipHandoff {

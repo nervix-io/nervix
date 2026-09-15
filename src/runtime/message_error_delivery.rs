@@ -105,6 +105,13 @@ impl MessageErrorRouteRuntime {
             shutdown,
             task: parking_lot::Mutex::new(None),
         });
+        // A route owes the force-flush generations of the node whose messages failed. The
+        // obligation is registered before the task starts, so a generation requested between the
+        // spawn and the first poll is still owed by this route rather than missed.
+        let force_flush = runtime.force_flush_participant(
+            &route.domain,
+            runtime.node_quiesce_counters(&route.domain, route.node.clone()),
+        );
         let task = tokio::spawn(
             MessageErrorRouteTask {
                 runtime,
@@ -113,7 +120,7 @@ impl MessageErrorRouteRuntime {
                 flush_policy,
                 pending: HashMap::default(),
             }
-            .run(input, shutdown_rx),
+            .run(input, shutdown_rx, force_flush),
         );
         *route_runtime.task.lock() = Some(task);
         route_runtime
@@ -310,10 +317,50 @@ impl MessageErrorRouteTask {
             .collect()
     }
 
+    /// Releases every buffered message error for one force-flush generation.
+    ///
+    /// The generation covers the deliveries the channel holds when it arrives: they are accepted
+    /// into their branch buffers before those buffers are released. Deliveries that land later
+    /// belong to the next generation, so a failing source cannot extend one flush indefinitely.
+    async fn force_flush(
+        &mut self,
+        input: &mut mpsc::Receiver<MessageErrorDelivery>,
+        domain_clock: &DomainClock,
+    ) {
+        let ready = input.len();
+        for _ in 0..ready {
+            tokio::task::consume_budget().await;
+            let Ok(delivery) = input.try_recv() else {
+                break;
+            };
+            self.accept(delivery, domain_clock).await;
+        }
+        self.flush_all().await;
+    }
+
+    /// Accepts everything already sent to this route, then releases every buffer.
+    ///
+    /// Closing the channel first is what bounds the drain. A node that fails a message afterwards
+    /// sees a stopped route and reports the failure itself, rather than adding to a buffer that
+    /// nothing will publish.
+    async fn drain_and_flush(
+        &mut self,
+        input: &mut mpsc::Receiver<MessageErrorDelivery>,
+        domain_clock: &DomainClock,
+    ) {
+        input.close();
+        while let Some(delivery) = input.recv().await {
+            tokio::task::consume_budget().await;
+            self.accept(delivery, domain_clock).await;
+        }
+        self.flush_all().await;
+    }
+
     async fn run(
         mut self,
         mut input: mpsc::Receiver<MessageErrorDelivery>,
         mut shutdown_rx: watch::Receiver<bool>,
+        mut force_flush: DomainForceFlushParticipant,
     ) {
         let domain_clock = match self.runtime.bind_domain_clock(&self.route.domain) {
             Ok(clock) => clock,
@@ -336,13 +383,18 @@ impl MessageErrorRouteTask {
                 // A signalled stop and a dropped sender both mean the owner is gone, and this
                 // arm drains and finishes either way, so the outcome carries nothing to read.
                 _ = shutdown_rx.changed() => {
-                    input.close();
-                    while let Some(delivery) = input.recv().await {
-                        tokio::task::consume_budget().await;
-                        self.accept(delivery, &domain_clock).await;
-                    }
-                    self.flush_all().await;
+                    self.drain_and_flush(&mut input, &domain_clock).await;
                     break;
+                }
+                completion = force_flush.changed() => {
+                    let Ok(completion) = completion else {
+                        // The domain's coordinator is gone, so the domain is being torn down and no
+                        // later generation can arrive. Release everything this route holds now.
+                        self.drain_and_flush(&mut input, &domain_clock).await;
+                        break;
+                    };
+                    self.force_flush(&mut input, &domain_clock).await;
+                    completion.complete();
                 }
                 result = wait_for_branch_buffer_deadlines(&domain_clock, flush_deadlines),
                     if has_flush_deadlines =>
@@ -533,7 +585,12 @@ mod tests {
         );
         let (sender, input) = mpsc::channel(1);
         let (shutdown, shutdown_rx) = watch::channel(false);
-        let task = tokio::spawn(task.run(input, shutdown_rx));
+        let force_flush = task.runtime.force_flush_participant(
+            &task.route.domain,
+            task.runtime
+                .node_quiesce_counters(&task.route.domain, task.route.node.clone()),
+        );
+        let task = tokio::spawn(task.run(input, shutdown_rx, force_flush));
         let (delivery, mut completion) = test_delivery();
 
         sender
@@ -561,6 +618,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn force_flush_releases_a_buffered_message_error_before_its_cadence() {
+        let runtime = Runtime::default();
+        let domain = DomainName::try_from("test").expect("valid domain");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
+        let route = MessageErrorRouteKey {
+            domain: domain.clone(),
+            node: NodeRef::new(ModelKind::Junction, named::<ModelName>("route_orders")),
+            source_route: None,
+            error_relay: named("route_errors"),
+        };
+        let target = MessageErrorRouteTarget {
+            registry: RelayRegistry::new(),
+            services: Arc::new(RelayBoundaryServices::new(
+                RelayBoundaryFanout::direct_with_capacity(
+                    NonZeroUsize::new(1).expect("non-zero test capacity"),
+                ),
+                0,
+                0,
+                Vec::new(),
+                None,
+            )),
+        };
+        let owner_task = runtime.spawn_relay_owner_task(
+            &domain,
+            &route.error_relay,
+            target.registry.clone(),
+            target.services.clone(),
+            RelayRetention::default(),
+        );
+        let route_runtime = MessageErrorRouteRuntime::new(
+            runtime.clone(),
+            route,
+            target,
+            RuntimeFlushPolicy::Each {
+                interval: Duration::from_secs(3600),
+                max_batch_size: u64::MAX,
+            },
+        );
+        let (delivery, completion) = test_delivery();
+        route_runtime
+            .sender
+            .send(delivery)
+            .await
+            .expect("message-error route must accept delivery");
+
+        runtime.force_flush_domain(&domain);
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), completion.wait())
+                .await
+                .expect("a force flush must publish a message error its cadence still holds"),
+            AckOutcome::Ack
+        );
+        route_runtime.shutdown().await;
+        owner_task
+            .stop(Duration::from_secs(1))
+            .await
+            .expect("relay owner should stop");
+    }
+
+    #[tokio::test]
     async fn blocked_message_error_relay_delivery_refreshes_source_ack() {
         let fanout = RelayBoundaryFanout::direct_with_capacity(
             NonZeroUsize::new(1).expect("non-zero test capacity"),
@@ -573,7 +694,12 @@ mod tests {
         let (task, owner_task) = test_task(RuntimeFlushPolicy::Immediate, fanout);
         let (sender, input) = mpsc::channel(1);
         let (shutdown, shutdown_rx) = watch::channel(false);
-        let task = tokio::spawn(task.run(input, shutdown_rx));
+        let force_flush = task.runtime.force_flush_participant(
+            &task.route.domain,
+            task.runtime
+                .node_quiesce_counters(&task.route.domain, task.route.node.clone()),
+        );
+        let task = tokio::spawn(task.run(input, shutdown_rx, force_flush));
         let (delivery, mut completion) = test_delivery();
 
         sender

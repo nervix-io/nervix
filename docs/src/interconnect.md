@@ -439,7 +439,9 @@ and console listeners. Its interconnect listener and registered handlers remain 
 live node throughout the drain-support phase. They continue carrying queued and active relay
 payloads, admission and record acknowledgements, runtime-state replication and checkpoints,
 ownership-handoff coordination, domain-clock progress, and the schedule revisions that activate
-committed ownership.
+committed ownership. Drain support first moves scheduled work to a live replacement node when one
+exists and then completes the work the node already admitted in place, so these consumers remain
+available until the node's own graphs are quiescent.
 
 The relay payload lane retains its transport admission guard for every queued or active payload.
 Sender-side runtime drain accounting retains the tracked root until admission and every requested

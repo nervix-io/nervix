@@ -20,7 +20,7 @@ use nervix_models::{
     PlacementPolicy, QuiesceLevel, ScheduledNode,
 };
 use rdkafka::{config::ClientConfig, consumer::StreamConsumer};
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, Instant, sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -37,7 +37,11 @@ use super::{
     session_service::SessionServiceImpl,
     shutdown::ShutdownPhaseOutcome,
 };
-use crate::{proto::CommandResult, registry::ActiveGraph, runtime::KafkaIngestor};
+use crate::{
+    proto::CommandResult,
+    registry::ActiveGraph,
+    runtime::{KafkaIngestor, LocalGraphDrainOutcome},
+};
 
 pub(in crate::application) const LEADER_KAFKA_PARTITION_WATCH_INTERVAL: Duration =
     Duration::from_secs(1);
@@ -47,6 +51,14 @@ pub(in crate::application) const RUNTIME_REVISION_READINESS_PROPAGATION_BOUND: D
 
 const SHUTDOWN_CORDON_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const SHUTDOWN_LEADER_OBSERVATION_INTERVAL: Duration = Duration::from_millis(25);
+
+/// What moving this node's scheduled work to other nodes did before its local graphs drain.
+enum ShutdownOwnershipMove {
+    /// No live schedulable node can take the work, so nothing was cordoned or moved.
+    NoReplacement,
+    /// The node was cordoned and its scheduled work was drained to other nodes with this outcome.
+    Attempted(ShutdownPhaseOutcome),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(in crate::application) struct KafkaPartitionWatcherKey {
@@ -679,6 +691,7 @@ impl SessionServiceImpl {
         &self,
         drain_timeout: Duration,
     ) -> ShutdownPhaseOutcome {
+        let started = Instant::now();
         let local_node_id = self.inner.consensus.local_node_id().clone();
         let operator_cordon_exists = self
             .inner
@@ -686,50 +699,65 @@ impl SessionServiceImpl {
             .cordoned_node_ids()
             .await
             .contains(&local_node_id);
-        let drain = self.drain_local_node_for_shutdown(&local_node_id);
-        let drain_outcome = match tokio::time::timeout(drain_timeout, drain).await {
-            Ok(outcome) => outcome,
+        let ownership_move = self.move_local_ownership_for_shutdown(&local_node_id);
+        let ownership_move = match tokio::time::timeout(drain_timeout, ownership_move).await {
+            Ok(ownership_move) => ownership_move,
             Err(_) => {
                 warn!(
                     node_id = %local_node_id,
                     timeout = ?drain_timeout,
-                    "timed out draining local node before graceful shutdown"
+                    "timed out moving scheduled work off the local node before graceful shutdown"
                 );
-                ShutdownPhaseOutcome::Abandoned
+                ShutdownOwnershipMove::Attempted(ShutdownPhaseOutcome::Abandoned)
             }
         };
-
-        if operator_cordon_exists {
-            info!(
-                node_id = %local_node_id,
-                "preserving operator cordon across graceful shutdown"
-            );
-            return drain_outcome;
-        }
-
-        let cleanup_outcome = match tokio::time::timeout(
-            SHUTDOWN_CORDON_CLEANUP_TIMEOUT,
-            self.clear_shutdown_drain_cordon(&local_node_id),
-        )
-        .await
-        {
-            Ok(outcome) => outcome,
-            Err(_) => {
-                warn!(
+        let ownership_outcome = match ownership_move {
+            ShutdownOwnershipMove::NoReplacement => ShutdownPhaseOutcome::Completed,
+            ShutdownOwnershipMove::Attempted(move_outcome) if operator_cordon_exists => {
+                info!(
                     node_id = %local_node_id,
-                    timeout = ?SHUTDOWN_CORDON_CLEANUP_TIMEOUT,
-                    "timed out clearing shutdown drain cordon"
+                    "preserving operator cordon across graceful shutdown"
                 );
-                ShutdownPhaseOutcome::Abandoned
+                move_outcome
+            }
+            ShutdownOwnershipMove::Attempted(move_outcome) => {
+                let cleanup_outcome = match tokio::time::timeout(
+                    SHUTDOWN_CORDON_CLEANUP_TIMEOUT,
+                    self.clear_shutdown_drain_cordon(&local_node_id),
+                )
+                .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(_) => {
+                        warn!(
+                            node_id = %local_node_id,
+                            timeout = ?SHUTDOWN_CORDON_CLEANUP_TIMEOUT,
+                            "timed out clearing shutdown drain cordon"
+                        );
+                        ShutdownPhaseOutcome::Abandoned
+                    }
+                };
+                move_outcome.combine(cleanup_outcome)
             }
         };
-        drain_outcome.combine(cleanup_outcome)
+
+        // Moving ownership hands scheduled work to other nodes. Everything this node has already
+        // admitted, including all of its work when no replacement exists, completes here before
+        // terminal teardown, within what remains of the same drain timeout.
+        let remaining = drain_timeout
+            .checked_sub(started.elapsed())
+            .unwrap_or(Duration::ZERO);
+        let local_outcome = match self.inner.runtime.drain_local_graphs(remaining).await {
+            LocalGraphDrainOutcome::Quiescent => ShutdownPhaseOutcome::Completed,
+            LocalGraphDrainOutcome::Abandoned => ShutdownPhaseOutcome::Abandoned,
+        };
+        ownership_outcome.combine(local_outcome)
     }
 
-    async fn drain_local_node_for_shutdown(
+    async fn move_local_ownership_for_shutdown(
         &self,
         local_node_id: &ClusterNodeName,
-    ) -> ShutdownPhaseOutcome {
+    ) -> ShutdownOwnershipMove {
         let availability = self.inner.cluster.availability_state().await;
         let placement_candidate_node_ids = availability.placement_candidate_node_ids();
         let drain_targets = self
@@ -738,12 +766,19 @@ impl SessionServiceImpl {
             .schedulable_live_voter_ids(placement_candidate_node_ids)
             .await;
         if !drain_targets.iter().any(|node_id| node_id != local_node_id) {
-            warn!(
+            info!(
                 node_id = %local_node_id,
-                "skipping graceful shutdown drain: no live schedulable replacement nodes remain"
+                "no live schedulable replacement node remains; admitted work completes in place"
             );
-            return ShutdownPhaseOutcome::Abandoned;
+            return ShutdownOwnershipMove::NoReplacement;
         }
+        ShutdownOwnershipMove::Attempted(self.drain_local_node_through_leader(local_node_id).await)
+    }
+
+    async fn drain_local_node_through_leader(
+        &self,
+        local_node_id: &ClusterNodeName,
+    ) -> ShutdownPhaseOutcome {
         let leader_id = self.wait_for_shutdown_drain_leader().await;
         if &leader_id == local_node_id {
             let result = self.drain_node(local_node_id.clone()).await;

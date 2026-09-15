@@ -220,10 +220,12 @@ relay. Do not use them to scan across branches.
 - Interdependent schema evolution is one transaction, preserves ALTER operation order, and includes
   all wire schema, internal schema, codec, and dependent-node mutations needed by the new graph.
 - Model-alteration entity holds, domain pauses, and memory-pressure quiescing consult the
-  ingestor's mode. Planned drain, graceful-shutdown drain, placement relocation, and explicit
-  `RELOCATE` ignore that mode: they stop new intake only for moved ingestors, drain already
-  admitted ACK work, then switch ownership. Stop and drop terminate the source session; unexpected
-  owner loss uses immediate failover. Do not emit `PAUSE` or `RESUME` syntax.
+  ingestor's mode. Planned drain, placement relocation, and explicit `RELOCATE` ignore that mode:
+  they stop new intake only for moved ingestors, drain already admitted ACK work, then switch
+  ownership. Graceful shutdown ignores it too: after moving what it can, the terminating node stops
+  intake on all of its ingestors and completes already admitted work in place, even when no
+  replacement node exists. Stop and drop terminate the source session; unexpected owner loss uses
+  immediate failover. Do not emit `PAUSE` or `RESUME` syntax.
 - `RELOCATE <selection> ONTO NODE <node_id> FOLLOW PREFERENCES | IGNORE PREFERENCES [FOR <kind>
   <name> ...];` moves a selected subgraph onto a named cluster node as one atomic gated handoff.
   The selection is a kind-qualified list or a `FROM ... TO ...` corridor, `REQUIRE COLOCATION`

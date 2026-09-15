@@ -41,11 +41,25 @@ pub(in crate::runtime) enum IngestorQuiesceCause {
     DomainPause,
     #[strum(serialize = "memory pressure")]
     MemoryPressure,
+    #[strum(serialize = "shutdown")]
+    Shutdown,
 }
 
 impl IngestorQuiesceCause {
     pub(super) fn as_str(self) -> &'static str {
         self.into()
+    }
+
+    /// Whether this cause stops new intake whatever the ingestor's `ON QUIESCE` mode declares.
+    ///
+    /// An ownership handoff and a graceful shutdown both complete the work an ingestor already
+    /// admitted and admit nothing further: polling and endpoint admission stop, a payload already
+    /// received still dispatches, and no quiesce buffer or drop policy acts on their behalf.
+    fn stops_intake_regardless_of_mode(self) -> bool {
+        match self {
+            Self::OwnershipHandoff | Self::Shutdown => true,
+            Self::EntityHold | Self::DomainPause | Self::MemoryPressure => false,
+        }
     }
 }
 
@@ -55,11 +69,14 @@ pub(super) struct IngestorQuiesceReasons {
     pub(super) ownership_handoffs: usize,
     pub(super) domain_pause: bool,
     pub(super) memory_pressure: bool,
+    pub(super) shutdown: bool,
 }
 
 impl IngestorQuiesceReasons {
     pub(super) fn active(&self) -> Option<IngestorQuiesceCause> {
-        if self.ownership_handoffs > 0 {
+        if self.shutdown {
+            Some(IngestorQuiesceCause::Shutdown)
+        } else if self.ownership_handoffs > 0 {
             Some(IngestorQuiesceCause::OwnershipHandoff)
         } else if self.memory_pressure {
             Some(IngestorQuiesceCause::MemoryPressure)
@@ -317,6 +334,7 @@ impl IngestorQuiesceControl {
             }
             IngestorQuiesceCause::DomainPause => reasons.domain_pause = true,
             IngestorQuiesceCause::MemoryPressure => reasons.memory_pressure = true,
+            IngestorQuiesceCause::Shutdown => reasons.shutdown = true,
         }
         drop(reasons);
         self.changed.notify_waiters();
@@ -341,6 +359,7 @@ impl IngestorQuiesceControl {
                 }
                 IngestorQuiesceCause::DomainPause => reasons.domain_pause = false,
                 IngestorQuiesceCause::MemoryPressure => reasons.memory_pressure = false,
+                IngestorQuiesceCause::Shutdown => reasons.shutdown = false,
             }
             reasons.active()
         };
@@ -371,18 +390,18 @@ impl IngestorQuiesceControl {
     }
 
     pub(in crate::runtime) fn should_suspend_intake(&self) -> bool {
-        if self.cause() == Some(IngestorQuiesceCause::OwnershipHandoff) {
-            true
-        } else {
-            self.is_quiesced()
-                && (!self.active_mode_is_supported()
-                    || matches!(self.mode(), IngestQuiesceMode::Suspend))
+        let Some(cause) = self.cause() else {
+            return false;
+        };
+        if cause.stops_intake_regardless_of_mode() {
+            return true;
         }
+        !self.active_mode_is_supported() || matches!(self.mode(), IngestQuiesceMode::Suspend)
     }
 
     pub(in crate::runtime) fn should_skip_poll(&self) -> bool {
         match self.cause() {
-            Some(IngestorQuiesceCause::OwnershipHandoff) => true,
+            Some(cause) if cause.stops_intake_regardless_of_mode() => true,
             Some(IngestorQuiesceCause::MemoryPressure) => true,
             Some(_) if !self.active_mode_is_supported() => true,
             Some(_) => matches!(self.mode(), IngestQuiesceMode::Suspend),
@@ -416,7 +435,7 @@ impl IngestorQuiesceControl {
         let Some(cause) = self.cause() else {
             return IngestorQuiesceIntake::Dispatch(payload);
         };
-        if cause == IngestorQuiesceCause::OwnershipHandoff {
+        if cause.stops_intake_regardless_of_mode() {
             return IngestorQuiesceIntake::Dispatch(payload);
         }
         let mode = self.mode();
@@ -511,7 +530,7 @@ impl IngestorQuiesceControl {
         let Some(cause) = self.cause() else {
             return Ok(());
         };
-        if cause == IngestorQuiesceCause::OwnershipHandoff {
+        if cause.stops_intake_regardless_of_mode() {
             self.record_rejected(1);
             return Err(None);
         }
@@ -708,6 +727,11 @@ impl Runtime {
             control.engage(IngestorQuiesceCause::MemoryPressure);
         }
         self.inner.ingestor_quiescence.insert(key, control.clone());
+        // Read after the control is visible, so a local intake boundary closing concurrently
+        // either engages this control itself or is observed here.
+        if self.local_intake_is_closed() {
+            control.engage(IngestorQuiesceCause::Shutdown);
+        }
         control
     }
 
@@ -1047,6 +1071,45 @@ mod tests {
 
         control.release(IngestorQuiesceCause::OwnershipHandoff);
         assert!(!control.should_skip_poll());
+    }
+
+    #[test]
+    fn shutdown_stops_new_intake_whatever_the_declared_quiesce_mode() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let ingestor = named("source");
+        let control = test_ingestor_quiesce_control(
+            &runtime,
+            &domain,
+            &ingestor,
+            IngestQuiesceMode::Buffer {
+                max_size: "1MiB".to_string(),
+                overflow: IngestQuiesceOverflow::DropOldest,
+            },
+        );
+        control.engage(IngestorQuiesceCause::EntityHold);
+        control.engage(IngestorQuiesceCause::Shutdown);
+
+        assert_eq!(control.cause(), Some(IngestorQuiesceCause::Shutdown));
+        assert!(control.should_skip_poll());
+        assert!(control.should_suspend_intake());
+        assert_eq!(control.endpoint_admission(), Err(None));
+        assert!(matches!(
+            control.intake(
+                0,
+                BufferedIngestPayload::new(
+                    b"admitted",
+                    BufferedIngestMetadata::without_headers(),
+                    Timestamp::from_unix_nanos(1),
+                ),
+                false,
+            ),
+            IngestorQuiesceIntake::Dispatch(_)
+        ));
+        assert_eq!(control.counters().buffered_records, 0);
+
+        control.release(IngestorQuiesceCause::EntityHold);
+        assert_eq!(control.cause(), Some(IngestorQuiesceCause::Shutdown));
     }
 
     #[test]

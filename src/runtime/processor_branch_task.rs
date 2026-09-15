@@ -857,6 +857,13 @@ pub(super) async fn run_processor_branch_task(
                         break;
                     }
                 };
+                // A generation releases everything the branch can release now, including parked
+                // messages whose materialized dependency arrived after they were parked.
+                if branch.processor_has_pending_materialized(&processor) {
+                    branch
+                        .retry_processor_pending_materialized(&graph, &processor)
+                        .await;
+                }
                 branch.force_flush(&graph, &flush_snapshot).await;
                 quiesce_gauges.observe(&branch, &processor);
                 completion.complete();
@@ -900,31 +907,42 @@ pub(super) async fn run_processor_branch_task(
         quiesce_gauges.observe(&branch, &processor);
         drop(work);
     }
-    let handoff_timestamp = match &stop_mode {
-        Some(ProcessorBranchStopMode::Handoff(_)) => {
-            branch
-                .flush_processor_collected_inputs(&graph, &processor)
-                .await;
-            let snapshot = handoff_execution_snapshot.verified(
-                "the handoff command arm captures the validated domain time for this stop mode",
-            );
-            branch.force_flush(&graph, &snapshot).await;
-            Some(snapshot.now())
-        }
-        Some(ProcessorBranchStopMode::Detach) | None => {
-            branch
-                .flush_processor_collected_inputs(&graph, &processor)
-                .await;
-            None
-        }
+    // A detached and a handed-off branch both finish with nothing accepted left inside them, so both
+    // publish through the one finalizing flush below: collected input, guest buffers and route
+    // output. Only eviction drops branch-local work, which is its contract.
+    let finalization_snapshot = match &stop_mode {
+        Some(ProcessorBranchStopMode::Handoff(_)) => Some(handoff_execution_snapshot.verified(
+            "the handoff command arm captures the validated domain time for this stop mode",
+        )),
+        Some(ProcessorBranchStopMode::Detach) | None => match domain_clock.snapshot() {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                runtime_handle.events().report_error(format!(
+                    "processor branch '{}' in domain '{}' stopped without its clock and cannot \
+                     publish its accepted output: {error}",
+                    processor.as_str(),
+                    domain.as_str(),
+                ));
+                // Without a clock the processor produces no output. Running its collected input
+                // still reports each batch through the processor's error policy.
+                branch
+                    .flush_processor_collected_inputs(&graph, &processor)
+                    .await;
+                None
+            }
+        },
         Some(ProcessorBranchStopMode::Evict) => None,
     };
+    if let Some(snapshot) = &finalization_snapshot {
+        branch.force_flush(&graph, snapshot).await;
+    }
     stop_processor_snapshot_task(&mut branch, &processor, &mut snapshot).await;
     match stop_mode {
         Some(ProcessorBranchStopMode::Evict) => branch.evict().await,
         Some(ProcessorBranchStopMode::Handoff(response)) => {
-            let restored_at = handoff_timestamp
-                .verified("the handoff arm above captured the timestamp for this same stop mode");
+            let restored_at = finalization_snapshot
+                .verified("a handoff stop always finalizes with the snapshot its command captured")
+                .now();
             let pending_materialized = match branch.processors.get_mut(&processor) {
                 Some(processor) => std::mem::take(&mut processor.pending_materialized),
                 None => VecDeque::new(),
@@ -1499,6 +1517,117 @@ mod tests {
         task.abort();
         task.await
             .discarded("an aborted fixture task reports only its own cancellation");
+    }
+
+    #[tokio::test]
+    async fn detached_branch_publishes_buffered_route_output_before_it_stops() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
+        let processor = named::<ModelName>("route_orders");
+        let output = named::<RelayName>("routed_orders");
+        let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
+        let mut downstream =
+            RelayRuntimeFanIn::new(fanout.runtime_consumer_receiver_for_mode(AckMode::Attached));
+        let services = Arc::new(RelayBoundaryServices::new(fanout, 1, 0, Vec::new(), None));
+        let registry = RelayRegistry::new();
+        let owner = runtime.spawn_relay_owner_task(
+            &domain,
+            &output,
+            registry.clone(),
+            services.clone(),
+            RelayRetention::default(),
+        );
+        let mut template = junction_branch_template(processor.as_str(), "orders");
+        template.relays.insert(
+            output.clone(),
+            RelayProcessorRelayTemplate { registry, services },
+        );
+        let domain_clock = runtime
+            .bind_domain_clock(&domain)
+            .expect("the fixture installs a running unpaced clock");
+        let mut branch = template
+            .instantiate(&runtime, &domain, None)
+            .expect("the junction fixture instantiates")
+            .into_inner();
+        let node = branch
+            .processors
+            .get_mut(&processor)
+            .expect("the fixture instantiates its junction");
+        let RelayProcessorOperationNode::Junction { output_routes } = &mut node.operation else {
+            panic!("the fixture must instantiate a junction");
+        };
+        let mut route = RelayProcessorOutputNode {
+            relay: output.clone(),
+            construction: nervix_models::RouteConstruction::default(),
+            branch: None,
+            flush_policy: Some(RuntimeFlushPolicy::Each {
+                interval: Duration::from_secs(3600),
+                max_batch_size: 1024 * 1024,
+            }),
+            message_error_policy: MessageErrorPolicy::Log,
+            pending: Vec::new(),
+            flush_timer: BranchBufferTimer::default(),
+            compiled_program: None,
+            compiled_branch_program: None,
+        };
+        let flush_due = route
+            .enqueue(
+                quiesce_test_batch(),
+                &domain_clock,
+                &domain_clock
+                    .snapshot()
+                    .expect("the fixture installs a running unpaced clock"),
+            )
+            .expect("an hour-long cadence arms its route deadline");
+        assert!(
+            !flush_due,
+            "an hour-long cadence must hold the accepted output"
+        );
+        output_routes.routes.push(route);
+
+        let (_input_sender, input) = mpsc::channel(1);
+        let (commands, command_rx) = mpsc::channel(1);
+        commands
+            .send(ProcessorBranchCommand::Stop(
+                ProcessorBranchStopMode::Detach,
+            ))
+            .await
+            .expect("the stop command queues before the branch task runs");
+        let (snapshot_shutdown, _) = watch::channel(false);
+        timeout(
+            Duration::from_secs(2),
+            run_processor_branch_task(
+                ProcessorRuntimeContext::new(
+                    runtime.clone(),
+                    domain.clone(),
+                    StdArc::new(ArcSwapOption::from(None)),
+                ),
+                processor.clone(),
+                branch,
+                input,
+                command_rx,
+                runtime
+                    .node_quiesce_counters(&domain, NodeRef::new(ModelKind::Junction, &processor)),
+                ProcessorSnapshotTask {
+                    shutdown_tx: snapshot_shutdown,
+                    task: None,
+                    requests: None,
+                },
+            ),
+        )
+        .await
+        .expect("a detached branch task stops");
+
+        let published = timeout(Duration::from_millis(500), downstream.recv())
+            .await
+            .expect("detaching a branch must publish the output its route still buffers")
+            .expect("the live relay owner keeps the output relay open");
+        assert_eq!(published.message_count(), 1);
+        owner
+            .stop(Duration::from_secs(1))
+            .await
+            .expect("the fixture relay owner stops");
     }
 
     #[tokio::test]

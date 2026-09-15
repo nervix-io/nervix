@@ -95,6 +95,7 @@ impl Runtime {
                 domain_instantiation_errors: DashMap::default(),
                 domains: DashMap::default(),
                 domain_status_changed,
+                local_intake: watch::channel(LocalIntake::Open).0,
                 in_flight_by_domain: DashMap::default(),
                 in_flight_by_ingestor: DashMap::default(),
                 generator_activity_by_domain: DashMap::default(),

@@ -474,6 +474,7 @@ impl Runtime {
             self.node_quiesce_counters(domain, NodeRef::new(ModelKind::Generator, &generator.name));
         let mut shutdown_rx = shutdown_tx.subscribe();
         let mut domain_status_rx = self.inner.domain_status_changed.subscribe();
+        let mut local_intake_rx = self.inner.local_intake.subscribe();
         let generator_activity = self.generator_activity_tracker(domain);
         let runtime = self.clone();
         let task_events = self.inner.events.clone();
@@ -489,6 +490,25 @@ impl Runtime {
 
             loop {
                 tokio::task::consume_budget().await;
+                if *local_intake_rx.borrow_and_update() == LocalIntake::Closed {
+                    // A terminating node admits no new work. The generator releases what its
+                    // routes buffered and produces nothing further until the domain stops it.
+                    runtime
+                        .flush_generator_route_buffers(
+                            &task_domain,
+                            &task_generator,
+                            &routes,
+                            &task_events,
+                            &mut branch_states,
+                        )
+                        .await;
+                    quiesce_activity.take();
+                    activity.set_active(false);
+                    shutdown_rx.wait_for(|stopped| *stopped).await.discarded(
+                        "a signalled stop and a dropped domain sender both end this generator",
+                    );
+                    break;
+                }
                 if source_gate.is_closed() {
                     pending_occurrence = None;
                     runtime
@@ -542,6 +562,11 @@ impl Runtime {
                             }
                         }
                         changed = domain_status_rx.changed() => {
+                            if changed.is_err() {
+                                break;
+                            }
+                        }
+                        changed = local_intake_rx.changed() => {
                             if changed.is_err() {
                                 break;
                             }
@@ -607,6 +632,7 @@ impl Runtime {
 
                     if !state_load_failed {
                         if source_gate.is_closed()
+                            || runtime.local_intake_is_closed()
                             || runtime
                                 .inner
                                 .domains
@@ -951,6 +977,11 @@ impl Runtime {
                         }
                     }
                     changed = domain_status_rx.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                    }
+                    changed = local_intake_rx.changed() => {
                         if changed.is_err() {
                             break;
                         }

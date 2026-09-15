@@ -324,8 +324,8 @@ dependent node cannot observe a half-applied change through its input relay.
 
 ## Planned Ownership Handoffs And Failover
 
-Node drain, graceful-shutdown drain, placement consolidation, and `RELOCATE` are planned ownership
-handoffs.
+Node drain, the ownership move of a graceful-shutdown drain, placement consolidation, and `RELOCATE`
+are planned ownership handoffs.
 Nervix computes the complete target schedule before it engages a hold. It then fences dispatch at
 the affected subgraph boundary on every live node, stops new intake for each moved ingestor, and
 drains work already admitted to the moved unit. Ownership-handoff intake does not consult `ON
@@ -376,6 +376,33 @@ Graceful shutdown records whether that stable node name was already cordoned bef
 drain. Its cleanup clears the drain cordon only when shutdown began with an uncordoned node, and it
 runs after a successful, failed, or timed-out drain attempt. A pre-existing operator cordon therefore
 remains set across shutdown and restart.
+
+A graceful-shutdown drain has two parts that share one drain timeout. When another live, schedulable
+Raft voter exists, the node first moves its scheduled work there through the planned handoff above.
+It then completes the work it has already admitted in place. That second part is the whole drain
+when no replacement exists, such as on a single node or on the last schedulable node of a cluster,
+and it also covers listener ingestors, which bind on every node, and any unit whose move failed. The
+terminating node stops new intake on all of its ingestors, whatever their `ON QUIESCE` mode, and its
+generators stop producing. Work already admitted keeps flowing while the node's relays, processors,
+emitters, and acknowledgement paths stay alive: Nervix repeatedly force-flushes ingestor routes,
+processor collections and route buffers, message-error routes, reingestors, and emitters, whatever
+their `FLUSH EACH` cadence, until no relay batch, node work item, emitter buffer or publish, or
+admitted acknowledgement root remains. One more force flush then confirms that nothing is still
+moving, so work an upstream flush publishes after a downstream node finished its own flush is not
+left behind.
+Source acknowledgements and commits, such as Kafka consumer-group offsets, complete before the source
+session stops.
+
+Terminal teardown stops the node's tasks only after that drain completes or its timeout passes. A
+timeout reports the drain as abandoned, and teardown negatively acknowledges the remaining work: a
+source with external acknowledgements redelivers it after restart, and a `NO_ACK` source loses it. A
+sink that stays unavailable therefore holds the drain until its timeout. Pending `REQUIRED WAIT`
+records do not hold the drain open; every force flush retries them against the state that is
+present, and teardown negatively acknowledges whatever still waits. Payloads that other live nodes
+publish into this node's relays are admitted work as well, so an owner that keeps publishing extends
+the drain until its timeout. When every node terminates at once, each node completes its own
+admitted work within its own drain timeout, and work that reaches a peer after that peer finished
+its drain is negatively acknowledged.
 
 `DROP NODE` records the stopped process incarnation before removing its Raft membership. Delayed
 gossip cannot admit that process again. Starting the node again creates a newer incarnation, which
