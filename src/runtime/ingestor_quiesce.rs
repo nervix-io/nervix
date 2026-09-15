@@ -63,17 +63,17 @@ impl IngestorQuiesceCause {
     }
 }
 
-#[derive(Debug, Default)]
-pub(super) struct IngestorQuiesceReasons {
-    pub(super) entity_holds: usize,
-    pub(super) ownership_handoffs: usize,
-    pub(super) domain_pause: bool,
-    pub(super) memory_pressure: bool,
-    pub(super) shutdown: bool,
+#[derive(Debug, Clone, Copy, Default)]
+struct IngestorQuiesceReasons {
+    entity_holds: usize,
+    ownership_handoffs: usize,
+    domain_pause: bool,
+    memory_pressure: bool,
+    shutdown: bool,
 }
 
 impl IngestorQuiesceReasons {
-    pub(super) fn active(&self) -> Option<IngestorQuiesceCause> {
+    fn active(&self) -> Option<IngestorQuiesceCause> {
         if self.shutdown {
             Some(IngestorQuiesceCause::Shutdown)
         } else if self.ownership_handoffs > 0 {
@@ -88,13 +88,263 @@ impl IngestorQuiesceReasons {
             None
         }
     }
+
+    fn engage(&mut self, cause: IngestorQuiesceCause) {
+        match cause {
+            IngestorQuiesceCause::EntityHold => {
+                self.entity_holds = self.entity_holds.checked_add(1).assured(
+                    "a quiesce reason is held once per live entity hold, which is bounded by the \
+                     entities resident on this node",
+                );
+            }
+            IngestorQuiesceCause::OwnershipHandoff => {
+                self.ownership_handoffs = self.ownership_handoffs.checked_add(1).assured(
+                    "a quiesce reason is held once per live ownership handoff, which is bounded \
+                     by the entities resident on this node",
+                );
+            }
+            IngestorQuiesceCause::DomainPause => self.domain_pause = true,
+            IngestorQuiesceCause::MemoryPressure => self.memory_pressure = true,
+            IngestorQuiesceCause::Shutdown => self.shutdown = true,
+        }
+    }
+
+    fn release(&mut self, cause: IngestorQuiesceCause) {
+        match cause {
+            IngestorQuiesceCause::EntityHold => {
+                self.entity_holds = self.entity_holds.checked_sub(1).verified(
+                    "the entity gate hold that engaged this control is released once, by the one \
+                     caller that took it out of the hold map",
+                );
+            }
+            IngestorQuiesceCause::OwnershipHandoff => {
+                self.ownership_handoffs = self.ownership_handoffs.checked_sub(1).verified(
+                    "the entity gate hold that engaged this control is released once, by the one \
+                     caller that took it out of the hold map",
+                );
+            }
+            IngestorQuiesceCause::DomainPause => self.domain_pause = false,
+            IngestorQuiesceCause::MemoryPressure => self.memory_pressure = false,
+            IngestorQuiesceCause::Shutdown => self.shutdown = false,
+        }
+    }
 }
 
+#[derive(Debug, Clone)]
+struct IngestorQuiesceModes {
+    active: IngestQuiesceMode,
+    pending: Option<IngestQuiesceMode>,
+    active_supported_by_source: bool,
+}
+
+/// How a quiesced ingestor treats its source and the payloads that still reach it.
+///
+/// Each variant settles polling, endpoint admission and intake together, so those verdicts cannot
+/// disagree and reading any of them is a match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IngestorQuiesceHandling {
+    /// The source stops taking payloads, and a payload it already received still dispatches.
+    Suspend,
+    /// The source stops taking payloads, and a payload that still arrives is shed: an endpoint
+    /// rejects it and any other source drops it.
+    SuspendAndShed,
+    /// Polls stop and every payload that arrives is shed, an endpoint rejecting it with
+    /// `retry_after`.
+    Shed { retry_after: Option<Duration> },
+    /// Every payload that arrives is dropped.
+    Drop,
+    /// Every payload that arrives is rejected with `retry_after`.
+    Reject { retry_after: Option<Duration> },
+    /// Payloads are retained per instance within `max_size` bytes, applying `overflow` when full.
+    Buffer {
+        max_size: usize,
+        overflow: IngestQuiesceOverflow,
+    },
+    /// Endpoint payloads are retained per instance within `max_size` bytes and rejected once full.
+    EndpointBuffer { max_size: usize },
+}
+
+impl IngestorQuiesceHandling {
+    fn new(cause: IngestorQuiesceCause, modes: &IngestorQuiesceModes) -> Self {
+        if cause.stops_intake_regardless_of_mode() {
+            return Self::Suspend;
+        }
+        if !modes.active_supported_by_source {
+            return Self::SuspendAndShed;
+        }
+        if cause == IngestorQuiesceCause::MemoryPressure {
+            return Self::under_memory_pressure(&modes.active);
+        }
+        Self::declared_by(&modes.active)
+    }
+
+    /// Memory pressure never adds buffered bytes. A suspended source stays suspended, and every
+    /// other mode sheds what arrives, keeping the retry delay a `REJECT` declares.
+    fn under_memory_pressure(active: &IngestQuiesceMode) -> Self {
+        match active {
+            IngestQuiesceMode::Suspend => Self::SuspendAndShed,
+            IngestQuiesceMode::Reject { retry_after } => Self::Shed {
+                retry_after: quiesce_retry_after(retry_after),
+            },
+            IngestQuiesceMode::Buffer { .. }
+            | IngestQuiesceMode::Drop
+            | IngestQuiesceMode::EndpointBuffer { .. } => Self::Shed { retry_after: None },
+        }
+    }
+
+    /// The handling an entity hold or a domain pause takes from a mode the source honors.
+    fn declared_by(active: &IngestQuiesceMode) -> Self {
+        match active {
+            IngestQuiesceMode::Suspend => Self::Suspend,
+            IngestQuiesceMode::Drop => Self::Drop,
+            IngestQuiesceMode::Reject { retry_after } => Self::Reject {
+                retry_after: quiesce_retry_after(retry_after),
+            },
+            IngestQuiesceMode::Buffer { max_size, overflow } => Self::Buffer {
+                max_size: quiesce_max_size_bytes(max_size),
+                overflow: *overflow,
+            },
+            IngestQuiesceMode::EndpointBuffer { max_size } => Self::EndpointBuffer {
+                max_size: quiesce_max_size_bytes(max_size),
+            },
+        }
+    }
+
+    fn suspends_intake(self) -> bool {
+        match self {
+            Self::Suspend | Self::SuspendAndShed => true,
+            Self::Shed { .. }
+            | Self::Drop
+            | Self::Reject { .. }
+            | Self::Buffer { .. }
+            | Self::EndpointBuffer { .. } => false,
+        }
+    }
+
+    fn skips_poll(self) -> bool {
+        match self {
+            Self::Suspend | Self::SuspendAndShed | Self::Shed { .. } => true,
+            Self::Drop
+            | Self::Reject { .. }
+            | Self::Buffer { .. }
+            | Self::EndpointBuffer { .. } => false,
+        }
+    }
+
+    /// The delay a rejected payload or admission tells its sender to wait before retrying.
+    fn retry_after(self) -> Option<Duration> {
+        match self {
+            Self::Shed { retry_after } | Self::Reject { retry_after } => retry_after,
+            Self::Suspend
+            | Self::SuspendAndShed
+            | Self::Drop
+            | Self::Buffer { .. }
+            | Self::EndpointBuffer { .. } => None,
+        }
+    }
+}
+
+/// What intake does under one publication of an ingestor's quiesce reasons and modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IngestorQuiesceDecision {
+    /// No reason is engaged: sources poll, endpoints admit and every payload dispatches.
+    Open,
+    Quiesced {
+        /// The engaged reason that takes precedence, which `DESCRIBE INGESTOR` reports.
+        cause: IngestorQuiesceCause,
+        handling: IngestorQuiesceHandling,
+    },
+}
+
+impl IngestorQuiesceDecision {
+    fn new(reasons: IngestorQuiesceReasons, modes: &IngestorQuiesceModes) -> Self {
+        let Some(cause) = reasons.active() else {
+            return Self::Open;
+        };
+        let handling = IngestorQuiesceHandling::new(cause, modes);
+        Self::Quiesced { cause, handling }
+    }
+
+    fn cause(self) -> Option<IngestorQuiesceCause> {
+        match self {
+            Self::Open => None,
+            Self::Quiesced { cause, .. } => Some(cause),
+        }
+    }
+
+    fn suspends_intake(self) -> bool {
+        match self {
+            Self::Open => false,
+            Self::Quiesced { handling, .. } => handling.suspends_intake(),
+        }
+    }
+
+    fn skips_poll(self) -> bool {
+        match self {
+            Self::Open => false,
+            Self::Quiesced { handling, .. } => handling.skips_poll(),
+        }
+    }
+}
+
+/// One ingestor's quiesce reasons and modes, with the decision they produce.
+///
+/// Every engagement, release and declared-mode change publishes a replacement whole, so a reader
+/// never sees reasons, modes and a decision that came from different changes.
 #[derive(Debug)]
-pub(super) struct IngestorQuiesceModes {
-    pub(super) active: IngestQuiesceMode,
-    pub(super) pending: Option<IngestQuiesceMode>,
-    pub(super) active_supported_by_source: bool,
+struct IngestorQuiescePublication {
+    reasons: IngestorQuiesceReasons,
+    modes: IngestorQuiesceModes,
+    /// Derived from `reasons` and `modes` when the publication is built. Every message, poll and
+    /// endpoint admission reads it; deriving it there instead would resolve the engaged cause and
+    /// parse the mode's retry delay and size bound once per message.
+    decision: IngestorQuiesceDecision,
+}
+
+impl IngestorQuiescePublication {
+    fn new(reasons: IngestorQuiesceReasons, modes: IngestorQuiesceModes) -> Self {
+        let decision = IngestorQuiesceDecision::new(reasons, &modes);
+        Self {
+            reasons,
+            modes,
+            decision,
+        }
+    }
+
+    fn engaging(&self, cause: IngestorQuiesceCause) -> Self {
+        let mut reasons = self.reasons;
+        reasons.engage(cause);
+        Self::new(reasons, self.modes.clone())
+    }
+
+    /// Releasing the last engaged reason makes a mode declared during the hold active.
+    fn releasing(&self, cause: IngestorQuiesceCause) -> Self {
+        let mut reasons = self.reasons;
+        reasons.release(cause);
+        let mut modes = self.modes.clone();
+        if reasons.active().is_none() {
+            if let Some(pending) = modes.pending.take() {
+                modes.active = pending;
+            }
+            modes.active_supported_by_source = true;
+        }
+        Self::new(reasons, modes)
+    }
+
+    /// While a reason is engaged, the mode in effect when the hold began keeps governing it and
+    /// `declared` waits for the release.
+    fn declaring(&self, declared: &IngestQuiesceMode, active_supported_by_source: bool) -> Self {
+        let mut modes = self.modes.clone();
+        if self.reasons.active().is_some() {
+            modes.active_supported_by_source = active_supported_by_source;
+            modes.pending = Some(declared.clone());
+        } else {
+            modes.active = declared.clone();
+            modes.pending = None;
+            modes.active_supported_by_source = true;
+        }
+        Self::new(self.reasons, modes)
+    }
 }
 
 /// One buffered message's ingest metadata.
@@ -243,10 +493,16 @@ pub(in crate::runtime) enum IngestorQuiesceIntake {
 
 #[derive(Debug)]
 pub(in crate::runtime) struct IngestorQuiesceControl {
-    pub(super) modes: RwLock<IngestorQuiesceModes>,
-    pub(super) reasons: RwLock<IngestorQuiesceReasons>,
+    /// Loaded without a lock by every message, poll and admission. Every change replaces it
+    /// through `rcu`, deriving the replacement from the publication it replaces, so concurrent
+    /// changes never overwrite one another.
+    published: ArcSwap<IngestorQuiescePublication>,
+    /// Intake reaches the retained payloads only under a buffering decision, and replay only while
+    /// `buffered_records` counts some.
     pub(super) buffers: parking_lot::Mutex<HashMap<u64, IngestorQuiesceBuffer>>,
     pub(super) changed: Notify,
+    /// Changes only while `buffers` is locked, so whenever that lock is free it counts exactly the
+    /// payloads retained.
     pub(super) buffered_records: AtomicUsize,
     pub(super) buffered_bytes: AtomicUsize,
     pub(super) dropped_total: AtomicU64,
@@ -261,13 +517,14 @@ impl IngestorQuiesceControl {
         metrics: RuntimeMetrics,
         metric_labels: IngestorQuiesceMetricLabels,
     ) -> Self {
+        let modes = IngestorQuiesceModes {
+            active: mode,
+            pending: None,
+            active_supported_by_source: true,
+        };
+        let publication = IngestorQuiescePublication::new(IngestorQuiesceReasons::default(), modes);
         Self {
-            modes: RwLock::new(IngestorQuiesceModes {
-                active: mode,
-                pending: None,
-                active_supported_by_source: true,
-            }),
-            reasons: RwLock::new(IngestorQuiesceReasons::default()),
+            published: ArcSwap::from_pointee(publication),
             buffers: parking_lot::Mutex::new(HashMap::default()),
             changed: Notify::new(),
             buffered_records: AtomicUsize::new(0),
@@ -304,110 +561,43 @@ impl IngestorQuiesceControl {
         declared: &IngestQuiesceMode,
         active_supported_by_source: bool,
     ) {
-        let quiesced = self.reasons.read().active().is_some();
-        let mut modes = self.modes.write();
-        if quiesced {
-            modes.active_supported_by_source = active_supported_by_source;
-            modes.pending = Some(declared.clone());
-        } else {
-            modes.active = declared.clone();
-            modes.pending = None;
-            modes.active_supported_by_source = true;
-        }
-        drop(modes);
+        self.published
+            .rcu(|current| current.declaring(declared, active_supported_by_source));
         self.changed.notify_waiters();
     }
 
     pub(super) fn engage(&self, cause: IngestorQuiesceCause) {
-        let mut reasons = self.reasons.write();
-        match cause {
-            IngestorQuiesceCause::EntityHold => {
-                reasons.entity_holds = reasons.entity_holds.checked_add(1).assured(
-                    "a quiesce reason is held once per live entity hold, which is bounded by the \
-                     entities resident on this node",
-                );
-            }
-            IngestorQuiesceCause::OwnershipHandoff => {
-                reasons.ownership_handoffs = reasons.ownership_handoffs.checked_add(1).assured(
-                    "a quiesce reason is held once per live ownership handoff, which is bounded \
-                     by the entities resident on this node",
-                );
-            }
-            IngestorQuiesceCause::DomainPause => reasons.domain_pause = true,
-            IngestorQuiesceCause::MemoryPressure => reasons.memory_pressure = true,
-            IngestorQuiesceCause::Shutdown => reasons.shutdown = true,
-        }
-        drop(reasons);
+        self.published.rcu(|current| current.engaging(cause));
         self.changed.notify_waiters();
     }
 
     pub(super) fn release(&self, cause: IngestorQuiesceCause) {
-        let now_active = {
-            let mut reasons = self.reasons.write();
-            match cause {
-                IngestorQuiesceCause::EntityHold => {
-                    reasons.entity_holds = reasons.entity_holds.checked_sub(1).verified(
-                        "the entity gate hold that engaged this control is released once, by the \
-                         one caller that took it out of the hold map",
-                    );
-                }
-                IngestorQuiesceCause::OwnershipHandoff => {
-                    reasons.ownership_handoffs =
-                        reasons.ownership_handoffs.checked_sub(1).verified(
-                            "the entity gate hold that engaged this control is released once, by \
-                             the one caller that took it out of the hold map",
-                        );
-                }
-                IngestorQuiesceCause::DomainPause => reasons.domain_pause = false,
-                IngestorQuiesceCause::MemoryPressure => reasons.memory_pressure = false,
-                IngestorQuiesceCause::Shutdown => reasons.shutdown = false,
-            }
-            reasons.active()
-        };
-        if now_active.is_none() {
-            let mut modes = self.modes.write();
-            if let Some(pending) = modes.pending.take() {
-                modes.active = pending;
-            }
-            modes.active_supported_by_source = true;
-        }
+        self.published.rcu(|current| current.releasing(cause));
         self.changed.notify_waiters();
     }
 
+    fn decision(&self) -> IngestorQuiesceDecision {
+        self.published.load().decision
+    }
+
     pub(in crate::runtime) fn cause(&self) -> Option<IngestorQuiesceCause> {
-        self.reasons.read().active()
+        self.decision().cause()
     }
 
     pub(in crate::runtime) fn is_quiesced(&self) -> bool {
         self.cause().is_some()
     }
 
-    pub(in crate::runtime) fn mode(&self) -> IngestQuiesceMode {
-        self.modes.read().active.clone()
-    }
-
-    pub(super) fn active_mode_is_supported(&self) -> bool {
-        self.modes.read().active_supported_by_source
+    fn mode(&self) -> IngestQuiesceMode {
+        self.published.load().modes.active.clone()
     }
 
     pub(in crate::runtime) fn should_suspend_intake(&self) -> bool {
-        let Some(cause) = self.cause() else {
-            return false;
-        };
-        if cause.stops_intake_regardless_of_mode() {
-            return true;
-        }
-        !self.active_mode_is_supported() || matches!(self.mode(), IngestQuiesceMode::Suspend)
+        self.decision().suspends_intake()
     }
 
     pub(in crate::runtime) fn should_skip_poll(&self) -> bool {
-        match self.cause() {
-            Some(cause) if cause.stops_intake_regardless_of_mode() => true,
-            Some(IngestorQuiesceCause::MemoryPressure) => true,
-            Some(_) if !self.active_mode_is_supported() => true,
-            Some(_) => matches!(self.mode(), IngestQuiesceMode::Suspend),
-            None => false,
-        }
+        self.decision().skips_poll()
     }
 
     pub(in crate::runtime) async fn wait_until_not_suspended(&self) {
@@ -433,51 +623,30 @@ impl IngestorQuiesceControl {
         payload: BufferedIngestPayload,
         endpoint: bool,
     ) -> IngestorQuiesceIntake {
-        let Some(cause) = self.cause() else {
+        let IngestorQuiesceDecision::Quiesced { handling, .. } = self.decision() else {
             return IngestorQuiesceIntake::Dispatch(payload);
         };
-        if cause.stops_intake_regardless_of_mode() {
-            return IngestorQuiesceIntake::Dispatch(payload);
-        }
-        let mode = self.mode();
-        if !self.active_mode_is_supported() {
-            if endpoint {
-                self.record_rejected(1);
-                return IngestorQuiesceIntake::Rejected { retry_after: None };
-            }
-            self.record_dropped(1);
-            return IngestorQuiesceIntake::Dropped;
-        }
-        if cause == IngestorQuiesceCause::MemoryPressure {
-            if endpoint {
-                self.record_rejected(1);
-                return IngestorQuiesceIntake::Rejected {
-                    retry_after: match mode {
-                        IngestQuiesceMode::Reject { retry_after } => {
-                            humantime::parse_duration(&retry_after).ok()
-                        }
-                        _ => None,
-                    },
-                };
-            }
-            self.record_dropped(1);
-            return IngestorQuiesceIntake::Dropped;
-        }
-
-        match mode {
-            IngestQuiesceMode::Suspend => IngestorQuiesceIntake::Dispatch(payload),
-            IngestQuiesceMode::Drop => {
+        match handling {
+            IngestorQuiesceHandling::Suspend => IngestorQuiesceIntake::Dispatch(payload),
+            IngestorQuiesceHandling::SuspendAndShed | IngestorQuiesceHandling::Shed { .. } => {
+                if endpoint {
+                    self.record_rejected(1);
+                    return IngestorQuiesceIntake::Rejected {
+                        retry_after: handling.retry_after(),
+                    };
+                }
                 self.record_dropped(1);
                 IngestorQuiesceIntake::Dropped
             }
-            IngestQuiesceMode::Reject { retry_after } => {
-                self.record_rejected(1);
-                IngestorQuiesceIntake::Rejected {
-                    retry_after: humantime::parse_duration(&retry_after).ok(),
-                }
+            IngestorQuiesceHandling::Drop => {
+                self.record_dropped(1);
+                IngestorQuiesceIntake::Dropped
             }
-            IngestQuiesceMode::EndpointBuffer { max_size } => {
-                let max_size = quiesce_max_size_bytes(&max_size);
+            IngestorQuiesceHandling::Reject { retry_after } => {
+                self.record_rejected(1);
+                IngestorQuiesceIntake::Rejected { retry_after }
+            }
+            IngestorQuiesceHandling::EndpointBuffer { max_size } => {
                 let payload_bytes = payload.byte_len();
                 let mut buffers = self.buffers.lock();
                 let buffer = buffers.entry(instance).or_default();
@@ -486,14 +655,13 @@ impl IngestorQuiesceControl {
                     return IngestorQuiesceIntake::Rejected { retry_after: None };
                 }
                 buffer.admit(payload, payload_bytes);
-                self.buffered_records.fetch_add(1, Ordering::Relaxed);
+                self.buffered_records.fetch_add(1, Ordering::SeqCst);
                 self.buffered_bytes
                     .fetch_add(payload_bytes, Ordering::Relaxed);
                 self.sync_buffered_metrics();
                 IngestorQuiesceIntake::Buffered
             }
-            IngestQuiesceMode::Buffer { max_size, overflow } => {
-                let max_size = quiesce_max_size_bytes(&max_size);
+            IngestorQuiesceHandling::Buffer { max_size, overflow } => {
                 let payload_bytes = payload.byte_len();
                 let mut buffers = self.buffers.lock();
                 let buffer = buffers.entry(instance).or_default();
@@ -512,13 +680,13 @@ impl IngestorQuiesceControl {
                         break;
                     };
                     buffer.release(dropped.byte_len());
-                    self.buffered_records.fetch_sub(1, Ordering::Relaxed);
+                    self.buffered_records.fetch_sub(1, Ordering::SeqCst);
                     self.buffered_bytes
                         .fetch_sub(dropped.byte_len(), Ordering::Relaxed);
                     self.record_dropped(1);
                 }
                 buffer.admit(payload, payload_bytes);
-                self.buffered_records.fetch_add(1, Ordering::Relaxed);
+                self.buffered_records.fetch_add(1, Ordering::SeqCst);
                 self.buffered_bytes
                     .fetch_add(payload_bytes, Ordering::Relaxed);
                 self.sync_buffered_metrics();
@@ -528,41 +696,31 @@ impl IngestorQuiesceControl {
     }
 
     pub(super) fn endpoint_admission(&self) -> Result<(), Option<Duration>> {
-        let Some(cause) = self.cause() else {
+        let IngestorQuiesceDecision::Quiesced { handling, .. } = self.decision() else {
             return Ok(());
         };
-        if cause.stops_intake_regardless_of_mode() {
-            self.record_rejected(1);
-            return Err(None);
-        }
-        let mode = self.mode();
-        if !self.active_mode_is_supported() {
-            self.record_rejected(1);
-            return Err(None);
-        }
-        if cause != IngestorQuiesceCause::MemoryPressure
-            && matches!(mode, IngestQuiesceMode::EndpointBuffer { .. })
-        {
+        if let IngestorQuiesceHandling::EndpointBuffer { .. } = handling {
             return Ok(());
         }
         self.record_rejected(1);
-        Err(match mode {
-            IngestQuiesceMode::Reject { retry_after } => {
-                humantime::parse_duration(&retry_after).ok()
-            }
-            _ => None,
-        })
+        Err(handling.retry_after())
     }
 
     pub(in crate::runtime) fn pop_buffered(&self, instance: u64) -> Option<BufferedIngestPayload> {
         if self.is_quiesced() {
             return None;
         }
+        // Every ingestor asks on every loop turn, and payloads are retained only under a buffering
+        // decision, so one that retains none answers without the lock. The count changes only
+        // under that lock, so it reflects every admission that completed before this read.
+        if self.buffered_records.load(Ordering::SeqCst) == 0 {
+            return None;
+        }
         let mut buffers = self.buffers.lock();
         let buffer = buffers.get_mut(&instance)?;
         let payload = buffer.payloads.pop_front()?;
         buffer.release(payload.byte_len());
-        self.buffered_records.fetch_sub(1, Ordering::Relaxed);
+        self.buffered_records.fetch_sub(1, Ordering::SeqCst);
         self.buffered_bytes
             .fetch_sub(payload.byte_len(), Ordering::Relaxed);
         self.sync_buffered_metrics();
@@ -586,10 +744,10 @@ impl IngestorQuiesceControl {
                 .map(|buffer| buffer.payloads.len())
                 .sum::<usize>();
             buffers.clear();
+            self.buffered_records.store(0, Ordering::SeqCst);
+            self.buffered_bytes.store(0, Ordering::Relaxed);
             dropped
         };
-        self.buffered_records.store(0, Ordering::Relaxed);
-        self.buffered_bytes.store(0, Ordering::Relaxed);
         self.sync_buffered_metrics();
         self.record_dropped(dropped.arch_into());
     }
@@ -600,6 +758,10 @@ pub(super) fn quiesce_max_size_bytes(value: &str) -> usize {
         return 0;
     };
     size.as_u64().arch_into()
+}
+
+fn quiesce_retry_after(value: &str) -> Option<Duration> {
+    humantime::parse_duration(value).ok()
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1287,6 +1449,172 @@ mod tests {
                 .payload(),
             b"retained"
         );
+    }
+
+    #[test]
+    fn an_open_control_answers_intake_without_waiting_on_retained_payloads() {
+        #[derive(Debug, PartialEq, Eq)]
+        struct IntakeAnswers {
+            suspends_intake: bool,
+            skips_poll: bool,
+            endpoint_admission: Result<(), Option<Duration>>,
+            dispatches: bool,
+            replays: bool,
+        }
+
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let ingestor = named("source");
+        let control = test_ingestor_quiesce_control(
+            &runtime,
+            &domain,
+            &ingestor,
+            IngestQuiesceMode::Buffer {
+                max_size: "1MiB".to_string(),
+                overflow: IngestQuiesceOverflow::DropOldest,
+            },
+        );
+        // Retention and replay own this lock, so holding it shows that an ingestor which is neither
+        // quiesced nor retaining payloads never reaches it from a message, a poll or a loop turn.
+        let retention = control.buffers.lock();
+        let reader_control = control.clone();
+        let reader = std::thread::spawn(move || IntakeAnswers {
+            suspends_intake: reader_control.should_suspend_intake(),
+            skips_poll: reader_control.should_skip_poll(),
+            endpoint_admission: reader_control.endpoint_admission(),
+            dispatches: matches!(
+                reader_control.intake(
+                    0,
+                    BufferedIngestPayload::new(
+                        b"live",
+                        BufferedIngestMetadata::without_headers(),
+                        Timestamp::from_unix_nanos(1),
+                    ),
+                    false,
+                ),
+                IngestorQuiesceIntake::Dispatch(_)
+            ),
+            replays: reader_control.pop_buffered(0).is_some(),
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !reader.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "an open control waited on its retained payloads while answering intake"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(retention);
+        let answers = reader
+            .join()
+            .assured("an open control answers every intake check without panicking");
+
+        assert_eq!(
+            answers,
+            IntakeAnswers {
+                suspends_intake: false,
+                skips_poll: false,
+                endpoint_admission: Ok(()),
+                dispatches: true,
+                replays: false,
+            }
+        );
+    }
+
+    #[test]
+    fn reject_quiesce_hints_its_retry_delay_through_a_pause_and_memory_pressure() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let ingestor = named("source");
+        let control = test_ingestor_quiesce_control(
+            &runtime,
+            &domain,
+            &ingestor,
+            IngestQuiesceMode::Reject {
+                retry_after: "7s".to_string(),
+            },
+        );
+        let retry_after = Duration::from_secs(7);
+
+        control.engage(IngestorQuiesceCause::DomainPause);
+        assert!(!control.should_suspend_intake());
+        assert!(!control.should_skip_poll());
+        assert_eq!(control.endpoint_admission(), Err(Some(retry_after)));
+        assert!(matches!(
+            control.intake(
+                0,
+                BufferedIngestPayload::new(
+                    b"paused",
+                    BufferedIngestMetadata::without_headers(),
+                    Timestamp::from_unix_nanos(1),
+                ),
+                true,
+            ),
+            IngestorQuiesceIntake::Rejected { retry_after: Some(delay) } if delay == retry_after
+        ));
+
+        control.engage(IngestorQuiesceCause::MemoryPressure);
+        assert!(!control.should_suspend_intake());
+        assert!(control.should_skip_poll());
+        assert_eq!(control.endpoint_admission(), Err(Some(retry_after)));
+        assert!(matches!(
+            control.intake(
+                0,
+                BufferedIngestPayload::new(
+                    b"pressured",
+                    BufferedIngestMetadata::without_headers(),
+                    Timestamp::from_unix_nanos(2),
+                ),
+                true,
+            ),
+            IngestorQuiesceIntake::Rejected { retry_after: Some(delay) } if delay == retry_after
+        ));
+        assert_eq!(control.counters().rejected_total, 4);
+        assert_eq!(control.counters().dropped_total, 0);
+    }
+
+    #[test]
+    fn memory_pressure_keeps_a_suspended_source_suspended_and_sheds_what_still_arrives() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let ingestor = named("source");
+        let control =
+            test_ingestor_quiesce_control(&runtime, &domain, &ingestor, IngestQuiesceMode::Suspend);
+
+        control.engage(IngestorQuiesceCause::MemoryPressure);
+        assert!(control.should_suspend_intake());
+        assert!(control.should_skip_poll());
+        assert_eq!(control.endpoint_admission(), Err(None));
+        assert!(matches!(
+            control.intake(
+                0,
+                BufferedIngestPayload::new(
+                    b"pressured",
+                    BufferedIngestMetadata::without_headers(),
+                    Timestamp::from_unix_nanos(1),
+                ),
+                false,
+            ),
+            IngestorQuiesceIntake::Dropped
+        ));
+        assert_eq!(control.counters().dropped_total, 1);
+
+        control.release(IngestorQuiesceCause::MemoryPressure);
+        control.engage(IngestorQuiesceCause::EntityHold);
+        assert!(control.should_suspend_intake());
+        assert!(matches!(
+            control.intake(
+                0,
+                BufferedIngestPayload::new(
+                    b"held",
+                    BufferedIngestMetadata::without_headers(),
+                    Timestamp::from_unix_nanos(2),
+                ),
+                false,
+            ),
+            IngestorQuiesceIntake::Dispatch(_)
+        ));
+        assert_eq!(control.counters().dropped_total, 1);
     }
 
     #[tokio::test]
