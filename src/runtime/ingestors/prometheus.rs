@@ -94,6 +94,7 @@ impl PrometheusIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
+        let metrics = dependencies.metrics;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
             .verified(
@@ -136,8 +137,11 @@ impl PrometheusIngestor {
                 {
                     continue;
                 }
-                let mut buffered_collector =
-                    IngestRouteCollector::new(IngestMetadataKind::Headers, INGEST_GROUP_MAX_ROWS);
+                let mut buffered_collector = IngestRouteCollector::new(
+                    IngestMetadataKind::Headers,
+                    INGEST_GROUP_MAX_ROWS,
+                    metrics.clone(),
+                );
                 let mut drained_buffer = false;
                 while let Some(payload) = task_quiesce.pop_buffered(0) {
                     tokio::task::consume_budget().await;
@@ -267,6 +271,7 @@ impl PrometheusIngestor {
                                     let mut collector = IngestRouteCollector::new(
                                         IngestMetadataKind::Headers,
                                         payload.len(),
+                                        metrics.clone(),
                                     );
                                     if let Err(error) = task_runtime
                                         .dispatch_raw_ingest_payload(RawIngestDispatch {

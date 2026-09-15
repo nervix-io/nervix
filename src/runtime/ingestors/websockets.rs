@@ -23,6 +23,7 @@ struct WebsocketDispatchContext<'a> {
     filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
     branched_senders: &'a HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     codec: &'a Arc<CompiledCodec>,
+    metrics: &'a MessageMetricsHandle,
     quiesce: &'a Arc<IngestorQuiesceControl>,
 }
 
@@ -88,6 +89,7 @@ impl WebsocketsIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
+        let metrics = dependencies.metrics;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
             .verified(
@@ -149,6 +151,7 @@ impl WebsocketsIngestor {
                 filter_where: filter_where.as_ref(),
                 branched_senders: &branched_senders,
                 codec: &codec,
+                metrics: &metrics,
                 quiesce: &quiesce,
             };
             let mut backoff = RuntimeReconnectBackoff::default();
@@ -392,9 +395,11 @@ impl WebsocketsIngestor {
             filter_where,
             branched_senders,
             codec,
+            metrics,
             quiesce: _,
         } = *context;
-        let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, payload.len());
+        let mut collector =
+            IngestRouteCollector::new(IngestMetadataKind::Headers, payload.len(), metrics.clone());
         if let Err(error) = runtime
             .dispatch_raw_ingest_payload(RawIngestDispatch {
                 domain,

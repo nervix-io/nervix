@@ -77,6 +77,7 @@ impl RabbitMqIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
+        let metrics = dependencies.metrics;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
             .verified(
@@ -104,6 +105,7 @@ impl RabbitMqIngestor {
             let task_output_routes = output_routes.clone();
             let task_filter_where = filter_where.clone();
             let task_codec = codec.clone();
+            let task_metrics = metrics.clone();
             let task_branched_senders = branched_runtime.senders.clone();
             let task_ack_mode = ack_mode.clone();
             let task_config = resolved_client.entries.clone();
@@ -268,6 +270,7 @@ impl RabbitMqIngestor {
                                         let mut collector = IngestRouteCollector::new(
                                             IngestMetadataKind::Headers,
                                             1,
+                                            task_metrics.clone(),
                                         );
                                         match collector
                                             .decode_payload(&task_codec, Cow::Borrowed(payload))

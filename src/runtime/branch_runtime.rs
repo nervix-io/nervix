@@ -26,6 +26,14 @@ pub(super) struct BranchRuntime {
     pub(super) materialized_states: HashMap<RelayName, MaterializedRelayStateOriginator>,
     pub(super) relay_state_epoch: Option<u64>,
     pub(super) processors: HashMap<ModelName, RelayProcessorNode>,
+    pub(super) metrics: BranchRuntimeMetrics,
+}
+
+pub(super) struct BranchRuntimeMetrics {
+    pub(super) source: BatchMetricsHandle,
+    pub(super) source_input: Option<MessageMetricsHandle>,
+    pub(super) processor_inputs: HashMap<ModelName, HashMap<RelayName, NodeInputMetricsHandle>>,
+    pub(super) processor_outputs: HashMap<ModelName, HashMap<RelayName, BatchMetricsHandle>>,
 }
 
 #[derive(Debug)]
@@ -415,43 +423,17 @@ impl BranchRuntime {
 
     pub(super) async fn dispatch(&mut self, graph: &SharedActiveGraph, batch: RelayRecordBatch) {
         let root_relay = self.root_relay.clone();
-        self.runtime
-            .inner
-            .metrics
-            .observe_global_node_sent(NodeBatchObservation {
-                domain: &self.domain,
-                kind: self.source_kind,
-                node: &ModelName::from(&self.source),
-                relay: &root_relay,
-                physical_node_id: self
-                    .runtime
-                    .inner
-                    .remote_dispatch
-                    .local_node_id
-                    .read()
-                    .as_ref(),
-                messages: batch.message_count(),
-                bytes: batch.estimated_bytes(),
-                domain_timestamp: batch.domain_timestamp(),
-            });
-        self.runtime.inner.metrics.observe_branch_node_sent(
-            branch_key_display(&self.key),
-            NodeBatchObservation {
-                domain: &self.domain,
-                kind: self.source_kind,
-                node: &ModelName::from(&self.source),
-                relay: &root_relay,
-                physical_node_id: self
-                    .runtime
-                    .inner
-                    .remote_dispatch
-                    .local_node_id
-                    .read()
-                    .as_ref(),
-                messages: batch.message_count(),
-                bytes: batch.estimated_bytes(),
-                domain_timestamp: batch.domain_timestamp(),
-            },
+        if let Some(source_input) = &self.metrics.source_input {
+            source_input.observe(
+                batch.message_count(),
+                batch.estimated_bytes(),
+                batch.domain_timestamp(),
+            );
+        }
+        self.metrics.source.observe(
+            batch.message_count(),
+            batch.estimated_bytes(),
+            batch.domain_timestamp(),
         );
         self.runtime.mark_branch_aggregated_metrics_updated(
             &self.domain,
@@ -544,38 +526,17 @@ impl BranchRuntime {
             }
         };
         let delivery_observation = batch.delivery_observation(snapshot.now());
-        let physical_node_id = self
-            .runtime
-            .inner
-            .remote_dispatch
-            .local_node_id
-            .read()
-            .clone();
-        self.runtime
-            .inner
-            .metrics
-            .observe_global_node_received(NodeBatchObservation {
-                domain: &self.domain,
-                kind: processor.kind,
-                node: &processor.processor,
-                relay: incoming_relay,
-                physical_node_id: physical_node_id.as_ref(),
-                messages: batch.message_count(),
-                bytes: batch.estimated_bytes(),
-                domain_timestamp: delivery_observation.domain_timestamp,
-            });
-        self.runtime.inner.metrics.observe_branch_node_received(
-            branch_key_display(&self.key),
-            NodeBatchObservation {
-                domain: &self.domain,
-                kind: processor.kind,
-                node: &processor.processor,
-                relay: incoming_relay,
-                physical_node_id: physical_node_id.as_ref(),
-                messages: batch.message_count(),
-                bytes: batch.estimated_bytes(),
-                domain_timestamp: delivery_observation.domain_timestamp,
-            },
+        let input_metrics =
+            self.metrics.processor_inputs.get(processor_id).verified(
+                "the branch template resolves metrics for every processor before spawning",
+            );
+        let input_metrics = input_metrics.get(incoming_relay).verified(
+            "the branch template resolves every declared processor input before spawning",
+        );
+        input_metrics.observe_batch(
+            batch.message_count(),
+            batch.estimated_bytes(),
+            delivery_observation.domain_timestamp,
         );
         self.runtime.mark_branch_aggregated_metrics_updated(
             &self.domain,
@@ -583,30 +544,7 @@ impl BranchRuntime {
             &processor.processor,
         );
         for seconds in delivery_observation.latency_seconds {
-            self.runtime
-                .inner
-                .metrics
-                .observe_global_delivery_latency_at_domain_time(NodeLatencyObservation {
-                    domain: &self.domain,
-                    kind: processor.kind,
-                    node: &processor.processor,
-                    relay: incoming_relay,
-                    physical_node_id: physical_node_id.as_ref(),
-                    seconds,
-                    domain_timestamp: delivery_observation.domain_timestamp,
-                });
-            self.runtime.inner.metrics.observe_branch_delivery_latency(
-                branch_key_display(&self.key),
-                NodeLatencyObservation {
-                    domain: &self.domain,
-                    kind: processor.kind,
-                    node: &processor.processor,
-                    relay: incoming_relay,
-                    physical_node_id: physical_node_id.as_ref(),
-                    seconds,
-                    domain_timestamp: delivery_observation.domain_timestamp,
-                },
-            );
+            input_metrics.observe_delivery_latency(seconds, delivery_observation.domain_timestamp);
         }
         processor
             .accept_input(graph, self, incoming_relay, batch, &snapshot)
@@ -634,43 +572,16 @@ impl BranchRuntime {
         source: &ModelName,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
-        self.runtime
-            .inner
-            .metrics
-            .observe_global_node_sent(NodeBatchObservation {
-                domain: &self.domain,
-                kind: source_kind,
-                node: &ModelName::from(source),
-                relay: &output.relay,
-                physical_node_id: self
-                    .runtime
-                    .inner
-                    .remote_dispatch
-                    .local_node_id
-                    .read()
-                    .as_ref(),
-                messages: batch.message_count(),
-                bytes: batch.estimated_bytes(),
-                domain_timestamp: batch.domain_timestamp(),
-            });
-        self.runtime.inner.metrics.observe_branch_node_sent(
-            branch_key_display(&self.key),
-            NodeBatchObservation {
-                domain: &self.domain,
-                kind: source_kind,
-                node: &ModelName::from(source),
-                relay: &output.relay,
-                physical_node_id: self
-                    .runtime
-                    .inner
-                    .remote_dispatch
-                    .local_node_id
-                    .read()
-                    .as_ref(),
-                messages: batch.message_count(),
-                bytes: batch.estimated_bytes(),
-                domain_timestamp: batch.domain_timestamp(),
-            },
+        let output_metrics = self.metrics.processor_outputs.get(source).verified(
+            "the branch template resolves output metrics for every processor before spawning",
+        );
+        let output_metrics = output_metrics.get(&output.relay).verified(
+            "the branch template resolves every declared processor output before spawning",
+        );
+        output_metrics.observe(
+            batch.message_count(),
+            batch.estimated_bytes(),
+            batch.domain_timestamp(),
         );
         self.runtime
             .mark_branch_aggregated_metrics_updated(&self.domain, source_kind, source);
@@ -803,57 +714,8 @@ impl IngestorRouteTask {
                 return Vec::new();
             }
         };
-        if self.template.branch.source_kind == ModelKind::Ingestor {
-            let row_count = input_batch.batch.batch().num_rows();
-            let row_bytes = input_batch
-                .batch
-                .batch()
-                .columns()
-                .iter()
-                .map(|column| {
-                    let Ok(bytes) = column.to_data().get_slice_memory_size() else {
-                        return u64::MAX;
-                    };
-                    bytes.arch_into()
-                })
-                .fold(0_u64, u64::saturating_add)
-                .checked_div(row_count.arch_into())
-                .unwrap_or_default();
-            for (key, row) in &branch_plan.valid_rows {
-                let Some(metadata) = input_batch.metadata.get(*row) else {
-                    continue;
-                };
-                self.runtime_handle
-                    .inner
-                    .metrics
-                    .observe_branch_node_without_stream_received(
-                        branch_key_display(key),
-                        NodeWithoutRelayObservation {
-                            domain: &self.domain,
-                            kind: self.template.branch.source_kind,
-                            node: &ModelName::from(&self.template.branch.source),
-                            physical_node_id: self
-                                .runtime_handle
-                                .inner
-                                .remote_dispatch
-                                .local_node_id
-                                .read()
-                                .as_ref(),
-                            messages: 1,
-                            bytes: row_bytes,
-                            domain_timestamp: Some(metadata.ingested_at_high_watermark()),
-                        },
-                    );
-                self.runtime_handle.mark_branch_aggregated_metrics_updated(
-                    &self.domain,
-                    self.template.branch.source_kind,
-                    &self.template.branch.source,
-                );
-            }
-        }
-
         let mut batch_builds = FuturesUnordered::new();
-        for selection in branch_plan.selections {
+        for selection in branch_plan {
             tokio::task::consume_budget().await;
             batch_builds.push(branched_branch_filter_blocking(
                 input_batch.clone(),

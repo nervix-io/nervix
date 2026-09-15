@@ -208,12 +208,47 @@ pub(super) struct RelayBoundaryBuilder {
 #[derive(Debug)]
 pub(super) struct RelayConsumerFanout {
     pub(super) dispatch_gate: Arc<RelayDispatchGate>,
-    pub(super) owner_buffer: RwLock<Option<Arc<RelayBroadcast<RelayRecordBatch>>>>,
+    pub(super) owner_buffer: RwLock<Option<Arc<RelayOwnerBuffer>>>,
     pub(super) owner_capacity: AtomicUsize,
     pub(super) owner_pending_batches: Arc<AtomicUsize>,
     pub(super) subscriptions: RelayBroadcast<RelayRecordBatch>,
     pub(super) attached_runtime_consumers: RelayBroadcast<RelayRecordBatch>,
     pub(super) detached_runtime_consumers: RelayBroadcast<RelayRecordBatch>,
+}
+
+#[derive(Debug)]
+pub(super) struct RelayOwnerBuffer {
+    batches: RelayBroadcast<RelayRecordBatch>,
+    metrics: RelayMetricsHandle,
+}
+
+impl RelayOwnerBuffer {
+    fn with_capacity(capacity: NonZeroUsize, metrics: RelayMetricsHandle) -> Self {
+        Self {
+            batches: RelayBroadcast::with_capacity(capacity),
+            metrics,
+        }
+    }
+
+    fn new_receiver(&self) -> RelayRuntimeConsumerReceiver {
+        self.batches.new_receiver()
+    }
+
+    fn len(&self) -> usize {
+        self.batches.len()
+    }
+
+    fn capacity(&self) -> usize {
+        self.batches.capacity()
+    }
+
+    fn set_capacity(&self, capacity: NonZeroUsize) {
+        self.batches.set_capacity(capacity);
+    }
+
+    fn observe_length(&self) {
+        self.metrics.observe_buffer(self.len(), self.capacity());
+    }
 }
 
 pub(super) struct RelayOwnerAdmission {
@@ -313,7 +348,9 @@ pub(super) struct RelayOwnerTask {
 
 pub(super) struct RelayOwnerBranchState {
     pub(super) registry: RelayRegistry,
-    pub(super) instances: BranchInstanceRegistry<Option<BranchKey>, ()>,
+    pub(super) instances: BranchInstanceRegistry<Option<BranchKey>, RelayMetricRecorders>,
+    pub(super) global_metrics: RelayMetricsHandle,
+    pub(super) physical_node_id: Option<ClusterNodeName>,
     pub(super) capacity: Option<NonZeroUsize>,
 }
 
@@ -391,10 +428,13 @@ impl RelayConsumerFanout {
         }
     }
 
-    pub(super) fn activate_owner_buffer(&self) -> RelayRuntimeConsumerReceiver {
+    pub(super) fn activate_owner_buffer(
+        &self,
+        metrics: RelayMetricsHandle,
+    ) -> RelayRuntimeConsumerReceiver {
         let capacity = NonZeroUsize::new(self.owner_capacity.load(Ordering::Acquire))
             .verified("relay capacity is validated as nonzero before it is stored");
-        let buffer = Arc::new(RelayBroadcast::with_capacity(capacity));
+        let buffer = Arc::new(RelayOwnerBuffer::with_capacity(capacity, metrics));
         let receiver = buffer.new_receiver();
         *self.owner_buffer.write() = Some(buffer);
         receiver
@@ -404,7 +444,7 @@ impl RelayConsumerFanout {
         *self.owner_buffer.write() = None;
     }
 
-    pub(super) fn owner_buffer(&self) -> Option<Arc<RelayBroadcast<RelayRecordBatch>>> {
+    pub(super) fn owner_buffer(&self) -> Option<Arc<RelayOwnerBuffer>> {
         self.owner_buffer.read().clone()
     }
 
@@ -592,10 +632,15 @@ impl RelayBoundaryFanout {
         }
     }
 
-    pub(super) fn activate_owner_buffer(&self) -> RelayRuntimeConsumerReceiver {
+    pub(super) fn activate_owner_buffer(
+        &self,
+        metrics: RelayMetricsHandle,
+    ) -> RelayRuntimeConsumerReceiver {
         match self {
-            Self::Direct(fanout) => fanout.activate_owner_buffer(),
-            Self::BranchCollapse(branch_collapse) => branch_collapse.fanout.activate_owner_buffer(),
+            Self::Direct(fanout) => fanout.activate_owner_buffer(metrics),
+            Self::BranchCollapse(branch_collapse) => {
+                branch_collapse.fanout.activate_owner_buffer(metrics)
+            }
         }
     }
 
@@ -608,7 +653,7 @@ impl RelayBoundaryFanout {
         }
     }
 
-    pub(super) fn owner_buffer(&self) -> Option<Arc<RelayBroadcast<RelayRecordBatch>>> {
+    pub(super) fn owner_buffer(&self) -> Option<Arc<RelayOwnerBuffer>> {
         match self {
             Self::Direct(fanout) => fanout.owner_buffer(),
             Self::BranchCollapse(branch_collapse) => branch_collapse.fanout.owner_buffer(),
@@ -911,8 +956,8 @@ impl RelayBoundaryServices {
             .is_none_or(|owner| Some(owner) == node_id)
     }
 
-    pub(super) fn activate_owner_buffer(&self) -> RelayRuntimeFanIn {
-        RelayRuntimeFanIn::new(self.fanout.activate_owner_buffer())
+    pub(super) fn activate_owner_buffer(&self, metrics: RelayMetricsHandle) -> RelayRuntimeFanIn {
+        RelayRuntimeFanIn::new(self.fanout.activate_owner_buffer(metrics))
     }
 
     pub(super) fn deactivate_owner_buffer(&self) {
@@ -960,10 +1005,6 @@ impl RelayBoundaryServices {
 
     pub(super) async fn enqueue_owner_batch(
         &self,
-        metrics: &RuntimeMetrics,
-        domain: &DomainName,
-        relay: &RelayName,
-        physical_node_id: Option<&ClusterNodeName>,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         let dispatch_gate = self.fanout.dispatch_gate();
@@ -975,20 +1016,14 @@ impl RelayBoundaryServices {
             return Err(Box::new(batch.clone()));
         };
         let admission = self.fanout.begin_owner_admission();
-        if let Err(error) = buffer.broadcast(batch.attached()).await {
+        if let Err(error) = buffer.batches.broadcast(batch.attached()).await {
             for ack in error.0.acks.iter() {
                 ack.no_ack("relay owner buffer is unavailable");
             }
             return Err(Box::new(batch.clone()));
         }
         admission.accept();
-        self.observe_owner_buffer_length(
-            metrics,
-            domain,
-            relay,
-            physical_node_id,
-            batch.key.as_ref(),
-        );
+        buffer.observe_length();
         Ok(())
     }
 
@@ -1084,29 +1119,11 @@ impl RelayBoundaryServices {
         Ok(())
     }
 
-    pub(super) fn observe_owner_buffer_length(
-        &self,
-        metrics: &RuntimeMetrics,
-        domain: &DomainName,
-        relay: &RelayName,
-        physical_node_id: Option<&ClusterNodeName>,
-        branch_key: Option<&BranchKey>,
-    ) {
+    pub(super) fn observe_owner_buffer_length(&self, metrics: &RelayMetricsHandle) {
         let Some((len, capacity)) = self.fanout.owner_buffer_len() else {
             return;
         };
-        let observation = RelayBufferObservation {
-            domain,
-            relay,
-            physical_node_id,
-            direction: RELAY_BUFFER_DIRECTION_CONCRETE,
-            len,
-            capacity,
-        };
-        metrics.observe_global_relay_buffer_len(observation);
-        if let Some(branch_key) = branch_key {
-            metrics.observe_branch_relay_buffer_len(branch_key.as_str(), observation);
-        }
+        metrics.observe_buffer(len, capacity);
     }
 
     pub(super) async fn fanout_local_subscriptions(&self, batch: &RelayRecordBatch) {
@@ -1305,21 +1322,12 @@ impl RelayBoundaryServices {
 
     pub(super) async fn fanout_owner_batch(
         &self,
-        metrics: &RuntimeMetrics,
         domain: &DomainName,
         relay: &RelayName,
-        physical_node_id: Option<&ClusterNodeName>,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         self.fanout_local_subscriptions(batch).await;
         self.fanout_remote_subscriptions(domain, relay, batch).await;
-        self.observe_owner_buffer_length(
-            metrics,
-            domain,
-            relay,
-            physical_node_id,
-            batch.key.as_ref(),
-        );
         self.dispatch_local_runtime_consumers(batch).await?;
         self.dispatch_remote_runtime_consumers(domain, batch).await
     }
@@ -1471,7 +1479,6 @@ impl Runtime {
         branches: &mut RelayOwnerBranchState,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
-        let physical_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
         let now = match self.current_stream_expiration_time(domain) {
             Ok(now) => now,
             Err(error) => {
@@ -1489,12 +1496,26 @@ impl Runtime {
         };
         branches.registry.touch(&batch.key, now);
         self.touch_stream_key(domain, relay, &batch.key, now);
-        branches
-            .instances
-            .get_or_try_create_with(batch.key.clone(), now, |_| {
-                Ok::<(), std::convert::Infallible>(())
-            })
-            .assured("the tracking closure's error type is Infallible");
+        let metrics = match batch.key.as_ref() {
+            Some(branch_key) => {
+                let branch_instance = branches
+                    .instances
+                    .get_or_try_create_with(batch.key.clone(), now, |_| {
+                        Ok::<RelayMetricRecorders, std::convert::Infallible>(
+                            self.inner.metrics.resolve_relay_metric_recorders(
+                                domain,
+                                relay,
+                                branches.physical_node_id.as_ref(),
+                                RELAY_BUFFER_DIRECTION_CONCRETE,
+                                Some(branch_key.as_str()),
+                            ),
+                        )
+                    })
+                    .assured("the metrics resolver's error type is Infallible");
+                RelayMetricsHandle::from_recorders(branch_instance.state)
+            }
+            None => branches.global_metrics.clone(),
+        };
         if let Some(capacity) = branches.capacity {
             for (evicted_key, _) in branches.instances.evict_lru_to_capacity(capacity) {
                 branches.registry.remove(&evicted_key);
@@ -1502,35 +1523,14 @@ impl Runtime {
                 self.invalidate_branch_relay_generation(domain, &evicted_key);
             }
         }
-        self.inner.metrics.observe_global_stream_received(
-            domain,
-            relay,
-            self.inner.remote_dispatch.local_node_id.read().as_ref(),
+        metrics.observe_batch(
             batch.message_count(),
             batch.estimated_bytes(),
             batch.domain_timestamp(),
         );
-        self.inner.metrics.observe_branch_stream_received(
-            branch_key_display(&batch.key),
-            RelayBatchObservation {
-                domain,
-                relay,
-                physical_node_id: self.inner.remote_dispatch.local_node_id.read().as_ref(),
-                messages: batch.message_count(),
-                bytes: batch.estimated_bytes(),
-                domain_timestamp: batch.domain_timestamp(),
-            },
-        );
+        services.observe_owner_buffer_length(&metrics);
         self.mark_branch_aggregated_metrics_updated(domain, ModelKind::Relay, relay);
-        let result = services
-            .fanout_owner_batch(
-                &self.inner.metrics,
-                domain,
-                relay,
-                physical_node_id.as_ref(),
-                batch,
-            )
-            .await;
+        let result = services.fanout_owner_batch(domain, relay, batch).await;
         batch.ack_success();
         result
     }
@@ -1622,8 +1622,16 @@ impl Runtime {
         services: Arc<RelayBoundaryServices>,
         retention: RelayRetention,
     ) -> RelayOwnerTask {
-        let mut receiver = services.activate_owner_buffer();
         let (shutdown, mut shutdown_rx) = watch::channel(false);
+        let physical_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
+        let global_metrics = self.inner.metrics.resolve_relay_metrics(
+            domain,
+            relay,
+            physical_node_id.as_ref(),
+            RELAY_BUFFER_DIRECTION_CONCRETE,
+            None,
+        );
+        let mut receiver = services.activate_owner_buffer(global_metrics.clone());
         let runtime = self.clone();
         let domain = domain.clone();
         let relay = relay.clone();
@@ -1636,6 +1644,8 @@ impl Runtime {
             let mut branches = RelayOwnerBranchState {
                 registry,
                 instances: BranchInstanceRegistry::new(),
+                global_metrics,
+                physical_node_id,
                 capacity: branch_capacity,
             };
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
@@ -1721,13 +1731,7 @@ impl Runtime {
                          second consumer for a rejected copy",
                     );
             }
-            services.observe_owner_buffer_length(
-                &runtime.inner.metrics,
-                &domain,
-                &relay,
-                runtime.inner.remote_dispatch.local_node_id.read().as_ref(),
-                None,
-            );
+            services.observe_owner_buffer_length(&branches.global_metrics);
             services.deactivate_owner_buffer();
             branches.registry.clear();
             runtime.inner.metrics.remove_relay(&domain, &relay);

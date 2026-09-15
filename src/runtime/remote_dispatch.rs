@@ -1463,7 +1463,6 @@ mod tests {
 
     #[tokio::test]
     async fn relay_gate_allows_admitted_owner_batches_to_reach_consumers() {
-        let runtime = Runtime::default();
         let domain = domain("default");
         let relay = named("orders");
         let services = test_relay_boundary_services();
@@ -1475,16 +1474,9 @@ mod tests {
             "relay owner is moving",
         );
         assert!(lease.wait_quiescent().await);
-
         timeout(
             Duration::from_millis(100),
-            services.fanout_owner_batch(
-                &runtime.inner.metrics,
-                &domain,
-                &relay,
-                None,
-                &quiesce_test_batch(),
-            ),
+            services.fanout_owner_batch(&domain, &relay, &quiesce_test_batch()),
         )
         .await
         .expect("the gate must not pause a batch already admitted to the owner buffer")
