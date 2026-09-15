@@ -154,6 +154,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   schema. Declare datetime encoding explicitly when required.
 - For every JAQ-backed codec, use `WITH JAQ TRANSFORMATIONS` and declare `ON INGESTION`,
   `ON EMITTING`, or both in that order. At least one direction is required.
+- An `ON INGESTION` program runs once per value a payload holds, and every object it yields becomes
+  one message: `.[]` unfolds an array, and a program that yields nothing acknowledges the payload
+  without a message. A payload is decoded or rejected as a whole, unfolds into at most 65,536
+  messages, and stays the unit of source acknowledgement. `ON EMITTING` must yield exactly one
+  value per record.
 - Give every signaling protocol an explicit `FORMAT` and express the handshake as JAQ:
   `SEND JAQ` programs must each yield exactly one value, and `WAIT JAQ` matchers accept any output
   that is neither null nor false. Match only the fields that matter so acknowledgements carrying

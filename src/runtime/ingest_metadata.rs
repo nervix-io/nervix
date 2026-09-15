@@ -555,11 +555,14 @@ pub(super) fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use ahash::HashMap;
     use arrow_array::Array;
     use nervix_models::{
-        CreateSchema, IngestSource, MessageErrorOperation, ModelKind, ModelName, ParseAsType,
-        RetryPolicy, SchemaField, Timestamp,
+        CodecWireFormat, CreateCodec, CreateSchema, CreateWireSchema, IngestSource, JsonType,
+        MessageErrorOperation, ModelKind, ModelName, ParseAsType, ResolvedCodecWireFormat,
+        RetryPolicy, SchemaField, Timestamp, WireSchemaField,
     };
     use nonzero_ext::nonzero;
     use triomphe::Arc;
@@ -568,24 +571,63 @@ mod tests {
     use crate::{
         runtime::ingest_group::PendingIngestGroup,
         runtime_ack::AckSet,
-        runtime_schema::{RuntimeRecordBatch, RuntimeValue, compile_schema, test_runtime_row},
+        runtime_schema::{
+            RuntimeRecordBatch, RuntimeValue, compile_codec, compile_schema, test_runtime_row,
+        },
     };
-    #[test]
-    fn ingest_group_builds_one_metadata_column_set_for_all_of_its_messages() {
+
+    /// A JSON codec over a one-field `value` schema, for tests that decode payloads into a group.
+    fn metering_value_codec() -> Arc<CompiledCodec> {
+        let schema = Arc::new(compile_schema(&CreateSchema {
+            name: named("metering_value"),
+            fields: vec![SchemaField {
+                name: named("value"),
+                ty: ParseAsType::I64,
+                optional: false,
+                sensitive: false,
+            }],
+        }));
+        compile_codec(
+            &CreateCodec {
+                name: named("metering_value_codec"),
+                wire_format: CodecWireFormat::Json {
+                    wire_schema: named("metering_value_wire"),
+                },
+                schema: named("metering_value"),
+                encoding_rules: Vec::new(),
+            },
+            schema,
+            ResolvedCodecWireFormat::Json(&CreateWireSchema {
+                name: named("metering_value_wire"),
+                strictness: Default::default(),
+                fields: vec![WireSchemaField {
+                    name: named("value"),
+                    ty: JsonType::Integer,
+                    optional: false,
+                }],
+            }),
+        )
+        .expect("the metering value codec should compile")
+    }
+
+    #[tokio::test]
+    async fn ingest_group_builds_one_metadata_column_set_for_all_of_its_messages() {
         let topic = "metering_events";
         let headers = TestIngestHeaders(&[("route", "primary")]);
-        let schema = test_schema(&[("value", ParseAsType::I64)]);
+        let codec = metering_value_codec();
         let mut group = PendingIngestGroup::new(IngestMetadataKind::Kafka, 8);
 
         INGEST_METADATA_BUILDER_SETS_OPENED.with(|count| count.set(0));
         INGEST_METADATA_COLUMN_SETS_BUILT.with(|count| count.set(0));
 
         for offset in 0..3i64 {
-            let builder = group.record_builder(&schema);
-            builder
-                .append(Some(&RuntimeValue::I64(offset)))
-                .and_then(|()| builder.finish_row())
-                .expect("each decoded message must append into the group's record builder");
+            group
+                .decode_payload(
+                    &codec,
+                    Cow::Owned(format!(r#"{{"value":{offset}}}"#).into_bytes()),
+                )
+                .await
+                .expect("each payload must decode into the group's record builder");
             group
                 .append(
                     &[IngestMetadataRow::Kafka {
@@ -597,7 +639,7 @@ mod tests {
                     vec![AckSet::empty()],
                     Timestamp::from_unix_nanos(1),
                 )
-                .expect("each decoded message must append into the open group");
+                .expect("each decoded payload must append into the open group");
         }
 
         assert_eq!(

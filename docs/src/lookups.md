@@ -39,7 +39,8 @@ the model is created. Creation succeeds only after the selected file has decoded
 usable on every current live node, including while the domain is stopped. The next command may run
 `LOOKUP` immediately; malformed input fails creation.
 
-Resource files are typically newline-delimited encoded records, such as JSON Lines when the codec uses a JSON wire schema:
+A resource file is read line by line, and each non-blank line is one payload for the codec. With a
+schemaful codec, such as a JSON wire schema over JSON Lines, each line is one entry:
 
 ```nspl
 CREATE RESOURCE zip_codes;
@@ -68,6 +69,11 @@ CREATE HASH MAP zip_codes_by_zip
   DECODE USING zip_code_entry_codec;
 ```
 
+A JAQ-backed codec [unfolds](schemas-and-codecs.md#unfolding-payloads) each line, so one line may
+contribute zero, one, or several entries, in the order its program yields them. When two entries
+carry the same key, whether from two lines or from one, the later entry replaces the earlier one.
+A line that fails to decode fails the hash map's creation with a diagnostic naming the line.
+
 Direct lookup commands are session/control commands:
 
 ```nspl,ignore
@@ -76,9 +82,10 @@ LOOKUP <name> KEY '<key>';
 ```
 
 `DESCRIBE HASH MAP` reports the loaded resource version, path, codec, owner/replica placement, key
-field, and entry count. `LOOKUP` returns the matching decoded record when the key exists. These are
-read-only control-plane commands: they do not execute the graph or require a running domain clock,
-so a loaded hash map remains directly queryable while its domain is stopped.
+field, and entry count, which counts distinct keys. `LOOKUP` returns the matching decoded record
+when the key exists. These are read-only control-plane commands: they do not execute the graph or
+require a running domain clock, so a loaded hash map remains directly queryable while its domain is
+stopped.
 
 Expressions can call `LOOKUP_HASH_MAP`:
 

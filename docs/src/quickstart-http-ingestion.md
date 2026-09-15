@@ -39,9 +39,10 @@ COMMIT;
 ```
 
 `MODE NO_ACK SEQUENTIAL` is the only mode endpoint ingestors support — there is no broker to
-acknowledge to. Each POST body is one record. To merge this stream with the Kafka-fed `orders`
-relay, a [junction](processors.md#junction) can consume both relays with
-`FROM orders, orders_http`.
+acknowledge to. With this schemaful codec each POST body is one record, while a JAQ-backed codec
+can [unfold](schemas-and-codecs.md#unfolding-payloads) one body into several. To merge this
+stream with the Kafka-fed `orders` relay, a [junction](processors.md#junction) can consume both
+relays with `FROM orders, orders_http`.
 
 ## POST An Order
 

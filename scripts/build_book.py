@@ -212,15 +212,20 @@ to the [JAQ v{version} release]({release_url}). This page only summarizes the Ne
 
 ## Nervix Contract
 
-- A codec transform receives one parsed native-format or protobuf JSON value as `.`.
-- An ingestion transform must yield exactly one JSON object compatible with the internal schema.
-- An emitting transform must yield exactly one value accepted by the selected native format or
-  protobuf message.
+- An ingestion transform runs once for every value a parsed native-format or protobuf payload
+  holds, and receives that value as `.`.
+- Every object an ingestion transform yields becomes one message compatible with the internal
+  schema. It may yield zero, one, or many objects, and one payload unfolds into at most 65,536
+  messages.
+- An emitting transform receives one record as `.` and must yield exactly one value accepted by the
+  selected native format or protobuf message.
 - Nervix compiles filters with JAQ's core, standard-library, JSON, and format functions. Standalone
   JAQ command-line options and file loading are not part of the codec contract.
 
 See [JAQ transformations](schemas-and-codecs.md#jaq-transformations) for directionality, supported
-formats, exact output rules, and NSPL syntax.
+formats, exact output rules, and NSPL syntax, and
+[Unfolding Payloads](schemas-and-codecs.md#unfolding-payloads) for how one payload becomes several
+messages.
 
 ## Common Filters
 

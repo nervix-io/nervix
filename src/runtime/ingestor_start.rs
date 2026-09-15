@@ -477,8 +477,9 @@ impl Runtime {
         let mut lines = tokio::io::BufReader::new(file).lines();
         let schema = codec.schema();
         // The whole file is one batch, so it is decoded into one set of Arrow columns rather than
-        // one batch per line. Blank lines are skipped, so each row remembers the line it came from
-        // for the diagnostics below.
+        // one batch per line. Blank lines are skipped and a JAQ-backed codec may unfold one line
+        // into any number of rows, so each row remembers the line it came from for the diagnostics
+        // below.
         let mut builder = schema.batch_builder(0);
         let mut row_lines = Vec::new();
         let mut line_number = 0usize;
@@ -495,17 +496,18 @@ impl Runtime {
             if line.trim().is_empty() {
                 continue;
             }
-            decode_ingested_payload(&codec, Cow::Owned(line.into_bytes()), &mut builder)
-                .await
-                .map_err(|error| {
-                    format!(
-                        "failed to decode lookup '{}' line {}: {}",
-                        lookup.name.as_str(),
-                        line_number,
-                        error
-                    )
-                })?;
-            row_lines.push(line_number);
+            let messages =
+                decode_ingested_payload(&codec, Cow::Owned(line.into_bytes()), &mut builder)
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "failed to decode lookup '{}' line {}: {}",
+                            lookup.name.as_str(),
+                            line_number,
+                            error
+                        )
+                    })?;
+            row_lines.extend(std::iter::repeat_n(line_number, messages));
         }
 
         let batch = builder.finish()?;

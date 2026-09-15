@@ -462,3 +462,52 @@ Feature: Ingestor metrics
     Then within "10s" node "node-1" eventually reports describe ingestor "remote_owner_metrics_source" as "messages_total sent relay=notifications physical_node={{ingestor_owner}} total=2"
     When the cluster is restarted
     Then within "10s" node "node-1" eventually reports describe ingestor "remote_owner_metrics_source" as "messages_total sent relay=notifications physical_node={{ingestor_owner}} total=2"
+
+  Scenario Outline: DESCRIBE INGESTOR counts every message a JAQ codec unfolds from one payload
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+      CREATE CODEC notification_batch_codec
+        FROM JSON
+        TO SCHEMA notification
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE ENDPOINT unfolded_metrics_ingress ON edge PATH '/unfolded-metrics' TYPE HTTP;
+      CREATE INGESTOR unfolded_metrics_source
+        FROM ENDPOINT unfolded_metrics_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_batch_codec
+        TO notifications
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
+      START;
+      """
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/unfolded-metrics"
+      """
+      [{"user_id":42},{"user_id":43},{"user_id":44}]
+      """
+    Then within "5s" the relay subscription receives payloads
+      """
+      {"user_id":42}
+      {"user_id":43}
+      {"user_id":44}
+      """
+    And within "10s" node "node-1" eventually reports describe ingestor "unfolded_metrics_source" as "messages_total received relay=- physical_node=node-1 total=3"
+    And within "10s" node "node-1" eventually reports describe ingestor "unfolded_metrics_source" as "messages_total sent relay=notifications physical_node=node-1 total=3"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

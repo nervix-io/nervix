@@ -267,8 +267,8 @@ impl Runtime {
         payload: BufferedIngestPayload,
         protocol: &str,
     ) {
-        // One request is one group, so its builders are sized for the single row this binding
-        // decodes.
+        // One request is one group, so its builders are sized for the single payload this binding
+        // decodes; a payload that unfolds into several messages grows them.
         let mut collector =
             IngestRouteCollector::new(IngestMetadataKind::Headers, 1, binding.metrics.clone());
         match collector

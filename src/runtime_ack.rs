@@ -422,6 +422,30 @@ impl AckSet {
         }
     }
 
+    /// Splits this set into `shares` sets that each resolve one share of its acknowledgement, and
+    /// appends them to `sets`.
+    ///
+    /// The first share is this set's own and every further share is attached to it, so the
+    /// acknowledgement resolves only once every share has, and a negative acknowledgement of any
+    /// share resolves it negatively. Splitting into no shares leaves nothing to wait for, so this
+    /// set's own share resolves here.
+    pub fn split_into(self, shares: usize, sets: &mut Vec<AckSet>) {
+        let Some(further_shares) = shares.checked_sub(1) else {
+            self.ack_success();
+            return;
+        };
+        if further_shares == 0 {
+            sets.push(self);
+            return;
+        }
+        let further = self.attached_for_receivers(further_shares);
+        sets.push(self);
+        for _ in 1..further_shares {
+            sets.push(further.clone());
+        }
+        sets.push(further);
+    }
+
     /// One shared attached clone delivered to `receivers` consumers, each of
     /// which resolves its own share exactly once.
     pub fn attached_for_receivers(&self, receivers: usize) -> Self {
@@ -553,6 +577,51 @@ mod tests {
         drop(acks);
         drop(completion);
 
+        assert_eq!(tracker.outstanding(), 0);
+    }
+
+    #[tokio::test]
+    async fn split_shares_resolve_the_set_only_once_every_share_has() {
+        let tracker = Arc::new(AckRootTracker::default());
+        let (acks, completion) = AckSet::tracked_root(tracker.clone());
+        let mut shares = Vec::new();
+
+        acks.split_into(3, &mut shares);
+
+        assert_eq!(shares.len(), 3);
+        shares[0].ack_success();
+        shares[1].ack_success();
+        assert_eq!(tracker.outstanding(), 1);
+        shares[2].ack_success();
+        assert_eq!(completion.wait().await, AckOutcome::Ack);
+        assert_eq!(tracker.outstanding(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_negative_acknowledgement_of_one_split_share_resolves_the_set_negatively() {
+        let (acks, completion) = AckSet::root();
+        let mut shares = Vec::new();
+
+        acks.split_into(2, &mut shares);
+        shares[0].ack_success();
+        shares[1].no_ack("sink rejected the message");
+
+        assert_eq!(
+            completion.wait().await,
+            AckOutcome::NoAck("sink rejected the message".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn splitting_into_no_shares_resolves_the_set() {
+        let tracker = Arc::new(AckRootTracker::default());
+        let (acks, completion) = AckSet::tracked_root(tracker.clone());
+        let mut shares = Vec::new();
+
+        acks.split_into(0, &mut shares);
+
+        assert!(shares.is_empty());
+        assert_eq!(completion.wait().await, AckOutcome::Ack);
         assert_eq!(tracker.outstanding(), 0);
     }
 

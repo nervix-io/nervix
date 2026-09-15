@@ -346,8 +346,9 @@ illustrative, not recommended defaults. Two measured facts decide what a `FLUSH`
 `MAX BATCH SIZE` only clamps a batch; it never grows one. The batch a route emits is roughly its
 arrival rate multiplied by the `FLUSH EACH` interval, cut off at the byte cap, so raising a cap
 that never fires changes nothing and the only way to grow batches is a longer interval, paid in
-latency. Upstream of every route, ingestors build their first Arrow batches from source groups of
-at most 1,024 messages, or fewer after a 5 ms idle gap, independent of any `FLUSH` policy; larger
+latency. Upstream of every route, ingestors build their first Arrow batches from source groups that
+close at 1,024 messages, or earlier after a 5 ms idle gap, independent of any `FLUSH` policy; a
+payload a JAQ-backed codec unfolds is never split, so its group may close above 1,024. Larger
 batches downstream come only from route buffering across an interval. Read actual batch sizes
 from the [`nervix_messages_per_batch` histogram](metrics-and-observability.md) instead of
 inferring them.

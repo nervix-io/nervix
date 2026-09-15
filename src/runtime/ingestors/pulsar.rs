@@ -935,7 +935,7 @@ impl PulsarIngestor {
         Ok(Some(tls_options))
     }
 
-    /// Decodes one message as one row of `collector`'s ingest group.
+    /// Decodes one Pulsar message's payload into `collector`'s ingest group.
     async fn decode_message(
         collector: &mut IngestRouteCollector,
         codec: &Arc<CompiledCodec>,

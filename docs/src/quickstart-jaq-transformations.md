@@ -3,9 +3,9 @@
 So far every payload matched the wire schema field for field. Real feeds rarely do. When a partner
 sends orders as a nested envelope, a JAQ codec reshapes the payload at the boundary instead of
 declaring a wire schema: the codec parses the native format and runs a
-[jq-style program](schemas-and-codecs.md#jaq-transformations) whose output must be one JSON object
-matching the internal schema. The concise [JAQ Reference](jaq-reference.md) links the complete,
-version-matched upstream manual.
+[jq-style program](schemas-and-codecs.md#jaq-transformations) whose outputs must each be a JSON
+object matching the internal schema. The concise [JAQ Reference](jaq-reference.md) links the
+complete, version-matched upstream manual.
 
 Suppose the partner posts this envelope:
 
@@ -79,5 +79,32 @@ curl -i -X POST http://127.0.0.1:8080/partner-orders \
 ```
 
 The subscription shows the flattened `order_record` — the envelope never enters the graph.
+
+## Unfold A Batch
+
+A partner that sends several orders in one body needs no second endpoint. Every object the program
+yields becomes its own message, so a program that iterates an array unfolds one POST into one
+record per element:
+
+```nspl
+CREATE CODEC partner_batch_codec
+  FROM JSON
+  TO SCHEMA order_record
+  WITH JAQ TRANSFORMATIONS ON INGESTION $jaq$
+  .orders[] | {
+    order_id: .order.id,
+    customer: .order.customer,
+    status: .order.state,
+    amount: .totals.amount,
+    quantity: .totals.quantity
+  }
+  $jaq$;
+```
+
+An ingestor decoding with `partner_batch_codec` turns a body of `{"orders":[...]}` into one
+`order_record` per element, in array order. The body is still accepted or rejected as a whole: if
+one element does not fit the schema, no record from that body enters the graph.
+[Unfolding Payloads](schemas-and-codecs.md#unfolding-payloads) covers acknowledgement, limits, and
+diagnostics.
 
 Next: binary payloads in [Protobuf Codecs](./quickstart-protobuf.md).

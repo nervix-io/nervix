@@ -975,7 +975,7 @@ impl MqttIngestor {
                     batch_failure = Some("mqtt runtime dispatch failed".to_string());
                     // The rest of the poll group is replayed rather than flushed, so its rows
                     // leave the group with the message that failed.
-                    collector.discard_undispatched_rows();
+                    collector.discard_undispatched_payloads();
                     break;
                 }
             }
@@ -1051,8 +1051,9 @@ impl MqttIngestor {
         }
     }
 
-    /// Decodes one publish as one row of `collector`'s ingest group, reporting a payload the
-    /// codec rejects and answering whether the row joined the group.
+    /// Decodes one publish into `collector`'s ingest group as the messages its payload unfolds
+    /// into, reporting a payload the codec rejects and answering whether the payload joined the
+    /// group.
     async fn decode_publish(
         context: &MqttTaskContext,
         collector: &mut IngestRouteCollector,

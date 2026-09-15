@@ -39,6 +39,7 @@ use arrow_select::{
     filter::{filter as filter_arrow_array, filter_record_batch},
     take::take,
 };
+use bytes::Bytes;
 use chrono::{DateTime, FixedOffset};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -67,7 +68,10 @@ use triomphe::Arc;
 use crate::jaq_program::{CompiledJaqProgram, JaqNativeFormat};
 
 mod arrow_body;
+mod jaq_unfold;
 mod syslog;
+
+pub use jaq_unfold::UnfoldPosition;
 
 #[derive(Debug, Clone)]
 pub struct CompiledSchema {
@@ -351,12 +355,22 @@ pub enum CodecError {
     SyslogDecode { codec: String, reason: String },
     #[error("failed to encode syslog payload for codec '{codec}': {reason}")]
     SyslogEncode { codec: String, reason: String },
-    #[error("codec '{codec}' expected object payload")]
+    #[error("codec '{codec}' expected an object")]
     ExpectedObject { codec: String },
     #[error("codec '{codec}' has invalid jaq transformation: {reason}")]
     InvalidJaqTransformation { codec: String, reason: String },
     #[error("codec '{codec}' jaq transformation failed: {reason}")]
     JaqTransform { codec: String, reason: String },
+    #[error("codec '{codec}' ON INGESTION program evaluation failed")]
+    JaqIngestionEvaluation { codec: String },
+    #[error("{cause} ({position})")]
+    Unfold {
+        position: UnfoldPosition,
+        #[source]
+        cause: Box<CodecError>,
+    },
+    #[error("codec '{codec}' payload exceeds the unfold limit of {limit} messages")]
+    UnfoldLimit { codec: String, limit: usize },
     #[error("codec '{codec}' missing field '{field}'")]
     MissingField { codec: String, field: String },
     #[error("codec '{codec}' has unexpected field '{field}'")]
@@ -612,37 +626,6 @@ fn test_runtime_value_arrow_type(value: &RuntimeValue) -> Result<ArrowDataType, 
 impl CompiledCodec {
     pub(crate) fn schema(&self) -> Arc<CompiledSchema> {
         self.schema.clone()
-    }
-
-    /// Runs the ON INGESTION transformation that [`Self::requires_blocking_decode`] selects,
-    /// without touching a single Arrow column.
-    ///
-    /// jaq and protobuf decoding is the CPU-bound half of those codecs, and it produces a JSON
-    /// value before any column is written. Naming that half separately is what lets a caller run
-    /// it off the reactor and then [`Self::append_transformed_row`] on the task that owns the
-    /// batch builder, instead of sending the builder to another thread.
-    pub(crate) fn transform_on_ingestion(&self, payload: &[u8]) -> Result<JsonValue, CodecError> {
-        match &self.wire_schema {
-            CompiledWireSchema::JaqNative(native) => transform_jaq_native(self, native, payload),
-            CompiledWireSchema::Protobuf(protobuf) => transform_protobuf(self, protobuf, payload),
-            CompiledWireSchema::Json(_)
-            | CompiledWireSchema::Cbor(_)
-            | CompiledWireSchema::Avro(_)
-            | CompiledWireSchema::Syslog => Err(CodecError::InvalidCodec {
-                codec: self.name.as_str().to_string(),
-                reason: "codec declares no ON INGESTION transformation to run".to_string(),
-            }),
-        }
-    }
-
-    /// Appends the result of [`Self::transform_on_ingestion`] as one row of `builder`.
-    pub(crate) fn append_transformed_row(
-        &self,
-        value: &JsonValue,
-        builder: &mut RuntimeRecordBatchBuilder,
-    ) -> Result<(), CodecError> {
-        let appended = decode_json_value(self, value, None, builder);
-        finish_decoded_row(self, builder, appended)
     }
 
     pub fn requires_blocking_decode(&self) -> bool {
@@ -1899,31 +1882,34 @@ fn compile_json_wire_schema(schema_def: &CreateWireSchema<JsonType>) -> Compiled
     }
 }
 
-/// Appends one payload as one row of `builder`.
+/// Decodes one payload into `builder` and answers how many messages it decoded into.
 ///
-/// The builder belongs to the batch the row joins, so a batch of `n` payloads is decoded into one
-/// set of Arrow columns. A payload that fails to decode leaves the batch exactly as it was: the row
-/// it had started is closed and dropped, and the error names the payload that produced it.
+/// The builder belongs to the batch the messages join, so a batch of `n` payloads is decoded into
+/// one set of Arrow columns. A schemaful codec decodes a payload into exactly one message, and a
+/// JAQ-backed codec unfolds it into zero or more. A payload that fails to decode leaves the batch
+/// exactly as it was: every row it had started is closed and dropped, and the error names the
+/// payload that produced it.
 ///
 /// A caller that already owns its payload hands it over, which is what lets JSON parse in place.
 pub(crate) fn decode_with_codec(
     codec: &CompiledCodec,
     mut payload: Cow<'_, [u8]>,
     builder: &mut RuntimeRecordBatchBuilder,
-) -> Result<(), CodecError> {
+) -> Result<usize, CodecError> {
     let appended = match &codec.wire_schema {
         CompiledWireSchema::Json(wire_schema) => {
             decode_json(codec, wire_schema, &mut payload, builder)
         }
         CompiledWireSchema::Cbor(wire_schema) => decode_cbor(codec, wire_schema, &payload, builder),
         CompiledWireSchema::Avro(wire_schema) => decode_avro(codec, wire_schema, &payload, builder),
-        CompiledWireSchema::JaqNative(native) => transform_jaq_native(codec, native, &payload)
-            .and_then(|value| decode_json_value(codec, &value, None, builder)),
-        CompiledWireSchema::Protobuf(protobuf) => transform_protobuf(codec, protobuf, &payload)
-            .and_then(|value| decode_json_value(codec, &value, None, builder)),
         CompiledWireSchema::Syslog => syslog::decode(codec, &payload, builder),
+        CompiledWireSchema::JaqNative(_) | CompiledWireSchema::Protobuf(_) => {
+            let unfolded = codec.unfold_on_ingestion(Bytes::from(payload.into_owned()))?;
+            return unfolded.append_to(codec, builder);
+        }
     };
-    finish_decoded_row(codec, builder, appended)
+    finish_decoded_row(codec, builder, appended)?;
+    Ok(1)
 }
 
 /// Commits the row a codec appended, or closes and drops the row a failed decode left behind.
@@ -2448,51 +2434,6 @@ fn decode_cbor(
     decode_json_value(codec, &value, Some(wire_schema), builder)
 }
 
-fn transform_jaq_native(
-    codec: &CompiledCodec,
-    native: &CompiledJaqNativeCodec,
-    payload: &[u8],
-) -> Result<JsonValue, CodecError> {
-    let Some(program) = native.transformations.on_ingestion.as_deref() else {
-        return Err(CodecError::InvalidCodec {
-            codec: codec.name.as_str().to_string(),
-            reason: "JAQ-native codec used for decoding must declare ON INGESTION transformation"
-                .to_string(),
-        });
-    };
-    let value =
-        native
-            .format
-            .read_single_value(payload)
-            .map_err(|error| CodecError::JaqNativeDecode {
-                codec: codec.name.as_str().to_string(),
-                format: native.format.name(),
-                reason: error.to_string(),
-            })?;
-    run_jaq_transformation(codec, program, value)
-}
-
-fn transform_protobuf(
-    codec: &CompiledCodec,
-    protobuf: &CompiledProtobufCodec,
-    payload: &[u8],
-) -> Result<JsonValue, CodecError> {
-    let Some(program) = protobuf.transformations.on_ingestion.as_deref() else {
-        return Err(CodecError::InvalidCodec {
-            codec: codec.name.as_str().to_string(),
-            reason: "protobuf codec used for decoding must declare ON INGESTION transformation"
-                .to_string(),
-        });
-    };
-    let value = decode_protobuf_payload(&protobuf.message, payload).map_err(|reason| {
-        CodecError::ProtobufDecode {
-            codec: codec.name.as_str().to_string(),
-            reason,
-        }
-    })?;
-    run_jaq_transformation(codec, program, value)
-}
-
 /// Decode protobuf bytes as `message` into the JSON value jaq programs operate on.
 pub(crate) fn decode_protobuf_payload(
     message: &MessageDescriptor,
@@ -2605,7 +2546,11 @@ fn decode_json_value(
             return Err(CodecError::ParseField {
                 codec: codec.name.as_str().to_string(),
                 field: field.name.clone(),
-                reason: format!("expected {:?}, found {}", wire_field.ty, value),
+                reason: format!(
+                    "expected {:?}, found a JSON {}",
+                    wire_field.ty,
+                    json_value_kind(value)
+                ),
             });
         }
         builder
@@ -2717,7 +2662,12 @@ fn append_json_value_to_arrow(
     value: &JsonValue,
     context: &str,
 ) -> Result<(), String> {
-    let incompatible = || format!("{context} value {value} is incompatible with {ty:?}");
+    let incompatible = || {
+        format!(
+            "{context} holds a JSON {}, which is incompatible with {ty:?}",
+            json_value_kind(value)
+        )
+    };
 
     macro_rules! append_primitive {
         ($builder:ty, $parsed:expr) => {{
@@ -3410,6 +3360,18 @@ fn runtime_values_from_arrow_slice(
                 .ok_or_else(|| format!("field '{field}' list contains null at index {index}"))
         })
         .collect()
+}
+
+/// The JSON kind of `value`, for a diagnostic that must describe a payload value without quoting it.
+fn json_value_kind(value: &JsonValue) -> &'static str {
+    match value {
+        JsonValue::Null => "null",
+        JsonValue::Bool(_) => "boolean",
+        JsonValue::Number(_) => "number",
+        JsonValue::String(_) => "string",
+        JsonValue::Array(_) => "array",
+        JsonValue::Object(_) => "object",
+    }
 }
 
 fn json_value_matches_wire_type(value: &JsonValue, ty: JsonType) -> bool {
@@ -5953,6 +5915,41 @@ mod tests {
         assert_eq!(
             single_batch_value(&decoded, "payload"),
             Some(RuntimeValue::String("hello".to_string()))
+        );
+    }
+
+    #[test]
+    fn protobuf_codec_unfolds_one_message_into_every_output_of_its_program() {
+        let codec = protobuf_codec(
+            "protobuf_unfold",
+            Some("., {user_id: (.user_id + 1), tenant: .tenant, payload: .payload}"),
+            None,
+        );
+        let compiled_schema = Arc::new(compile_schema(&protobuf_schema()));
+        let compiled_codec = compile_codec_with_protobuf(
+            &codec,
+            compiled_schema,
+            self_describing(&codec.wire_format),
+            Some(protobuf_descriptor()),
+        )
+        .expect("codec should compile");
+        let payload = [
+            0x08, 42, 0x12, 4, b'a', b'c', b'm', b'e', 0x1a, 5, b'h', b'e', b'l', b'l', b'o',
+        ];
+        let mut builder = compiled_codec.schema.batch_builder(2);
+
+        let decoded = decode_with_codec(&compiled_codec, Cow::Borrowed(&payload), &mut builder)
+            .expect("the message should unfold");
+
+        assert_eq!(decoded, 2);
+        let batch = builder.finish().expect("the batch should build");
+        assert_eq!(
+            batch.value(0, "user_id").expect("readable"),
+            Some(RuntimeValue::U32(42))
+        );
+        assert_eq!(
+            batch.value(1, "user_id").expect("readable"),
+            Some(RuntimeValue::U32(43))
         );
     }
 
