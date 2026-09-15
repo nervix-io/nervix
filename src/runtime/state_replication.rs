@@ -21,6 +21,7 @@ pub(crate) struct StateSyncAck {
 
 mod handoff;
 mod preparation;
+mod published_branch_state;
 
 use handoff::OwnershipHandoffTransitionRef;
 pub(in crate::runtime) use handoff::{
@@ -31,6 +32,7 @@ use preparation::{ForcedRecoveryCheckpoint, RuntimeStatePreparationIdentity};
 pub(in crate::runtime) use preparation::{
     PreparedForcedRuntimeStateRecovery, PreparedRuntimeStateSnapshot,
 };
+pub(in crate::runtime) use published_branch_state::PublishedBranchState;
 
 #[derive(Debug, Clone)]
 pub(super) struct PendingStateReplicaSync {
@@ -42,62 +44,6 @@ pub(super) struct PendingStateReplicaSync {
 pub(super) struct PendingStateCheckpointAnnouncement {
     target_lsm: u64,
     replica_progress: BTreeMap<ClusterNodeName, u64>,
-}
-
-pub(super) fn persist_dirty_runtime_state_snapshot(
-    store: &RuntimeStateStore,
-    placement: &RuntimeStatePlacement,
-    last_persisted_lsm: &AtomicU64,
-    dirty: &AtomicBool,
-    latest_snapshot: impl FnOnce() -> Result<PersistedRuntimeStateEntry, RuntimePersistenceError>,
-) -> Result<Option<u64>, Report<RuntimePersistenceError>> {
-    if !dirty.swap(false, Ordering::SeqCst) {
-        return Ok(None);
-    }
-    let result = (|| {
-        let snapshot = latest_snapshot()?;
-        if snapshot.lsm <= last_persisted_lsm.load(Ordering::SeqCst) {
-            return Ok(None);
-        }
-        store.persist_latest_snapshot(placement, snapshot.lsm, &snapshot.payload)?;
-        last_persisted_lsm.fetch_max(snapshot.lsm, Ordering::SeqCst);
-        Ok(Some(snapshot.lsm))
-    })();
-    if result.is_err() {
-        dirty.store(true, Ordering::SeqCst);
-    }
-    result
-}
-
-pub(super) async fn persist_window_processor_state_snapshot(
-    store: &RuntimeStateStore,
-    state: &ReplicatedWindowProcessorState,
-    snapshot_requests: &mpsc::Sender<WindowProcessorSnapshotRequest>,
-) -> RuntimeStateResult<Option<u64>> {
-    if state.live_dirty.load(Ordering::SeqCst) {
-        let (response_tx, response_rx) = oneshot::channel();
-        snapshot_requests.send(response_tx).await.map_err(|_| {
-            RuntimeStateOperationError::checkpoint(format!(
-                "window processor '{}' snapshot owner is unavailable",
-                state.placement.identifier.as_str()
-            ))
-        })?;
-        let response = response_rx.await.map_err(|_| {
-            RuntimeStateOperationError::checkpoint(format!(
-                "window processor '{}' snapshot owner dropped its response",
-                state.placement.identifier.as_str()
-            ))
-        })?;
-        response.map_err(RuntimeStateOperationError::checkpoint)?;
-    }
-    persist_dirty_runtime_state_snapshot(
-        store,
-        &state.placement,
-        &state.last_persisted_lsm,
-        &state.dirty,
-        || state.latest_snapshot(),
-    )
-    .map_err(|error| RuntimeStateOperationError::persistence(error.current_context().clone()))
 }
 
 impl Runtime {
@@ -752,15 +698,19 @@ impl Runtime {
                 .await?
         };
         let mut checkpoints = Vec::new();
+        // Branch states leave their maps before they are encoded, so an encode never holds a map
+        // shard that a branch appearing or leaving elsewhere has to write.
+        let mut deduplicators = Vec::new();
         for state in self.inner.replicated_deduplicator_states.iter() {
             if matches_entity(state.key()) {
-                checkpoints.push((
-                    state.key().clone(),
-                    state
-                        .latest_snapshot()
-                        .map_err(OwnershipHandoffError::persistence)?,
-                ));
+                deduplicators.push((state.key().clone(), state.value().clone()));
             }
+        }
+        for (placement, state) in deduplicators {
+            let snapshot = state.latest_snapshot().map_err(|error| {
+                OwnershipHandoffError::persistence(error.current_context().clone())
+            })?;
+            checkpoints.push((placement, snapshot));
         }
         for state in self.inner.replicated_kafka_offset_states.iter() {
             if matches_entity(state.key()) {
@@ -797,25 +747,26 @@ impl Runtime {
                 })?;
             checkpoints.push((placement, sealed.into_persisted_entry()));
         }
+        let mut windows = Vec::new();
         for state in self.inner.replicated_window_processor_states.iter() {
             if matches_entity(state.key()) {
-                checkpoints.push((
-                    state.key().clone(),
-                    state
-                        .latest_snapshot()
-                        .map_err(OwnershipHandoffError::persistence)?,
-                ));
+                windows.push((state.key().clone(), state.value().clone()));
             }
         }
+        for (placement, state) in windows {
+            let snapshot = state.latest_snapshot().map_err(|error| {
+                OwnershipHandoffError::persistence(error.current_context().clone())
+            })?;
+            checkpoints.push((placement, snapshot));
+        }
+        let mut wasm_processors = Vec::new();
         for state in self.inner.replicated_wasm_processor_states.iter() {
             if matches_entity(state.key()) {
-                checkpoints.push((
-                    state.key().clone(),
-                    state
-                        .latest_snapshot()
-                        .map_err(OwnershipHandoffError::persistence)?,
-                ));
+                wasm_processors.push((state.key().clone(), state.value().clone()));
             }
+        }
+        for (placement, state) in wasm_processors {
+            checkpoints.push((placement, state.latest_snapshot()));
         }
         for state in self.inner.replicated_branch_aggregated_states.iter() {
             if matches_entity(state.key()) {
@@ -1228,13 +1179,17 @@ impl Runtime {
                 ReplicatedDeduplicatorState::new(placement.clone(), None)
                     .map_err(OwnershipHandoffError::persistence)?
                     .latest_snapshot()
-                    .map_err(OwnershipHandoffError::persistence)
+                    .map_err(|error| {
+                        OwnershipHandoffError::persistence(error.current_context().clone())
+                    })
             }
             RuntimeStateKind::WindowProcessor => {
                 ReplicatedWindowProcessorState::new(placement.clone(), None)
                     .map_err(OwnershipHandoffError::persistence)?
                     .latest_snapshot()
-                    .map_err(OwnershipHandoffError::persistence)
+                    .map_err(|error| {
+                        OwnershipHandoffError::persistence(error.current_context().clone())
+                    })
             }
             RuntimeStateKind::WasmProcessor => Ok(PersistedRuntimeStateEntry {
                 lsm: 0,
@@ -2416,12 +2371,17 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         after_lsm: Option<u64>,
     ) -> Result<Option<PersistedRuntimeStateEntry>, String> {
-        if let Some(state) = self.inner.replicated_deduplicator_states.get(placement) {
-            let snapshot = state.latest_snapshot().map_err(|error| error.to_string())?;
-            if snapshot.is_after(after_lsm) {
-                return Ok(Some(snapshot));
-            }
-            return Ok(None);
+        // A branch state leaves its map before it is encoded, so an encode never holds a map shard
+        // that a branch appearing or leaving elsewhere has to write.
+        let deduplicator = self
+            .inner
+            .replicated_deduplicator_states
+            .get(placement)
+            .map(|state| state.clone());
+        if let Some(state) = deduplicator {
+            return state
+                .snapshot_after(after_lsm)
+                .map_err(|error| error.to_string());
         }
         if let Some(state) = self.inner.replicated_kafka_offset_states.get(placement) {
             let snapshot = ReplicatedKafkaOffsetState::read(state.value())
@@ -2431,17 +2391,27 @@ impl Runtime {
                 return Ok(Some(snapshot));
             }
         }
-        if let Some(state) = self.inner.replicated_window_processor_states.get(placement) {
-            let snapshot = state.latest_snapshot().map_err(|error| error.to_string())?;
-            if snapshot.is_after(after_lsm) {
-                return Ok(Some(snapshot));
-            }
+        let window = self
+            .inner
+            .replicated_window_processor_states
+            .get(placement)
+            .map(|state| state.clone());
+        if let Some(state) = window
+            && let Some(snapshot) = state
+                .snapshot_after(after_lsm)
+                .map_err(|error| error.to_string())?
+        {
+            return Ok(Some(snapshot));
         }
-        if let Some(state) = self.inner.replicated_wasm_processor_states.get(placement) {
-            let snapshot = state.latest_snapshot().map_err(|error| error.to_string())?;
-            if snapshot.is_after(after_lsm) {
-                return Ok(Some(snapshot));
-            }
+        let wasm = self
+            .inner
+            .replicated_wasm_processor_states
+            .get(placement)
+            .map(|state| state.clone());
+        if let Some(state) = wasm
+            && let Some(snapshot) = state.snapshot_after(after_lsm)
+        {
+            return Ok(Some(snapshot));
         }
         if let Some(state) = self
             .inner
@@ -2674,21 +2644,20 @@ impl Runtime {
             .await
     }
 
+    /// Persist the guest state a WASM processor branch saved and wait until its replicas hold it.
     pub(in crate::runtime) async fn persist_wasm_processor_snapshot(
         &self,
         state: &ReplicatedWasmProcessorState,
-        lsm: u64,
-        payload: &[u8],
+        saved: &WasmGuestState,
     ) -> Result<(), String> {
         if let Some(store) = &self.inner.state_store {
             store
-                .persist_latest_snapshot(&state.placement, lsm, payload)
+                .persist_latest_snapshot(&state.placement, saved.revision(), saved.bytes())
                 .map_err(|error| error.to_string())?;
-            state.last_persisted_lsm.store(lsm, Ordering::SeqCst);
-            state.dirty.store(false, Ordering::SeqCst);
-            self.notify_runtime_state_replicas(&state.placement, lsm);
+            state.record_persisted(saved.revision());
+            self.notify_runtime_state_replicas(&state.placement, saved.revision());
         }
-        self.wait_for_wasm_processor_replica_quorum(state, lsm)
+        self.wait_for_wasm_processor_replica_quorum(state, saved.revision())
             .await
     }
 

@@ -1,6 +1,10 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{
+    Arc as StdArc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use ahash::RandomState;
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use nervix_models::ClusterNodeName;
 use tokio::sync::Notify;
@@ -15,12 +19,48 @@ pub(super) struct ReplicatedWasmProcessorState {
     pub(super) placement: RuntimeStatePlacement,
     pub(super) required_replica_acks: usize,
     pub(super) replica_nodes: Vec<ClusterNodeName>,
-    snapshot: parking_lot::Mutex<Vec<u8>>,
-    pub(super) current_lsm: LsmSequence,
-    pub(super) last_persisted_lsm: AtomicU64,
-    pub(super) dirty: AtomicBool,
+    /// Replaced after every save, so keeping a save is one pointer replacement and nothing that
+    /// reads the saved state waits for the branch task or makes it copy the guest buffer.
+    saved: ArcSwap<WasmGuestState>,
+    /// Allocates the revision each save is stamped with.
+    current_lsm: LsmSequence,
+    last_persisted_lsm: AtomicU64,
     pub(super) replica_progress: DashMap<String, u64, RandomState>,
     pub(super) replication_notify: Notify,
+}
+
+/// The bytes a WASM processor guest returned when its state was saved, and the revision of that
+/// save.
+#[derive(Debug)]
+pub(super) struct WasmGuestState {
+    revision: u64,
+    bytes: Vec<u8>,
+}
+
+impl WasmGuestState {
+    pub(super) fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub(super) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The bytes a new guest instance restores from, or `None` while the guest has saved nothing.
+    pub(super) fn restorable(&self) -> Option<&[u8]> {
+        if self.bytes.is_empty() {
+            return None;
+        }
+        Some(&self.bytes)
+    }
+
+    fn snapshot(&self, placement: &RuntimeStatePlacement) -> PersistedRuntimeStateEntry {
+        PersistedRuntimeStateEntry {
+            lsm: self.revision,
+            schema_fingerprint: placement.schema_fingerprint,
+            payload: self.bytes.clone(),
+        }
+    }
 }
 
 impl ReplicatedWasmProcessorState {
@@ -30,52 +70,76 @@ impl ReplicatedWasmProcessorState {
         required_replica_acks: usize,
         initial: Option<PersistedRuntimeStateEntry>,
     ) -> Result<Self, RuntimePersistenceError> {
-        let mut current_lsm = 0;
-        let mut last_persisted_lsm = 0;
-        let mut snapshot = Vec::new();
+        let mut saved = WasmGuestState {
+            revision: 0,
+            bytes: Vec::new(),
+        };
         if let Some(initial) = initial {
-            current_lsm = initial.lsm;
-            last_persisted_lsm = initial.lsm;
-            snapshot = initial.payload;
+            saved = WasmGuestState {
+                revision: initial.lsm,
+                bytes: initial.payload,
+            };
         }
         Ok(Self {
             placement,
             required_replica_acks,
             replica_nodes,
-            snapshot: parking_lot::Mutex::new(snapshot),
-            current_lsm: LsmSequence::restored(current_lsm),
-            last_persisted_lsm: AtomicU64::new(last_persisted_lsm),
-            dirty: AtomicBool::new(false),
+            current_lsm: LsmSequence::restored(saved.revision),
+            last_persisted_lsm: AtomicU64::new(saved.revision),
+            saved: ArcSwap::from_pointee(saved),
             replica_progress: DashMap::default(),
             replication_notify: Notify::new(),
         })
     }
 
-    pub(super) fn restore_guest_state(&self) -> Option<Vec<u8>> {
-        let snapshot = self.snapshot.lock().clone();
-        (!snapshot.is_empty()).then_some(snapshot)
+    /// The guest state saved last, which a new guest instance restores from.
+    pub(super) fn restore_guest_state(&self) -> StdArc<WasmGuestState> {
+        self.saved.load_full()
     }
 
-    pub(super) fn replace_guest_state(
-        &self,
-        guest_state: Vec<u8>,
-    ) -> Result<(u64, Vec<u8>), RuntimePersistenceError> {
-        let payload = guest_state.clone();
-        *self.snapshot.lock() = guest_state;
-        let lsm = self.current_lsm.advance();
-        self.dirty.store(true, Ordering::SeqCst);
-        Ok((lsm, payload))
+    /// Keep `bytes`, what the guest returned from a save, as the guest state saved last.
+    pub(super) fn replace_guest_state(&self, bytes: Vec<u8>) -> StdArc<WasmGuestState> {
+        let saved = StdArc::new(WasmGuestState {
+            revision: self.current_lsm.advance(),
+            bytes,
+        });
+        self.saved.store(saved.clone());
+        saved
     }
 
-    pub(super) fn latest_snapshot(
+    /// The revision of the guest state saved last.
+    pub(super) fn saved_revision(&self) -> u64 {
+        self.saved.load().revision
+    }
+
+    /// Record that the guest state saved at `revision` is persisted. Persisting an older save
+    /// afterwards never moves this back.
+    pub(super) fn record_persisted(&self, revision: u64) {
+        self.last_persisted_lsm
+            .fetch_max(revision, Ordering::SeqCst);
+    }
+
+    /// Whether the guest state saved last is newer than the guest state persisted last.
+    pub(super) fn is_dirty(&self) -> bool {
+        self.saved_revision() > self.last_persisted_lsm.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn latest_snapshot(&self) -> PersistedRuntimeStateEntry {
+        self.saved.load_full().snapshot(&self.placement)
+    }
+
+    /// The guest state saved last when its revision is after `after_lsm`.
+    pub(super) fn snapshot_after(
         &self,
-    ) -> Result<PersistedRuntimeStateEntry, RuntimePersistenceError> {
-        let snapshot = self.snapshot.lock().clone();
-        Ok(PersistedRuntimeStateEntry {
-            lsm: self.current_lsm.current(),
-            schema_fingerprint: self.placement.schema_fingerprint,
-            payload: snapshot,
-        })
+        after_lsm: Option<u64>,
+    ) -> Option<PersistedRuntimeStateEntry> {
+        let saved = self.saved.load_full();
+        if let Some(after_lsm) = after_lsm
+            && saved.revision <= after_lsm
+        {
+            return None;
+        }
+        Some(saved.snapshot(&self.placement))
     }
 
     pub(super) fn mark_replica_progress(&self, node_id: &ClusterNodeName, lsm: u64) {
@@ -134,11 +198,10 @@ mod tests {
             None,
         )
         .expect("state should initialize");
-        let (lsm, payload) = state
-            .replace_guest_state(vec![1, 2, 3])
-            .expect("guest state should persist");
+        let saved = state.replace_guest_state(vec![1, 2, 3]);
+        let lsm = saved.revision();
 
-        assert_eq!(payload, vec![1, 2, 3]);
+        assert_eq!(saved.bytes(), [1_u8, 2, 3].as_slice());
         assert!(!state.replica_quorum_satisfied(lsm));
         state.mark_replica_progress(&ClusterNodeName::parse("node-2").expect("valid name"), lsm);
         assert!(!state.replica_quorum_satisfied(lsm));
@@ -156,7 +219,29 @@ mod tests {
         let state = ReplicatedWasmProcessorState::new(placement(), Vec::new(), 0, Some(initial))
             .expect("state should initialize from persisted payload");
 
-        assert_eq!(state.restore_guest_state(), Some(vec![9, 8, 7]));
-        assert_eq!(state.current_lsm.current(), 7);
+        let restored = state.restore_guest_state();
+        assert_eq!(restored.restorable(), Some([9_u8, 8, 7].as_slice()));
+        assert_eq!(restored.revision(), 7);
+    }
+
+    /// Guest state is saved after every batch. Keeping it for persistence, replication and the next
+    /// guest instance must not copy the whole guest buffer each time.
+    #[test]
+    fn saving_guest_state_keeps_the_saved_buffer_without_copying_it() {
+        let state = ReplicatedWasmProcessorState::new(placement(), Vec::new(), 0, None)
+            .expect("state should initialize");
+        let guest_state = vec![7_u8; 4_096];
+        let saved_buffer = guest_state.as_ptr();
+        let saved = state.replace_guest_state(guest_state);
+
+        assert_eq!(
+            saved.bytes().as_ptr(),
+            saved_buffer,
+            "saving guest state copied the whole guest buffer"
+        );
+        assert!(
+            StdArc::ptr_eq(&saved, &state.restore_guest_state()),
+            "a new guest instance would not restore the state that was just saved"
+        );
     }
 }
