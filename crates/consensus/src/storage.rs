@@ -7,19 +7,21 @@
 
 use std::{
     collections::BTreeSet,
-    io,
+    fmt, io,
     ops::{Bound, RangeBounds},
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
-use futures_util::StreamExt as _;
+use futures_util::{FutureExt as _, StreamExt as _};
+use meticulous::OptionExt as _;
 use nervix_execution::{Executor, MemoryClass, Reservation, StorageClass};
 use openraft::{
     Snapshot, SnapshotMeta, StoredMembership,
     entry::{EntryPayload, RaftPayload},
     storage::{
-        IOFlushed, LogState, RaftLogReader, RaftLogStorage, RaftSnapshotBuilder, RaftStateMachine,
+        ApplyResponder, EntryResponder, IOFlushed, LogState, RaftLogReader, RaftLogStorage,
+        RaftSnapshotBuilder, RaftStateMachine,
     },
     type_config::alias::EntryOf,
 };
@@ -31,8 +33,9 @@ use triomphe::Arc;
 #[cfg(test)]
 use crate::apply_consensus_command;
 use crate::{
-    AppliedConsensusCommand, AppliedEntryContext, LogIdOf, SnapshotOf, StateMachineChanges,
-    StateMachineData, StoredMembershipOf, TypeConfig, VoteOf, apply_consensus_command_at,
+    AppliedConsensusCommand, AppliedEntryContext, ConsensusCommand, ConsensusResponse, LogIdOf,
+    SnapshotOf, StateMachineChanges, StateMachineData, StoredMembershipOf, TypeConfig, VoteOf,
+    apply_consensus_command_at,
     durable_batch::{DurableBatch, StorageFailure},
     raft_record::{EntryRecord, LogIdRecord, StoredMembershipRecord, VoteRecord},
     read_key,
@@ -179,7 +182,60 @@ impl StateMachineData {
         })
     }
 
+    /// Apply one committed entry: its log position, the membership it carries and its command.
+    fn apply_entry(&mut self, entry: &EntryOf<TypeConfig>) -> AppliedConsensusCommand {
+        let input_revision = self.last_applied_log_id.as_ref().map(|log_id| log_id.index);
+        self.last_applied_log_id = Some(entry.log_id.clone());
+        if let Some(membership) = entry.get_membership() {
+            self.last_membership = Arc::new(StoredMembership::new(
+                Some(entry.log_id.clone()),
+                membership,
+            ));
+        }
+        let EntryPayload::Normal(command) = &entry.payload else {
+            return AppliedConsensusCommand::applied(StateMachineChanges::default());
+        };
+        let applied = apply_consensus_command_at(
+            self,
+            command,
+            AppliedEntryContext {
+                leader_term: entry.log_id.leader_id.term,
+                input_revision,
+            },
+        );
+        self.record_runtime_revision(entry.log_id.index, &applied);
+        applied
+    }
+
+    /// What storing this revision's changes from `preceding` charges, measured in a batch that is
+    /// never committed.
+    fn charge_since(
+        &self,
+        preceding: &Self,
+        reservation: &Reservation,
+        sm: &Keyspace,
+    ) -> io::Result<EntryCharge> {
+        let mut batch = DurableBatch::new(reservation)?;
+        self.write_record_changes(preceding, &mut batch, sm)?;
+        let records = batch.charged();
+        self.write_metadata(&mut batch, sm)?;
+        Ok(EntryCharge {
+            records,
+            with_metadata: batch.charged(),
+        })
+    }
+
     fn write_changes(
+        &self,
+        preceding: &Self,
+        batch: &mut DurableBatch<'_>,
+        sm: &Keyspace,
+    ) -> io::Result<()> {
+        self.write_record_changes(preceding, batch, sm)?;
+        self.write_metadata(batch, sm)
+    }
+
+    fn write_record_changes(
         &self,
         preceding: &Self,
         batch: &mut DurableBatch<'_>,
@@ -221,9 +277,124 @@ impl StateMachineData {
         self.transactions
             .write_changes(&preceding.transactions, b't', batch, sm)?;
         self.command_executions
-            .write_changes(&preceding.command_executions, b'e', batch, sm)?;
+            .write_changes(&preceding.command_executions, b'e', batch, sm)
+    }
+
+    fn write_metadata(&self, batch: &mut DurableBatch<'_>, sm: &Keyspace) -> io::Result<()> {
         let metadata = StateMetadata::from(self);
         batch.insert(sm, KEY_METADATA, &StateMetadataRecord::from(&metadata))
+    }
+}
+
+impl StateMachineChanges {
+    /// Add the observers `applied` notifies to the ones a write already notifies.
+    fn include(&mut self, applied: &AppliedConsensusCommand) {
+        self.schedule_changed |= applied.schedule_changed;
+        self.domains_changed |= applied.domains_changed;
+        self.resources_changed |= applied.resources_changed;
+        self.transactions_changed |= applied.transactions_changed;
+    }
+}
+
+/// The storage operation an applied entry is committed as, which is what a storage fault names.
+enum AppliedOperation<'a> {
+    Command(&'a ConsensusCommand),
+    /// A leader's blank entry or a membership change, neither of which carries a command.
+    Entry,
+}
+
+impl fmt::Display for AppliedOperation<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Command(command) => write!(formatter, "{command}"),
+            Self::Entry => formatter.write_str("apply"),
+        }
+    }
+}
+
+/// A committed entry applied in memory and waiting for the durable write that stores it.
+struct AppliedEntry {
+    entry: EntryOf<TypeConfig>,
+    responder: Option<ApplyResponder<TypeConfig>>,
+    response: ConsensusResponse,
+}
+
+impl AppliedEntry {
+    fn operation(&self) -> AppliedOperation<'_> {
+        match &self.entry.payload {
+            EntryPayload::Normal(command) => AppliedOperation::Command(command),
+            EntryPayload::Blank | EntryPayload::Membership(_) => AppliedOperation::Entry,
+        }
+    }
+}
+
+/// Batch bytes one applied entry adds to the write that stores it.
+struct EntryCharge {
+    /// The records the entry changed. A later entry of the same write that changes one of them
+    /// replaces its write, so summing this over a write bounds the records the write stores.
+    records: usize,
+    /// The records together with the application metadata the entry leaves behind, which a write
+    /// stores only for its last entry.
+    with_metadata: usize,
+}
+
+/// Committed entries applied in memory since the last durable write, and the revision they leave.
+struct AppliedRange {
+    /// The published revision whose difference from `state` the range's write stores.
+    base: StateMachineData,
+    state: StateMachineData,
+    changes: StateMachineChanges,
+    entries: Vec<AppliedEntry>,
+    /// The record bytes the entries charged one by one, which bounds the records the write stores.
+    record_bytes: usize,
+}
+
+impl AppliedRange {
+    fn new(base: StateMachineData) -> Self {
+        Self {
+            state: base.clone(),
+            base,
+            changes: StateMachineChanges::default(),
+            entries: Vec::new(),
+            record_bytes: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Whether the range's write would exceed `limit` if it also stored an entry charging `charge`.
+    fn exceeds(&self, charge: &EntryCharge, limit: usize) -> bool {
+        let bytes = self.record_bytes.checked_add(charge.with_metadata).assured(
+            "a range's record bytes and an entry's charge are each at most the batch limit, half \
+             of a 64-bit reservation",
+        );
+        bytes > limit
+    }
+
+    /// Extend the range by one applied entry, whose application left `state`.
+    ///
+    /// The entry fits: either the range is empty or `exceeds` found room for its charge.
+    fn include(
+        &mut self,
+        state: StateMachineData,
+        entry: EntryOf<TypeConfig>,
+        responder: Option<ApplyResponder<TypeConfig>>,
+        applied: AppliedConsensusCommand,
+        charge: &EntryCharge,
+    ) {
+        self.record_bytes = self.record_bytes.checked_add(charge.records).assured(
+            "an entry joins a range only when its charge fits beside the range's record bytes \
+             within the batch limit",
+        );
+        self.changes.include(&applied);
+        self.state = state;
+        self.entries.push(AppliedEntry {
+            entry,
+            responder,
+            response: applied.response,
+        });
     }
 }
 
@@ -329,14 +500,24 @@ impl StoreInner {
     }
 
     fn commit(&self, operation: &str, batch: DurableBatch<'_>) -> io::Result<()> {
+        self.commit_operations([operation], batch)
+    }
+
+    /// Commit one batch that stores every operation in `operations`. A storage fault armed for any
+    /// of them fails the whole batch.
+    fn commit_operations<Operation: fmt::Display>(
+        &self,
+        operations: impl IntoIterator<Item = Operation> + Clone,
+        batch: DurableBatch<'_>,
+    ) -> io::Result<()> {
         if self.failed.load(Ordering::Acquire) {
             return Err(io::Error::other(StorageFailure::Stopped));
         }
         let result = (|| {
             self.faults
-                .check(operation, StorageBoundary::BeforeCommit)?;
+                .check(operations.clone(), StorageBoundary::BeforeCommit)?;
             batch.commit(&self.db)?;
-            self.faults.check(operation, StorageBoundary::AfterSync)
+            self.faults.check(operations, StorageBoundary::AfterSync)
         })();
         if result.is_err() {
             self.failed.store(true, Ordering::Release);
@@ -427,7 +608,7 @@ impl StoreInner {
         Ok(())
     }
 
-    fn publish(&self, state: StateMachineData, changes: &AppliedConsensusCommand) {
+    fn publish(&self, state: StateMachineData, changes: &StateMachineChanges) {
         let revision = match &state.last_applied_log_id {
             Some(id) => id.index,
             None => 0,
@@ -450,46 +631,62 @@ impl StoreInner {
         }
     }
 
-    fn apply_entry(
+    /// Apply ready committed entries in the fewest reservation-bounded durable writes.
+    ///
+    /// Consecutive entries share a write until the next entry's changes would take it past the
+    /// batch limit. An entry is answered only once the write that stores it is durable and its
+    /// revision is published.
+    fn apply_entries(
         &self,
-        entry: EntryOf<TypeConfig>,
+        entries: Vec<EntryResponder<TypeConfig>>,
         reservation: &Reservation,
-    ) -> io::Result<crate::ConsensusResponse> {
-        let preceding = self.state();
-        let mut state = preceding.clone();
-        state.last_applied_log_id = Some(entry.log_id.clone());
-        if let Some(membership) = entry.get_membership() {
-            state.last_membership = Arc::new(StoredMembership::new(
-                Some(entry.log_id.clone()),
-                membership,
-            ));
-        }
-        let (operation, applied) = match &entry.payload {
-            EntryPayload::Normal(command) => {
-                let applied = apply_consensus_command_at(
-                    &mut state,
-                    command,
-                    AppliedEntryContext {
-                        leader_term: entry.log_id.leader_id.term,
-                        input_revision: preceding
-                            .last_applied_log_id
-                            .as_ref()
-                            .map(|log_id| log_id.index),
-                    },
-                );
-                state.record_runtime_revision(entry.log_id.index, &applied);
-                (command.to_string(), applied)
+    ) -> io::Result<()> {
+        let limit = DurableBatch::byte_limit(reservation)?;
+        let mut range = AppliedRange::new(self.state());
+        for (entry, responder) in entries {
+            let mut state = range.state.clone();
+            let applied = state.apply_entry(&entry);
+            let charge = match state.charge_since(&range.state, reservation, &self.sm) {
+                Ok(charge) => charge,
+                Err(error) => {
+                    // The entries before one that cannot be stored are still written and answered,
+                    // as they would be one by one.
+                    self.write_applied_range(range, reservation)?;
+                    return Err(error);
+                }
+            };
+            if !range.is_empty() && range.exceeds(&charge, limit) {
+                let following = AppliedRange::new(range.state.clone());
+                let written = std::mem::replace(&mut range, following);
+                self.write_applied_range(written, reservation)?;
             }
-            _ => (
-                "apply".to_owned(),
-                AppliedConsensusCommand::applied(StateMachineChanges::default()),
-            ),
-        };
+            range.include(state, entry, responder, applied, &charge);
+        }
+        self.write_applied_range(range, reservation)
+    }
+
+    /// Store a range's changed records with its final metadata in one durable batch, publish the
+    /// revision it leaves, then answer its entries. A range without entries stores nothing.
+    fn write_applied_range(
+        &self,
+        range: AppliedRange,
+        reservation: &Reservation,
+    ) -> io::Result<()> {
+        if range.is_empty() {
+            return Ok(());
+        }
         let mut batch = DurableBatch::new(reservation)?;
-        state.write_changes(&preceding, &mut batch, &self.sm)?;
-        self.commit(&operation, batch)?;
-        self.publish(state, &applied);
-        Ok(applied.response)
+        range
+            .state
+            .write_changes(&range.base, &mut batch, &self.sm)?;
+        self.commit_operations(range.entries.iter().map(AppliedEntry::operation), batch)?;
+        self.publish(range.state, &range.changes);
+        for applied in range.entries {
+            if let Some(responder) = applied.responder {
+                responder.send(applied.response);
+            }
+        }
+        Ok(())
     }
 
     /// Seal one consistent view of the state machine as a new generation and publish it.
@@ -799,12 +996,12 @@ impl FjallStore {
         let state = store.recover_state(installing).await?;
         store.inner.publish(
             state,
-            &AppliedConsensusCommand::applied(StateMachineChanges {
+            &StateMachineChanges {
                 schedule_changed: true,
                 domains_changed: true,
                 resources_changed: true,
                 transactions_changed: true,
-            }),
+            },
         );
         Ok(store)
     }
@@ -1173,23 +1370,37 @@ impl RaftStateMachine<TypeConfig> for FjallStore {
             state.last_membership.as_ref().clone(),
         ))
     }
-    async fn apply<Strm>(&mut self, mut entries: Strm) -> io::Result<()>
+    async fn apply<Strm>(&mut self, entries: Strm) -> io::Result<()>
     where
-        Strm: futures_util::Stream<Item = io::Result<openraft::storage::EntryResponder<TypeConfig>>>
+        Strm: futures_util::Stream<Item = io::Result<EntryResponder<TypeConfig>>>
             + Unpin
             + openraft::OptionalSend,
     {
+        // Gathering ready entries may already have reached the end of the stream.
+        let mut entries = entries.fuse();
         while let Some(item) = entries.next().await {
             tokio::task::consume_budget().await;
-            let (entry, responder) = item?;
-            let response = self
-                .inner
+            let mut ready = vec![item?];
+            // Entries the stream yields without waiting share one storage job. An entry it still
+            // has to read starts the next job, so entries already read are never held back.
+            let mut read_failure = None;
+            while let Some(Some(item)) = entries.next().now_or_never() {
+                match item {
+                    Ok(entry) => ready.push(entry),
+                    Err(error) => {
+                        read_failure = Some(error);
+                        break;
+                    }
+                }
+            }
+            self.inner
                 .run(MemoryClass::Commands, move |inner, reservation| {
-                    inner.apply_entry(entry, reservation)
+                    inner.apply_entries(ready, reservation)
                 })
                 .await?;
-            if let Some(responder) = responder {
-                responder.send(response);
+            // Entries read before a failed read are applied first, as they would be one by one.
+            if let Some(error) = read_failure {
+                return Err(error);
             }
         }
         Ok(())
@@ -1226,12 +1437,12 @@ impl RaftStateMachine<TypeConfig> for FjallStore {
         let state = self.inner.replace_state_machine(&manifest).await?;
         self.inner.publish(
             state,
-            &AppliedConsensusCommand::applied(StateMachineChanges {
+            &StateMachineChanges {
                 schedule_changed: true,
                 domains_changed: true,
                 resources_changed: true,
                 transactions_changed: true,
-            }),
+            },
         );
         Ok(())
     }
