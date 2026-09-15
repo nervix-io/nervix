@@ -496,15 +496,16 @@ than its credentials, which only drains it early, but never a newer one that wou
 credentials outlive their replacement.
 
 Application shutdown has three ordered phases. A server process issues the stop request that
-starts them when it receives its first `SIGINT` or `SIGTERM`. The stop request first marks the local
-process incarnation as terminating and then closes admission on its public gRPC, connector,
-observability, and console listeners. Its interconnect listener and registered handlers remain
-available on that live node throughout the drain-support phase. They continue carrying queued and
-active relay payloads, admission and record acknowledgements, runtime-state replication and
-checkpoints, ownership-handoff coordination, domain-clock progress, and the schedule revisions that
-activate committed ownership. Drain support first moves scheduled work to a live replacement node
-when one exists and then completes the work the node already admitted in place, so these consumers
-remain available until the node's own graphs are quiescent.
+starts them when it receives its first `SIGINT` or `SIGTERM`, and one shutdown deadline measured
+from that request bounds all three. The stop request first marks the local process incarnation as
+terminating and then closes admission on its public gRPC, connector, observability, and console
+listeners, closing the client connections they had accepted. Its interconnect listener and
+registered handlers remain available on that live node throughout the drain-support phase. They
+continue carrying queued and active relay payloads, admission and record acknowledgements,
+runtime-state replication and checkpoints, ownership-handoff coordination, domain-clock progress,
+and the schedule revisions that activate committed ownership. Drain support first moves scheduled
+work to a live replacement node when one exists and then completes the work the node already
+admitted in place, so these consumers remain available until the node's own graphs are quiescent.
 
 The relay payload lane retains its transport admission guard for every queued or active payload.
 Sender-side runtime drain accounting retains the tracked root until admission and every requested
@@ -517,9 +518,9 @@ Only after drain support completes or reports abandonment does terminal teardown
 shutdown. Transport shutdown rejects new interconnect admission, cancels pool and operation
 waiters, and starts graceful HTTP/2 shutdown. Active transport work receives up to ten seconds to
 drain; remaining connections and handlers are then closed. Connection setup and incomplete TLS
-handshakes remain inside this bound. A repeated `SIGINT` or `SIGTERM` ends the process without
-running terminal teardown, so its peers observe its connections ending exactly as they do when the
-process crashes.
+handshakes remain inside this bound. A repeated `SIGINT` or `SIGTERM`, or the shutdown deadline
+passing, ends the process without running the rest of its shutdown, so its peers observe its
+connections ending exactly as they do when the process crashes.
 
 ## Failure Ownership And Persistence
 

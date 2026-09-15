@@ -38,11 +38,11 @@ use tokio_tungstenite::{
         protocol::{CloseFrame, Role, frame::coding::CloseCode},
     },
 };
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use triomphe::Arc;
 
-use super::AppError;
+use super::{AppError, service_tasks::ServiceTasks};
 use crate::runtime::{
     IngestMessageHeaders, RetainedIngestHeaders, Runtime, SignalingDataSink,
     WebsocketSignalingSession,
@@ -158,7 +158,7 @@ impl IngestMessageHeaders for HyperRequestHeaders<'_> {
 
 async fn handle_http_request(
     runtime: Runtime,
-    request_tasks: TaskTracker,
+    request_tasks: ServiceTasks,
     shutdown: CancellationToken,
     mut request: HyperRequest<HyperIncoming>,
 ) -> Result<HyperResponse<Empty<Bytes>>, Infallible> {
@@ -346,7 +346,7 @@ async fn handle_http_request(
 
 pub(in crate::application) async fn serve_http(
     runtime: Runtime,
-    request_tasks: TaskTracker,
+    request_tasks: ServiceTasks,
     listener: TcpListener,
     shutdown: CancellationToken,
 ) -> Result<(), Report<AppError>> {
@@ -396,7 +396,7 @@ pub(in crate::application) async fn serve_http(
 
 pub(in crate::application) async fn serve_https(
     runtime: Runtime,
-    request_tasks: TaskTracker,
+    request_tasks: ServiceTasks,
     http_tls_server_config: Arc<RwLock<Option<StdArc<ServerConfig>>>>,
     listener: TcpListener,
     shutdown: CancellationToken,

@@ -5,7 +5,7 @@
 //! - **Depends on.** Synchronization primitives.
 //! - **Must not know.** Graph semantics or transport behavior.
 
-use std::io;
+use std::{fmt, io};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StorageBoundary {
@@ -19,7 +19,11 @@ pub struct StorageFault(());
 
 #[cfg(not(any(test, feature = "testing")))]
 impl StorageFault {
-    pub(crate) fn check(&self, _: &str, _: StorageBoundary) -> io::Result<()> {
+    pub(crate) fn check<Operation: fmt::Display>(
+        &self,
+        _: impl IntoIterator<Item = Operation>,
+        _: StorageBoundary,
+    ) -> io::Result<()> {
         Ok(())
     }
 }
@@ -113,7 +117,15 @@ mod enabled {
         pub fn set_after_sync_delay(&self, delay: Duration) {
             *self.inner.after_sync_delay.write() = delay;
         }
-        pub(crate) fn check(&self, operation: &str, boundary: StorageBoundary) -> io::Result<()> {
+        /// Check one durable write at `boundary` against the armed fault and the sync delay.
+        ///
+        /// A write that stores several operations is still one commit: it is delayed once, and a
+        /// fault armed for any operation it stores applies to the whole write.
+        pub(crate) fn check<Operation: fmt::Display>(
+            &self,
+            operations: impl IntoIterator<Item = Operation>,
+            boundary: StorageBoundary,
+        ) -> io::Result<()> {
             if boundary == StorageBoundary::AfterSync {
                 let delay = *self.inner.after_sync_delay.read();
                 if !delay.is_zero() {
@@ -122,14 +134,18 @@ mod enabled {
             }
             let fault = {
                 let mut armed = self.inner.armed.lock();
+                let mut stored = false;
                 if let Some(fault) = armed.as_ref()
-                    && fault.operation == operation
                     && fault.boundary == boundary
                 {
-                    armed.take()
-                } else {
-                    None
+                    for operation in operations {
+                        if fault.operation == operation.to_string() {
+                            stored = true;
+                            break;
+                        }
+                    }
                 }
+                if stored { armed.take() } else { None }
             };
             match fault {
                 Some(ArmedFault {

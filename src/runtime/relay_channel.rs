@@ -4,7 +4,7 @@ use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
     pin::Pin,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     task::{Context, Poll},
 };
 
@@ -12,7 +12,7 @@ use async_broadcast::{
     InactiveReceiver, Receiver as AsyncBroadcastReceiver, RecvError, SendError, Sender,
     TryRecvError,
 };
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use parking_lot::Mutex;
 use tokio::{
     sync::Notify,
@@ -24,6 +24,7 @@ use triomphe::Arc;
 #[derive(Debug)]
 pub(in crate::runtime) struct RelayDispatchGate {
     closed: AtomicBool,
+    in_flight_dispatches: AtomicUsize,
     state: Mutex<RelayDispatchGateState>,
     changed: Notify,
 }
@@ -32,7 +33,6 @@ pub(in crate::runtime) struct RelayDispatchGate {
 struct RelayDispatchGateState {
     generation: u64,
     engagements: BTreeMap<u64, RelayDispatchGateEngagement>,
-    in_flight_dispatches: usize,
 }
 
 #[derive(Debug)]
@@ -60,9 +60,11 @@ pub(in crate::runtime) struct RelayDispatchGateLease {
 
 /// Proof that one relay dispatch entered before the current gate engagements.
 ///
-/// Acquiring a permit and engaging the gate are serialized by the gate state lock. Once an
-/// engagement wins that ordering, no later dispatch can acquire a permit until the engagement is
-/// released. Dropping every permit that won before it completes the engagement fence.
+/// Dispatch acquisition increments the in-flight count before inspecting the closed flag, while
+/// gate engagement closes the gate before inspecting the count. Those operations are sequentially
+/// consistent, so one side must observe the other: a dispatch either receives a permit that the
+/// fence counts or rolls its increment back and waits for the engagement to end. Dropping every
+/// permit counted by the fence completes it.
 #[derive(Debug)]
 pub(in crate::runtime) struct RelayDispatchPermit<'gate> {
     gate: &'gate RelayDispatchGate,
@@ -72,6 +74,7 @@ impl RelayDispatchGate {
     pub(in crate::runtime) fn new() -> Self {
         Self {
             closed: AtomicBool::new(false),
+            in_flight_dispatches: AtomicUsize::new(0),
             state: Mutex::new(RelayDispatchGateState::default()),
             changed: Notify::new(),
         }
@@ -96,7 +99,10 @@ impl RelayDispatchGate {
                 reason: reason.into(),
             },
         );
-        self.closed.store(true, Ordering::Release);
+        // Paired with the sequentially consistent counter increment and closed load in
+        // `acquire_dispatch`, and the counter load in `wait_quiescent`. This total order prevents
+        // an acquisition and an engagement from both missing one another.
+        self.closed.store(true, Ordering::SeqCst);
         drop(state);
         self.changed.notify_waiters();
         generation
@@ -116,16 +122,21 @@ impl RelayDispatchGate {
     pub(in crate::runtime) async fn acquire_dispatch(&self) -> RelayDispatchPermit<'_> {
         loop {
             tokio::task::consume_budget().await;
+            self.increment_in_flight_dispatches();
+            if !self.closed.load(Ordering::SeqCst) {
+                return RelayDispatchPermit { gate: self };
+            }
+            self.decrement_in_flight_dispatches();
+
             self.clear_if_expired();
             let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
             let deadline = {
-                let mut state = self.state.lock();
+                let state = self.state.lock();
                 if state.engagements.is_empty() {
-                    state.in_flight_dispatches = state
-                        .in_flight_dispatches
-                        .checked_add(1)
-                        .assured("a permit is held per in-flight dispatch this node holds");
-                    return RelayDispatchPermit { gate: self };
+                    drop(state);
+                    continue;
                 }
                 state
                     .engagements
@@ -134,7 +145,7 @@ impl RelayDispatchGate {
                     .min()
             };
             if let Some(deadline) = deadline {
-                if timeout_at(deadline, changed).await.is_err() {
+                if timeout_at(deadline, changed.as_mut()).await.is_err() {
                     self.clear_if_expired();
                 }
             } else {
@@ -152,9 +163,11 @@ impl RelayDispatchGate {
             tokio::task::consume_budget().await;
             self.clear_if_expired();
             let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
             let deadline = {
                 let mut state = self.state.lock();
-                let in_flight_dispatches = state.in_flight_dispatches;
+                let in_flight_dispatches = self.in_flight_dispatches.load(Ordering::SeqCst);
                 let Some(engagement) = state.engagements.get_mut(&generation) else {
                     return false;
                 };
@@ -174,7 +187,7 @@ impl RelayDispatchGate {
                     }
                 }
             };
-            if timeout_at(deadline, changed).await.is_err() {
+            if timeout_at(deadline, changed.as_mut()).await.is_err() {
                 self.clear_if_expired();
             }
         }
@@ -246,7 +259,27 @@ impl RelayDispatchGate {
 
     #[cfg(test)]
     pub(in crate::runtime) fn in_flight_dispatches(&self) -> usize {
-        self.state.lock().in_flight_dispatches
+        self.in_flight_dispatches.load(Ordering::SeqCst)
+    }
+
+    fn increment_in_flight_dispatches(&self) {
+        self.in_flight_dispatches
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                current.checked_add(1)
+            })
+            .assured("a process cannot hold usize::MAX live relay dispatch permits");
+    }
+
+    fn decrement_in_flight_dispatches(&self) {
+        let previous = self
+            .in_flight_dispatches
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                current.checked_sub(1)
+            })
+            .verified("this permit or rolled-back acquisition raised the count");
+        if previous == 1 && self.closed.load(Ordering::SeqCst) {
+            self.changed.notify_waiters();
+        }
     }
 
     fn clear_if_expired(&self) {
@@ -318,16 +351,7 @@ impl Default for RelayDispatchGate {
 
 impl Drop for RelayDispatchPermit<'_> {
     fn drop(&mut self) {
-        let mut state = self.gate.state.lock();
-        state.in_flight_dispatches = state
-            .in_flight_dispatches
-            .checked_sub(1)
-            .verified("this permit raised the count when the gate admitted it");
-        let quiescent = state.in_flight_dispatches == 0;
-        drop(state);
-        if quiescent {
-            self.gate.changed.notify_waiters();
-        }
+        self.gate.decrement_in_flight_dispatches();
     }
 }
 
@@ -537,6 +561,120 @@ mod gate_tests {
         assert!(gate.is_closed());
         drop(first);
         assert!(!gate.is_closed());
+    }
+}
+
+#[cfg(all(test, relay_dispatch_gate_loom))]
+mod gate_loom_tests {
+    use loom::{
+        model,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering, fence},
+        },
+        thread,
+    };
+
+    const MODEL_THREAD_STACK_BYTES: usize = 64 * 1024;
+
+    // Loom 0.7 can admit the forbidden store-buffer outcome for a model expressed only with
+    // sequentially consistent atomic operations. Its own specification test for that limitation is
+    // ignored upstream. These explicit fences model the same total order that the production
+    // sequentially consistent operations require.
+
+    struct LoomDispatchGate {
+        closed: AtomicBool,
+        in_flight_dispatches: AtomicUsize,
+    }
+
+    impl LoomDispatchGate {
+        fn new() -> Self {
+            Self {
+                closed: AtomicBool::new(false),
+                in_flight_dispatches: AtomicUsize::new(0),
+            }
+        }
+
+        fn try_acquire_dispatch(&self) -> bool {
+            let previous = self.in_flight_dispatches.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(previous, 0, "the model has one dispatch contender");
+            fence(Ordering::SeqCst);
+            if !self.closed.load(Ordering::SeqCst) {
+                return true;
+            }
+            let previous = self.in_flight_dispatches.fetch_sub(1, Ordering::SeqCst);
+            assert_eq!(previous, 1, "the rejected dispatch owns one increment");
+            false
+        }
+
+        fn engage_and_check_quiescent(&self) -> bool {
+            self.closed.store(true, Ordering::SeqCst);
+            fence(Ordering::SeqCst);
+            self.in_flight_dispatches.load(Ordering::SeqCst) == 0
+        }
+
+        fn finish_dispatch_and_check_notification(&self) -> bool {
+            let previous = self.in_flight_dispatches.fetch_sub(1, Ordering::SeqCst);
+            assert_eq!(previous, 1, "the model begins with one dispatch permit");
+            fence(Ordering::SeqCst);
+            self.closed.load(Ordering::SeqCst)
+        }
+    }
+
+    fn spawn_model_thread<F, T>(operation: F) -> thread::JoinHandle<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        thread::Builder::new()
+            .stack_size(MODEL_THREAD_STACK_BYTES)
+            .spawn(operation)
+            .expect("loom thread construction should succeed")
+    }
+
+    #[test]
+    fn concurrent_dispatch_acquire_and_engage_preserve_the_fence() {
+        model(|| {
+            let model = spawn_model_thread(|| {
+                let gate = Arc::new(LoomDispatchGate::new());
+                let dispatch = {
+                    let gate = gate.clone();
+                    spawn_model_thread(move || gate.try_acquire_dispatch())
+                };
+                let engagement_saw_quiescence = gate.engage_and_check_quiescent();
+
+                let dispatch_acquired = dispatch.join().expect("dispatch thread should join");
+                assert!(
+                    !dispatch_acquired || !engagement_saw_quiescence,
+                    "an acquired dispatch must be visible to a concurrent engagement"
+                );
+            });
+            model.join().expect("model driver should join");
+        });
+    }
+
+    #[test]
+    fn final_dispatch_drop_cannot_miss_a_concurrent_engagement() {
+        model(|| {
+            let model = spawn_model_thread(|| {
+                let gate = Arc::new(LoomDispatchGate {
+                    closed: AtomicBool::new(false),
+                    in_flight_dispatches: AtomicUsize::new(1),
+                });
+                let dispatch = {
+                    let gate = gate.clone();
+                    spawn_model_thread(move || gate.finish_dispatch_and_check_notification())
+                };
+                let engagement_saw_quiescence = gate.engage_and_check_quiescent();
+
+                let dispatch_would_notify = dispatch.join().expect("dispatch thread should join");
+                assert!(
+                    dispatch_would_notify || engagement_saw_quiescence,
+                    "the fence must either observe the final drop or receive its notification"
+                );
+            });
+            model.join().expect("model driver should join");
+        });
     }
 }
 
