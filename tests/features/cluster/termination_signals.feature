@@ -1,3 +1,4 @@
+@shutdown_qualification
 Feature: Process termination signals
 
   Scenario Outline: The first termination signal starts graceful shutdown of a server process

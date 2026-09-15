@@ -1,3 +1,4 @@
+@shutdown_qualification
 Feature: Graceful shutdown
 
   Scenario: Graceful shutdown preserves an operator cordon across restart
