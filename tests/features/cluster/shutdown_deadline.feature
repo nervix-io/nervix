@@ -1,3 +1,4 @@
+@shutdown_qualification
 Feature: Process shutdown deadline
 
   Scenario Outline: Graceful shutdown cancels an accepted resource upload <progress>

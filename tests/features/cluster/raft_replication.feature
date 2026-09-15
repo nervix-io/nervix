@@ -21,6 +21,7 @@ Feature: Pipelined raft replication and bounded log retention
     Then within "60s" node "node-3" recovers by installing a raft snapshot
     And within "60s" node "node-3" has applied 40 domains named "compacted"
 
+  @shutdown_qualification
   Scenario: An interrupted snapshot installation finishes on the next start
     Given raft snapshots after 8 entries retaining 2 covered entries
     And a 3 node nervix cluster is started
