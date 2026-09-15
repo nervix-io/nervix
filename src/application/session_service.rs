@@ -38,7 +38,7 @@ use tokio::{
     time::Duration,
 };
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 use tracing::{debug, warn};
 use triomphe::Arc;
@@ -56,6 +56,7 @@ use super::{
     },
     runtime_admission::RuntimeAdmission,
     scheduling::RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
+    service_tasks::ServiceTasks,
     subscription::{SessionSubscriptions, SubscriptionInterestKey},
 };
 use crate::{
@@ -159,7 +160,7 @@ pub(in crate::application) struct SessionServiceInner {
     pub(in crate::application) subscription_interest_counts:
         DashMap<SubscriptionInterestKey, usize, RandomState>,
     pub(in crate::application) interconnect: Transport,
-    pub(in crate::application) service_tasks: TaskTracker,
+    pub(in crate::application) service_tasks: ServiceTasks,
     pub(in crate::application) configured_basic_auth: Option<BasicAuthCredentials>,
     pub(in crate::application) auth_rate_limiter: AuthRateLimiter,
     pub(in crate::application) failed_auth_rate_limit_keys: DashMap<String, (), RandomState>,
@@ -555,6 +556,11 @@ impl SessionService for SessionServiceImpl {
         let installation = installation
             .await
             .map_err(|error| Status::internal(format!("resource upload task failed: {error}")))?;
+        let Some(installation) = installation else {
+            return Err(Status::unavailable(
+                "the node shut down before the uploaded resource was installed",
+            ));
+        };
         match installation {
             Ok(installation) => Ok(Response::new(UploadResourceResponse {
                 success: true,

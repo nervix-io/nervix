@@ -743,3 +743,55 @@ Feature: Graceful shutdown
       """
     When all nodes are gracefully stopped
     Then the last cluster operation completes within "5s"
+
+  Scenario: A transaction commit stuck at its shutdown deadline is cancelled and completed after restart
+    Given graceful shutdown drain is enabled
+    And shutdown timeout is configured as "5s"
+    And a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Given client "owner" is connected to node "node-1"
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE SCHEMA deadline_record (value STRING);
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    Given transaction commit on node "node-1" pauses after 1 statement
+    When client "owner" begins executing these NSPL commands in the background
+      """
+      COMMIT;
+      """
+    Then the transaction commit pause on node "node-1" after 1 statement is reached
+    When node "node-1" is stopped while timing shutdown
+    Then the last cluster operation takes at least "5s"
+    And the last cluster operation completes within "60s"
+    And node "node-1" reports that its last shutdown passed its deadline
+    When the transaction commit pause on node "node-1" after 1 statement is released
+    And node "node-1" is started
+    Then transaction "{{transaction_id}}" eventually has state "COMMITTED"
+
+  Scenario: A command held inside its session does not keep a stopping node past its shutdown deadline
+    Given graceful shutdown drain is enabled
+    And shutdown timeout is configured as "5s"
+    And a 1 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Given command admission on node "node-1" pauses before proposal
+    When this NSPL command request begins executing in the background on the leader node
+      """
+      CREATE SCHEMA held_admission_event ( id I64 );
+      """
+    Then the command admission pause on node "node-1" is reached
+    When node "node-1" is stopped while timing shutdown
+    Then the last cluster operation takes at least "5s"
+    And the last cluster operation completes within "60s"
+    And node "node-1" reports that its last shutdown passed its deadline
+    When the command admission pause on node "node-1" is released
+    And node "node-1" is started
+    Then node "node-1" eventually observes a stable leader

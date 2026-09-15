@@ -34,7 +34,7 @@ use rcgen::{
     SanType,
 };
 use tokio::{sync::mpsc, time::Duration};
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::sync::CancellationToken;
 use tonic::Status;
 use triomphe::Arc;
 
@@ -223,7 +223,7 @@ fn test_session_service(
             events: SessionEvents::new(16),
             subscription_interest_counts: DashMap::with_hasher(RandomState::new()),
             interconnect,
-            service_tasks: TaskTracker::new(),
+            service_tasks: super::service_tasks::ServiceTasks::default(),
             configured_basic_auth: None,
             auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
             failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),

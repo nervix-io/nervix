@@ -16,7 +16,7 @@ use nervix_interconnect::{HandlerRegistrationError, Transport};
 use nervix_recovery::Discarded as _;
 use triomphe::Arc;
 
-use super::{Application, Args, error, error::AppError};
+use super::{Application, Args, error, error::AppError, shutdown::ShutdownCoordinator};
 use crate::{
     ConfiguredFaultInjection, cluster,
     memory_pressure::MemoryPressureConfig,
@@ -238,6 +238,7 @@ impl TryFrom<Args> for Application {
             .replica_count(args.replica_count)
             .state_snapshot_interval(args.state_snapshot_interval)
             .memory_pressure(memory_pressure)
+            .shutdown(ShutdownCoordinator::new(args.shutdown_timeout))
             .drain_timeout(args.drain_timeout)
             .cluster_bootstrap_host(args.cluster_bootstrap_host)
             .db_path(PathBuf::from(args.db_path))
