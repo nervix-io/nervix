@@ -144,6 +144,16 @@ impl Harness {
             )),
         })
     }
+    fn admissions(
+        end: u64,
+        bytes: usize,
+    ) -> Result<Vec<EntryOf<TypeConfig>>, Box<dyn std::error::Error>> {
+        let mut entries = Vec::new();
+        for index in 1..=end {
+            entries.push(Self::entry(index, Self::admission(index, bytes)?));
+        }
+        Ok(entries)
+    }
     async fn apply(&mut self, index: u64, command: ConsensusCommand) -> io::Result<()> {
         self.store
             .apply(futures_util::stream::iter([Ok((
@@ -567,6 +577,160 @@ async fn a_queued_vote_runs_after_a_ready_append_batch() -> TestResult {
         .map(|entry| entry.log_id.index)
         .collect::<Vec<_>>();
     assert_eq!(indexes, vec![1, 2]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn complete_log_reads_return_every_entry_in_a_large_range() -> TestResult {
+    const ENTRY_BYTES: usize = 768 * 1024;
+    const ENTRY_COUNT: u64 = 3;
+
+    let mut harness = Harness::new().await?;
+    harness
+        .store
+        .blocking_append(Harness::admissions(ENTRY_COUNT, ENTRY_BYTES)?)
+        .await
+        .map_err(io::Error::other)?;
+    assert!(
+        harness.store.retained_log_bytes()
+            > append_batch_target_bytes(&harness.executor)
+                .checked_mul(2)
+                .assured("twice the configured command limit fits in u64"),
+        "the fixture must span several byte-bounded read chunks"
+    );
+
+    let entries = harness
+        .store
+        .get_log_reader()
+        .await
+        .try_get_log_entries(..)
+        .await?;
+    let indexes = entries
+        .iter()
+        .map(|entry| entry.log_id.index)
+        .collect::<Vec<_>>();
+    assert_eq!(indexes, vec![1, 2, 3]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn log_entry_stream_reads_a_large_range_in_separate_chunks() -> TestResult {
+    const ENTRY_BYTES: usize = 768 * 1024;
+    const ENTRY_COUNT: u64 = 3;
+
+    let mut harness = Harness::new().await?;
+    harness
+        .store
+        .blocking_append(Harness::admissions(ENTRY_COUNT, ENTRY_BYTES)?)
+        .await
+        .map_err(io::Error::other)?;
+    let before = harness.executor.snapshot().commands_memory;
+    let mut reader = harness.store.get_log_reader().await;
+    let entries = reader.entries_stream(..).await;
+    tokio::pin!(entries);
+
+    let first = entries
+        .next()
+        .await
+        .verified("the stored range contains its first entry")?;
+    assert_eq!(first.log_id.index, 1);
+    assert!(
+        entries.next().now_or_never().is_none(),
+        "the next byte-bounded chunk must cross an asynchronous read boundary"
+    );
+
+    let mut indexes = vec![1];
+    while let Some(entry) = entries.next().await {
+        tokio::task::consume_budget().await;
+        indexes.push(entry?.log_id.index);
+    }
+    assert_eq!(indexes, vec![1, 2, 3]);
+    let after = harness.executor.snapshot().commands_memory;
+    assert!(
+        after
+            .granted
+            .checked_sub(before.granted)
+            .verified("the memory grant counter only increases")
+            >= ENTRY_COUNT,
+        "each oversized pair must be read under a separate memory grant"
+    );
+    assert_eq!(after.reserved_bytes, before.reserved_bytes);
+    Ok(())
+}
+
+#[tokio::test]
+async fn log_entry_stream_yields_at_the_entry_count_bound() -> TestResult {
+    let entry_count = MAX_APPEND_BATCH_ENTRIES
+        .checked_add(1)
+        .assured("one more than the fixed append entry bound fits in u64");
+    let mut harness = Harness::new().await?;
+    harness.append(entry_count).await?;
+    assert!(
+        harness.store.retained_log_bytes() < append_batch_target_bytes(&harness.executor),
+        "the fixture must reach the entry bound before the byte bound"
+    );
+
+    let mut reader = harness.store.get_log_reader().await;
+    let entries = reader.entries_stream(..).await;
+    tokio::pin!(entries);
+    for expected in 1..=MAX_APPEND_BATCH_ENTRIES {
+        tokio::task::consume_budget().await;
+        let entry = entries
+            .next()
+            .await
+            .verified("the first count-bounded chunk contains every expected entry")?;
+        assert_eq!(entry.log_id.index, expected);
+    }
+    assert!(
+        entries.next().now_or_never().is_none(),
+        "the next count-bounded chunk must cross an asynchronous read boundary"
+    );
+    let final_entry = entries
+        .next()
+        .await
+        .verified("the second chunk contains the final stored entry")?;
+    assert_eq!(final_entry.log_id.index, entry_count);
+    assert!(entries.next().await.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn leader_bounded_log_stream_revalidates_the_vote_between_chunks() -> TestResult {
+    const ENTRY_BYTES: usize = 768 * 1024;
+
+    let mut harness = Harness::new().await?;
+    harness
+        .store
+        .blocking_append(Harness::admissions(2, ENTRY_BYTES)?)
+        .await
+        .map_err(io::Error::other)?;
+    let vote = VoteOf::new_committed(3, Harness::node());
+    harness.store.save_vote(&vote).await?;
+
+    let mut vote_store = harness.store.clone();
+    let mut reader = harness.store.get_log_reader().await;
+    let entries = reader
+        .leader_bounded_stream(vote.leader_id().clone(), ..)
+        .await;
+    tokio::pin!(entries);
+    let first = entries
+        .next()
+        .await
+        .verified("the stored range contains its first entry")?;
+    assert_eq!(first.log_id.index, 1);
+
+    vote_store
+        .save_vote(&VoteOf::new(4, Harness::node()))
+        .await?;
+    let changed = entries
+        .next()
+        .await
+        .verified("the leader change is reported as a stream item");
+    assert!(matches!(
+        changed,
+        Err(LeaderBoundedStreamError::LeaderChanged(_))
+    ));
+    assert!(entries.next().await.is_none());
     Ok(())
 }
 

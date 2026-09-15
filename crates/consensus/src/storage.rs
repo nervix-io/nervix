@@ -12,21 +12,25 @@ use std::{
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
+use error_stack::Report;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
-use futures_util::{FutureExt as _, StreamExt as _};
+use futures_util::{FutureExt as _, Stream, StreamExt as _, stream};
 use meticulous::OptionExt as _;
 use nervix_execution::{Executor, MemoryClass, Reservation, StorageClass};
 use openraft::{
     Snapshot, SnapshotMeta, StoredMembership,
     entry::{EntryPayload, RaftPayload},
+    errors::LeaderChanged,
     storage::{
-        ApplyResponder, EntryResponder, IOFlushed, LogState, RaftLogReader, RaftLogStorage,
-        RaftSnapshotBuilder, RaftStateMachine,
+        ApplyResponder, EntryResponder, IOFlushed, LeaderBoundedStreamError,
+        LeaderBoundedStreamResult, LogState, RaftLogReader, RaftLogStorage, RaftSnapshotBuilder,
+        RaftStateMachine,
     },
-    type_config::alias::EntryOf,
+    type_config::alias::{EntryOf, LeaderIdOf},
 };
 use parking_lot::{Mutex, RwLock};
 use rkyv::{Archive, Deserialize, Serialize};
+use thiserror::Error;
 use tokio::sync::watch;
 use triomphe::Arc;
 
@@ -40,7 +44,7 @@ use crate::{
     raft_record::{EntryRecord, LogIdRecord, StoredMembershipRecord, VoteRecord},
     read_key,
     records::{Records, ResourceRecords, ScheduleRecords},
-    replication::append_batch_target_bytes,
+    replication::{MAX_APPEND_BATCH_ENTRIES, append_batch_target_bytes},
     snapshot::{
         KEY_MANIFEST, SealedSnapshot, SectionWriter, SnapshotGenerations, SnapshotManifest,
         SnapshotManifestRecord, SnapshotRetention, SnapshotSection, StoredRecord,
@@ -456,6 +460,17 @@ impl std::ops::Deref for StoreInner {
     }
 }
 
+#[derive(Clone, Copy)]
+enum LogReadLimit {
+    Complete,
+    Bounded { bytes: u64, entries: u64 },
+}
+
+struct DecodedLogRange {
+    entries: Vec<EntryOf<TypeConfig>>,
+    continuation: Option<Bound<Vec<u8>>>,
+}
+
 impl StoreInner {
     pub(super) fn state(&self) -> StateMachineData {
         self.state_machine.read().clone()
@@ -864,11 +879,126 @@ impl StoreInner {
         (convert(range.start_bound()), convert(range.end_bound()))
     }
 
+    /// Decode one complete range or the first bounded part of it.
+    fn read_log_entries(
+        &self,
+        bounds: (Bound<Vec<u8>>, Bound<Vec<u8>>),
+        limit: LogReadLimit,
+    ) -> io::Result<DecodedLogRange> {
+        let mut entries = Vec::new();
+        let mut bytes = 0_u64;
+        let mut continuation = None;
+        for item in self.logs.range(bounds) {
+            let (key, value) = item.into_inner().map_err(io::Error::other)?;
+            if let LogReadLimit::Bounded {
+                bytes: byte_limit,
+                entries: entry_limit,
+            } = limit
+            {
+                let length = u64::try_from(value.len()).map_err(io::Error::other)?;
+                let next_bytes = bytes
+                    .checked_add(length)
+                    .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
+                let entry_count = u64::try_from(entries.len()).map_err(io::Error::other)?;
+                // One semantic command is never split. A first entry larger than the target
+                // therefore travels alone, just as it does for replication.
+                if !entries.is_empty() && (next_bytes > byte_limit || entry_count >= entry_limit) {
+                    return Ok(DecodedLogRange {
+                        entries,
+                        continuation,
+                    });
+                }
+                bytes = next_bytes;
+            }
+            let record: EntryRecord = storage_decode(&value)?;
+            let entry = record
+                .into_entry()
+                .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+            if let LogReadLimit::Bounded { .. } = limit {
+                continuation = Some(Bound::Excluded(key.to_vec()));
+            }
+            entries.push(entry);
+        }
+        Ok(DecodedLogRange {
+            entries,
+            continuation: None,
+        })
+    }
+
     fn read_optional_log_id(&self, key: &[u8]) -> io::Result<Option<LogIdOf>> {
         match read_key::<Option<LogIdRecord>>(&self.meta, key)? {
             Some(value) => Ok(value.map(Into::into)),
             None => Ok(None),
         }
+    }
+
+    fn read_vote(&self) -> io::Result<Option<VoteOf>> {
+        let vote = read_key::<VoteRecord>(&self.meta, KEY_VOTE)?;
+        Ok(vote.map(Into::into))
+    }
+
+    /// Read one byte- and count-bounded part of a log range on the ordered storage worker.
+    ///
+    /// A leader-bound read validates the durable vote before every part. This lets a long stream
+    /// release the worker between parts while still stopping before it reads through a truncation
+    /// performed under a different leader.
+    async fn read_log_chunk(
+        &self,
+        start: Bound<Vec<u8>>,
+        end: Bound<Vec<u8>>,
+        expected_leader: Option<LeaderIdOf<TypeConfig>>,
+    ) -> io::Result<LogChunkRead> {
+        let reservation = Self::reserve(&self.executor, MemoryClass::Commands).await?;
+        let executor = self.executor.clone();
+        let inner = self.clone();
+        executor
+            .run_storage(
+                StorageClass::Consensus,
+                reservation,
+                move |reservation, cancellation| {
+                    cancellation.check().map_err(io::Error::other)?;
+                    if let Some(expected_leader) = expected_leader {
+                        let current_vote = inner.read_vote()?;
+                        let is_current_leader = match &current_vote {
+                            Some(vote) => {
+                                vote.leader_id() == &expected_leader && vote.is_committed()
+                            }
+                            None => false,
+                        };
+                        if !is_current_leader {
+                            return Ok(LogChunkRead::LeaderChanged(LeaderChanged::new(
+                                expected_leader,
+                                current_vote,
+                            )));
+                        }
+                    }
+
+                    let decoded = inner.read_log_entries(
+                        (start, end),
+                        LogReadLimit::Bounded {
+                            bytes: append_batch_target_bytes(&inner.executor),
+                            entries: MAX_APPEND_BATCH_ENTRIES,
+                        },
+                    )?;
+                    let continuation = decoded.continuation;
+                    let entries = decoded.entries;
+                    if entries.is_empty() {
+                        return Ok(LogChunkRead::Entries {
+                            chunk: None,
+                            continuation,
+                        });
+                    }
+                    Ok(LogChunkRead::Entries {
+                        chunk: Some(LogEntryChunk {
+                            entries: entries.into_iter(),
+                            _reservation: reservation,
+                        }),
+                        continuation,
+                    })
+                },
+            )
+            .await
+            .map_err(io::Error::other)?
     }
 }
 
@@ -1145,7 +1275,164 @@ pub(super) struct FjallLogReader {
     inner: StoreInner,
 }
 
+struct LogEntryChunk {
+    entries: std::vec::IntoIter<EntryOf<TypeConfig>>,
+    /// The decoded entries remain charged until the stream has handed out this complete chunk.
+    _reservation: Reservation,
+}
+
+enum LogChunkRead {
+    Entries {
+        chunk: Option<LogEntryChunk>,
+        continuation: Option<Bound<Vec<u8>>>,
+    },
+    LeaderChanged(LeaderChanged<TypeConfig>),
+}
+
+#[derive(Debug, Error)]
+enum LogEntryStreamError {
+    #[error("failed to read a Raft log entry chunk")]
+    Io(#[source] io::Error),
+    #[error(transparent)]
+    LeaderChanged(LeaderChanged<TypeConfig>),
+}
+
+impl LogEntryStreamError {
+    fn report_into_io(report: Report<Self>) -> io::Error {
+        io::Error::other(report.into_error())
+    }
+
+    fn report_into_leader_bounded(report: Report<Self>) -> LeaderBoundedStreamError<TypeConfig> {
+        let changed = match report.current_context() {
+            Self::LeaderChanged(error) => Some(error.clone()),
+            Self::Io(_) => None,
+        };
+        match changed {
+            Some(error) => LeaderBoundedStreamError::LeaderChanged(error),
+            None => LeaderBoundedStreamError::IoError(io::Error::other(report.into_error())),
+        }
+    }
+}
+
+/// State retained between polls of one incremental log read.
+struct LogEntryStream {
+    inner: StoreInner,
+    start: Bound<Vec<u8>>,
+    end: Bound<Vec<u8>>,
+    chunk: Option<LogEntryChunk>,
+    complete: bool,
+    expected_leader: Option<LeaderIdOf<TypeConfig>>,
+}
+
+impl LogEntryStream {
+    fn new<R: RangeBounds<u64>>(
+        inner: StoreInner,
+        range: R,
+        expected_leader: Option<LeaderIdOf<TypeConfig>>,
+    ) -> Self {
+        let (start, end) = StoreInner::log_bounds(range);
+        Self {
+            inner,
+            start,
+            end,
+            chunk: None,
+            complete: false,
+            expected_leader,
+        }
+    }
+
+    async fn next(&mut self) -> Result<Option<EntryOf<TypeConfig>>, Report<LogEntryStreamError>> {
+        if let Some(chunk) = &mut self.chunk
+            && let Some(entry) = chunk.entries.next()
+        {
+            return Ok(Some(entry));
+        }
+        let crossed_chunk_boundary = self.chunk.take().is_some();
+        if self.complete {
+            return Ok(None);
+        }
+
+        // `RaftStateMachine::apply` probes for another immediately ready entry after every one it
+        // receives. Make crossing a chunk boundary pending before starting another storage job,
+        // so that the apply job for the chunk already in hand reaches the ordered worker first.
+        if crossed_chunk_boundary {
+            tokio::task::yield_now().await;
+        }
+        let read_result = self
+            .inner
+            .read_log_chunk(
+                self.start.clone(),
+                self.end.clone(),
+                self.expected_leader.clone(),
+            )
+            .await;
+        let read = match read_result {
+            Ok(read) => read,
+            Err(error) => return Err(Report::new(LogEntryStreamError::Io(error))),
+        };
+        let (chunk, continuation) = match read {
+            LogChunkRead::Entries {
+                chunk,
+                continuation,
+            } => (chunk, continuation),
+            LogChunkRead::LeaderChanged(error) => {
+                return Err(Report::new(LogEntryStreamError::LeaderChanged(error)));
+            }
+        };
+        match continuation {
+            Some(start) => self.start = start,
+            None => self.complete = true,
+        }
+        let Some(mut chunk) = chunk else {
+            return Ok(None);
+        };
+        let entry = chunk
+            .entries
+            .next()
+            .verified("a present log chunk contains at least one decoded entry");
+        self.chunk = Some(chunk);
+        Ok(Some(entry))
+    }
+}
+
 impl RaftLogReader<TypeConfig> for FjallLogReader {
+    async fn leader_bounded_stream<
+        RB: RangeBounds<u64> + Clone + fmt::Debug + openraft::OptionalSend,
+    >(
+        &mut self,
+        leader: LeaderIdOf<TypeConfig>,
+        range: RB,
+    ) -> impl Stream<Item = LeaderBoundedStreamResult<TypeConfig>> + openraft::OptionalSend {
+        let state = LogEntryStream::new(self.inner.clone(), range, Some(leader));
+        stream::try_unfold(state, |mut state| async move {
+            let next = state
+                .next()
+                .await
+                .map_err(LogEntryStreamError::report_into_leader_bounded)?;
+            match next {
+                Some(entry) => Ok(Some((entry, state))),
+                None => Ok(None),
+            }
+        })
+    }
+
+    async fn entries_stream<RB: RangeBounds<u64> + Clone + fmt::Debug + openraft::OptionalSend>(
+        &mut self,
+        range: RB,
+    ) -> impl Stream<Item = io::Result<EntryOf<TypeConfig>>> + openraft::OptionalSend {
+        let state = LogEntryStream::new(self.inner.clone(), range, None);
+        stream::try_unfold(state, |mut state| async move {
+            let next = state
+                .next()
+                .await
+                .map_err(LogEntryStreamError::report_into_io)?;
+            match next {
+                Some(entry) => Ok(Some((entry, state))),
+                None => Ok(None),
+            }
+        })
+    }
+
     async fn try_get_log_entries<
         RB: RangeBounds<u64> + Clone + std::fmt::Debug + openraft::OptionalSend,
     >(
@@ -1154,35 +1441,16 @@ impl RaftLogReader<TypeConfig> for FjallLogReader {
     ) -> io::Result<Vec<EntryOf<TypeConfig>>> {
         let bounds = StoreInner::log_bounds(range);
         self.inner
-            .run(MemoryClass::Commands, move |inner, reservation| {
-                let mut entries = Vec::new();
-                let mut bytes = 0u64;
-                for item in inner.logs.range(bounds) {
-                    let (_, value) = item.into_inner().map_err(io::Error::other)?;
-                    let length = u64::try_from(value.len()).map_err(io::Error::other)?;
-                    bytes = bytes
-                        .checked_add(length)
-                        .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
-                    if bytes > reservation.bytes() / 2 {
-                        return Err(io::Error::other(StorageFailure::Capacity));
-                    }
-                    let record: EntryRecord = storage_decode(&value)?;
-                    let entry = record
-                        .into_entry()
-                        .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
-                    entries.push(entry);
-                }
-                Ok(entries)
+            .run(MemoryClass::Commands, move |inner, _| {
+                let decoded = inner.read_log_entries(bounds, LogReadLimit::Complete)?;
+                Ok(decoded.entries)
             })
             .await
     }
 
     async fn read_vote(&mut self) -> io::Result<Option<VoteOf>> {
         self.inner
-            .run(MemoryClass::Management, |inner, _| {
-                let vote = read_key::<VoteRecord>(&inner.meta, KEY_VOTE)?;
-                Ok(vote.map(Into::into))
-            })
+            .run(MemoryClass::Management, |inner, _| inner.read_vote())
             .await
     }
 
@@ -1198,32 +1466,14 @@ impl RaftLogReader<TypeConfig> for FjallLogReader {
         let bounds = StoreInner::log_bounds(start..end);
         self.inner
             .run(MemoryClass::Commands, move |inner, _| {
-                let target = append_batch_target_bytes(&inner.executor);
-                let mut entries = Vec::new();
-                let mut bytes = 0_u64;
-                for item in inner.logs.range(bounds) {
-                    let (_, value) = item.into_inner().map_err(io::Error::other)?;
-                    let length = u64::try_from(value.len()).map_err(io::Error::other)?;
-                    // One semantic command is never split, so the first entry is always read even
-                    // when it alone exceeds the target.
-                    if !entries.is_empty()
-                        && bytes
-                            .checked_add(length)
-                            .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?
-                            > target
-                    {
-                        break;
-                    }
-                    bytes = bytes
-                        .checked_add(length)
-                        .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
-                    let record: EntryRecord = storage_decode(&value)?;
-                    let entry = record
-                        .into_entry()
-                        .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
-                    entries.push(entry);
-                }
-                Ok(entries)
+                let decoded = inner.read_log_entries(
+                    bounds,
+                    LogReadLimit::Bounded {
+                        bytes: append_batch_target_bytes(&inner.executor),
+                        entries: MAX_APPEND_BATCH_ENTRIES,
+                    },
+                )?;
+                Ok(decoded.entries)
             })
             .await
     }
