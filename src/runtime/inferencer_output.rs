@@ -74,7 +74,7 @@ pub(super) async fn flush_branch_inferencer_output(
         .as_ref()
         .is_none_or(|loaded| loaded.version() != version)
     {
-        let Some(resource_store) = branch.runtime.inner.resource_store.read().clone() else {
+        let Some(resource_store) = branch.runtime.inner.resource_store.load_full() else {
             branch.runtime.handle_internal_processor_error_for_acks(
                 &branch.domain,
                 node_kind,

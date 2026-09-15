@@ -3,10 +3,15 @@
 //! A fixture lives here only when tests in more than one application module build the same
 //! value: parsed arguments, TLS material, a running session service, and the models a command
 //! is given. A fixture used by one module belongs in that module's own test module instead.
+//! The runtime's unit tests bind their loopback interconnect through this module as well, so the
+//! TLS material a transport authenticates with is generated in one place.
 
 use std::{
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc as StdArc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use ahash::RandomState;
@@ -199,7 +204,7 @@ fn test_session_service(
     cluster: Arc<cluster::ClusterHandle>,
     consensus: &Consensus,
     registry: Arc<Registry>,
-    resource_store: Arc<ResourceStore>,
+    resource_store: StdArc<ResourceStore>,
     interconnect: Transport,
 ) -> SessionServiceImpl {
     SessionServiceImpl {
@@ -238,7 +243,7 @@ fn test_session_service(
     }
 }
 
-async fn test_interconnect(cluster_id: &str, node_id: &ClusterNodeName) -> Transport {
+pub(crate) async fn test_interconnect(cluster_id: &str, node_id: &ClusterNodeName) -> Transport {
     let files = test_tls_files(cluster_id, node_id);
     let tls = TlsConfigBundle::from_pem_files(&files.ca, &files.certificate, &files.private_key)
         .expect("test TLS bundle should load");
@@ -487,7 +492,7 @@ pub(in crate::application) async fn build_test_service(
         cluster,
         &consensus,
         registry.clone(),
-        Arc::new(
+        StdArc::new(
             ResourceStore::open(path.join("resources"), executor)
                 .expect("resource store should open"),
         ),
