@@ -100,15 +100,7 @@ impl EmptyRelayHandoffFixture {
         }
     }
 
-    async fn rebuild_destination(
-        &self,
-        runtime: &Runtime,
-        schedule: DomainSchedule,
-        destination_incarnation: ClusterNodeIncarnation,
-    ) {
-        *runtime.inner.remote_dispatch.local_node_id.write() = Some(self.destination.clone());
-        *runtime.inner.remote_dispatch.local_node_incarnation.write() =
-            Some(destination_incarnation);
+    async fn rebuild_destination(&self, runtime: &Runtime, schedule: DomainSchedule) {
         let mut domain_state = unpaced_domain_state(self.domain.as_str());
         domain_state.status = DomainStatus::Stopped;
         runtime.sync_domains(&BTreeMap::from([(self.domain.clone(), domain_state)]));
@@ -185,13 +177,10 @@ async fn restarted_destination_reclaims_an_uncommitted_handoff_preparation() {
             .expect("database should open");
         let runtime = Runtime::with_persistence(Some(db), Duration::from_secs(3_600))
             .expect("runtime should open persisted state");
-        let destination_incarnation = ClusterNodeIncarnation::new(32);
+        let destination_incarnation =
+            attach_loopback_cluster(&runtime, &abandoned.destination).await;
         abandoned
-            .rebuild_destination(
-                &runtime,
-                abandoned.base_schedule.clone(),
-                destination_incarnation,
-            )
+            .rebuild_destination(&runtime, abandoned.base_schedule.clone())
             .await;
         abandoned
             .prepare(
@@ -209,13 +198,9 @@ async fn restarted_destination_reclaims_an_uncommitted_handoff_preparation() {
     let runtime = Runtime::with_persistence(Some(db), Duration::from_secs(3_600))
         .expect("restarted runtime should restore persisted state");
     let replacement = EmptyRelayHandoffFixture::new("replacement-operation");
-    let destination_incarnation = ClusterNodeIncarnation::new(33);
+    let destination_incarnation = attach_loopback_cluster(&runtime, &replacement.destination).await;
     replacement
-        .rebuild_destination(
-            &runtime,
-            replacement.base_schedule.clone(),
-            destination_incarnation,
-        )
+        .rebuild_destination(&runtime, replacement.base_schedule.clone())
         .await;
     let coordination = CoordinationIdentity::new(named("coordinator-b"), 12, 1);
     replacement
@@ -250,13 +235,9 @@ async fn surviving_authority_reconciles_a_dead_coordinators_preparation() {
     let fixture = EmptyRelayHandoffFixture::new("abandoned-operation");
     let runtime = Runtime::new();
     let source_incarnation = ClusterNodeIncarnation::new(31);
-    let destination_incarnation = ClusterNodeIncarnation::new(32);
+    let destination_incarnation = attach_loopback_cluster(&runtime, &fixture.destination).await;
     fixture
-        .rebuild_destination(
-            &runtime,
-            fixture.base_schedule.clone(),
-            destination_incarnation,
-        )
+        .rebuild_destination(&runtime, fixture.base_schedule.clone())
         .await;
     let abandoned_coordination = CoordinationIdentity::new(named("coordinator-a"), 11, 1);
     fixture
@@ -331,41 +312,41 @@ async fn committed_preparation_survives_coordinator_failure_and_destination_rest
     let dir = tempdir().expect("temporary runtime state directory should open");
     let coordination = CoordinationIdentity::new(named("coordinator-a"), 11, 1);
     let source_incarnation = ClusterNodeIncarnation::new(31);
-    {
+    let prepared_destination_incarnation = {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should open");
         let runtime = Runtime::with_persistence(Some(db), Duration::from_secs(3_600))
             .expect("runtime should open persisted state");
+        let destination_incarnation = attach_loopback_cluster(&runtime, &fixture.destination).await;
         fixture
-            .rebuild_destination(
-                &runtime,
-                fixture.base_schedule.clone(),
-                ClusterNodeIncarnation::new(32),
-            )
+            .rebuild_destination(&runtime, fixture.base_schedule.clone())
             .await;
         fixture
             .prepare(
                 &runtime,
                 coordination.clone(),
                 source_incarnation,
-                ClusterNodeIncarnation::new(32),
+                destination_incarnation,
             )
             .await;
-    }
+        destination_incarnation
+    };
 
     let db = Database::builder(dir.path())
         .open()
         .expect("database should reopen after destination restart");
     let runtime = Runtime::with_persistence(Some(db), Duration::from_secs(3_600))
         .expect("restarted runtime should restore persisted state");
-    *runtime.inner.remote_dispatch.local_node_id.write() = Some(fixture.destination.clone());
-    *runtime.inner.remote_dispatch.local_node_incarnation.write() =
-        Some(ClusterNodeIncarnation::new(33));
+    let restarted_destination_incarnation =
+        attach_loopback_cluster(&runtime, &fixture.destination).await;
     let committed_schedule = ClusterSchedule::from_iter([fixture.target_schedule.clone()]);
     let incarnations = BTreeMap::from([
         (fixture.source.clone(), source_incarnation),
-        (fixture.destination.clone(), ClusterNodeIncarnation::new(33)),
+        (
+            fixture.destination.clone(),
+            restarted_destination_incarnation,
+        ),
     ]);
     let surviving_authority = CoordinationIdentity::new(named("coordinator-b"), 12, 1);
     assert_eq!(
@@ -412,7 +393,7 @@ async fn committed_preparation_survives_coordinator_failure_and_destination_rest
                 source: fixture.source.clone(),
                 destination: fixture.destination.clone(),
                 source_incarnation,
-                destination_incarnation: ClusterNodeIncarnation::new(32),
+                destination_incarnation: prepared_destination_incarnation,
                 domain: fixture.domain.clone(),
                 entity: fixture.entity.clone(),
                 base_schedule_fingerprint: fixture.base_schedule_fingerprint,
@@ -521,9 +502,7 @@ async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuil
             .expect("database should open");
         let runtime = Runtime::with_persistence(Some(db), Duration::from_secs(3_600))
             .expect("runtime should open persisted state");
-        *runtime.inner.remote_dispatch.local_node_id.write() = Some(destination.clone());
-        *runtime.inner.remote_dispatch.local_node_incarnation.write() =
-            Some(ClusterNodeIncarnation::new(42));
+        let destination_incarnation = attach_loopback_cluster(&runtime, &destination).await;
         let mut domain_state = unpaced_domain_state(domain.as_str());
         domain_state.status = DomainStatus::Stopped;
         runtime.sync_domains(&BTreeMap::from([(domain.clone(), domain_state)]));
@@ -531,7 +510,7 @@ async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuil
             operation_id,
             source: &source,
             destination: &destination,
-            destination_incarnation: ClusterNodeIncarnation::new(42),
+            destination_incarnation,
             entity: &entity,
             target_schedule_fingerprint: initial_fingerprint,
         };
@@ -563,9 +542,7 @@ async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuil
             .expect("database should reopen after the owner restart");
         let runtime = Runtime::with_persistence(Some(db), Duration::from_secs(3_600))
             .expect("restarted runtime should open persisted state");
-        *runtime.inner.remote_dispatch.local_node_id.write() = Some(destination.clone());
-        *runtime.inner.remote_dispatch.local_node_incarnation.write() =
-            Some(ClusterNodeIncarnation::new(43));
+        attach_loopback_cluster(&runtime, &destination).await;
         let mut domain_state = unpaced_domain_state(domain.as_str());
         domain_state.status = DomainStatus::Stopped;
         runtime.sync_domains(&BTreeMap::from([(domain.clone(), domain_state)]));
@@ -613,8 +590,8 @@ async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuil
     }
 }
 
-#[test]
-fn forced_recovery_recreates_state_only_for_a_complete_reset_decision() {
+#[tokio::test]
+async fn forced_recovery_recreates_state_only_for_a_complete_reset_decision() {
     let dir = tempdir().expect("temporary runtime state directory should open");
     let db = Database::builder(dir.path())
         .open()
@@ -625,9 +602,7 @@ fn forced_recovery_recreates_state_only_for_a_complete_reset_decision() {
     let identifier = named::<ModelName>("latest_orders");
     let source = named::<ClusterNodeName>("node-1");
     let destination = named::<ClusterNodeName>("node-2");
-    *runtime.inner.remote_dispatch.local_node_id.write() = Some(destination.clone());
-    *runtime.inner.remote_dispatch.local_node_incarnation.write() =
-        Some(ClusterNodeIncarnation::new(42));
+    attach_loopback_cluster(&runtime, &destination).await;
     let placement = RuntimeStatePlacement {
         domain: domain.clone(),
         state: RuntimeStateKind::MaterializedRelay,

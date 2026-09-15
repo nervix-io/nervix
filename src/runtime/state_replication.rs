@@ -155,10 +155,11 @@ impl Runtime {
         if !self.runtime_state_placement_is_current(&placement) {
             return;
         }
-        let local_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
-        let Some(local_node_id) = local_node_id else {
+        let dispatcher = self.inner.remote_dispatcher.load();
+        let Some(dispatcher) = dispatcher.as_deref() else {
             return;
         };
+        let local_node_id = dispatcher.local_node_id();
         let valid_assignment = if let Some(execution) = self.inner.executions.get(&placement.domain)
         {
             if let Some(node) = execution
@@ -167,8 +168,8 @@ impl Runtime {
                 .get(&NodeRef::new(placement.kind, placement.identifier.clone()))
             {
                 node.execution_node() == Some(source)
-                    && node.is_assigned_to(&local_node_id)
-                    && !node.is_primary_on(&local_node_id)
+                    && node.is_assigned_to(local_node_id)
+                    && !node.is_primary_on(local_node_id)
             } else {
                 false
             }
@@ -317,10 +318,11 @@ impl Runtime {
         if !self.runtime_state_placement_is_current(placement) {
             return false;
         }
-        let local_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
-        let Some(local_node_id) = local_node_id else {
+        let dispatcher = self.inner.remote_dispatcher.load();
+        let Some(dispatcher) = dispatcher.as_deref() else {
             return false;
         };
+        let local_node_id = dispatcher.local_node_id();
         let Some(execution) = self.inner.executions.get(&placement.domain) else {
             return false;
         };
@@ -332,8 +334,8 @@ impl Runtime {
             return false;
         };
         node.execution_node() == Some(source)
-            && node.is_assigned_to(&local_node_id)
-            && !node.is_primary_on(&local_node_id)
+            && node.is_assigned_to(local_node_id)
+            && !node.is_primary_on(local_node_id)
     }
 
     fn passive_state_replica_lsm(
@@ -488,8 +490,7 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         lsm: u64,
     ) {
-        let dispatcher = self.inner.remote_dispatcher.read().clone();
-        let Some(dispatcher) = dispatcher else {
+        let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
             return;
         };
         let source = source.clone();
@@ -553,8 +554,7 @@ impl Runtime {
                 Some(pending) => pending.value().clone(),
                 None => return,
             };
-            let Some(local_node_id) = self.inner.remote_dispatch.local_node_id.read().clone()
-            else {
+            let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
                 self.inner
                     .pending_state_checkpoint_announcements
                     .remove(&placement);
@@ -567,7 +567,7 @@ impl Runtime {
                         .nodes
                         .get(&NodeRef::new(placement.kind, placement.identifier.clone()))
                     {
-                        if node.is_primary_on(&local_node_id) {
+                        if node.is_primary_on(dispatcher.local_node_id()) {
                             node.replica_nodes()
                                 .into_iter()
                                 .cloned()
@@ -616,12 +616,6 @@ impl Runtime {
                 }
                 continue;
             }
-            let Some(dispatcher) = self.inner.remote_dispatcher.read().clone() else {
-                self.inner
-                    .pending_state_checkpoint_announcements
-                    .remove(&placement);
-                return;
-            };
             let checkpoint = nervix_interconnect::StateCheckpointAvailable {
                 placement: placement.to_remote(),
                 lsm: pending.target_lsm,
@@ -1006,16 +1000,11 @@ impl Runtime {
                 source
             )));
         }
-        let local_node = self
-            .inner
-            .remote_dispatch
-            .local_node_id
-            .read()
-            .clone()
-            .ok_or_else(|| {
-                OwnershipHandoffError::participant("local node identity is unavailable")
-            })?;
-        if local_node != *destination {
+        let dispatcher = self.inner.remote_dispatcher.load_full().ok_or_else(|| {
+            OwnershipHandoffError::participant("local node identity is unavailable")
+        })?;
+        let local_node = dispatcher.local_node_id();
+        if local_node != destination {
             return Err(OwnershipHandoffError::participant(format!(
                 "forced ownership recovery targets node '{destination}' but reached '{local_node}'"
             )));
@@ -2064,10 +2053,11 @@ impl Runtime {
             return Ok(());
         };
         let entity = DomainNodeRef::node_in(domain.clone(), node.kind(), node.identifier.clone());
-        let local_incarnation = *self.inner.remote_dispatch.local_node_incarnation.read();
-        let Some(local_incarnation) = local_incarnation else {
+        let dispatcher = self.inner.remote_dispatcher.load();
+        let Some(dispatcher) = dispatcher.as_deref() else {
             return Err(Report::new(RuntimePersistenceError::MissingNodeIncarnation));
         };
+        let local_incarnation = dispatcher.local_node_incarnation();
         let recovery = ForcedRuntimeStateRecoveryTransition {
             operation_id: &transition.id,
             source: &transition.source,
@@ -2478,8 +2468,8 @@ impl Runtime {
         if !self.runtime_state_placement_is_current(placement) {
             return false;
         }
-        let local_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
-        let Some(local_node_id) = local_node_id else {
+        let dispatcher = self.inner.remote_dispatcher.load();
+        let Some(dispatcher) = dispatcher.as_deref() else {
             return false;
         };
         let Some(execution) = self.inner.executions.get(&placement.domain) else {
@@ -2492,7 +2482,7 @@ impl Runtime {
         else {
             return false;
         };
-        node.assigned_nodes.contains(&local_node_id)
+        node.assigned_nodes.contains(dispatcher.local_node_id())
     }
 
     pub(crate) fn handle_state_replication_ack(
@@ -2538,7 +2528,7 @@ impl Runtime {
         after_lsm: Option<u64>,
         response_timeout: Duration,
     ) -> Result<Option<PersistedRuntimeStateEntry>, String> {
-        let Some(dispatcher) = self.inner.remote_dispatcher.read().clone() else {
+        let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
             return Err("remote dispatcher unavailable".to_string());
         };
         let response = dispatcher

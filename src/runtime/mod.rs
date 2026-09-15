@@ -456,8 +456,8 @@ pub(in crate::runtime) use state_store::{
 pub(in crate::runtime) use test_fixtures::STUPID_CHANNEL_CAPACITY_REMOVE_ME;
 #[cfg(test)]
 use test_fixtures::{
-    OptionalTestField, TWO_ITEM_TEST_CHANNEL_CAPACITY, TestIngestHeaders, batch_value,
-    branch_model, branched_by, compile_window_aggregate_for_test, concrete_branch_key,
+    OptionalTestField, TWO_ITEM_TEST_CHANNEL_CAPACITY, TestIngestHeaders, attach_loopback_cluster,
+    batch_value, branch_model, branched_by, compile_window_aggregate_for_test, concrete_branch_key,
     construction, domain, execute_filter_map_for_test, expression, ingest_metadata_for_test,
     install_unpaced_test_domain, junction_branch_template, key_label, named, nonzero_capacity,
     paced_domain_state, processor_branched_by, quiesce_test_batch, row_value, scheduled_model,

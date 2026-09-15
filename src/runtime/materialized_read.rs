@@ -265,9 +265,8 @@ impl Runtime {
             .get(relay)
             .and_then(|node| node.as_ref())
             .cloned();
-        let local_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
         if let Some(owner) = owner
-            && local_node_id.as_ref() != Some(&owner)
+            && !self.is_local_node(&owner)
         {
             return self
                 .remote_materialized_stream_values_for_branch(
@@ -380,9 +379,8 @@ impl Runtime {
         } else {
             None
         };
-        let local_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
         if let Some(owner) = owner
-            && local_node_id.as_ref() != Some(&owner)
+            && !self.is_local_node(&owner)
         {
             let Some(schema) = self.materialized_relay_schema(&placement) else {
                 return Ok(Vec::new());
