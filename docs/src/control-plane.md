@@ -65,10 +65,19 @@ management connection that carries heartbeats and votes. Batches are submitted a
 order, with at most 16 batches and 16 MiB outstanding per follower and a one-command target batch
 size; the node's aggregate transient memory bounds the sum across followers. A batch carries whole
 commands, so one command is never split into parts that could commit separately. A conflict, a
-higher vote, a partially accepted batch, a stalled answer, or a broken stream stops new
-submissions and delivers that first result; nothing later on that stream can advance past it, and
-replication resumes from the progress consensus confirmed. Response deadlines apply per answer
-while a batch is outstanding, so a healthy stream with nothing to carry stays open.
+higher vote, a partially accepted batch, a stalled stream, or a broken stream stops new submissions
+and delivers that first result; nothing later on that stream can advance past it, and replication
+resumes from the progress consensus confirmed.
+
+A follower answers a batch only after appending it durably, so slow follower storage delays answers
+without ending the stream. A stream stalls only when a batch is outstanding and, for five seconds,
+no answer arrives and the follower accepts none of the leader's bytes. That bound does not depend
+on the heartbeat interval, and a stream with nothing outstanding stays open however long it idles.
+Opening a stream has its own five-second deadline, while heartbeats keep a deadline derived from
+the heartbeat interval. The leader skips a follower's heartbeat when that follower has already
+acknowledged replication sent within the last heartbeat interval. That window never exceeds half of
+the gap between the heartbeat interval and the minimum election timeout, so a follower still hears
+from the leader before its election timer can expire.
 
 A node snapshots its replicated state automatically after 10,000 committed entries
 (`--raft-snapshot-entry-threshold`) or 64 MiB of appended entries since its last completed

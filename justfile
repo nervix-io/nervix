@@ -65,6 +65,15 @@ test-lib *args: tests-deps
 test-vm *args:
     cargo test --package nervix-vm --lib -- {{ args }}
 
+# Run the consensus unit tests, which live in the nervix-consensus crate rather than the server lib.
+test-consensus *args:
+    cargo test --package nervix-consensus --lib -- {{ args }}
+
+# Run the interconnect unit tests, which live in the nervix-interconnect crate rather than the
+# server lib.
+test-interconnect *args:
+    cargo test --package nervix-interconnect --lib -- {{ args }}
+
 test-runtime-state-capabilities: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail

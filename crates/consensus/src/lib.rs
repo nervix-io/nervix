@@ -1513,13 +1513,25 @@ impl Consensus {
         Recorder: AppendStreamOpenRecorder,
     {
         let retention = settings.raft_retention;
+        let heartbeat_interval =
+            u64::try_from(settings.raft_heartbeat_interval.as_millis()).unwrap_or(u64::MAX);
+        let election_timeout_min =
+            u64::try_from(settings.raft_election_timeout_min.as_millis()).unwrap_or(u64::MAX);
+        // A follower that acknowledged replication sent within the last heartbeat interval already
+        // knows what a heartbeat would tell it, so sustained writes send none. The window never
+        // takes more than half of the gap before the minimum election timeout, which keeps one
+        // interval plus the window below that timeout and leaves the rest for delivery.
+        let heartbeat_min_interval = match election_timeout_min.checked_sub(heartbeat_interval) {
+            Some(election_gap) => heartbeat_interval.min(election_gap / 2),
+            // `validate` rejects an election timeout that does not exceed the heartbeat interval.
+            None => 0,
+        };
         let config = StdArc::new(
             Config {
                 cluster_name: settings.cluster_name,
-                heartbeat_interval: u64::try_from(settings.raft_heartbeat_interval.as_millis())
-                    .unwrap_or(u64::MAX),
-                election_timeout_min: u64::try_from(settings.raft_election_timeout_min.as_millis())
-                    .unwrap_or(u64::MAX),
+                heartbeat_interval,
+                heartbeat_min_interval: Some(heartbeat_min_interval),
+                election_timeout_min,
                 election_timeout_max: u64::try_from(settings.raft_election_timeout_max.as_millis())
                     .unwrap_or(u64::MAX),
                 // The log reader fills a batch to the append target and never splits a command,
@@ -3311,7 +3323,7 @@ where
             .request_with_timeout(
                 &self.target,
                 wire::HeartbeatRequest(record),
-                replication::append_deadline(&option),
+                replication::heartbeat_deadline(&option),
             )
             .await
             .map_err(io_error)
@@ -3324,8 +3336,9 @@ where
     /// Carry appends on the path this client was built for.
     ///
     /// A replication client opens one ordered stream to its follower and pipelines every batch
-    /// over it. A heartbeat client keeps OpenRaft's one-probe-at-a-time shape on the management
-    /// pool, where a saturated append stream cannot reach it.
+    /// over it, under the stream's own idle bound rather than OpenRaft's heartbeat-derived soft
+    /// TTL. A heartbeat client keeps OpenRaft's one-probe-at-a-time shape and deadline on the
+    /// management pool, where a saturated append stream cannot reach it.
     fn stream_append<'s, S>(
         &'s mut self,
         input: S,
@@ -3366,7 +3379,6 @@ where
                         &local_node_id,
                         &target,
                         input,
-                        option,
                     )
                     .await?;
                     append_stream_open_recorder.record_append_stream_open(&target);
