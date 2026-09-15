@@ -241,9 +241,9 @@ Feature: Kafka ingestor domain pacing
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: Domain-owned Kafka offsets resume from persisted state after cluster restart
+  Scenario Outline: Domain-owned Kafka offsets committed between snapshot intervals resume after cluster restart
     Given Kafka is running
-    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "1h"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
