@@ -319,22 +319,19 @@ impl BranchRuntime {
                 return;
             }
         };
-        for message in messages {
-            tokio::task::consume_budget().await;
-            if let Err(error) = self.runtime.update_materialized_stream_last_by_timestamp(
-                state,
-                &batch.key,
-                &message.record,
-            ) {
-                warn!(
-                    domain = self.domain.as_str(),
-                    relay = relay.as_str(),
-                    branch = branch_key_display(&self.key),
-                    error = %error,
-                    "materialized relay assignment changed while applying a branch-local batch"
-                );
-                return;
-            }
+        let records = messages.into_iter().map(|message| message.record);
+        if let Err(error) = self
+            .runtime
+            .apply_materialized_stream_records(state, &batch.key, records)
+            .await
+        {
+            warn!(
+                domain = self.domain.as_str(),
+                relay = relay.as_str(),
+                branch = branch_key_display(&self.key),
+                error = %error,
+                "materialized relay assignment changed while applying a branch-local batch"
+            );
         }
     }
 

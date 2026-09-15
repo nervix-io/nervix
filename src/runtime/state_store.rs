@@ -1,9 +1,17 @@
-use std::{collections::BTreeSet, str::FromStr};
+use std::{
+    collections::BTreeSet,
+    str::FromStr,
+    sync::{
+        Arc as StdArc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
+};
 
 use ahash::HashMap;
+use arc_swap::{ArcSwap, Guard};
 use error_stack::Report;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 pub(crate) use nervix_interconnect::RuntimeStateKind;
 use nervix_models::{
     ClusterNodeIncarnation, ClusterNodeName, CoordinationIdentity, DomainName, DomainNodeRef,
@@ -72,67 +80,224 @@ impl StateReplicationRoles {
 /// The operation one assignment grants over a shared runtime state. A capability token carries
 /// this discriminator as well as its generation, so possessing a generation number alone never
 /// authorizes an operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr, strum::FromRepr)]
 #[strum(serialize_all = "snake_case")]
+#[repr(u8)]
 pub(in crate::runtime) enum StateCapability {
-    Read,
-    Originate,
-    InstallSnapshot,
+    Read = 0,
+    Originate = 1,
+    InstallSnapshot = 2,
 }
+
+impl StateCapability {
+    /// The tag a packed binding stores this capability as, which is its declared discriminant.
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Read => 0,
+            Self::Originate => 1,
+            Self::InstallSnapshot => 2,
+        }
+    }
+}
+
+/// The low bits of a packed binding that hold its capability tag; the generation fills the rest.
+const CAPABILITY_TAG_BITS: u32 = 2;
+/// How many tags the capability bits hold, which is the factor a generation is scaled by to leave
+/// room for them.
+const CAPABILITY_TAG_SLOTS: u64 = 1 << CAPABILITY_TAG_BITS;
+/// The bits of a packed binding that hold its capability tag.
+const CAPABILITY_TAG_MASK: u8 = (1 << CAPABILITY_TAG_BITS) - 1;
+
+// A packed binding is read back through the declared discriminant, so every tag must be that
+// discriminant and fit in the capability bits. The unassigned binding packs to zero because it is
+// generation zero with the read tag.
+const _: () = {
+    assert!(matches!(
+        StateCapability::from_repr(StateCapability::Read.tag()),
+        Some(StateCapability::Read)
+    ));
+    assert!(matches!(
+        StateCapability::from_repr(StateCapability::Originate.tag()),
+        Some(StateCapability::Originate)
+    ));
+    assert!(matches!(
+        StateCapability::from_repr(StateCapability::InstallSnapshot.tag()),
+        Some(StateCapability::InstallSnapshot)
+    ));
+    assert!(StateCapability::Read.tag() <= CAPABILITY_TAG_MASK);
+    assert!(StateCapability::Originate.tag() <= CAPABILITY_TAG_MASK);
+    assert!(StateCapability::InstallSnapshot.tag() <= CAPABILITY_TAG_MASK);
+    assert!(StateCapability::Read.tag() == 0);
+};
+
+/// How many times a rebind spins on the operations it waits for before it yields its thread.
+const ADMISSION_SPINS_BEFORE_YIELD: u32 = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runtime) struct StateAssignmentToken {
-    generation: u64,
-    capability: StateCapability,
+    binding: StateAssignmentBinding,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One assignment of a runtime state: its generation and the capability it grants this node, packed
+/// into the single word the authority publishes, so the two are always read together.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::runtime) struct StateAssignmentBinding {
-    generation: u64,
-    capability: StateCapability,
+    packed: u64,
 }
 
 impl StateAssignmentBinding {
+    /// The binding before a state is first assigned: generation zero, granting only reads.
+    const UNASSIGNED: Self = Self { packed: 0 };
+
     pub(in crate::runtime) fn token_for(
         self,
         capability: StateCapability,
     ) -> Option<StateAssignmentToken> {
-        (self.capability == capability).then_some(StateAssignmentToken {
-            generation: self.generation,
-            capability,
-        })
+        self.grants(capability)
+            .then_some(StateAssignmentToken { binding: self })
     }
 
     /// The ownership fence this binding acts under. A capture records it so a snapshot sealed
     /// under a superseded assignment is refused instead of installed.
     pub(in crate::runtime) fn fence(self) -> u64 {
-        self.generation
+        self.generation()
+    }
+
+    fn generation(self) -> u64 {
+        self.packed >> CAPABILITY_TAG_BITS
+    }
+
+    fn capability(self) -> StateCapability {
+        let tag = u8::try_from(self.packed & u64::from(CAPABILITY_TAG_MASK))
+            .assured("the capability mask keeps a tag within one byte");
+        StateCapability::from_repr(tag)
+            .assured("a binding is only ever packed from a declared capability")
+    }
+
+    fn grants(self, capability: StateCapability) -> bool {
+        (self.packed & u64::from(CAPABILITY_TAG_MASK)) == u64::from(capability.tag())
+    }
+
+    /// The binding that supersedes this one, granting `capability`.
+    fn successor(self, capability: StateCapability) -> Self {
+        let generation = self
+            .generation()
+            .checked_add(1)
+            .assured("a packed generation is below 2^62, so the next one fits in a u64");
+        let scaled = generation
+            .checked_mul(CAPABILITY_TAG_SLOTS)
+            .assured("one process cannot apply 2^62 assignments to one runtime state");
+        Self {
+            packed: scaled | u64::from(capability.tag()),
+        }
     }
 }
 
-#[derive(Debug)]
-struct StateAssignment {
-    generation: u64,
-    roles: StateReplicationRoles,
-    local_capability: StateCapability,
+impl std::fmt::Debug for StateAssignmentBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StateAssignmentBinding")
+            .field("generation", &self.generation())
+            .field("capability", &self.capability())
+            .finish()
+    }
 }
 
-/// Serializes assignment rebinding with every authoritative mutation and replica installation.
-/// The state value outlives individual assignments; short-lived capability handles carry the
-/// token returned by `rebind` and must validate it inside this lock at the operation boundary.
+/// Operations admitted under an assignment that have not finished, counted separately for even and
+/// odd generations.
+///
+/// A rebind waits only for the generation it supersedes. The generation it publishes has the other
+/// parity, so operations admitted under the new assignment never delay it.
+#[derive(Debug, Default)]
+struct StateAdmissions {
+    even_generation: AtomicUsize,
+    odd_generation: AtomicUsize,
+}
+
+impl StateAdmissions {
+    fn of_generation(&self, generation: u64) -> &AtomicUsize {
+        if generation.is_multiple_of(2) {
+            &self.even_generation
+        } else {
+            &self.odd_generation
+        }
+    }
+
+    fn admit(&self, generation: u64) -> StateAdmission<'_> {
+        let admitted = self.of_generation(generation);
+        admitted
+            .fetch_add(1, Ordering::SeqCst)
+            .checked_add(1)
+            .assured(
+                "every admitted operation occupies a running stack frame, so fewer than \
+                 usize::MAX are admitted at once",
+            );
+        StateAdmission { admitted }
+    }
+
+    /// Wait until every operation admitted under `generation` has finished.
+    ///
+    /// Admitted operations are synchronous and never take the barrier, so the wait lasts only as
+    /// long as the operations already running.
+    fn wait_until_finished(&self, generation: u64) {
+        let admitted = self.of_generation(generation);
+        let mut spins = 0_u32;
+        while admitted.load(Ordering::SeqCst) != 0 {
+            if spins < ADMISSION_SPINS_BEFORE_YIELD {
+                spins = spins
+                    .checked_add(1)
+                    .verified("the loop only spins while below ADMISSION_SPINS_BEFORE_YIELD");
+                std::hint::spin_loop();
+            } else {
+                std::thread::yield_now();
+            }
+        }
+    }
+}
+
+/// One admitted operation. Releasing it on drop keeps the count exact when the operation panics, so
+/// a rebind never waits for an operation that already unwound.
+struct StateAdmission<'a> {
+    admitted: &'a AtomicUsize,
+}
+
+impl Drop for StateAdmission<'_> {
+    fn drop(&mut self) {
+        self.admitted
+            .fetch_sub(1, Ordering::SeqCst)
+            .checked_sub(1)
+            .verified("an admission releases only the count it added");
+    }
+}
+
+/// Fences every operation over one runtime state to the assignment it was granted under.
+///
+/// The assignment in force is one packed word and its replication roles are a published snapshot,
+/// so checking a capability is a load and a compare and neither is ever read under a lock. The
+/// state value outlives individual assignments; short-lived capability handles carry the token
+/// returned by `rebind`.
+///
+/// Operations that replace or restructure the whole state, and captures that must describe one
+/// consistent generation, serialize on the barrier. A per-message operation never takes it: it is
+/// admitted instead, counting itself in before it compares the binding and out when it finishes,
+/// while `rebind` publishes the new binding under the barrier and then waits for the operations
+/// admitted under the one it replaced. An admitted operation therefore either observes the new
+/// binding and is refused, or finishes before `rebind` returns.
 #[derive(Debug)]
 pub(in crate::runtime) struct StateAssignmentAuthority {
-    assignment: parking_lot::Mutex<StateAssignment>,
+    binding: AtomicU64,
+    roles: ArcSwap<StateReplicationRoles>,
+    admissions: StateAdmissions,
+    barrier: parking_lot::Mutex<()>,
 }
 
 impl Default for StateAssignmentAuthority {
     fn default() -> Self {
         Self {
-            assignment: parking_lot::Mutex::new(StateAssignment {
-                generation: 0,
-                roles: StateReplicationRoles::default(),
-                local_capability: StateCapability::Read,
-            }),
+            binding: AtomicU64::new(StateAssignmentBinding::UNASSIGNED.packed),
+            roles: ArcSwap::from_pointee(StateReplicationRoles::default()),
+            admissions: StateAdmissions::default(),
+            barrier: parking_lot::Mutex::new(()),
         }
     }
 }
@@ -143,29 +308,24 @@ impl StateAssignmentAuthority {
         roles: StateReplicationRoles,
         local_node: Option<&ClusterNodeName>,
     ) -> StateAssignmentBinding {
-        let mut assignment = self.assignment.lock();
-        assignment.generation = assignment
-            .generation
-            .checked_add(1)
-            .assured("one process cannot apply 2^64 assignments to one runtime state");
-        assignment.local_capability = roles.local_capability(local_node);
-        assignment.roles = roles;
-        StateAssignmentBinding {
-            generation: assignment.generation,
-            capability: assignment.local_capability,
-        }
+        let _barrier = self.barrier.lock();
+        let superseded = self.current_binding();
+        let binding = superseded.successor(roles.local_capability(local_node));
+        self.roles.store(StdArc::new(roles));
+        self.binding.store(binding.packed, Ordering::SeqCst);
+        self.admissions.wait_until_finished(superseded.generation());
+        binding
     }
 
     pub(in crate::runtime) fn current_binding(&self) -> StateAssignmentBinding {
-        let assignment = self.assignment.lock();
         StateAssignmentBinding {
-            generation: assignment.generation,
-            capability: assignment.local_capability,
+            packed: self.binding.load(Ordering::SeqCst),
         }
     }
 
-    pub(in crate::runtime) fn roles(&self) -> StateReplicationRoles {
-        self.assignment.lock().roles.clone()
+    /// The replication roles of the assignment in force, as `rebind` last published them.
+    pub(in crate::runtime) fn roles(&self) -> Guard<StdArc<StateReplicationRoles>> {
+        self.roles.load()
     }
 
     pub(in crate::runtime) fn serialize<T>(&self, action: impl FnOnce() -> T) -> T {
@@ -175,28 +335,55 @@ impl StateAssignmentAuthority {
     /// Run `action` under the barrier with the assignment in force while it runs.
     ///
     /// A capture that must record which assignment it observed reads the fence in the same
-    /// critical section as the contents, so the two cannot describe different moments.
+    /// critical section as the contents, so the two cannot describe different moments: `rebind`
+    /// publishes under the same barrier and keeps it until every operation admitted under the
+    /// assignment it replaced has finished.
     pub(in crate::runtime) fn serialize_with<T>(
         &self,
         action: impl FnOnce(StateAssignmentBinding) -> T,
     ) -> T {
-        let assignment = self.assignment.lock();
-        action(StateAssignmentBinding {
-            generation: assignment.generation,
-            capability: assignment.local_capability,
-        })
+        let _barrier = self.barrier.lock();
+        action(self.current_binding())
     }
 
+    /// Run a per-message operation under the assignment `token` was granted, without the barrier.
+    ///
+    /// The operation is counted as admitted before the binding is compared, which is what lets
+    /// `rebind` wait for it, so `action` must not rebind this authority. Operations admitted under
+    /// the same assignment run beside each other and beside exclusive operations and captures.
     pub(in crate::runtime) fn authorize<T>(
         &self,
         token: StateAssignmentToken,
         required: StateCapability,
         action: impl FnOnce() -> T,
     ) -> Result<T, Report<StateAuthorityError>> {
-        let assignment = self.assignment.lock();
-        if token.generation != assignment.generation
-            || token.capability != required
-            || assignment.local_capability != required
+        if !token.binding.grants(required) {
+            return Err(Report::new(StateAuthorityError {
+                operation: required,
+            }));
+        }
+        let _admission = self.admissions.admit(token.binding.generation());
+        if self.binding.load(Ordering::SeqCst) != token.binding.packed {
+            return Err(Report::new(StateAuthorityError {
+                operation: required,
+            }));
+        }
+        Ok(action())
+    }
+
+    /// Run an operation that replaces or restructures the whole state under the barrier.
+    ///
+    /// It excludes `rebind`, captures and every other exclusive operation, and no operation
+    /// admitted under an earlier assignment is still running while it holds the barrier.
+    pub(in crate::runtime) fn authorize_exclusive<T>(
+        &self,
+        token: StateAssignmentToken,
+        required: StateCapability,
+        action: impl FnOnce() -> T,
+    ) -> Result<T, Report<StateAuthorityError>> {
+        let _barrier = self.barrier.lock();
+        if !token.binding.grants(required)
+            || self.binding.load(Ordering::SeqCst) != token.binding.packed
         {
             return Err(Report::new(StateAuthorityError {
                 operation: required,
@@ -1800,6 +1987,111 @@ mod tests {
             matches!(error.current_context(), RuntimePersistenceError::DecodeState(message)
                 if message.contains("model-kind separator")),
             "unexpected error for a truncated state key: {error:?}"
+        );
+    }
+
+    /// A rebind that returned while an operation admitted under the assignment it replaced was
+    /// still running would let that stale operation land after the new assignment took over.
+    #[test]
+    fn a_rebind_waits_for_an_operation_admitted_under_the_assignment_it_replaces() {
+        use std::sync::atomic::AtomicBool;
+
+        let authority = StdArc::new(StateAssignmentAuthority::default());
+        let replaced = authority.rebind(StateReplicationRoles::owned_by(None), None);
+        let token = replaced
+            .token_for(StateCapability::Originate)
+            .assured("a state without roles is originated locally");
+        let finished = StdArc::new(AtomicBool::new(false));
+        let (running_tx, running_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let admitted = std::thread::spawn({
+            let authority = authority.clone();
+            let finished = finished.clone();
+            move || {
+                authority
+                    .authorize(token, StateCapability::Originate, || {
+                        running_tx
+                            .send(())
+                            .assured("the test keeps the receiver until the operation runs");
+                        release_rx
+                            .recv()
+                            .assured("the test releases the operation before it finishes");
+                        finished.store(true, Ordering::SeqCst);
+                    })
+                    .assured("the operation is admitted before the rebind publishes");
+            }
+        });
+        running_rx
+            .recv()
+            .assured("the admitted operation reports once it runs");
+
+        let rebinding = std::thread::spawn({
+            let authority = authority.clone();
+            let finished = finished.clone();
+            move || {
+                authority.rebind(StateReplicationRoles::owned_by(None), None);
+                finished.load(Ordering::SeqCst)
+            }
+        });
+        // The rebind has published its binding once the fence advances. From then on it waits for
+        // the admitted operation, which is released only afterwards.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while authority.current_binding().fence() == replaced.fence() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the rebind did not publish its binding within ten seconds"
+            );
+            std::thread::yield_now();
+        }
+        release_tx
+            .send(())
+            .assured("the admitted operation waits for its release");
+        admitted.join().assured("the admitted operation completes");
+        let finished_before_rebind_returned = rebinding.join().assured("the rebind completes");
+
+        assert!(
+            finished_before_rebind_returned,
+            "the rebind returned before the operation admitted under the replaced assignment \
+             finished"
+        );
+    }
+
+    #[test]
+    fn an_operation_under_a_replaced_assignment_is_refused() {
+        let authority = StateAssignmentAuthority::default();
+        let replaced = authority
+            .rebind(StateReplicationRoles::owned_by(None), None)
+            .token_for(StateCapability::Originate)
+            .assured("a state without roles is originated locally");
+        let current = authority
+            .rebind(StateReplicationRoles::owned_by(None), None)
+            .token_for(StateCapability::Originate)
+            .assured("a state without roles is originated locally");
+
+        assert!(
+            authority
+                .authorize(replaced, StateCapability::Originate, || ())
+                .is_err()
+        );
+        assert!(
+            authority
+                .authorize_exclusive(replaced, StateCapability::Originate, || ())
+                .is_err()
+        );
+        assert!(
+            authority
+                .authorize(current, StateCapability::Originate, || ())
+                .is_ok()
+        );
+        assert!(
+            authority
+                .authorize_exclusive(current, StateCapability::Originate, || ())
+                .is_ok()
+        );
+        assert!(
+            authority
+                .authorize(current, StateCapability::InstallSnapshot, || ())
+                .is_err()
         );
     }
 }
