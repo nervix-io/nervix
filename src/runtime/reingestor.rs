@@ -1247,6 +1247,15 @@ impl Runtime {
         let runtime = self.clone();
         let shutdown_rx = shutdown_tx.subscribe();
         let force_flush = self.force_flush_participant(domain, quiesce_counters.clone());
+        let physical_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
+        let input_metrics = self.inner.metrics.resolve_node_input_metrics(
+            domain,
+            ModelKind::Reingestor,
+            &ModelName::from(&reingestor.name),
+            &task_from_relay,
+            physical_node_id.as_ref(),
+            None,
+        );
 
         Ok(tokio::spawn(async move {
             let domain_clock = match runtime.bind_domain_clock(&task_domain) {
@@ -1402,40 +1411,22 @@ impl Runtime {
                             }
                         };
                         let delivery_observation = batch.delivery_observation(accepted_at);
-                        let physical_node_id =
-                            runtime.inner.remote_dispatch.local_node_id.read().clone();
-                        runtime
-                            .inner
-                            .metrics
-                            .observe_global_node_received(NodeBatchObservation {
-                                domain: &task_domain,
-                                kind: ModelKind::Reingestor,
-                                node: &task_reingestor_node,
-                                relay: &task_from_relay,
-                                physical_node_id: physical_node_id.as_ref(),
-                                messages: batch.message_count(),
-                                bytes: batch.estimated_bytes(),
-                                domain_timestamp: delivery_observation.domain_timestamp,
-                            });
+                        input_metrics.observe_batch(
+                            batch.message_count(),
+                            batch.estimated_bytes(),
+                            delivery_observation.domain_timestamp,
+                        );
                         runtime.mark_branch_aggregated_metrics_updated(
                             &task_domain,
                             ModelKind::Reingestor,
                             &task_reingestor_node,
                         );
-                        runtime
-                            .inner
-                            .metrics
-                            .observe_global_delivery_latencies_at_domain_time(
-                                NodeLatenciesObservation {
-                                    domain: &task_domain,
-                                    kind: ModelKind::Reingestor,
-                                    node: &task_reingestor_node,
-                                    relay: &task_from_relay,
-                                    physical_node_id: physical_node_id.as_ref(),
-                                    seconds: &delivery_observation.latency_seconds,
-                                    domain_timestamp: delivery_observation.domain_timestamp,
-                                },
+                        for seconds in delivery_observation.latency_seconds {
+                            input_metrics.observe_delivery_latency(
+                                seconds,
+                                delivery_observation.domain_timestamp,
                             );
+                        }
                         let dependency_error_acks = batch.acks.clone();
                         let wait_for_required_state = !interaction.is_terminal_drain();
                         let batch = match runtime

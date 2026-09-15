@@ -69,6 +69,7 @@ impl NatsIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
+        let metrics = dependencies.metrics;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
             .verified(
@@ -91,13 +92,17 @@ impl NatsIngestor {
             let task_output_routes = output_routes.clone();
             let task_filter_where = filter_where.clone();
             let task_codec = codec.clone();
+            let task_metrics = metrics.clone();
             let task_branched_senders = branched_senders.clone();
             let task_quiesce = quiesce.clone();
             let task = tokio::spawn(async move {
                 let _client_mounts = task_client_mounts;
                 let mut backoff = RuntimeReconnectBackoff::default();
-                let mut collector =
-                    IngestRouteCollector::new(IngestMetadataKind::Headers, INGEST_GROUP_MAX_ROWS);
+                let mut collector = IngestRouteCollector::new(
+                    IngestMetadataKind::Headers,
+                    INGEST_GROUP_MAX_ROWS,
+                    task_metrics,
+                );
 
                 info!(
                     domain = task_domain.as_str(),

@@ -81,6 +81,7 @@ pub(crate) struct LookupRuntime {
     pub(super) schema: Arc<CompiledSchema>,
     pub(super) batch: Arc<RuntimeRecordBatch>,
     pub(super) entries: Arc<HashMap<String, usize>>,
+    pub(super) metrics: MessageMetricsHandle,
 }
 
 #[derive(Debug, Clone)]

@@ -99,6 +99,7 @@ impl KafkaIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
+        let metrics = dependencies.metrics;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
             .verified(
@@ -301,6 +302,7 @@ impl KafkaIngestor {
             let task_output_routes = output_routes.clone();
             let task_filter_where = filter_where.clone();
             let task_codec = codec.clone();
+            let task_metrics = metrics.clone();
             let task_branched_senders = branched_runtime.senders.clone();
             let task_kafka_offset_state = kafka_offset_state.clone();
             let task_ack_mode = ack_mode.clone();
@@ -339,8 +341,14 @@ impl KafkaIngestor {
                 // executes once and becomes one Arrow batch per (relay, branch key)
                 // instead of entering the VM and downstream channel once per record.
                 // Size and idle-time bounds keep partial groups bounded.
-                let mut ingest_collector =
-                    IngestRouteCollector::new(IngestMetadataKind::Kafka, INGEST_GROUP_MAX_ROWS);
+                let mut ingest_collector = IngestRouteCollector::new(
+                    IngestMetadataKind::Kafka,
+                    INGEST_GROUP_MAX_ROWS,
+                    task_metrics.clone(),
+                );
+                let idle_flush = sleep_until(Instant::now());
+                tokio::pin!(idle_flush);
+                let mut idle_flush_armed = false;
 
                 'ingest: loop {
                     tokio::task::consume_budget().await;
@@ -492,8 +500,14 @@ impl KafkaIngestor {
                         }
                     }
                     let next_flush = ingest_collector.next_flush();
-                    let flush_at =
-                        next_flush.unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
+                    if let Some(flush_at) = next_flush {
+                        if !idle_flush_armed {
+                            idle_flush.as_mut().reset(flush_at);
+                            idle_flush_armed = true;
+                        }
+                    } else {
+                        idle_flush_armed = false;
+                    }
                     tokio::select! {
                         _ = task_quiesce.wait_for_change() => {
                             continue;
@@ -516,7 +530,16 @@ impl KafkaIngestor {
                                 continue;
                             }
                         }
-                        _ = sleep_until(flush_at), if next_flush.is_some() => {
+                        _ = &mut idle_flush, if idle_flush_armed => {
+                            let Some(flush_at) = ingest_collector.next_flush() else {
+                                idle_flush_armed = false;
+                                continue;
+                            };
+                            if Instant::now() < flush_at {
+                                idle_flush.as_mut().reset(flush_at);
+                                continue;
+                            }
+                            idle_flush_armed = false;
                             if let Err(error) = task_runtime.flush_ingest_collector(
                                 &task_domain,
                                 &task_ingestor,
@@ -700,8 +723,11 @@ impl KafkaIngestor {
                                             tokio::task::consume_budget().await;
                                                 // One acknowledged message is one group, and a replay
                                                 // decodes into the group it replays into.
-                                                let mut collector =
-                                                    IngestRouteCollector::new(IngestMetadataKind::Kafka, 1);
+                                                let mut collector = IngestRouteCollector::new(
+                                                    IngestMetadataKind::Kafka,
+                                                    1,
+                                                    task_metrics.clone(),
+                                                );
                                                 if let Err(error) = collector
                                                     .decode_payload(&task_codec, Cow::Borrowed(&payload))
                                                     .await
@@ -874,6 +900,7 @@ impl KafkaIngestor {
                                             let mut collector = IngestRouteCollector::new(
                                                 IngestMetadataKind::Kafka,
                                                 ack_parallel_limit.get(),
+                                                task_metrics.clone(),
                                             );
                                             let mut messages = Vec::with_capacity(ack_parallel_limit.get());
                                             trace_message(&message);

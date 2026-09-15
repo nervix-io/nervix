@@ -33,6 +33,7 @@ pub(super) struct IngestorDependencies {
     pub(super) filter_where: Option<CompiledProgramWithMaterializedInterest>,
     pub(super) codec: Arc<CompiledCodec>,
     pub(super) branched_templates: HashMap<RelayName, (SharedActiveGraph, IngestorRouteTemplate)>,
+    pub(super) metrics: MessageMetricsHandle,
 }
 
 pub(super) struct IngestGroupContext {
@@ -331,6 +332,7 @@ pub(super) struct IngestRouteCollector {
     /// The number of rows a group is expected to reach, used to size its metadata builders.
     pub(super) row_bound: usize,
     pub(super) context: Option<IngestGroupContext>,
+    metrics: MessageMetricsHandle,
     pub(super) pending: PendingIngestGroup,
     pub(super) routed: IndexMap<RoutedGroupKey, Vec<RelayMessage>, RandomState>,
     pub(super) flush_at: Option<Instant>,
@@ -341,11 +343,16 @@ impl IngestRouteCollector {
     ///
     /// Sources that flush one group per message or per poll pass their own bound so a
     /// short group does not size its builders for a streaming one.
-    pub(super) fn new(kind: IngestMetadataKind, row_bound: usize) -> Self {
+    pub(super) fn new(
+        kind: IngestMetadataKind,
+        row_bound: usize,
+        metrics: MessageMetricsHandle,
+    ) -> Self {
         Self {
             kind,
             row_bound,
             context: None,
+            metrics,
             pending: PendingIngestGroup::new(kind, row_bound),
             routed: IndexMap::with_hasher(RandomState::default()),
             flush_at: None,
@@ -536,10 +543,6 @@ pub(super) struct BranchedBranchSelection {
     pub(super) rows: Vec<usize>,
 }
 
-pub(super) struct BranchedBranchPlan {
-    pub(super) selections: Vec<BranchedBranchSelection>,
-}
-
 impl BranchedEntrypointBatch {
     pub(super) fn from_inputs(
         inputs: Vec<BranchedEntrypointInput>,
@@ -591,7 +594,7 @@ impl BranchedEntrypointBatch {
         })
     }
 
-    pub(super) fn branch_selections(&self) -> Result<BranchedBranchPlan, String> {
+    pub(super) fn branch_selections(&self) -> Result<Vec<BranchedBranchSelection>, String> {
         let mut selections = Vec::<BranchedBranchSelection>::new();
         let mut positions = HashMap::<Option<BranchKey>, usize>::default();
         for index in 0..self.metadata.len() {
@@ -607,7 +610,7 @@ impl BranchedEntrypointBatch {
             });
         }
 
-        Ok(BranchedBranchPlan { selections })
+        Ok(selections)
     }
 
     pub(super) fn filter_branch(
@@ -691,7 +694,7 @@ pub(super) async fn branched_entrypoint_batch_from_inputs_blocking(
 
 pub(super) async fn branched_branch_plan_blocking(
     input: Arc<BranchedEntrypointBatch>,
-) -> Result<BranchedBranchPlan, String> {
+) -> Result<Vec<BranchedBranchSelection>, String> {
     input.branch_selections()
 }
 
@@ -759,15 +762,7 @@ impl Runtime {
         if !services.is_owned_by(physical_node_id.as_ref()) {
             return services.dispatch_to_owner(domain, relay, batch).await;
         }
-        services
-            .enqueue_owner_batch(
-                &self.inner.metrics,
-                domain,
-                relay,
-                physical_node_id.as_ref(),
-                batch,
-            )
-            .await
+        services.enqueue_owner_batch(batch).await
     }
 
     /// Executes the collected ingest group, then builds one Arrow batch per (relay,
@@ -1084,21 +1079,12 @@ impl Runtime {
             .collect();
         let estimated_bytes = rows.batch.estimated_bytes();
         let row_count: u64 = rows.len().arch_into();
-        let bytes_per_row = estimated_bytes.checked_div(row_count).unwrap_or_default();
-        let extra_bytes = estimated_bytes.checked_rem(row_count).unwrap_or_default();
-        let ingestor_node = ModelName::from(ingestor);
-        let physical_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
-        self.inner
+        // One decoded group is one metrics recording unit. Its latest event time gives the
+        // rolling domain rate the group's high-water mark.
+        let domain_timestamp = event_timestamps.iter().copied().max();
+        collector
             .metrics
-            .observe_global_node_rows_without_stream_received(NodeRowsWithoutRelayObservation {
-                domain,
-                kind: ModelKind::Ingestor,
-                node: &ingestor_node,
-                physical_node_id: physical_node_id.as_ref(),
-                domain_timestamps: &event_timestamps,
-                bytes_per_row,
-                extra_bytes,
-            });
+            .observe(row_count, estimated_bytes, domain_timestamp);
         self.mark_branch_aggregated_metrics_updated(domain, ModelKind::Ingestor, ingestor);
 
         // Every route filters the same surviving group in one VM execution. Outcomes are
@@ -1595,6 +1581,17 @@ mod tests {
         .expect("the grouped event codec should compile")
     }
 
+    fn grouped_event_ingestor_metrics() -> MessageMetricsHandle {
+        let ingestor: IngestorName = named("grouped_event_source");
+        RuntimeMetrics::default().resolve_global_node_message_metrics(
+            &domain("default"),
+            ModelKind::Ingestor,
+            &ModelName::from(&ingestor),
+            None,
+            "received",
+        )
+    }
+
     /// Accepts the rows `collector` has decoded, as an ingestor does after a successful decode.
     fn accept_decoded_rows(
         collector: &mut IngestRouteCollector,
@@ -1621,7 +1618,11 @@ mod tests {
     #[tokio::test]
     async fn ingest_group_builds_one_record_column_set_for_all_of_its_messages() {
         let codec = grouped_event_codec();
-        let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 8);
+        let mut collector = IngestRouteCollector::new(
+            IngestMetadataKind::Headers,
+            8,
+            grouped_event_ingestor_metrics(),
+        );
 
         RECORD_BUILDER_SETS_OPENED.with(|count| count.set(0));
         RECORD_COLUMN_SETS_BUILT.with(|count| count.set(0));
@@ -1676,7 +1677,11 @@ mod tests {
     #[tokio::test]
     async fn ingest_group_accepts_its_decoded_rows_one_at_a_time() {
         let codec = grouped_event_codec();
-        let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 3);
+        let mut collector = IngestRouteCollector::new(
+            IngestMetadataKind::Headers,
+            3,
+            grouped_event_ingestor_metrics(),
+        );
 
         for user_id in 0..3i64 {
             collector
@@ -1715,7 +1720,11 @@ mod tests {
     #[tokio::test]
     async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode() {
         let codec = grouped_event_codec();
-        let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 8);
+        let mut collector = IngestRouteCollector::new(
+            IngestMetadataKind::Headers,
+            8,
+            grouped_event_ingestor_metrics(),
+        );
 
         collector
             .decode_payload(&codec, Cow::Borrowed(br#"{"user_id":1}"#))
@@ -1800,16 +1809,30 @@ mod tests {
             root_services.clone(),
             RelayRetention::default(),
         );
+        let root_key = Some(concrete_branch_key([(
+            named("tenant"),
+            RuntimeValue::String("acme".to_string()),
+        )]));
+        let root_source = named("metric_ingestor");
+        let root_metrics = runtime
+            .inner
+            .metrics
+            .resolve_node_batch_metrics(NodeBatchMetricsSpec {
+                domain: &root_domain,
+                kind: ModelKind::Ingestor,
+                node: &ModelName::from(&root_source),
+                relay: &root_relay,
+                physical_node_id: None,
+                direction: "sent",
+                branch_key: Some(branch_key_display(&root_key)),
+            });
         let mut root = BranchRuntime {
-            key: Some(concrete_branch_key([(
-                named("tenant"),
-                RuntimeValue::String("acme".to_string()),
-            )])),
+            key: root_key.clone(),
             runtime: runtime.clone(),
             domain: root_domain.clone(),
             domain_clock: test_domain_clock(&root_domain),
             source_kind: ModelKind::Ingestor,
-            source: named("metric_ingestor"),
+            source: root_source,
             root_relay: root_relay.clone(),
             error_policies: ErrorPolicies::handled_by_log(),
             relays: [(
@@ -1820,10 +1843,7 @@ mod tests {
                     relay: root_relay,
                     registry: root_registry,
                     services: root_services,
-                    key: Some(concrete_branch_key([(
-                        named("tenant"),
-                        RuntimeValue::String("acme".to_string()),
-                    )])),
+                    key: root_key,
                 }),
             )]
             .into_iter()
@@ -1831,6 +1851,12 @@ mod tests {
             materialized_states: HashMap::default(),
             relay_state_epoch: None,
             processors: HashMap::default(),
+            metrics: BranchRuntimeMetrics {
+                source: root_metrics,
+                source_input: None,
+                processor_inputs: HashMap::default(),
+                processor_outputs: HashMap::default(),
+            },
         };
         let graph = StdArc::new(ArcSwapOption::from(None));
         let (acks, completion) = AckSet::root();

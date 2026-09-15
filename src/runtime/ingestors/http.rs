@@ -92,6 +92,7 @@ impl HttpIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
+        let metrics = dependencies.metrics;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
             .verified(
@@ -135,8 +136,11 @@ impl HttpIngestor {
                     continue;
                 }
                 if let Some(payload) = task_quiesce.pop_buffered(0) {
-                    let mut collector =
-                        IngestRouteCollector::new(IngestMetadataKind::Headers, payload.len());
+                    let mut collector = IngestRouteCollector::new(
+                        IngestMetadataKind::Headers,
+                        payload.len(),
+                        metrics.clone(),
+                    );
                     if let Err(error) = task_runtime
                         .dispatch_raw_ingest_payload(RawIngestDispatch {
                             domain: &task_domain,
@@ -256,6 +260,7 @@ impl HttpIngestor {
                                             let mut collector = IngestRouteCollector::new(
                                                 IngestMetadataKind::Headers,
                                                 payload.len(),
+                                                metrics.clone(),
                                             );
                                             if let Err(error) = task_runtime
                                                 .dispatch_raw_ingest_payload(RawIngestDispatch {

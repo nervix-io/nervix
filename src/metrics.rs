@@ -33,10 +33,10 @@ use nervix_models::{
 use nervix_recovery::Discarded as _;
 use parking_lot::Mutex;
 use prometheus::{
-    Encoder, Gauge, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts, Registry,
-    TextEncoder,
+    Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGaugeVec,
+    Opts, Registry, TextEncoder,
     core::{Collector, Desc},
-    proto::MetricFamily,
+    proto::{MetricFamily, MetricType},
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use strum::{AsRefStr, EnumIter, IntoEnumIterator};
@@ -100,6 +100,8 @@ const BRANCH_EVICTION_PROMETHEUS_LABELS: &[&str] =
 const INGESTOR_QUIESCE_PROMETHEUS_LABELS: &[&str] = &["domain", "ingestor", "physical_node_id"];
 const NO_DOMAIN_TIMESTAMP: i64 = i64::MIN;
 const NO_HISTOGRAM_CAPACITY: u64 = u64::MAX;
+const NO_WALL_ELAPSED_NANOS: u64 = u64::MAX;
+const NO_EMA_VALUE_BITS: u64 = f64::NAN.to_bits();
 const ONE_MINUTE: Duration = Duration::from_secs(60);
 const FIFTEEN_MINUTES: Duration = Duration::from_secs(15 * 60);
 const RATE_DECAY_TAU_FRACTION: f64 = 20.0;
@@ -229,16 +231,18 @@ struct DomainEmaSnapshot {
 #[derive(Debug)]
 struct WallEma {
     tau_seconds: f64,
-    value: Option<f64>,
-    last_at: Option<Instant>,
+    series_started_at: Instant,
+    value_bits: AtomicU64,
+    last_elapsed_nanos: AtomicU64,
 }
 
 impl WallEma {
-    fn new(tau_seconds: f64) -> Self {
+    fn new(series_started_at: Instant, tau_seconds: f64) -> Self {
         Self {
             tau_seconds,
-            value: None,
-            last_at: None,
+            series_started_at,
+            value_bits: AtomicU64::new(NO_EMA_VALUE_BITS),
+            last_elapsed_nanos: AtomicU64::new(NO_WALL_ELAPSED_NANOS),
         }
     }
 
@@ -247,58 +251,87 @@ impl WallEma {
         series_started_at: Instant,
         tau_seconds: f64,
     ) -> Self {
+        let last_at = match snapshot
+            .last_at_wall_nanos
+            .and_then(instant_from_wall_unix_nanos)
+        {
+            Some(last_at) => Some(last_at),
+            None => snapshot
+                .last_elapsed_seconds
+                .map(|elapsed| instant_from_series_elapsed(series_started_at, elapsed)),
+        };
+        let series_started_at = match last_at {
+            Some(last_at) if last_at < series_started_at => last_at,
+            Some(_) | None => series_started_at,
+        };
+        let mut last_elapsed_nanos = NO_WALL_ELAPSED_NANOS;
+        if let Some(last_at) = last_at
+            && let Some(elapsed) = last_at.checked_duration_since(series_started_at)
+            && let Ok(elapsed_nanos) = u64::try_from(elapsed.as_nanos())
+        {
+            last_elapsed_nanos = elapsed_nanos;
+        }
         Self {
             tau_seconds,
-            value: snapshot.value,
-            last_at: match snapshot
-                .last_at_wall_nanos
-                .and_then(instant_from_wall_unix_nanos)
-            {
-                Some(last_at) => Some(last_at),
-                None => snapshot
-                    .last_elapsed_seconds
-                    .map(|elapsed| instant_from_series_elapsed(series_started_at, elapsed)),
-            },
+            series_started_at,
+            value_bits: AtomicU64::new(ema_value_bits(snapshot.value)),
+            last_elapsed_nanos: AtomicU64::new(last_elapsed_nanos),
         }
     }
 
-    fn observe_rate_delta(&mut self, delta: u64, now: Instant) {
-        let Some(last_at) = self.last_at.replace(now) else {
+    fn observe_rate_delta(&self, delta: u64, now: Instant) {
+        let Some(now_elapsed_nanos) = now
+            .checked_duration_since(self.series_started_at)
+            .and_then(|elapsed| u64::try_from(elapsed.as_nanos()).ok())
+        else {
             return;
         };
-        let elapsed_seconds = now.duration_since(last_at).as_secs_f64();
+        let Some(last_elapsed_nanos) =
+            advance_wall_elapsed(&self.last_elapsed_nanos, now_elapsed_nanos)
+        else {
+            return;
+        };
+        let elapsed_nanos = now_elapsed_nanos
+            .checked_sub(last_elapsed_nanos)
+            .verified("advance_wall_elapsed returns only an earlier elapsed timestamp");
+        let elapsed_seconds = Duration::from_nanos(elapsed_nanos).as_secs_f64();
         if elapsed_seconds <= 0.0 {
             return;
         }
-        self.observe_sample(
+        observe_ema_sample(
+            &self.value_bits,
             delta.approx_into::<f64>() / elapsed_seconds,
             elapsed_seconds,
+            self.tau_seconds,
         );
     }
 
-    fn observe_sample(&mut self, sample: f64, elapsed_seconds: f64) {
-        let Some(current) = self.value else {
-            self.value = Some(sample);
-            return;
-        };
-        let alpha = time_decay_alpha(elapsed_seconds, self.tau_seconds);
-        self.value = Some(current + alpha * (sample - current));
-    }
-
     fn value_at(&self, now: Instant) -> Option<f64> {
-        let value = self.value?;
-        let last_at = self.last_at?;
-        let elapsed_seconds = now.duration_since(last_at).as_secs_f64();
+        let value = load_ema_value(&self.value_bits)?;
+        let last_elapsed_nanos = self.last_elapsed_nanos.load(AtomicOrdering::Relaxed);
+        if last_elapsed_nanos == NO_WALL_ELAPSED_NANOS {
+            return None;
+        }
+        let now_elapsed_nanos = now
+            .checked_duration_since(self.series_started_at)
+            .and_then(|elapsed| u64::try_from(elapsed.as_nanos()).ok())?;
+        let elapsed_nanos = now_elapsed_nanos.checked_sub(last_elapsed_nanos)?;
+        let elapsed_seconds = Duration::from_nanos(elapsed_nanos).as_secs_f64();
         Some(value * decay_factor(elapsed_seconds, self.tau_seconds))
     }
 
-    fn to_snapshot(&self, series_started_at: Instant) -> WallEmaSnapshot {
+    fn to_snapshot(&self, _series_started_at: Instant) -> WallEmaSnapshot {
+        let last_elapsed_nanos = self.last_elapsed_nanos.load(AtomicOrdering::Relaxed);
+        let last_elapsed = if last_elapsed_nanos == NO_WALL_ELAPSED_NANOS {
+            None
+        } else {
+            Some(Duration::from_nanos(last_elapsed_nanos))
+        };
+        let last_at = last_elapsed.and_then(|elapsed| self.series_started_at.checked_add(elapsed));
         WallEmaSnapshot {
-            value: self.value,
-            last_elapsed_seconds: self
-                .last_at
-                .map(|last_at| last_at.duration_since(series_started_at).as_secs_f64()),
-            last_at_wall_nanos: self.last_at.and_then(wall_unix_nanos_from_instant),
+            value: load_ema_value(&self.value_bits),
+            last_elapsed_seconds: last_elapsed.map(|elapsed| elapsed.as_secs_f64()),
+            last_at_wall_nanos: last_at.and_then(wall_unix_nanos_from_instant),
         }
     }
 }
@@ -306,35 +339,38 @@ impl WallEma {
 #[derive(Debug)]
 struct DomainEma {
     tau_seconds: f64,
-    value: Option<f64>,
-    last_at_nanos: Option<i64>,
+    value_bits: AtomicU64,
+    last_at_nanos: AtomicI64,
 }
 
 impl DomainEma {
     fn new(tau_seconds: f64) -> Self {
         Self {
             tau_seconds,
-            value: None,
-            last_at_nanos: None,
+            value_bits: AtomicU64::new(NO_EMA_VALUE_BITS),
+            last_at_nanos: AtomicI64::new(NO_DOMAIN_TIMESTAMP),
         }
     }
 
     fn from_snapshot(snapshot: &DomainEmaSnapshot, tau_seconds: f64) -> Self {
         Self {
             tau_seconds,
-            value: snapshot.value,
-            last_at_nanos: snapshot.last_at_nanos,
+            value_bits: AtomicU64::new(ema_value_bits(snapshot.value)),
+            last_at_nanos: AtomicI64::new(snapshot.last_at_nanos.unwrap_or(NO_DOMAIN_TIMESTAMP)),
         }
     }
 
-    fn observe_rate_delta(&mut self, delta: u64, now: Timestamp) {
+    fn observe_rate_delta(&self, delta: u64, now: Timestamp) {
         let now = now.unix_nanos();
-        let Some(last_at) = self.last_at_nanos.replace(now) else {
+        if now == NO_DOMAIN_TIMESTAMP {
+            return;
+        }
+        let Some(last_at) = advance_domain_timestamp(&self.last_at_nanos, now) else {
             return;
         };
-        let Some(elapsed_nanos) = now.checked_sub(last_at) else {
-            return;
-        };
+        let elapsed_nanos = now
+            .checked_sub(last_at)
+            .verified("advance_domain_timestamp returns only an earlier domain timestamp");
         let Ok(elapsed_nanos) = u64::try_from(elapsed_nanos) else {
             return;
         };
@@ -342,24 +378,20 @@ impl DomainEma {
         if elapsed_seconds <= 0.0 {
             return;
         }
-        self.observe_sample(
+        observe_ema_sample(
+            &self.value_bits,
             delta.approx_into::<f64>() / elapsed_seconds,
             elapsed_seconds,
+            self.tau_seconds,
         );
     }
 
-    fn observe_sample(&mut self, sample: f64, elapsed_seconds: f64) {
-        let Some(current) = self.value else {
-            self.value = Some(sample);
-            return;
-        };
-        let alpha = time_decay_alpha(elapsed_seconds, self.tau_seconds);
-        self.value = Some(current + alpha * (sample - current));
-    }
-
     fn value_at(&self, now: Option<Timestamp>) -> Option<f64> {
-        let value = self.value?;
-        let last_at = self.last_at_nanos?;
+        let value = load_ema_value(&self.value_bits)?;
+        let last_at = self.last_at_nanos.load(AtomicOrdering::Relaxed);
+        if last_at == NO_DOMAIN_TIMESTAMP {
+            return None;
+        }
         let now = now?.unix_nanos();
         let elapsed_nanos = now.checked_sub(last_at)?;
         let Ok(elapsed_nanos) = u64::try_from(elapsed_nanos) else {
@@ -370,9 +402,62 @@ impl DomainEma {
     }
 
     fn to_snapshot(&self) -> DomainEmaSnapshot {
+        let last_at_nanos = self.last_at_nanos.load(AtomicOrdering::Relaxed);
         DomainEmaSnapshot {
-            value: self.value,
-            last_at_nanos: self.last_at_nanos,
+            value: load_ema_value(&self.value_bits),
+            last_at_nanos: (last_at_nanos != NO_DOMAIN_TIMESTAMP).then_some(last_at_nanos),
+        }
+    }
+}
+
+fn advance_wall_elapsed(target: &AtomicU64, elapsed_nanos: u64) -> Option<u64> {
+    if elapsed_nanos == NO_WALL_ELAPSED_NANOS {
+        return None;
+    }
+    let mut current = target.load(AtomicOrdering::Relaxed);
+    loop {
+        if current != NO_WALL_ELAPSED_NANOS && elapsed_nanos <= current {
+            return None;
+        }
+        match target.compare_exchange_weak(
+            current,
+            elapsed_nanos,
+            AtomicOrdering::Relaxed,
+            AtomicOrdering::Relaxed,
+        ) {
+            Ok(previous) => {
+                if previous == NO_WALL_ELAPSED_NANOS {
+                    return None;
+                }
+                return Some(previous);
+            }
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+fn advance_domain_timestamp(target: &AtomicI64, timestamp: i64) -> Option<i64> {
+    if timestamp == NO_DOMAIN_TIMESTAMP {
+        return None;
+    }
+    let mut current = target.load(AtomicOrdering::Relaxed);
+    loop {
+        if current != NO_DOMAIN_TIMESTAMP && timestamp <= current {
+            return None;
+        }
+        match target.compare_exchange_weak(
+            current,
+            timestamp,
+            AtomicOrdering::Relaxed,
+            AtomicOrdering::Relaxed,
+        ) {
+            Ok(previous) => {
+                if previous == NO_DOMAIN_TIMESTAMP {
+                    return None;
+                }
+                return Some(previous);
+            }
+            Err(observed) => current = observed,
         }
     }
 }
@@ -394,10 +479,10 @@ struct RollingRates {
 }
 
 impl RollingRates {
-    fn new() -> Self {
+    fn new(series_started_at: Instant) -> Self {
         Self {
-            wall_1m: WallEma::new(rate_decay_tau_seconds(ONE_MINUTE)),
-            wall_15m: WallEma::new(rate_decay_tau_seconds(FIFTEEN_MINUTES)),
+            wall_1m: WallEma::new(series_started_at, rate_decay_tau_seconds(ONE_MINUTE)),
+            wall_15m: WallEma::new(series_started_at, rate_decay_tau_seconds(FIFTEEN_MINUTES)),
             domain_1m: DomainEma::new(rate_decay_tau_seconds(ONE_MINUTE)),
             domain_15m: DomainEma::new(rate_decay_tau_seconds(FIFTEEN_MINUTES)),
         }
@@ -405,7 +490,7 @@ impl RollingRates {
 
     fn from_snapshot(snapshot: Option<&RollingRatesSnapshot>, series_started_at: Instant) -> Self {
         let Some(snapshot) = snapshot else {
-            return Self::new();
+            return Self::new(series_started_at);
         };
         Self {
             wall_1m: WallEma::from_snapshot(
@@ -429,7 +514,7 @@ impl RollingRates {
         }
     }
 
-    fn observe(&mut self, delta: u64, domain_timestamp: Option<Timestamp>) {
+    fn observe(&self, delta: u64, domain_timestamp: Option<Timestamp>) {
         let now = Instant::now();
         self.wall_1m.observe_rate_delta(delta, now);
         self.wall_15m.observe_rate_delta(delta, now);
@@ -766,6 +851,7 @@ struct RollingHistogramsSnapshot {
 
 #[derive(Debug)]
 struct RollingHistograms {
+    observed: bool,
     wall_1m: WallRollingHistogram,
     wall_15m: WallRollingHistogram,
     domain_1m: DomainRollingHistogram,
@@ -775,6 +861,7 @@ struct RollingHistograms {
 impl RollingHistograms {
     fn new(buckets: &'static [f64]) -> Self {
         Self {
+            observed: false,
             wall_1m: WallRollingHistogram::new(ONE_MINUTE, WALL_HISTOGRAM_1M_STEP, buckets),
             wall_15m: WallRollingHistogram::new(FIFTEEN_MINUTES, WALL_HISTOGRAM_15M_STEP, buckets),
             domain_1m: DomainRollingHistogram::new(ONE_MINUTE, DOMAIN_HISTOGRAM_1M_STEP, buckets),
@@ -795,6 +882,7 @@ impl RollingHistograms {
             return Self::new(buckets);
         };
         Self {
+            observed: true,
             wall_1m: WallRollingHistogram::from_snapshot(
                 &snapshot.wall_1m,
                 ONE_MINUTE,
@@ -823,6 +911,7 @@ impl RollingHistograms {
     }
 
     fn observe(&mut self, value: f64, domain_timestamp: Option<Timestamp>) {
+        self.observed = true;
         self.wall_1m.observe(value);
         self.wall_15m.observe(value);
         if let Some(domain_timestamp) = domain_timestamp {
@@ -847,6 +936,10 @@ impl RollingHistograms {
             domain_1m: self.domain_1m.to_snapshot(),
             domain_15m: self.domain_15m.to_snapshot(),
         }
+    }
+
+    fn was_observed(&self) -> bool {
+        self.observed
     }
 }
 
@@ -951,17 +1044,18 @@ struct CounterSeries {
     domain_started_at_nanos: AtomicI64,
     domain_last_at_nanos: AtomicI64,
     value: AtomicU64,
-    rolling: Mutex<RollingRates>,
+    rolling: RollingRates,
 }
 
 impl Default for CounterSeries {
     fn default() -> Self {
+        let started_at = Instant::now();
         Self {
-            started_at: Instant::now(),
+            started_at,
             domain_started_at_nanos: AtomicI64::new(NO_DOMAIN_TIMESTAMP),
             domain_last_at_nanos: AtomicI64::new(NO_DOMAIN_TIMESTAMP),
             value: AtomicU64::new(0),
-            rolling: Mutex::new(RollingRates::new()),
+            rolling: RollingRates::new(started_at),
         }
     }
 }
@@ -986,17 +1080,14 @@ impl CounterSeries {
                 snapshot.domain_last_at_nanos.unwrap_or(NO_DOMAIN_TIMESTAMP),
             ),
             value: AtomicU64::new(snapshot.value),
-            rolling: Mutex::new(RollingRates::from_snapshot(
-                snapshot.rolling.as_ref(),
-                started_at,
-            )),
+            rolling: RollingRates::from_snapshot(snapshot.rolling.as_ref(), started_at),
         }
     }
 
     fn increment(&self, value: u64, domain_timestamp: Option<Timestamp>) {
         self.value.fetch_add(value, AtomicOrdering::Relaxed);
         self.observe_domain_timestamp(domain_timestamp);
-        self.rolling.lock().observe(value, domain_timestamp);
+        self.rolling.observe(value, domain_timestamp);
     }
 
     fn observe_domain_timestamp(&self, domain_timestamp: Option<Timestamp>) {
@@ -1016,7 +1107,7 @@ impl CounterSeries {
             started_at_wall_nanos: wall_unix_nanos_from_instant(self.started_at),
             domain_started_at_nanos: optional_domain_timestamp(&self.domain_started_at_nanos),
             domain_last_at_nanos: optional_domain_timestamp(&self.domain_last_at_nanos),
-            rolling: Some(self.rolling.lock().to_snapshot(self.started_at)),
+            rolling: Some(self.rolling.to_snapshot(self.started_at)),
             value: self.value.load(AtomicOrdering::Relaxed),
         }
     }
@@ -1031,7 +1122,7 @@ impl CounterSeries {
                 &self.domain_started_at_nanos,
                 &self.domain_last_at_nanos,
             ),
-            rolling: self.rolling.lock().summary(
+            rolling: self.rolling.summary(
                 optional_domain_timestamp(&self.domain_last_at_nanos)
                     .map(Timestamp::from_unix_nanos),
             ),
@@ -1133,6 +1224,10 @@ impl HistogramSeries {
             capacity: optional_histogram_capacity(&self.capacity),
             rolling_histograms: self.rolling_histograms.lock().summary(domain_timestamp),
         }
+    }
+
+    fn was_observed(&self) -> bool {
+        self.rolling_histograms.lock().was_observed()
     }
 }
 
@@ -1551,66 +1646,39 @@ impl PrometheusMetrics {
         }
     }
 
-    fn register_counter(&self, key: &MetricKey) {
+    fn counter(&self, key: &MetricKey) -> Option<IntCounter> {
         match key.metric {
-            MESSAGES_TOTAL => {
+            MESSAGES_TOTAL => Some(
                 self.messages_total
-                    .with_label_values(&prometheus_label_values(key));
-            }
-            BATCHES_TOTAL => {
+                    .with_label_values(&prometheus_label_values(key)),
+            ),
+            BATCHES_TOTAL => Some(
                 self.batches_total
-                    .with_label_values(&prometheus_label_values(key));
-            }
-            BYTES_TOTAL => {
+                    .with_label_values(&prometheus_label_values(key)),
+            ),
+            BYTES_TOTAL => Some(
                 self.bytes_total
-                    .with_label_values(&prometheus_label_values(key));
-            }
-            _ => {}
+                    .with_label_values(&prometheus_label_values(key)),
+            ),
+            _ => None,
         }
     }
 
-    fn increment_counter(&self, key: &MetricKey, value: u64) {
+    fn histogram(&self, key: &MetricKey) -> Option<Histogram> {
         match key.metric {
-            MESSAGES_TOTAL => self
-                .messages_total
-                .with_label_values(&prometheus_label_values(key))
-                .inc_by(value),
-            BATCHES_TOTAL => self
-                .batches_total
-                .with_label_values(&prometheus_label_values(key))
-                .inc_by(value),
-            BYTES_TOTAL => self
-                .bytes_total
-                .with_label_values(&prometheus_label_values(key))
-                .inc_by(value),
-            _ => {}
-        }
-    }
-
-    fn observe_histogram(&self, key: &MetricKey, value: f64) {
-        if !value.is_finite() {
-            return;
-        }
-        match key.metric {
-            MESSAGES_PER_BATCH => self
-                .messages_per_batch
-                .with_label_values(&prometheus_label_values(key))
-                .observe(value),
-            DELIVERY_LATENCY_SECONDS => self
-                .delivery_latency_seconds
-                .with_label_values(&prometheus_label_values(key))
-                .observe(value),
-            RELAY_BUFFER_LEN => self
-                .relay_buffer_len
-                .with_label_values(&prometheus_label_values(key))
-                .observe(value),
-            _ => {}
-        }
-    }
-
-    fn observe_histograms(&self, key: &MetricKey, values: &[f64]) {
-        for value in values {
-            self.observe_histogram(key, *value);
+            MESSAGES_PER_BATCH => Some(
+                self.messages_per_batch
+                    .with_label_values(&prometheus_label_values(key)),
+            ),
+            DELIVERY_LATENCY_SECONDS => Some(
+                self.delivery_latency_seconds
+                    .with_label_values(&prometheus_label_values(key)),
+            ),
+            RELAY_BUFFER_LEN => Some(
+                self.relay_buffer_len
+                    .with_label_values(&prometheus_label_values(key)),
+            ),
+            _ => None,
         }
     }
 
@@ -1659,7 +1727,16 @@ impl PrometheusMetrics {
 
     fn text(&self) -> String {
         let encoder = TextEncoder::new();
-        let metric_families = self.registry.gather();
+        let mut metric_families = self.registry.gather();
+        for family in &mut metric_families {
+            if family.get_field_type() != MetricType::HISTOGRAM {
+                continue;
+            }
+            family
+                .mut_metric()
+                .retain(|metric| metric.get_histogram().sample_count() > 0);
+        }
+        metric_families.retain(|family| !family.get_metric().is_empty());
         let mut buffer = Vec::new();
         if encoder.encode(&metric_families, &mut buffer).is_err() {
             return String::new();
@@ -1843,83 +1920,533 @@ struct MetricHistogramSnapshot {
     sum: f64,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct NodeBatchObservation<'a> {
-    pub domain: &'a DomainName,
-    pub kind: ModelKind,
-    pub node: &'a ModelName,
-    pub relay: &'a RelayName,
-    pub physical_node_id: Option<&'a ClusterNodeName>,
-    pub messages: u64,
-    pub bytes: u64,
-    pub domain_timestamp: Option<Timestamp>,
+#[derive(Debug)]
+struct CounterRecorder {
+    /// The registry owns this series independently so snapshots and descriptions can outlive the
+    /// task handle that records it.
+    series: Arc<CounterSeries>,
+    prometheus: Option<IntCounter>,
+}
+
+impl CounterRecorder {
+    fn increment(&self, value: u64, domain_timestamp: Option<Timestamp>) {
+        self.series.increment(value, domain_timestamp);
+        if let Some(prometheus) = &self.prometheus {
+            prometheus.inc_by(value);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CounterRecorders {
+    primary: CounterRecorder,
+    secondary: Option<CounterRecorder>,
+}
+
+impl CounterRecorders {
+    fn increment(&self, value: u64, domain_timestamp: Option<Timestamp>) {
+        self.primary.increment(value, domain_timestamp);
+        if let Some(secondary) = &self.secondary {
+            secondary.increment(value, domain_timestamp);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct HistogramRecorder {
+    /// The registry owns this series independently so snapshots and descriptions can outlive the
+    /// task handle that records it.
+    series: Arc<HistogramSeries>,
+    prometheus: Option<Histogram>,
+}
+
+impl HistogramRecorder {
+    fn observe(&self, value: f64, capacity: Option<u64>, domain_timestamp: Option<Timestamp>) {
+        if !value.is_finite() {
+            return;
+        }
+        self.series
+            .observe_with_capacity(value, capacity, domain_timestamp);
+        if let Some(prometheus) = &self.prometheus {
+            prometheus.observe(value);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct HistogramRecorders {
+    primary: HistogramRecorder,
+    secondary: Option<HistogramRecorder>,
+}
+
+impl HistogramRecorders {
+    fn observe(&self, value: f64, capacity: Option<u64>, domain_timestamp: Option<Timestamp>) {
+        self.primary.observe(value, capacity, domain_timestamp);
+        if let Some(secondary) = &self.secondary {
+            secondary.observe(value, capacity, domain_timestamp);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BatchMetricRecorders {
+    messages: CounterRecorders,
+    batches: CounterRecorders,
+    bytes: CounterRecorders,
+    messages_per_batch: HistogramRecorders,
+}
+
+/// A task-local handle for one node/relay/direction label set.
+///
+/// Every map lookup, label construction and Prometheus child lookup happens when this handle is
+/// resolved. Recording through it touches only the resolved series.
+#[derive(Debug, Clone)]
+pub(crate) struct BatchMetricsHandle {
+    inner: Arc<BatchMetricRecorders>,
+}
+
+impl BatchMetricsHandle {
+    pub(crate) fn observe(&self, messages: u64, bytes: u64, domain_timestamp: Option<Timestamp>) {
+        self.inner.messages.increment(messages, domain_timestamp);
+        self.inner.batches.increment(1, domain_timestamp);
+        self.inner.bytes.increment(bytes, domain_timestamp);
+        self.inner
+            .messages_per_batch
+            .observe(messages.approx_into(), None, domain_timestamp);
+    }
+}
+
+#[derive(Debug)]
+struct MessageMetricRecorders {
+    messages: CounterRecorders,
+    bytes: CounterRecorders,
+}
+
+/// A task-local handle for node observations that have no relay batch boundary.
+#[derive(Debug, Clone)]
+pub(crate) struct MessageMetricsHandle {
+    inner: Arc<MessageMetricRecorders>,
+}
+
+impl MessageMetricsHandle {
+    pub(crate) fn observe(&self, messages: u64, bytes: u64, domain_timestamp: Option<Timestamp>) {
+        self.inner.messages.increment(messages, domain_timestamp);
+        self.inner.bytes.increment(bytes, domain_timestamp);
+    }
+}
+
+#[derive(Debug)]
+struct NodeInputMetricRecorders {
+    batch: BatchMetricRecorders,
+    delivery_latency: HistogramRecorders,
+}
+
+/// A task-local handle for one node input edge, including delivery latency.
+#[derive(Debug, Clone)]
+pub(crate) struct NodeInputMetricsHandle {
+    inner: Arc<NodeInputMetricRecorders>,
+}
+
+impl NodeInputMetricsHandle {
+    pub(crate) fn observe_batch(
+        &self,
+        messages: u64,
+        bytes: u64,
+        domain_timestamp: Option<Timestamp>,
+    ) {
+        self.inner
+            .batch
+            .messages
+            .increment(messages, domain_timestamp);
+        self.inner.batch.batches.increment(1, domain_timestamp);
+        self.inner.batch.bytes.increment(bytes, domain_timestamp);
+        self.inner
+            .batch
+            .messages_per_batch
+            .observe(messages.approx_into(), None, domain_timestamp);
+    }
+
+    pub(crate) fn observe_delivery_latency(
+        &self,
+        seconds: f64,
+        domain_timestamp: Option<Timestamp>,
+    ) {
+        self.inner
+            .delivery_latency
+            .observe(seconds, None, domain_timestamp);
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RelayMetricRecorders {
+    batch: BatchMetricRecorders,
+    buffer: HistogramRecorders,
+}
+
+/// A task-local handle for one relay and concrete branch.
+#[derive(Debug, Clone)]
+pub(crate) struct RelayMetricsHandle {
+    inner: Arc<RelayMetricRecorders>,
+}
+
+impl RelayMetricsHandle {
+    pub(crate) fn from_recorders(inner: Arc<RelayMetricRecorders>) -> Self {
+        Self { inner }
+    }
+
+    pub(crate) fn observe_batch(
+        &self,
+        messages: u64,
+        bytes: u64,
+        domain_timestamp: Option<Timestamp>,
+    ) {
+        self.inner
+            .batch
+            .messages
+            .increment(messages, domain_timestamp);
+        self.inner.batch.batches.increment(1, domain_timestamp);
+        self.inner.batch.bytes.increment(bytes, domain_timestamp);
+        self.inner
+            .batch
+            .messages_per_batch
+            .observe(messages.approx_into(), None, domain_timestamp);
+    }
+
+    pub(crate) fn observe_buffer(&self, len: usize, capacity: usize) {
+        self.inner
+            .buffer
+            .observe(len.approx_into(), Some(capacity.arch_into()), None);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct NodeWithoutRelayObservation<'a> {
-    pub domain: &'a DomainName,
-    pub kind: ModelKind,
-    pub node: &'a ModelName,
-    pub physical_node_id: Option<&'a ClusterNodeName>,
-    pub messages: u64,
-    pub bytes: u64,
-    pub domain_timestamp: Option<Timestamp>,
+enum RecordingScope<'a> {
+    Global,
+    Branch(&'a str),
+    GlobalAndBranch(&'a str),
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct NodeRowsWithoutRelayObservation<'a> {
-    pub domain: &'a DomainName,
-    pub kind: ModelKind,
-    pub node: &'a ModelName,
-    pub physical_node_id: Option<&'a ClusterNodeName>,
-    pub domain_timestamps: &'a [Timestamp],
-    pub bytes_per_row: u64,
-    pub extra_bytes: u64,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct RelayBatchObservation<'a> {
-    pub domain: &'a DomainName,
-    pub relay: &'a RelayName,
-    pub physical_node_id: Option<&'a ClusterNodeName>,
-    pub messages: u64,
-    pub bytes: u64,
-    pub domain_timestamp: Option<Timestamp>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct RelayBufferObservation<'a> {
-    pub domain: &'a DomainName,
-    pub relay: &'a RelayName,
-    pub physical_node_id: Option<&'a ClusterNodeName>,
-    pub direction: &'static str,
-    pub len: usize,
-    pub capacity: usize,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct NodeLatencyObservation<'a> {
-    pub domain: &'a DomainName,
-    pub kind: ModelKind,
-    pub node: &'a ModelName,
-    pub relay: &'a RelayName,
-    pub physical_node_id: Option<&'a ClusterNodeName>,
-    pub seconds: f64,
-    pub domain_timestamp: Option<Timestamp>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct NodeLatenciesObservation<'a> {
-    pub domain: &'a DomainName,
-    pub kind: ModelKind,
-    pub node: &'a ModelName,
-    pub relay: &'a RelayName,
-    pub physical_node_id: Option<&'a ClusterNodeName>,
-    pub seconds: &'a [f64],
-    pub domain_timestamp: Option<Timestamp>,
+pub(crate) struct NodeBatchMetricsSpec<'a> {
+    pub(crate) domain: &'a DomainName,
+    pub(crate) kind: ModelKind,
+    pub(crate) node: &'a ModelName,
+    pub(crate) relay: &'a RelayName,
+    pub(crate) physical_node_id: Option<&'a ClusterNodeName>,
+    pub(crate) direction: &'static str,
+    pub(crate) branch_key: Option<&'a str>,
 }
 
 impl RuntimeMetrics {
+    pub(crate) fn resolve_node_batch_metrics(
+        &self,
+        spec: NodeBatchMetricsSpec<'_>,
+    ) -> BatchMetricsHandle {
+        let NodeBatchMetricsSpec {
+            domain,
+            kind,
+            node,
+            relay,
+            physical_node_id,
+            direction,
+            branch_key,
+        } = spec;
+        let scope = match branch_key {
+            Some(branch_key) => RecordingScope::GlobalAndBranch(branch_key),
+            None => RecordingScope::Global,
+        };
+        self.resolve_batch_metrics(
+            MetricKey::node(
+                domain,
+                kind,
+                node,
+                physical_node_id,
+                relay,
+                direction,
+                MESSAGES_TOTAL,
+            ),
+            scope,
+        )
+    }
+
+    pub(crate) fn resolve_global_node_message_metrics(
+        &self,
+        domain: &DomainName,
+        kind: ModelKind,
+        node: &ModelName,
+        physical_node_id: Option<&ClusterNodeName>,
+        direction: &'static str,
+    ) -> MessageMetricsHandle {
+        self.resolve_message_metrics(
+            MetricKey::node_without_stream(
+                domain,
+                kind,
+                node,
+                physical_node_id,
+                direction,
+                MESSAGES_TOTAL,
+            ),
+            RecordingScope::Global,
+        )
+    }
+
+    pub(crate) fn resolve_branch_node_message_metrics(
+        &self,
+        domain: &DomainName,
+        kind: ModelKind,
+        node: &ModelName,
+        physical_node_id: Option<&ClusterNodeName>,
+        direction: &'static str,
+        branch_key: &str,
+    ) -> MessageMetricsHandle {
+        self.resolve_message_metrics(
+            MetricKey::node_without_stream(
+                domain,
+                kind,
+                node,
+                physical_node_id,
+                direction,
+                MESSAGES_TOTAL,
+            ),
+            RecordingScope::Branch(branch_key),
+        )
+    }
+
+    pub(crate) fn resolve_node_input_metrics(
+        &self,
+        domain: &DomainName,
+        kind: ModelKind,
+        node: &ModelName,
+        relay: &RelayName,
+        physical_node_id: Option<&ClusterNodeName>,
+        branch_key: Option<&str>,
+    ) -> NodeInputMetricsHandle {
+        let scope = match branch_key {
+            Some(branch_key) => RecordingScope::GlobalAndBranch(branch_key),
+            None => RecordingScope::Global,
+        };
+        let messages_key = MetricKey::node(
+            domain,
+            kind,
+            node,
+            physical_node_id,
+            relay,
+            "received",
+            MESSAGES_TOTAL,
+        );
+        NodeInputMetricsHandle {
+            inner: Arc::new(NodeInputMetricRecorders {
+                batch: self.resolve_batch_metric_recorders(messages_key.clone(), scope),
+                delivery_latency: self.resolve_histogram_recorders(
+                    with_metric(&messages_key, DELIVERY_LATENCY_SECONDS),
+                    scope,
+                ),
+            }),
+        }
+    }
+
+    pub(crate) fn resolve_relay_metrics(
+        &self,
+        domain: &DomainName,
+        relay: &RelayName,
+        physical_node_id: Option<&ClusterNodeName>,
+        direction: &'static str,
+        branch_key: Option<&str>,
+    ) -> RelayMetricsHandle {
+        RelayMetricsHandle {
+            inner: Arc::new(self.resolve_relay_metric_recorders(
+                domain,
+                relay,
+                physical_node_id,
+                direction,
+                branch_key,
+            )),
+        }
+    }
+
+    pub(crate) fn resolve_relay_metric_recorders(
+        &self,
+        domain: &DomainName,
+        relay: &RelayName,
+        physical_node_id: Option<&ClusterNodeName>,
+        direction: &'static str,
+        branch_key: Option<&str>,
+    ) -> RelayMetricRecorders {
+        let scope = match branch_key {
+            Some(branch_key) => RecordingScope::GlobalAndBranch(branch_key),
+            None => RecordingScope::Global,
+        };
+        let messages_key =
+            MetricKey::relay(domain, relay, physical_node_id, "received", MESSAGES_TOTAL);
+        RelayMetricRecorders {
+            batch: self.resolve_batch_metric_recorders(messages_key, scope),
+            buffer: self.resolve_histogram_recorders(
+                MetricKey::relay(domain, relay, physical_node_id, direction, RELAY_BUFFER_LEN),
+                scope,
+            ),
+        }
+    }
+
+    fn resolve_batch_metrics(
+        &self,
+        messages_key: MetricKey,
+        scope: RecordingScope<'_>,
+    ) -> BatchMetricsHandle {
+        let recorders = self.resolve_batch_metric_recorders(messages_key, scope);
+        BatchMetricsHandle {
+            inner: Arc::new(recorders),
+        }
+    }
+
+    fn resolve_batch_metric_recorders(
+        &self,
+        messages_key: MetricKey,
+        scope: RecordingScope<'_>,
+    ) -> BatchMetricRecorders {
+        BatchMetricRecorders {
+            messages: self.resolve_counter_recorders(messages_key.clone(), scope),
+            batches: self
+                .resolve_counter_recorders(with_metric(&messages_key, BATCHES_TOTAL), scope),
+            bytes: self.resolve_counter_recorders(with_metric(&messages_key, BYTES_TOTAL), scope),
+            messages_per_batch: self
+                .resolve_histogram_recorders(with_metric(&messages_key, MESSAGES_PER_BATCH), scope),
+        }
+    }
+
+    fn resolve_message_metrics(
+        &self,
+        messages_key: MetricKey,
+        scope: RecordingScope<'_>,
+    ) -> MessageMetricsHandle {
+        let recorders = MessageMetricRecorders {
+            messages: self.resolve_counter_recorders(messages_key.clone(), scope),
+            bytes: self.resolve_counter_recorders(with_metric(&messages_key, BYTES_TOTAL), scope),
+        };
+        MessageMetricsHandle {
+            inner: Arc::new(recorders),
+        }
+    }
+
+    fn resolve_counter_recorders(
+        &self,
+        key: MetricKey,
+        scope: RecordingScope<'_>,
+    ) -> CounterRecorders {
+        match scope {
+            RecordingScope::Global => CounterRecorders {
+                primary: self.resolve_global_counter(key),
+                secondary: None,
+            },
+            RecordingScope::Branch(branch_key) => CounterRecorders {
+                primary: self.resolve_branch_counter(branch_key, key),
+                secondary: None,
+            },
+            RecordingScope::GlobalAndBranch(branch_key) => CounterRecorders {
+                primary: self.resolve_global_counter(key.clone()),
+                secondary: Some(self.resolve_branch_counter(branch_key, key)),
+            },
+        }
+    }
+
+    fn resolve_histogram_recorders(
+        &self,
+        key: MetricKey,
+        scope: RecordingScope<'_>,
+    ) -> HistogramRecorders {
+        match scope {
+            RecordingScope::Global => HistogramRecorders {
+                primary: self.resolve_global_histogram(key),
+                secondary: None,
+            },
+            RecordingScope::Branch(branch_key) => HistogramRecorders {
+                primary: self.resolve_branch_histogram(branch_key, key),
+                secondary: None,
+            },
+            RecordingScope::GlobalAndBranch(branch_key) => HistogramRecorders {
+                primary: self.resolve_global_histogram(key.clone()),
+                secondary: Some(self.resolve_branch_histogram(branch_key, key)),
+            },
+        }
+    }
+
+    fn resolve_global_counter(&self, key: MetricKey) -> CounterRecorder {
+        let prometheus = self
+            .series
+            .prometheus
+            .counter(&key)
+            .assured("counter metric keys are built with one of the three counter constants");
+        let series = match self.series.counters.entry(key) {
+            Entry::Occupied(entry) => Arc::clone(entry.get()),
+            Entry::Vacant(entry) => {
+                let series = Arc::new(CounterSeries::default());
+                entry.insert(Arc::clone(&series));
+                series
+            }
+        };
+        CounterRecorder {
+            series,
+            prometheus: Some(prometheus),
+        }
+    }
+
+    fn resolve_branch_counter(&self, branch_key: &str, key: MetricKey) -> CounterRecorder {
+        let key = BranchMetricKey {
+            branch_key: branch_key.to_string(),
+            key,
+        };
+        let series = match self.series.branch_counters.entry(key) {
+            Entry::Occupied(entry) => Arc::clone(entry.get()),
+            Entry::Vacant(entry) => {
+                let series = Arc::new(CounterSeries::default());
+                entry.insert(Arc::clone(&series));
+                series
+            }
+        };
+        CounterRecorder {
+            series,
+            prometheus: None,
+        }
+    }
+
+    fn resolve_global_histogram(&self, key: MetricKey) -> HistogramRecorder {
+        let prometheus =
+            self.series.prometheus.histogram(&key).assured(
+                "histogram metric keys are built with one of the three histogram constants",
+            );
+        let buckets = internal_buckets_for_metric(key.metric);
+        let series = match self.series.histograms.entry(key) {
+            Entry::Occupied(entry) => Arc::clone(entry.get()),
+            Entry::Vacant(entry) => {
+                let series = Arc::new(HistogramSeries::new(buckets));
+                entry.insert(Arc::clone(&series));
+                series
+            }
+        };
+        HistogramRecorder {
+            series,
+            prometheus: Some(prometheus),
+        }
+    }
+
+    fn resolve_branch_histogram(&self, branch_key: &str, key: MetricKey) -> HistogramRecorder {
+        let buckets = internal_buckets_for_metric(key.metric);
+        let key = BranchMetricKey {
+            branch_key: branch_key.to_string(),
+            key,
+        };
+        let series = match self.series.branch_histograms.entry(key) {
+            Entry::Occupied(entry) => Arc::clone(entry.get()),
+            Entry::Vacant(entry) => {
+                let series = Arc::new(HistogramSeries::new(buckets));
+                entry.insert(Arc::clone(&series));
+                series
+            }
+        };
+        HistogramRecorder {
+            series,
+            prometheus: None,
+        }
+    }
+
     pub(crate) fn register_ingestor_quiesce(
         &self,
         domain: &DomainName,
@@ -2220,385 +2747,6 @@ impl RuntimeMetrics {
             .retain(|key, _| !key.key.belongs_to_relay(domain, relay));
     }
 
-    pub fn observe_global_stream_received(
-        &self,
-        domain: &DomainName,
-        relay: &RelayName,
-        physical_node_id: Option<&ClusterNodeName>,
-        messages: u64,
-        bytes: u64,
-        domain_timestamp: Option<Timestamp>,
-    ) {
-        self.observe_batch(
-            MetricKey::relay(domain, relay, physical_node_id, "received", MESSAGES_TOTAL),
-            messages,
-            bytes,
-            domain_timestamp,
-        );
-    }
-
-    pub fn observe_global_node_sent(&self, observation: NodeBatchObservation<'_>) {
-        self.observe_batch(
-            MetricKey::node(
-                observation.domain,
-                observation.kind,
-                observation.node,
-                observation.physical_node_id,
-                observation.relay,
-                "sent",
-                MESSAGES_TOTAL,
-            ),
-            observation.messages,
-            observation.bytes,
-            observation.domain_timestamp,
-        );
-    }
-
-    pub fn observe_global_node_received(&self, observation: NodeBatchObservation<'_>) {
-        self.observe_batch(
-            MetricKey::node(
-                observation.domain,
-                observation.kind,
-                observation.node,
-                observation.physical_node_id,
-                observation.relay,
-                "received",
-                MESSAGES_TOTAL,
-            ),
-            observation.messages,
-            observation.bytes,
-            observation.domain_timestamp,
-        );
-    }
-
-    pub fn observe_global_node_without_stream_received(
-        &self,
-        observation: NodeWithoutRelayObservation<'_>,
-    ) {
-        let messages_key = MetricKey::node_without_stream(
-            observation.domain,
-            observation.kind,
-            observation.node,
-            observation.physical_node_id,
-            "received",
-            MESSAGES_TOTAL,
-        );
-        self.increment(
-            &messages_key,
-            observation.messages,
-            observation.domain_timestamp,
-        );
-        let bytes_key = with_metric(&messages_key, BYTES_TOTAL);
-        self.increment(&bytes_key, observation.bytes, observation.domain_timestamp);
-    }
-
-    pub fn observe_global_node_rows_without_stream_received(
-        &self,
-        observation: NodeRowsWithoutRelayObservation<'_>,
-    ) {
-        let messages_key = MetricKey::node_without_stream(
-            observation.domain,
-            observation.kind,
-            observation.node,
-            observation.physical_node_id,
-            "received",
-            MESSAGES_TOTAL,
-        );
-        let bytes_key = with_metric(&messages_key, BYTES_TOTAL);
-        for (row, domain_timestamp) in observation.domain_timestamps.iter().enumerate() {
-            let row: u64 = row.arch_into();
-            let bytes = observation
-                .bytes_per_row
-                .checked_add(u64::from(row < observation.extra_bytes))
-                .assured("a per-row byte share plus one remainder byte fits in u64");
-            self.increment(&messages_key, 1, Some(*domain_timestamp));
-            self.increment(&bytes_key, bytes, Some(*domain_timestamp));
-        }
-    }
-
-    pub fn observe_global_node_without_stream_sent(
-        &self,
-        observation: NodeWithoutRelayObservation<'_>,
-    ) {
-        let messages_key = MetricKey::node_without_stream(
-            observation.domain,
-            observation.kind,
-            observation.node,
-            observation.physical_node_id,
-            "sent",
-            MESSAGES_TOTAL,
-        );
-        self.increment(
-            &messages_key,
-            observation.messages,
-            observation.domain_timestamp,
-        );
-        let bytes_key = with_metric(&messages_key, BYTES_TOTAL);
-        self.increment(&bytes_key, observation.bytes, observation.domain_timestamp);
-    }
-
-    pub fn observe_branch_node_without_stream_received(
-        &self,
-        branch_key: &str,
-        observation: NodeWithoutRelayObservation<'_>,
-    ) {
-        let messages_key = MetricKey::node_without_stream(
-            observation.domain,
-            observation.kind,
-            observation.node,
-            observation.physical_node_id,
-            "received",
-            MESSAGES_TOTAL,
-        );
-        self.increment_branch(
-            branch_key,
-            messages_key.clone(),
-            observation.messages,
-            observation.domain_timestamp,
-        );
-        self.increment_branch(
-            branch_key,
-            with_metric(&messages_key, BYTES_TOTAL),
-            observation.bytes,
-            observation.domain_timestamp,
-        );
-    }
-
-    pub fn observe_branch_node_rows_without_stream_received(
-        &self,
-        branch_key: &str,
-        observation: NodeRowsWithoutRelayObservation<'_>,
-    ) {
-        let messages_key = MetricKey::node_without_stream(
-            observation.domain,
-            observation.kind,
-            observation.node,
-            observation.physical_node_id,
-            "received",
-            MESSAGES_TOTAL,
-        );
-        let messages_key = BranchMetricKey {
-            branch_key: branch_key.to_string(),
-            key: messages_key,
-        };
-        let bytes_key = BranchMetricKey {
-            branch_key: branch_key.to_string(),
-            key: with_metric(&messages_key.key, BYTES_TOTAL),
-        };
-        for (row, domain_timestamp) in observation.domain_timestamps.iter().enumerate() {
-            let row: u64 = row.arch_into();
-            let bytes = observation
-                .bytes_per_row
-                .checked_add(u64::from(row < observation.extra_bytes))
-                .assured("a per-row byte share plus one remainder byte fits in u64");
-            self.increment_branch_key(&messages_key, 1, Some(*domain_timestamp));
-            self.increment_branch_key(&bytes_key, bytes, Some(*domain_timestamp));
-        }
-    }
-
-    pub fn observe_global_delivery_latency(
-        &self,
-        domain: &DomainName,
-        kind: ModelKind,
-        node: &ModelName,
-        relay: &RelayName,
-        physical_node_id: Option<&ClusterNodeName>,
-        seconds: f64,
-    ) {
-        let key = MetricKey::node(
-            domain,
-            kind,
-            node,
-            physical_node_id,
-            relay,
-            "received",
-            DELIVERY_LATENCY_SECONDS,
-        );
-        self.observe_histogram(key.clone(), seconds, None);
-        self.series.prometheus.observe_histogram(&key, seconds);
-    }
-
-    pub fn observe_global_delivery_latency_at_domain_time(
-        &self,
-        observation: NodeLatencyObservation<'_>,
-    ) {
-        let seconds = [observation.seconds];
-        self.observe_global_delivery_latencies_at_domain_time(NodeLatenciesObservation {
-            domain: observation.domain,
-            kind: observation.kind,
-            node: observation.node,
-            relay: observation.relay,
-            physical_node_id: observation.physical_node_id,
-            seconds: &seconds,
-            domain_timestamp: observation.domain_timestamp,
-        });
-    }
-
-    pub fn observe_global_delivery_latencies_at_domain_time(
-        &self,
-        observation: NodeLatenciesObservation<'_>,
-    ) {
-        let key = MetricKey::node(
-            observation.domain,
-            observation.kind,
-            observation.node,
-            observation.physical_node_id,
-            observation.relay,
-            "received",
-            DELIVERY_LATENCY_SECONDS,
-        );
-        self.observe_histograms(&key, observation.seconds, observation.domain_timestamp);
-        self.series
-            .prometheus
-            .observe_histograms(&key, observation.seconds);
-    }
-
-    pub fn observe_branch_stream_received(
-        &self,
-        branch_key: &str,
-        observation: RelayBatchObservation<'_>,
-    ) {
-        self.observe_branch_batch(
-            branch_key,
-            MetricKey::relay(
-                observation.domain,
-                observation.relay,
-                observation.physical_node_id,
-                "received",
-                MESSAGES_TOTAL,
-            ),
-            observation.messages,
-            observation.bytes,
-            observation.domain_timestamp,
-        );
-    }
-
-    pub fn observe_branch_node_sent(
-        &self,
-        branch_key: &str,
-        observation: NodeBatchObservation<'_>,
-    ) {
-        self.observe_branch_batch(
-            branch_key,
-            MetricKey::node(
-                observation.domain,
-                observation.kind,
-                observation.node,
-                observation.physical_node_id,
-                observation.relay,
-                "sent",
-                MESSAGES_TOTAL,
-            ),
-            observation.messages,
-            observation.bytes,
-            observation.domain_timestamp,
-        );
-    }
-
-    pub fn observe_branch_node_received(
-        &self,
-        branch_key: &str,
-        observation: NodeBatchObservation<'_>,
-    ) {
-        self.observe_branch_batch(
-            branch_key,
-            MetricKey::node(
-                observation.domain,
-                observation.kind,
-                observation.node,
-                observation.physical_node_id,
-                observation.relay,
-                "received",
-                MESSAGES_TOTAL,
-            ),
-            observation.messages,
-            observation.bytes,
-            observation.domain_timestamp,
-        );
-    }
-
-    pub fn observe_branch_delivery_latency(
-        &self,
-        branch_key: &str,
-        observation: NodeLatencyObservation<'_>,
-    ) {
-        let seconds = [observation.seconds];
-        self.observe_branch_delivery_latencies(
-            branch_key,
-            NodeLatenciesObservation {
-                domain: observation.domain,
-                kind: observation.kind,
-                node: observation.node,
-                relay: observation.relay,
-                physical_node_id: observation.physical_node_id,
-                seconds: &seconds,
-                domain_timestamp: observation.domain_timestamp,
-            },
-        );
-    }
-
-    pub fn observe_branch_delivery_latencies(
-        &self,
-        branch_key: &str,
-        observation: NodeLatenciesObservation<'_>,
-    ) {
-        let key = MetricKey::node(
-            observation.domain,
-            observation.kind,
-            observation.node,
-            observation.physical_node_id,
-            observation.relay,
-            "received",
-            DELIVERY_LATENCY_SECONDS,
-        );
-        let key = BranchMetricKey {
-            branch_key: branch_key.to_string(),
-            key,
-        };
-        for value in observation.seconds {
-            self.observe_branch_histogram_key(&key, *value, None, observation.domain_timestamp);
-        }
-    }
-
-    pub fn observe_global_relay_buffer_len(&self, observation: RelayBufferObservation<'_>) {
-        let key = MetricKey::relay(
-            observation.domain,
-            observation.relay,
-            observation.physical_node_id,
-            observation.direction,
-            RELAY_BUFFER_LEN,
-        );
-        self.observe_histogram_with_capacity(
-            key.clone(),
-            observation.len.approx_into(),
-            Some(observation.capacity),
-            None,
-        );
-        self.series
-            .prometheus
-            .observe_histogram(&key, observation.len.approx_into());
-    }
-
-    pub fn observe_branch_relay_buffer_len(
-        &self,
-        branch_key: &str,
-        observation: RelayBufferObservation<'_>,
-    ) {
-        self.observe_branch_histogram_with_capacity(
-            branch_key,
-            MetricKey::relay(
-                observation.domain,
-                observation.relay,
-                observation.physical_node_id,
-                observation.direction,
-                RELAY_BUFFER_LEN,
-            ),
-            observation.len.approx_into(),
-            Some(observation.capacity),
-            None,
-        );
-    }
-
     pub fn prometheus_text(&self) -> String {
         self.series.prometheus.text()
     }
@@ -2633,6 +2781,7 @@ impl RuntimeMetrics {
             .iter()
             .filter(|entry| {
                 key_matches_target(entry.key(), domain, &target_kind, target, physical_node_id)
+                    && entry.value().was_observed()
             })
             .map(|entry| entry.value().to_snapshot(entry.key().clone()))
             .collect::<Vec<_>>();
@@ -2675,6 +2824,7 @@ impl RuntimeMetrics {
             .iter()
             .filter(|entry| {
                 entry.key().branch_key == branch_key
+                    && entry.value().was_observed()
                     && key_matches_target(
                         &entry.key().key,
                         domain,
@@ -2765,6 +2915,7 @@ impl RuntimeMetrics {
                 && key.target_kind == target_kind
                 && key.target == target.as_str()
                 && key.relay != "-"
+                && entry.value().was_observed()
         })
     }
 
@@ -2892,6 +3043,7 @@ impl RuntimeMetrics {
                 entry.key().domain == domain.as_str()
                     && entry.key().target_kind == kind
                     && entry.key().target == target.as_str()
+                    && entry.value().was_observed()
             })
             .map(|entry| (entry.key().clone(), entry.value().summary()))
             .collect::<Vec<_>>();
@@ -3088,6 +3240,9 @@ impl RuntimeMetrics {
             }
         }
         for entry in self.series.branch_histograms.iter() {
+            if !entry.value().was_observed() {
+                continue;
+            }
             let branch_key = entry.key();
             if branch_key.key.domain != domain.as_str()
                 || branch_key.key.target_kind != kind
@@ -3142,6 +3297,9 @@ impl RuntimeMetrics {
             }
         }
         for entry in self.series.branch_histograms.iter() {
+            if !entry.value().was_observed() {
+                continue;
+            }
             let branch_key = entry.key();
             if !branch_key.key.matches_dataflow_metric_ref(domain, metric) {
                 continue;
@@ -3183,6 +3341,9 @@ impl RuntimeMetrics {
             }
         }
         for entry in self.series.histograms.iter() {
+            if !entry.value().was_observed() {
+                continue;
+            }
             if !include(entry.key()) {
                 continue;
             }
@@ -3238,6 +3399,9 @@ impl RuntimeMetrics {
     ) -> Vec<(MetricKey, HistogramSummary)> {
         let mut histograms = Vec::<(MetricKey, AggregatedRollingHistograms)>::new();
         for entry in self.series.histograms.iter() {
+            if !entry.value().was_observed() {
+                continue;
+            }
             let key = entry.key();
             if key.domain != domain.as_str() || !scope.includes_target_kind(&key.target_kind) {
                 continue;
@@ -3271,201 +3435,8 @@ impl RuntimeMetrics {
             .collect()
     }
 
-    fn observe_batch(
-        &self,
-        messages_key: MetricKey,
-        messages: u64,
-        bytes: u64,
-        domain_timestamp: Option<Timestamp>,
-    ) {
-        self.increment(&messages_key, messages, domain_timestamp);
-        let batches_key = with_metric(&messages_key, BATCHES_TOTAL);
-        self.increment(&batches_key, 1, domain_timestamp);
-        let bytes_key = with_metric(&messages_key, BYTES_TOTAL);
-        self.increment(&bytes_key, bytes, domain_timestamp);
-        let batch_key = with_metric(&messages_key, MESSAGES_PER_BATCH);
-        self.observe_histogram(batch_key.clone(), messages.approx_into(), domain_timestamp);
-        self.series
-            .prometheus
-            .observe_histogram(&batch_key, messages.approx_into());
-    }
-
-    fn observe_branch_batch(
-        &self,
-        branch_key: &str,
-        messages_key: MetricKey,
-        messages: u64,
-        bytes: u64,
-        domain_timestamp: Option<Timestamp>,
-    ) {
-        self.increment_branch(branch_key, messages_key.clone(), messages, domain_timestamp);
-        self.increment_branch(
-            branch_key,
-            with_metric(&messages_key, BATCHES_TOTAL),
-            1,
-            domain_timestamp,
-        );
-        self.increment_branch(
-            branch_key,
-            with_metric(&messages_key, BYTES_TOTAL),
-            bytes,
-            domain_timestamp,
-        );
-        self.observe_branch_histogram(
-            branch_key,
-            with_metric(&messages_key, MESSAGES_PER_BATCH),
-            messages.approx_into(),
-            domain_timestamp,
-        );
-    }
-
-    fn increment(&self, key: &MetricKey, value: u64, domain_timestamp: Option<Timestamp>) {
-        self.with_counter_series(key, |series| {
-            series.increment(value, domain_timestamp);
-        });
-        self.series.prometheus.increment_counter(key, value);
-    }
-
     fn register_counter(&self, key: MetricKey) {
-        self.with_counter_series(&key, |_| {});
-        self.series.prometheus.register_counter(&key);
-    }
-
-    fn with_counter_series(&self, key: &MetricKey, observe: impl FnOnce(&CounterSeries)) {
-        if let Some(series) = self.series.counters.get(key) {
-            observe(series.value());
-            return;
-        }
-        let series = self
-            .series
-            .counters
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(CounterSeries::default()));
-        observe(series.value());
-    }
-
-    fn observe_histogram(&self, key: MetricKey, value: f64, domain_timestamp: Option<Timestamp>) {
-        self.observe_histogram_key(&key, value, None, domain_timestamp);
-    }
-
-    fn observe_histograms(
-        &self,
-        key: &MetricKey,
-        values: &[f64],
-        domain_timestamp: Option<Timestamp>,
-    ) {
-        if values.is_empty() {
-            return;
-        }
-        for value in values {
-            self.observe_histogram_key(key, *value, None, domain_timestamp);
-        }
-    }
-
-    fn observe_histogram_with_capacity(
-        &self,
-        key: MetricKey,
-        value: f64,
-        capacity: Option<usize>,
-        domain_timestamp: Option<Timestamp>,
-    ) {
-        self.observe_histogram_key(&key, value, capacity, domain_timestamp);
-    }
-
-    fn observe_histogram_key(
-        &self,
-        key: &MetricKey,
-        value: f64,
-        capacity: Option<usize>,
-        domain_timestamp: Option<Timestamp>,
-    ) {
-        let capacity = capacity.map(|capacity| capacity.arch_into());
-        if let Some(series) = self.series.histograms.get(key) {
-            series.observe_with_capacity(value, capacity, domain_timestamp);
-        } else {
-            let buckets = internal_buckets_for_metric(key.metric);
-            self.series
-                .histograms
-                .entry(key.clone())
-                .or_insert_with(|| Arc::new(HistogramSeries::new(buckets)))
-                .observe_with_capacity(value, capacity, domain_timestamp);
-        }
-    }
-
-    fn increment_branch(
-        &self,
-        branch_key: &str,
-        key: MetricKey,
-        value: u64,
-        domain_timestamp: Option<Timestamp>,
-    ) {
-        let key = BranchMetricKey {
-            branch_key: branch_key.to_string(),
-            key,
-        };
-        self.increment_branch_key(&key, value, domain_timestamp);
-    }
-
-    fn increment_branch_key(
-        &self,
-        key: &BranchMetricKey,
-        value: u64,
-        domain_timestamp: Option<Timestamp>,
-    ) {
-        if let Some(series) = self.series.branch_counters.get(key) {
-            series.increment(value, domain_timestamp);
-        } else {
-            self.series
-                .branch_counters
-                .entry(key.clone())
-                .or_insert_with(|| Arc::new(CounterSeries::default()))
-                .increment(value, domain_timestamp);
-        }
-    }
-
-    fn observe_branch_histogram(
-        &self,
-        branch_key: &str,
-        key: MetricKey,
-        value: f64,
-        domain_timestamp: Option<Timestamp>,
-    ) {
-        self.observe_branch_histogram_with_capacity(branch_key, key, value, None, domain_timestamp);
-    }
-
-    fn observe_branch_histogram_with_capacity(
-        &self,
-        branch_key: &str,
-        key: MetricKey,
-        value: f64,
-        capacity: Option<usize>,
-        domain_timestamp: Option<Timestamp>,
-    ) {
-        let key = BranchMetricKey {
-            branch_key: branch_key.to_string(),
-            key,
-        };
-        self.observe_branch_histogram_key(&key, value, capacity, domain_timestamp);
-    }
-
-    fn observe_branch_histogram_key(
-        &self,
-        key: &BranchMetricKey,
-        value: f64,
-        capacity: Option<usize>,
-        domain_timestamp: Option<Timestamp>,
-    ) {
-        let capacity = capacity.map(|capacity| capacity.arch_into());
-        if let Some(series) = self.series.branch_histograms.get(key) {
-            series.observe_with_capacity(value, capacity, domain_timestamp);
-        } else {
-            let buckets = internal_buckets_for_metric(key.key.metric);
-            self.series
-                .branch_histograms
-                .entry(key.clone())
-                .or_insert_with(|| Arc::new(HistogramSeries::new(buckets)))
-                .observe_with_capacity(value, capacity, domain_timestamp);
-        }
+        drop(self.resolve_global_counter(key));
     }
 }
 
@@ -3751,6 +3722,44 @@ fn domain_rate(value: u64, started_at_nanos: &AtomicI64, last_at_nanos: &AtomicI
         return None;
     }
     Some(value.approx_into::<f64>() / elapsed)
+}
+
+fn ema_value_bits(value: Option<f64>) -> u64 {
+    match value {
+        Some(value) => value.to_bits(),
+        None => NO_EMA_VALUE_BITS,
+    }
+}
+
+fn load_ema_value(value_bits: &AtomicU64) -> Option<f64> {
+    let bits = value_bits.load(AtomicOrdering::Relaxed);
+    if bits == NO_EMA_VALUE_BITS {
+        None
+    } else {
+        Some(f64::from_bits(bits))
+    }
+}
+
+fn observe_ema_sample(value_bits: &AtomicU64, sample: f64, elapsed_seconds: f64, tau_seconds: f64) {
+    let mut current_bits = value_bits.load(AtomicOrdering::Relaxed);
+    loop {
+        let next = if current_bits == NO_EMA_VALUE_BITS {
+            sample
+        } else {
+            let current = f64::from_bits(current_bits);
+            let alpha = time_decay_alpha(elapsed_seconds, tau_seconds);
+            current + alpha * (sample - current)
+        };
+        match value_bits.compare_exchange_weak(
+            current_bits,
+            next.to_bits(),
+            AtomicOrdering::Relaxed,
+            AtomicOrdering::Relaxed,
+        ) {
+            Ok(_) => return,
+            Err(observed) => current_bits = observed,
+        }
+    }
 }
 
 fn decay_factor(elapsed_seconds: f64, tau_seconds: f64) -> f64 {
@@ -4132,31 +4141,42 @@ mod tests {
         })
     }
 
+    fn branch_relay_batch_metrics(
+        metrics: &RuntimeMetrics,
+        domain: &DomainName,
+        relay: &RelayName,
+        physical_node_id: &ClusterNodeName,
+        branch_key: &str,
+    ) -> BatchMetricsHandle {
+        metrics.resolve_batch_metrics(
+            MetricKey::relay(
+                domain,
+                relay,
+                Some(physical_node_id),
+                "received",
+                MESSAGES_TOTAL,
+            ),
+            RecordingScope::Branch(branch_key),
+        )
+    }
+
     #[test]
     fn local_summary_reports_rates_and_percentiles() {
         let metrics = RuntimeMetrics::default();
         let domain = DomainName::parse("main").expect("valid domain");
         let node = ModelName::parse("dedupe").expect("valid identifier");
         let relay = RelayName::parse("input").expect("valid identifier");
-
-        metrics.observe_global_node_received(NodeBatchObservation {
-            domain: &domain,
-            kind: ModelKind::Deduplicator,
-            node: &node,
-            relay: &relay,
-            physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-            messages: 3,
-            bytes: 128,
-            domain_timestamp: Some(Timestamp::from_unix_nanos(1_000_000_000)),
-        });
-        metrics.observe_global_delivery_latency(
+        let physical_node = ClusterNodeName::parse("node-1").expect("valid name");
+        let input_metrics = metrics.resolve_node_input_metrics(
             &domain,
             ModelKind::Deduplicator,
             &node,
             &relay,
-            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-            0.25,
+            Some(&physical_node),
+            None,
         );
+        input_metrics.observe_batch(3, 128, Some(Timestamp::from_unix_nanos(1_000_000_000)));
+        input_metrics.observe_delivery_latency(0.25, None);
 
         let rendered = metrics.describe_global_target(&domain, "DEDUPLICATOR", &node);
         assert!(rendered.iter().any(|line| line.contains("metrics:")));
@@ -4183,30 +4203,31 @@ mod tests {
         let domain = DomainName::parse("main").expect("valid domain");
         let node = ModelName::parse("dedupe").expect("valid identifier");
         let relay = RelayName::parse("input").expect("valid identifier");
-
-        metrics.observe_global_node_received(NodeBatchObservation {
-            domain: &domain,
-            kind: ModelKind::Deduplicator,
-            node: &node,
-            relay: &relay,
-            physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-            messages: 3,
-            bytes: 128,
-            domain_timestamp: None,
-        });
-        metrics.observe_branch_node_received(
-            r#"{"tenant":"alpha"}"#,
-            NodeBatchObservation {
-                domain: &domain,
-                kind: ModelKind::Deduplicator,
-                node: &node,
-                relay: &relay,
-                physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-                messages: 2,
-                bytes: 64,
-                domain_timestamp: None,
-            },
-        );
+        let physical_node = ClusterNodeName::parse("node-1").expect("valid name");
+        metrics
+            .resolve_node_input_metrics(
+                &domain,
+                ModelKind::Deduplicator,
+                &node,
+                &relay,
+                Some(&physical_node),
+                None,
+            )
+            .observe_batch(3, 128, None);
+        metrics
+            .resolve_batch_metrics(
+                MetricKey::node(
+                    &domain,
+                    ModelKind::Deduplicator,
+                    &node,
+                    Some(&physical_node),
+                    &relay,
+                    "received",
+                    MESSAGES_TOTAL,
+                ),
+                RecordingScope::Branch(r#"{"tenant":"alpha"}"#),
+            )
+            .observe(2, 64, None);
 
         let domain_statistics = metrics.dataflow_domain_statistics(&domain);
         assert_eq!(domain_statistics.messages_total, 3);
@@ -4241,34 +4262,26 @@ mod tests {
         let metrics = RuntimeMetrics::default();
         let domain = DomainName::parse("main").expect("valid domain");
         let ingestor = IngestorName::parse("ing").expect("valid identifier");
-        let node = ModelName::from(&ingestor);
-        let physical_node_id = ClusterNodeName::parse("node-1").expect("valid name");
-        let domain_timestamps = [
-            Timestamp::from_unix_nanos(1_000_000_000),
-            Timestamp::from_unix_nanos(1_000_000_001),
-        ];
-
-        metrics.observe_global_node_rows_without_stream_received(NodeRowsWithoutRelayObservation {
-            domain: &domain,
-            kind: ModelKind::Ingestor,
-            node: &node,
-            physical_node_id: Some(&physical_node_id),
-            domain_timestamps: &domain_timestamps,
-            bytes_per_row: 16,
-            extra_bytes: 2,
-        });
-        metrics.observe_branch_node_without_stream_received(
-            r#"{"tenant":"alpha"}"#,
-            NodeWithoutRelayObservation {
-                domain: &domain,
-                kind: ModelKind::Ingestor,
-                node: &node,
-                physical_node_id: Some(&physical_node_id),
-                messages: 2,
-                bytes: 34,
-                domain_timestamp: None,
-            },
-        );
+        let physical_node = ClusterNodeName::parse("node-1").expect("valid name");
+        metrics
+            .resolve_global_node_message_metrics(
+                &domain,
+                ModelKind::Ingestor,
+                &ModelName::from(&ingestor),
+                Some(&physical_node),
+                "received",
+            )
+            .observe(2, 34, None);
+        metrics
+            .resolve_branch_node_message_metrics(
+                &domain,
+                ModelKind::Ingestor,
+                &ModelName::from(&ingestor),
+                Some(&physical_node),
+                "received",
+                r#"{"tenant":"alpha"}"#,
+            )
+            .observe(2, 34, None);
 
         let edge_metric = DataflowMetricRef::new("INGESTOR", "ing", "received", None::<String>);
         let statistics = metrics.dataflow_edge_statistics(&domain, &edge_metric);
@@ -4322,29 +4335,20 @@ mod tests {
         let domain = DomainName::parse("main").expect("valid domain");
         let node = ModelName::parse("dedupe").expect("valid identifier");
         let relay = RelayName::parse("events").expect("valid identifier");
+        let physical_node = ClusterNodeName::parse("node-1").expect("valid name");
+        let input_metrics = metrics.resolve_node_input_metrics(
+            &domain,
+            ModelKind::Deduplicator,
+            &node,
+            &relay,
+            Some(&physical_node),
+            None,
+        );
 
         for _ in 0..100 {
-            metrics.observe_global_node_received(NodeBatchObservation {
-                domain: &domain,
-                kind: ModelKind::Deduplicator,
-                node: &node,
-                relay: &relay,
-                physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-                messages: 2,
-                bytes: 64,
-                domain_timestamp: None,
-            });
+            input_metrics.observe_batch(2, 64, None);
         }
-        metrics.observe_global_node_received(NodeBatchObservation {
-            domain: &domain,
-            kind: ModelKind::Deduplicator,
-            node: &node,
-            relay: &relay,
-            physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-            messages: 500,
-            bytes: 64,
-            domain_timestamp: None,
-        });
+        input_metrics.observe_batch(500, 64, None);
 
         let rendered = metrics.describe_global_target(&domain, "DEDUPLICATOR", &node);
         let line = rendered
@@ -4376,23 +4380,11 @@ mod tests {
         let metrics = RuntimeMetrics::default();
         let domain = DomainName::parse("main").expect("valid domain");
         let relay = RelayName::parse("events").expect("valid identifier");
-
-        metrics.observe_global_relay_buffer_len(RelayBufferObservation {
-            domain: &domain,
-            relay: &relay,
-            physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-            direction: "concrete",
-            len: 2,
-            capacity: 3,
-        });
-        metrics.observe_global_stream_received(
-            &domain,
-            &relay,
-            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-            2,
-            64,
-            None,
-        );
+        let physical_node = ClusterNodeName::parse("node-1").expect("valid name");
+        let relay_metrics =
+            metrics.resolve_relay_metrics(&domain, &relay, Some(&physical_node), "concrete", None);
+        relay_metrics.observe_buffer(2, 3);
+        relay_metrics.observe_batch(2, 64, None);
 
         let rendered = metrics.describe_global_target(&domain, "RELAY", &relay);
         let line = rendered
@@ -4507,6 +4499,7 @@ mod tests {
         let old = now_wall - 2 * 60 * 1_000_000_000;
         {
             let mut rolling = histogram.rolling_histograms.lock();
+            rolling.observed = true;
             rolling.wall_1m.inner.observe_at(10.0, old);
             rolling.wall_15m.inner.observe_at(10.0, old);
         }
@@ -4525,13 +4518,14 @@ mod tests {
 
     #[test]
     fn wall_ema_rate_decays_when_no_new_samples_arrive() {
-        let mut ema = WallEma::new(rate_decay_tau_seconds(ONE_MINUTE));
         let now = Instant::now();
         let last = now
             .checked_sub(std::time::Duration::from_secs(5 * 60))
             .expect("old instant should be representable");
-        ema.value = Some(100.0);
-        ema.last_at = Some(last);
+        let ema = WallEma::new(last, rate_decay_tau_seconds(ONE_MINUTE));
+        ema.value_bits
+            .store(100.0_f64.to_bits(), AtomicOrdering::Relaxed);
+        ema.last_elapsed_nanos.store(0, AtomicOrdering::Relaxed);
 
         let decayed = ema
             .value_at(now)
@@ -4541,13 +4535,14 @@ mod tests {
 
     #[test]
     fn one_minute_rate_ema_is_nearly_zero_after_one_minute_without_activity() {
-        let mut ema = WallEma::new(rate_decay_tau_seconds(ONE_MINUTE));
         let now = Instant::now();
         let last = now
             .checked_sub(std::time::Duration::from_secs(60))
             .expect("old instant should be representable");
-        ema.value = Some(100.0);
-        ema.last_at = Some(last);
+        let ema = WallEma::new(last, rate_decay_tau_seconds(ONE_MINUTE));
+        ema.value_bits
+            .store(100.0_f64.to_bits(), AtomicOrdering::Relaxed);
+        ema.last_elapsed_nanos.store(0, AtomicOrdering::Relaxed);
 
         let decayed = ema
             .value_at(now)
@@ -4560,12 +4555,12 @@ mod tests {
 
     #[test]
     fn one_minute_rate_ema_reacts_to_short_rate_changes() {
-        let mut ema = WallEma::new(rate_decay_tau_seconds(ONE_MINUTE));
+        let ema = WallEma::new(Instant::now(), rate_decay_tau_seconds(ONE_MINUTE));
+        ema.value_bits
+            .store(10.0_f64.to_bits(), AtomicOrdering::Relaxed);
+        observe_ema_sample(&ema.value_bits, 100.0, 5.0, ema.tau_seconds);
 
-        ema.value = Some(10.0);
-        ema.observe_sample(100.0, 5.0);
-
-        let value = ema.value.expect("sampled EMA should have a value");
+        let value = load_ema_value(&ema.value_bits).expect("sampled EMA should have a value");
         assert!(
             value >= 80.0,
             "expected 1m EMA to move most of the way toward a 5s rate change, got {value}"
@@ -4629,15 +4624,15 @@ mod tests {
         let metrics = RuntimeMetrics::default();
         let domain = DomainName::parse("main").expect("valid domain");
         let relay = RelayName::parse("events").expect("valid identifier");
-
-        metrics.observe_global_stream_received(
-            &domain,
-            &relay,
-            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-            2,
-            64,
-            None,
-        );
+        metrics
+            .resolve_relay_metrics(
+                &domain,
+                &relay,
+                Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+                "concrete",
+                None,
+            )
+            .observe_batch(2, 64, None);
 
         let rendered = metrics.prometheus_text();
         assert!(rendered.contains("nervix_messages_total"));
@@ -4653,33 +4648,15 @@ mod tests {
         let metrics = RuntimeMetrics::default();
         let domain = DomainName::parse("main").expect("valid domain");
         let relay = RelayName::parse("events").expect("valid identifier");
-        metrics.observe_global_stream_received(
+        let relay_metrics = metrics.resolve_relay_metrics(
             &domain,
             &relay,
             Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-            2,
-            64,
-            None,
+            "concrete",
+            Some(r#"{"tenant":"acme"}"#),
         );
-        metrics.observe_branch_stream_received(
-            r#"{"tenant":"acme"}"#,
-            RelayBatchObservation {
-                domain: &domain,
-                relay: &relay,
-                physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-                messages: 2,
-                bytes: 64,
-                domain_timestamp: None,
-            },
-        );
-        metrics.observe_global_relay_buffer_len(RelayBufferObservation {
-            domain: &domain,
-            relay: &relay,
-            physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-            direction: "concrete",
-            len: 1,
-            capacity: 2,
-        });
+        relay_metrics.observe_batch(2, 64, None);
+        relay_metrics.observe_buffer(1, 2);
 
         metrics.remove_relay(&domain, &relay);
 
@@ -4852,17 +4829,16 @@ mod tests {
         let domain = DomainName::parse("main").expect("valid domain");
         let node = ModelName::parse("dedupe").expect("valid identifier");
         let relay = RelayName::parse("events").expect("valid identifier");
-
-        metrics.observe_global_node_received(NodeBatchObservation {
-            domain: &domain,
-            kind: ModelKind::Deduplicator,
-            node: &node,
-            relay: &relay,
-            physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-            messages: 3,
-            bytes: 96,
-            domain_timestamp: None,
-        });
+        metrics
+            .resolve_node_input_metrics(
+                &domain,
+                ModelKind::Deduplicator,
+                &node,
+                &relay,
+                Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+                None,
+            )
+            .observe_batch(3, 96, None);
 
         let prometheus = metrics.prometheus_text();
         assert!(prometheus.contains("nervix_messages_per_batch_bucket"));
@@ -4906,22 +4882,39 @@ mod tests {
     }
 
     #[test]
+    fn resolved_unobserved_histograms_are_not_exported() {
+        let metrics = RuntimeMetrics::default();
+        let domain = DomainName::parse("main").expect("valid domain");
+        let node = ModelName::parse("dedupe").expect("valid identifier");
+        let relay = RelayName::parse("events").expect("valid identifier");
+
+        let _handle = metrics.resolve_node_input_metrics(
+            &domain,
+            ModelKind::Deduplicator,
+            &node,
+            &relay,
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+            None,
+        );
+
+        let prometheus = metrics.prometheus_text();
+        assert!(!prometheus.contains("nervix_messages_per_batch_count"));
+        assert!(!prometheus.contains("nervix_delivery_latency_seconds_count"));
+    }
+
+    #[test]
     fn prometheus_export_uses_global_metrics_only() {
         let metrics = RuntimeMetrics::default();
         let domain = DomainName::parse("main").expect("valid domain");
         let relay = RelayName::parse("events").expect("valid identifier");
-
-        metrics.observe_branch_stream_received(
+        branch_relay_batch_metrics(
+            &metrics,
+            &domain,
+            &relay,
+            &ClusterNodeName::parse("node-1").expect("valid name"),
             r#"{"tenant":"acme"}"#,
-            RelayBatchObservation {
-                domain: &domain,
-                relay: &relay,
-                physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-                messages: 9,
-                bytes: 128,
-                domain_timestamp: None,
-            },
-        );
+        )
+        .observe(9, 128, None);
 
         let rendered = metrics.prometheus_text();
         assert!(!rendered.contains(r#"{"tenant":"acme"}"#));
@@ -4933,25 +4926,18 @@ mod tests {
         let metrics = RuntimeMetrics::default();
         let domain = DomainName::parse("main").expect("valid domain");
         let relay = RelayName::parse("events").expect("valid identifier");
-        metrics.observe_branch_stream_received(
-            r#"{"tenant":"acme"}"#,
-            RelayBatchObservation {
-                domain: &domain,
-                relay: &relay,
-                physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-                messages: 9,
-                bytes: 128,
-                domain_timestamp: None,
-            },
-        );
-        metrics.observe_global_stream_received(
+        let physical_node = ClusterNodeName::parse("node-1").expect("valid name");
+        branch_relay_batch_metrics(
+            &metrics,
             &domain,
             &relay,
-            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-            2,
-            64,
-            None,
-        );
+            &physical_node,
+            r#"{"tenant":"acme"}"#,
+        )
+        .observe(9, 128, None);
+        metrics
+            .resolve_relay_metrics(&domain, &relay, Some(&physical_node), "concrete", None)
+            .observe_batch(2, 64, None);
 
         let snapshot = metrics.snapshot_global_target(
             &domain,
@@ -4974,25 +4960,18 @@ mod tests {
         let metrics = RuntimeMetrics::default();
         let domain = DomainName::parse("main").expect("valid domain");
         let relay = RelayName::parse("events").expect("valid identifier");
-        metrics.observe_branch_stream_received(
-            r#"{"tenant":"acme"}"#,
-            RelayBatchObservation {
-                domain: &domain,
-                relay: &relay,
-                physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-                messages: 9,
-                bytes: 128,
-                domain_timestamp: None,
-            },
-        );
-        metrics.observe_global_stream_received(
+        let physical_node = ClusterNodeName::parse("node-1").expect("valid name");
+        branch_relay_batch_metrics(
+            &metrics,
             &domain,
             &relay,
-            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-            2,
-            64,
-            None,
-        );
+            &physical_node,
+            r#"{"tenant":"acme"}"#,
+        )
+        .observe(9, 128, None);
+        metrics
+            .resolve_relay_metrics(&domain, &relay, Some(&physical_node), "concrete", None)
+            .observe_batch(2, 64, None);
 
         let snapshot = metrics.snapshot_branch_target(
             r#"{"tenant":"acme"}"#,
