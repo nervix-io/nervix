@@ -1,8 +1,12 @@
 use arch_into::ArchInto as _;
 use meticulous::OptionExt as _;
+#[cfg(test)]
+use meticulous::ResultExt as _;
 use nervix_models::{
     ClusterNodeIdentity, CommandExecutionReference, DomainClockState, DomainName, DomainSchedule,
-    DomainStartPoint, DomainState, QuiesceLevel, ResourceName, Statement, Timestamp, UserName,
+    DomainStartPoint, DomainState, ExecutionStepImpactReport, ExecutionStepOutcome,
+    ImpactDiagnostic, ImpactDiagnosticKind, ResourceName, Statement, Timestamp,
+    TransactionOperationRange, UserName,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -67,11 +71,41 @@ pub struct TransactionCommandResult {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct TransactionStepResult {
-    pub first_statement: usize,
-    pub statement_count: usize,
-    pub quiesce_level: Option<QuiesceLevel>,
-    pub planned_relocations: Option<usize>,
+    pub impact: ExecutionStepImpactReport,
     pub result: TransactionCommandResult,
+}
+
+impl TransactionStepResult {
+    pub fn operation_range(&self) -> TransactionOperationRange {
+        self.impact.operations()
+    }
+
+    pub fn first_statement(&self) -> usize {
+        self.operation_range().first_index()
+    }
+
+    pub fn statement_count(&self) -> usize {
+        self.operation_range().operation_count().get()
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_step_impact(
+    first_statement: usize,
+    statement_count: usize,
+) -> ExecutionStepImpactReport {
+    let operations =
+        TransactionOperationRange::from_index_and_count(first_statement, statement_count)
+            .assured("test transaction steps use non-empty addressable statement ranges");
+    ExecutionStepImpactReport::new(
+        operations,
+        nervix_models::PlannedExecutionStepImpact {
+            completeness: nervix_models::ImpactReportCompleteness::Complete,
+            pause: nervix_models::PauseRequirement::NoPause,
+            effects: nervix_models::ImpactEffects::default(),
+        },
+        nervix_models::ActualExecutionStepImpact::applying(),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,7 +254,7 @@ impl ReplicatedTransaction {
             TransactionState::Finished(finished) => finished
                 .results
                 .iter()
-                .map(|result| result.statement_count)
+                .map(TransactionStepResult::statement_count)
                 .sum(),
         }
     }
@@ -427,8 +461,8 @@ impl ReplicatedTransaction {
                 statement_count: self.statements.len(),
             });
         }
-        if applying.result.first_statement != expected_next_statement
-            || Some(applying.result.statement_count)
+        if applying.result.first_statement() != expected_next_statement
+            || Some(applying.result.statement_count())
                 != applying.next_statement.checked_sub(expected_next_statement)
         {
             return Err(TransactionMutationError::InvalidStepResult {
@@ -466,7 +500,7 @@ impl ReplicatedTransaction {
                 statement: expected_next_statement,
             });
         };
-        if applying.result.first_statement != expected_next_statement {
+        if applying.result.first_statement() != expected_next_statement {
             progress.applying = Some(applying);
             return Err(TransactionMutationError::InvalidStepResult {
                 id: self.id.clone(),
@@ -481,11 +515,29 @@ impl ReplicatedTransaction {
                 span_start: 0,
                 span_end: 0,
             }];
+            applying.result.impact.actual_mut().outcome = ExecutionStepOutcome::Failed {
+                diagnostic: ImpactDiagnostic {
+                    kind: ImpactDiagnosticKind::Application,
+                    operation: Some(applying.result.operation_range().first()),
+                    message: error.clone(),
+                },
+            };
             Some(TransactionOutcome::Failed {
                 failing_step: expected_next_statement,
                 error,
             })
         } else {
+            applying.result.impact.actual_mut().outcome = if applying.result.result.success {
+                ExecutionStepOutcome::Applied
+            } else {
+                ExecutionStepOutcome::Failed {
+                    diagnostic: ImpactDiagnostic {
+                        kind: ImpactDiagnosticKind::Application,
+                        operation: Some(applying.result.operation_range().first()),
+                        message: applying.result.result.message.clone(),
+                    },
+                }
+            };
             applying.completion
         };
         self.last_activity_at = at;
@@ -712,8 +764,10 @@ pub enum TransactionMutationError {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
-    use nervix_models::ShowTransactions;
+    use nervix_models::{
+        ActualExecutionStepImpact, ImpactEffects, ImpactReportCompleteness, PauseRequirement,
+        PlannedExecutionStepImpact, ShowTransactions,
+    };
 
     use super::*;
 
@@ -759,14 +813,21 @@ mod tests {
     }
 
     fn applying_step() -> TransactionApplyingStep {
+        let operations = TransactionOperationRange::from_index_and_count(0, 1)
+            .assured("the first test operation is an addressable single-operation range");
         TransactionApplyingStep {
             effect_revision: 4,
             next_statement: 1,
             result: TransactionStepResult {
-                first_statement: 0,
-                statement_count: 1,
-                quiesce_level: None,
-                planned_relocations: None,
+                impact: ExecutionStepImpactReport::new(
+                    operations,
+                    PlannedExecutionStepImpact {
+                        completeness: ImpactReportCompleteness::Complete,
+                        pause: PauseRequirement::NoPause,
+                        effects: ImpactEffects::default(),
+                    },
+                    ActualExecutionStepImpact::applying(),
+                ),
                 result: TransactionCommandResult {
                     success: true,
                     message: "listed transactions".to_string(),
@@ -800,7 +861,6 @@ mod tests {
         let mut invalid = transaction_with_one_statement();
         let mut no_progress = applying_step();
         no_progress.next_statement = 0;
-        no_progress.result.statement_count = 0;
         assert!(matches!(
             invalid.begin_application(0, Timestamp::from_unix_nanos(4), no_progress),
             Err(TransactionMutationError::InvalidProgress {
@@ -854,7 +914,17 @@ mod tests {
             .applying
             .as_mut()
             .assured("the test installed one applying step above");
-        current.result.first_statement = 1;
+        let operations = TransactionOperationRange::from_index_and_count(1, 1)
+            .assured("the second test operation is an addressable single-operation range");
+        current.result.impact = ExecutionStepImpactReport::new(
+            operations,
+            PlannedExecutionStepImpact {
+                completeness: ImpactReportCompleteness::Complete,
+                pause: PauseRequirement::NoPause,
+                effects: ImpactEffects::default(),
+            },
+            ActualExecutionStepImpact::applying(),
+        );
         assert!(matches!(
             invalid_result.complete_application(0, Timestamp::from_unix_nanos(5), 5, None),
             Err(TransactionMutationError::InvalidStepResult { .. })

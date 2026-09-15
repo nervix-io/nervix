@@ -1,9 +1,10 @@
-//! Ingestor quiescence vocabulary.
+//! Quiescence and model-change vocabulary.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** Typed quiescence modes, overflow policies and their scalar limits.
+//!
+//! - **Owns.** Typed quiescence modes and model-change classification.
 //! - **Depends on.** Self-contained model primitives.
-//! - **Must not know.** Runtime buffers, transport clients or lifecycle coordination.
+//! - **Must not know.** Parsing, planning, persistence, runtime buffers or coordination.
 
 use std::num::NonZeroUsize;
 
@@ -17,6 +18,10 @@ use crate::{
     EmitterName, MessageErrorPolicy, Model, ModelKind, ModelName, ProcessorInputs, ProcessorOutput,
     ProcessorOutputs, RelayName,
 };
+
+mod impact;
+
+pub use impact::*;
 
 #[derive(
     Debug,
@@ -33,6 +38,7 @@ use crate::{
     RkyvDeserialize,
     AsRefStr,
     IntoStaticStr,
+    Hash,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum QuiesceLevel {
@@ -73,7 +79,24 @@ pub enum DynamicModelUpdate {
 
 /// Node-owned runtime state that a model change makes meaningless even though the schemas around
 /// it are unchanged, so fingerprint-keyed staleness cannot detect it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum StatePurge {
     DeduplicatorKeyspace,
     ReordererBuffer,
@@ -85,7 +108,24 @@ pub enum StatePurge {
 
 macro_rules! declare_model_change_aspects {
     ($($Aspect:ident => $Level:ident, $state_purge:expr, $control_plane_only:literal;)+) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[derive(
+            Debug,
+            Clone,
+            Copy,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            Serialize,
+            Deserialize,
+            Archive,
+            RkyvSerialize,
+            RkyvDeserialize,
+            AsRefStr,
+        )]
+        #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+        #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
         pub enum ModelChangeAspect {
             $($Aspect,)+
         }

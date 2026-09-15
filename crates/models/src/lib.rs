@@ -64,7 +64,19 @@ pub use names::{
 };
 pub use node_ref::{DomainNodeRef, NodeRef};
 pub use quiesce::{
-    DynamicModelUpdate, ModelChangeAspect, ModelChangeAspects, QuiesceLevel, StatePurge,
+    ActivationAction, ActivationImpact, ActualExecutionStepImpact, ActualQuiescence,
+    AffectedTopology, AttributedGateBoundary, AttributedImpactNode, BranchKeyFingerprint,
+    CanonicalImpactSet, ConcreteBranchCoverage, ConfigurationImpact, ConfigurationTransition,
+    DomainLifecycleAction, DomainLifecycleImpact, DynamicModelUpdate, ExecutionStepImpactReport,
+    ExecutionStepOutcome, ForceFlushImpact, ImpactAttribution, ImpactDiagnostic,
+    ImpactDiagnosticKind, ImpactEdgeKind, ImpactEffects, ImpactGateBoundary, ImpactNodeCoverage,
+    ImpactPlanningBasis, ImpactReportCompleteness, ImpactReportError, ImpactTopology,
+    ImpactTopologyEdge, ModelChangeAspect, ModelChangeAspects, OperationImpactReason,
+    OperationImpactReport, OwnershipMoveImpact, PauseRequirement, PlannedExecutionStepImpact,
+    QuiesceLevel, QuiesceSubgraph, QuiescenceOutcome, RebuildImpact, RebuildReason,
+    ResourceCatalogAction, ResourceCatalogImpact, StatePurge, StateResetImpact,
+    TransactionImpactReport, TransactionImpactSummary, TransactionOperation,
+    TransactionOperationNumber, TransactionOperationRange, TransactionPosition,
 };
 pub use remote::{
     RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeElementValue,
