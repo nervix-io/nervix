@@ -7,6 +7,8 @@
 
 use std::borrow::Cow;
 
+use bytes::Bytes;
+
 use super::*;
 
 /// Why an ingestor that keeps running discards the summary a flush returns.
@@ -16,8 +18,10 @@ use super::*;
 pub(in crate::runtime) const INGEST_FLUSH_FAILURES_ARE_HANDLED: &str =
     "the ingestor's error policy already handled every failure this flush produced";
 
-/// Chosen operational bound for how many decoded source rows accumulate before an
-/// ingest group executes and becomes one Arrow batch per (relay, branch key). This is
+/// Chosen operational bound for how many decoded source messages accumulate before an ingest group
+/// executes and becomes one Arrow batch per (relay, branch key). A group closes once it holds this
+/// many or more: every message of one payload joins the same group, so a payload that unfolds past
+/// the remaining room carries the group beyond the bound instead of being split. This is
 /// intentionally independent of an NSPL route's flush policy.
 pub(in crate::runtime) const INGEST_GROUP_MAX_ROWS: usize = 1024;
 
@@ -40,24 +44,25 @@ pub(super) struct IngestGroupContext {
     pub(super) filter_where: Option<CompiledProgramWithMaterializedInterest>,
 }
 
-/// The rows a source has decoded into its ingest group and is now accepting.
+/// The payloads a source has decoded into its ingest group and is now accepting.
 ///
-/// The payloads have already been appended to the group's record builder by
-/// [`IngestRouteCollector::decode_payload`]; this call is what accepts them, by giving each one the
-/// metadata row and ACK set that belong to it. A source may contribute one poll batch or several
-/// consecutive single-record polls. The collector owns the actual group boundary: request-scoped
-/// sources flush at the end of the request, while streaming sources flush at the row or idle-time
-/// bound.
+/// The payloads have already been decoded into the group's record builder by
+/// [`IngestRouteCollector::decode_payload`], each as the zero or more messages it unfolded into;
+/// this call is what accepts them, by giving each payload the metadata row and ACK set that belong
+/// to it. A source may contribute one poll batch or several consecutive single-record polls. The
+/// collector owns the actual group boundary: request-scoped sources flush at the end of the
+/// request, while streaming sources flush at the message or idle-time bound.
 pub(super) struct IngestGroupDispatch<'a> {
     pub(super) domain: &'a DomainName,
     pub(super) ingestor: &'a IngestorName,
     pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
     pub(super) output_routes: &'a RelayProcessorOutputsNode,
     pub(super) filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
-    /// One entry per decoded row, read from the borrowed source messages and appended into the
-    /// group's own metadata builders.
+    /// One entry per decoded payload, read from the borrowed source messages and appended into the
+    /// group's own metadata builders once for every message the payload unfolded into.
     pub(super) metadata: &'a [IngestMetadataRow<'a>],
-    /// Row-aligned with `metadata`. An empty set is replaced by a tracked ack root.
+    /// Payload-aligned with `metadata`. Every message of a payload takes one share of its set, and
+    /// an empty share is replaced by a tracked ack root.
     pub(super) acks: Vec<AckSet>,
     pub(super) ingested_at: Timestamp,
     /// Sources differ only in when they flush this group: stream sources use the
@@ -101,24 +106,30 @@ pub(super) struct IngestGroupRows {
     pub(super) acks: Vec<AckSet>,
 }
 
-/// One ingest group's rows before the group closes.
+/// One ingest group's messages before the group closes.
 ///
 /// The group owns exactly one record builder and exactly one set of metadata builders: it opens
-/// each with its first row, appends one row per decoded message, and finishes both once in
+/// each with its first message, appends one row per decoded message, and finishes both once in
 /// `into_rows`. Nothing here is built per message, so a group of `n` messages is one set of Arrow
 /// columns rather than `n` single-row batches and a concatenation.
 ///
 /// Decoding and accepting are two steps, because a payload that fails to decode has to stay
-/// attributable to the message that carried it. `record_builder` hands the codec the group's
-/// builder, which drops the row a failed decode started; `append` then accepts the rows that did
-/// decode, together with the metadata and ACKs that belong to them.
+/// attributable to the message that carried it. `decode_payload` appends a payload's messages to
+/// the group's builder, all of them or none, and remembers how many there were; `append` then
+/// accepts the payloads that did decode, giving every message of each payload the payload's
+/// metadata row and a share of its ACK set.
 pub(super) struct PendingIngestGroup {
     pub(super) kind: IngestMetadataKind,
     /// The number of rows the group is expected to reach, used to size its builders.
     pub(super) row_bound: usize,
     pub(super) records: Option<RuntimeRecordBatchBuilder>,
+    /// How many messages each decoded payload unfolded into, oldest first, for the payloads the
+    /// source has not accepted yet.
+    pub(super) undispatched_payloads: VecDeque<usize>,
     pub(super) metadata: Option<IngestMetadataBuilders>,
+    /// One ACK set per accepted message.
     pub(super) acks: Vec<AckSet>,
+    /// One ingestion instant per accepted message.
     pub(super) ingested_at: Vec<Timestamp>,
 }
 
@@ -128,27 +139,45 @@ impl PendingIngestGroup {
             kind,
             row_bound,
             records: None,
+            undispatched_payloads: VecDeque::new(),
             metadata: None,
             acks: Vec::new(),
             ingested_at: Vec::new(),
         }
     }
 
-    /// The group's record builder, opened for `schema` on the first payload it decodes.
-    pub(super) fn record_builder(
+    /// Decodes one payload into the group's record builder, opened for the codec's schema on the
+    /// first payload the group decodes, and holds its messages until the source accepts it.
+    ///
+    /// A payload that fails to decode leaves the group's rows exactly as they were. When the group
+    /// then holds no row at all, its builder is dropped, so the rows a rejected payload abandoned do
+    /// not stay allocated while the group waits for a message it keeps.
+    pub(super) async fn decode_payload(
         &mut self,
-        schema: &CompiledSchema,
-    ) -> &mut RuntimeRecordBatchBuilder {
+        codec: &Arc<CompiledCodec>,
+        payload: Cow<'_, [u8]>,
+    ) -> Result<(), CodecError> {
         let row_bound = self.row_bound;
-        self.records
-            .get_or_insert_with(|| schema.batch_builder(row_bound))
+        let records = self
+            .records
+            .get_or_insert_with(|| codec.schema().batch_builder(row_bound));
+        match decode_ingested_payload(codec, payload, records).await {
+            Ok(messages) => {
+                self.undispatched_payloads.push_back(messages);
+                Ok(())
+            }
+            Err(error) => {
+                if self.decoded_rows() == 0 {
+                    self.records = None;
+                }
+                Err(error)
+            }
+        }
     }
 
-    /// Rows the group has decoded but not yet accepted with their metadata and ACKs.
-    pub(super) fn undispatched_rows(&self) -> usize {
-        self.decoded_rows()
-            .checked_sub(self.acks.len())
-            .assured("`append` accepts an ACK set only for a row the group already decoded")
+    /// Payloads the group has decoded but the source has not accepted yet.
+    pub(super) fn undispatched_payloads(&self) -> usize {
+        self.undispatched_payloads.len()
     }
 
     fn decoded_rows(&self) -> usize {
@@ -158,33 +187,41 @@ impl PendingIngestGroup {
         }
     }
 
-    /// Drops the decoded rows the caller could not accept, so the group stays row-aligned.
-    pub(super) fn discard_undispatched_rows(&mut self) {
+    /// Drops the decoded payloads the caller could not accept, so the group keeps only the
+    /// messages it accepted.
+    pub(super) fn discard_undispatched_payloads(&mut self) {
+        self.undispatched_payloads.clear();
         let accepted = self.acks.len();
         if let Some(records) = self.records.as_mut() {
             records.abandon_rows_after(accepted);
         }
     }
 
+    /// Accepts the oldest decoded payloads, one for each metadata row and ACK set.
+    ///
+    /// Every message a payload unfolded into takes the payload's metadata row and one share of its
+    /// ACK set, so the payload's acknowledgement resolves only once all of its messages have. A
+    /// payload that unfolded into no message has nothing left to wait for, so its share resolves
+    /// here.
     pub(super) fn append(
         &mut self,
         metadata: &[IngestMetadataRow<'_>],
         acks: Vec<AckSet>,
         ingested_at: Timestamp,
     ) -> Result<(), String> {
-        let row_count = metadata.len();
-        if acks.len() != row_count {
+        let payload_count = metadata.len();
+        if acks.len() != payload_count {
             return Err(format!(
-                "received {} ack sets for {row_count} ingest metadata rows",
+                "received {} ack sets for {payload_count} ingest metadata rows",
                 acks.len()
             ));
         }
-        // Rows are accepted in the order they decoded, and a source may accept them one at a
+        // Payloads are accepted in the order they decoded, and a source may accept them one at a
         // time, so a contribution may cover a prefix of what the group has decoded but never more.
-        if row_count > self.undispatched_rows() {
+        if payload_count > self.undispatched_payloads.len() {
             return Err(format!(
-                "received {row_count} ingest metadata rows for {} decoded records",
-                self.undispatched_rows()
+                "received {payload_count} ingest metadata rows for {} decoded payloads",
+                self.undispatched_payloads.len()
             ));
         }
 
@@ -192,12 +229,18 @@ impl PendingIngestGroup {
         let builders = self
             .metadata
             .get_or_insert_with(|| IngestMetadataBuilders::new(kind, row_bound));
-        for row in metadata {
-            builders.append(row)?;
+        for (row, payload_acks) in metadata.iter().zip(acks) {
+            let messages = self
+                .undispatched_payloads
+                .pop_front()
+                .verified("the check above admits at most one metadata row per decoded payload");
+            for _ in 0..messages {
+                builders.append(row)?;
+            }
+            payload_acks.split_into(messages, &mut self.acks);
+            self.ingested_at
+                .extend(std::iter::repeat_n(ingested_at, messages));
         }
-        self.acks.extend(acks);
-        self.ingested_at
-            .extend(std::iter::repeat_n(ingested_at, row_count));
         Ok(())
     }
 
@@ -319,7 +362,7 @@ pub(super) struct IngestorFilterWhereError<'a> {
 /// Accumulates one source ingest group before program execution, then holds its routed
 /// messages long enough to build one Arrow batch per (relay, branch key).
 ///
-/// A source decodes each payload into the open group with `decode_payload` and accepts the rows
+/// A source decodes each payload into the open group with `decode_payload` and accepts the payloads
 /// that decoded with `collect`, so the group's records, metadata and ACKs stay row-aligned. The
 /// metadata schema is fixed by the source kind when the ingestor starts, so every group the
 /// collector opens builds the same columns.
@@ -351,21 +394,20 @@ impl IngestRouteCollector {
 
     /// Decodes one source payload into the group's record builder.
     ///
-    /// The builder belongs to the group, so consecutive payloads share one set of Arrow columns.
-    /// A payload that fails to decode leaves the group exactly as it was, and the error names that
-    /// payload alone.
+    /// The builder belongs to the group, so consecutive payloads share one set of Arrow columns,
+    /// and every message a payload unfolds into is appended there. A payload that fails to decode
+    /// leaves the group exactly as it was, and the error names that payload alone.
     pub(super) async fn decode_payload(
         &mut self,
         codec: &Arc<CompiledCodec>,
         payload: Cow<'_, [u8]>,
     ) -> Result<(), CodecError> {
-        let schema = codec.schema();
-        decode_ingested_payload(codec, payload, self.pending.record_builder(&schema)).await
+        self.pending.decode_payload(codec, payload).await
     }
 
-    /// Drops decoded rows a caller could not accept, so a failed dispatch leaves no stray row.
-    pub(super) fn discard_undispatched_rows(&mut self) {
-        self.pending.discard_undispatched_rows();
+    /// Drops decoded payloads a caller could not accept, so a failed dispatch leaves no stray row.
+    pub(super) fn discard_undispatched_payloads(&mut self) {
+        self.pending.discard_undispatched_payloads();
     }
 
     pub(super) fn collect(
@@ -382,13 +424,13 @@ impl IngestRouteCollector {
             acks,
             ingested_at,
         } = contribution;
-        if metadata.is_empty() && self.pending.undispatched_rows() == 0 {
+        if metadata.is_empty() && self.pending.undispatched_payloads() == 0 {
             return Ok(());
         }
         if let Some(existing) = self.context.as_ref()
             && (existing.domain != *domain || existing.ingestor != *ingestor)
         {
-            self.pending.discard_undispatched_rows();
+            self.pending.discard_undispatched_payloads();
             return Err(format!(
                 "ingest group for '{}.{}' cannot collect rows for '{}.{}'",
                 existing.domain.as_str(),
@@ -397,9 +439,15 @@ impl IngestRouteCollector {
                 ingestor.as_str()
             ));
         }
+        let accepted_before = self.pending.len();
         if let Err(error) = self.pending.append(metadata, acks, ingested_at) {
-            self.pending.discard_undispatched_rows();
+            self.pending.discard_undispatched_payloads();
             return Err(error);
+        }
+        // Payloads that unfolded into no message leave nothing to deliver, so they neither open
+        // the group nor push its idle close back.
+        if self.pending.len() == accepted_before {
+            return Ok(());
         }
         if self.context.is_none() {
             self.context = Some(IngestGroupContext {
@@ -417,13 +465,13 @@ impl IngestRouteCollector {
     pub(super) fn take_pending(
         &mut self,
     ) -> Result<Option<(IngestGroupContext, IngestGroupRows)>, String> {
-        // A decoded row the source never accepted would put the records out of step with the
+        // A decoded payload the source never accepted would put the records out of step with the
         // metadata and ACKs, so the group says so rather than closing over the mismatch.
-        let undispatched = self.pending.undispatched_rows();
+        let undispatched = self.pending.undispatched_payloads();
         if undispatched != 0 {
-            self.pending.discard_undispatched_rows();
+            self.pending.discard_undispatched_payloads();
             return Err(format!(
-                "ingest group closed with {undispatched} decoded records that were never accepted"
+                "ingest group closed with {undispatched} decoded payloads that were never accepted"
             ));
         }
         if self.pending.is_empty() {
@@ -449,6 +497,11 @@ impl IngestRouteCollector {
         self.pending.is_empty() && self.routed.is_empty()
     }
 
+    /// The messages the open group has accepted.
+    ///
+    /// Sources close the group once this reaches [`INGEST_GROUP_MAX_ROWS`]. It counts messages
+    /// rather than payloads, and a payload that unfolds past the remaining room overshoots the
+    /// bound rather than being split.
     pub(super) fn len(&self) -> usize {
         self.pending.len()
     }
@@ -703,33 +756,34 @@ pub(super) async fn branched_branch_filter_blocking(
     }
 }
 
-/// Decodes one payload as one row of `builder`.
+/// Decodes one payload into `builder` and answers how many messages it decoded into.
 ///
-/// jaq and protobuf decoding is CPU-bound, so the transformation half runs off the reactor and
-/// hands back the JSON value the append consumes. The append itself always runs here, which keeps
-/// the builder on the task that owns it.
+/// A schemaful codec decodes a payload into exactly one message, and a JAQ-backed codec unfolds it
+/// into zero or more. jaq and protobuf decoding is CPU-bound, so the unfolding half runs off the
+/// reactor and hands back the messages the append consumes. The append itself always runs here,
+/// which keeps the builder on the task that owns it, and it keeps all of a payload's messages or
+/// none of them.
 pub(super) async fn decode_ingested_payload(
     codec: &Arc<CompiledCodec>,
     payload: Cow<'_, [u8]>,
     builder: &mut RuntimeRecordBatchBuilder,
-) -> Result<(), CodecError> {
+) -> Result<usize, CodecError> {
     if !codec.requires_blocking_decode() {
         return decode_with_codec(codec, payload, builder);
     }
 
-    // Only the transformation leaves the reactor. The Arrow append that consumes its result stays
-    // here, with the batch builder the decoded row joins.
+    // Only the unfolding leaves the reactor. The Arrow append that consumes its result stays here,
+    // with the batch builder the decoded rows join.
     let codec_name = codec.name.as_str().to_string();
     let blocking_codec = codec.clone();
-    let payload = payload.into_owned();
-    let value =
-        tokio::task::spawn_blocking(move || blocking_codec.transform_on_ingestion(&payload))
-            .await
-            .map_err(|error| CodecError::InvalidCodec {
-                codec: codec_name,
-                reason: format!("blocking decode task failed: {error}"),
-            })??;
-    codec.append_transformed_row(&value, builder)
+    let payload = Bytes::from(payload.into_owned());
+    let unfolded = tokio::task::spawn_blocking(move || blocking_codec.unfold_on_ingestion(payload))
+        .await
+        .map_err(|error| CodecError::InvalidCodec {
+            codec: codec_name,
+            reason: format!("blocking decode task failed: {error}"),
+        })??;
+    codec.append_unfolded(unfolded, builder)
 }
 
 impl Runtime {
@@ -1483,19 +1537,17 @@ impl Runtime {
             collector,
             flush,
         } = dispatch;
-        let mut row_count = 0usize;
         for source_payload in payload.payloads() {
             tokio::task::consume_budget().await;
             // A request carries all of its payloads or none of them, so a payload that fails to
-            // decode takes the rows decoded before it back out of the group.
+            // decode takes the payloads decoded before it back out of the group.
             if let Err(error) = collector
                 .decode_payload(&codec, Cow::Borrowed(source_payload))
                 .await
             {
-                collector.discard_undispatched_rows();
+                collector.discard_undispatched_payloads();
                 return Err(error.to_string());
             }
-            row_count += 1;
         }
         let metadata = payload.metadata_rows();
         self.dispatch_ingested_records(IngestGroupDispatch {
@@ -1507,7 +1559,7 @@ impl Runtime {
             filter_where,
             metadata: &metadata,
             ingested_at: payload.observed_at(),
-            acks: vec![AckSet::empty(); row_count],
+            acks: vec![AckSet::empty(); payload.len()],
         })
         .await
         .map_err(|error| error.to_string())?;
@@ -1527,9 +1579,9 @@ mod tests {
     use ahash::HashMap;
     use arc_swap::ArcSwapOption;
     use nervix_models::{
-        AckMode, CodecWireFormat, CreateCodec, CreateSchema, CreateWireSchema, ErrorPolicies,
-        JsonType, ModelKind, ParseAsType, ResolvedCodecWireFormat, SchemaField, Timestamp,
-        WireSchemaField,
+        AckMode, CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec,
+        CreateSchema, CreateWireSchema, ErrorPolicies, JsonType, ModelKind, ParseAsType,
+        ResolvedCodecWireFormat, SchemaField, Timestamp, WireSchemaField,
     };
     use tokio::time::{Duration, timeout};
     use triomphe::Arc;
@@ -1537,16 +1589,16 @@ mod tests {
     use super::*;
     use crate::{
         runtime::branch_runtime::BranchExecutionRuntime,
-        runtime_ack::{AckOutcome, AckSet},
+        runtime_ack::{AckOutcome, AckRootTracker, AckSet},
         runtime_schema::{
             RECORD_BUILDER_SETS_OPENED, RECORD_COLUMN_SETS_BUILT, RuntimeRecordBatch,
             RuntimeRecordMetadata, RuntimeValue, compile_codec, test_runtime_row,
         },
     };
 
-    /// A JSON codec over a one-field schema, for the ingest-group decode tests below.
-    fn grouped_event_codec() -> Arc<CompiledCodec> {
-        let schema = Arc::new(compile_schema(&CreateSchema {
+    /// The one-field schema the ingest-group decode tests below decode into.
+    fn grouped_event_schema() -> Arc<CompiledSchema> {
+        Arc::new(compile_schema(&CreateSchema {
             name: named("grouped_event"),
             fields: vec![SchemaField {
                 name: named("user_id"),
@@ -1554,7 +1606,12 @@ mod tests {
                 optional: false,
                 sensitive: false,
             }],
-        }));
+        }))
+    }
+
+    /// A JSON codec over the grouped event schema, for the ingest-group decode tests below.
+    fn grouped_event_codec() -> Arc<CompiledCodec> {
+        let schema = grouped_event_schema();
         compile_codec(
             &CreateCodec {
                 name: named("grouped_event_codec"),
@@ -1578,13 +1635,39 @@ mod tests {
         .expect("the grouped event codec should compile")
     }
 
-    /// Accepts the rows `collector` has decoded, as an ingestor does after a successful decode.
-    fn accept_decoded_rows(
+    /// A JSON codec over the grouped event schema whose ON INGESTION program is `program`.
+    fn unfolding_event_codec(program: &str) -> Arc<CompiledCodec> {
+        let transformations = CodecJaqTransformations {
+            on_ingestion: Some(program.to_string()),
+            on_emitting: None,
+        };
+        compile_codec(
+            &CreateCodec {
+                name: named("unfolding_event_codec"),
+                wire_format: CodecWireFormat::JaqNative {
+                    format: CodecJaqFormat::Json,
+                    transformations: transformations.clone(),
+                },
+                schema: named("grouped_event"),
+                encoding_rules: Vec::new(),
+            },
+            grouped_event_schema(),
+            ResolvedCodecWireFormat::JaqNative {
+                format: CodecJaqFormat::Json,
+                transformations: &transformations,
+            },
+        )
+        .expect("the unfolding event codec should compile")
+    }
+
+    /// Accepts the oldest payloads `collector` has decoded, one for each ACK set, as an ingestor
+    /// does after a successful decode.
+    fn accept_decoded_payloads(
         collector: &mut IngestRouteCollector,
-        rows: usize,
+        acks: Vec<AckSet>,
     ) -> Result<(), String> {
         let headers = NoIngestHeaders;
-        let metadata = (0..rows)
+        let metadata = (0..acks.len())
             .map(|_| IngestMetadataRow::Headers { headers: &headers })
             .collect::<Vec<_>>();
         collector.collect(IngestGroupContribution {
@@ -1594,7 +1677,7 @@ mod tests {
             output_routes: &RelayProcessorOutputsNode { routes: Vec::new() },
             filter_where: None,
             metadata: &metadata,
-            acks: vec![AckSet::empty(); rows],
+            acks,
             ingested_at: Timestamp::from_unix_nanos(1),
         })
     }
@@ -1617,7 +1700,8 @@ mod tests {
                 )
                 .await
                 .expect("each payload should decode into the open group");
-            accept_decoded_rows(&mut collector, 1).expect("each decoded row should be accepted");
+            accept_decoded_payloads(&mut collector, vec![AckSet::empty()])
+                .expect("each decoded payload should be accepted");
         }
 
         assert_eq!(
@@ -1654,10 +1738,10 @@ mod tests {
         }
     }
 
-    /// An acknowledged poll group decodes its whole batch up front and then accepts the rows one
-    /// at a time, so a contribution covers a prefix of what the group has decoded.
+    /// An acknowledged poll group decodes its whole batch up front and then accepts the payloads
+    /// one at a time, so a contribution covers a prefix of what the group has decoded.
     #[tokio::test]
-    async fn ingest_group_accepts_its_decoded_rows_one_at_a_time() {
+    async fn ingest_group_accepts_its_decoded_payloads_one_at_a_time() {
         let codec = grouped_event_codec();
         let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 3);
 
@@ -1671,8 +1755,8 @@ mod tests {
                 .expect("each payload should decode into the open group");
         }
         for _ in 0..3 {
-            accept_decoded_rows(&mut collector, 1)
-                .expect("each decoded row should be accepted on its own");
+            accept_decoded_payloads(&mut collector, vec![AckSet::empty()])
+                .expect("each decoded payload should be accepted on its own");
         }
 
         let (_, rows) = collector
@@ -1704,7 +1788,8 @@ mod tests {
             .decode_payload(&codec, Cow::Borrowed(br#"{"user_id":1}"#))
             .await
             .expect("the first payload should decode");
-        accept_decoded_rows(&mut collector, 1).expect("the first row should be accepted");
+        accept_decoded_payloads(&mut collector, vec![AckSet::empty()])
+            .expect("the first payload should be accepted");
 
         collector
             .decode_payload(&codec, Cow::Borrowed(br#"{"user_id":"two"}"#))
@@ -1715,7 +1800,8 @@ mod tests {
             .decode_payload(&codec, Cow::Borrowed(br#"{"user_id":3}"#))
             .await
             .expect("the payload after the rejected one should decode");
-        accept_decoded_rows(&mut collector, 1).expect("the third row should be accepted");
+        accept_decoded_payloads(&mut collector, vec![AckSet::empty()])
+            .expect("the third payload should be accepted");
 
         let (_, rows) = collector
             .take_pending()
@@ -1732,6 +1818,164 @@ mod tests {
         assert_eq!(
             rows.batch.value(1, "user_id").expect("readable"),
             Some(RuntimeValue::I64(3))
+        );
+    }
+
+    /// Every message a payload unfolds into takes the payload's metadata and a share of its ACK
+    /// set, so the source's acknowledgement waits for all of them.
+    #[tokio::test]
+    async fn ingest_group_gives_every_unfolded_message_its_payload_metadata_and_an_ack_share() {
+        let codec = unfolding_event_codec(".[]");
+        let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 1);
+        let tracker = Arc::new(AckRootTracker::default());
+        let (payload_acks, completion) = AckSet::tracked_root(tracker.clone());
+
+        collector
+            .decode_payload(
+                &codec,
+                Cow::Borrowed(br#"[{"user_id":1},{"user_id":2},{"user_id":3}]"#),
+            )
+            .await
+            .expect("the payload should unfold into the open group");
+        accept_decoded_payloads(&mut collector, vec![payload_acks])
+            .expect("the unfolded payload should be accepted");
+
+        assert_eq!(
+            collector.len(),
+            3,
+            "the group counts messages, not payloads"
+        );
+        let (_, rows) = collector
+            .take_pending()
+            .expect("the group must close")
+            .expect("the group holds rows");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.record_metadata.len(), 3);
+        assert_eq!(rows.acks.len(), 3);
+        assert!(
+            rows.metadata_row(2).is_some(),
+            "every unfolded message must carry the payload's ingest metadata"
+        );
+        for (row, user_id) in (1..=3i64).enumerate() {
+            assert_eq!(
+                rows.batch.value(row, "user_id").expect("readable"),
+                Some(RuntimeValue::I64(user_id))
+            );
+        }
+
+        rows.acks[0].ack_success();
+        rows.acks[1].ack_success();
+        assert_eq!(
+            tracker.outstanding(),
+            1,
+            "the payload must stay outstanding until its last message is acknowledged"
+        );
+        rows.acks[2].ack_success();
+        assert_eq!(
+            timeout(Duration::from_secs(1), completion.wait())
+                .await
+                .expect("the payload acknowledgement should resolve"),
+            AckOutcome::Ack
+        );
+    }
+
+    /// A payload that unfolds into no message is acknowledged when it is accepted, and it neither
+    /// opens the group nor schedules its idle close.
+    #[tokio::test]
+    async fn ingest_group_acknowledges_a_payload_that_unfolds_into_no_messages() {
+        let codec = unfolding_event_codec(".[] | select(.keep)");
+        let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 1);
+        let tracker = Arc::new(AckRootTracker::default());
+        let (payload_acks, completion) = AckSet::tracked_root(tracker.clone());
+
+        collector
+            .decode_payload(&codec, Cow::Borrowed(br#"[{"user_id":1,"keep":false}]"#))
+            .await
+            .expect("a payload the program selects nothing from should decode");
+        accept_decoded_payloads(&mut collector, vec![payload_acks])
+            .expect("the payload without messages should be accepted");
+
+        assert_eq!(tracker.outstanding(), 0);
+        assert_eq!(
+            timeout(Duration::from_secs(1), completion.wait())
+                .await
+                .expect("the payload acknowledgement should resolve"),
+            AckOutcome::Ack
+        );
+        assert!(collector.is_empty());
+        assert!(collector.next_flush().is_none());
+        assert!(
+            collector
+                .take_pending()
+                .expect("the empty group must close")
+                .is_none()
+        );
+    }
+
+    /// A payload that fails part-way through unfolding contributes no message, and the group keeps
+    /// the messages of the payloads around it.
+    #[tokio::test]
+    async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_unfolding() {
+        let codec = unfolding_event_codec(".[]");
+        let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 8);
+
+        collector
+            .decode_payload(&codec, Cow::Borrowed(br#"[{"user_id":1}]"#))
+            .await
+            .expect("the first payload should unfold");
+        accept_decoded_payloads(&mut collector, vec![AckSet::empty()])
+            .expect("the first payload should be accepted");
+
+        let error = collector
+            .decode_payload(
+                &codec,
+                Cow::Borrowed(br#"[{"user_id":2},{"user_id":"confidential"}]"#),
+            )
+            .await
+            .expect_err("an element of the wrong type must reject its whole payload");
+        let message = error.to_string();
+        assert!(message.contains("(input value 0, output 1)"), "{message}");
+        assert!(!message.contains("confidential"), "{message}");
+
+        collector
+            .decode_payload(&codec, Cow::Borrowed(br#"[{"user_id":3},{"user_id":4}]"#))
+            .await
+            .expect("the payload after the rejected one should unfold");
+        accept_decoded_payloads(&mut collector, vec![AckSet::empty()])
+            .expect("the last payload should be accepted");
+
+        let (_, rows) = collector
+            .take_pending()
+            .expect("the group must close")
+            .expect("the group holds rows");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.acks.len(), 3);
+        for (row, user_id) in [1i64, 3, 4].into_iter().enumerate() {
+            assert_eq!(
+                rows.batch.value(row, "user_id").expect("readable"),
+                Some(RuntimeValue::I64(user_id))
+            );
+        }
+    }
+
+    /// A rejected payload in an otherwise empty group releases the rows it abandoned instead of
+    /// keeping them allocated until a message arrives.
+    #[tokio::test]
+    async fn ingest_group_releases_the_rows_a_rejected_payload_abandoned_in_an_empty_group() {
+        let codec = unfolding_event_codec(".[]");
+        let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 8);
+
+        collector
+            .decode_payload(
+                &codec,
+                Cow::Borrowed(br#"[{"user_id":1},{"user_id":"two"}]"#),
+            )
+            .await
+            .expect_err("an element of the wrong type must reject its whole payload");
+
+        assert!(
+            collector.pending.records.is_none(),
+            "an empty group must drop the builder a rejected payload abandoned rows in"
         );
     }
 

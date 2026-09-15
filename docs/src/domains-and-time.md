@@ -207,7 +207,7 @@ branch owns its route deadline. A deadline starts only when data enters an empty
 cleared when that buffer is released by time, size, force flush, shutdown, or error handling.
 
 `FLUSH IMMEDIATE` instead uses a physical 100 µs minimum on the process monotonic clock, regardless
-of domain rate. The ingestor source-group limit of 1,024 messages and 5 ms idle close are also
+of domain rate. The ingestor source-group bound of 1,024 messages and 5 ms idle close are also
 physical and run before route-local flushing. Connector retry and backoff timers remain separate
 physical controls; none of these operational waits is projected through the domain clock.
 

@@ -148,7 +148,8 @@ relay. Do not use them to scan across branches.
   schema referenced directly with `FROM SYSLOG`; it has no name or model lifecycle.
 - Every codec explicitly handles any wire/internal datetime or shape difference. Every JAQ-backed
   codec uses `WITH JAQ TRANSFORMATIONS` and declares `ON INGESTION`, `ON EMITTING`, or both in that
-  order.
+  order. Every `ON INGESTION` output is an object that fits the internal schema, and a payload that
+  unfolds into several messages is decoded, acknowledged, and redelivered as a whole.
 - Every codec using the SYSLOG wire schema uses `FROM SYSLOG` and only the exact fixed fields
   documented in `Common` → `Syslog`; keep the format separate from the `TYPE SYSLOG` transport,
   use only `NO_ACK` source/sink modes, and configure TLS identity and framing for the client

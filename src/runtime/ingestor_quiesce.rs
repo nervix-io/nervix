@@ -146,7 +146,8 @@ impl BufferedIngestPayload {
         )
     }
 
-    /// The number of source payloads, which is the row count of the group this buffer opens.
+    /// The number of source payloads this buffer holds, which is how many payloads the group it
+    /// opens accepts.
     pub(in crate::runtime) fn len(&self) -> usize {
         self.payloads.len()
     }

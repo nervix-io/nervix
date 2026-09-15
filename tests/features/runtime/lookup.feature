@@ -309,3 +309,73 @@ Feature: Resource-backed lookups
       | 1            | 0             |
       | 3            | 0             |
       | 3            | 1             |
+
+  Scenario Outline: A hash map line decoded by a JAQ codec contributes one entry per unfolded message
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has resource directory "zip_batches_dir" containing
+      """
+      {
+        "lookup.jsonl": "[{\"zip\":\"60601\",\"city\":\"Chicago\"},{\"zip\":\"10001\",\"city\":\"New York\"}]\n"
+      }
+      """
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE RESOURCE zip_batches;
+      UPLOAD RESOURCE zip_batches VERSION '{{zip_batches_dir}}';
+      """
+    Then the last command output contains
+      """
+      uploaded resource version 1
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA zip_code_entry (
+        zip STRING,
+        city STRING
+      );
+
+      CREATE CODEC zip_batch_codec
+        FROM JSON
+        TO SCHEMA zip_code_entry
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+
+      CREATE HASH MAP zip_codes_by_zip
+        KEY zip
+        FROM RESOURCE zip_batches
+        PATH 'lookup.jsonl'
+        DECODE USING zip_batch_codec;
+      """
+    When these NSPL commands are executed
+      """
+      DESCRIBE HASH MAP zip_codes_by_zip;
+      """
+    Then the last command output contains
+      """
+      entries: 2
+      """
+    When these NSPL commands are executed
+      """
+      LOOKUP zip_codes_by_zip KEY '60601';
+      """
+    Then the last command output contains
+      """
+      "city":"Chicago"
+      """
+    When these NSPL commands are executed
+      """
+      LOOKUP zip_codes_by_zip KEY '10001';
+      """
+    Then the last command output contains
+      """
+      "city":"New York"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |

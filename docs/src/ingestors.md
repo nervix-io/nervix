@@ -52,10 +52,13 @@ buffer capacity and object overhead. In delivery modes, `MAX <n>` is only an in-
 
 At runtime, the ingestor:
 
-- decodes inbound payloads into runtime records
-- collects decoded records into a bounded source ingest group of at most 1,024 messages, closing
-  it earlier when the source goes quiet for 5 ms; this bound is independent of every route
-  `FLUSH` policy and caps the size of the first Arrow batch built from external input
+- decodes inbound payloads into runtime records; a JAQ-backed codec may
+  [unfold](schemas-and-codecs.md#unfolding-payloads) one payload into zero or more records
+- collects decoded records into a bounded source ingest group that closes once it holds 1,024 or
+  more messages, or earlier when the source goes quiet for 5 ms; the records of one payload always
+  join one group together, so a payload that unfolds past the remaining room closes its group
+  above 1,024. This bound is independent of every route `FLUSH` policy and caps the first Arrow
+  batch built from external input at 1,023 messages plus one payload's records
 - executes `FILTER WHERE` once against that whole group
 - executes each route's ordered construction and `WHERE` program once against the surviving group
 - resolves the concrete branch group from the referenced `CREATE BRANCH`
@@ -66,6 +69,11 @@ At runtime, the ingestor:
 
 Branch execution receives these completed Arrow batches and does not buffer them behind another
 flush policy.
+
+Source acknowledgement is per payload. An acknowledged delivery mode acknowledges a payload once
+every record decoded from it has been acknowledged on every route it reached, and a negative
+acknowledgement of any of those records negatively acknowledges the payload.
+`ACK PARALLEL MAX <n>` windows count payloads.
 
 Timestamp selection and admission use one domain execution snapshot when the source group is
 delivered. `TIMESTAMP NOW` records that snapshot. `TIMESTAMP AT <field>` and connector-owned event
@@ -698,9 +706,10 @@ declared format. `JSON`, `YAML`, `TOML`, `XML`, and `RAW` travel as text frames;
 string, which is sent verbatim — that is how plain-text handshakes are
 expressed.
 
-Every incoming frame is decoded with the same format and offered to the current
-step. A textual format also reads payloads delivered as binary frames, since
-peers commonly frame text that way; a binary format reads binary frames only.
+Every incoming frame is decoded with the same format into exactly one value,
+which for `XML` is the frame's root element, and offered to the current step. A
+textual format also reads payloads delivered as binary frames, since peers
+commonly frame text that way; a binary format reads binary frames only.
 Failure matchers run first, so a rejection is never swallowed by a lenient
 acknowledgement matcher: a `FAIL JAQ` guard on the step is checked before the
 protocol-wide one, and the first to produce a value that is neither `null` nor

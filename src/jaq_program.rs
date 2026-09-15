@@ -12,7 +12,7 @@
 //! - **Must not know.** Schemas, relays or branches. Its callers decide what a program means; this
 //!   module only runs it.
 
-use std::{fmt::Display, str::FromStr};
+use std::{fmt::Display, io, str::FromStr};
 
 use bytes::Bytes;
 use jaq_core::{
@@ -44,6 +44,44 @@ pub enum JaqProgramError {
     NotJson { reason: String },
 }
 
+/// One value read from a payload, in the form a program runs on.
+#[derive(Debug)]
+pub struct JaqInput(JaqVal);
+
+impl TryFrom<JsonValue> for JaqInput {
+    type Error = JaqProgramError;
+
+    fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
+        let value = serde_json::from_value(value).map_err(|error| JaqProgramError::Eval {
+            reason: error.to_string(),
+        })?;
+        Ok(Self(value))
+    }
+}
+
+/// One value a program produced, before it is read as JSON.
+#[derive(Debug)]
+pub struct JaqOutput(JaqVal);
+
+impl JaqOutput {
+    fn evaluated(output: Result<JaqVal, jaq_json::Error>) -> Result<Self, JaqProgramError> {
+        match output {
+            Ok(value) => Ok(Self(value)),
+            Err(error) => Err(JaqProgramError::Eval {
+                reason: error.to_string(),
+            }),
+        }
+    }
+}
+
+impl TryFrom<JaqOutput> for JsonValue {
+    type Error = JaqProgramError;
+
+    fn try_from(output: JaqOutput) -> Result<Self, Self::Error> {
+        jaq_value_to_json(output.0)
+    }
+}
+
 /// A jaq program compiled once and reusable across payloads.
 pub struct CompiledJaqProgram {
     source: String,
@@ -72,7 +110,7 @@ impl CompiledJaqProgram {
 
     /// Run the program and require exactly one output.
     pub fn run_single(&self, input: JsonValue) -> Result<JsonValue, JaqProgramError> {
-        run_single(&self.filter, input, Vec::new())
+        run_single(&self.filter, JaqInput::try_from(input)?, Vec::new())
     }
 
     /// Run the program and take its first output, if it produces any.
@@ -80,7 +118,18 @@ impl CompiledJaqProgram {
     /// Matchers probe payloads they were not written for, so an absent output is an ordinary
     /// answer rather than a failure.
     pub fn run_first(&self, input: JsonValue) -> Result<Option<JsonValue>, JaqProgramError> {
-        run_first(&self.filter, input, Vec::new())
+        run_first(&self.filter, JaqInput::try_from(input)?, Vec::new())
+    }
+
+    /// Run the program on one input value and yield its outputs in the order it produces them.
+    ///
+    /// Each output is produced only when it is read, so a caller that stops reading stops the
+    /// program.
+    pub fn outputs(
+        &self,
+        input: JaqInput,
+    ) -> impl Iterator<Item = Result<JaqOutput, JaqProgramError>> + '_ {
+        run(&self.filter, input, Vec::new())
     }
 }
 
@@ -121,7 +170,7 @@ impl StatefulJaqProgram {
         input: JsonValue,
         state: &JsonValue,
     ) -> Result<JsonValue, JaqProgramError> {
-        run_single(&self.filter, input, self.bind(state)?)
+        run_single(&self.filter, JaqInput::try_from(input)?, self.bind(state)?)
     }
 
     pub fn run_first(
@@ -129,7 +178,7 @@ impl StatefulJaqProgram {
         input: JsonValue,
         state: &JsonValue,
     ) -> Result<Option<JsonValue>, JaqProgramError> {
-        run_first(&self.filter, input, self.bind(state)?)
+        run_first(&self.filter, JaqInput::try_from(input)?, self.bind(state)?)
     }
 
     fn bind(&self, state: &JsonValue) -> Result<Vec<JaqVal>, JaqProgramError> {
@@ -176,46 +225,43 @@ fn compile_filter(
 
 fn run<'a>(
     filter: &'a JaqFilter<data::JustLut<JaqVal>>,
-    input: JsonValue,
+    input: JaqInput,
     vars: Vec<JaqVal>,
-) -> Result<impl Iterator<Item = Result<JaqVal, jaq_json::Error>> + 'a, JaqProgramError> {
-    let input: JaqVal = serde_json::from_value(input).map_err(|error| JaqProgramError::Eval {
-        reason: error.to_string(),
-    })?;
+) -> impl Iterator<Item = Result<JaqOutput, JaqProgramError>> + 'a {
     let ctx = JaqCtx::<data::JustLut<JaqVal>>::new(&filter.lut, JaqVars::new(vars));
-    Ok(filter.id.run((ctx, input)).map(unwrap_valr))
+    filter
+        .id
+        .run((ctx, input.0))
+        .map(unwrap_valr)
+        .map(JaqOutput::evaluated)
 }
 
 fn run_single(
     filter: &JaqFilter<data::JustLut<JaqVal>>,
-    input: JsonValue,
+    input: JaqInput,
     vars: Vec<JaqVal>,
 ) -> Result<JsonValue, JaqProgramError> {
-    let mut outputs = run(filter, input, vars)?;
-    let output = outputs
-        .next()
-        .ok_or(JaqProgramError::NoOutput)?
-        .map_err(|error| JaqProgramError::Eval {
-            reason: error.to_string(),
-        })?;
+    let mut outputs = run(filter, input, vars);
+    let Some(output) = outputs.next() else {
+        return Err(JaqProgramError::NoOutput);
+    };
+    let output = output?;
     if outputs.next().is_some() {
         return Err(JaqProgramError::MultipleOutputs);
     }
-    jaq_value_to_json(output)
+    JsonValue::try_from(output)
 }
 
 fn run_first(
     filter: &JaqFilter<data::JustLut<JaqVal>>,
-    input: JsonValue,
+    input: JaqInput,
     vars: Vec<JaqVal>,
 ) -> Result<Option<JsonValue>, JaqProgramError> {
-    let Some(output) = run(filter, input, vars)?.next() else {
+    let Some(output) = run(filter, input, vars).next() else {
         return Ok(None);
     };
-    let output = output.map_err(|error| JaqProgramError::Eval {
-        reason: error.to_string(),
-    })?;
-    jaq_value_to_json(output).map(Some)
+    let output = output?;
+    JsonValue::try_from(output).map(Some)
 }
 
 #[derive(Debug, Error)]
@@ -302,24 +348,64 @@ declare_jaq_native_formats! {
 }
 
 impl JaqNativeFormat {
-    /// Decode a payload into the single value it represents.
+    /// Read the values `payload` holds, in payload order.
     ///
     /// `RAW` slurps the whole payload into one string rather than splitting it into lines, because
-    /// a payload is one message.
+    /// a payload is one message. An `XML` payload holds only its root element, as
+    /// [`JaqPayloadValues`] describes.
+    pub fn read_values(self, payload: &Bytes) -> Result<JaqPayloadValues<'_>, JaqFormatError> {
+        let format = self.jaq_format();
+        let source = jaq_read::bytes_str(format, payload).map_err(|error| self.decode(error))?;
+        let slurp = self == Self::Raw;
+        Ok(JaqPayloadValues {
+            format: self,
+            values: jaq_read::parse(format, payload, source, slurp),
+        })
+    }
+
+    /// Decode a payload into the single value it represents.
     pub fn read_single_value(self, payload: &[u8]) -> Result<JsonValue, JaqFormatError> {
         let bytes = Bytes::copy_from_slice(payload);
-        let format = self.jaq_format();
-        let source = jaq_read::bytes_str(format, &bytes).map_err(|error| self.decode(error))?;
-        let slurp = self == Self::Raw;
-        let mut values = jaq_read::parse(format, &bytes, source, slurp);
-        let value = values
-            .next()
-            .ok_or_else(|| self.decode("payload produced no input values"))?
-            .map_err(|error| self.decode(error))?;
+        let mut values = self.read_values(&bytes)?;
+        let Some(value) = values.next() else {
+            return Err(self.decode("payload produced no input values"));
+        };
+        let value = value?;
         if values.next().is_some() {
             return Err(self.decode("payload produced multiple input values"));
         }
-        jaq_value_to_json(value).map_err(|error| self.decode(error))
+        jaq_value_to_json(value.0).map_err(|error| self.decode(error))
+    }
+
+    /// Whether a value the reader produced is one of the payload's values.
+    ///
+    /// The XML reader also yields the declaration, document type, comments, and processing
+    /// instructions around the root element. Only an element, which jaq reads as an object that
+    /// carries its tag in `t`, is a value of the payload.
+    fn holds_value(self, value: &JaqVal) -> bool {
+        match self {
+            Self::Xml => {
+                let JaqVal::Obj(fields) = value else {
+                    return false;
+                };
+                fields.contains_key(&JaqVal::from(String::from("t")))
+            }
+            Self::Json | Self::Yaml | Self::Toml | Self::Cbor | Self::Raw => true,
+        }
+    }
+
+    /// The failure to read one value, described without the payload content a reader's own
+    /// message can quote.
+    fn read_failure(self, error: &io::Error) -> JaqFormatError {
+        if let Some(source) = error.get_ref()
+            && let Some(jaq_read::yaml::Error::Scalar(tag, _, span)) =
+                source.downcast_ref::<jaq_read::yaml::Error>()
+        {
+            return self.decode(format_args!(
+                "scalar at {span} is incompatible with tag {tag}"
+            ));
+        }
+        self.decode(error)
     }
 
     /// Encode one value as a payload of this format.
@@ -357,6 +443,32 @@ impl JaqNativeFormat {
         JaqFormatError::Encode {
             format: self.name(),
             reason: reason.to_string(),
+        }
+    }
+}
+
+/// The values one payload holds, read lazily in payload order.
+///
+/// A value is parsed only when it is read. An `XML` payload yields its root element alone: the
+/// declaration, document type, comments, and processing instructions outside it are skipped, and a
+/// second root element is malformed.
+pub struct JaqPayloadValues<'a> {
+    format: JaqNativeFormat,
+    values: Box<dyn Iterator<Item = io::Result<JaqVal>> + 'a>,
+}
+
+impl Iterator for JaqPayloadValues<'_> {
+    type Item = Result<JaqInput, JaqFormatError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let value = match self.values.next()? {
+                Ok(value) => value,
+                Err(error) => return Some(Err(self.format.read_failure(&error))),
+            };
+            if self.format.holds_value(&value) {
+                return Some(Ok(JaqInput(value)));
+            }
         }
     }
 }
@@ -577,6 +689,158 @@ mod tests {
             JaqNativeFormat::Raw.write_value(json!({"id": 1})),
             Err(JaqFormatError::Encode { .. })
         ));
+    }
+
+    /// Reads every value of `payload` as JSON, for tests that assert on what a payload holds.
+    fn read_json_values(format: JaqNativeFormat, payload: &[u8]) -> Vec<JsonValue> {
+        let bytes = Bytes::copy_from_slice(payload);
+        let mut values = Vec::new();
+        for value in format
+            .read_values(&bytes)
+            .expect("the payload should be readable")
+        {
+            let value = value.expect("every value of the payload should parse");
+            values.push(jaq_value_to_json(value.0).expect("every value should be JSON"));
+        }
+        values
+    }
+
+    #[test]
+    fn reads_every_value_of_a_json_sequence() {
+        assert_eq!(
+            read_json_values(JaqNativeFormat::Json, b"{\"id\":1}\n{\"id\":2} {\"id\":3}"),
+            vec![json!({"id": 1}), json!({"id": 2}), json!({"id": 3})]
+        );
+    }
+
+    #[test]
+    fn reads_every_document_of_a_yaml_stream() {
+        assert_eq!(
+            read_json_values(JaqNativeFormat::Yaml, b"id: 1\n---\nid: 2\n"),
+            vec![json!({"id": 1}), json!({"id": 2})]
+        );
+    }
+
+    #[test]
+    fn reads_every_item_of_a_cbor_sequence() {
+        let mut payload = Vec::new();
+        for id in 1..=2 {
+            ciborium::into_writer(&json!({"id": id}), &mut payload)
+                .expect("a CBOR item should encode");
+        }
+
+        assert_eq!(
+            read_json_values(JaqNativeFormat::Cbor, &payload),
+            vec![json!({"id": 1}), json!({"id": 2})]
+        );
+    }
+
+    #[test]
+    fn reads_the_root_element_of_an_xml_payload_without_its_prolog() {
+        assert_eq!(
+            read_json_values(
+                JaqNativeFormat::Xml,
+                b"<?xml version=\"1.0\"?>\n<!-- batch -->\n<order id=\"7\"/>\n<!-- end -->\n",
+            ),
+            vec![json!({"t": "order", "a": {"id": "7"}})]
+        );
+    }
+
+    #[test]
+    fn rejects_a_second_xml_root_element() {
+        let bytes = Bytes::from_static(b"<first/><second/>");
+        let mut values = JaqNativeFormat::Xml
+            .read_values(&bytes)
+            .expect("the payload should be readable");
+
+        assert!(matches!(values.next(), Some(Ok(_))));
+        assert!(matches!(
+            values.next(),
+            Some(Err(JaqFormatError::Decode { .. }))
+        ));
+    }
+
+    #[test]
+    fn reads_no_value_from_an_empty_payload_of_a_sequence_format() {
+        for format in [
+            JaqNativeFormat::Json,
+            JaqNativeFormat::Yaml,
+            JaqNativeFormat::Xml,
+            JaqNativeFormat::Cbor,
+        ] {
+            assert_eq!(
+                read_json_values(format, b""),
+                Vec::<JsonValue>::new(),
+                "an empty {} payload holds no value",
+                format.name()
+            );
+        }
+    }
+
+    #[test]
+    fn reads_an_empty_toml_payload_as_one_empty_document() {
+        assert_eq!(
+            read_json_values(JaqNativeFormat::Toml, b""),
+            vec![json!({})]
+        );
+    }
+
+    #[test]
+    fn stops_reading_at_the_first_malformed_value() {
+        let bytes = Bytes::from_static(b"{\"id\":1}\n{\"id\":");
+        let mut values = JaqNativeFormat::Json
+            .read_values(&bytes)
+            .expect("the payload should be readable");
+
+        assert!(matches!(values.next(), Some(Ok(_))));
+        assert!(matches!(
+            values.next(),
+            Some(Err(JaqFormatError::Decode { .. }))
+        ));
+    }
+
+    #[test]
+    fn describes_a_yaml_scalar_that_conflicts_with_its_tag_without_quoting_it() {
+        let bytes = Bytes::from_static(b"id: !!int confidential\n");
+        let mut values = JaqNativeFormat::Yaml
+            .read_values(&bytes)
+            .expect("the payload should be readable");
+        let Some(Err(error)) = values.next() else {
+            panic!("a scalar that conflicts with its tag must fail to read");
+        };
+        let message = error.to_string();
+
+        assert!(message.contains("incompatible with tag"), "{message}");
+        assert!(!message.contains("confidential"), "{message}");
+    }
+
+    #[test]
+    fn yields_every_output_of_a_program_in_order() {
+        let program = CompiledJaqProgram::compile(".[]").expect("program should compile");
+        let input = JaqInput::try_from(json!([1, 2, 3])).expect("the input should convert");
+        let mut outputs = Vec::new();
+        for output in program.outputs(input) {
+            let output = output.expect("every output should evaluate");
+            outputs.push(JsonValue::try_from(output).expect("every output should be JSON"));
+        }
+
+        assert_eq!(outputs, vec![json!(1), json!(2), json!(3)]);
+    }
+
+    #[test]
+    fn yields_no_output_for_a_value_the_program_rejects() {
+        let program = CompiledJaqProgram::compile("select(.ok)").expect("program should compile");
+        let input = JaqInput::try_from(json!({"ok": false})).expect("the input should convert");
+
+        assert_eq!(program.outputs(input).count(), 0);
+    }
+
+    #[test]
+    fn stops_an_unbounded_program_when_its_outputs_are_no_longer_read() {
+        let program = CompiledJaqProgram::compile("repeat(1)").expect("program should compile");
+        let input = JaqInput::try_from(JsonValue::Null).expect("the input should convert");
+
+        assert_eq!(program.outputs(input).take(3).count(), 3);
     }
 
     #[test]

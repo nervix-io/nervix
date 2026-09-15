@@ -535,12 +535,12 @@ impl KafkaIngestor {
                                 Ok(message) => {
                                     task_runtime
                                         .clear_ingestor_transient_error(&task_domain, &task_ingestor);
-                                    // Decoding appends one row to the group's own record builder,
-                                    // so a poll group is one set of Arrow columns. The payload is
-                                    // copied because the codec may leave the reactor while the
-                                    // source message stays borrowed from the consumer; every other
-                                    // value a mode needs is read from the borrowed message where
-                                    // it is used.
+                                    // Decoding appends a payload's messages to the group's own
+                                    // record builder, so a poll group is one set of Arrow
+                                    // columns. The payload is copied because the codec may leave
+                                    // the reactor while the source message stays borrowed from
+                                    // the consumer; every other value a mode needs is read from
+                                    // the borrowed message where it is used.
                                     let trace_message = |message: &rdkafka::message::BorrowedMessage<'_>| {
                                         let key = match message.key_view::<str>() {
                                             Some(Ok(key)) => key.to_owned(),

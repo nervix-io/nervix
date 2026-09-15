@@ -5420,6 +5420,27 @@ fn jaq_native_payload_fixture(fixture: &str) -> (Vec<u8>, &'static str) {
                 .unwrap_or_else(|error| panic!("failed to encode CBOR fixture: {error}"));
             (encoded, "application/cbor")
         }
+        "yaml_notification_stream" => (
+            b"user_id: 41\npayload: first\n---\nuser_id: 42\npayload: second\n".to_vec(),
+            "application/yaml",
+        ),
+        "cbor_notification_sequence" => {
+            let mut encoded = Vec::new();
+            for (user_id, payload) in [(41, "first"), (42, "second")] {
+                let value = serde_json::json!({"user_id": user_id, "payload": payload});
+                ciborium::into_writer(&value, &mut encoded)
+                    .unwrap_or_else(|error| panic!("failed to encode CBOR fixture: {error}"));
+            }
+            (encoded, "application/cbor")
+        }
+        "xml_declared_notification_batch" => (
+            b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- partner feed -->\n\
+              <notifications><notification><user_id>41</user_id><payload>first</payload>\
+              </notification><notification><user_id>42</user_id><payload>second</payload>\
+              </notification></notifications>\n"
+                .to_vec(),
+            "application/xml",
+        ),
         other => panic!("unknown JAQ native payload fixture '{other}'"),
     }
 }
@@ -14919,6 +14940,19 @@ async fn then_last_server_error_contains(world: &mut ScenarioWorld, #[step] step
     assert!(
         error.contains(&expected),
         "expected server error to contain {expected:?}, got: {error}"
+    );
+}
+
+#[then("the last server error does not contain")]
+async fn then_last_server_error_does_not_contain(world: &mut ScenarioWorld, #[step] step: &Step) {
+    let unexpected = expand_placeholders(world, docstring(step).trim());
+    let error = world
+        .last_server_error
+        .as_deref()
+        .expect("server error must be captured before assertion");
+    assert!(
+        !error.contains(&unexpected),
+        "expected server error not to contain {unexpected:?}, got: {error}"
     );
 }
 
