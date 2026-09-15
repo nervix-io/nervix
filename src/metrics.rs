@@ -3320,24 +3320,28 @@ impl RuntimeMetrics {
     }
 
     fn increment(&self, key: &MetricKey, value: u64, domain_timestamp: Option<Timestamp>) {
-        if let Some(series) = self.series.counters.get(key) {
+        self.with_counter_series(key, |series| {
             series.increment(value, domain_timestamp);
-        } else {
-            self.series
-                .counters
-                .entry(key.clone())
-                .or_insert_with(|| Arc::new(CounterSeries::default()))
-                .increment(value, domain_timestamp);
-        }
+        });
         self.series.prometheus.increment_counter(key, value);
     }
 
     fn register_counter(&self, key: MetricKey) {
-        self.series
+        self.with_counter_series(&key, |_| {});
+        self.series.prometheus.register_counter(&key);
+    }
+
+    fn with_counter_series(&self, key: &MetricKey, observe: impl FnOnce(&CounterSeries)) {
+        if let Some(series) = self.series.counters.get(key) {
+            observe(series.value());
+            return;
+        }
+        let series = self
+            .series
             .counters
             .entry(key.clone())
             .or_insert_with(|| Arc::new(CounterSeries::default()));
-        self.series.prometheus.register_counter(&key);
+        observe(series.value());
     }
 
     fn observe_histogram(&self, key: MetricKey, value: f64, domain_timestamp: Option<Timestamp>) {
