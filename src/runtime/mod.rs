@@ -198,6 +198,7 @@ mod ingestor_start;
 mod ingestor_start_plan;
 mod ingestors;
 mod kafka_offset_state;
+mod local_drain;
 mod lookup_hash_map;
 mod lsm_sequence;
 mod materialized_read;
@@ -344,6 +345,7 @@ use kafka_offset_state::{
     KafkaOffsetStatePersistence, KafkaOffsetStateRead, KafkaTopicPartition,
     ReplicatedKafkaOffsetState,
 };
+use local_drain::LocalIntake;
 use lookup_hash_map::{
     LookupHashMapCall, LookupHashMapCallKey, collect_program_field_refs,
     compile_lookup_hash_map_calls, rewrite_lookup_hash_map_program,
@@ -572,6 +574,7 @@ pub(crate) use ingest_metadata::{
 };
 pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;
 pub(crate) use ingestors::kafka::KafkaIngestor;
+pub(crate) use local_drain::LocalGraphDrainOutcome;
 pub(crate) use materialized_state::MaterializedRecordReport;
 pub use node::{DEFAULT_TEMP_DIR, Runtime};
 pub(crate) use observability::{IngestorDescribe, KafkaDomainOffsetDescribe};

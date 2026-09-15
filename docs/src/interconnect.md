@@ -333,7 +333,9 @@ keeps a previous branch lifetime from being confused with the new runtime instan
 
 Cluster membership gossip uses management discovery capacity. It discovers topology and
 incarnations but does not replace application health checks. Gossip payloads remain below the
-management-event bound, so discovery cannot allocate an arbitrary wire message.
+management-event bound, so discovery cannot allocate an arbitrary wire message. A node that is
+shutting down closes its gossip transport before it stops gossip, so an exchange still waiting on a
+peer that stopped first ends at once instead of holding shutdown until its one-second deadline.
 
 Terminal teardown closes the gossip exchange path before it asks the gossip loop to stop. The loop
 reads its stop request only between rounds, and a round exchanges with each selected peer in turn
@@ -460,7 +462,9 @@ observability, and console listeners. Its interconnect listener and registered h
 available on that live node throughout the drain-support phase. They continue carrying queued and
 active relay payloads, admission and record acknowledgements, runtime-state replication and
 checkpoints, ownership-handoff coordination, domain-clock progress, and the schedule revisions that
-activate committed ownership.
+activate committed ownership. Drain support first moves scheduled work to a live replacement node
+when one exists and then completes the work the node already admitted in place, so these consumers
+remain available until the node's own graphs are quiescent.
 
 The relay payload lane retains its transport admission guard for every queued or active payload.
 Sender-side runtime drain accounting retains the tracked root until admission and every requested

@@ -178,6 +178,15 @@ Only moved ingestors take this hold. Every other ingestor keeps its session open
 ingesting, including ingestors on the former and destination cluster nodes. A failed fence or drain
 releases the former source and leaves the schedule unchanged.
 
+Graceful shutdown then stops intake the same way on every ingestor of the terminating node,
+including endpoint ingestors, which serve on every node, and ingestors whose scheduled owner did not
+move. It also ignores `ON QUIESCE`. Already admitted payloads continue through their routes, route
+buffers are force-flushed whatever their `FLUSH EACH` cadence, and Nervix waits for their ACK roots
+to resolve before the source session stops, so offsets, acknowledgements, and deletes complete for
+work that reached its sinks. A root still unresolved when the drain timeout passes is negatively
+acknowledged, and the source's redelivery contract applies. See
+[Planned Ownership Handoffs And Failover](control-plane.md#planned-ownership-handoffs-and-failover).
+
 Ordinary model-alteration quiesce still does not wait for downstream ACK chains. Already admitted
 route batches continue downstream, and a source item not yet acknowledged, committed, or deleted is
 eligible for redelivery on resume. A connected mode's raw quiesce buffer is outside runtime graph
