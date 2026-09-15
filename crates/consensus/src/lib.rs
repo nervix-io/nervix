@@ -534,7 +534,7 @@ pub struct RaftLogRetention {
     pub snapshot_index: Option<u64>,
     /// The highest index the node's log holds.
     pub last_log_index: Option<u64>,
-    /// What the retained log occupies in node-owned storage.
+    /// Encoded bytes held by the current log entries.
     pub retained_bytes: u64,
 }
 

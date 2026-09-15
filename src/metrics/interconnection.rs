@@ -406,7 +406,7 @@ const SERIES: &[SeriesSpec] = &[
     },
     SeriesSpec {
         name: "nervix_consensus_log_retained_bytes",
-        help: "What this node's retained Raft log occupies in node-owned storage.",
+        help: "Encoded bytes held by this node's current Raft log entries.",
         kind: SeriesKind::Gauge,
         labels: NO_LABELS,
     },
