@@ -1,8 +1,9 @@
-//! Ordering and half-close coverage for bidirectional frame streams.
+//! Ordering, half-close, and sender-progress coverage for bidirectional frame streams.
 //!
 //! Layer: test harness.
 //!
-//! - **Owns.** The pipelined submission scenario for one ordered duplex stream.
+//! - **Owns.** The pipelined submission and sender-progress scenarios for one ordered duplex
+//!   stream.
 //! - **Depends on.** The interconnect test fixture and typed test messages.
 //! - **Must not know.** Product runtime graphs or consensus behavior.
 
@@ -34,15 +35,9 @@ impl InterconnectDuplexRequest for CountingStream {
 
 const PIPELINED_ITEMS: u64 = 32;
 
-#[tokio::test]
-async fn a_duplex_stream_answers_every_frame_in_submission_order() {
-    let ConnectedTransports {
-        transport_a,
-        transport_b,
-        node_b,
-        ..
-    } = connected_transports().await;
-    transport_b
+/// Answer every frame with its value plus the stream's starting offset, in arrival order.
+fn register_counting_handler(transport: &Transport) {
+    transport
         .register_duplex_handler::<CountingStream, _, _>(|_context, opening, items| async move {
             let stream = futures_util::stream::unfold(
                 (opening.start, items),
@@ -59,6 +54,17 @@ async fn a_duplex_stream_answers_every_frame_in_submission_order() {
             Ok(DuplexResponses::new(stream))
         })
         .assured("the fresh test transport has no duplex handler with this name");
+}
+
+#[tokio::test]
+async fn a_duplex_stream_answers_every_frame_in_submission_order() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_b,
+        ..
+    } = connected_transports().await;
+    register_counting_handler(&transport_b);
 
     let (mut sender, mut receiver) = transport_a
         .open_duplex_stream(&node_b, CountingStream { start: 100 })
@@ -99,6 +105,53 @@ async fn a_duplex_stream_answers_every_frame_in_submission_order() {
             .expect("the duplex stream should stay healthy")
             .is_none(),
         "the responder ends its direction once the initiator half-closes"
+    );
+
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_duplex_sender_reports_when_its_peer_last_accepted_its_bytes() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_b,
+        ..
+    } = connected_transports().await;
+    register_counting_handler(&transport_b);
+
+    let (mut sender, mut receiver) = transport_a
+        .open_duplex_stream(&node_b, CountingStream { start: 0 })
+        .await
+        .expect("the duplex test stream should open");
+    let progress = sender.progress();
+
+    let before_send = Instant::now();
+    sender
+        .send(CountingItem { value: 7 })
+        .await
+        .expect("the frame should be submitted");
+    let accepted_at = progress.last_accepted_at();
+    assert!(
+        accepted_at >= before_send,
+        "a frame the peer accepted must move the sender's progress past the moment it was sent"
+    );
+
+    let answer = timeout(Duration::from_secs(10), receiver.next())
+        .await
+        .expect("the answer should arrive before the test deadline")
+        .expect("the duplex stream should stay healthy")
+        .expect("the submitted frame should be answered");
+    assert_eq!(
+        answer,
+        CountingAnswer { value: 7 },
+        "the peer answers the frame it accepted"
+    );
+    assert_eq!(
+        progress.last_accepted_at(),
+        accepted_at,
+        "answers arriving from the peer must not count as the peer accepting the sender's bytes"
     );
 
     transport_a.shutdown().await;
