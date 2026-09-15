@@ -571,10 +571,12 @@ build and the existing tests, and nothing in it changes behavior.
   API, control flow written as `Option` and `Result` combinator chains, `Result<_, String>`,
   signatures returning a Nervix error without `Report`, node identities carried as `String`, struct
   fields gated on `cfg(feature = "testing")`, parser references outside the language edges, and
-  `Model` references in the data plane, and CI fails when a count is above `debt-baseline.json`. A
-  change may lower a count and never raise one. When a count falls, run `just ratchet --update` and
-  commit the baseline in the same change; `just ratchet --show <count>` lists the sites behind one
-  count.
+  `Model` references in the data plane. It also records `data_plane_lock_acquisitions` for lock and
+  `DashMap::entry` acquisitions in data-plane files, and `write_once_rwlock_fields` for names and
+  shared references held as `RwLock<Option<...>>` fields. CI fails when a count is above
+  `debt-baseline.json`. A change may lower a count and never raise one. When a count falls, run
+  `just ratchet --update` and commit the baseline in the same change; `just ratchet --show <count>`
+  lists the sites behind one count.
 - Every Rust build, check, lint, and test invocation must use the repository-configured kache
   compiler wrapper. Never unset, clear, or override `RUSTC_WRAPPER`, including for diagnostics,
   benchmarks, cache troubleshooting, or retries.
