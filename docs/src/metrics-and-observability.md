@@ -182,7 +182,7 @@ Consensus retention:
   `nervix_consensus_log_purged_index`: the highest Raft index the log holds, the highest the
   current snapshot covers, and the highest already removed. A position that does not exist yet
   reports `-1`
-- `nervix_consensus_log_retained_bytes`: what the retained log occupies in node-owned storage
+- `nervix_consensus_log_retained_bytes`: encoded bytes held by the node's current Raft log entries
 - `nervix_consensus_snapshot_pinned_generations`, `nervix_consensus_snapshot_pinned_readers`,
   `nervix_consensus_snapshot_unreferenced_generations`: snapshot generations an outgoing transfer
   holds against deletion, the readers those pins are held for, and generations waiting to be

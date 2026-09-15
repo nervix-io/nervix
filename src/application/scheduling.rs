@@ -35,6 +35,7 @@ use super::{
     },
     peer_grpc::{grpc_client_connect_options, grpc_uri_from_advertise_addr},
     session_service::SessionServiceImpl,
+    shutdown::ShutdownPhaseOutcome,
 };
 use crate::{proto::CommandResult, registry::ActiveGraph, runtime::KafkaIngestor};
 
@@ -45,6 +46,7 @@ pub(in crate::application) const RUNTIME_REVISION_READINESS_PROPAGATION_BOUND: D
     Duration::from_secs(30);
 
 const SHUTDOWN_CORDON_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
+const SHUTDOWN_LEADER_OBSERVATION_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(in crate::application) struct KafkaPartitionWatcherKey {
@@ -676,7 +678,7 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn drain_local_node_before_shutdown(
         &self,
         drain_timeout: Duration,
-    ) {
+    ) -> ShutdownPhaseOutcome {
         let local_node_id = self.inner.consensus.local_node_id().clone();
         let operator_cordon_exists = self
             .inner
@@ -685,38 +687,49 @@ impl SessionServiceImpl {
             .await
             .contains(&local_node_id);
         let drain = self.drain_local_node_for_shutdown(&local_node_id);
-        if tokio::time::timeout(drain_timeout, drain).await.is_err() {
-            warn!(
-                node_id = %local_node_id,
-                timeout = ?drain_timeout,
-                "timed out draining local node before graceful shutdown"
-            );
-        }
+        let drain_outcome = match tokio::time::timeout(drain_timeout, drain).await {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                warn!(
+                    node_id = %local_node_id,
+                    timeout = ?drain_timeout,
+                    "timed out draining local node before graceful shutdown"
+                );
+                ShutdownPhaseOutcome::Abandoned
+            }
+        };
 
         if operator_cordon_exists {
             info!(
                 node_id = %local_node_id,
                 "preserving operator cordon across graceful shutdown"
             );
-            return;
+            return drain_outcome;
         }
 
-        if tokio::time::timeout(
+        let cleanup_outcome = match tokio::time::timeout(
             SHUTDOWN_CORDON_CLEANUP_TIMEOUT,
             self.clear_shutdown_drain_cordon(&local_node_id),
         )
         .await
-        .is_err()
         {
-            warn!(
-                node_id = %local_node_id,
-                timeout = ?SHUTDOWN_CORDON_CLEANUP_TIMEOUT,
-                "timed out clearing shutdown drain cordon"
-            );
-        }
+            Ok(outcome) => outcome,
+            Err(_) => {
+                warn!(
+                    node_id = %local_node_id,
+                    timeout = ?SHUTDOWN_CORDON_CLEANUP_TIMEOUT,
+                    "timed out clearing shutdown drain cordon"
+                );
+                ShutdownPhaseOutcome::Abandoned
+            }
+        };
+        drain_outcome.combine(cleanup_outcome)
     }
 
-    async fn drain_local_node_for_shutdown(&self, local_node_id: &ClusterNodeName) {
+    async fn drain_local_node_for_shutdown(
+        &self,
+        local_node_id: &ClusterNodeName,
+    ) -> ShutdownPhaseOutcome {
         let availability = self.inner.cluster.availability_state().await;
         let placement_candidate_node_ids = availability.placement_candidate_node_ids();
         let drain_targets = self
@@ -729,105 +742,106 @@ impl SessionServiceImpl {
                 node_id = %local_node_id,
                 "skipping graceful shutdown drain: no live schedulable replacement nodes remain"
             );
-            return;
+            return ShutdownPhaseOutcome::Abandoned;
         }
-        let leader = self.inner.consensus.current_leader().await;
-        match leader.as_ref() {
-            Some(leader_id) if leader_id == local_node_id => {
-                let result = self.drain_node(local_node_id.clone()).await;
-                if result.success {
-                    info!(
-                        node_id = %local_node_id,
-                        message = result.message,
-                        "drained local node before graceful shutdown"
-                    );
-                } else {
-                    warn!(
-                        node_id = %local_node_id,
-                        message = result.message,
-                        "failed to drain local node before graceful shutdown"
-                    );
-                }
+        let leader_id = self.wait_for_shutdown_drain_leader().await;
+        if &leader_id == local_node_id {
+            let result = self.drain_node(local_node_id.clone()).await;
+            if result.success {
+                info!(
+                    node_id = %local_node_id,
+                    message = result.message,
+                    "drained local node before graceful shutdown"
+                );
+                ShutdownPhaseOutcome::Completed
+            } else {
+                warn!(
+                    node_id = %local_node_id,
+                    message = result.message,
+                    "failed to drain local node before graceful shutdown"
+                );
+                ShutdownPhaseOutcome::Abandoned
             }
-            Some(leader_id) => {
-                let Some(leader_grpc_uri) = self.leader_grpc_uri(leader_id).await else {
-                    warn!(
-                        node_id = %local_node_id,
-                        leader = %leader_id,
-                        "failed to drain local node before graceful shutdown: leader grpc uri is \
-                         unknown"
-                    );
-                    return;
-                };
-                match NervixClient::connect_with_options(
+        } else {
+            let Some(leader_grpc_uri) = self.leader_grpc_uri(&leader_id).await else {
+                warn!(
+                    node_id = %local_node_id,
+                    leader = %leader_id,
+                    "failed to drain local node before graceful shutdown: leader grpc uri is \
+                     unknown"
+                );
+                return ShutdownPhaseOutcome::Abandoned;
+            };
+            match NervixClient::connect_with_options(
+                &leader_grpc_uri,
+                "default",
+                grpc_client_connect_options(
                     &leader_grpc_uri,
-                    "default",
-                    grpc_client_connect_options(
-                        &leader_grpc_uri,
-                        self.inner.configured_basic_auth.as_ref(),
-                    ),
-                )
-                .await
-                {
-                    Ok(client) => {
-                        match client.execute(format!("DRAIN NODE {local_node_id};")).await {
-                            Ok(outcome) if outcome.success => {
-                                info!(
-                                    node_id = %local_node_id,
-                                    leader = %leader_id,
-                                    message = outcome.message,
-                                    "drained local node through leader before graceful shutdown"
-                                );
-                            }
-                            Ok(outcome) => {
-                                warn!(
-                                    node_id = %local_node_id,
-                                    leader = %leader_id,
-                                    message = outcome.message,
-                                    "failed to drain local node through leader before graceful \
-                                     shutdown"
-                                );
-                            }
-                            Err(error) => {
-                                warn!(
-                                    node_id = %local_node_id,
-                                    leader = %leader_id,
-                                    error = %error,
-                                    "failed to drain local node through leader before graceful shutdown"
-                                );
-                            }
-                        }
+                    self.inner.configured_basic_auth.as_ref(),
+                ),
+            )
+            .await
+            {
+                Ok(client) => match client.execute(format!("DRAIN NODE {local_node_id};")).await {
+                    Ok(outcome) if outcome.success => {
+                        info!(
+                            node_id = %local_node_id,
+                            leader = %leader_id,
+                            message = outcome.message,
+                            "drained local node through leader before graceful shutdown"
+                        );
+                        ShutdownPhaseOutcome::Completed
+                    }
+                    Ok(outcome) => {
+                        warn!(
+                            node_id = %local_node_id,
+                            leader = %leader_id,
+                            message = outcome.message,
+                            "failed to drain local node through leader before graceful shutdown"
+                        );
+                        ShutdownPhaseOutcome::Abandoned
                     }
                     Err(error) => {
                         warn!(
                             node_id = %local_node_id,
                             leader = %leader_id,
-                            leader_grpc_uri,
                             error = %error,
-                            "failed to connect to leader for graceful shutdown drain"
+                            "failed to drain local node through leader before graceful shutdown"
                         );
+                        ShutdownPhaseOutcome::Abandoned
                     }
+                },
+                Err(error) => {
+                    warn!(
+                        node_id = %local_node_id,
+                        leader = %leader_id,
+                        leader_grpc_uri,
+                        error = %error,
+                        "failed to connect to leader for graceful shutdown drain"
+                    );
+                    ShutdownPhaseOutcome::Abandoned
                 }
-            }
-            None => {
-                warn!(
-                    node_id = %local_node_id,
-                    "failed to drain local node before graceful shutdown: raft leader is unknown"
-                );
             }
         }
     }
 
-    async fn clear_shutdown_drain_cordon(&self, local_node_id: &ClusterNodeName) {
-        let leader = self.inner.consensus.current_leader().await;
-        let Some(leader_id) = leader.as_ref() else {
-            warn!(
-                node_id = %local_node_id,
-                "failed to clear shutdown drain cordon: raft leader is unknown"
-            );
-            return;
-        };
-        if leader_id == local_node_id {
+    async fn wait_for_shutdown_drain_leader(&self) -> ClusterNodeName {
+        loop {
+            tokio::task::consume_budget().await;
+            let leader = self.inner.consensus.current_leader().await;
+            if let Some(leader) = leader {
+                return leader;
+            }
+            sleep(SHUTDOWN_LEADER_OBSERVATION_INTERVAL).await;
+        }
+    }
+
+    async fn clear_shutdown_drain_cordon(
+        &self,
+        local_node_id: &ClusterNodeName,
+    ) -> ShutdownPhaseOutcome {
+        let leader_id = self.wait_for_shutdown_drain_leader().await;
+        if &leader_id == local_node_id {
             match self
                 .inner
                 .consensus
@@ -839,6 +853,7 @@ impl SessionServiceImpl {
                         node_id = %local_node_id,
                         "cleared shutdown drain cordon before graceful shutdown"
                     );
+                    ShutdownPhaseOutcome::Completed
                 }
                 Err(error) => {
                     warn!(
@@ -846,67 +861,70 @@ impl SessionServiceImpl {
                         error = %error,
                         "failed to clear shutdown drain cordon before graceful shutdown"
                     );
+                    ShutdownPhaseOutcome::Abandoned
                 }
             }
-            return;
-        }
-
-        let Some(leader_grpc_uri) = self.leader_grpc_uri(leader_id).await else {
-            warn!(
-                node_id = %local_node_id,
-                leader = %leader_id,
-                "failed to clear shutdown drain cordon: leader grpc uri is unknown"
-            );
-            return;
-        };
-        let client = NervixClient::connect_with_options(
-            &leader_grpc_uri,
-            "default",
-            grpc_client_connect_options(
+        } else {
+            let Some(leader_grpc_uri) = self.leader_grpc_uri(&leader_id).await else {
+                warn!(
+                    node_id = %local_node_id,
+                    leader = %leader_id,
+                    "failed to clear shutdown drain cordon: leader grpc uri is unknown"
+                );
+                return ShutdownPhaseOutcome::Abandoned;
+            };
+            let client = NervixClient::connect_with_options(
                 &leader_grpc_uri,
-                self.inner.configured_basic_auth.as_ref(),
-            ),
-        )
-        .await;
-        let client = match client {
-            Ok(client) => client,
-            Err(error) => {
-                warn!(
-                    node_id = %local_node_id,
-                    leader = %leader_id,
-                    error = %error,
-                    "failed to connect to leader to clear shutdown drain cordon"
-                );
-                return;
-            }
-        };
-        match client
-            .execute(format!("UNCORDON NODE {local_node_id};"))
-            .await
-        {
-            Ok(outcome) if outcome.success => {
-                info!(
-                    node_id = %local_node_id,
-                    leader = %leader_id,
-                    message = outcome.message,
-                    "cleared shutdown drain cordon through leader"
-                );
-            }
-            Ok(outcome) => {
-                warn!(
-                    node_id = %local_node_id,
-                    leader = %leader_id,
-                    message = outcome.message,
-                    "failed to clear shutdown drain cordon through leader"
-                );
-            }
-            Err(error) => {
-                warn!(
-                    node_id = %local_node_id,
-                    leader = %leader_id,
-                    error = %error,
-                    "failed to clear shutdown drain cordon through leader"
-                );
+                "default",
+                grpc_client_connect_options(
+                    &leader_grpc_uri,
+                    self.inner.configured_basic_auth.as_ref(),
+                ),
+            )
+            .await;
+            let client = match client {
+                Ok(client) => client,
+                Err(error) => {
+                    warn!(
+                        node_id = %local_node_id,
+                        leader = %leader_id,
+                        error = %error,
+                        "failed to connect to leader to clear shutdown drain cordon"
+                    );
+                    return ShutdownPhaseOutcome::Abandoned;
+                }
+            };
+            match client
+                .execute(format!("UNCORDON NODE {local_node_id};"))
+                .await
+            {
+                Ok(outcome) if outcome.success => {
+                    info!(
+                        node_id = %local_node_id,
+                        leader = %leader_id,
+                        message = outcome.message,
+                        "cleared shutdown drain cordon through leader"
+                    );
+                    ShutdownPhaseOutcome::Completed
+                }
+                Ok(outcome) => {
+                    warn!(
+                        node_id = %local_node_id,
+                        leader = %leader_id,
+                        message = outcome.message,
+                        "failed to clear shutdown drain cordon through leader"
+                    );
+                    ShutdownPhaseOutcome::Abandoned
+                }
+                Err(error) => {
+                    warn!(
+                        node_id = %local_node_id,
+                        leader = %leader_id,
+                        error = %error,
+                        "failed to clear shutdown drain cordon through leader"
+                    );
+                    ShutdownPhaseOutcome::Abandoned
+                }
             }
         }
     }
@@ -1833,7 +1851,7 @@ impl SessionServiceImpl {
                                 error
                             ));
                             tokio::select! {
-                                _ = service.inner.shutdown.cancelled() => break,
+                                _ = service.inner.drain_support_shutdown.cancelled() => break,
                                 _ = cancel_child.cancelled() => break,
                                 _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => continue,
                             }
@@ -1863,7 +1881,7 @@ impl SessionServiceImpl {
                         }
                     }
                     tokio::select! {
-                        _ = service.inner.shutdown.cancelled() => break,
+                        _ = service.inner.drain_support_shutdown.cancelled() => break,
                         _ = cancel_child.cancelled() => break,
                         _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => {}
                     }

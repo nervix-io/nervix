@@ -507,6 +507,150 @@ async fn execution_builder_uses_direct_fanout_for_unbranched_relay() {
     assert!(!services.fanout.uses_branch_collapse());
 }
 
+#[tokio::test]
+async fn inbound_subscription_wait_does_not_hold_domain_execution() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    runtime.sync_domains(&BTreeMap::from([(
+        domain.clone(),
+        unpaced_domain_state(domain.as_str()),
+    )]));
+    let schema_name = named::<SchemaName>("notification");
+    let relay = named::<RelayName>("notifications");
+
+    runtime
+        .rebuild_domain_from_schedule(
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+            &domain,
+            Some(DomainSchedule::new(
+                domain.clone(),
+                vec![
+                    scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                        name: schema_name.clone(),
+                        fields: vec![nervix_models::SchemaField {
+                            name: named("user_id"),
+                            ty: ParseAsType::I64,
+                            optional: false,
+                            sensitive: false,
+                        }],
+                    })),
+                    scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                        name: relay.clone(),
+                        schema: schema_name,
+                        buffer: nonzero!(2usize),
+                        branching: RelayBranching::unbranched(),
+                        materialized_state: None,
+                    })),
+                ],
+                Vec::new(),
+            )),
+            true,
+        )
+        .await
+        .expect("unbranched relay execution should build");
+
+    let (schema, services) = {
+        let execution = runtime
+            .inner
+            .executions
+            .get(&domain)
+            .expect("domain execution should exist");
+        let schema = execution
+            .relay_schemas
+            .get(&relay)
+            .expect("relay schema should exist")
+            .clone();
+        let services = execution
+            .relay_services
+            .get(&relay)
+            .expect("relay services should exist")
+            .clone();
+        (schema, services)
+    };
+    let RelayBoundaryFanout::Direct(subscription_fanout) = &services.fanout else {
+        panic!("an unbranched relay must use direct fanout");
+    };
+    let mut subscription = services.subscription_receiver();
+    let row = test_runtime_row([("user_id".to_string(), RuntimeValue::I64(42))]);
+    let metadata = row.metadata().to_remote();
+    let batch = RelayRecordBatch::single(schema, None, row, AckSet::empty())
+        .expect("subscription batch should build");
+    let batch_ipc = batch
+        .batch
+        .encode_arrow_ipc(runtime.executor())
+        .await
+        .expect("subscription batch should encode");
+    subscription_fanout
+        .subscriptions
+        .set_capacity(nonzero!(2usize));
+    services.fanout_local_subscriptions(&batch).await;
+    services.fanout_local_subscriptions(&batch).await;
+    subscription_fanout
+        .subscriptions
+        .set_capacity(STUPID_CHANNEL_CAPACITY_REMOVE_ME);
+
+    let inbound_runtime = runtime.clone();
+    let inbound_domain = domain.clone();
+    let inbound = tokio::spawn(async move {
+        inbound_runtime
+            .handle_remote_subscription_payload(RelayPayload {
+                delivery: RelayDelivery {
+                    channel_incarnation: [1; 16],
+                    sequence: 0,
+                },
+                kind: RelayPayloadKind::SubscriptionFanout,
+                domain: inbound_domain,
+                relay,
+                key: None,
+                batch_ipc,
+                metadata: vec![metadata],
+                acks: vec![None],
+                admission: None,
+            })
+            .await
+    });
+    timeout(Duration::from_secs(1), async {
+        loop {
+            tokio::task::consume_budget().await;
+            if subscription_fanout.subscriptions.waiting_publishers() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("inbound subscription fanout should wait behind the full buffer");
+
+    let execution_write = runtime.inner.executions.try_get_mut(&domain);
+    assert!(
+        execution_write.is_present(),
+        "waiting inbound fanout must not retain the domain execution read guard"
+    );
+    drop(execution_write);
+
+    subscription
+        .recv()
+        .await
+        .expect("subscription should receive the first buffered batch");
+    subscription
+        .recv()
+        .await
+        .expect("subscription should receive the second buffered batch");
+    timeout(Duration::from_secs(1), inbound)
+        .await
+        .expect("inbound subscription fanout should finish after buffer capacity opens")
+        .expect("inbound subscription task should join")
+        .expect("inbound subscription payload should dispatch");
+    assert_eq!(
+        subscription
+            .recv()
+            .await
+            .expect("subscription should receive the inbound batch")
+            .message_count(),
+        1
+    );
+}
+
 #[test]
 fn relay_record_batches_can_be_concatenated_without_losing_metadata() {
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
