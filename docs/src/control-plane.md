@@ -386,23 +386,39 @@ signal received during startup takes effect once startup completes. Every later 
 with status 128 plus the number of the signal that forced it, without running its remaining
 phases. The rest of the cluster observes that exit exactly as it observes a crash.
 
+Graceful shutdown has one deadline, set by `--shutdown-timeout` (`NERVIX_SHUTDOWN_TIMEOUT`, default
+`50s`) and measured on the process monotonic clock from the first stop request: the first `SIGINT`
+or `SIGTERM`, or a public listener that fails. A later request never restarts or extends it, and
+domain pacing never changes its physical length. Every shutdown step described below waits at most
+until the deadline. When it passes, the process logs the phase it had reached, reports
+`shutdown deadline expired; abandoning graceful shutdown`, and exits at once with status 1 without
+running its remaining phases, so the rest of the cluster again observes a crash. Whichever comes
+first, the deadline or a repeated signal, decides how the process exits.
+
 When graceful shutdown begins, the process advertises that its current incarnation is terminating.
 The incarnation remains live for Raft and for ownership handoffs already in progress, while placement
 and explicit relocation exclude it as a new destination. The advertisement is transient state of
 that process incarnation, so a restarted incarnation is eligible again unless the stable node name
-is cordoned in Raft.
+is cordoned in Raft. The process then stops accepting on its public gRPC, connector, observability,
+and console listeners and closes the client connections they had accepted. Closing a connection
+cancels the requests it carries, such as a session stream or a resource upload that is waiting for
+its client, so no client can delay the drain or the process exit. Work that a session command had
+already started, such as a transaction commit, keeps running, and terminal teardown waits for it
+until the shutdown deadline.
 
 Graceful shutdown records whether that stable node name was already cordoned before it invokes the
 drain. Its cleanup clears the drain cordon only when shutdown began with an uncordoned node, and it
 runs after a successful, failed, or timed-out drain attempt. A pre-existing operator cordon therefore
-remains set across shutdown and restart. When the drain timeout passes, or the leader cannot be
-reached, before the node requests its drain, nothing was cordoned and no cleanup runs.
+remains set across shutdown and restart. When the drain timeout or the shutdown deadline passes, or
+the leader cannot be reached, before the node requests its drain, nothing was cordoned and no
+cleanup runs.
 
-A graceful-shutdown drain has two parts that share one drain timeout. When another live, schedulable
-Raft voter exists, the node first moves its scheduled work there through the planned handoff above.
-It then completes the work it has already admitted in place. That second part is the whole drain
-when no replacement exists, such as on a single node or on the last schedulable node of a cluster,
-and it also covers listener ingestors, which bind on every node, and any unit whose move failed. The
+A graceful-shutdown drain has two parts that share one drain timeout, and the drain also ends when
+the shutdown deadline passes first. When another live, schedulable Raft voter exists, the node
+first moves its scheduled work there through the planned handoff above. It then completes the work
+it has already admitted in place. That second part is the whole drain when no replacement exists,
+such as on a single node or on the last schedulable node of a cluster, and it also covers listener
+ingestors, which bind on every node, and any unit whose move failed. The
 terminating node stops new intake on all of its ingestors, whatever their `ON QUIESCE` mode, and its
 generators stop producing. Work already admitted keeps flowing while the node's relays, processors,
 emitters, and acknowledgement paths stay alive: Nervix repeatedly force-flushes ingestor routes,
@@ -414,7 +430,10 @@ left behind.
 Source acknowledgements and commits, such as Kafka consumer-group offsets, complete before the source
 session stops.
 
-Terminal teardown stops the node's tasks only after that drain completes or its timeout passes. A
+Terminal teardown stops the node's tasks only after that drain completes or its timeout passes. It
+gives each background task at most two seconds to stop, waits for work that sessions and commands
+started until the shutdown deadline and cancels whatever still runs then, and finally stops the
+runtime, consensus, cluster membership, and the interconnect and releases the node's storage. A
 timeout reports the drain as abandoned, and teardown negatively acknowledges the remaining work: a
 source with external acknowledgements redelivers it after restart, and a `NO_ACK` source loses it. A
 sink that stays unavailable therefore holds the drain until its timeout. Pending `REQUIRED WAIT`

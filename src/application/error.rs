@@ -105,4 +105,10 @@ pub enum AppError {
     RegisterTerminationSignals,
     #[error("failed to start termination signal supervision")]
     SuperviseTerminationSignals,
+    #[error("failed to start shutdown deadline supervision")]
+    SuperviseShutdownDeadline,
+    #[error("the task running the public listeners failed")]
+    JoinPublicListeners,
+    #[error("graceful shutdown did not finish before its shutdown deadline")]
+    ShutdownDeadlineExpired,
 }

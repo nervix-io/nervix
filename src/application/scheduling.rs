@@ -35,7 +35,7 @@ use super::{
     },
     peer_grpc::{grpc_client_connect_options, grpc_uri_from_advertise_addr},
     session_service::SessionServiceImpl,
-    shutdown::ShutdownPhaseOutcome,
+    shutdown::{ShutdownDeadline, ShutdownPhaseOutcome},
 };
 use crate::{
     proto::CommandResult,
@@ -52,25 +52,31 @@ pub(in crate::application) const RUNTIME_REVISION_READINESS_PROPAGATION_BOUND: D
 const SHUTDOWN_CORDON_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const SHUTDOWN_LEADER_OBSERVATION_INTERVAL: Duration = Duration::from_millis(25);
 
-/// The one drain timeout that a graceful shutdown's ownership move and local graph drain share.
+/// The one drain timeout that a graceful shutdown's ownership move and local graph drain share,
+/// which never reaches past the shutdown deadline.
 struct ShutdownDrainBudget {
     started: Instant,
     timeout: Duration,
+    deadline: ShutdownDeadline,
 }
 
 impl ShutdownDrainBudget {
-    fn start(timeout: Duration) -> Self {
+    fn start(timeout: Duration, deadline: ShutdownDeadline) -> Self {
         Self {
             started: Instant::now(),
             timeout,
+            deadline,
         }
     }
 
-    /// What remains of the drain timeout, which is nothing once it has passed.
+    /// What remains of the drain timeout, which is nothing once it or the shutdown deadline has
+    /// passed.
     fn remaining(&self) -> Duration {
-        self.timeout
+        let drain_remaining = self
+            .timeout
             .checked_sub(self.started.elapsed())
-            .unwrap_or(Duration::ZERO)
+            .unwrap_or(Duration::ZERO);
+        drain_remaining.min(self.deadline.remaining())
     }
 }
 
@@ -78,8 +84,8 @@ impl ShutdownDrainBudget {
 enum ShutdownOwnershipMove {
     /// No live schedulable node can take the work, so nothing was cordoned or moved.
     NoReplacement,
-    /// The drain timeout passed, or the leader could not be reached, before the drain was
-    /// requested, so nothing was cordoned or moved.
+    /// The drain timeout or the shutdown deadline passed, or the leader could not be reached,
+    /// before the drain was requested, so nothing was cordoned or moved.
     NotRequested,
     /// The leader was asked to cordon the node and move its scheduled work, and that drain ended
     /// with this outcome.
@@ -770,8 +776,9 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn drain_local_node_before_shutdown(
         &self,
         drain_timeout: Duration,
+        deadline: ShutdownDeadline,
     ) -> ShutdownPhaseOutcome {
-        let budget = ShutdownDrainBudget::start(drain_timeout);
+        let budget = ShutdownDrainBudget::start(drain_timeout, deadline);
         let local_node_id = self.inner.consensus.local_node_id().clone();
         let operator_cordon_exists = self
             .inner
@@ -793,17 +800,18 @@ impl SessionServiceImpl {
                 move_outcome
             }
             ShutdownOwnershipMove::Requested(move_outcome) => {
-                let cleanup_outcome = match tokio::time::timeout(
-                    SHUTDOWN_CORDON_CLEANUP_TIMEOUT,
+                let cleanup_timeout = SHUTDOWN_CORDON_CLEANUP_TIMEOUT.min(deadline.remaining());
+                let cleanup = tokio::time::timeout(
+                    cleanup_timeout,
                     self.clear_shutdown_drain_cordon(&local_node_id),
                 )
-                .await
-                {
+                .await;
+                let cleanup_outcome = match cleanup {
                     Ok(outcome) => outcome,
                     Err(_) => {
                         warn!(
                             node_id = %local_node_id,
-                            timeout = ?SHUTDOWN_CORDON_CLEANUP_TIMEOUT,
+                            timeout = ?cleanup_timeout,
                             "timed out clearing shutdown drain cordon"
                         );
                         ShutdownPhaseOutcome::Abandoned
