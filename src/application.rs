@@ -1090,12 +1090,15 @@ impl Application {
             let mut missing_init_default_user_password_warned = false;
             loop {
                 tokio::task::consume_budget().await;
-                if reconcile_shutdown.is_cancelled() {
-                    break;
-                }
-                if consensus_for_reconcile.current_leader().await.as_ref()
-                    == Some(consensus_for_reconcile.local_node_id())
-                {
+                // A pass waits on consensus writes and on requests to peers, and neither completes
+                // once the peers have stopped. The pass therefore ends with drain support rather
+                // than holding terminal teardown until the grace period aborts the whole task.
+                let reconcile_pass = async {
+                    if consensus_for_reconcile.current_leader().await.as_ref()
+                        != Some(consensus_for_reconcile.local_node_id())
+                    {
+                        return;
+                    }
                     let orphaned_alter_committing_domains = consensus_for_reconcile
                         .current_transactions()
                         .await
@@ -1417,7 +1420,10 @@ impl Application {
                             break;
                         }
                     }
-                }
+                };
+                let Some(()) = reconcile_shutdown.run_until_cancelled(reconcile_pass).await else {
+                    break;
+                };
                 tokio::select! {
                     _ = reconcile_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_secs(1)) => {}

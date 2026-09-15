@@ -320,6 +320,11 @@ Cluster membership gossip uses management discovery capacity. It discovers topol
 incarnations but does not replace application health checks. Gossip payloads remain below the
 management-event bound, so discovery cannot allocate an arbitrary wire message.
 
+Terminal teardown closes the gossip exchange path before it asks the gossip loop to stop. The loop
+reads its stop request only between rounds, and a round exchanges with each selected peer in turn
+under a one-second request timeout. Closing the path first makes an exchange still waiting on a
+peer that is itself stopping fail at once, instead of holding teardown for the rest of the round.
+
 Consensus separates traffic according to the progress it protects:
 
 - heartbeats, votes, leadership notifications, linearizable runtime-admission reads, and other
