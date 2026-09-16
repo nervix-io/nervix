@@ -1524,6 +1524,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_relay_admission_reports_a_closed_response_channel() {
+        let target = ClusterNodeName::parse("relay-owner").expect("valid name");
+        let (admission_tx, admission_rx) = watch::channel(RelayAdmissionUpdate::Pending);
+        drop(admission_tx);
+
+        let error =
+            RemoteDispatcher::await_relay_admission(&target, admission_rx, Duration::from_secs(1))
+                .await
+                .expect_err("a closed relay admission response must fail dispatch");
+
+        assert!(matches!(
+            error.current_context(),
+            RemoteDispatchError::AdmissionResponseClosed {
+                target: error_target,
+            } if error_target == &target
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn remote_relay_admission_bounds_the_total_wait() {
+        let target = ClusterNodeName::parse("relay-owner").expect("valid name");
+        let (_admission_tx, admission_rx) = watch::channel(RelayAdmissionUpdate::Pending);
+
+        let error = RemoteDispatcher::await_relay_admission(
+            &target,
+            admission_rx,
+            REMOTE_RELAY_TOTAL_TIMEOUT + Duration::from_secs(1),
+        )
+        .await
+        .expect_err("relay admission must stop at its total deadline");
+
+        assert!(matches!(
+            error.current_context(),
+            RemoteDispatchError::AdmissionTotalTimeout {
+                target: error_target,
+                timeout: REMOTE_RELAY_TOTAL_TIMEOUT,
+            } if error_target == &target
+        ));
+    }
+
+    #[tokio::test]
     async fn remote_relay_admission_progress_is_coalesced() {
         let runtime = Runtime::default();
         let (admission_tx, mut admission_rx) = watch::channel(RelayAdmissionUpdate::Pending);

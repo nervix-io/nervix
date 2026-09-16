@@ -1794,4 +1794,95 @@ mod tests {
         ));
         assert!(dropped.load(Ordering::Acquire));
     }
+
+    #[tokio::test]
+    async fn scheduled_processor_handoff_reports_an_unavailable_command_receiver() {
+        let (commands, command_rx) = mpsc::channel(1);
+        drop(command_rx);
+        let task = tokio::spawn(std::future::pending::<()>());
+        let scheduled = ScheduledNodeTask { commands, task };
+
+        let error = scheduled
+            .handoff_within(Duration::from_millis(10))
+            .await
+            .expect_err("a closed processor mailbox must fail handoff");
+
+        assert!(matches!(
+            error.current_context(),
+            ScheduledNodeHandoffError::CommandUnavailable
+        ));
+    }
+
+    #[tokio::test]
+    async fn scheduled_processor_handoff_bounds_the_response_wait() {
+        let (commands, mut command_rx) = mpsc::channel(1);
+        let task = tokio::spawn(async move {
+            let Some(ProcessorNodeCommand::Handoff { response }) = command_rx.recv().await else {
+                panic!("scheduled processor must receive its handoff command")
+            };
+            let _response = response;
+            std::future::pending::<()>().await;
+        });
+        let scheduled = ScheduledNodeTask { commands, task };
+
+        let error = scheduled
+            .handoff_within(Duration::from_millis(10))
+            .await
+            .expect_err("a stalled handoff response must time out");
+
+        assert!(matches!(
+            error.current_context(),
+            ScheduledNodeHandoffError::ResponseTimeout
+        ));
+    }
+
+    #[tokio::test]
+    async fn scheduled_processor_handoff_reports_a_failed_task_join() {
+        let (commands, mut command_rx) = mpsc::channel(1);
+        let task = tokio::spawn(async move {
+            let Some(ProcessorNodeCommand::Handoff { response }) = command_rx.recv().await else {
+                panic!("scheduled processor must receive its handoff command")
+            };
+            response
+                .send(Vec::new())
+                .expect("handoff receiver must remain while the task responds");
+            panic!("test processor task failure");
+        });
+        let scheduled = ScheduledNodeTask { commands, task };
+
+        let error = scheduled
+            .handoff_within(Duration::from_secs(1))
+            .await
+            .expect_err("a failed processor task must fail handoff");
+
+        assert!(matches!(
+            error.current_context(),
+            ScheduledNodeHandoffError::TaskJoin
+        ));
+    }
+
+    #[tokio::test]
+    async fn scheduled_processor_handoff_bounds_task_shutdown() {
+        let (commands, mut command_rx) = mpsc::channel(1);
+        let task = tokio::spawn(async move {
+            let Some(ProcessorNodeCommand::Handoff { response }) = command_rx.recv().await else {
+                panic!("scheduled processor must receive its handoff command")
+            };
+            response
+                .send(Vec::new())
+                .expect("handoff receiver must remain while the task responds");
+            std::future::pending::<()>().await;
+        });
+        let scheduled = ScheduledNodeTask { commands, task };
+
+        let error = scheduled
+            .handoff_within(Duration::from_millis(10))
+            .await
+            .expect_err("a processor task that does not stop must time out");
+
+        assert!(matches!(
+            error.current_context(),
+            ScheduledNodeHandoffError::TaskStopTimeout
+        ));
+    }
 }

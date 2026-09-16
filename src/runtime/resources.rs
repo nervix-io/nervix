@@ -635,6 +635,213 @@ mod tests {
 
     use super::*;
     use crate::resource::ResourceStore;
+
+    #[test]
+    fn protobuf_descriptor_configuration_reports_typed_failures() {
+        let unsupported = ProtobufDescriptorCompileConfig::from_entries(&[ClientConfigEntry {
+            key: "package".to_string(),
+            value: "events".to_string(),
+        }])
+        .expect_err("unsupported protobuf configuration must fail");
+        assert!(matches!(
+            unsupported.current_context(),
+            RuntimeResourceError::UnsupportedProtobufConfigKey { key } if key == "package"
+        ));
+
+        let store_root = tempdir().expect("resource store tempdir");
+        let store = ResourceStore::open(store_root.path(), Executor::default())
+            .expect("resource store should open");
+        let id = ResourceId::new(
+            DomainName::parse("tenant").expect("valid domain"),
+            named("events_proto"),
+            1,
+        );
+
+        let invalid_source = ProtobufDescriptorCompileConfig {
+            files: vec!["../schema.proto".to_string()],
+            includes: Vec::new(),
+        }
+        .compile_descriptor_set(&store, &id)
+        .expect_err("a parent source path must fail");
+        assert!(matches!(
+            invalid_source.current_context(),
+            RuntimeResourceError::InvalidProtobufSourcePath {
+                resource,
+                version: 1,
+                path,
+            } if resource.as_str() == "events_proto" && path == "../schema.proto"
+        ));
+
+        std::fs::create_dir_all(store.content_root(&id))
+            .expect("empty protobuf content root should be created");
+        let missing_sources = ProtobufDescriptorCompileConfig {
+            files: Vec::new(),
+            includes: Vec::new(),
+        }
+        .compile_descriptor_set(&store, &id)
+        .expect_err("an empty protobuf resource must fail");
+        assert!(matches!(
+            missing_sources.current_context(),
+            RuntimeResourceError::MissingProtobufSources {
+                resource,
+                version: 1,
+            } if resource.as_str() == "events_proto"
+        ));
+
+        let invalid_include = ProtobufDescriptorCompileConfig {
+            files: vec!["schema.proto".to_string()],
+            includes: vec!["../includes".to_string()],
+        }
+        .compile_descriptor_set(&store, &id)
+        .expect_err("a parent include path must fail");
+        assert!(matches!(
+            invalid_include.current_context(),
+            RuntimeResourceError::InvalidProtobufIncludePath {
+                resource,
+                version: 1,
+                path,
+            } if resource.as_str() == "events_proto" && path == "../includes"
+        ));
+
+        let compilation = ProtobufDescriptorCompileConfig {
+            files: vec!["missing.proto".to_string()],
+            includes: Vec::new(),
+        }
+        .compile_descriptor_set(&store, &id)
+        .expect_err("a missing protobuf source must fail compilation");
+        assert!(matches!(
+            compilation.current_context(),
+            RuntimeResourceError::ProtobufCompilation {
+                resource,
+                version: 1,
+            } if resource.as_str() == "events_proto"
+        ));
+
+        let missing_directory = store_root.path().join("missing-directory");
+        let directory = ProtobufDescriptorCompileConfig::collect_proto_files_recursive(
+            &missing_directory,
+            &mut BTreeSet::new(),
+        )
+        .expect_err("an unreadable protobuf directory must fail");
+        assert!(matches!(
+            directory.current_context(),
+            RuntimeResourceError::ReadProtobufDirectory { directory }
+                if directory == &missing_directory
+        ));
+    }
+
+    #[tokio::test]
+    async fn protobuf_descriptor_pool_requires_a_resource_store() {
+        let domain = DomainName::parse("tenant").expect("valid domain");
+        let resource = named::<ResourceName>("events_proto");
+        let error = Runtime::new()
+            .compile_protobuf_descriptor_pool(&domain, &resource, Some(1), &[])
+            .await
+            .expect_err("protobuf compilation without a resource store must fail");
+
+        assert!(matches!(
+            error.current_context(),
+            RuntimeResourceError::ProtobufStoreUnavailable {
+                domain: error_domain,
+                resource: error_resource,
+            } if error_domain == &domain && error_resource == &resource
+        ));
+    }
+
+    #[test]
+    fn resource_specification_failures_preserve_typed_identity() {
+        let runtime = Runtime::new();
+        let domain = DomainName::parse("tenant").expect("valid domain");
+        let resource = named::<ResourceName>("dev_tls");
+
+        let invalid_identifier = runtime
+            .resolve_resource_id(&domain, &resource, None, "bad name@1")
+            .expect_err("an invalid resource identifier must fail");
+        assert!(matches!(
+            invalid_identifier.current_context(),
+            RuntimeResourceError::InvalidResourceIdentifier { spec } if spec == "bad name@1"
+        ));
+
+        let mismatch = runtime
+            .resolve_resource_id(&domain, &resource, None, "other_tls@1")
+            .expect_err("a mismatched resource identifier must fail");
+        assert!(matches!(
+            mismatch.current_context(),
+            RuntimeResourceError::ResourceIdentifierMismatch {
+                spec,
+                expected,
+                actual,
+            } if spec == "other_tls@1"
+                && expected == &resource
+                && actual.as_str() == "other_tls"
+        ));
+
+        let invalid_version = runtime
+            .resolve_resource_id(&domain, &resource, None, "dev_tls@latest")
+            .expect_err("a non-numeric resource version must fail");
+        assert!(matches!(
+            invalid_version.current_context(),
+            RuntimeResourceError::InvalidResourceVersion {
+                domain: error_domain,
+                resource: error_resource,
+            } if error_domain == &domain && error_resource == &resource
+        ));
+    }
+
+    #[test]
+    fn client_resource_mount_failures_preserve_domain_and_resource() {
+        let runtime = Runtime::new();
+        let domain = DomainName::parse("tenant").expect("valid domain");
+        let resource = named::<ResourceName>("dev_tls");
+        let unavailable = runtime
+            .resolve_client_config(&domain, Some(&resource), &[])
+            .expect_err("a client mount without a resource store must fail");
+        assert!(matches!(
+            unavailable.current_context(),
+            RuntimeResourceError::ClientResourceStoreUnavailable {
+                domain: error_domain,
+                resource: error_resource,
+            } if error_domain == &domain && error_resource == &resource
+        ));
+
+        let store_root = tempdir().expect("resource store tempdir");
+        let store = ResourceStore::open(store_root.path(), Executor::default())
+            .expect("resource store should open");
+        runtime.attach_resources(
+            StdArc::new(store),
+            ResourceVersionStatus {
+                next_version_by_resource: SortedVec::from_unsorted(vec![ResourceVersionCounter {
+                    domain: domain.clone(),
+                    identifier: resource.clone(),
+                    next_version: 2,
+                }]),
+                versions: SortedVec::from_unsorted(vec![ResourceVersion {
+                    id: ResourceId::new(domain.clone(), resource.clone(), 1),
+                    root_checksum: "root".to_string(),
+                    manifest_checksum: "manifest".to_string(),
+                    file_count: 0,
+                    total_bytes: 0,
+                    archive_bytes: 0,
+                    created_at: Timestamp::from_unix_nanos(0),
+                    created_by_node: ClusterNodeName::parse("node-1").expect("valid name"),
+                }]),
+                replicas: SortedVec::new(),
+                uploads: SortedVec::new(),
+            },
+        );
+        let missing_content = runtime
+            .resolve_client_config(&domain, Some(&resource), &[])
+            .expect_err("a client mount without installed content must fail");
+        assert!(matches!(
+            missing_content.current_context(),
+            RuntimeResourceError::ClientMountContentMissing {
+                domain: error_domain,
+                resource: error_resource,
+                version: 1,
+            } if error_domain == &domain && error_resource == &resource
+        ));
+    }
+
     #[tokio::test]
     async fn client_resource_mounts_expand_into_runtime_paths() {
         let store_root = tempdir().expect("resource store tempdir");
@@ -698,6 +905,21 @@ mod tests {
             std::fs::read_to_string(&mounted_ca).expect("mounted ca should be readable"),
             "test-ca"
         );
+
+        let template_error = runtime
+            .resolve_client_config(
+                &mount_domain,
+                Some(&named("dev_tls")),
+                &[ClientConfigEntry {
+                    key: "tls_ca_file".to_string(),
+                    value: "{{missing}}/ca.pem".to_string(),
+                }],
+            )
+            .expect_err("an unknown mounted-resource placeholder must fail");
+        assert!(matches!(
+            template_error.current_context(),
+            RuntimeResourceError::ClientConfigTemplate { key } if key == "tls_ca_file"
+        ));
 
         let other_domain = DomainName::parse("other").expect("valid domain");
         let error = runtime
