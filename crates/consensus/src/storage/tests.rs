@@ -1152,16 +1152,18 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                     owner: owner.clone(),
                     domain: domain.id.clone(),
                     at,
-                    statement: Box::new(TransactionStatement {
-                        request_reference: nervix_models::CommandExecutionReference::parse(
-                            "request-0",
-                        )?,
-                        expected_position: 0,
-                        source: "START;".into(),
-                        statement: Statement::StartDomain(StartDomain {
-                            start: DomainStartPoint::Resume,
-                        }),
-                    }),
+                    statement: Box::new(TransactionStatement::test_admitted(
+                        crate::TransactionStatementRequest {
+                            request_reference: nervix_models::CommandExecutionReference::parse(
+                                "request-0",
+                            )?,
+                            expected_position: 0,
+                            source: "START;".into(),
+                            statement: Statement::StartDomain(StartDomain {
+                                start: DomainStartPoint::Resume,
+                            }),
+                        },
+                    )),
                     limits: TransactionQueueLimits {
                         max_statements: 10,
                         max_source_bytes: 1024,

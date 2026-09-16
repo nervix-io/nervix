@@ -155,31 +155,39 @@ Session subscriptions, `UPLOAD RESOURCE`, and node scheduling or membership oper
 statements outside `BEGIN`/`COMMIT`.
 
 Queue admission is not a blind append. The leader replays the replicated transaction prefix into a
-side-effect-free candidate, then checks the new statement against that candidate. This catches such
-errors as duplicate configuration, a missing `ALTER` target or field, invalid domain lifecycle,
-invalid external bindings, and invalid UDF or schedule inputs before the statement is replicated.
-A successfully queued model mutation reports the quiesce level contributed by that statement
-against its prefix, even though the mutation has not executed yet. Configuration statements with
-no useful command output return no message instead of a queue acknowledgement.
+side-effect-free ordered plan, then checks the new statement against that plan. The planner uses one
+captured set of domain, model, resource, schedule, placement, membership, and liveness inputs. It
+simulates lifecycle and placement changes, resource declarations, and model candidates in written
+order, with the same execution-step boundaries `COMMIT` uses. This catches such errors as duplicate
+configuration, a missing `ALTER` target or field, invalid domain lifecycle, invalid external
+bindings, and invalid UDF or schedule inputs before the statement is replicated. A successfully
+queued model mutation reports the effective quiesce level of its complete consecutive model run at
+that prefix. Extending the run can raise that level or make cancelling changes a no-op.
 A rejected statement does not change the pending count or the transaction's activity time, so the
-client can correct it and continue the same transaction. Limits are checked before this preflight
-and every check is repeated during `COMMIT`, because other sessions may change control-plane state
-after a statement was admitted.
+client can correct it and continue the same transaction. The admitted result is stored with the
+statement; an exact retry with the same request reference, source, semantic statement, and expected
+position returns that result without rerunning preflight or extending activity. A reused reference
+with different content is rejected. Limits are checked before preflight and the same ordered
+planner runs from a refreshed snapshot during `COMMIT`, because other sessions may change relevant
+control-plane state after admission.
 
 An accumulated model run that already forms a complete graph receives the full registry, binding,
-UDF, and scheduling preflight. Cross-model completeness remains provisional while the run is still
-being assembled: an intermediate schema/codec mismatch or temporarily referenced model may be
-repaired by a later statement in the same atomic run. Statement-local mutations must still be valid
-against the prefix, and `COMMIT` requires the final candidate graph to pass every check. This keeps
-coordinated multi-model migrations possible without letting a malformed `ALTER` or an impossible
-lifecycle transition enter the queue.
+UDF, and scheduling preflight. Cross-model completeness may remain provisional only for the
+unfinished final model run. An intermediate schema/codec mismatch or temporarily referenced model
+may be repaired by a later statement in that same run. Once a lifecycle, domain, or resource step
+ends the run, a later model run cannot repair it. Statement-local mutations must still be valid
+against the prefix, and `COMMIT` requires every run to pass every check. This keeps coordinated
+multi-model migrations possible without allowing a later execution step to make an earlier step
+valid retroactively.
 
 Within a transaction, each consecutive run of model mutations can mix `CREATE`,
 `ALTER SCHEMA`, `ALTER WIRE ... SCHEMA`, `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`,
 `ALTER REORDERER`, `ALTER EMITTER`, `ALTER INGESTOR`, `ALTER REINGESTOR`, `ALTER GENERATOR`,
 `ALTER PLACEMENT`, and `DROP`. Nervix applies that run as one registry mutation: all operations are
 evaluated in written order against one candidate model map, the complete domain graph is
-revalidated, and one atomic storage batch persists the result. A failure writes nothing and does
+revalidated, and one atomic storage batch persists the base-to-final result. Drop/recreate and
+multi-ALTER sequences are therefore classified jointly; cancelling changes can produce a no-op.
+A failure writes nothing and does
 not swap the active registry state. This supports coordinated wire-schema, internal-schema, codec,
 relay, processor, emitter, ingestor, generator, placement, and dependent-node migrations without
 exposing an invalid intermediate graph.

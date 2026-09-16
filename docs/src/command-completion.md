@@ -114,12 +114,17 @@ recovery and application owners perform repair before declaring readiness.
 ## Transactions
 
 `BEGIN` creates an `OPEN` transaction for one existing selected domain. A queueable statement is
-validated against the ordered candidate formed by the existing prefix, then durably appended with
-its request reference and expected position. Queue success means validation and staging only. It
-does not replace a live graph, start or stop a domain, install a resource, or engage a runtime gate.
-Other sessions continue to see the committed configuration.
+validated by planning the ordered candidate formed by the existing prefix, then durably appended
+with its request reference, expected position, and admitted result. The plan uses one captured set
+of relevant control-plane inputs and the exact execution-step segmentation used at commit. Queue
+success means validation and staging only. It does not replace a live graph, start or stop a domain,
+install a resource, or engage a runtime gate. Other sessions continue to see the committed
+configuration. Retrying the exact append returns the retained admitted result without touching the
+transaction.
 
-`COMMIT` changes the transaction to `COMMITTING` and applies its ordered steps. Durable effect
+`COMMIT` changes the transaction to `COMMITTING`, refreshes the ordered plan from a new coherent
+snapshot, and applies its ordered steps. Consecutive model mutations are one step; lifecycle,
+domain, and resource statements each end a model run and form their own step. Durable effect
 progress and completed application are separate records. A step whose authoritative write is
 committed remains applying until activation, handoff, drain, source readiness, lifecycle work, and
 command-owned gate release are complete. Only then can the next step advance. The transaction

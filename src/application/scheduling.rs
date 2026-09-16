@@ -30,10 +30,10 @@ use super::{
     model_mutation::{command_error, command_ok, quiesce_level_message},
     ownership_handoff::{
         AssignmentRelocation, DrainMove, format_planned_ownership_move,
-        mark_complete_ownership_transitions, planned_ownership_moves, planned_relocation_count,
-        prefer_former_owners_as_replicas,
+        mark_complete_ownership_transitions, planned_ownership_moves,
     },
     peer_grpc::{grpc_client_connect_options, grpc_uri_from_advertise_addr},
+    schedule_planning::PreparedDomainSchedule,
     session_service::SessionServiceImpl,
     shutdown::{ShutdownDeadline, ShutdownPhaseOutcome},
 };
@@ -152,13 +152,6 @@ pub(in crate::application) struct KafkaPartitionWatcherKey {
     ingestor: IngestorName,
 }
 
-/// A domain schedule computed from a candidate graph, with how many runtime nodes it moves off
-/// the node that owns them today.
-pub(in crate::application) struct PreparedDomainSchedule {
-    pub(in crate::application) schedule: Option<nervix_models::DomainSchedule>,
-    pub(in crate::application) relocations: usize,
-}
-
 /// The schedule change one model mutation makes: what the domain is scheduled as now, what it
 /// would be scheduled as, and how many runtime nodes that move relocates.
 #[derive(Default)]
@@ -242,52 +235,9 @@ impl SessionServiceImpl {
         graph: Option<ActiveGraph>,
         placement: PlacementPolicy,
     ) -> Result<PreparedDomainSchedule, String> {
-        let availability = self.inner.cluster.availability_state().await;
-        let live_node_ids = availability.live_node_ids();
-        let placement_candidate_node_ids = availability.placement_candidate_node_ids();
-        let live_voters = self.inner.consensus.live_voter_ids(live_node_ids).await;
-        let cluster_nodes = self
-            .inner
-            .consensus
-            .schedulable_live_voter_ids(placement_candidate_node_ids)
-            .await;
+        let snapshot = self.capture_domain_schedule_planning_snapshot().await;
         let current = self.inner.consensus.current_schedule().await;
-        let schedule = match graph {
-            Some(graph) => {
-                #[cfg(feature = "testing")]
-                let mut schedule = graph.schedule_for_domain_with_mode(
-                    domain,
-                    &cluster_nodes,
-                    self.inner.replica_count,
-                    placement,
-                    self.inner.runtime.scheduler_mode(),
-                );
-                #[cfg(not(feature = "testing"))]
-                let mut schedule = graph.schedule_for_domain(
-                    domain,
-                    &cluster_nodes,
-                    self.inner.replica_count,
-                    placement,
-                );
-                Self::merge_existing_schedule_data(
-                    &mut schedule,
-                    current.domain(domain),
-                    &live_voters,
-                );
-                prefer_former_owners_as_replicas(
-                    current.domain(domain),
-                    &mut schedule,
-                    &live_voters,
-                );
-                Some(schedule)
-            }
-            None => None,
-        };
-        let relocations = planned_relocation_count(current.domain(domain), schedule.as_ref());
-        Ok(PreparedDomainSchedule {
-            schedule,
-            relocations,
-        })
+        Ok(snapshot.prepare(domain, graph, placement, current.domain(domain)))
     }
 
     pub(in crate::application) async fn drop_node(
