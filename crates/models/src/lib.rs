@@ -148,5 +148,5 @@ pub use statement::{
     VhostTlsResource, WasmProcessorLimits, WebsocketsConfigEntry, WebsocketsIngestMode,
     WindowBound, WireSchemaLookup, ZeroMqConfigEntry, ZeroMqIngestMode, default_relay_buffer,
 };
-pub use timestamp::{Timestamp, TimestampError};
+pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};

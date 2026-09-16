@@ -6,7 +6,12 @@
 //! - **Depends on.** Chrono and serialization primitives.
 //! - **Must not know.** Domain clocks, scheduling, runtime state or transport behavior.
 
-use std::{fmt, str::FromStr, time::Duration};
+use std::{
+    fmt,
+    str::FromStr,
+    sync::atomic::{AtomicI64, Ordering},
+    time::Duration,
+};
 
 use chrono::{DateTime, Utc};
 use error_stack::Report;
@@ -224,6 +229,39 @@ where
         Ok(DateTime::from_timestamp_nanos(
             field.deserialize(deserializer)?,
         ))
+    }
+}
+
+/// A [`Timestamp`] cell that is replaced and read without a lock.
+///
+/// A timestamp's complete value space is exactly the signed Unix nanoseconds it is defined by, so
+/// one `AtomicI64` holds it without narrowing. The integer is an internal representation and never
+/// escapes: every method takes and returns `Timestamp`, keeping the raw nanoseconds a boundary
+/// form the way serialization and Arrow carriage use it.
+///
+/// The cell publishes nothing but itself. A reader learns the last value stored and orders no
+/// other memory against it, which is what `Relaxed` means, so a marker such as a last-seen time
+/// needs no stronger ordering.
+#[derive(Debug)]
+pub struct AtomicTimestamp(AtomicI64);
+
+impl AtomicTimestamp {
+    pub fn new(timestamp: Timestamp) -> Self {
+        Self(AtomicI64::new(timestamp.unix_nanos()))
+    }
+
+    pub fn load(&self) -> Timestamp {
+        Timestamp::from_unix_nanos(self.0.load(Ordering::Relaxed))
+    }
+
+    pub fn store(&self, timestamp: Timestamp) {
+        self.0.store(timestamp.unix_nanos(), Ordering::Relaxed);
+    }
+}
+
+impl From<Timestamp> for AtomicTimestamp {
+    fn from(timestamp: Timestamp) -> Self {
+        Self::new(timestamp)
     }
 }
 

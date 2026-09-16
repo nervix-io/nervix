@@ -59,23 +59,23 @@ use nervix_interconnect::{
     Transport,
 };
 use nervix_models::{
-    AckMode, Assignment, BranchName, ClickHouseValueMapping, ClientConfigEntry, ClientName,
-    ClientPoolBounds, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule, CodecName,
-    CodecWireFormat, CoordinationIdentity, CorrelationTimeoutAction, CorrelatorMatchPolicy,
-    CreateClientAzureBlob, CreateClientGcs, CreateClientIcebergRest, CreateClientKafka,
-    CreateClientMqtt, CreateClientNats, CreateClientOtel, CreateClientPulsar, CreateClientRabbitMq,
-    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
-    CreateClientZeroMq, CreateCodec, CreateEmitter, CreateGenerator, CreateIngestor, CreateLookup,
-    CreateReingestor, CreateRelay, CreateSignalingProtocol, CreateUdf, DomainClockAuthority,
-    DomainConfig, DomainName, DomainNodeRef, DomainSchedule, DomainState, EmitSink,
-    EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName, EndpointType,
-    ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy, GeneratorName,
-    IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
-    InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
-    IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
-    Literal as ModelLiteral, LookupName, MaterializedStatePolicy, MessageErrorCode,
-    MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind, ModelName,
-    MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
+    AckMode, Assignment, AtomicTimestamp, BranchName, ClickHouseValueMapping, ClientConfigEntry,
+    ClientName, ClientPoolBounds, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule,
+    CodecName, CodecWireFormat, CoordinationIdentity, CorrelationTimeoutAction,
+    CorrelatorMatchPolicy, CreateClientAzureBlob, CreateClientGcs, CreateClientIcebergRest,
+    CreateClientKafka, CreateClientMqtt, CreateClientNats, CreateClientOtel, CreateClientPulsar,
+    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
+    CreateClientSyslog, CreateClientZeroMq, CreateCodec, CreateEmitter, CreateGenerator,
+    CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateSignalingProtocol,
+    CreateUdf, DomainClockAuthority, DomainConfig, DomainName, DomainNodeRef, DomainSchedule,
+    DomainState, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName,
+    EndpointType, ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy,
+    GeneratorName, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
+    InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
+    IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode,
+    KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
+    MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind,
+    ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
     MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality, OtelMetric,
     OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch, OwnershipStateComponent,
     OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
@@ -260,9 +260,9 @@ use branch_key::branch_key_display;
 use branch_lru_state::{decode_branch_lru_snapshot, encode_branch_lru_snapshot};
 use branch_runtime::{
     BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL, BranchRuntime, BranchRuntimeMetrics,
-    IngestorRouteRuntime, MaterializedBatchWaitContext, PendingMaterializedBatch,
-    branch_lru_placement, flush_branch_junction, internal_processor_error_policies,
-    output_error_policies, persist_branch_instance_lru_snapshot,
+    IngestorRouteRuntime, MaterializedBatchWaitContext, MaterializedDomainHandles,
+    PendingMaterializedBatch, branch_lru_placement, flush_branch_junction,
+    internal_processor_error_policies, output_error_policies, persist_branch_instance_lru_snapshot,
 };
 use client_config::{
     ParsedRetryPolicy, client_config_entries, client_config_value, client_tls_paths,
@@ -313,7 +313,10 @@ use filter_map::{
     plan_emitter_filter_map_batch, plan_filter_map_messages,
 };
 pub(in crate::runtime) use filter_map::{SqsMessageGroupError, evaluate_sqs_fifo_group_program};
-use force_flush::{DomainForceFlush, DomainForceFlushCompletion, DomainForceFlushParticipant};
+use force_flush::{
+    DomainForceFlush, DomainForceFlushCompletion, DomainForceFlushParticipant,
+    IngestorAckRootTrackers,
+};
 use generator::{GeneratorTaskRouteSpec, GeneratorTaskSpec};
 use http_client::HttpClientConfig;
 use inferencer_output::flush_branch_inferencer_output;
