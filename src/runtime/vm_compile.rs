@@ -2130,12 +2130,38 @@ pub(super) fn relay_branch_schema_for_routing(
 
 #[cfg(test)]
 mod tests {
-    use ahash::HashMap;
+    use ahash::{HashMap, HashSet};
     use nervix_models::{CreateSchema, ModelName, ParseAsType, Timestamp};
     use triomphe::Arc;
 
     use super::*;
     use crate::runtime_schema::{RuntimeValue, compile_schema, test_runtime_row};
+
+    fn program_with_filter(
+        expression: Expr,
+    ) -> nervix_vm::program::SpannedNode<nervix_vm::program::Program> {
+        nervix_vm::program::SpannedNode {
+            inner: nervix_vm::program::Program {
+                filter: Some(nervix_vm::program::SpannedNode {
+                    inner: expression,
+                    span: (0..0).into(),
+                }),
+                set: Vec::new(),
+                invoke: Vec::new(),
+            },
+            span: (0..0).into(),
+        }
+    }
+
+    fn materialized_reference_program(
+        relay: &RelayName,
+        field: &str,
+    ) -> nervix_vm::program::SpannedNode<nervix_vm::program::Program> {
+        program_with_filter(Expr::FieldRef(nervix_vm::program::FieldRef {
+            relay: format!("relay_state.{relay}"),
+            field: field.to_string(),
+        }))
+    }
 
     #[test]
     fn message_error_metadata_mismatch_carries_both_counts() {
@@ -2159,6 +2185,147 @@ mod tests {
             panic!("unexpected VM compile error: {error:#}");
         };
         assert_eq!((*operations, *assignments), (1, 0));
+    }
+
+    #[test]
+    fn materialized_binding_errors_carry_relay_fields_and_branches() {
+        let relay = named::<RelayName>("state");
+        let value = named::<FieldName>("value");
+        let tenant = named::<FieldName>("tenant");
+        let region = named::<FieldName>("region");
+        let schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            value.as_str(),
+            ArrowDataType::Int64,
+            false,
+        )]));
+        let mut available = HashMap::default();
+        available.insert(
+            relay.clone(),
+            RuntimeMaterializedRelaySpec::new(
+                schema.clone(),
+                VmSchemaSensitivity::default(),
+                vec![tenant.clone()],
+            ),
+        );
+
+        let program = materialized_reference_program(&relay, value.as_str());
+        let error = referenced_materialized_stream_bindings(
+            &program,
+            &HashSet::default(),
+            &available,
+            std::slice::from_ref(&region),
+        )
+        .expect_err("different branch contracts must be rejected");
+        let RuntimeVmCompileError::MaterializedBranchMismatch {
+            relay: actual_relay,
+            materialized_branching,
+            current_branching,
+        } = error.current_context()
+        else {
+            panic!("unexpected VM compile error: {error:#}");
+        };
+        assert_eq!(actual_relay, &relay);
+        assert_eq!(materialized_branching, std::slice::from_ref(&tenant));
+        assert_eq!(current_branching, std::slice::from_ref(&region));
+
+        available.insert(
+            relay.clone(),
+            RuntimeMaterializedRelaySpec::new(schema, VmSchemaSensitivity::default(), Vec::new()),
+        );
+        let missing = "missing";
+        let program = materialized_reference_program(&relay, missing);
+        let error =
+            referenced_materialized_stream_bindings(&program, &HashSet::default(), &available, &[])
+                .expect_err("an unknown materialized field must be rejected");
+        let RuntimeVmCompileError::MissingMaterializedField {
+            relay: actual_relay,
+            field,
+        } = error.current_context()
+        else {
+            panic!("unexpected VM compile error: {error:#}");
+        };
+        assert_eq!(actual_relay, &relay);
+        assert_eq!(field, missing);
+    }
+
+    #[test]
+    fn key_projection_errors_carry_the_processor_kind_and_name() {
+        let processor = named::<ModelName>("ordered_messages");
+        let input_schema = StdArc::new(arrow_schema::Schema::empty());
+        let cases = [
+            (
+                KeyProjectionKind::Deduplicator,
+                "deduplicator 'ordered_messages' DEDUPLICATE ON requires at least one input relay",
+            ),
+            (
+                KeyProjectionKind::Reorderer,
+                "reorderer 'ordered_messages' BY requires at least one input relay",
+            ),
+        ];
+        for (kind, expected) in cases {
+            let error = compile_key_projection_program(
+                kind,
+                &processor,
+                &[],
+                &[],
+                input_schema.clone(),
+                None,
+            )
+            .expect_err("a key projection must have an input relay");
+            let RuntimeVmCompileError::MissingKeyProjectionInput { target } =
+                error.current_context()
+            else {
+                panic!("unexpected VM compile error: {error:#}");
+            };
+            assert_eq!(target.processor, processor);
+            assert_eq!(error.to_string(), expected);
+        }
+
+        let input_relays = [named::<RelayName>("messages")];
+        let expressions = [expression("missing")];
+        let error = compile_key_projection_program(
+            KeyProjectionKind::Deduplicator,
+            &processor,
+            &input_relays,
+            &expressions,
+            input_schema,
+            None,
+        )
+        .expect_err("an unknown key field must fail type inference");
+        let RuntimeVmCompileError::InferKeyProjection { target, .. } = error.current_context()
+        else {
+            panic!("unexpected VM compile error: {error:#}");
+        };
+        assert!(matches!(target.kind, KeyProjectionKind::Deduplicator));
+        assert_eq!(target.processor, processor);
+    }
+
+    #[test]
+    fn missing_filter_metadata_and_reorderer_order_are_typed() {
+        let program = program_with_filter(Expr::Literal(Literal::Bool(true)));
+        let error = compiled_message_error_sites(&program, &[], None)
+            .expect_err("a lowered filter must have operation metadata");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeVmCompileError::MissingMessageErrorFilterOperation
+        ));
+
+        let processor = named::<ModelName>("ordered_messages");
+        let error = compile_reorderer_program(
+            &processor,
+            &[],
+            &[],
+            StdArc::new(arrow_schema::Schema::empty()),
+            None,
+        )
+        .expect_err("a reorderer must declare at least one order expression");
+        let RuntimeVmCompileError::MissingReordererOrder {
+            processor: actual_processor,
+        } = error.current_context()
+        else {
+            panic!("unexpected VM compile error: {error:#}");
+        };
+        assert_eq!(actual_processor, &processor);
     }
 
     #[test]

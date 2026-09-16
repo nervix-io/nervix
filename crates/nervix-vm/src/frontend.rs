@@ -21,17 +21,38 @@ use crate::program::{
     SpannedExpr, SpannedInvocation, SpannedNode, UnaryOp, spanned,
 };
 
+/// A compile-time frontend failure together with the semantic operation it belongs to.
+#[derive(Debug, Clone, PartialEq, Error)]
+#[error("{kind} at {span}")]
+pub struct FrontendError {
+    pub span: Span,
+    pub kind: FrontendErrorKind,
+}
+
+impl FrontendError {
+    fn at(span: Span, kind: FrontendErrorKind) -> Self {
+        Self { span, kind }
+    }
+
+    fn report(span: Span, kind: FrontendErrorKind) -> Report<Self> {
+        Report::new(Self::at(span, kind))
+    }
+}
+
 /// Why a semantic expression or route construction cannot be represented as a VM program.
 #[derive(Debug, Clone, PartialEq, Error)]
-pub enum FrontendError {
+pub enum FrontendErrorKind {
     #[error("schema field '{field}' is not a valid inherited field name")]
     InvalidInheritedFieldName { field: String },
     #[error("branch targets are valid only in branch construction")]
     BranchTargetOutsideBranchConstruction,
     #[error("SET targets unknown output field '{field}'")]
     UnknownOutputSetTarget { field: FieldName },
-    #[error("branch SET targets must be bare fields or branch fields")]
-    InvalidBranchSetTarget { scope: AssignmentTargetScope },
+    #[error("branch SET target expected {expected}, found {found:?}")]
+    InvalidBranchSetTarget {
+        expected: AssignmentTargetSet,
+        found: AssignmentTargetScope,
+    },
     #[error("SET targets unknown branch field '{field}'")]
     UnknownBranchSetTarget { field: FieldName },
     #[error("unknown branch field '{field}'")]
@@ -42,20 +63,26 @@ pub enum FrontendError {
     UnknownFinalizedOutputField { field: FieldName },
     #[error("unknown input field '{field}'")]
     UnknownInputField { field: FieldName },
-    #[error("{scope:?} is unavailable during branch construction")]
-    ScopeUnavailableDuringBranchConstruction { scope: FieldScope },
+    #[error("{found:?} is unavailable during branch construction")]
+    ScopeUnavailableDuringBranchConstruction { found: FieldScope },
     #[error("INHERIT is not valid for set-only routes")]
     InheritInSetOnlyRoute,
     #[error("INVOKE is not valid for internal set-only routes")]
     InvokeInSetOnlyRoute,
-    #[error("set-only SET targets must be bare fields or output fields")]
-    InvalidSetOnlySetTarget { scope: AssignmentTargetScope },
+    #[error("set-only SET target expected {expected}, found {found:?}")]
+    InvalidSetOnlySetTarget {
+        expected: AssignmentTargetSet,
+        found: AssignmentTargetScope,
+    },
     #[error("INHERIT is not valid for generated routes")]
     InheritInGeneratedRoute,
     #[error("INVOKE is not valid for internal generated routes")]
     InvokeInGeneratedRoute,
-    #[error("generated-route SET targets must be bare fields or output fields")]
-    InvalidGeneratedSetTarget { scope: AssignmentTargetScope },
+    #[error("generated-route SET target expected {expected}, found {found:?}")]
+    InvalidGeneratedSetTarget {
+        expected: AssignmentTargetSet,
+        found: AssignmentTargetScope,
+    },
     #[error("unknown output field '{field}'")]
     UnknownOutputField { field: FieldName },
     #[error("unknown generated field '{field}'")]
@@ -84,35 +111,55 @@ pub enum FrontendError {
     UnknownInheritedInputField { field: String },
     #[error("INHERIT has no same-named output field '{field}'")]
     MissingInheritedOutputField { field: String },
-    #[error("INHERIT field '{field}' requires identical input and output type and nullability")]
+    #[error(
+        "INHERIT field '{field}' expected {expected_type:?} nullable={expected_nullable}, found \
+         {found_type:?} nullable={found_nullable}"
+    )]
     IncompatibleInheritedField {
         field: String,
-        input_type: DataType,
-        input_nullable: bool,
-        output_type: DataType,
-        output_nullable: bool,
+        expected_type: DataType,
+        expected_nullable: bool,
+        found_type: DataType,
+        found_nullable: bool,
     },
     #[error("working message field '{field}' is uninitialized")]
     UninitializedWorkingMessageField { field: FieldName },
     #[error("working message field '{field}' is not an output field")]
     WorkingMessageFieldNotOutput { field: FieldName },
     #[error(
-        "working message field '{field}' cannot fall back to input with a different type or \
-         nullability"
+        "working message field '{field}' expected {expected_type:?} nullable={expected_nullable}, \
+         found {found_type:?} nullable={found_nullable}"
     )]
     IncompatibleWorkingMessageFallback {
         field: FieldName,
-        input_type: DataType,
-        input_nullable: bool,
-        output_type: DataType,
-        output_nullable: bool,
+        expected_type: DataType,
+        expected_nullable: bool,
+        found_type: DataType,
+        found_nullable: bool,
     },
     #[error("INHERIT must be expanded against the input and output schemas")]
     UnexpandedInheritance,
     #[error("array expressions are valid only in window SET values")]
     ArrayExpressionOutsideWindow,
-    #[error("casts to collection types are not supported")]
-    UnsupportedCollectionCast { target: ParseAsType },
+    #[error("cast target expected {expected}, found {found:?}")]
+    UnsupportedCollectionCast {
+        expected: CastTargetKind,
+        found: ParseAsType,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum AssignmentTargetSet {
+    #[strum(serialize = "a bare or branch field")]
+    BareOrBranch,
+    #[strum(serialize = "a bare or output field")]
+    BareOrOutput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum CastTargetKind {
+    #[strum(serialize = "a scalar type")]
+    Scalar,
 }
 
 pub type FrontendResult<T> = error_stack::Result<T, FrontendError>;
@@ -121,6 +168,35 @@ pub type FrontendResult<T> = error_stack::Result<T, FrontendError>;
 enum RequiredFieldTarget {
     Output,
     Branch,
+}
+
+fn operation_span(index: usize) -> Span {
+    let start = index
+        .checked_add(1)
+        .assured("the operation index belongs to one construction held in memory");
+    let end = start
+        .checked_add(1)
+        .assured("the operation index belongs to one construction held in memory");
+    (start..end).into()
+}
+
+fn construction_span(construction: &RouteConstruction) -> Span {
+    operations_span(
+        construction.assignments.len(),
+        construction.where_clause.is_some(),
+        construction.invocations.len(),
+    )
+}
+
+fn operations_span(assignments: usize, has_filter: bool, invocations: usize) -> Span {
+    let operation_count = assignments
+        .checked_add(usize::from(has_filter))
+        .and_then(|count| count.checked_add(invocations))
+        .assured("the operations counted here belong to one construction held in memory");
+    let end = operation_count
+        .checked_add(1)
+        .assured("the operations counted here belong to one construction held in memory");
+    (0..end).into()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -147,7 +223,8 @@ pub fn lower_transforming_route(
     let mut initialized = HashSet::new();
     let mut normalized = RouteConstruction::default();
     if let Some(inherit) = &construction.inherit {
-        for inherited in inherited_fields(inherit, input_schema, output_schema)? {
+        let span = operation_span(0);
+        for inherited in inherited_fields(inherit, input_schema, output_schema, span)? {
             initialized.insert(inherited.field.as_str().to_string());
             let input = ModelExpression::Field(FieldReference::scoped(
                 FieldScope::Input,
@@ -172,16 +249,21 @@ pub fn lower_transforming_route(
         }
     }
     for assignment in &construction.assignments {
+        let span = operation_span(normalized.assignments.len());
         if assignment.target.scope == AssignmentTargetScope::Branch {
-            return Err(Report::new(
-                FrontendError::BranchTargetOutsideBranchConstruction,
+            return Err(FrontendError::report(
+                span,
+                FrontendErrorKind::BranchTargetOutsideBranchConstruction,
             ));
         }
         let field = assignment.target.field.as_str();
         output_schema.field_with_name(field).map_err(|_| {
-            Report::new(FrontendError::UnknownOutputSetTarget {
-                field: assignment.target.field.clone(),
-            })
+            FrontendError::report(
+                span,
+                FrontendErrorKind::UnknownOutputSetTarget {
+                    field: assignment.target.field.clone(),
+                },
+            )
         })?;
         let value = resolve_transforming_expression(
             &assignment.value,
@@ -189,6 +271,7 @@ pub fn lower_transforming_route(
             input_schema,
             output_schema,
             false,
+            span,
         )?;
         normalized.assignments.push(Assignment {
             target: AssignmentTarget {
@@ -199,24 +282,42 @@ pub fn lower_transforming_route(
         });
         initialized.insert(field.to_string());
     }
-    ensure_required_fields_initialized(&initialized, output_schema, RequiredFieldTarget::Output)?;
+    let route_span = operations_span(
+        normalized.assignments.len(),
+        construction.where_clause.is_some(),
+        construction.invocations.len(),
+    );
+    ensure_required_fields_initialized(
+        &initialized,
+        output_schema,
+        RequiredFieldTarget::Output,
+        route_span,
+    )?;
     normalized.where_clause = construction
         .where_clause
         .as_ref()
         .map(|expression| {
+            let span = operation_span(normalized.assignments.len());
             resolve_transforming_expression(
                 expression,
                 &initialized,
                 input_schema,
                 output_schema,
                 true,
+                span,
             )
         })
         .transpose()?;
     normalized.invocations = construction
         .invocations
         .iter()
-        .map(|invocation| {
+        .enumerate()
+        .map(|(index, invocation)| {
+            let span = operation_span(
+                normalized.assignments.len()
+                    + usize::from(normalized.where_clause.is_some())
+                    + index,
+            );
             Ok(nervix_models::Invocation {
                 function: invocation.function.clone(),
                 arguments: invocation
@@ -229,6 +330,7 @@ pub fn lower_transforming_route(
                             input_schema,
                             output_schema,
                             true,
+                            span,
                         )
                     })
                     .collect::<FrontendResult<Vec<_>>>()?,
@@ -250,34 +352,48 @@ pub fn lower_branch_construction(
 ) -> FrontendResult<SpannedNode<Program>> {
     let mut initialized = HashSet::new();
     let mut normalized = RouteConstruction::default();
-    for assignment in assignments {
+    for (index, assignment) in assignments.iter().enumerate() {
+        let span = operation_span(index);
         if !matches!(
             assignment.target.scope,
             AssignmentTargetScope::Bare | AssignmentTargetScope::Branch
         ) {
-            return Err(Report::new(FrontendError::InvalidBranchSetTarget {
-                scope: assignment.target.scope,
-            }));
+            return Err(FrontendError::report(
+                span,
+                FrontendErrorKind::InvalidBranchSetTarget {
+                    expected: AssignmentTargetSet::BareOrBranch,
+                    found: assignment.target.scope,
+                },
+            ));
         }
         let field = assignment.target.field.as_str();
         branch_schema.field_with_name(field).map_err(|_| {
-            Report::new(FrontendError::UnknownBranchSetTarget {
-                field: assignment.target.field.clone(),
-            })
+            FrontendError::report(
+                span,
+                FrontendErrorKind::UnknownBranchSetTarget {
+                    field: assignment.target.field.clone(),
+                },
+            )
         })?;
         let value = resolve_expression(&assignment.value, &mut |reference| {
             let name = reference.field.as_str();
             match reference.scope {
                 FieldScope::Bare | FieldScope::Branch => {
                     branch_schema.field_with_name(name).map_err(|_| {
-                        Report::new(FrontendError::UnknownBranchField {
-                            field: reference.field.clone(),
-                        })
+                        FrontendError::report(
+                            span,
+                            FrontendErrorKind::UnknownBranchField {
+                                field: reference.field.clone(),
+                            },
+                        )
                     })?;
                     if !initialized.contains(name) {
-                        return Err(Report::new(FrontendError::UninitializedBranchField {
-                            field: reference.field.clone(),
-                        }));
+                        return Err(FrontendError::report(
+                            span,
+                            FrontendErrorKind::UninitializedBranchField {
+                                field: reference.field.clone(),
+                            },
+                        ));
                     }
                     Ok(FieldReference::scoped(
                         FieldScope::Branch,
@@ -286,9 +402,12 @@ pub fn lower_branch_construction(
                 }
                 FieldScope::Message | FieldScope::Output => {
                     output_schema.field_with_name(name).map_err(|_| {
-                        Report::new(FrontendError::UnknownFinalizedOutputField {
-                            field: reference.field.clone(),
-                        })
+                        FrontendError::report(
+                            span,
+                            FrontendErrorKind::UnknownFinalizedOutputField {
+                                field: reference.field.clone(),
+                            },
+                        )
                     })?;
                     Ok(FieldReference::scoped(
                         FieldScope::Output,
@@ -297,9 +416,12 @@ pub fn lower_branch_construction(
                 }
                 FieldScope::Input => {
                     input_schema.field_with_name(name).map_err(|_| {
-                        Report::new(FrontendError::UnknownInputField {
-                            field: reference.field.clone(),
-                        })
+                        FrontendError::report(
+                            span,
+                            FrontendErrorKind::UnknownInputField {
+                                field: reference.field.clone(),
+                            },
+                        )
                     })?;
                     Ok(reference.clone())
                 }
@@ -307,9 +429,10 @@ pub fn lower_branch_construction(
                 | FieldScope::Right
                 | FieldScope::Metadata
                 | FieldScope::PartialOutput
-                | FieldScope::Error => Err(Report::new(
-                    FrontendError::ScopeUnavailableDuringBranchConstruction {
-                        scope: reference.scope.clone(),
+                | FieldScope::Error => Err(FrontendError::report(
+                    span,
+                    FrontendErrorKind::ScopeUnavailableDuringBranchConstruction {
+                        found: reference.scope.clone(),
                     },
                 )),
                 FieldScope::RelayState { .. } => Ok(reference.clone()),
@@ -324,7 +447,12 @@ pub fn lower_branch_construction(
         });
         initialized.insert(field.to_string());
     }
-    ensure_required_fields_initialized(&initialized, branch_schema, RequiredFieldTarget::Branch)?;
+    ensure_required_fields_initialized(
+        &initialized,
+        branch_schema,
+        RequiredFieldTarget::Branch,
+        operations_span(assignments.len(), false, 0),
+    )?;
     lower_route_construction(&normalized, SemanticNamespaces::new("branch", "branch"))
 }
 
@@ -338,31 +466,55 @@ pub fn lower_set_only_route(
     output_schema: &Schema,
 ) -> FrontendResult<SpannedNode<Program>> {
     if construction.inherit.is_some() {
-        return Err(Report::new(FrontendError::InheritInSetOnlyRoute));
+        return Err(FrontendError::report(
+            operation_span(0),
+            FrontendErrorKind::InheritInSetOnlyRoute,
+        ));
     }
     if !construction.invocations.is_empty() {
-        return Err(Report::new(FrontendError::InvokeInSetOnlyRoute));
+        let invocation_offset = construction
+            .assignments
+            .len()
+            .checked_add(usize::from(construction.where_clause.is_some()))
+            .assured("the operations belong to one construction held in memory");
+        return Err(FrontendError::report(
+            operation_span(invocation_offset),
+            FrontendErrorKind::InvokeInSetOnlyRoute,
+        ));
     }
 
     let mut initialized = HashSet::new();
     let mut normalized = RouteConstruction::default();
-    for assignment in &construction.assignments {
+    for (index, assignment) in construction.assignments.iter().enumerate() {
+        let span = operation_span(index);
         if !matches!(
             assignment.target.scope,
             AssignmentTargetScope::Bare | AssignmentTargetScope::Output
         ) {
-            return Err(Report::new(FrontendError::InvalidSetOnlySetTarget {
-                scope: assignment.target.scope,
-            }));
+            return Err(FrontendError::report(
+                span,
+                FrontendErrorKind::InvalidSetOnlySetTarget {
+                    expected: AssignmentTargetSet::BareOrOutput,
+                    found: assignment.target.scope,
+                },
+            ));
         }
         let field = assignment.target.field.as_str();
         output_schema.field_with_name(field).map_err(|_| {
-            Report::new(FrontendError::UnknownOutputSetTarget {
-                field: assignment.target.field.clone(),
-            })
+            FrontendError::report(
+                span,
+                FrontendErrorKind::UnknownOutputSetTarget {
+                    field: assignment.target.field.clone(),
+                },
+            )
         })?;
-        let value =
-            resolve_set_only_expression(&assignment.value, &initialized, output_schema, false)?;
+        let value = resolve_set_only_expression(
+            &assignment.value,
+            &initialized,
+            output_schema,
+            false,
+            span,
+        )?;
         normalized.assignments.push(Assignment {
             target: AssignmentTarget {
                 scope: AssignmentTargetScope::Output,
@@ -372,12 +524,23 @@ pub fn lower_set_only_route(
         });
         initialized.insert(field.to_string());
     }
-    ensure_required_fields_initialized(&initialized, output_schema, RequiredFieldTarget::Output)?;
+    ensure_required_fields_initialized(
+        &initialized,
+        output_schema,
+        RequiredFieldTarget::Output,
+        construction_span(construction),
+    )?;
     normalized.where_clause = construction
         .where_clause
         .as_ref()
         .map(|expression| {
-            resolve_set_only_expression(expression, &initialized, output_schema, true)
+            resolve_set_only_expression(
+                expression,
+                &initialized,
+                output_schema,
+                true,
+                operation_span(construction.assignments.len()),
+            )
         })
         .transpose()?;
 
@@ -395,7 +558,13 @@ pub fn lower_finalized_output_filter(
     filter: &ModelExpression,
     output_schema: &Schema,
 ) -> FrontendResult<SpannedNode<Program>> {
-    let resolved = resolve_set_only_expression(filter, &HashSet::new(), output_schema, true)?;
+    let resolved = resolve_set_only_expression(
+        filter,
+        &HashSet::new(),
+        output_schema,
+        true,
+        operation_span(0),
+    )?;
     lower_route_construction(
         &RouteConstruction {
             where_clause: Some(resolved),
@@ -413,28 +582,47 @@ pub fn lower_generated_route(
     generated_schema: &Schema,
 ) -> FrontendResult<SpannedNode<Program>> {
     if construction.inherit.is_some() {
-        return Err(Report::new(FrontendError::InheritInGeneratedRoute));
+        return Err(FrontendError::report(
+            operation_span(0),
+            FrontendErrorKind::InheritInGeneratedRoute,
+        ));
     }
     if !construction.invocations.is_empty() {
-        return Err(Report::new(FrontendError::InvokeInGeneratedRoute));
+        let invocation_offset = construction
+            .assignments
+            .len()
+            .checked_add(usize::from(construction.where_clause.is_some()))
+            .assured("the operations belong to one construction held in memory");
+        return Err(FrontendError::report(
+            operation_span(invocation_offset),
+            FrontendErrorKind::InvokeInGeneratedRoute,
+        ));
     }
 
     let mut initialized = HashSet::new();
     let mut normalized = RouteConstruction::default();
-    for assignment in &construction.assignments {
+    for (index, assignment) in construction.assignments.iter().enumerate() {
+        let span = operation_span(index);
         if !matches!(
             assignment.target.scope,
             AssignmentTargetScope::Bare | AssignmentTargetScope::Output
         ) {
-            return Err(Report::new(FrontendError::InvalidGeneratedSetTarget {
-                scope: assignment.target.scope,
-            }));
+            return Err(FrontendError::report(
+                span,
+                FrontendErrorKind::InvalidGeneratedSetTarget {
+                    expected: AssignmentTargetSet::BareOrOutput,
+                    found: assignment.target.scope,
+                },
+            ));
         }
         let field = assignment.target.field.as_str();
         output_schema.field_with_name(field).map_err(|_| {
-            Report::new(FrontendError::UnknownOutputSetTarget {
-                field: assignment.target.field.clone(),
-            })
+            FrontendError::report(
+                span,
+                FrontendErrorKind::UnknownOutputSetTarget {
+                    field: assignment.target.field.clone(),
+                },
+            )
         })?;
         let value = resolve_generated_expression(
             &assignment.value,
@@ -442,6 +630,7 @@ pub fn lower_generated_route(
             output_schema,
             generated_schema,
             false,
+            span,
         )?;
         normalized.assignments.push(Assignment {
             target: AssignmentTarget {
@@ -452,7 +641,12 @@ pub fn lower_generated_route(
         });
         initialized.insert(field.to_string());
     }
-    ensure_required_fields_initialized(&initialized, output_schema, RequiredFieldTarget::Output)?;
+    ensure_required_fields_initialized(
+        &initialized,
+        output_schema,
+        RequiredFieldTarget::Output,
+        construction_span(construction),
+    )?;
     normalized.where_clause = construction
         .where_clause
         .as_ref()
@@ -463,6 +657,7 @@ pub fn lower_generated_route(
                 output_schema,
                 generated_schema,
                 true,
+                operation_span(construction.assignments.len()),
             )
         })
         .transpose()?;
@@ -476,15 +671,19 @@ fn resolve_generated_expression(
     output_schema: &Schema,
     generated_schema: &Schema,
     finalized: bool,
+    span: Span,
 ) -> FrontendResult<ModelExpression> {
     resolve_expression(expression, &mut |reference| match reference.scope {
         FieldScope::Bare => {
             let name = reference.field.as_str();
             if finalized || initialized.contains(name) {
                 output_schema.field_with_name(name).map_err(|_| {
-                    Report::new(FrontendError::UnknownOutputField {
-                        field: reference.field.clone(),
-                    })
+                    FrontendError::report(
+                        span,
+                        FrontendErrorKind::UnknownOutputField {
+                            field: reference.field.clone(),
+                        },
+                    )
                 })?;
                 Ok(FieldReference::scoped(
                     FieldScope::Output,
@@ -492,9 +691,12 @@ fn resolve_generated_expression(
                 ))
             } else {
                 generated_schema.field_with_name(name).map_err(|_| {
-                    Report::new(FrontendError::UnknownGeneratedField {
-                        field: reference.field.clone(),
-                    })
+                    FrontendError::report(
+                        span,
+                        FrontendErrorKind::UnknownGeneratedField {
+                            field: reference.field.clone(),
+                        },
+                    )
                 })?;
                 Ok(reference.clone())
             }
@@ -502,21 +704,31 @@ fn resolve_generated_expression(
         FieldScope::Output => {
             let name = reference.field.as_str();
             output_schema.field_with_name(name).map_err(|_| {
-                Report::new(FrontendError::UnknownOutputField {
-                    field: reference.field.clone(),
-                })
+                FrontendError::report(
+                    span,
+                    FrontendErrorKind::UnknownOutputField {
+                        field: reference.field.clone(),
+                    },
+                )
             })?;
             if !finalized && !initialized.contains(name) {
-                return Err(Report::new(FrontendError::UninitializedOutputField {
-                    field: reference.field.clone(),
-                }));
+                return Err(FrontendError::report(
+                    span,
+                    FrontendErrorKind::UninitializedOutputField {
+                        field: reference.field.clone(),
+                    },
+                ));
             }
             Ok(reference.clone())
         }
-        FieldScope::Message => Err(Report::new(
-            FrontendError::MessageUnavailableInGeneratedRoute,
+        FieldScope::Message => Err(FrontendError::report(
+            span,
+            FrontendErrorKind::MessageUnavailableInGeneratedRoute,
         )),
-        FieldScope::Input => Err(Report::new(FrontendError::InputUnavailableInGeneratedRoute)),
+        FieldScope::Input => Err(FrontendError::report(
+            span,
+            FrontendErrorKind::InputUnavailableInGeneratedRoute,
+        )),
         _ => Ok(reference.clone()),
     })
 }
@@ -526,33 +738,48 @@ fn resolve_set_only_expression(
     initialized: &HashSet<String>,
     output_schema: &Schema,
     finalized: bool,
+    span: Span,
 ) -> FrontendResult<ModelExpression> {
     resolve_expression(expression, &mut |reference| match reference.scope {
         FieldScope::Bare | FieldScope::Output => {
             let name = reference.field.as_str();
             output_schema.field_with_name(name).map_err(|_| {
-                Report::new(FrontendError::UnknownOutputField {
-                    field: reference.field.clone(),
-                })
+                FrontendError::report(
+                    span,
+                    FrontendErrorKind::UnknownOutputField {
+                        field: reference.field.clone(),
+                    },
+                )
             })?;
             if !finalized && !initialized.contains(name) {
-                return Err(Report::new(FrontendError::UninitializedOutputField {
-                    field: reference.field.clone(),
-                }));
+                return Err(FrontendError::report(
+                    span,
+                    FrontendErrorKind::UninitializedOutputField {
+                        field: reference.field.clone(),
+                    },
+                ));
             }
             Ok(FieldReference::scoped(
                 FieldScope::Output,
                 reference.field.clone(),
             ))
         }
-        FieldScope::Message if finalized => Err(Report::new(
-            FrontendError::MessageUnavailableAfterSetOnlyFinalization,
+        FieldScope::Message if finalized => Err(FrontendError::report(
+            span,
+            FrontendErrorKind::MessageUnavailableAfterSetOnlyFinalization,
         )),
-        FieldScope::Input if finalized => Err(Report::new(
-            FrontendError::InputUnavailableAfterSetOnlyFinalization,
+        FieldScope::Input if finalized => Err(FrontendError::report(
+            span,
+            FrontendErrorKind::InputUnavailableAfterSetOnlyFinalization,
         )),
-        FieldScope::Message => Err(Report::new(FrontendError::MessageUnavailableInSetOnlyRoute)),
-        FieldScope::Input => Err(Report::new(FrontendError::InputUnavailableInSetOnlyRoute)),
+        FieldScope::Message => Err(FrontendError::report(
+            span,
+            FrontendErrorKind::MessageUnavailableInSetOnlyRoute,
+        )),
+        FieldScope::Input => Err(FrontendError::report(
+            span,
+            FrontendErrorKind::InputUnavailableInSetOnlyRoute,
+        )),
         _ => Ok(reference.clone()),
     })
 }
@@ -561,18 +788,23 @@ fn ensure_required_fields_initialized(
     initialized: &HashSet<String>,
     schema: &Schema,
     target: RequiredFieldTarget,
+    span: Span,
 ) -> FrontendResult<()> {
     for field in schema.fields() {
         if !field.is_nullable() && !initialized.contains(field.name()) {
             let error = match target {
-                RequiredFieldTarget::Output => FrontendError::RequiredOutputFieldUninitialized {
-                    field: field.name().clone(),
-                },
-                RequiredFieldTarget::Branch => FrontendError::RequiredBranchFieldUninitialized {
-                    field: field.name().clone(),
-                },
+                RequiredFieldTarget::Output => {
+                    FrontendErrorKind::RequiredOutputFieldUninitialized {
+                        field: field.name().clone(),
+                    }
+                }
+                RequiredFieldTarget::Branch => {
+                    FrontendErrorKind::RequiredBranchFieldUninitialized {
+                        field: field.name().clone(),
+                    }
+                }
             };
-            return Err(Report::new(error));
+            return Err(FrontendError::report(span, error));
         }
     }
     Ok(())
@@ -587,6 +819,7 @@ fn inherited_fields(
     inheritance: &Inheritance,
     input_schema: &Schema,
     output_schema: &Schema,
+    span: Span,
 ) -> FrontendResult<Vec<InheritedName>> {
     let selected = match inheritance {
         Inheritance::All => input_schema
@@ -597,9 +830,12 @@ fn inherited_fields(
         Inheritance::AllExcept(excluded) => {
             for field in excluded {
                 input_schema.field_with_name(field.as_str()).map_err(|_| {
-                    Report::new(FrontendError::UnknownInheritanceExclusion {
-                        field: field.clone(),
-                    })
+                    FrontendError::report(
+                        span,
+                        FrontendErrorKind::UnknownInheritanceExclusion {
+                            field: field.clone(),
+                        },
+                    )
                 })?;
             }
             input_schema
@@ -622,31 +858,41 @@ fn inherited_fields(
         .into_iter()
         .map(|(name, leak_sensitive)| {
             let input = input_schema.field_with_name(name).map_err(|_| {
-                Report::new(FrontendError::UnknownInheritedInputField {
-                    field: name.to_string(),
-                })
+                FrontendError::report(
+                    span,
+                    FrontendErrorKind::UnknownInheritedInputField {
+                        field: name.to_string(),
+                    },
+                )
             })?;
             let output = output_schema.field_with_name(name).map_err(|_| {
-                Report::new(FrontendError::MissingInheritedOutputField {
-                    field: name.to_string(),
-                })
+                FrontendError::report(
+                    span,
+                    FrontendErrorKind::MissingInheritedOutputField {
+                        field: name.to_string(),
+                    },
+                )
             })?;
             if input.data_type() != output.data_type()
                 || input.is_nullable() != output.is_nullable()
             {
-                return Err(Report::new(FrontendError::IncompatibleInheritedField {
-                    field: name.to_string(),
-                    input_type: input.data_type().clone(),
-                    input_nullable: input.is_nullable(),
-                    output_type: output.data_type().clone(),
-                    output_nullable: output.is_nullable(),
-                }));
+                return Err(FrontendError::report(
+                    span,
+                    FrontendErrorKind::IncompatibleInheritedField {
+                        field: name.to_string(),
+                        expected_type: output.data_type().clone(),
+                        expected_nullable: output.is_nullable(),
+                        found_type: input.data_type().clone(),
+                        found_nullable: input.is_nullable(),
+                    },
+                ));
             }
-            let field = FieldName::parse(name).change_context(
-                FrontendError::InvalidInheritedFieldName {
+            let field = FieldName::parse(name).change_context(FrontendError::at(
+                span,
+                FrontendErrorKind::InvalidInheritedFieldName {
                     field: name.to_string(),
                 },
-            )?;
+            ))?;
             Ok(InheritedName {
                 field,
                 leak_sensitive,
@@ -661,15 +907,19 @@ fn resolve_transforming_expression(
     input_schema: &Schema,
     output_schema: &Schema,
     finalized: bool,
+    span: Span,
 ) -> FrontendResult<ModelExpression> {
     resolve_expression(expression, &mut |reference| match reference.scope {
         FieldScope::Bare | FieldScope::Message => {
             let name = reference.field.as_str();
             if finalized || initialized.contains(name) {
                 output_schema.field_with_name(name).map_err(|_| {
-                    Report::new(FrontendError::UnknownOutputField {
-                        field: reference.field.clone(),
-                    })
+                    FrontendError::report(
+                        span,
+                        FrontendErrorKind::UnknownOutputField {
+                            field: reference.field.clone(),
+                        },
+                    )
                 })?;
                 Ok(FieldReference::scoped(
                     FieldScope::Output,
@@ -677,25 +927,32 @@ fn resolve_transforming_expression(
                 ))
             } else {
                 let input = input_schema.field_with_name(name).map_err(|_| {
-                    Report::new(FrontendError::UninitializedWorkingMessageField {
-                        field: reference.field.clone(),
-                    })
+                    FrontendError::report(
+                        span,
+                        FrontendErrorKind::UninitializedWorkingMessageField {
+                            field: reference.field.clone(),
+                        },
+                    )
                 })?;
                 let output = output_schema.field_with_name(name).map_err(|_| {
-                    Report::new(FrontendError::WorkingMessageFieldNotOutput {
-                        field: reference.field.clone(),
-                    })
+                    FrontendError::report(
+                        span,
+                        FrontendErrorKind::WorkingMessageFieldNotOutput {
+                            field: reference.field.clone(),
+                        },
+                    )
                 })?;
                 if input.data_type() != output.data_type()
                     || input.is_nullable() != output.is_nullable()
                 {
-                    return Err(Report::new(
-                        FrontendError::IncompatibleWorkingMessageFallback {
+                    return Err(FrontendError::report(
+                        span,
+                        FrontendErrorKind::IncompatibleWorkingMessageFallback {
                             field: reference.field.clone(),
-                            input_type: input.data_type().clone(),
-                            input_nullable: input.is_nullable(),
-                            output_type: output.data_type().clone(),
-                            output_nullable: output.is_nullable(),
+                            expected_type: output.data_type().clone(),
+                            expected_nullable: output.is_nullable(),
+                            found_type: input.data_type().clone(),
+                            found_nullable: input.is_nullable(),
                         },
                     ));
                 }
@@ -708,14 +965,20 @@ fn resolve_transforming_expression(
         FieldScope::Output => {
             let name = reference.field.as_str();
             if !finalized && !initialized.contains(name) {
-                return Err(Report::new(FrontendError::UninitializedOutputField {
-                    field: reference.field.clone(),
-                }));
+                return Err(FrontendError::report(
+                    span,
+                    FrontendErrorKind::UninitializedOutputField {
+                        field: reference.field.clone(),
+                    },
+                ));
             }
             output_schema.field_with_name(name).map_err(|_| {
-                Report::new(FrontendError::UnknownOutputField {
-                    field: reference.field.clone(),
-                })
+                FrontendError::report(
+                    span,
+                    FrontendErrorKind::UnknownOutputField {
+                        field: reference.field.clone(),
+                    },
+                )
             })?;
             Ok(reference.clone())
         }
@@ -723,9 +986,12 @@ fn resolve_transforming_expression(
             input_schema
                 .field_with_name(reference.field.as_str())
                 .map_err(|_| {
-                    Report::new(FrontendError::UnknownInputField {
-                        field: reference.field.clone(),
-                    })
+                    FrontendError::report(
+                        span,
+                        FrontendErrorKind::UnknownInputField {
+                            field: reference.field.clone(),
+                        },
+                    )
                 })?;
             Ok(reference.clone())
         }
@@ -826,15 +1092,12 @@ pub fn lower_route_construction(
     namespaces: SemanticNamespaces<'_>,
 ) -> FrontendResult<SpannedNode<Program>> {
     if construction.inherit.is_some() {
-        return Err(Report::new(FrontendError::UnexpandedInheritance));
+        return Err(FrontendError::report(
+            operation_span(0),
+            FrontendErrorKind::UnexpandedInheritance,
+        ));
     }
-    let operation_count = construction.assignments.len()
-        + usize::from(construction.where_clause.is_some())
-        + construction.invocations.len();
-    let span: Span = (0..operation_count
-        .checked_add(1)
-        .assured("the operations counted here belong to one construction held in memory"))
-        .into();
+    let span = construction_span(construction);
     let set = construction
         .assignments
         .iter()
@@ -854,7 +1117,7 @@ pub fn lower_route_construction(
                 lower_expression_with_span(
                     &assignment.value,
                     namespaces.bare_read,
-                    (index + 1..index + 2).into(),
+                    operation_span(index),
                 )?,
             ))
         })
@@ -863,19 +1126,27 @@ pub fn lower_route_construction(
         .where_clause
         .as_ref()
         .map(|expression| {
-            let index = construction.assignments.len() + 1;
-            lower_expression_with_span(expression, namespaces.bare_read, (index..index + 1).into())
+            lower_expression_with_span(
+                expression,
+                namespaces.bare_read,
+                operation_span(construction.assignments.len()),
+            )
         })
         .transpose()?;
-    let invocation_offset =
-        construction.assignments.len() + usize::from(construction.where_clause.is_some()) + 1;
+    let invocation_offset = construction
+        .assignments
+        .len()
+        .checked_add(usize::from(construction.where_clause.is_some()))
+        .assured("the operations belong to one construction held in memory");
     let invoke = construction
         .invocations
         .iter()
         .enumerate()
         .map(|(index, invocation)| {
-            let invocation_span: Span =
-                (invocation_offset + index..invocation_offset + index + 1).into();
+            let operation_index = invocation_offset
+                .checked_add(index)
+                .assured("the invocation belongs to one construction held in memory");
+            let invocation_span = operation_span(operation_index);
             Ok(spanned(
                 Invocation {
                     function: FunctionName::parse(invocation.function.as_str()),
@@ -994,7 +1265,7 @@ fn lower_expression_with_span(
                 bare_read_namespace,
                 span,
             )?),
-            data_type: scalar_data_type(target)?,
+            data_type: scalar_data_type(target, span)?,
         },
         ModelExpression::Call {
             function,
@@ -1017,7 +1288,10 @@ fn lower_expression_with_span(
                 .collect::<FrontendResult<Vec<_>>>()?,
         },
         ModelExpression::Array(_) => {
-            return Err(Report::new(FrontendError::ArrayExpressionOutsideWindow));
+            return Err(FrontendError::report(
+                span,
+                FrontendErrorKind::ArrayExpressionOutsideWindow,
+            ));
         }
         ModelExpression::If {
             condition,
@@ -1070,7 +1344,7 @@ fn lower_expression_with_span(
     Ok(spanned(expression, span))
 }
 
-fn scalar_data_type(target: &ParseAsType) -> FrontendResult<DataType> {
+fn scalar_data_type(target: &ParseAsType, span: Span) -> FrontendResult<DataType> {
     match target {
         ParseAsType::U8 => Ok(DataType::UInt8),
         ParseAsType::I8 => Ok(DataType::Int8),
@@ -1088,22 +1362,61 @@ fn scalar_data_type(target: &ParseAsType) -> FrontendResult<DataType> {
         )),
         ParseAsType::F32 => Ok(DataType::Float32),
         ParseAsType::F64 => Ok(DataType::Float64),
-        ParseAsType::Array { .. } | ParseAsType::Vec { .. } => {
-            Err(Report::new(FrontendError::UnsupportedCollectionCast {
-                target: target.clone(),
-            }))
-        }
+        ParseAsType::Array { .. } | ParseAsType::Vec { .. } => Err(FrontendError::report(
+            span,
+            FrontendErrorKind::UnsupportedCollectionCast {
+                expected: CastTargetKind::Scalar,
+                found: target.clone(),
+            },
+        )),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use arrow_schema::Field;
+    use nervix_models::InheritedField;
 
     use super::*;
 
     fn field(name: &str) -> FieldName {
         FieldName::parse(name).assured("test field names use the language name alphabet")
+    }
+
+    fn expression(source: &str) -> ModelExpression {
+        nervix_nspl::parse_expression(source).assured("test expressions are valid NSPL")
+    }
+
+    fn construction(source: &str) -> RouteConstruction {
+        nervix_nspl::parse_route_construction(source)
+            .assured("test route constructions are valid NSPL")
+    }
+
+    fn nullable_schema(fields: &[(&str, DataType)]) -> Schema {
+        Schema::new(
+            fields
+                .iter()
+                .map(|(name, data_type)| Field::new(*name, data_type.clone(), true))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn assignment(scope: AssignmentTargetScope, target: &str, value: &str) -> Assignment {
+        Assignment {
+            target: AssignmentTarget {
+                scope,
+                field: field(target),
+            },
+            value: expression(value),
+        }
+    }
+
+    fn assert_frontend_error<T: std::fmt::Debug>(
+        result: FrontendResult<T>,
+        expected: FrontendErrorKind,
+    ) {
+        let error = result.expect_err("the invalid construction must be rejected");
+        assert_eq!(&error.current_context().kind, &expected);
     }
 
     #[test]
@@ -1122,7 +1435,37 @@ mod tests {
 
         assert_eq!(
             error.current_context(),
-            &FrontendError::UnknownOutputSetTarget { field: missing }
+            &FrontendError {
+                span: operation_span(0),
+                kind: FrontendErrorKind::UnknownOutputSetTarget { field: missing },
+            }
+        );
+    }
+
+    #[test]
+    fn frontend_failure_span_identifies_the_failing_operation() {
+        let missing = field("missing");
+        let output = nullable_schema(&[("value", DataType::Int64)]);
+        let construction = RouteConstruction {
+            assignments: vec![
+                assignment(AssignmentTargetScope::Bare, "value", "1"),
+                Assignment {
+                    target: AssignmentTarget::bare(missing.clone()),
+                    value: ModelExpression::Literal(ModelLiteral::I64(2)),
+                },
+            ],
+            ..RouteConstruction::default()
+        };
+
+        let error = lower_transforming_route(&construction, &Schema::empty(), &output)
+            .expect_err("the second assignment targets an unknown output field");
+
+        assert_eq!(
+            error.current_context(),
+            &FrontendError {
+                span: operation_span(1),
+                kind: FrontendErrorKind::UnknownOutputSetTarget { field: missing },
+            }
         );
     }
 
@@ -1140,13 +1483,430 @@ mod tests {
 
         assert_eq!(
             error.current_context(),
-            &FrontendError::IncompatibleInheritedField {
-                field: "value".to_string(),
-                input_type: DataType::Int64,
-                input_nullable: false,
-                output_type: DataType::Utf8,
-                output_nullable: true,
+            &FrontendError {
+                span: operation_span(0),
+                kind: FrontendErrorKind::IncompatibleInheritedField {
+                    field: "value".to_string(),
+                    expected_type: DataType::Utf8,
+                    expected_nullable: true,
+                    found_type: DataType::Int64,
+                    found_nullable: false,
+                },
             }
+        );
+    }
+
+    #[test]
+    fn route_contract_failures_have_semantic_contexts() {
+        let branch_target = RouteConstruction {
+            assignments: vec![assignment(AssignmentTargetScope::Branch, "value", "1")],
+            ..RouteConstruction::default()
+        };
+        assert_frontend_error(
+            lower_transforming_route(&branch_target, &Schema::empty(), &Schema::empty()),
+            FrontendErrorKind::BranchTargetOutsideBranchConstruction,
+        );
+
+        let inherited = construction("INHERIT ALL");
+        assert_frontend_error(
+            lower_set_only_route(&inherited, &Schema::empty()),
+            FrontendErrorKind::InheritInSetOnlyRoute,
+        );
+        assert_frontend_error(
+            lower_generated_route(&inherited, &Schema::empty(), &Schema::empty()),
+            FrontendErrorKind::InheritInGeneratedRoute,
+        );
+
+        let invoked = construction("INVOKE write_header(\"name\", \"value\")");
+        assert_frontend_error(
+            lower_set_only_route(&invoked, &Schema::empty()),
+            FrontendErrorKind::InvokeInSetOnlyRoute,
+        );
+        assert_frontend_error(
+            lower_generated_route(&invoked, &Schema::empty(), &Schema::empty()),
+            FrontendErrorKind::InvokeInGeneratedRoute,
+        );
+
+        let invalid_set_target = RouteConstruction {
+            assignments: vec![assignment(AssignmentTargetScope::Message, "value", "1")],
+            ..RouteConstruction::default()
+        };
+        assert_frontend_error(
+            lower_set_only_route(&invalid_set_target, &Schema::empty()),
+            FrontendErrorKind::InvalidSetOnlySetTarget {
+                expected: AssignmentTargetSet::BareOrOutput,
+                found: AssignmentTargetScope::Message,
+            },
+        );
+
+        let invalid_generated_target = RouteConstruction {
+            assignments: vec![assignment(AssignmentTargetScope::Branch, "value", "1")],
+            ..RouteConstruction::default()
+        };
+        assert_frontend_error(
+            lower_generated_route(
+                &invalid_generated_target,
+                &Schema::empty(),
+                &Schema::empty(),
+            ),
+            FrontendErrorKind::InvalidGeneratedSetTarget {
+                expected: AssignmentTargetSet::BareOrOutput,
+                found: AssignmentTargetScope::Branch,
+            },
+        );
+
+        let missing = field("missing");
+        let unknown_target = RouteConstruction {
+            assignments: vec![Assignment {
+                target: AssignmentTarget::bare(missing.clone()),
+                value: ModelExpression::Literal(ModelLiteral::I64(1)),
+            }],
+            ..RouteConstruction::default()
+        };
+        assert_frontend_error(
+            lower_set_only_route(&unknown_target, &Schema::empty()),
+            FrontendErrorKind::UnknownOutputSetTarget {
+                field: missing.clone(),
+            },
+        );
+        assert_frontend_error(
+            lower_generated_route(&unknown_target, &Schema::empty(), &Schema::empty()),
+            FrontendErrorKind::UnknownOutputSetTarget { field: missing },
+        );
+    }
+
+    #[test]
+    fn branch_reference_failures_have_semantic_contexts() {
+        let branch = nullable_schema(&[("target", DataType::Int64), ("later", DataType::Int64)]);
+        let output = nullable_schema(&[("value", DataType::Int64)]);
+        let input = nullable_schema(&[("value", DataType::Int64)]);
+
+        assert_frontend_error(
+            lower_branch_construction(
+                &[assignment(AssignmentTargetScope::Output, "target", "1")],
+                &branch,
+                &output,
+                &input,
+            ),
+            FrontendErrorKind::InvalidBranchSetTarget {
+                expected: AssignmentTargetSet::BareOrBranch,
+                found: AssignmentTargetScope::Output,
+            },
+        );
+        assert_frontend_error(
+            lower_branch_construction(
+                &[assignment(AssignmentTargetScope::Bare, "missing", "1")],
+                &branch,
+                &output,
+                &input,
+            ),
+            FrontendErrorKind::UnknownBranchSetTarget {
+                field: field("missing"),
+            },
+        );
+        assert_frontend_error(
+            lower_branch_construction(
+                &[assignment(
+                    AssignmentTargetScope::Bare,
+                    "target",
+                    "branch.missing",
+                )],
+                &branch,
+                &output,
+                &input,
+            ),
+            FrontendErrorKind::UnknownBranchField {
+                field: field("missing"),
+            },
+        );
+        assert_frontend_error(
+            lower_branch_construction(
+                &[assignment(
+                    AssignmentTargetScope::Bare,
+                    "target",
+                    "branch.later",
+                )],
+                &branch,
+                &output,
+                &input,
+            ),
+            FrontendErrorKind::UninitializedBranchField {
+                field: field("later"),
+            },
+        );
+        assert_frontend_error(
+            lower_branch_construction(
+                &[assignment(
+                    AssignmentTargetScope::Bare,
+                    "target",
+                    "input.missing",
+                )],
+                &branch,
+                &output,
+                &input,
+            ),
+            FrontendErrorKind::UnknownInputField {
+                field: field("missing"),
+            },
+        );
+        assert_frontend_error(
+            lower_branch_construction(
+                &[assignment(
+                    AssignmentTargetScope::Bare,
+                    "target",
+                    "left.value",
+                )],
+                &branch,
+                &output,
+                &input,
+            ),
+            FrontendErrorKind::ScopeUnavailableDuringBranchConstruction {
+                found: FieldScope::Left,
+            },
+        );
+    }
+
+    #[test]
+    fn generated_and_set_only_references_have_semantic_contexts() {
+        let output = nullable_schema(&[("target", DataType::Int64), ("source", DataType::Int64)]);
+        let generated = nullable_schema(&[("base", DataType::Int64)]);
+
+        let generated_cases = [
+            (
+                "missing",
+                FrontendErrorKind::UnknownGeneratedField {
+                    field: field("missing"),
+                },
+            ),
+            (
+                "output.missing",
+                FrontendErrorKind::UnknownOutputField {
+                    field: field("missing"),
+                },
+            ),
+            (
+                "output.source",
+                FrontendErrorKind::UninitializedOutputField {
+                    field: field("source"),
+                },
+            ),
+            (
+                "message.source",
+                FrontendErrorKind::MessageUnavailableInGeneratedRoute,
+            ),
+            (
+                "input.source",
+                FrontendErrorKind::InputUnavailableInGeneratedRoute,
+            ),
+        ];
+        for (value, expected) in generated_cases {
+            let route = RouteConstruction {
+                assignments: vec![assignment(AssignmentTargetScope::Bare, "target", value)],
+                ..RouteConstruction::default()
+            };
+            assert_frontend_error(lower_generated_route(&route, &output, &generated), expected);
+        }
+
+        let finalized_unknown = RouteConstruction {
+            where_clause: Some(expression("missing = 1")),
+            ..RouteConstruction::default()
+        };
+        assert_frontend_error(
+            lower_generated_route(&finalized_unknown, &output, &generated),
+            FrontendErrorKind::UnknownOutputField {
+                field: field("missing"),
+            },
+        );
+
+        let set_only_cases = [
+            (
+                "missing",
+                FrontendErrorKind::UnknownOutputField {
+                    field: field("missing"),
+                },
+            ),
+            (
+                "output.source",
+                FrontendErrorKind::UninitializedOutputField {
+                    field: field("source"),
+                },
+            ),
+            (
+                "message.source",
+                FrontendErrorKind::MessageUnavailableInSetOnlyRoute,
+            ),
+            (
+                "input.source",
+                FrontendErrorKind::InputUnavailableInSetOnlyRoute,
+            ),
+        ];
+        for (value, expected) in set_only_cases {
+            let route = RouteConstruction {
+                assignments: vec![assignment(AssignmentTargetScope::Bare, "target", value)],
+                ..RouteConstruction::default()
+            };
+            assert_frontend_error(lower_set_only_route(&route, &output), expected);
+        }
+
+        assert_frontend_error(
+            lower_finalized_output_filter(&expression("message.source = 1"), &output),
+            FrontendErrorKind::MessageUnavailableAfterSetOnlyFinalization,
+        );
+        assert_frontend_error(
+            lower_finalized_output_filter(&expression("input.source = 1"), &output),
+            FrontendErrorKind::InputUnavailableAfterSetOnlyFinalization,
+        );
+    }
+
+    #[test]
+    fn inheritance_failures_have_semantic_contexts() {
+        let value_schema = nullable_schema(&[("value", DataType::Int64)]);
+        let missing = field("missing");
+        let excluded = RouteConstruction {
+            inherit: Some(Inheritance::AllExcept(vec![missing.clone()])),
+            ..RouteConstruction::default()
+        };
+        assert_frontend_error(
+            lower_transforming_route(&excluded, &value_schema, &value_schema),
+            FrontendErrorKind::UnknownInheritanceExclusion {
+                field: missing.clone(),
+            },
+        );
+
+        let named_missing = RouteConstruction {
+            inherit: Some(Inheritance::Fields(vec![InheritedField {
+                field: missing,
+                leak_sensitive: false,
+            }])),
+            ..RouteConstruction::default()
+        };
+        assert_frontend_error(
+            lower_transforming_route(&named_missing, &Schema::empty(), &Schema::empty()),
+            FrontendErrorKind::UnknownInheritedInputField {
+                field: "missing".to_string(),
+            },
+        );
+
+        let all = RouteConstruction {
+            inherit: Some(Inheritance::All),
+            ..RouteConstruction::default()
+        };
+        assert_frontend_error(
+            lower_transforming_route(&all, &value_schema, &Schema::empty()),
+            FrontendErrorKind::MissingInheritedOutputField {
+                field: "value".to_string(),
+            },
+        );
+
+        let invalid_name = nullable_schema(&[("not valid", DataType::Int64)]);
+        assert_frontend_error(
+            lower_transforming_route(&all, &invalid_name, &invalid_name),
+            FrontendErrorKind::InvalidInheritedFieldName {
+                field: "not valid".to_string(),
+            },
+        );
+
+        let leaked = RouteConstruction {
+            inherit: Some(Inheritance::Fields(vec![InheritedField {
+                field: field("value"),
+                leak_sensitive: true,
+            }])),
+            ..RouteConstruction::default()
+        };
+        lower_transforming_route(&leaked, &value_schema, &value_schema)
+            .expect("explicit sensitive inheritance must lower");
+    }
+
+    #[test]
+    fn transforming_reference_failures_have_semantic_contexts() {
+        let target = nullable_schema(&[("target", DataType::Int64)]);
+        let source = nullable_schema(&[("source", DataType::Int64)]);
+        let target_and_source =
+            nullable_schema(&[("target", DataType::Int64), ("source", DataType::Int64)]);
+
+        let route = |value| RouteConstruction {
+            assignments: vec![assignment(AssignmentTargetScope::Bare, "target", value)],
+            ..RouteConstruction::default()
+        };
+        assert_frontend_error(
+            lower_transforming_route(&route("missing"), &Schema::empty(), &target),
+            FrontendErrorKind::UninitializedWorkingMessageField {
+                field: field("missing"),
+            },
+        );
+        assert_frontend_error(
+            lower_transforming_route(&route("source"), &source, &target),
+            FrontendErrorKind::WorkingMessageFieldNotOutput {
+                field: field("source"),
+            },
+        );
+
+        let incompatible_output =
+            nullable_schema(&[("target", DataType::Int64), ("source", DataType::Utf8)]);
+        assert_frontend_error(
+            lower_transforming_route(&route("source"), &source, &incompatible_output),
+            FrontendErrorKind::IncompatibleWorkingMessageFallback {
+                field: field("source"),
+                expected_type: DataType::Utf8,
+                expected_nullable: true,
+                found_type: DataType::Int64,
+                found_nullable: true,
+            },
+        );
+        assert_frontend_error(
+            lower_transforming_route(
+                &route("output.source"),
+                &Schema::empty(),
+                &target_and_source,
+            ),
+            FrontendErrorKind::UninitializedOutputField {
+                field: field("source"),
+            },
+        );
+
+        let finalized_unknown = RouteConstruction {
+            where_clause: Some(expression("missing = 1")),
+            ..RouteConstruction::default()
+        };
+        assert_frontend_error(
+            lower_transforming_route(&finalized_unknown, &Schema::empty(), &target),
+            FrontendErrorKind::UnknownOutputField {
+                field: field("missing"),
+            },
+        );
+    }
+
+    #[test]
+    fn expression_shape_failures_have_semantic_contexts() {
+        let unexpanded = RouteConstruction {
+            inherit: Some(Inheritance::All),
+            ..RouteConstruction::default()
+        };
+        assert_frontend_error(
+            lower_route_construction(&unexpanded, SemanticNamespaces::new("input", "output")),
+            FrontendErrorKind::UnexpandedInheritance,
+        );
+
+        assert_frontend_error(
+            lower_expression(&ModelExpression::Array(Vec::new()), "input"),
+            FrontendErrorKind::ArrayExpressionOutsideWindow,
+        );
+
+        let target = ParseAsType::Vec {
+            element: Box::new(ParseAsType::I64),
+        };
+        assert_frontend_error(
+            lower_expression(
+                &ModelExpression::Cast {
+                    expression: Box::new(ModelExpression::Literal(ModelLiteral::I64(1))),
+                    target: target.clone(),
+                },
+                "input",
+            ),
+            FrontendErrorKind::UnsupportedCollectionCast {
+                expected: CastTargetKind::Scalar,
+                found: target,
+            },
         );
     }
 }

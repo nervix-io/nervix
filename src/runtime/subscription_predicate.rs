@@ -118,8 +118,10 @@ pub(crate) async fn execute_subscription_predicate_on_record(
         },
         None,
     )
-    .map_err(|reason| {
-        Report::new(SubscriptionPredicateExecutionError::InputProjection { reason })
+    .map_err(|error| {
+        Report::new(SubscriptionPredicateExecutionError::InputProjection {
+            reason: error.to_string(),
+        })
     })?;
     let execution_context = VmExecutionContext::new(execution_now);
     let result = execute_vm_predicate_in_context(&predicate.predicate, &input, &execution_context)

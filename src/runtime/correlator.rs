@@ -597,7 +597,8 @@ pub(super) fn correlator_input_batch(
                 .map(|state| state.value(field.name())),
             row_count,
             field,
-        )?;
+        )
+        .map_err(|error| error.to_string())?;
         fields.push(field.clone());
         columns.push(column.to_array_ref());
     }

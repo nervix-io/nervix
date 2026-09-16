@@ -16,7 +16,7 @@ pub(super) async fn execute_filter_map_on_record(
     filter_map_metadata: Option<&IngestFilterMapMetadata>,
     side_inputs: &HashMap<String, RuntimeValue>,
     execution_now: Timestamp,
-) -> Result<Option<RuntimeRow>, String> {
+) -> PlannedGeneralResult<Option<RuntimeRow>> {
     let keys = vec![branch_key.cloned()];
     let metadata = vec![record.metadata().clone()];
     let carrier = record.one_row_batch();
@@ -41,7 +41,10 @@ pub(super) async fn execute_filter_map_on_record(
         SingleRecordFilterMapOutcome::Filtered => Ok(None),
         SingleRecordFilterMapOutcome::Output(record) => Ok(Some(record)),
         SingleRecordFilterMapOutcome::MessageError { error, .. } => {
-            Err(format!("FILTER-MAP message error: {}", error.message))
+            Err(Report::new(PlannedGeneralError {
+                acks: Vec::new(),
+                reason: format!("FILTER-MAP message error: {}", error.message),
+            }))
         }
     }
 }
@@ -67,7 +70,7 @@ pub(super) async fn evaluate_filter_map_on_batch(
     filter_map: &CompiledProgramWithMaterializedInterest,
     inputs: FilterMapOutcomeInputs<'_>,
     execution_now: Timestamp,
-) -> Result<Vec<SingleRecordFilterMapOutcome>, String> {
+) -> PlannedGeneralResult<Vec<SingleRecordFilterMapOutcome>> {
     let processor = processor.into();
     let FilterMapOutcomeInputs {
         carrier,
@@ -81,24 +84,33 @@ pub(super) async fn evaluate_filter_map_on_batch(
         return Ok(Vec::new());
     }
     if record_metadata.len() != row_count {
-        return Err(format!(
-            "FILTER-MAP received {} runtime metadata rows for {row_count} records",
-            record_metadata.len()
-        ));
+        return Err(Report::new(PlannedGeneralError {
+            acks: Vec::new(),
+            reason: format!(
+                "FILTER-MAP received {} runtime metadata rows for {row_count} records",
+                record_metadata.len()
+            ),
+        }));
     }
     if keys.len() != row_count {
-        return Err(format!(
-            "FILTER-MAP received {} branch keys for {row_count} records",
-            keys.len()
-        ));
+        return Err(Report::new(PlannedGeneralError {
+            acks: Vec::new(),
+            reason: format!(
+                "FILTER-MAP received {} branch keys for {row_count} records",
+                keys.len()
+            ),
+        }));
     }
     if let Some(metadata) = filter_map_metadata
         && metadata.len() != row_count
     {
-        return Err(format!(
-            "FILTER-MAP received {} ingest metadata rows for {row_count} records",
-            metadata.len()
-        ));
+        return Err(Report::new(PlannedGeneralError {
+            acks: Vec::new(),
+            reason: format!(
+                "FILTER-MAP received {} ingest metadata rows for {row_count} records",
+                metadata.len()
+            ),
+        }));
     }
     let executed = execute_filter_map_program_on_batch(
         processor_kind,
@@ -116,13 +128,16 @@ pub(super) async fn evaluate_filter_map_on_batch(
         None,
     )
     .await
-    .map_err(|error| error.reason)?;
+    .map_err(Report::new)?;
     if executed.selected_rows.len() != executed.batch.row_count() {
-        return Err(format!(
-            "FILTER-MAP produced {} rows for {} selected rows",
-            executed.batch.row_count(),
-            executed.selected_rows.len()
-        ));
+        return Err(Report::new(PlannedGeneralError {
+            acks: Vec::new(),
+            reason: format!(
+                "FILTER-MAP produced {} rows for {} selected rows",
+                executed.batch.row_count(),
+                executed.selected_rows.len()
+            ),
+        }));
     }
     // Rows the program filtered out never appear in `selected_rows`, so starting every
     // record at `Filtered` and overwriting the survivors keeps the result row-aligned
@@ -138,9 +153,12 @@ pub(super) async fn evaluate_filter_map_on_batch(
         // outcome slot is what this loop writes.
         let (Some(slot), Some(_)) = (outcomes.get_mut(input_row), record_metadata.get(input_row))
         else {
-            return Err(format!(
-                "FILTER-MAP selected row {input_row} outside its {row_count}-record input"
-            ));
+            return Err(Report::new(PlannedGeneralError {
+                acks: Vec::new(),
+                reason: format!(
+                    "FILTER-MAP selected row {input_row} outside its {row_count}-record input"
+                ),
+            }));
         };
         if let Some(side_error) = executed.batch.errors().row(output_row).first() {
             *slot = SingleRecordFilterMapOutcome::MessageError {
@@ -164,10 +182,15 @@ pub(super) async fn evaluate_filter_map_on_batch(
         successful_input_rows.push(input_row);
     }
     if !successful_output_rows.is_empty() {
-        let output_batch = Arc::new(vm_typed_batch_selected_rows_to_runtime_batch(
-            &executed.batch,
-            &successful_output_rows,
-        )?);
+        let output_batch = Arc::new(
+            vm_typed_batch_selected_rows_to_runtime_batch(&executed.batch, &successful_output_rows)
+                .map_err(|error| {
+                    Report::new(PlannedGeneralError {
+                        acks: Vec::new(),
+                        reason: error.to_string(),
+                    })
+                })?,
+        );
         for (output_row, input_row) in successful_input_rows.into_iter().enumerate() {
             outcomes[input_row] = SingleRecordFilterMapOutcome::Output(
                 RuntimeRow::new(
@@ -175,7 +198,12 @@ pub(super) async fn evaluate_filter_map_on_batch(
                     output_row,
                     record_metadata[input_row].clone(),
                 )
-                .map_err(|error| error.to_string())?,
+                .map_err(|error| {
+                    Report::new(PlannedGeneralError {
+                        acks: Vec::new(),
+                        reason: error.to_string(),
+                    })
+                })?,
             );
         }
     }
@@ -760,7 +788,7 @@ pub(in crate::runtime) async fn evaluate_sqs_fifo_group_program(
     batch: &RelayRecordBatch,
     execution_now: Timestamp,
     side_inputs: &HashMap<String, RuntimeValue>,
-) -> Result<Vec<Result<Option<String>, String>>, PlannedGeneralError> {
+) -> PlannedGeneralResult<Vec<PlannedGeneralResult<Option<String>>>> {
     let row_count = batch.batch.batch().num_rows();
     let result = execute_filter_map_program_on_batch(
         "emitter",
@@ -779,35 +807,52 @@ pub(in crate::runtime) async fn evaluate_sqs_fifo_group_program(
     )
     .await?;
     let mut groups = (0..row_count)
-        .map(|_| Err("SQS FIFO GROUP expression omitted its input row".to_string()))
+        .map(|_| {
+            Err(Report::new(PlannedGeneralError {
+                acks: Vec::new(),
+                reason: "SQS FIFO GROUP expression omitted its input row".to_string(),
+            }))
+        })
         .collect::<Vec<_>>();
     for (output_row, input_row) in result.selected_rows.iter().enumerate() {
         if input_row >= row_count {
-            return Err(PlannedGeneralError {
+            return Err(Report::new(PlannedGeneralError {
                 acks: batch.acks.clone(),
                 reason: format!(
                     "emitter '{}' SQS FIFO GROUP expression referenced missing input row \
                      {input_row}",
                     emitter.as_str()
                 ),
-            });
+            }));
         }
         if let Some(side_error) = result.batch.errors().row(output_row).first() {
-            groups[input_row] = Err(format!(
-                "SQS FIFO GROUP expression failed with {} at {}",
-                side_error.code.as_str(),
-                side_error.span
-            ));
+            groups[input_row] = Err(Report::new(PlannedGeneralError {
+                acks: Vec::new(),
+                reason: format!(
+                    "SQS FIFO GROUP expression failed with {} at {}",
+                    side_error.code.as_str(),
+                    side_error.span
+                ),
+            }));
             continue;
         }
         groups[input_row] = match vm_output_value(&result.batch, output_row, "fifo_group") {
             Ok(Some(RuntimeValue::String(value))) => Ok(Some(value)),
-            Ok(Some(value)) => Err(format!(
-                "SQS FIFO GROUP expression produced {}, expected STRING",
-                runtime_value_type_name(&value)
-            )),
-            Ok(None) => Err("SQS FIFO GROUP expression produced NULL".to_string()),
-            Err(reason) => Err(reason),
+            Ok(Some(value)) => Err(Report::new(PlannedGeneralError {
+                acks: Vec::new(),
+                reason: format!(
+                    "SQS FIFO GROUP expression produced {}, expected STRING",
+                    runtime_value_type_name(&value)
+                ),
+            })),
+            Ok(None) => Err(Report::new(PlannedGeneralError {
+                acks: Vec::new(),
+                reason: "SQS FIFO GROUP expression produced NULL".to_string(),
+            })),
+            Err(error) => Err(Report::new(PlannedGeneralError {
+                acks: Vec::new(),
+                reason: error.to_string(),
+            })),
         };
     }
     Ok(groups)
@@ -976,17 +1021,20 @@ pub(super) async fn evaluate_output_branch_program(
     keys: &[Option<BranchKey>],
     side_inputs: &HashMap<String, RuntimeValue>,
     execution_now: Timestamp,
-) -> Result<Vec<Result<Option<BranchKey>, String>>, String> {
+) -> PlannedGeneralResult<Vec<PlannedGeneralResult<Option<BranchKey>>>> {
     let node = node.into();
     let row_count = output.batch().num_rows();
     if input.batch().num_rows() != row_count || keys.len() != row_count {
-        return Err(format!(
-            "branch construction for '{}' received {} input rows, {} output rows, and {} keys",
-            node.as_str(),
-            input.batch().num_rows(),
-            row_count,
-            keys.len()
-        ));
+        return Err(Report::new(PlannedGeneralError {
+            acks: Vec::new(),
+            reason: format!(
+                "branch construction for '{}' received {} input rows, {} output rows, and {} keys",
+                node.as_str(),
+                input.batch().num_rows(),
+                row_count,
+                keys.len()
+            ),
+        }));
     }
     let namespace_batches = [("input", input), ("output", output), ("message", output)];
     let lookup_columns = compute_lookup_hash_map_columns(
@@ -1001,7 +1049,13 @@ pub(super) async fn evaluate_output_branch_program(
         execution_now,
         None,
     )
-    .await?;
+    .await
+    .map_err(|error| {
+        Report::new(PlannedGeneralError {
+            acks: Vec::new(),
+            reason: error.to_string(),
+        })
+    })?;
     let uninitialized = VmUninitializedInput {
         fields: program
             .program
@@ -1026,7 +1080,13 @@ pub(super) async fn evaluate_output_branch_program(
             uninitialized: Some(&uninitialized),
         },
         None,
-    )?;
+    )
+    .map_err(|error| {
+        Report::new(PlannedGeneralError {
+            acks: Vec::new(),
+            reason: error.to_string(),
+        })
+    })?;
     let result = execute_program_with_selection_in_context(
         &program.program.compiled,
         &vm_input,
@@ -1037,30 +1097,44 @@ pub(super) async fn evaluate_output_branch_program(
     )
     .await
     .map_err(|error| {
-        format!(
-            "branch construction VM for '{}' failed: {}",
-            node.as_str(),
-            error
-        )
+        Report::new(PlannedGeneralError {
+            acks: Vec::new(),
+            reason: format!(
+                "branch construction VM for '{}' failed: {}",
+                node.as_str(),
+                error
+            ),
+        })
     })?;
     let mut outcomes = (0..row_count)
-        .map(|_| Err("branch construction VM did not preserve the input row".to_string()))
+        .map(|_| {
+            Err(Report::new(PlannedGeneralError {
+                acks: Vec::new(),
+                reason: "branch construction VM did not preserve the input row".to_string(),
+            }))
+        })
         .collect::<Vec<_>>();
     for (output_row, input_row) in result.selected_rows.iter().enumerate() {
         if input_row >= outcomes.len() {
-            return Err(format!(
-                "branch construction VM for '{}' selected unknown row {}",
-                node.as_str(),
-                input_row
-            ));
+            return Err(Report::new(PlannedGeneralError {
+                acks: Vec::new(),
+                reason: format!(
+                    "branch construction VM for '{}' selected unknown row {}",
+                    node.as_str(),
+                    input_row
+                ),
+            }));
         }
         if let Some(error) = result.batch.errors().row(output_row).first() {
-            outcomes[input_row] = Err(format!(
-                "branch SET failed with {}: {} at {}",
-                error.code.as_str(),
-                error.message,
-                error.span
-            ));
+            outcomes[input_row] = Err(Report::new(PlannedGeneralError {
+                acks: Vec::new(),
+                reason: format!(
+                    "branch SET failed with {}: {} at {}",
+                    error.code.as_str(),
+                    error.message,
+                    error.span
+                ),
+            }));
             continue;
         }
         let mut fields = Vec::with_capacity(result.batch.schema().fields().len());
@@ -1068,23 +1142,46 @@ pub(super) async fn evaluate_output_branch_program(
             let array = result.batch.column(column_index).to_array_ref();
             let value = runtime_value_from_arrow_array(
                 array.as_ref(),
-                &parse_as_type_from_arrow(field.data_type()).map_err(|error| error.to_string())?,
+                &parse_as_type_from_arrow(field.data_type()).map_err(|error| {
+                    Report::new(PlannedGeneralError {
+                        acks: Vec::new(),
+                        reason: error.to_string(),
+                    })
+                })?,
                 false,
                 output_row,
                 field.name(),
             )
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("branch field '{}' is null", field.name()))?;
+            .map_err(|error| {
+                Report::new(PlannedGeneralError {
+                    acks: Vec::new(),
+                    reason: error.to_string(),
+                })
+            })?
+            .ok_or_else(|| {
+                Report::new(PlannedGeneralError {
+                    acks: Vec::new(),
+                    reason: format!("branch field '{}' is null", field.name()),
+                })
+            })?;
             let name = FieldName::parse(field.name()).map_err(|error| {
-                format!(
-                    "compiled branch field '{}' is invalid: {}",
-                    field.name(),
-                    error
-                )
+                Report::new(PlannedGeneralError {
+                    acks: Vec::new(),
+                    reason: format!(
+                        "compiled branch field '{}' is invalid: {}",
+                        field.name(),
+                        error
+                    ),
+                })
             })?;
             fields.push((name, value));
         }
-        outcomes[input_row] = BranchKey::from_fields(fields).map(Some);
+        outcomes[input_row] = BranchKey::from_fields(fields).map(Some).map_err(|reason| {
+            Report::new(PlannedGeneralError {
+                acks: Vec::new(),
+                reason,
+            })
+        });
     }
     Ok(outcomes)
 }
@@ -1092,27 +1189,34 @@ pub(super) async fn evaluate_output_branch_program(
 pub(super) fn emitter_headers_from_invocations(
     invocations: &[nervix_vm::FunctionInvocation],
     row: usize,
-) -> Result<EmitterHeaders, String> {
+) -> PlannedGeneralResult<EmitterHeaders> {
     let mut headers = Vec::new();
     for invocation in invocations {
         if invocation.function != FunctionName::WriteHeader {
-            return Err(format!(
-                "unsupported invocation '{}'",
-                invocation.function.as_str()
-            ));
+            return Err(Report::new(PlannedGeneralError {
+                acks: Vec::new(),
+                reason: format!("unsupported invocation '{}'", invocation.function.as_str()),
+            }));
         }
         let [VmTypedArray::Utf8(names), VmTypedArray::Utf8(values)] =
             invocation.arguments.as_slice()
         else {
-            return Err("write_header arguments must both be STRING".to_string());
+            return Err(Report::new(PlannedGeneralError {
+                acks: Vec::new(),
+                reason: "write_header arguments must both be STRING".to_string(),
+            }));
         };
         if row >= names.len() || row >= values.len() {
-            return Err(format!(
-                "write_header result does not contain output row {row}"
-            ));
+            return Err(Report::new(PlannedGeneralError {
+                acks: Vec::new(),
+                reason: format!("write_header result does not contain output row {row}"),
+            }));
         }
         if names.is_null(row) || values.is_null(row) {
-            return Err("write_header arguments cannot be NULL".to_string());
+            return Err(Report::new(PlannedGeneralError {
+                acks: Vec::new(),
+                reason: "write_header arguments cannot be NULL".to_string(),
+            }));
         }
         headers.push((names.value(row).to_string(), values.value(row).to_string()));
     }
@@ -1126,12 +1230,14 @@ macro_rules! append_filter_map_numeric_list_value {
                 $builder.append_value(*value);
                 Ok(())
             }
-            value => Err(format!(
-                "FILTER-MAP input field '{}' expected {:?}, got {}",
-                $field.name(),
-                $field.data_type(),
-                runtime_value_type_name(value)
-            )),
+            value => Err(Report::new(RuntimeSchemaError::RuntimeValueTypeMismatch {
+                location: RuntimeValueLocation::VmInputField {
+                    field: $field.name().clone(),
+                    elements: Vec::new(),
+                },
+                expected: parse_as_type_from_arrow($field.data_type())?,
+                found: value.kind(),
+            })),
         }
     }};
 }
@@ -1142,7 +1248,7 @@ macro_rules! define_filter_map_numeric_list_appender {
             builder: &mut $builder,
             value: &RuntimeValue,
             field: &arrow_schema::Field,
-        ) -> Result<(), String> {
+        ) -> error_stack::Result<(), RuntimeSchemaError> {
             append_filter_map_numeric_list_value!(builder, value, field, $pattern)
         }
     };
@@ -1168,18 +1274,20 @@ pub(super) fn append_filter_map_f32(
     builder: &mut Float32Builder,
     value: &RuntimeValue,
     field: &arrow_schema::Field,
-) -> Result<(), String> {
+) -> error_stack::Result<(), RuntimeSchemaError> {
     match value {
         RuntimeValue::F32(value) => {
             builder.append_value(value.into_inner());
             Ok(())
         }
-        value => Err(format!(
-            "FILTER-MAP input field '{}' expected {:?}, got {}",
-            field.name(),
-            field.data_type(),
-            runtime_value_type_name(value)
-        )),
+        value => Err(Report::new(RuntimeSchemaError::RuntimeValueTypeMismatch {
+            location: RuntimeValueLocation::VmInputField {
+                field: field.name().clone(),
+                elements: Vec::new(),
+            },
+            expected: parse_as_type_from_arrow(field.data_type())?,
+            found: value.kind(),
+        })),
     }
 }
 
@@ -1187,18 +1295,20 @@ pub(super) fn append_filter_map_f64(
     builder: &mut Float64Builder,
     value: &RuntimeValue,
     field: &arrow_schema::Field,
-) -> Result<(), String> {
+) -> error_stack::Result<(), RuntimeSchemaError> {
     match value {
         RuntimeValue::F64(value) => {
             builder.append_value(value.into_inner());
             Ok(())
         }
-        value => Err(format!(
-            "FILTER-MAP input field '{}' expected {:?}, got {}",
-            field.name(),
-            field.data_type(),
-            runtime_value_type_name(value)
-        )),
+        value => Err(Report::new(RuntimeSchemaError::RuntimeValueTypeMismatch {
+            location: RuntimeValueLocation::VmInputField {
+                field: field.name().clone(),
+                elements: Vec::new(),
+            },
+            expected: parse_as_type_from_arrow(field.data_type())?,
+            found: value.kind(),
+        })),
     }
 }
 
@@ -1206,18 +1316,20 @@ pub(super) fn append_filter_map_bool(
     builder: &mut BooleanBuilder,
     value: &RuntimeValue,
     field: &arrow_schema::Field,
-) -> Result<(), String> {
+) -> error_stack::Result<(), RuntimeSchemaError> {
     match value {
         RuntimeValue::Bool(value) => {
             builder.append_value(*value);
             Ok(())
         }
-        value => Err(format!(
-            "FILTER-MAP input field '{}' expected {:?}, got {}",
-            field.name(),
-            field.data_type(),
-            runtime_value_type_name(value)
-        )),
+        value => Err(Report::new(RuntimeSchemaError::RuntimeValueTypeMismatch {
+            location: RuntimeValueLocation::VmInputField {
+                field: field.name().clone(),
+                elements: Vec::new(),
+            },
+            expected: parse_as_type_from_arrow(field.data_type())?,
+            found: value.kind(),
+        })),
     }
 }
 
@@ -1225,7 +1337,7 @@ pub(super) fn append_filter_map_string(
     builder: &mut StringBuilder,
     value: &RuntimeValue,
     field: &arrow_schema::Field,
-) -> Result<(), String> {
+) -> error_stack::Result<(), RuntimeSchemaError> {
     match value {
         RuntimeValue::String(value) => {
             builder.append_value(value);
@@ -1235,12 +1347,14 @@ pub(super) fn append_filter_map_string(
             builder.append_value(value.to_rfc3339());
             Ok(())
         }
-        value => Err(format!(
-            "FILTER-MAP input field '{}' expected {:?}, got {}",
-            field.name(),
-            field.data_type(),
-            runtime_value_type_name(value)
-        )),
+        value => Err(Report::new(RuntimeSchemaError::RuntimeValueTypeMismatch {
+            location: RuntimeValueLocation::VmInputField {
+                field: field.name().clone(),
+                elements: Vec::new(),
+            },
+            expected: parse_as_type_from_arrow(field.data_type())?,
+            found: value.kind(),
+        })),
     }
 }
 
@@ -1248,24 +1362,29 @@ pub(super) fn append_filter_map_datetime(
     builder: &mut TimestampNanosecondBuilder,
     value: &RuntimeValue,
     field: &arrow_schema::Field,
-) -> Result<(), String> {
+) -> error_stack::Result<(), RuntimeSchemaError> {
     match value {
         RuntimeValue::Datetime(value) => match value.timestamp_nanos_opt() {
             Some(value) => {
                 builder.append_value(value);
                 Ok(())
             }
-            None => Err(format!(
-                "FILTER-MAP input field '{}' datetime is out of nanosecond range",
-                field.name()
-            )),
+            None => Err(Report::new(RuntimeSchemaError::RuntimeValueOutOfRange {
+                location: RuntimeValueLocation::VmInputField {
+                    field: field.name().clone(),
+                    elements: Vec::new(),
+                },
+                expected: ParseAsType::Datetime,
+            })),
         },
-        value => Err(format!(
-            "FILTER-MAP input field '{}' expected {:?}, got {}",
-            field.name(),
-            field.data_type(),
-            runtime_value_type_name(value)
-        )),
+        value => Err(Report::new(RuntimeSchemaError::RuntimeValueTypeMismatch {
+            location: RuntimeValueLocation::VmInputField {
+                field: field.name().clone(),
+                elements: Vec::new(),
+            },
+            expected: ParseAsType::Datetime,
+            found: value.kind(),
+        })),
     }
 }
 
@@ -1274,17 +1393,17 @@ pub(super) fn append_filter_map_nested_value(
     data_type: &ArrowDataType,
     value: Option<&RuntimeValue>,
     field: &arrow_schema::Field,
-) -> Result<(), String> {
+) -> error_stack::Result<(), RuntimeSchemaError> {
     macro_rules! append_primitive {
         ($builder:ty, $append:ident) => {{
             let builder = builder
                 .as_any_mut()
                 .downcast_mut::<$builder>()
                 .ok_or_else(|| {
-                    format!(
-                        "FILTER-MAP input field '{}' has an incompatible Arrow builder",
-                        field.name()
-                    )
+                    Report::new(RuntimeSchemaError::ArrowBuilderTypeMismatch {
+                        field: field.name().clone(),
+                        expected: data_type.clone(),
+                    })
                 })?;
             if let Some(value) = value {
                 $append(builder, value, field)?;
@@ -1318,20 +1437,23 @@ pub(super) fn append_filter_map_nested_value(
                 .as_any_mut()
                 .downcast_mut::<ListBuilder<Box<dyn ArrayBuilder>>>()
                 .ok_or_else(|| {
-                    format!(
-                        "FILTER-MAP input field '{}' has an incompatible list builder",
-                        field.name()
-                    )
+                    Report::new(RuntimeSchemaError::ArrowBuilderTypeMismatch {
+                        field: field.name().clone(),
+                        expected: data_type.clone(),
+                    })
                 })?;
             let values = match value {
                 Some(RuntimeValue::Vec(values)) => Some(values),
                 None => None,
                 Some(value) => {
-                    return Err(format!(
-                        "FILTER-MAP input field '{}' expected VEC, got {}",
-                        field.name(),
-                        runtime_value_type_name(value)
-                    ));
+                    return Err(Report::new(RuntimeSchemaError::RuntimeValueTypeMismatch {
+                        location: RuntimeValueLocation::VmInputField {
+                            field: field.name().clone(),
+                            elements: Vec::new(),
+                        },
+                        expected: parse_as_type_from_arrow(data_type)?,
+                        found: value.kind(),
+                    }));
                 }
             };
             if let Some(values) = values {
@@ -1352,33 +1474,43 @@ pub(super) fn append_filter_map_nested_value(
                 .as_any_mut()
                 .downcast_mut::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>()
                 .ok_or_else(|| {
-                    format!(
-                        "FILTER-MAP input field '{}' has an incompatible fixed-list builder",
-                        field.name()
-                    )
+                    Report::new(RuntimeSchemaError::ArrowBuilderTypeMismatch {
+                        field: field.name().clone(),
+                        expected: data_type.clone(),
+                    })
                 })?;
-            let expected = usize::try_from(*len).map_err(|_| {
-                format!(
-                    "FILTER-MAP input field '{}' has invalid array length",
-                    field.name()
-                )
-            })?;
+            let expected_length =
+                std::num::NonZeroU32::new(u32::try_from(*len).map_err(|_| {
+                    Report::new(RuntimeSchemaError::EmptyFixedSizeList { len: *len })
+                })?)
+                .ok_or_else(|| Report::new(RuntimeSchemaError::EmptyFixedSizeList { len: *len }))?;
+            let expected = usize::try_from(expected_length.get()).assured(
+                "the fixed-size Arrow list length is a u32 and fits every supported usize",
+            );
             let values = match value {
                 Some(RuntimeValue::Array(values)) if values.len() == expected => Some(values),
                 Some(RuntimeValue::Array(values)) => {
-                    return Err(format!(
-                        "FILTER-MAP input field '{}' expected array length {expected}, got {}",
-                        field.name(),
-                        values.len()
+                    return Err(Report::new(
+                        RuntimeSchemaError::RuntimeArrayLengthMismatch {
+                            location: RuntimeValueLocation::VmInputField {
+                                field: field.name().clone(),
+                                elements: Vec::new(),
+                            },
+                            expected: expected_length,
+                            found: values.len(),
+                        },
                     ));
                 }
                 None => None,
                 Some(value) => {
-                    return Err(format!(
-                        "FILTER-MAP input field '{}' expected ARRAY, got {}",
-                        field.name(),
-                        runtime_value_type_name(value)
-                    ));
+                    return Err(Report::new(RuntimeSchemaError::RuntimeValueTypeMismatch {
+                        location: RuntimeValueLocation::VmInputField {
+                            field: field.name().clone(),
+                            elements: Vec::new(),
+                        },
+                        expected: parse_as_type_from_arrow(data_type)?,
+                        found: value.kind(),
+                    }));
                 }
             };
             for index in 0..expected {
@@ -1392,10 +1524,9 @@ pub(super) fn append_filter_map_nested_value(
             builder.append(values.is_some());
             Ok(())
         }
-        data_type => Err(format!(
-            "FILTER-MAP input field '{}' has unsupported nested type {data_type:?}",
-            field.name()
-        )),
+        data_type => Err(Report::new(RuntimeSchemaError::UnsupportedArrowType {
+            data_type: data_type.clone(),
+        })),
     }
 }
 
@@ -2045,13 +2176,17 @@ mod tests {
         )
         .await
         .expect("SQS FIFO group expression must execute");
+        let groups = groups
+            .into_iter()
+            .collect::<PlannedGeneralResult<Vec<_>>>()
+            .expect("every input row must produce an SQS FIFO group");
 
         assert_eq!(
             groups,
             vec![
-                Ok(Some("acme-us".to_string())),
-                Ok(Some("globex-eu".to_string())),
-                Ok(Some("acme-ap".to_string())),
+                Some("acme-us".to_string()),
+                Some("globex-eu".to_string()),
+                Some("acme-ap".to_string()),
             ]
         );
     }

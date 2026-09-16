@@ -57,9 +57,10 @@ pub use error::{
     CompileError, ErrorCode, RowErrorLengths, RowErrorMask, RowErrors, RuntimeError, SideError,
 };
 pub use frontend::{
-    FrontendError, FrontendResult, SemanticNamespaces, lower_branch_construction, lower_expression,
-    lower_finalized_output_filter, lower_generated_route, lower_route_construction,
-    lower_set_only_route, lower_transforming_route,
+    AssignmentTargetSet, CastTargetKind, FrontendError, FrontendErrorKind, FrontendResult,
+    SemanticNamespaces, lower_branch_construction, lower_expression, lower_finalized_output_filter,
+    lower_generated_route, lower_route_construction, lower_set_only_route,
+    lower_transforming_route,
 };
 pub use ir::{
     CompiledPredicate, CompiledProgram, InputBinding, Instruction, InstructionKind,

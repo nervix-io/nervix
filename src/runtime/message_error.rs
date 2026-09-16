@@ -647,7 +647,8 @@ impl Runtime {
             ingest_metadata,
             execution_now,
         )
-        .await?;
+        .await
+        .map_err(|error| error.to_string())?;
         let key = preserved_message_error_branch(&branching, &message.key, relay, error.reference)?;
         let batch = RelayRecordBatch::single(schema, key, dlq_record, AckSet::empty())?;
         if let Some(flush_policy) = flush_policy {
@@ -980,7 +981,8 @@ impl Runtime {
             execution_now,
             None,
         )
-        .await?;
+        .await
+        .map_err(|error| error.to_string())?;
         let uninitialized = VmUninitializedInput {
             fields: program
                 .compiled
@@ -1004,7 +1006,8 @@ impl Runtime {
                 uninitialized: Some(&uninitialized),
             },
             None,
-        )?;
+        )
+        .map_err(|error| error.to_string())?;
         let result = execute_program_with_selection_in_context(
             &program.compiled,
             &batch,
@@ -1032,7 +1035,8 @@ impl Runtime {
                 side_error.span
             ));
         }
-        let output = vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &[0])?;
+        let output = vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &[0])
+            .map_err(|error| error.to_string())?;
         RuntimeRow::new(Arc::new(output), 0, message.record.metadata().clone())
             .map_err(|error| error.to_string())
     }

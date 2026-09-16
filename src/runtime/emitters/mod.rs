@@ -4587,9 +4587,13 @@ impl EmitterBatchContext<'_> {
                 )
                 .await;
                 match evaluated {
-                    Ok(groups) => groups,
+                    Ok(groups) => groups
+                        .into_iter()
+                        .map(|group| group.map_err(|error| error.to_string()))
+                        .collect(),
                     Err(error) => {
-                        self.report_general_error(error.acks.iter(), error.reason);
+                        let error = error.current_context();
+                        self.report_general_error(error.acks.iter(), error.reason.clone());
                         return None;
                     }
                 }
