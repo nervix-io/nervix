@@ -1106,7 +1106,8 @@ impl RelayBoundaryServices {
                 &ingress_slot,
             )
             .await;
-        if let Err(reason) = admission_result {
+        if let Err(error) = admission_result {
+            let reason = error.to_string();
             for ack_id in registered_ack_ids {
                 dispatcher.clear_pending_ack(ack_id);
             }
@@ -1265,11 +1266,12 @@ impl RelayBoundaryServices {
             match (consumer.mode, result) {
                 (AckMode::Attached, Ok(())) => {}
                 (AckMode::Attached, Err(error)) => {
+                    let reason = error.to_string();
                     for (ack_set, remote_ack) in remote_batch.acks.iter().zip(remote_acks.iter()) {
                         if let Some(remote_ack) = remote_ack {
                             dispatcher.clear_pending_ack(remote_ack.ack_id);
                         }
-                        ack_set.no_ack(error.clone());
+                        ack_set.no_ack(reason.clone());
                     }
                     return Err(Box::new(batch.clone()));
                 }

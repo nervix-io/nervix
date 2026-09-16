@@ -119,7 +119,7 @@ impl RelayProcessorNode {
             Some(&routing.udfs),
         ) {
             Ok(template) => template,
-            Err(error) => return Some(error),
+            Err(error) => return Some(error.to_string()),
         };
         self.apply_node_template(template).err()
     }

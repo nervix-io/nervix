@@ -62,7 +62,7 @@ impl PrometheusIngestor {
             .map_err(|reason| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-                reason,
+                reason: reason.to_string(),
             })?;
         let http_client = HttpClientConfig::new(&resolved_client.entries, "Prometheus")
             .build()

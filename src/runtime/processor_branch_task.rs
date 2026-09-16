@@ -1227,6 +1227,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        runtime::scheduled_node::ScheduledNodeHandoffError,
         runtime_ack::AckSet,
         runtime_schema::{RuntimeValue, compile_schema, test_runtime_row},
     };
@@ -1752,10 +1753,10 @@ mod tests {
             .await
             .expect_err("a full command mailbox must bound handoff");
 
-        assert_eq!(
-            error,
-            "scheduled node task timed out accepting handoff".to_string()
-        );
+        assert!(matches!(
+            error.current_context(),
+            ScheduledNodeHandoffError::CommandTimeout
+        ));
         assert!(dropped.load(Ordering::Acquire));
     }
 
@@ -1787,10 +1788,10 @@ mod tests {
             .await
             .expect_err("a dropped handoff response must fail");
 
-        assert_eq!(
-            error,
-            "scheduled node task dropped its handoff response".to_string()
-        );
+        assert!(matches!(
+            error.current_context(),
+            ScheduledNodeHandoffError::ResponseDropped
+        ));
         assert!(dropped.load(Ordering::Acquire));
     }
 }

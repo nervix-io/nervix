@@ -128,7 +128,7 @@ impl MqttIngestor {
             .map_err(|reason| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-                reason,
+                reason: reason.to_string(),
             })?;
         runtime.prepare_ingestor_readiness(domain, &ingestor.name, instances);
         if let Err(error) =
