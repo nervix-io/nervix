@@ -101,6 +101,47 @@ class RatchetGateTests(unittest.TestCase):
             self.assertEqual(status, 0)
             self.assertEqual(listing, "src/lib.rs:2: x as u32\n")
 
+    def test_string_error_conversion_requires_an_error_stack_result(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            string_error = """
+enum ParseError { Invalid }
+
+fn parse() -> Result<(), String> {
+    Ok(())
+}
+"""
+            write_repository(root, {"src/lib.rs": string_error})
+            run("--root", str(root), "--update")
+
+            bare_error = """
+enum ParseError { Invalid }
+
+fn parse() -> Result<(), ParseError> {
+    Ok(())
+}
+"""
+            (root / "src" / "lib.rs").write_text(bare_error, encoding="utf-8")
+            status, report, _ = run("--root", str(root))
+
+            self.assertEqual(status, 1)
+            self.assertIn("result_string_errors: 1 -> 0", report)
+            self.assertIn("bare_error_signatures: 0 -> 1 (+1)", report)
+
+            reported_error = """
+enum ParseError { Invalid }
+
+fn parse() -> error_stack::Result<(), ParseError> {
+    Ok(())
+}
+"""
+            (root / "src" / "lib.rs").write_text(reported_error, encoding="utf-8")
+            status, report, errors = run("--root", str(root))
+
+            self.assertEqual(status, 0)
+            self.assertEqual(errors, "")
+            self.assertIn("result_string_errors: 1 -> 0", report)
+
 
 class CountTests(unittest.TestCase):
     def test_as_casts_ignore_comments_literals_imports_and_unit_tests(self) -> None:
