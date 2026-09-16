@@ -522,6 +522,9 @@ handshakes remain inside this bound. A repeated `SIGINT` or `SIGTERM`, or the sh
 passing, ends the process without running the rest of its shutdown, so its peers observe its
 connections ending exactly as they do when the process crashes.
 
+See [Shutdown And Recovery](./shutdown.md) for the complete phase contract, the deadline and exit
+statuses, and what each ending preserves.
+
 ## Failure Ownership And Persistence
 
 Transport failures identify setup, authentication, admission, encoding, decoding, flow-control,

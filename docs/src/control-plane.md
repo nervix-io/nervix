@@ -384,6 +384,9 @@ independent units after one times out. Its result lists every successful move an
 unit makes the command unsuccessful, while a later `DRAIN NODE` retries the units still owned by the
 cordoned node. Endpoint and Syslog listeners bind on every live node and are not schedule units.
 
+[Shutdown And Recovery](shutdown.md) is the complete account of stopping a node and recovering from
+a forced ending. This section states how a graceful shutdown uses the planned handoff above.
+
 A server process begins graceful shutdown when it receives its first `SIGINT` or `SIGTERM`. It
 registers both signals before it starts any other work and supervises them until it exits, so a
 signal received during startup takes effect once startup completes. Every later `SIGINT` or
