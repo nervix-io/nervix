@@ -38,7 +38,7 @@ mod request;
 mod wire;
 
 pub use connection::{
-    DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress, DuplexSender,
+    ChargedItem, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress, DuplexSender,
     IncomingByteStream, RelayAdmission, RelayCancellationGuard,
 };
 pub use identity::TlsConfigBundle;
@@ -1432,6 +1432,8 @@ mod tests {
         transport_b: Transport,
         node_a: ClusterNodeName,
         node_b: ClusterNodeName,
+        /// The responder's budgets, so a test can observe what its handlers are holding charged.
+        executor_b: Executor,
         _incoming_a: mpsc::Receiver<ReceivedEnvelope>,
         incoming_b: mpsc::Receiver<ReceivedEnvelope>,
     }
@@ -1467,6 +1469,7 @@ mod tests {
         )
         .await
         .expect("first test transport should bind");
+        let executor_b = Executor::default();
         let (transport_b, incoming_b) = Transport::bind(
             "127.0.0.1:0".parse().expect("test address should be valid"),
             "localhost",
@@ -1474,7 +1477,7 @@ mod tests {
             node_b.clone(),
             authority.issue("test-cluster", &node_b),
             options,
-            Executor::default(),
+            executor_b.clone(),
         )
         .await
         .expect("second test transport should bind");
@@ -1487,6 +1490,7 @@ mod tests {
             transport_b,
             node_a,
             node_b,
+            executor_b,
             _incoming_a: incoming_a,
             incoming_b,
         }
@@ -2700,6 +2704,7 @@ mod tests {
             transport_b,
             node_a,
             node_b,
+            executor_b: _,
             _incoming_a: _,
             mut incoming_b,
         } = connected_transports().await;

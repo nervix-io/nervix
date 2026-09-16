@@ -3431,7 +3431,8 @@ impl EmitterTask {
         } else {
             None
         };
-        let physical_node_id = runtime.inner.remote_dispatch.local_node_id.read().clone();
+        let dispatcher = runtime.inner.remote_dispatcher.load();
+        let physical_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
         let task_input_metrics = inputs
             .iter()
             .map(|(relay, _)| {
@@ -3440,7 +3441,7 @@ impl EmitterTask {
                     ModelKind::Emitter,
                     &ModelName::from(&emitter.name),
                     relay,
-                    physical_node_id.as_ref(),
+                    physical_node_id,
                     None,
                 );
                 (relay.clone(), metrics)
@@ -3454,7 +3455,7 @@ impl EmitterTask {
                         kind: ModelKind::Emitter,
                         node: &ModelName::from(&emitter.name),
                         relay,
-                        physical_node_id: physical_node_id.as_ref(),
+                        physical_node_id,
                         direction: "sent",
                         branch_key: None,
                     },
@@ -3465,7 +3466,7 @@ impl EmitterTask {
                     domain,
                     ModelKind::Emitter,
                     &ModelName::from(&emitter.name),
-                    physical_node_id.as_ref(),
+                    physical_node_id,
                     "sent",
                 ),
             ),

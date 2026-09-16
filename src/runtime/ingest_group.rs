@@ -811,8 +811,7 @@ impl Runtime {
         services: &RelayBoundaryServices,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
-        let physical_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
-        if !services.is_owned_by(physical_node_id.as_ref()) {
+        if !self.owns_relay(services) {
             return services.dispatch_to_owner(domain, relay, batch).await;
         }
         services.enqueue_owner_batch(batch).await

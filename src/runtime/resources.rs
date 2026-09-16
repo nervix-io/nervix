@@ -200,7 +200,7 @@ impl Runtime {
         config: &[ClientConfigEntry],
     ) -> Result<ProtobufDescriptorPool, String> {
         let store =
-            self.inner.resource_store.read().clone().ok_or_else(|| {
+            self.inner.resource_store.load_full().ok_or_else(|| {
                 "protobuf descriptors require an attached resource store".to_string()
             })?;
         let id = self.resolve_resource_id(domain, resource, resource_version, resource.as_str())?;
@@ -215,8 +215,8 @@ impl Runtime {
         ProtobufDescriptorPool::from_file_descriptor_set(file_descriptor_set)
     }
 
-    pub(crate) fn attach_resource_store(&self, resource_store: Arc<ResourceStore>) {
-        *self.inner.resource_store.write() = Some(resource_store);
+    pub(crate) fn attach_resource_store(&self, resource_store: StdArc<ResourceStore>) {
+        self.inner.resource_store.store(Some(resource_store));
     }
 
     pub(crate) fn sync_resource_versions(&self, resources: &nervix_models::ResourceVersionStatus) {
@@ -240,17 +240,21 @@ impl Runtime {
 
     pub(crate) fn attach_resources(
         &self,
-        resource_store: Arc<ResourceStore>,
+        resource_store: StdArc<ResourceStore>,
         resource_versions: ResourceVersionStatus,
     ) {
-        *self.inner.resource_store.write() = Some(resource_store);
+        self.inner.resource_store.store(Some(resource_store));
         self.sync_resource_versions(&resource_versions);
-        *self.inner.resource_versions.write() = resource_versions;
+        self.inner
+            .resource_versions
+            .store(StdArc::new(resource_versions));
     }
 
     pub(crate) fn update_resource_versions(&self, resource_versions: ResourceVersionStatus) {
         self.sync_resource_versions(&resource_versions);
-        *self.inner.resource_versions.write() = resource_versions;
+        self.inner
+            .resource_versions
+            .store(StdArc::new(resource_versions));
     }
 
     /// Resolves a resource reference to the concrete version installed in `domain`. Resources are
@@ -281,7 +285,7 @@ impl Runtime {
             return Ok(ResourceId::new(domain.clone(), identifier.clone(), version));
         }
 
-        let resources = self.inner.resource_versions.read();
+        let resources = self.inner.resource_versions.load();
         let Some(version) = resources.latest_version(domain, identifier) else {
             return Err(format!(
                 "resource '{}' has no installed versions in domain '{}'",
@@ -347,8 +351,7 @@ impl Runtime {
         let resource_store = self
             .inner
             .resource_store
-            .read()
-            .clone()
+            .load_full()
             .ok_or_else(|| "runtime resource store is not available".to_string())?;
         let mount_root = tempfile::tempdir()
             .map_err(|source| format!("failed to create client resource mount root: {source}"))?;
@@ -456,7 +459,6 @@ mod tests {
     };
     use sorted_vec::SortedVec;
     use tempfile::tempdir;
-    use triomphe::Arc;
 
     use super::*;
     use crate::resource::ResourceStore;
@@ -482,7 +484,7 @@ mod tests {
 
         let runtime = Runtime::new();
         runtime.attach_resources(
-            Arc::new(store),
+            StdArc::new(store),
             ResourceVersionStatus {
                 next_version_by_resource: SortedVec::from_unsorted(vec![ResourceVersionCounter {
                     domain: mount_domain.clone(),

@@ -312,7 +312,7 @@ impl Runtime {
         let mut emitter_tasks = HashMap::new();
         let mut generator_tasks = HashMap::new();
         let mut reingestor_tasks = HashMap::new();
-        let remote_dispatcher = self.inner.remote_dispatcher.read().clone();
+        let remote_dispatcher = self.inner.remote_dispatcher.load_full();
         let model_index = schedule
             .nodes
             .values()

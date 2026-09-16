@@ -7,7 +7,86 @@
 //! - **Depends on.** The vocabulary the variants quote.
 //! - **Must not know.** How a caller reports or recovers from a refusal.
 
+use std::fmt;
+
+use nervix_models::{DomainName, ModelName};
 use thiserror::Error;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub(crate) enum OtelMappingSignal {
+    #[strum(serialize = "LOGS")]
+    Logs,
+    #[strum(serialize = "TRACES")]
+    Traces,
+    #[strum(serialize = "METRIC GAUGE")]
+    MetricGauge,
+    #[strum(serialize = "METRIC SUM")]
+    MetricSum,
+    #[strum(serialize = "METRIC HISTOGRAM")]
+    MetricHistogram,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub(crate) enum OtelMappingSection {
+    #[strum(serialize = "ATTRIBUTES")]
+    Attributes,
+    #[strum(serialize = "RESOURCE")]
+    Resource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OtelMappingIssue {
+    UnsupportedValue {
+        signal: OtelMappingSignal,
+        key: String,
+    },
+    DuplicateValue {
+        signal: OtelMappingSignal,
+        key: String,
+    },
+    MissingValue {
+        signal: OtelMappingSignal,
+        key: &'static str,
+    },
+    MissingDeltaValue {
+        signal: OtelMappingSignal,
+        key: &'static str,
+    },
+    DuplicateMetadata {
+        signal: OtelMappingSignal,
+        section: OtelMappingSection,
+        key: String,
+    },
+}
+
+impl fmt::Display for OtelMappingIssue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedValue { signal, key } => {
+                write!(
+                    formatter,
+                    "OTEL {signal} VALUES does not support key '{key}'"
+                )
+            }
+            Self::DuplicateValue { signal, key } => {
+                write!(
+                    formatter,
+                    "OTEL {signal} VALUES contains duplicate key '{key}'"
+                )
+            }
+            Self::MissingValue { signal, key } => {
+                write!(formatter, "OTEL {signal} VALUES requires key '{key}'")
+            }
+            Self::MissingDeltaValue { signal, key } => {
+                write!(formatter, "OTEL {signal} DELTA VALUES requires key '{key}'")
+            }
+            Self::DuplicateMetadata { section, key, .. } => {
+                write!(formatter, "OTEL {section} contains duplicate key '{key}'")
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum RegistryError {
     #[error("failed to open registry storage")]
@@ -92,6 +171,12 @@ pub(crate) enum RegistryError {
         domain: String,
         identifier: String,
         reason: String,
+    },
+    #[error("model '{identifier}' in domain '{domain}' is invalid: {issue}")]
+    InvalidOtelMapping {
+        domain: DomainName,
+        identifier: ModelName,
+        issue: OtelMappingIssue,
     },
     #[error(
         "cannot delete model '{identifier}' in domain '{domain}' because it is used by {blockers}"

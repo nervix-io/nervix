@@ -99,9 +99,13 @@ pub(in crate::runtime) struct RuntimeInner {
     /// The test harness keeps another handle to the same injected state and arms it while this
     /// node runs. Normal builds store a zero-sized marker here.
     pub(in crate::runtime) fault_injection: ConfiguredFaultInjection,
-    pub(in crate::runtime) resource_store: RwLock<Option<Arc<ResourceStore>>>,
-    pub(in crate::runtime) resource_versions: RwLock<ResourceVersionStatus>,
-    pub(in crate::runtime) remote_dispatcher: RwLock<Option<Arc<RemoteDispatcher>>>,
+    /// Published once during startup. The session service holds the same store.
+    pub(in crate::runtime) resource_store: ArcSwapOption<ResourceStore>,
+    /// Replaced whole whenever consensus reports a new set of installed resource versions.
+    pub(in crate::runtime) resource_versions: ArcSwap<ResourceVersionStatus>,
+    /// Published once, when this node has joined its cluster, and never replaced. It carries the
+    /// node's identity and incarnation, and every relay boundary built afterwards holds it too.
+    pub(in crate::runtime) remote_dispatcher: ArcSwapOption<RemoteDispatcher>,
     /// Also held by the attached `RemoteDispatcher`, which must allocate correlation ids from the
     /// same registry the runtime resolves incoming acknowledgements against.
     pub(in crate::runtime) remote_dispatch: Arc<RemoteDispatchRegistry>,

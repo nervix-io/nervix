@@ -144,8 +144,8 @@ pub(in crate::application) struct SessionServiceInner {
     pub(in crate::application) consensus_administrator: Administrator,
     /// Also held by the application and by the registry reconciliation tasks it spawns.
     pub(in crate::application) registry: Arc<Registry>,
-    /// Also held by the application startup that opened it.
-    pub(in crate::application) resource_store: Arc<ResourceStore>,
+    /// Also held by the application startup that opened it, and published by the runtime.
+    pub(in crate::application) resource_store: StdArc<ResourceStore>,
     /// Also held by the HTTPS server, which reads the current certificate on every accept.
     pub(in crate::application) http_tls_server_config: Arc<RwLock<Option<StdArc<ServerConfig>>>>,
     pub(in crate::application) runtime: Runtime,

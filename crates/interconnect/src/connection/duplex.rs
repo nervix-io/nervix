@@ -5,6 +5,11 @@
 //! - **Owns.** Opening one ordered frame stream per caller, frame length validation, per-frame
 //!   memory admission, when the peer last accepted a sender's bytes, and the half-close that ends
 //!   a stream.
+//!
+//! A decoded frame is handed to its caller together with the charge that covers it. How long a
+//! decoded frame stays resident is the caller's contract, not this module's, so the charge travels
+//! with the value instead of being released at the decode boundary: a caller that queues decoded
+//! frames behind slow work keeps measuring the memory it is holding.
 //! - **Depends on.** The authenticated connection lease and bounded execution admission.
 //! - **Must not know.** What the frames carry, or why a caller keeps a stream open.
 
@@ -454,9 +459,21 @@ impl<T> DuplexItems<T> {
     }
 }
 
+/// One decoded frame and the charge that covers it.
+///
+/// Dropping it returns the charge, so the class stops accounting for the frame exactly when the
+/// caller stops holding it. A caller that keeps decoded frames waiting on slower work holds this
+/// for as long as it keeps them, which is what makes that queue visible to the budget that bounds
+/// it.
+pub struct ChargedItem<T> {
+    pub item: T,
+    pub charge: Reservation,
+}
+
 impl<T: RkyvMessage> DuplexItems<T> {
-    /// The next frame, or `None` once the peer half-closed its direction.
-    pub async fn next(&mut self) -> Result<Option<T>, Report<StreamHandlerError>> {
+    /// The next frame and the charge covering it, or `None` once the peer half-closed its
+    /// direction.
+    pub async fn next(&mut self) -> Result<Option<ChargedItem<T>>, Report<StreamHandlerError>> {
         let frame = self
             .reader
             .next_frame()
@@ -465,7 +482,7 @@ impl<T: RkyvMessage> DuplexItems<T> {
         let Some(frame) = frame else {
             return Ok(None);
         };
-        let (item, _reservation) = T::decode_rkyv(self.executor.clone(), self.class, frame)
+        let (item, charge) = T::decode_rkyv(self.executor.clone(), self.class, frame)
             .await
             .map_err(|error| {
                 Report::new(StreamHandlerError::new(format!(
@@ -473,7 +490,7 @@ impl<T: RkyvMessage> DuplexItems<T> {
                     self.request
                 )))
             })?;
-        Ok(Some(item))
+        Ok(Some(ChargedItem { item, charge }))
     }
 }
 

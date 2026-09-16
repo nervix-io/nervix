@@ -325,6 +325,27 @@ build and the existing tests, and nothing in it changes behavior.
 
 ## Failure Handling and Panics
 
+### Typed error conversions
+
+- Converting a `Result<T, String>` signature means returning `error_stack::Result<T, E>`, where
+  `E` is a semantic `thiserror` enum owned by the module that decides what the failure means. A
+  bare `Result<T, E>` does not carry the contextual `Report` required by this contract.
+- Extend the owning module's existing error enum when one already represents the operation. A
+  second error enum for the same failure is a duplicate to remove. Propagation adds context with
+  `error-stack`; `anyhow` remains limited to boundaries where callers cannot make a semantic
+  choice.
+- Error variants carry the values a caller can act on as typed fields, not a preformatted `String`
+  reason. Validation failures identify the owning node, the route when the contract is
+  route-local, the operation, and the relevant fields. They never carry sensitive payload values.
+- Hot-path errors do not allocate a formatted message per row or per batch when the variant already
+  names the failure. Formatting belongs at the reporting boundary.
+- `just ratchet` enforces the conversion as two coordinated counts: each conversion lowers
+  `result_string_errors`, while `bare_error_signatures` rejects replacing it with an unreported
+  Nervix error. A conversion must leave every count at or below its baseline; when the string-error
+  count falls, run `just ratchet --update` and commit `debt-baseline.json` in the same change.
+
+### Panics and recovery
+
 - Use `meticulous`'s `ResultExt` and `OptionExt` instead of bare `unwrap` and `expect`, and pick the
   method that states why the failure cannot happen: `assured` for a guarantee that holds by
   construction or by target platform, `verified` for a condition already checked earlier in the same

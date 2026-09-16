@@ -48,7 +48,9 @@ command of a write or none of them. Domain configuration and schedule changes wi
 therefore recover together. Transaction effects recover with the corresponding commit
 progress. Updating a resource replica writes that replica and application metadata; it does not
 rewrite unrelated domains or schedules. Log purging atomically stores its deletion boundary with
-the deleted entries.
+the deleted entries. Catch-up and replay read committed log ranges in bounded chunks, stopping at
+one command-sized target or 1,024 entries before yielding the storage worker and applying that
+chunk. A backlog may span any number of chunks without being materialized as one reader allocation.
 
 Observers see a coherent state revision only after durable success. Change notifications identify
 committed revisions and may coalesce intermediate revisions; readers retrieve a coherent current
