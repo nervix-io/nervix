@@ -63,6 +63,11 @@ pub enum AppError {
     OpenResourceStore,
     #[error("failed to start consensus")]
     StartConsensus,
+    #[error(
+        "consensus storage shares the node database; recreate the node's stored state for the \
+         dedicated consensus database layout"
+    )]
+    ConsensusStorageLayout,
     #[error("failed to apply startup runtime changes: {0}")]
     ApplyStartupRuntime(String),
     #[error("failed to open runtime state store")]
