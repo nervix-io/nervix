@@ -441,6 +441,14 @@ bulk class. Receivers stage and validate the owning artifact while releasing HTT
 chunk. The whole transfer may exceed the 32 MiB bulk-memory budget because only bounded chunks and
 the active decoded section are resident at once.
 
+Runtime-state synchronization replies and materialized-snapshot descriptions carry the shared
+typed remote-operation failure envelope. Rejection, absence, temporary unreadiness, and execution
+failure remain distinct across the node boundary, and the requester keeps that classification in
+its local replication or snapshot-exchange error. Only an execution failure includes the serving
+node's opaque diagnostic text. A materialized snapshot is streamed only after a successful typed
+description identifies its exact length, digest, schema fingerprint, revision, fence, and branch
+generation.
+
 The [Control Plane](./control-plane.md) defines when replicated changes and resources become
 authoritative. The [Data Plane](./data-plane.md) defines how a local execution consumes transferred
 state. The interconnect supplies bounded delivery between those owners and does not reinterpret

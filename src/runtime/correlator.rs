@@ -123,13 +123,15 @@ impl CorrelatorOutputCompileContext<'_> {
             .map_err(|error| format!("{error:#}"))?;
         bindings.extend(materialized_bindings);
         let (parsed, pending_lookup_calls) =
-            rewrite_lookup_hash_map_program(&parsed, self.runtime.available_lookups)?;
+            rewrite_lookup_hash_map_program(&parsed, self.runtime.available_lookups)
+                .map_err(|error| error.to_string())?;
         let (lookup_hash_maps, lookup_binding) = compile_lookup_hash_map_calls(
             pending_lookup_calls,
             "output",
             &bindings,
             self.runtime.udfs,
-        )?;
+        )
+        .map_err(|error| error.to_string())?;
         if let Some(lookup_binding) = lookup_binding {
             bindings.push(lookup_binding);
         }

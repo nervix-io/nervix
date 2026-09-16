@@ -113,6 +113,129 @@ Feature: Materialized relay state
       | 3            | 0             |
       | 3            | 1             |
 
+  Scenario: Materialized dependencies resolve in written order after REQUIRED WAIT wakes
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a 1 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the active domain is "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA dependency_event (
+        tenant STRING,
+        value STRING,
+        first_value STRING OPTIONAL,
+        second_value STRING OPTIONAL
+      );
+      CREATE WIRE JSON SCHEMA dependency_event_wire MODE STRICT (
+        tenant string,
+        value string,
+        first_value string OPTIONAL,
+        second_value string OPTIONAL
+      );
+      CREATE CODEC dependency_event_codec
+        FROM WIRE JSON SCHEMA dependency_event_wire
+        TO SCHEMA dependency_event;
+      CREATE SCHEMA dependency_tenant ( tenant STRING );
+      CREATE BRANCH by_dependency_tenant SCHEMA dependency_tenant TTL 5m;
+      CREATE RELAY first_dependency_state
+        SCHEMA dependency_event
+        BRANCHED BY by_dependency_tenant
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE RELAY second_dependency_state
+        SCHEMA dependency_event
+        BRANCHED BY by_dependency_tenant
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE RELAY dependency_input
+        SCHEMA dependency_event
+        BRANCHED BY by_dependency_tenant;
+      CREATE RELAY dependency_output
+        SCHEMA dependency_event
+        BRANCHED BY by_dependency_tenant;
+      CREATE VHOST edge http-materialized-order-{{test_id}}.example.com;
+      CREATE ENDPOINT first_state_ingress ON edge PATH '/first-state' TYPE HTTP;
+      CREATE ENDPOINT second_state_ingress ON edge PATH '/second-state' TYPE HTTP;
+      CREATE ENDPOINT dependency_ingress ON edge PATH '/dependency-input' TYPE HTTP;
+      CREATE INGESTOR first_state_source
+        FROM ENDPOINT first_state_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING dependency_event_codec
+        TO first_dependency_state
+          INHERIT ALL
+          BRANCHED BY by_dependency_tenant
+          SET tenant = message.tenant
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE INGESTOR second_state_source
+        FROM ENDPOINT second_state_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING dependency_event_codec
+        TO second_dependency_state
+          INHERIT ALL
+          BRANCHED BY by_dependency_tenant
+          SET tenant = message.tenant
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE INGESTOR dependency_source
+        FROM ENDPOINT dependency_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING dependency_event_codec
+        TO dependency_input
+          INHERIT ALL
+          BRANCHED BY by_dependency_tenant
+          SET tenant = message.tenant
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE JUNCTION resolve_dependencies
+        FROM dependency_input
+        BRANCHED BY by_dependency_tenant
+        USING MATERIALIZED STATE first_dependency_state REQUIRED WAIT
+        USING MATERIALIZED STATE second_dependency_state REQUIRED SKIP
+        TO dependency_output
+          INHERIT ALL
+          SET first_value = relay_state.first_dependency_state.value,
+              second_value = relay_state.second_dependency_state.value
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION dependency_output_subscription TO dependency_output;
+      START;
+      """
+    When http payload is posted to node "node-1" with host "http-materialized-order-{{test_id}}.example.com" path "/dependency-input"
+      """
+      {"tenant":"acme","value":"input-acme"}
+      """
+    Then the relay subscription does not receive a payload within "300ms"
+    When http payload is posted to node "node-1" with host "http-materialized-order-{{test_id}}.example.com" path "/second-state"
+      """
+      {"tenant":"acme","value":"second-acme"}
+      """
+    Then the relay subscription does not receive a payload within "300ms"
+    When http payload is posted to node "node-1" with host "http-materialized-order-{{test_id}}.example.com" path "/first-state"
+      """
+      {"tenant":"acme","value":"first-acme"}
+      """
+    Then within "5s" the relay subscription receives a payload
+      """
+      {"first_value":"first-acme","second_value":"second-acme","tenant":"acme","value":"input-acme"}
+      """
+    When http payload is posted to node "node-1" with host "http-materialized-order-{{test_id}}.example.com" path "/dependency-input"
+      """
+      {"tenant":"beta","value":"input-beta"}
+      """
+    Then the relay subscription does not receive a payload within "300ms"
+    When http payload is posted to node "node-1" with host "http-materialized-order-{{test_id}}.example.com" path "/first-state"
+      """
+      {"tenant":"beta","value":"first-beta"}
+      """
+    Then the relay subscription does not receive a payload within "300ms"
+    When http payload is posted to node "node-1" with host "http-materialized-order-{{test_id}}.example.com" path "/second-state"
+      """
+      {"tenant":"beta","value":"second-beta"}
+      """
+    Then the relay subscription does not receive a payload within "1s"
+
   Scenario Outline: Materialized relays keep the latest value by message watermark
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

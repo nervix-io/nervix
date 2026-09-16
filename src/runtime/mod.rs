@@ -593,9 +593,7 @@ pub(crate) use relay_channel::{
     RelayBroadcast, RelayReceiver as RelaySubscriptionReceiver, RelaySubscriptionRecvError,
 };
 pub(crate) use state_replication::StateSyncAck;
-pub(crate) use state_snapshot_transfer::{
-    DescribeStateSnapshot, DescribedStateSnapshot, FetchStateSnapshot,
-};
+pub(crate) use state_snapshot_transfer::{DescribeStateSnapshot, FetchStateSnapshot};
 pub(crate) use state_store::{
     PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
 };

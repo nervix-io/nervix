@@ -5,20 +5,21 @@
 //! - **Depends on.** Typed runtime snapshots, interconnect transfer and node schedules.
 //! - **Must not know.** NSPL parsing, graph validation or external connector configuration.
 
+use error_stack::ResultExt as _;
+
 use super::*;
 
 pub(super) const DEFAULT_STATE_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
-
 pub(super) const DEFAULT_STATE_REPLICATION_POLL_INTERVAL: Duration = Duration::from_secs(1);
-
 const STATE_CHECKPOINT_ANNOUNCEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+mod error;
+pub(crate) use error::StateReplicationError;
 
 #[derive(Debug)]
 pub(crate) struct StateSyncAck {
     pub(crate) placement: RuntimeStatePlacement,
     pub(crate) lsm: u64,
 }
-
 mod handoff;
 mod preparation;
 mod published_branch_state;
@@ -92,7 +93,7 @@ impl Runtime {
             Ok(placement) => placement,
             Err(error) => {
                 warn!(
-                    error,
+                    error = %error,
                     "ignored invalid runtime state checkpoint notification"
                 );
                 return;
@@ -397,7 +398,7 @@ impl Runtime {
             return Ok(false);
         };
         let entries = decode_branch_lru_snapshot(&snapshot.payload)
-            .map_err(RuntimeStateOperationError::replication)?;
+            .map_err(|error| RuntimeStateOperationError::replication(error.to_string()))?;
         Ok(entries
             .iter()
             .any(|(branch, _)| branch.as_ref() == placement.branch_key.as_ref()))
@@ -409,7 +410,7 @@ impl Runtime {
         snapshot: &PersistedRuntimeStateEntry,
     ) -> RuntimeStateResult<()> {
         let branches = decode_branch_lru_snapshot(&snapshot.payload)
-            .map_err(RuntimeStateOperationError::replication)?
+            .map_err(|error| RuntimeStateOperationError::replication(error.to_string()))?
             .into_iter()
             .map(|(branch, _)| branch)
             .collect::<HashSet<_>>();
@@ -810,8 +811,9 @@ impl Runtime {
                     PersistedRuntimeStateEntry {
                         lsm: 0,
                         schema_fingerprint,
-                        payload: encode_branch_lru_snapshot(&[])
-                            .map_err(OwnershipHandoffError::checkpoint)?,
+                        payload: encode_branch_lru_snapshot(&[]).map_err(|error| {
+                            OwnershipHandoffError::checkpoint(error.to_string())
+                        })?,
                     },
                 ));
             }
@@ -907,9 +909,8 @@ impl Runtime {
                 empty_sealed_container(placement.schema_fingerprint)
                     .map_err(|error| OwnershipHandoffError::state(error.to_string()))?
             }
-            RuntimeStateKind::BranchLru => {
-                encode_branch_lru_snapshot(&[]).map_err(OwnershipHandoffError::checkpoint)?
-            }
+            RuntimeStateKind::BranchLru => encode_branch_lru_snapshot(&[])
+                .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?,
             RuntimeStateKind::Correlator
             | RuntimeStateKind::Deduplicator
             | RuntimeStateKind::WasmProcessor
@@ -983,7 +984,7 @@ impl Runtime {
             match recovered.snapshot {
                 Some(snapshot) => {
                     let entries = decode_branch_lru_snapshot(&snapshot.payload)
-                        .map_err(OwnershipHandoffError::state)?;
+                        .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
                     checkpoints.push((placement, snapshot));
                     Some(entries)
                 }
@@ -1355,7 +1356,7 @@ impl Runtime {
         for snapshot in snapshots {
             lsm = lsm.max(snapshot.lsm);
             for (branch, last_ingestion) in decode_branch_lru_snapshot(&snapshot.payload)
-                .map_err(OwnershipHandoffError::checkpoint)?
+                .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?
             {
                 match entries.entry(branch) {
                     std::collections::hash_map::Entry::Occupied(mut entry) => {
@@ -1388,7 +1389,7 @@ impl Runtime {
             })?,
             schema_fingerprint: placement.schema_fingerprint,
             payload: encode_branch_lru_snapshot(&entries)
-                .map_err(OwnershipHandoffError::checkpoint)?,
+                .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?,
         }))
     }
 
@@ -1490,7 +1491,7 @@ impl Runtime {
         };
         if let Some(state_kind) = state_kind {
             for (branch_key, _) in decode_branch_lru_snapshot(&snapshot.payload)
-                .map_err(OwnershipHandoffError::checkpoint)?
+                .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?
             {
                 expected.insert(self.state_placement(
                     domain,
@@ -1541,7 +1542,7 @@ impl Runtime {
         let mut placements = HashSet::default();
         for checkpoint in checkpoints {
             let placement = RuntimeStatePlacement::from_remote(checkpoint.placement)
-                .map_err(OwnershipHandoffError::state)?;
+                .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
             if placement.domain != *domain
                 || placement.kind != entity.kind
                 || placement.identifier != entity.identifier
@@ -1882,7 +1883,7 @@ impl Runtime {
             }
             RuntimeStateKind::BranchLru => {
                 decode_branch_lru_snapshot(&snapshot.payload)
-                    .map_err(OwnershipHandoffError::state)?;
+                    .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
             }
         }
         Ok(())
@@ -2360,7 +2361,7 @@ impl Runtime {
         &self,
         placement: &RuntimeStatePlacement,
         after_lsm: Option<u64>,
-    ) -> Result<Option<PersistedRuntimeStateEntry>, String> {
+    ) -> error_stack::Result<Option<PersistedRuntimeStateEntry>, StateReplicationError> {
         // A branch state leaves its map before it is encoded, so an encode never holds a map shard
         // that a branch appearing or leaving elsewhere has to write.
         let deduplicator = self
@@ -2369,14 +2370,19 @@ impl Runtime {
             .get(placement)
             .map(|state| state.clone());
         if let Some(state) = deduplicator {
-            return state
-                .snapshot_after(after_lsm)
-                .map_err(|error| error.to_string());
+            return state.snapshot_after(after_lsm).change_context(
+                StateReplicationError::Capture {
+                    placement: placement.clone(),
+                },
+            );
         }
         if let Some(state) = self.inner.replicated_kafka_offset_states.get(placement) {
             let snapshot = ReplicatedKafkaOffsetState::read(state.value())
                 .latest_snapshot()
-                .map_err(|error| error.to_string())?;
+                .map_err(Report::new)
+                .change_context(StateReplicationError::Capture {
+                    placement: placement.clone(),
+                })?;
             if snapshot.is_after(after_lsm) {
                 return Ok(Some(snapshot));
             }
@@ -2387,9 +2393,12 @@ impl Runtime {
             .get(placement)
             .map(|state| state.clone());
         if let Some(state) = window
-            && let Some(snapshot) = state
-                .snapshot_after(after_lsm)
-                .map_err(|error| error.to_string())?
+            && let Some(snapshot) =
+                state
+                    .snapshot_after(after_lsm)
+                    .change_context(StateReplicationError::Capture {
+                        placement: placement.clone(),
+                    })?
         {
             return Ok(Some(snapshot));
         }
@@ -2410,7 +2419,10 @@ impl Runtime {
         {
             let snapshot = state
                 .latest_snapshot(&self.inner.metrics)
-                .map_err(|error| error.to_string())?;
+                .map_err(Report::new)
+                .change_context(StateReplicationError::Capture {
+                    placement: placement.clone(),
+                })?;
             if snapshot.is_after(after_lsm) {
                 return Ok(Some(snapshot));
             }
@@ -2423,7 +2435,10 @@ impl Runtime {
         if let Some(store) = self.inner.state_store.as_ref()
             && let Some(snapshot) = store
                 .latest_snapshot(placement)
-                .map_err(|error| error.to_string())?
+                .map_err(Report::new)
+                .change_context(StateReplicationError::Capture {
+                    placement: placement.clone(),
+                })?
             && snapshot.is_after(after_lsm)
         {
             return Ok(Some(snapshot));
@@ -2497,9 +2512,12 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         after_lsm: Option<u64>,
         response_timeout: Duration,
-    ) -> Result<Option<PersistedRuntimeStateEntry>, String> {
+    ) -> error_stack::Result<Option<PersistedRuntimeStateEntry>, StateReplicationError> {
         let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
-            return Err("remote dispatcher unavailable".to_string());
+            return Err(Report::new(StateReplicationError::DispatcherUnavailable {
+                target: target_node_id.clone(),
+                placement: placement.clone(),
+            }));
         };
         let response = dispatcher
             .request_with_timeout(
@@ -2510,8 +2528,21 @@ impl Runtime {
                 },
                 response_timeout,
             )
-            .await?;
-        let snapshot = response.result.map_err(|failure| failure.to_string())?;
+            .await
+            .map_err(|reason| {
+                Report::new(StateReplicationError::Request {
+                    target: target_node_id.clone(),
+                    placement: placement.clone(),
+                })
+                .attach_printable(reason)
+            })?;
+        let snapshot = response.result.map_err(|failure| {
+            Report::new(StateReplicationError::RemoteFailure {
+                target: target_node_id.clone(),
+                placement: placement.clone(),
+                failure,
+            })
+        })?;
         Ok(snapshot.map(|snapshot| PersistedRuntimeStateEntry {
             lsm: snapshot.lsm,
             schema_fingerprint: snapshot.schema_fingerprint,
@@ -2523,7 +2554,7 @@ impl Runtime {
         &self,
         state: &KafkaOffsetStateRead,
         lsm: u64,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), StateReplicationError> {
         if state.required_replica_acks() == 0 {
             return Ok(());
         }
@@ -2535,11 +2566,11 @@ impl Runtime {
             }
             let now = Instant::now();
             if now >= deadline {
-                return Err(format!(
-                    "timed out waiting for replica quorum for '{}' at lsm {}",
-                    state.placement().identifier.as_str(),
-                    lsm
-                ));
+                return Err(Report::new(StateReplicationError::ReplicaQuorum {
+                    placement: state.placement().clone(),
+                    lsm,
+                    required_acks: state.required_replica_acks(),
+                }));
             }
             tokio::select! {
                 _ = state.wait_for_replication_progress() => {}
@@ -2552,7 +2583,7 @@ impl Runtime {
         &self,
         state: &ReplicatedWasmProcessorState,
         lsm: u64,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), StateReplicationError> {
         if state.required_replica_acks == 0 {
             return Ok(());
         }
@@ -2564,13 +2595,11 @@ impl Runtime {
             }
             let now = Instant::now();
             if now >= deadline {
-                return Err(format!(
-                    "timed out waiting for replica quorum for wasm processor '{}' branch '{}' at \
-                     lsm {}",
-                    state.placement.identifier.as_str(),
-                    state.placement.concrete_branch_key(),
-                    lsm
-                ));
+                return Err(Report::new(StateReplicationError::ReplicaQuorum {
+                    placement: state.placement.clone(),
+                    lsm,
+                    required_acks: state.required_replica_acks,
+                }));
             }
             tokio::select! {
                 _ = state.replication_notify.notified() => {}
@@ -2584,12 +2613,16 @@ impl Runtime {
         state: &KafkaOffsetStatePersistence,
         lsm: u64,
         payload: &[u8],
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), StateReplicationError> {
         let offsets = state.read();
         if let Some(store) = &self.inner.state_store {
             store
                 .persist_latest_snapshot(offsets.placement(), lsm, payload)
-                .map_err(|error| error.to_string())?;
+                .map_err(Report::new)
+                .change_context(StateReplicationError::Persist {
+                    placement: offsets.placement().clone(),
+                    lsm,
+                })?;
             state.record_persisted(lsm);
             self.notify_runtime_state_replicas(offsets.placement(), lsm);
         }
@@ -2608,10 +2641,15 @@ impl Runtime {
         topic: &str,
         partition: i32,
         next_offset: i64,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), StateReplicationError> {
         let lsm = state
             .apply_committed_offset(topic, partition, next_offset)
-            .map_err(|error| error.to_string())?;
+            .change_context_lazy(|| StateReplicationError::CommitKafkaOffset {
+                placement: state.placement().clone(),
+                topic: topic.to_string(),
+                partition,
+                next_offset,
+            })?;
         let offsets = state.read();
         if offsets.required_replica_acks() == 0 {
             return Ok(());
@@ -2625,10 +2663,13 @@ impl Runtime {
         &self,
         state: &KafkaOffsetStateOriginator,
         offsets: HashMap<KafkaTopicPartition, i64>,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), StateReplicationError> {
         let (lsm, payload) = state
             .replace_offsets(offsets)
-            .map_err(|error| error.to_string())?;
+            .map_err(Report::new)
+            .change_context_lazy(|| StateReplicationError::ReplaceKafkaOffsets {
+                placement: state.placement().clone(),
+            })?;
         self.persist_kafka_offset_snapshot(&state.persistence(), lsm, &payload)
             .await
     }
@@ -2638,11 +2679,15 @@ impl Runtime {
         &self,
         state: &ReplicatedWasmProcessorState,
         saved: &WasmGuestState,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), StateReplicationError> {
         if let Some(store) = &self.inner.state_store {
             store
                 .persist_latest_snapshot(&state.placement, saved.revision(), saved.bytes())
-                .map_err(|error| error.to_string())?;
+                .map_err(Report::new)
+                .change_context(StateReplicationError::Persist {
+                    placement: state.placement.clone(),
+                    lsm: saved.revision(),
+                })?;
             state.record_persisted(saved.revision());
             self.notify_runtime_state_replicas(&state.placement, saved.revision());
         }

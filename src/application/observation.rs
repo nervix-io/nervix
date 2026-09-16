@@ -1822,14 +1822,14 @@ impl SessionServiceImpl {
                         .await
                     {
                         Ok(entries) => entries,
-                        Err(message) => return command_error(message),
+                        Err(error) => return command_error(error.to_string()),
                     }
                 } else {
                     Vec::new()
                 }
             }
             Ok(entries) => entries,
-            Err(message) => return command_error(message),
+            Err(error) => return command_error(error.to_string()),
         };
 
         let message = if entries.is_empty() {
