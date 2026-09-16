@@ -741,6 +741,8 @@ pub(crate) struct TestClusterConfig {
     pub drain_timeout: Duration,
     pub shutdown_timeout: Duration,
     pub memory_pressure: Option<MemoryPressureConfig>,
+    pub raft_election_timeout_min: Duration,
+    pub raft_election_timeout_max: Duration,
     pub raft_retention: RaftRetentionPolicy,
     pub temp_dir: Option<PathBuf>,
     pub dependencies: DependencyEndpoints,
@@ -763,6 +765,8 @@ impl Default for TestClusterConfig {
             drain_timeout: DEFAULT_TEST_DRAIN_TIMEOUT,
             shutdown_timeout: DEFAULT_TEST_SHUTDOWN_TIMEOUT,
             memory_pressure: None,
+            raft_election_timeout_min: TEST_RAFT_ELECTION_TIMEOUT_MIN,
+            raft_election_timeout_max: TEST_RAFT_ELECTION_TIMEOUT_MAX,
             raft_retention: RaftRetentionPolicy::default(),
             temp_dir: None,
             dependencies: DependencyEndpoints::default(),
@@ -2575,8 +2579,8 @@ impl NodeHandle {
             .init_default_user_password(Some(TEST_AUTH_PASSWORD.to_string()))
             .node_unavailability_timeout(TEST_NODE_UNAVAILABILITY_TIMEOUT)
             .raft_heartbeat_interval(TEST_RAFT_HEARTBEAT_INTERVAL)
-            .raft_election_timeout_min(TEST_RAFT_ELECTION_TIMEOUT_MIN)
-            .raft_election_timeout_max(TEST_RAFT_ELECTION_TIMEOUT_MAX)
+            .raft_election_timeout_min(self.config.raft_election_timeout_min)
+            .raft_election_timeout_max(self.config.raft_election_timeout_max)
             .replica_count(self.config.replica_count);
         let application = application_builder
             .state_snapshot_interval(self.config.state_snapshot_interval)

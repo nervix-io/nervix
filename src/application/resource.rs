@@ -184,27 +184,9 @@ pub(in crate::application) fn resolve_resource_id(
     identifier: &ResourceName,
     requested_version: Option<u64>,
 ) -> Result<ResourceId, String> {
-    if let Some(version) = requested_version {
-        let id = ResourceId::new(domain.clone(), identifier.clone(), version);
-        if resources.version(&id).is_some() {
-            return Ok(id);
-        }
-        return Err(format!(
-            "resource '{}@{}' does not exist in domain '{}'",
-            identifier.as_str(),
-            version,
-            domain.as_str()
-        ));
-    }
-
-    let Some(version) = resources.latest_version(domain, identifier) else {
-        return Err(format!(
-            "resource '{}' has no installed versions in domain '{}'",
-            identifier.as_str(),
-            domain.as_str()
-        ));
-    };
-    Ok(ResourceId::new(domain.clone(), identifier.clone(), version))
+    resources
+        .resolve_completed_version(domain, identifier, requested_version)
+        .map_err(|error| error.to_string())
 }
 
 pub(in crate::application) fn resource_ref_suggestions(
@@ -600,7 +582,10 @@ impl SessionServiceImpl {
             }
         };
 
-        if let Err(error) = self.refresh_http_tls_server_config().await {
+        if let Err(error) = self
+            .refresh_http_tls_server_config(Some(&manifest.resource.id))
+            .await
+        {
             if let Err(publish_error) = self
                 .publish_resource_replica(failed_replica(
                     Some(manifest.resource.root_checksum),
@@ -753,6 +738,11 @@ impl SessionServiceImpl {
             }
             ResourceUploadState::Applying { .. } => {}
         }
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_resource_installation_if_armed(self.inner.consensus.local_node_id())
+            .await;
         let id = ResourceId::new(key.domain.clone(), key.identifier.clone(), upload.version);
         let manifest = match self
             .inner
@@ -807,10 +797,10 @@ impl SessionServiceImpl {
             .change_context(ResourceUploadError::Publish {
                 id: manifest.resource.id.clone(),
             })?;
-        self.inner
-            .runtime
-            .sync_resource_versions(&self.inner.consensus.current_resources().await);
-        if let Err(error) = self.refresh_http_tls_server_config().await {
+        if let Err(error) = self
+            .refresh_http_tls_server_config(Some(&manifest.resource.id))
+            .await
+        {
             let reason = format!("failed to refresh HTTP TLS config: {error}");
             let failed = ResourceNodeStatus {
                 key: ResourceReplicaKey::new(
@@ -988,8 +978,9 @@ mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
         ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CreateResource,
-        CreateStatement, DomainName, ResourceName, ResourceUploadIdentity, ResourceVersion,
-        ResourceVersionCounter, ResourceVersionStatus, Timestamp, UserName,
+        CreateStatement, DomainName, ResourceName, ResourceUpload, ResourceUploadIdentity,
+        ResourceUploads, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus, Timestamp,
+        UserName,
     };
     use nervix_nspl::client_statement::upload_resource_path_fragment;
     use sorted_vec::SortedVec;
@@ -1065,6 +1056,79 @@ mod tests {
             created.success,
             "resource catalog must be created: {created:?}"
         );
+    }
+
+    #[test]
+    fn resource_resolution_uses_only_completed_versions() {
+        let domain =
+            DomainName::parse("tenant").assured("the test domain is an identifier-shaped literal");
+        let identifier: ResourceName = named("model");
+        let source = ClusterNodeIdentity::new(
+            ClusterNodeName::parse("node-1")
+                .assured("the test node name is an identifier-shaped literal"),
+            ClusterNodeIncarnation::new(1),
+        );
+        let completed_key = resource_upload_key(&domain, identifier.as_str(), "completed");
+        let applying_key = resource_upload_key(&domain, identifier.as_str(), "applying");
+        let failed_key = resource_upload_key(&domain, identifier.as_str(), "failed");
+        let resources = ResourceVersionStatus {
+            next_version_by_resource: SortedVec::from_unsorted(vec![ResourceVersionCounter {
+                domain: domain.clone(),
+                identifier: identifier.clone(),
+                next_version: 4,
+            }]),
+            versions: SortedVec::from_unsorted(vec![
+                resource_version(&completed_key, 1, &source, "completed-root"),
+                resource_version(&applying_key, 2, &source, "applying-root"),
+                resource_version(&failed_key, 3, &source, "failed-root"),
+            ]),
+            replicas: SortedVec::new(),
+            uploads: ResourceUploads::try_from_uploads([
+                ResourceUpload {
+                    key: completed_key,
+                    version: 1,
+                    state: ResourceUploadState::Completed {
+                        root_checksum: "completed-root".to_string(),
+                        outcome_revision: 1,
+                    },
+                },
+                ResourceUpload {
+                    key: applying_key,
+                    version: 2,
+                    state: ResourceUploadState::Applying {
+                        root_checksum: "applying-root".to_string(),
+                    },
+                },
+                ResourceUpload {
+                    key: failed_key,
+                    version: 3,
+                    state: ResourceUploadState::Failed {
+                        root_checksum: "failed-root".to_string(),
+                        outcome_revision: 2,
+                        reason: "installation failed".to_string(),
+                    },
+                },
+            ])
+            .assured("the test uploads have unique identities and versions"),
+        };
+
+        let latest = resolve_resource_id(&resources, &domain, &identifier, None)
+            .assured("the completed version is eligible for an omitted-version binding");
+        assert_eq!(latest.version, 1);
+        let pinned = resolve_resource_id(&resources, &domain, &identifier, Some(1))
+            .assured("the completed version is eligible for an explicit binding");
+        assert_eq!(pinned.version, 1);
+
+        for version in [2, 3] {
+            let error = match resolve_resource_id(&resources, &domain, &identifier, Some(version)) {
+                Ok(_) => panic!("an incomplete version must be ineligible for an explicit binding"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error,
+                format!("resource 'model@{version}' is not a completed version in domain 'tenant'")
+            );
+        }
     }
 
     #[test]

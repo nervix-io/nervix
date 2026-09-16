@@ -1199,14 +1199,18 @@ impl SessionServiceImpl {
             .next_version_by_resource
             .iter()
             .filter(|counter| Some(&counter.domain) == active_domain)
-            .map(|counter| DomainEntitySnapshot {
-                kind: "resource".to_string(),
-                identifier: counter.identifier.as_str().to_string(),
-                detail: if counter.next_version > 1 {
-                    format!("v{}", counter.next_version - 1)
-                } else {
-                    "catalog".to_string()
-                },
+            .map(|counter| {
+                let latest =
+                    resources.resolve_completed_version(&counter.domain, &counter.identifier, None);
+                let detail = match latest {
+                    Ok(id) => format!("v{}", id.version),
+                    Err(_) => "catalog".to_string(),
+                };
+                DomainEntitySnapshot {
+                    kind: "resource".to_string(),
+                    identifier: counter.identifier.as_str().to_string(),
+                    detail,
+                }
             })
             .collect::<Vec<_>>();
         let active_graphs = self

@@ -85,7 +85,8 @@ pub use remote::{
 pub use resource::{
     ResourceId, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ResourceUpload,
     ResourceUploadIdentity, ResourceUploadIdentityError, ResourceUploadKey, ResourceUploadState,
-    ResourceVersion, ResourceVersionCounter, ResourceVersionKey, ResourceVersionStatus,
+    ResourceUploads, ResourceUploadsError, ResourceVersion, ResourceVersionCounter,
+    ResourceVersionKey, ResourceVersionResolutionError, ResourceVersionStatus,
 };
 pub use schema::{
     AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation,

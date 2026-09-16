@@ -81,10 +81,10 @@ use nervix_models::{
     OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
     PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
     RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
-    RemoteRuntimeField, ResourceId, ResourceName, ResourceVersionStatus, RetryPolicy,
-    RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes, SignalingProtocolName,
-    SignalingWireFormat, SqsFifoGroup, SqsIngestMode, StructuredMessageError, SubscriptionName,
-    Timestamp,
+    RemoteRuntimeField, ResourceId, ResourceName, ResourceVersionResolutionError,
+    ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledModel, ScheduledNode,
+    ScheduledNodes, SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
+    StructuredMessageError, SubscriptionName, Timestamp,
 };
 #[cfg(test)]
 use nervix_models::{CreateClientHttp, CreateClientPrometheus, CreateClientWebsockets};
@@ -289,8 +289,8 @@ use domain_clock::{
 #[cfg(test)]
 use domain_execution::DomainRouting;
 use domain_execution::{
-    DomainExecution, DomainResourceKey, DomainRoutingError, DomainRoutingSnapshot,
-    ObservedDomainTick, RuntimeDomainState,
+    DomainExecution, DomainRoutingError, DomainRoutingSnapshot, ObservedDomainTick,
+    RuntimeDomainState,
 };
 pub(crate) use domain_execution::{DomainRoutingCache, SharedDomainRouting};
 use domain_rebuild::{branch_relays_from_branched_specs, relay_branching_schema_for_runtime};

@@ -1,3 +1,6 @@
+use std::collections::{BTreeMap, BTreeSet};
+
+use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use sorted_vec::SortedVec;
@@ -228,6 +231,144 @@ pub struct ResourceUpload {
     pub state: ResourceUploadState,
 }
 
+impl ResourceUpload {
+    pub fn resource_id(&self) -> ResourceId {
+        ResourceId::new(
+            self.key.domain.clone(),
+            self.key.identifier.clone(),
+            self.version,
+        )
+    }
+}
+
+/// Upload outcomes indexed by both administrative identity and assigned resource version.
+///
+/// The values are serialized once in identity order. The version and completed-version indexes are
+/// rebuilt when the collection is decoded, so the indexes cannot disagree with an upload's state.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ResourceUploads {
+    by_key: BTreeMap<ResourceUploadKey, ResourceUpload>,
+    by_version: BTreeMap<ResourceId, ResourceUploadKey>,
+    completed_versions: BTreeSet<ResourceId>,
+}
+
+impl ResourceUploads {
+    pub fn try_from_uploads(
+        uploads: impl IntoIterator<Item = ResourceUpload>,
+    ) -> Result<Self, Report<ResourceUploadsError>> {
+        let mut by_key = BTreeMap::new();
+        let mut by_version = BTreeMap::new();
+        let mut completed_versions = BTreeSet::new();
+        for upload in uploads {
+            let key = upload.key.clone();
+            if by_key.contains_key(&key) {
+                return Err(Report::new(ResourceUploadsError::DuplicateKey(key)));
+            }
+            let id = upload.resource_id();
+            if by_version.contains_key(&id) {
+                return Err(Report::new(ResourceUploadsError::DuplicateVersion(id)));
+            }
+            if matches!(upload.state, ResourceUploadState::Completed { .. }) {
+                completed_versions.insert(id.clone());
+            }
+            by_version.insert(id, key.clone());
+            by_key.insert(key, upload);
+        }
+        Ok(Self {
+            by_key,
+            by_version,
+            completed_versions,
+        })
+    }
+
+    pub fn get(&self, key: &ResourceUploadKey) -> Option<&ResourceUpload> {
+        self.by_key.get(key)
+    }
+
+    pub fn get_version(&self, id: &ResourceId) -> Option<&ResourceUpload> {
+        let key = self.by_version.get(id)?;
+        self.by_key.get(key)
+    }
+
+    pub fn iter(
+        &self,
+    ) -> std::collections::btree_map::Values<'_, ResourceUploadKey, ResourceUpload> {
+        self.by_key.values()
+    }
+
+    fn latest_completed_version(
+        &self,
+        domain: &DomainName,
+        identifier: &ResourceName,
+    ) -> Option<&ResourceId> {
+        let first = ResourceId::new(domain.clone(), identifier.clone(), 0);
+        let last = ResourceId::new(domain.clone(), identifier.clone(), u64::MAX);
+        self.completed_versions.range(first..=last).next_back()
+    }
+}
+
+impl Serialize for ResourceUploads {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_seq(self.by_key.values())
+    }
+}
+
+impl<'de> Deserialize<'de> for ResourceUploads {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let uploads = Vec::<ResourceUpload>::deserialize(deserializer)?;
+        match Self::try_from_uploads(uploads) {
+            Ok(uploads) => Ok(uploads),
+            Err(error) => Err(serde::de::Error::custom(error)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResourceUploadsError {
+    #[error("resource upload identity '{}' appears more than once", .0.identity)]
+    DuplicateKey(ResourceUploadKey),
+    #[error(
+        "resource '{}@{}' in domain '{}' is assigned to more than one upload",
+        .0.identifier.as_str(),
+        .0.version,
+        .0.domain.as_str()
+    )]
+    DuplicateVersion(ResourceId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResourceVersionResolutionError {
+    #[error(
+        "resource '{}@{}' is not a completed version in domain '{}'",
+        .0.identifier.as_str(),
+        .0.version,
+        .0.domain.as_str()
+    )]
+    NotCompleted(ResourceId),
+    #[error(
+        "resource '{}@{}' does not exist in domain '{}'",
+        .0.identifier.as_str(),
+        .0.version,
+        .0.domain.as_str()
+    )]
+    DoesNotExist(ResourceId),
+    #[error(
+        "resource '{}' has no completed versions in domain '{}'",
+        identifier.as_str(),
+        domain.as_str()
+    )]
+    NoCompletedVersions {
+        domain: DomainName,
+        identifier: ResourceName,
+    },
+}
+
 #[derive(
     Debug,
     Clone,
@@ -365,7 +506,7 @@ pub struct ResourceVersionStatus {
     pub next_version_by_resource: SortedVec<ResourceVersionCounter>,
     pub versions: SortedVec<ResourceVersion>,
     pub replicas: SortedVec<ResourceNodeStatus>,
-    pub uploads: SortedVec<ResourceUpload>,
+    pub uploads: ResourceUploads,
 }
 
 impl ResourceVersionStatus {
@@ -378,11 +519,7 @@ impl ResourceVersionStatus {
     }
 
     pub fn upload(&self, key: &ResourceUploadKey) -> Option<&ResourceUpload> {
-        let index = self
-            .uploads
-            .binary_search_by(|upload| upload.key.cmp(key))
-            .ok()?;
-        self.uploads.get(index)
+        self.uploads.get(key)
     }
 
     /// Locates a resource's catalog slot. `Ok` holds the entry's position and `Err` holds the
@@ -411,12 +548,38 @@ impl ResourceVersionStatus {
             .map(|counter| counter.next_version)
     }
 
-    /// Returns the highest installed version of the named resource in `domain`, which is `None`
-    /// when the resource is declared but has no installed version yet.
-    pub fn latest_version(&self, domain: &DomainName, identifier: &ResourceName) -> Option<u64> {
-        let next = self.next_version(domain, identifier)?;
-        let latest = next.checked_sub(1)?;
-        if latest > 0 { Some(latest) } else { None }
+    /// Resolves an explicit version, or the highest completed version when `requested_version` is
+    /// absent. Upload outcomes are the sole source of binding eligibility and latest selection.
+    pub fn resolve_completed_version(
+        &self,
+        domain: &DomainName,
+        identifier: &ResourceName,
+        requested_version: Option<u64>,
+    ) -> Result<ResourceId, Report<ResourceVersionResolutionError>> {
+        let id = match requested_version {
+            Some(version) => ResourceId::new(domain.clone(), identifier.clone(), version),
+            None => self
+                .uploads
+                .latest_completed_version(domain, identifier)
+                .cloned()
+                .ok_or_else(|| {
+                    Report::new(ResourceVersionResolutionError::NoCompletedVersions {
+                        domain: domain.clone(),
+                        identifier: identifier.clone(),
+                    })
+                })?,
+        };
+        let Some(upload) = self.uploads.get_version(&id) else {
+            return Err(Report::new(ResourceVersionResolutionError::DoesNotExist(
+                id,
+            )));
+        };
+        if matches!(upload.state, ResourceUploadState::Completed { .. }) {
+            return Ok(id);
+        }
+        Err(Report::new(ResourceVersionResolutionError::NotCompleted(
+            id,
+        )))
     }
 
     pub fn is_declared(&self, domain: &DomainName, identifier: &ResourceName) -> bool {
