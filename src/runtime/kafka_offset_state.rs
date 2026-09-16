@@ -303,6 +303,10 @@ impl KafkaOffsetStateRead {
 }
 
 impl KafkaOffsetStateOriginator {
+    pub(super) fn placement(&self) -> &RuntimeStatePlacement {
+        self.read.placement()
+    }
+
     pub(super) fn read(&self) -> &KafkaOffsetStateRead {
         &self.read
     }

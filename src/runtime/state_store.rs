@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeSet,
+    fmt,
     str::FromStr,
     sync::{
         Arc as StdArc,
@@ -30,6 +31,38 @@ pub(crate) struct RuntimeStatePlacement {
     pub(crate) identifier: ModelName,
     pub(in crate::runtime) schema_fingerprint: [u8; 32],
     pub(in crate::runtime) branch_key: Option<BranchKey>,
+}
+
+impl fmt::Display for RuntimeStatePlacement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let branch_scope = if self.branch_key.is_some() {
+            "branch-local"
+        } else {
+            "unbranched"
+        };
+        write!(
+            formatter,
+            "{branch_scope} {} state for {} '{}' in domain '{}'",
+            self.state.as_str(),
+            self.kind.as_str(),
+            self.identifier.as_str(),
+            self.domain.as_str()
+        )
+    }
+}
+
+#[derive(Debug, Error)]
+#[error(
+    "runtime state placement for {state} state of {kind} '{identifier}' in domain '{domain}' \
+     carries an invalid branch key",
+    state = .state.as_str(),
+    kind = .kind.as_str()
+)]
+pub(crate) struct RuntimeStatePlacementError {
+    pub(crate) domain: DomainName,
+    pub(crate) state: RuntimeStateKind,
+    pub(crate) kind: ModelKind,
+    pub(crate) identifier: ModelName,
 }
 
 /// Which cluster nodes currently own and replicate one runtime state. Ownership moves while the
@@ -673,22 +706,24 @@ impl RuntimeStatePlacement {
 
     pub(crate) fn from_remote(
         placement: nervix_interconnect::StatePlacementEnvelope,
-    ) -> Result<Self, String> {
+    ) -> error_stack::Result<Self, RuntimeStatePlacementError> {
+        let branch_key = BranchKey::from_remote_key(placement.branch_key).map_err(|reason| {
+            Report::new(RuntimeStatePlacementError {
+                domain: placement.domain.clone(),
+                state: placement.state,
+                kind: placement.kind,
+                identifier: placement.identifier.clone(),
+            })
+            .attach_printable(reason)
+        })?;
         Ok(Self {
             domain: placement.domain,
             state: placement.state,
             kind: placement.kind,
             identifier: placement.identifier,
             schema_fingerprint: placement.schema_fingerprint,
-            branch_key: BranchKey::from_remote_key(placement.branch_key)?,
+            branch_key,
         })
-    }
-
-    pub(in crate::runtime) fn concrete_branch_key(&self) -> &str {
-        self.branch_key
-            .as_ref()
-            .map(BranchKey::as_str)
-            .verified("concrete state is only built for a branch that has a key")
     }
 }
 
@@ -862,7 +897,7 @@ impl RuntimeStateStore {
             .map(|checkpoint| {
                 RuntimeStatePlacement::from_remote(checkpoint.placement)
                     .map(|placement| (placement, checkpoint.snapshot))
-                    .map_err(RuntimePersistenceError::DecodeState)
+                    .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(PersistedForcedRecoveryPreparation {
