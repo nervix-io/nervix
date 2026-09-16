@@ -733,6 +733,32 @@ impl SessionServiceImpl {
             let is_noop = planned.is_noop();
             let mut cluster_entity_gate = None;
             let mut ownership_handoff = None;
+            #[cfg(feature = "testing")]
+            if !is_noop
+                && self
+                    .inner
+                    .runtime
+                    .take_armed_schedule_publication_fault(&domain)
+            {
+                let error = format!(
+                    "injected schedule publication fault for domain '{}'",
+                    domain.as_str()
+                );
+                return CommandResult {
+                    success: false,
+                    message: format!(
+                        "failed to publish schedule for domain '{}'",
+                        domain.as_str()
+                    ),
+                    diagnostics: vec![Diagnostic {
+                        message: error,
+                        span_start: 0,
+                        span_end: u32::try_from(query.len()).unwrap_or(0),
+                    }],
+                    kind: i32::from(CommandResultKind::Error),
+                    ..Default::default()
+                };
+            }
             let ScheduleTransition {
                 expected_schedule,
                 mut prepared_schedule,
@@ -748,31 +774,6 @@ impl SessionServiceImpl {
                     }
                 }
             } else if !is_noop {
-                #[cfg(feature = "testing")]
-                if self
-                    .inner
-                    .runtime
-                    .take_armed_schedule_publication_fault(&domain)
-                {
-                    let error = format!(
-                        "injected schedule publication fault for domain '{}'",
-                        domain.as_str()
-                    );
-                    return CommandResult {
-                        success: false,
-                        message: format!(
-                            "failed to publish schedule for domain '{}'",
-                            domain.as_str()
-                        ),
-                        diagnostics: vec![Diagnostic {
-                            message: error,
-                            span_start: 0,
-                            span_end: u32::try_from(query.len()).unwrap_or(0),
-                        }],
-                        kind: i32::from(CommandResultKind::Error),
-                        ..Default::default()
-                    };
-                }
                 let expected_schedule = Box::pin(self.inner.consensus.current_schedule())
                     .await
                     .domain(&domain)
