@@ -17,10 +17,10 @@
 //! instead.
 
 use std::{
-    fs::File,
+    fs::{File, OpenOptions},
     io,
     os::unix::process::ExitStatusExt as _,
-    path::Path,
+    path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     time::Duration,
 };
@@ -42,9 +42,9 @@ use tokio::{
 use tokio_util::task::AbortOnDropHandle;
 
 use super::cluster::{
-    InterconnectTestCa, TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestCertificateValidity, next_port,
-    publish_http_uri_with_headers, release_test_ports, run_command_via_client,
-    server_accepts_commands, test_basic_authorization,
+    InterconnectTestCa, TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestCertificateValidity,
+    TestSession, next_port, open_raw_session, publish_http_uri_with_headers, release_test_ports,
+    run_command_via_client, server_accepts_commands, test_basic_authorization,
 };
 
 /// The identity the process runs as and its certificate names. Each process forms its own
@@ -70,20 +70,23 @@ const GRPC_MESSAGE_PREFIX_BYTES: usize = 5;
 const UNCOMPRESSED_GRPC_MESSAGE: u8 = 0;
 
 /// How a scenario executes the server binary.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum ServerProcessLaunch {
     /// Execute the binary directly, the way the container image's exec-form command does.
     Direct,
+    /// Execute a separately built server binary, such as the release subject of a benchmark.
+    Executable(PathBuf),
     /// Lower the soft and hard open-file limits before executing the binary. A shell applies the
     /// limit and then replaces itself with the server, so the server keeps the shell's process.
     OpenFileLimit(u32),
 }
 
 impl ServerProcessLaunch {
-    fn command(self) -> Command {
-        let executable = Path::new(env!("CARGO_BIN_EXE_nervix-server"));
+    fn command(&self) -> Command {
+        let default_executable = Path::new(env!("CARGO_BIN_EXE_nervix-server"));
         match self {
-            Self::Direct => Command::new(executable),
+            Self::Direct => Command::new(default_executable),
+            Self::Executable(executable) => Command::new(executable),
             Self::OpenFileLimit(limit) => {
                 let mut command = Command::new("bash");
                 command
@@ -93,7 +96,7 @@ impl ServerProcessLaunch {
                     .arg(r#"ulimit -Sn "$1" && ulimit -Hn "$1" && shift && exec "$@""#)
                     .arg("bash")
                     .arg(limit.to_string())
-                    .arg(executable);
+                    .arg(default_executable);
                 command
             }
         }
@@ -188,6 +191,8 @@ pub(crate) struct ServerProcess {
     exit_status: Option<ExitStatus>,
     ports: ServerProcessPorts,
     root: TempDir,
+    launch: ServerProcessLaunch,
+    options: Vec<ServerProcessOption>,
 }
 
 impl ServerProcess {
@@ -199,77 +204,23 @@ impl ServerProcess {
             .prefix("nervix-server-process-")
             .tempdir()?;
         let certificate_authority = InterconnectTestCa::new(&root)?;
-        let (certificate, private_key) = certificate_authority.issue_node_with_identity(
+        certificate_authority.issue_node_with_identity(
             CLUSTER_ID,
             NODE_ID,
             TestCertificateValidity::Current,
             root.path(),
         )?;
-        let temp_dir = root.path().join("temp");
-        std::fs::create_dir_all(&temp_dir)?;
+        std::fs::create_dir_all(root.path().join("temp"))?;
         let ports = ServerProcessPorts::allocate()?;
-        let log = File::create(root.path().join("server.log"))?;
-        let error_log = log.try_clone()?;
-
-        let mut command = launch.command();
-        command
-            .arg("--addr")
-            .arg(loopback(ports.grpc))
-            .arg("--grpc-advertise-addr")
-            .arg(loopback(ports.grpc))
-            .arg("--http-listen-addr")
-            .arg(loopback(ports.http))
-            .arg("--https-listen-addr")
-            .arg(loopback(ports.https))
-            .arg("--observability-listen-addr")
-            .arg(loopback(ports.observability))
-            .arg("--web-console-listen-addr")
-            .arg(loopback(ports.web_console))
-            .arg("--cluster-id")
-            .arg(CLUSTER_ID)
-            .arg("--node-id")
-            .arg(NODE_ID)
-            .arg("--interconnect-listen-addr")
-            .arg(loopback(ports.interconnect))
-            .arg("--interconnect-advertise-addr")
-            .arg(loopback(ports.interconnect))
-            .arg("--interconnect-tls-ca")
-            .arg(&certificate_authority.path)
-            .arg("--interconnect-tls-cert")
-            .arg(&certificate)
-            .arg("--interconnect-tls-key")
-            .arg(&private_key)
-            .arg("--allow-bootstrap")
-            .arg("--default-user")
-            .arg(TEST_AUTH_USERNAME)
-            .arg("--init-default-user-password")
-            .arg(TEST_AUTH_PASSWORD)
-            .arg("--db-path")
-            .arg(root.path().join("db"))
-            .arg("--temp-dir")
-            .arg(&temp_dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log))
-            .stderr(Stdio::from(error_log))
-            .kill_on_drop(true);
-        for option in options {
-            option.apply_to(&mut command);
-        }
-        // Any `NERVIX_*` variable the scenario runner carries would silently reconfigure the
-        // server, and `RUST_LOG` would replace the log filter the server ships with.
-        for (name, _) in std::env::vars_os() {
-            if name.to_string_lossy().starts_with("NERVIX_") {
-                command.env_remove(&name);
-            }
-        }
-        command.env_remove("RUST_LOG");
-        let child = command.spawn()?;
+        let child = spawn_server_process(&launch, options, root.path(), &ports, false)?;
 
         Ok(Self {
             child,
             exit_status: None,
             ports,
             root,
+            launch,
+            options: options.to_vec(),
         })
     }
 
@@ -308,6 +259,10 @@ impl ServerProcess {
     /// Runs NSPL through an authenticated session whose active domain is `domain`.
     pub(crate) async fn run_commands(&self, domain: &str, commands: &str) -> io::Result<String> {
         run_command_via_client(&self.grpc_uri(), domain, commands).await
+    }
+
+    pub(crate) async fn open_session(&self, domain: &str) -> io::Result<TestSession> {
+        open_raw_session(&self.grpc_uri(), domain).await
     }
 
     /// Posts `payload` to an HTTP endpoint the process serves for virtual host `host`, returning
@@ -349,6 +304,24 @@ impl ServerProcess {
         };
         self.exit_status = Some(status);
         Ok(status)
+    }
+
+    /// Starts the same executable again with the same ports, credentials and persisted database.
+    pub(crate) async fn restart(&mut self) -> io::Result<()> {
+        if self.observe_exit()?.is_none() {
+            return Err(io::Error::other(
+                "cannot restart nervix-server while its previous process is still running",
+            ));
+        }
+        self.child = spawn_server_process(
+            &self.launch,
+            &self.options,
+            self.root.path(),
+            &self.ports,
+            true,
+        )?;
+        self.exit_status = None;
+        self.wait_until_ready().await
     }
 
     pub(crate) fn has_exited(&self) -> bool {
@@ -525,9 +498,95 @@ impl ServerProcess {
         }
     }
 
-    fn grpc_uri(&self) -> String {
+    pub(crate) fn grpc_uri(&self) -> String {
         format!("http://{}", loopback(self.ports.grpc))
     }
+
+    pub(crate) fn observability_uri(&self, path: &str) -> String {
+        format!("http://{}{path}", loopback(self.ports.observability))
+    }
+
+    pub(crate) fn web_console_websocket_uri(&self) -> String {
+        format!("ws://{}/console/ws", loopback(self.ports.web_console))
+    }
+
+    pub(crate) fn process_id(&self) -> io::Result<u32> {
+        self.child
+            .id()
+            .ok_or_else(|| io::Error::other("nervix-server process has already been reaped"))
+    }
+}
+
+fn spawn_server_process(
+    launch: &ServerProcessLaunch,
+    options: &[ServerProcessOption],
+    root: &Path,
+    ports: &ServerProcessPorts,
+    append_log: bool,
+) -> io::Result<Child> {
+    let log_path = root.join("server.log");
+    let log = if append_log {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)?
+    } else {
+        File::create(log_path)?
+    };
+    let error_log = log.try_clone()?;
+    let mut command = launch.command();
+    command
+        .arg("--addr")
+        .arg(loopback(ports.grpc))
+        .arg("--grpc-advertise-addr")
+        .arg(loopback(ports.grpc))
+        .arg("--http-listen-addr")
+        .arg(loopback(ports.http))
+        .arg("--https-listen-addr")
+        .arg(loopback(ports.https))
+        .arg("--observability-listen-addr")
+        .arg(loopback(ports.observability))
+        .arg("--web-console-listen-addr")
+        .arg(loopback(ports.web_console))
+        .arg("--cluster-id")
+        .arg(CLUSTER_ID)
+        .arg("--node-id")
+        .arg(NODE_ID)
+        .arg("--interconnect-listen-addr")
+        .arg(loopback(ports.interconnect))
+        .arg("--interconnect-advertise-addr")
+        .arg(loopback(ports.interconnect))
+        .arg("--interconnect-tls-ca")
+        .arg(root.join("interconnect-ca.pem"))
+        .arg("--interconnect-tls-cert")
+        .arg(root.join("interconnect.pem"))
+        .arg("--interconnect-tls-key")
+        .arg(root.join("interconnect-key.pem"))
+        .arg("--allow-bootstrap")
+        .arg("--default-user")
+        .arg(TEST_AUTH_USERNAME)
+        .arg("--init-default-user-password")
+        .arg(TEST_AUTH_PASSWORD)
+        .arg("--db-path")
+        .arg(root.join("db"))
+        .arg("--temp-dir")
+        .arg(root.join("temp"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(error_log))
+        .kill_on_drop(true);
+    for option in options {
+        option.apply_to(&mut command);
+    }
+    // Any `NERVIX_*` variable the scenario runner carries would silently reconfigure the server,
+    // and `RUST_LOG` would replace the log filter the server ships with.
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("NERVIX_") {
+            command.env_remove(&name);
+        }
+    }
+    command.env_remove("RUST_LOG");
+    command.spawn()
 }
 
 /// An accepted upload stream kept open until it is dropped.
