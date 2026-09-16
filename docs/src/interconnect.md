@@ -226,9 +226,11 @@ Memory and CPU execution are isolated by class:
 
 The total interconnect memory budget is 256 MiB. Reservations cannot borrow from another class. The
 relay budget holds two worst-case operations, each consisting of a 32 MiB encoded body, a 32 MiB
-decoded batch, and 16 MiB of decode scratch space. Startup validates the relationships among
-operation limits and these budgets, including the paired work that must fit for independent
-operations to keep making progress.
+decoded batch, and 16 MiB of decode scratch space. The commands and replication budget holds the
+four decoded replication batches a follower keeps resident beside one batch being encoded, so a
+follower whose receive window is full can still produce the answer that releases it. Startup
+validates the relationships among operation limits and these budgets, including the paired work
+that must fit for independent operations to keep making progress.
 
 ## Exchange Forms
 
@@ -380,6 +382,13 @@ The ordered append stream can keep multiple batches in flight while preserving f
 consensus-level window bounds a follower to 16 outstanding batches and 16 MiB of unacknowledged log
 data. Heartbeats and elections remain on management capacity, so a full append window does not block
 leadership traffic.
+
+A follower bounds the same stream from its own side. It keeps at most four decoded batches resident
+at once, each charged to the commands and replication budget from the moment it is decoded until its
+Raft core answers it, which happens only once the batch has been appended durably. A follower that
+reaches the bound stops reading frames, so the leader's flow-control window closes and it stops
+sending rather than growing the follower's memory. Decoded batches belonging to a stream the leader
+has already torn down are released with that stream instead of staying queued behind it.
 
 The append stream opens under its five-second setup deadline. A follower answers a batch only after
 appending it durably, so the leader does not time out individual answers. While a batch is
