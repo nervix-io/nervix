@@ -61,5 +61,6 @@
   - [Command Completion](./command-completion.md)
   - [Data Plane](./data-plane.md)
   - [Relay](./relay.md)
+  - [Shutdown And Recovery](./shutdown.md)
 - [Developing Nervix](./developing-nervix.md)
 - [License](./license.md)

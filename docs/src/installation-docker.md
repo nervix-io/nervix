@@ -159,6 +159,8 @@ shutdown timeout, 50 seconds by default, which covers the 30-second default drai
 services that stop after it. The `--stop-timeout 60` above keeps Docker waiting longer than that,
 so a node that cannot finish shutting down exits with status `1` on its own rather than being
 killed; with Docker's default of ten seconds, a node could be killed partway through its drain.
+[Shutdown And Recovery](shutdown.md#deployment-grace-periods) explains what a node loses when its
+grace period ends first.
 Stop the nodes, then remove the containers and private network:
 
 ```bash

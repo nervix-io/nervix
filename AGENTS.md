@@ -107,6 +107,15 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   Its scope includes mappings and lifecycle generations, authority selection and fencing, local
   installation and reads, progress delivery, execution snapshots, admission, logical and physical
   deadline ownership, recovery, and distributed-time guarantees.
+- [Shutdown And Recovery](docs/src/shutdown.md) is the authoritative architecture reference for
+  stopping a node and recovering from a forced ending. Any change to shutdown phases, the shutdown
+  or drain deadline, termination signals, terminating placement eligibility, intake stop, graph
+  drain and force flush, terminal teardown, or startup recovery must keep that chapter current in
+  the same change. Its scope includes stop requests and phase outcomes, exit statuses, cordon
+  versus terminating exclusion, ownership handoff during drain, connector acknowledgement and
+  commit boundaries, durable versus volatile state, the former-owner startup fence, and
+  observability. It is the single canonical shutdown chapter: work that finishes with shutdown
+  documentation extends it rather than adding a competing page.
 
 ## System Layers and Migration
 

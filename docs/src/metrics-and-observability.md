@@ -305,7 +305,9 @@ after the move.
 
 Only moved runtime nodes cross that boundary. Internal `DESCRIBE` and edge metrics for unaffected
 nodes and concrete branches remain continuous during drain, graceful-shutdown drain, and placement
-consolidation. A timed-out precommit handoff leaves the schedule and metric authority unchanged.
+consolidation. There is no shutdown-specific metric family: a draining node is identified by its
+phase log records and by `terminating: true` in its status, as described in
+[Shutdown And Recovery](shutdown.md#observability). A timed-out precommit handoff leaves the schedule and metric authority unchanged.
 Unexpected owner loss continues through failover immediately and starts fresh relay metrics on the
 new owner.
 

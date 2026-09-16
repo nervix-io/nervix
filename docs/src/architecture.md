@@ -85,4 +85,15 @@ The [Cluster Interconnect](./interconnect.md) chapter defines peer identity, con
 wire contracts, resource isolation, exchange forms, relay delivery and reconciliation, consensus
 and bulk traffic, domain-clock progress, application health, lifecycle behavior, and observability.
 
+Stopping a node is its own ordered lifecycle. One owner advertises that the process incarnation is
+terminating, closes public admission, keeps the services admitted work depends on alive while the
+local graph drains, and only then tears down the node's tasks, connections, and storage. One
+physical deadline bounds all of it, and a repeated signal or an expired deadline ends the process
+the way a crash would.
+
+The [Shutdown And Recovery](./shutdown.md) chapter defines stop requests, phases and outcomes, the
+deadline and exit statuses, cordon versus terminating placement eligibility, intake stop, graph
+drain and force flush, ownership handoff during shutdown, connector acknowledgement and commit
+boundaries, terminal teardown, what survives each ending, and restart recovery.
+
 The rest of this section splits control-plane semantics from data-plane semantics because that distinction is fundamental to how Nervix behaves.
