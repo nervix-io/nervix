@@ -1,7 +1,7 @@
 use dashmap::mapref::entry::Entry as DashMapEntry;
 use nervix_models::{DomainName, NodeRef};
 
-use super::*;
+use super::{message_error::MessageErrorHandlingError, *};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct MessageErrorRouteKey {
@@ -466,7 +466,7 @@ impl Runtime {
         target: MessageErrorRouteTarget,
         flush_policy: RuntimeFlushPolicy,
         delivery: MessageErrorDelivery,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), MessageErrorHandlingError> {
         let failure_route = route.clone();
         let route_runtime = match self.inner.message_error_routes.entry(route.clone()) {
             DashMapEntry::Occupied(entry) => entry.get().clone(),
@@ -481,12 +481,9 @@ impl Runtime {
         await_message_error_ack_alive(&source_acks, route_runtime.sender.send(delivery))
             .await
             .map_err(|_| {
-                format!(
-                    "message-error route for {} '{}' to relay '{}' is stopped",
-                    failure_route.node.kind.as_str(),
-                    failure_route.node.identifier.as_str(),
-                    failure_route.error_relay.as_str()
-                )
+                error_stack::Report::new(MessageErrorHandlingError::DeliveryStopped {
+                    route: failure_route,
+                })
             })
     }
 
@@ -725,5 +722,60 @@ mod tests {
             .stop(Duration::from_secs(1))
             .await
             .expect("relay owner should stop");
+    }
+
+    #[tokio::test]
+    async fn enqueue_reports_when_the_error_route_has_stopped() {
+        let runtime = Runtime::default();
+        let domain = DomainName::try_from("test").expect("valid domain");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
+        let route = MessageErrorRouteKey {
+            domain,
+            node: NodeRef::new(ModelKind::Junction, named::<ModelName>("route_orders")),
+            source_route: None,
+            error_relay: named("route_errors"),
+        };
+        let target = MessageErrorRouteTarget {
+            registry: RelayRegistry::new(),
+            services: Arc::new(RelayBoundaryServices::new(
+                RelayBoundaryFanout::direct_with_capacity(
+                    NonZeroUsize::new(1).expect("non-zero test capacity"),
+                ),
+                0,
+                0,
+                Vec::new(),
+                None,
+            )),
+        };
+        let route_runtime = MessageErrorRouteRuntime::new(
+            runtime.clone(),
+            route.clone(),
+            target.clone(),
+            RuntimeFlushPolicy::Immediate,
+        );
+        route_runtime.shutdown().await;
+        runtime
+            .inner
+            .message_error_routes
+            .insert(route.clone(), route_runtime);
+        let (delivery, _) = test_delivery();
+
+        let error = runtime
+            .enqueue_message_error_delivery(
+                route.clone(),
+                target,
+                RuntimeFlushPolicy::Immediate,
+                delivery,
+            )
+            .await
+            .expect_err("a stopped error route must reject new delivery");
+
+        assert!(matches!(
+            error.current_context(),
+            MessageErrorHandlingError::DeliveryStopped { route: failed } if failed == &route
+        ));
     }
 }

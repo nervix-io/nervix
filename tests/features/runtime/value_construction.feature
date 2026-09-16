@@ -141,7 +141,7 @@ Feature: Route-local value construction
       | 1            | 0             |
       | 3            | 0             |
 
-  Scenario Outline: Error routes use standard scalar functions and captured construction state
+  Scenario Outline: Error routes expose typed error metadata and captured construction state
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -153,7 +153,8 @@ Feature: Route-local value construction
       CREATE SCHEMA calculation (
         id STRING,
         numerator I64,
-        denominator I64
+        denominator I64,
+        secret STRING SENSITIVE
       );
       CREATE SCHEMA calculation_result (
         id STRING,
@@ -161,16 +162,21 @@ Feature: Route-local value construction
       );
       CREATE SCHEMA calculation_error (
         input_id STRING,
+        error_reference STRING,
         error_code STRING,
+        error_message STRING,
         operation STRING,
         operation_index U32 OPTIONAL,
+        affected_fields <affected_fields_type>,
+        occurred_at DATETIME,
         message_digest STRING,
         attempted_result I64 OPTIONAL
       );
       CREATE WIRE JSON SCHEMA calculation_wire MODE STRICT (
         id string,
         numerator integer,
-        denominator integer
+        denominator integer,
+        secret string
       );
       CREATE CODEC calculation_codec
         FROM WIRE JSON SCHEMA calculation_wire
@@ -199,9 +205,13 @@ Feature: Route-local value construction
           FLUSH IMMEDIATE
           ON MESSAGE ERROR SEND TO calculation_errors
           SET input_id = input.id,
+              error_reference = error.reference,
               error_code = upper(error.code),
+              error_message = error.message,
               operation = error.operation,
               operation_index = error.operation_index,
+              affected_fields = error.fields,
+              occurred_at = error.occurred_at,
               message_digest = md5(error.message),
               attempted_result = partial_output.result;
       CREATE SUBSCRIPTION calculation_errors_subscription TO calculation_errors;
@@ -209,11 +219,15 @@ Feature: Route-local value construction
       """
     When http payload is posted to node "node-1" with host "error-construction-{{test_id}}.example.com" path "/calculations"
       """
-      {"id":"division-by-zero","numerator":10,"denominator":0}
+      {"id":"division-by-zero","numerator":10,"denominator":0,"secret":"sensitive-error-input"}
       """
     Then within "5s" the relay subscription receives a payload
       """
-      "attempted_result":10,"error_code":"EVALUATION","input_id":"division-by-zero"
+      "input_id":"division-by-zero"
+      """
+    And the last relay subscription payload contains
+      """
+      "attempted_result":10,"error_code":"EVALUATION"
       """
     And the last relay subscription payload contains
       """
@@ -223,8 +237,25 @@ Feature: Route-local value construction
       """
       "operation":"set","operation_index":2
       """
+    And the last relay subscription payload contains
+      """
+      "affected_fields":["input.denominator","output.result"]
+      """
+    And the last relay subscription payload contains
+      """
+      "error_reference":"
+      """
+    And the last relay subscription payload contains
+      """
+      "error_message":"junction 'calculate' FILTER-MAP side error division_by_zero
+      """
+    And the last relay subscription payload contains
+      """
+      "occurred_at":"
+      """
+    And the last relay subscription payload does not contain "sensitive-error-input"
 
     Examples:
-      | cluster_size | replica_count |
-      | 1            | 0             |
-      | 3            | 0             |
+      | cluster_size | replica_count | affected_fields_type |
+      | 1            | 0             | VEC<STRING>          |
+      | 3            | 0             | VEC<STRING>          |

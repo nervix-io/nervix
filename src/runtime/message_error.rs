@@ -1,5 +1,201 @@
 use super::*;
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum MessageErrorRecordConstructionError {
+    #[error("failed to compute message-error lookup columns: {reason}")]
+    LookupColumns { reason: String },
+    #[error("failed to project the message-error VM input: {reason}")]
+    InputProjection { reason: String },
+    #[error("message-error SET execution failed: {reason}")]
+    Execution { reason: String },
+    #[error("message-error SET produced {rows} rows for one error")]
+    RowCount { rows: usize },
+    #[error("message-error SET recorded {} at {span}", .code.as_str())]
+    SideError {
+        code: nervix_vm::ErrorCode,
+        span: VmSpan,
+    },
+    #[error("failed to project the message-error output: {reason}")]
+    OutputProjection { reason: String },
+    #[error("failed to materialize the message-error output row: {error}")]
+    OutputRow {
+        error: error_stack::Report<crate::runtime_schema::RuntimeSchemaError>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, strum::Display)]
+#[strum(serialize_all = "lowercase")]
+pub(super) enum MessageErrorInput {
+    Input,
+    Left,
+    Right,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum MessageErrorHandlingError {
+    #[error(
+        "unbranched DLQ relay '{}' cannot receive branched message error {reference}",
+        .relay.as_str()
+    )]
+    BranchedErrorForUnbranchedRelay {
+        relay: RelayName,
+        reference: uuid::Uuid,
+    },
+    #[error(
+        "branched DLQ relay '{}' cannot receive unbranched message error {reference}",
+        .relay.as_str()
+    )]
+    UnbranchedErrorForBranchedRelay {
+        relay: RelayName,
+        reference: uuid::Uuid,
+    },
+    #[error("partial output row {row} is outside batch with {rows} rows")]
+    PartialOutputRowOutOfBounds { row: usize, rows: usize },
+    #[error("failed to construct a partial-output Arrow batch: {source}")]
+    PartialOutputArrow {
+        #[source]
+        source: arrow_schema::ArrowError,
+    },
+    #[error("failed to construct a partial-output runtime batch: {error}")]
+    PartialOutputRecord {
+        error: error_stack::Report<crate::runtime_schema::RuntimeSchemaError>,
+    },
+    #[error("domain '{}' is not instantiated", .domain.as_str())]
+    DomainNotInstantiated { domain: DomainName },
+    #[error(
+        "DLQ relay '{}' schema is not instantiated in domain '{}'",
+        .relay.as_str(),
+        .domain.as_str()
+    )]
+    DlqSchemaNotInstantiated {
+        domain: DomainName,
+        relay: RelayName,
+    },
+    #[error(
+        "DLQ relay '{}' is not instantiated in domain '{}'",
+        .relay.as_str(),
+        .domain.as_str()
+    )]
+    DlqRelayNotInstantiated {
+        domain: DomainName,
+        relay: RelayName,
+    },
+    #[error(
+        "DLQ relay '{}' services are not instantiated in domain '{}'",
+        .relay.as_str(),
+        .domain.as_str()
+    )]
+    DlqServicesNotInstantiated {
+        domain: DomainName,
+        relay: RelayName,
+    },
+    #[error(
+        "runtime model for {} '{}' is unavailable",
+        .node.kind.as_str(),
+        .node.identifier.as_str()
+    )]
+    RuntimeModelUnavailable { node: NodeRef },
+    #[error(
+        "{} '{}' cannot own a message-error route",
+        .node.kind.as_str(),
+        .node.identifier.as_str()
+    )]
+    InvalidRouteOwner { node: NodeRef },
+    #[error(
+        "{} '{}' message-error output route is unavailable",
+        .node.kind.as_str(),
+        .node.identifier.as_str()
+    )]
+    OutputRouteUnavailable {
+        node: NodeRef,
+        source_route: Option<RelayName>,
+        error_relay: RelayName,
+    },
+    #[error("{source}")]
+    FlushPolicy {
+        node: NodeRef,
+        #[source]
+        source: RuntimeError,
+    },
+    #[error("runtime schema for relay '{}' is unavailable", .relay.as_str())]
+    RelaySchemaUnavailable { relay: RelayName },
+    #[error("runtime codec '{}' is unavailable", .codec.as_str())]
+    CodecUnavailable { codec: CodecName },
+    #[error(
+        "{} '{}' has no {input} relay",
+        .node.kind.as_str(),
+        .node.identifier.as_str()
+    )]
+    InputRelayUnavailable {
+        node: NodeRef,
+        input: MessageErrorInput,
+    },
+    #[error("{reason}")]
+    ProgramCompilation {
+        domain: DomainName,
+        node: NodeRef,
+        error_relay: RelayName,
+        reason: String,
+    },
+    #[error(
+        "failed to construct message-error record {reference} for {}: {source}",
+        .operation.as_ref()
+    )]
+    RecordConstruction {
+        reference: uuid::Uuid,
+        code: MessageErrorCode,
+        operation: MessageErrorOperation,
+        fields: SortedSet<FieldPath>,
+        #[source]
+        source: MessageErrorRecordConstructionError,
+    },
+    #[error(
+        "failed to build the message-error batch for {} '{}' to DLQ relay '{}': {reason}",
+        .node.kind.as_str(),
+        .node.identifier.as_str(),
+        .relay.as_str()
+    )]
+    BatchConstruction {
+        domain: DomainName,
+        node: NodeRef,
+        relay: RelayName,
+        reason: String,
+    },
+    #[error(
+        "DLQ relay '{}' rejected message error from {} '{}'",
+        .relay.as_str(),
+        .node.kind.as_str(),
+        .node.identifier.as_str()
+    )]
+    RelayRejected {
+        domain: DomainName,
+        node: NodeRef,
+        relay: RelayName,
+    },
+    #[error(
+        "message-error route for {} '{}' to relay '{}' is stopped",
+        .route.node.kind.as_str(),
+        .route.node.identifier.as_str(),
+        .route.error_relay.as_str()
+    )]
+    DeliveryStopped { route: MessageErrorRouteKey },
+}
+
+impl MessageErrorHandlingError {
+    fn record_construction(
+        error: &StructuredMessageError,
+        source: MessageErrorRecordConstructionError,
+    ) -> error_stack::Report<Self> {
+        error_stack::Report::new(Self::RecordConstruction {
+            reference: error.reference,
+            code: error.code,
+            operation: error.operation,
+            fields: error.fields.clone(),
+            source,
+        })
+    }
+}
+
 pub(super) struct MessageErrorContext<'a> {
     pub(super) domain: &'a DomainName,
     pub(super) node_kind: ModelKind,
@@ -127,16 +323,20 @@ pub(super) fn preserved_message_error_branch(
     incoming: &Option<BranchKey>,
     relay: &RelayName,
     reference: uuid::Uuid,
-) -> Result<Option<BranchKey>, String> {
+) -> error_stack::Result<Option<BranchKey>, MessageErrorHandlingError> {
     match (target_branching.is_empty(), incoming.as_ref()) {
         (true, None) | (false, Some(_)) => Ok(incoming.clone()),
-        (true, Some(_)) => Err(format!(
-            "unbranched DLQ relay '{}' cannot receive branched message error {}",
-            relay, reference
+        (true, Some(_)) => Err(error_stack::Report::new(
+            MessageErrorHandlingError::BranchedErrorForUnbranchedRelay {
+                relay: relay.clone(),
+                reference,
+            },
         )),
-        (false, None) => Err(format!(
-            "branched DLQ relay '{}' cannot receive unbranched message error {}",
-            relay, reference
+        (false, None) => Err(error_stack::Report::new(
+            MessageErrorHandlingError::UnbranchedErrorForBranchedRelay {
+                relay: relay.clone(),
+                reference,
+            },
         )),
     }
 }
@@ -157,7 +357,7 @@ pub(super) fn captured_partial_output(
         Ok(partial_output) => Some(partial_output),
         Err(error) => {
             debug!(
-                error,
+                error = %error,
                 row, "failed to capture the partial output view for a message error"
             );
             None
@@ -168,11 +368,13 @@ pub(super) fn captured_partial_output(
 pub(super) fn vm_partial_output_row_to_runtime_batch(
     batch: &VmTypedBatch,
     row: usize,
-) -> Result<RuntimeRecordBatch, String> {
+) -> error_stack::Result<RuntimeRecordBatch, MessageErrorHandlingError> {
     if row >= batch.row_count() {
-        return Err(format!(
-            "partial output row {row} is outside batch with {} rows",
-            batch.row_count()
+        return Err(error_stack::Report::new(
+            MessageErrorHandlingError::PartialOutputRowOutOfBounds {
+                row,
+                rows: batch.row_count(),
+            },
         ));
     }
     let mut fields_and_columns = Vec::new();
@@ -206,8 +408,12 @@ pub(super) fn vm_partial_output_row_to_runtime_batch(
     } else {
         RecordBatch::try_new(schema.clone(), columns)
     }
-    .map_err(|error| error.to_string())?;
-    RuntimeRecordBatch::from_record_batch(schema, record_batch).map_err(|error| error.to_string())
+    .map_err(|source| {
+        error_stack::Report::new(MessageErrorHandlingError::PartialOutputArrow { source })
+    })?;
+    RuntimeRecordBatch::from_record_batch(schema, record_batch).map_err(|error| {
+        error_stack::Report::new(MessageErrorHandlingError::PartialOutputRecord { error })
+    })
 }
 
 pub(super) fn invalid_output_fields(batch: &VmTypedBatch, row: usize) -> Vec<FieldPath> {
@@ -530,7 +736,7 @@ impl Runtime {
         context: MessageErrorContext<'_>,
         relay: &RelayName,
         assignments: &[Assignment],
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), MessageErrorHandlingError> {
         let MessageErrorContext {
             domain,
             node_kind,
@@ -543,6 +749,7 @@ impl Runtime {
             ingest_metadata,
             execution_now,
         } = context;
+        let owner = NodeRef::new(node_kind, node.clone());
         /// Everything the error route needs from the domain execution, resolved while the
         /// execution is borrowed so the delivery below runs without holding that borrow.
         struct MessageErrorRoutePlan {
@@ -561,35 +768,38 @@ impl Runtime {
             flush_policy,
         } = {
             let Some(execution) = self.inner.executions.get(domain) else {
-                return Err(format!("domain '{}' is not instantiated", domain.as_str()));
+                return Err(error_stack::Report::new(
+                    MessageErrorHandlingError::DomainNotInstantiated {
+                        domain: domain.clone(),
+                    },
+                ));
             };
             let schema = execution.relay_schemas.get(relay).cloned().ok_or_else(|| {
-                format!(
-                    "DLQ relay '{}' schema is not instantiated in domain '{}'",
-                    relay.as_str(),
-                    domain.as_str()
-                )
+                error_stack::Report::new(MessageErrorHandlingError::DlqSchemaNotInstantiated {
+                    domain: domain.clone(),
+                    relay: relay.clone(),
+                })
             })?;
             let registry = execution
                 .relay_registries
                 .get(relay)
                 .cloned()
                 .ok_or_else(|| {
-                    format!(
-                        "DLQ relay '{}' is not instantiated in domain '{}'",
-                        relay.as_str(),
-                        domain.as_str()
-                    )
+                    error_stack::Report::new(MessageErrorHandlingError::DlqRelayNotInstantiated {
+                        domain: domain.clone(),
+                        relay: relay.clone(),
+                    })
                 })?;
             let services = execution
                 .relay_services
                 .get(relay)
                 .cloned()
                 .ok_or_else(|| {
-                    format!(
-                        "DLQ relay '{}' services are not instantiated in domain '{}'",
-                        relay.as_str(),
-                        domain.as_str()
+                    error_stack::Report::new(
+                        MessageErrorHandlingError::DlqServicesNotInstantiated {
+                            domain: domain.clone(),
+                            relay: relay.clone(),
+                        },
                     )
                 })?;
             let branching = execution
@@ -628,7 +838,15 @@ impl Runtime {
                     current_branch_sensitivity: None,
                     udfs: Some(&execution.udfs),
                 },
-            )?;
+            )
+            .map_err(|reason| {
+                error_stack::Report::new(MessageErrorHandlingError::ProgramCompilation {
+                    domain: domain.clone(),
+                    node: owner.clone(),
+                    error_relay: relay.clone(),
+                    reason,
+                })
+            })?;
             MessageErrorRoutePlan {
                 schema,
                 target: MessageErrorRouteTarget { registry, services },
@@ -648,7 +866,16 @@ impl Runtime {
         )
         .await?;
         let key = preserved_message_error_branch(&branching, &message.key, relay, error.reference)?;
-        let batch = RelayRecordBatch::single(schema, key, dlq_record, AckSet::empty())?;
+        let batch = RelayRecordBatch::single(schema, key, dlq_record, AckSet::empty()).map_err(
+            |reason| {
+                error_stack::Report::new(MessageErrorHandlingError::BatchConstruction {
+                    domain: domain.clone(),
+                    node: owner.clone(),
+                    relay: relay.clone(),
+                    reason,
+                })
+            },
+        )?;
         if let Some(flush_policy) = flush_policy {
             self.enqueue_message_error_delivery(
                 MessageErrorRouteKey {
@@ -675,12 +902,11 @@ impl Runtime {
             )
             .await
             .map_err(|_| {
-                format!(
-                    "DLQ relay '{}' rejected message error from {} '{}'",
-                    relay.as_str(),
-                    node_kind.as_str(),
-                    node.as_str()
-                )
+                error_stack::Report::new(MessageErrorHandlingError::RelayRejected {
+                    domain: domain.clone(),
+                    node: owner,
+                    relay: relay.clone(),
+                })
             })?;
             message.acks.ack_success();
         }
@@ -695,20 +921,12 @@ impl Runtime {
         source_route: Option<&RelayName>,
         error_relay: &RelayName,
         assignments: &[Assignment],
-    ) -> Result<Option<RuntimeFlushPolicy>, String> {
-        let scheduled = match ModelKind::from_str(node_kind.as_str()) {
-            Ok(kind) => execution
-                .schedule
-                .nodes
-                .get(&NodeRef::new(kind, node.clone())),
-            Err(_) => None,
-        };
-        let scheduled = scheduled.ok_or_else(|| {
-            format!(
-                "runtime model for {} '{}' is unavailable",
-                node_kind.as_str(),
-                node.as_str()
-            )
+    ) -> error_stack::Result<Option<RuntimeFlushPolicy>, MessageErrorHandlingError> {
+        let owner = NodeRef::new(node_kind, node.clone());
+        let scheduled = execution.schedule.nodes.get(&owner).ok_or_else(|| {
+            error_stack::Report::new(MessageErrorHandlingError::RuntimeModelUnavailable {
+                node: owner.clone(),
+            })
         })?;
         let outputs = match scheduled.config.as_ref() {
             Model::Ingestor(model) => &model.output_routes,
@@ -729,30 +947,40 @@ impl Runtime {
                     &model.flush_policy,
                 )
                 .map(Some)
-                .map_err(|error| error.to_string());
+                .map_err(|source| {
+                    error_stack::Report::new(MessageErrorHandlingError::FlushPolicy {
+                        node: owner,
+                        source,
+                    })
+                });
             }
             other => {
-                return Err(format!(
-                    "{} '{}' cannot own a message-error route",
-                    other.kind().as_str(),
-                    node.as_str()
+                return Err(error_stack::Report::new(
+                    MessageErrorHandlingError::InvalidRouteOwner {
+                        node: NodeRef::new(other.kind(), node.clone()),
+                    },
                 ));
             }
         };
         let output = matching_message_error_output(outputs, source_route, error_relay, assignments)
             .ok_or_else(|| {
-                format!(
-                    "{} '{}' message-error output route is unavailable",
-                    node_kind.as_str(),
-                    node.as_str()
-                )
+                error_stack::Report::new(MessageErrorHandlingError::OutputRouteUnavailable {
+                    node: owner.clone(),
+                    source_route: source_route.cloned(),
+                    error_relay: error_relay.clone(),
+                })
             })?;
         let Some(policy) = output.flush_policy.as_ref() else {
             return Ok(None);
         };
         Self::parse_runtime_node_flush_policy(domain, node_kind.as_str(), node, policy)
             .map(Some)
-            .map_err(|error| error.to_string())
+            .map_err(|source| {
+                error_stack::Report::new(MessageErrorHandlingError::FlushPolicy {
+                    node: owner,
+                    source,
+                })
+            })
     }
 
     pub(super) fn message_error_compile_schemas(
@@ -762,33 +990,37 @@ impl Runtime {
         source_route: Option<&RelayName>,
         error_relay: &RelayName,
         assignments: &[Assignment],
-    ) -> Result<MessageErrorCompileSchemas, String> {
-        let scheduled = match ModelKind::from_str(node_kind.as_str()) {
-            Ok(kind) => execution
-                .schedule
-                .nodes
-                .get(&NodeRef::new(kind, node.clone())),
-            Err(_) => None,
-        };
-        let scheduled = scheduled.ok_or_else(|| {
-            format!(
-                "runtime model for {} '{}' is unavailable",
-                node_kind.as_str(),
-                node.as_str()
-            )
+    ) -> error_stack::Result<MessageErrorCompileSchemas, MessageErrorHandlingError> {
+        let owner = NodeRef::new(node_kind, node.clone());
+        let scheduled = execution.schedule.nodes.get(&owner).ok_or_else(|| {
+            error_stack::Report::new(MessageErrorHandlingError::RuntimeModelUnavailable {
+                node: owner.clone(),
+            })
         })?;
-        let relay_schema = |relay: &RelayName| {
+        let relay_schema = |relay: &RelayName| -> error_stack::Result<
+            Arc<CompiledSchema>,
+            MessageErrorHandlingError,
+        > {
             execution.relay_schemas.get(relay).cloned().ok_or_else(|| {
-                format!(
-                    "runtime schema for relay '{}' is unavailable",
-                    relay.as_str()
-                )
+                error_stack::Report::new(MessageErrorHandlingError::RelaySchemaUnavailable {
+                    relay: relay.clone(),
+                })
             })
         };
         let partial_output_schema = |outputs: &nervix_models::ProcessorOutputs| {
             matching_message_error_output(outputs, source_route, error_relay, assignments)
                 .map(|output| relay_schema(&output.relay))
                 .transpose()
+        };
+        let required_input = |inputs: &nervix_models::ProcessorInputs,
+                              input: MessageErrorInput|
+         -> error_stack::Result<RelayName, MessageErrorHandlingError> {
+            inputs.first().cloned().ok_or_else(|| {
+                error_stack::Report::new(MessageErrorHandlingError::InputRelayUnavailable {
+                    node: owner.clone(),
+                    input,
+                })
+            })
         };
         let mut schemas = MessageErrorCompileSchemas {
             input: None,
@@ -802,9 +1034,10 @@ impl Runtime {
         match scheduled.config.as_ref() {
             Model::Ingestor(model) => {
                 let Some(codec) = execution.codecs.get(&model.decode_using_codec) else {
-                    return Err(format!(
-                        "runtime codec '{}' is unavailable",
-                        model.decode_using_codec.as_str()
+                    return Err(error_stack::Report::new(
+                        MessageErrorHandlingError::CodecUnavailable {
+                            codec: model.decode_using_codec.clone(),
+                        },
                     ));
                 };
                 schemas.input = codec.schema().into();
@@ -812,35 +1045,27 @@ impl Runtime {
                 schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::Reingestor(model) => {
-                let input = model.from.first().ok_or_else(|| {
-                    format!("reingestor '{}' has no input relay", model.name.as_str())
-                })?;
-                schemas.input = Some(relay_schema(input)?);
-                current_branch_relay = Some(input.clone());
+                let input = required_input(&model.from, MessageErrorInput::Input)?;
+                schemas.input = Some(relay_schema(&input)?);
+                current_branch_relay = Some(input);
                 schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::Junction(model) => {
-                let input = model.from.first().ok_or_else(|| {
-                    format!("junction '{}' has no input relay", model.name.as_str())
-                })?;
-                schemas.input = Some(relay_schema(input)?);
-                current_branch_relay = Some(input.clone());
+                let input = required_input(&model.from, MessageErrorInput::Input)?;
+                schemas.input = Some(relay_schema(&input)?);
+                current_branch_relay = Some(input);
                 schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::Deduplicator(model) => {
-                let input = model.from.first().ok_or_else(|| {
-                    format!("deduplicator '{}' has no input relay", model.name.as_str())
-                })?;
-                schemas.input = Some(relay_schema(input)?);
-                current_branch_relay = Some(input.clone());
+                let input = required_input(&model.from, MessageErrorInput::Input)?;
+                schemas.input = Some(relay_schema(&input)?);
+                current_branch_relay = Some(input);
                 schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::Reorderer(model) => {
-                let input = model.from.first().ok_or_else(|| {
-                    format!("reorderer '{}' has no input relay", model.name.as_str())
-                })?;
-                schemas.input = Some(relay_schema(input)?);
-                current_branch_relay = Some(input.clone());
+                let input = required_input(&model.from, MessageErrorInput::Input)?;
+                schemas.input = Some(relay_schema(&input)?);
+                current_branch_relay = Some(input);
                 schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::WindowProcessor(model) => {
@@ -852,56 +1077,47 @@ impl Runtime {
                 schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::Inferencer(model) => {
-                let input = model.from.first().ok_or_else(|| {
-                    format!("inferencer '{}' has no input relay", model.name.as_str())
-                })?;
-                schemas.input = Some(relay_schema(input)?);
-                current_branch_relay = Some(input.clone());
+                let input = required_input(&model.from, MessageErrorInput::Input)?;
+                schemas.input = Some(relay_schema(&input)?);
+                current_branch_relay = Some(input);
                 schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::WasmProcessor(model) => {
-                let input = model.from.first().ok_or_else(|| {
-                    format!(
-                        "WASM processor '{}' has no input relay",
-                        model.name.as_str()
-                    )
-                })?;
-                schemas.input = Some(relay_schema(input)?);
-                current_branch_relay = Some(input.clone());
+                let input = required_input(&model.from, MessageErrorInput::Input)?;
+                schemas.input = Some(relay_schema(&input)?);
+                current_branch_relay = Some(input);
                 schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::Correlator(model) => {
-                let left = model.left.first().ok_or_else(|| {
-                    format!("correlator '{}' has no left relay", model.name.as_str())
-                })?;
-                let right = model.right.first().ok_or_else(|| {
-                    format!("correlator '{}' has no right relay", model.name.as_str())
-                })?;
-                schemas.left = Some(relay_schema(left)?);
-                schemas.right = Some(relay_schema(right)?);
-                current_branch_relay = Some(left.clone());
+                let left = required_input(&model.left, MessageErrorInput::Left)?;
+                let right = required_input(&model.right, MessageErrorInput::Right)?;
+                schemas.left = Some(relay_schema(&left)?);
+                schemas.right = Some(relay_schema(&right)?);
+                current_branch_relay = Some(left);
                 schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::Emitter(model) => {
-                let input = model.from.first().ok_or_else(|| {
-                    format!("emitter '{}' has no input relay", model.name.as_str())
-                })?;
-                schemas.input = Some(relay_schema(input)?);
-                current_branch_relay = Some(input.clone());
+                let input = required_input(&model.from, MessageErrorInput::Input)?;
+                schemas.input = Some(relay_schema(&input)?);
+                current_branch_relay = Some(input);
                 schemas.partial_output = model
                     .encode_using_codec
                     .as_ref()
                     .map(|codec| match execution.codecs.get(codec) {
                         Some(compiled) => Ok(compiled.schema()),
-                        None => Err(format!("runtime codec '{}' is unavailable", codec.as_str())),
+                        None => Err(error_stack::Report::new(
+                            MessageErrorHandlingError::CodecUnavailable {
+                                codec: codec.clone(),
+                            },
+                        )),
                     })
                     .transpose()?;
             }
             other => {
-                return Err(format!(
-                    "{} '{}' cannot own a message-error route",
-                    other.kind().as_str(),
-                    node.as_str()
+                return Err(error_stack::Report::new(
+                    MessageErrorHandlingError::InvalidRouteOwner {
+                        node: NodeRef::new(other.kind(), node.clone()),
+                    },
                 ));
             }
         }
@@ -923,7 +1139,7 @@ impl Runtime {
         materialized_state: &HashMap<String, RuntimeValue>,
         ingest_metadata: Option<&IngestFilterMapMetadata>,
         execution_now: Timestamp,
-    ) -> Result<RuntimeRow, String> {
+    ) -> error_stack::Result<RuntimeRow, MessageErrorHandlingError> {
         let carrier = message.record.one_row_batch();
         let keys = vec![message.key.clone()];
         let namespace_batches = match partial_output {
@@ -979,7 +1195,13 @@ impl Runtime {
             execution_now,
             None,
         )
-        .await?;
+        .await
+        .map_err(|reason| {
+            MessageErrorHandlingError::record_construction(
+                error,
+                MessageErrorRecordConstructionError::LookupColumns { reason },
+            )
+        })?;
         let uninitialized = VmUninitializedInput {
             fields: program
                 .compiled
@@ -1003,7 +1225,13 @@ impl Runtime {
                 uninitialized: Some(&uninitialized),
             },
             None,
-        )?;
+        )
+        .map_err(|reason| {
+            MessageErrorHandlingError::record_construction(
+                error,
+                MessageErrorRecordConstructionError::InputProjection { reason },
+            )
+        })?;
         let result = execute_program_with_selection_in_context(
             &program.compiled,
             &batch,
@@ -1016,24 +1244,49 @@ impl Runtime {
             },
         )
         .await
-        .map_err(|error| format!("message-error SET execution failed: {error}"))?;
+        .map_err(|source| {
+            MessageErrorHandlingError::record_construction(
+                error,
+                MessageErrorRecordConstructionError::Execution {
+                    reason: source.to_string(),
+                },
+            )
+        })?;
         if result.batch.row_count() != 1 {
-            return Err(format!(
-                "message-error SET produced {} rows for one error",
-                result.batch.row_count()
+            return Err(MessageErrorHandlingError::record_construction(
+                error,
+                MessageErrorRecordConstructionError::RowCount {
+                    rows: result.batch.row_count(),
+                },
             ));
         }
         if let Some(side_error) = result.batch.errors().row(0).first() {
-            return Err(format!(
-                "message-error SET failed with {}: {} at {}",
-                side_error.code.as_str(),
-                side_error.message,
-                side_error.span
+            return Err(MessageErrorHandlingError::record_construction(
+                error,
+                MessageErrorRecordConstructionError::SideError {
+                    code: side_error.code,
+                    span: side_error.span,
+                },
             ));
         }
-        let output = vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &[0])?;
-        RuntimeRow::new(Arc::new(output), 0, message.record.metadata().clone())
-            .map_err(|error| error.to_string())
+        let output = vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &[0]).map_err(
+            |reason| {
+                MessageErrorHandlingError::record_construction(
+                    error,
+                    MessageErrorRecordConstructionError::OutputProjection { reason },
+                )
+            },
+        )?;
+        RuntimeRow::new(Arc::new(output), 0, message.record.metadata().clone()).map_err(
+            |output_error| {
+                MessageErrorHandlingError::record_construction(
+                    error,
+                    MessageErrorRecordConstructionError::OutputRow {
+                        error: output_error,
+                    },
+                )
+            },
+        )
     }
 }
 
@@ -1041,8 +1294,8 @@ impl Runtime {
 mod tests {
     use ahash::HashMap;
     use nervix_models::{
-        FieldPath, MessageErrorCode, MessageErrorOperation, ParseAsType, StructuredMessageError,
-        Timestamp,
+        FieldPath, MessageErrorCode, MessageErrorOperation, ParseAsType, Statement,
+        StructuredMessageError, Timestamp,
     };
     use sorted_vec::SortedSet;
 
@@ -1051,6 +1304,452 @@ mod tests {
         runtime_ack::AckSet,
         runtime_schema::{RuntimeValue, test_runtime_row},
     };
+
+    fn parsed_model(source: &str) -> Model {
+        let statement = nervix_nspl::server_statement::parse_server_statement(source)
+            .expect("test model should parse");
+        let Statement::Create(create) = statement else {
+            panic!("test source should create a runtime model");
+        };
+        *create.body
+    }
+
+    fn install_message_error_test_execution(
+        runtime: &Runtime,
+        domain: &DomainName,
+        model: Option<Model>,
+        routing: DomainRoutingSnapshot,
+    ) {
+        let nodes = model.into_iter().map(scheduled_model).collect::<Vec<_>>();
+        install_test_domain_execution(runtime, domain, nodes, routing);
+    }
+
+    #[test]
+    fn partial_output_capture_rejects_an_out_of_bounds_row() {
+        let schema = test_schema(&[("result", ParseAsType::I64)]);
+        let batch = vm_input_from_test_rows(
+            &[test_runtime_row([(
+                "result".to_string(),
+                RuntimeValue::I64(7),
+            )])],
+            &schema.arrow_schema(),
+        )
+        .expect("test VM input should build");
+
+        let error = vm_partial_output_row_to_runtime_batch(&batch, 1)
+            .expect_err("a row outside the VM batch must fail");
+
+        assert!(matches!(
+            error.current_context(),
+            MessageErrorHandlingError::PartialOutputRowOutOfBounds { row: 1, rows: 1 }
+        ));
+    }
+
+    #[test]
+    fn message_error_route_planning_classifies_configuration_failures() {
+        let runtime = Runtime::new();
+        let domain = domain("default");
+        let node = named::<ModelName>("calculate");
+        let output = named::<RelayName>("results");
+        let error_relay = named::<RelayName>("route_errors");
+        let assignments = Vec::new();
+
+        install_message_error_test_execution(
+            &runtime,
+            &domain,
+            None,
+            DomainRoutingSnapshot::default(),
+        );
+        let execution = runtime
+            .inner
+            .executions
+            .get(&domain)
+            .expect("test execution should be installed");
+        let error = Runtime::message_error_flush_policy(
+            &execution,
+            &domain,
+            ModelKind::Junction,
+            &node,
+            Some(&output),
+            &error_relay,
+            &assignments,
+        )
+        .expect_err("an absent scheduled model must fail");
+        assert!(matches!(
+            error.current_context(),
+            MessageErrorHandlingError::RuntimeModelUnavailable { .. }
+        ));
+        drop(execution);
+
+        let relay = parsed_model("CREATE RELAY calculate SCHEMA error_schema UNBRANCHED;");
+        install_message_error_test_execution(
+            &runtime,
+            &domain,
+            Some(relay),
+            DomainRoutingSnapshot::default(),
+        );
+        let execution = runtime
+            .inner
+            .executions
+            .get(&domain)
+            .expect("test execution should be installed");
+        let error = Runtime::message_error_flush_policy(
+            &execution,
+            &domain,
+            ModelKind::Relay,
+            &node,
+            None,
+            &error_relay,
+            &assignments,
+        )
+        .expect_err("a relay cannot own an error route");
+        assert!(matches!(
+            error.current_context(),
+            MessageErrorHandlingError::InvalidRouteOwner { .. }
+        ));
+        drop(execution);
+
+        let junction = parsed_model(
+            "CREATE JUNCTION calculate FROM calculations UNBRANCHED TO results SET value = \
+             input.value FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        );
+        install_message_error_test_execution(
+            &runtime,
+            &domain,
+            Some(junction.clone()),
+            DomainRoutingSnapshot::default(),
+        );
+        let execution = runtime
+            .inner
+            .executions
+            .get(&domain)
+            .expect("test execution should be installed");
+        let error = Runtime::message_error_flush_policy(
+            &execution,
+            &domain,
+            ModelKind::Junction,
+            &node,
+            None,
+            &error_relay,
+            &assignments,
+        )
+        .expect_err("an unmatched output route must fail");
+        assert!(matches!(
+            error.current_context(),
+            MessageErrorHandlingError::OutputRouteUnavailable { .. }
+        ));
+        drop(execution);
+
+        let mut invalid_flush_junction = junction;
+        let Model::Junction(model) = &mut invalid_flush_junction else {
+            panic!("test model should be a junction");
+        };
+        model.output_routes.routes[0].flush_policy = Some(nervix_models::FlushPolicy::Each {
+            interval: "not-a-duration".to_string(),
+            max_batch_size: "1MiB".to_string(),
+        });
+        install_message_error_test_execution(
+            &runtime,
+            &domain,
+            Some(invalid_flush_junction),
+            DomainRoutingSnapshot::default(),
+        );
+        let execution = runtime
+            .inner
+            .executions
+            .get(&domain)
+            .expect("test execution should be installed");
+        let error = Runtime::message_error_flush_policy(
+            &execution,
+            &domain,
+            ModelKind::Junction,
+            &node,
+            Some(&output),
+            &error_relay,
+            &assignments,
+        )
+        .expect_err("an invalid route flush policy must fail");
+        assert!(matches!(
+            error.current_context(),
+            MessageErrorHandlingError::FlushPolicy { .. }
+        ));
+    }
+
+    #[test]
+    fn message_error_schema_planning_classifies_missing_inputs() {
+        let runtime = Runtime::new();
+        let domain = domain("default");
+        let node = named::<ModelName>("calculate");
+        let error_relay = named::<RelayName>("route_errors");
+        let assignments = Vec::new();
+
+        install_message_error_test_execution(
+            &runtime,
+            &domain,
+            None,
+            DomainRoutingSnapshot::default(),
+        );
+        let execution = runtime
+            .inner
+            .executions
+            .get(&domain)
+            .expect("test execution should be installed");
+        let error = Runtime::message_error_compile_schemas(
+            &execution,
+            ModelKind::Junction,
+            &node,
+            None,
+            &error_relay,
+            &assignments,
+        )
+        .expect_err("an absent scheduled model must fail");
+        assert!(matches!(
+            error.current_context(),
+            MessageErrorHandlingError::RuntimeModelUnavailable { .. }
+        ));
+        drop(execution);
+
+        let relay = parsed_model("CREATE RELAY calculate SCHEMA error_schema UNBRANCHED;");
+        install_message_error_test_execution(
+            &runtime,
+            &domain,
+            Some(relay),
+            DomainRoutingSnapshot::default(),
+        );
+        let execution = runtime
+            .inner
+            .executions
+            .get(&domain)
+            .expect("test execution should be installed");
+        let error = Runtime::message_error_compile_schemas(
+            &execution,
+            ModelKind::Relay,
+            &node,
+            None,
+            &error_relay,
+            &assignments,
+        )
+        .expect_err("a relay cannot own an error route");
+        assert!(matches!(
+            error.current_context(),
+            MessageErrorHandlingError::InvalidRouteOwner { .. }
+        ));
+        drop(execution);
+
+        let junction_source = "CREATE JUNCTION calculate FROM calculations UNBRANCHED TO results \
+                               SET value = input.value FLUSH IMMEDIATE ON MESSAGE ERROR LOG;";
+        let mut junction_without_input = parsed_model(junction_source);
+        let Model::Junction(model) = &mut junction_without_input else {
+            panic!("test model should be a junction");
+        };
+        model.from.from.clear();
+        install_message_error_test_execution(
+            &runtime,
+            &domain,
+            Some(junction_without_input),
+            DomainRoutingSnapshot::default(),
+        );
+        let execution = runtime
+            .inner
+            .executions
+            .get(&domain)
+            .expect("test execution should be installed");
+        let error = Runtime::message_error_compile_schemas(
+            &execution,
+            ModelKind::Junction,
+            &node,
+            None,
+            &error_relay,
+            &assignments,
+        )
+        .expect_err("a junction without input must fail");
+        assert!(matches!(
+            error.current_context(),
+            MessageErrorHandlingError::InputRelayUnavailable {
+                input: MessageErrorInput::Input,
+                ..
+            }
+        ));
+        drop(execution);
+
+        install_message_error_test_execution(
+            &runtime,
+            &domain,
+            Some(parsed_model(junction_source)),
+            DomainRoutingSnapshot::default(),
+        );
+        let execution = runtime
+            .inner
+            .executions
+            .get(&domain)
+            .expect("test execution should be installed");
+        let error = Runtime::message_error_compile_schemas(
+            &execution,
+            ModelKind::Junction,
+            &node,
+            None,
+            &error_relay,
+            &assignments,
+        )
+        .expect_err("a missing input relay schema must fail");
+        assert!(matches!(
+            error.current_context(),
+            MessageErrorHandlingError::RelaySchemaUnavailable { .. }
+        ));
+        drop(execution);
+
+        let ingestor = parsed_model(
+            "CREATE INGESTOR calculate FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON QUIESCE \
+             BUFFER MAX SIZE 1MiB DECODE USING input_codec TO results INHERIT ALL UNBRANCHED \
+             FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+        );
+        install_message_error_test_execution(
+            &runtime,
+            &domain,
+            Some(ingestor),
+            DomainRoutingSnapshot::default(),
+        );
+        let execution = runtime
+            .inner
+            .executions
+            .get(&domain)
+            .expect("test execution should be installed");
+        let error = Runtime::message_error_compile_schemas(
+            &execution,
+            ModelKind::Ingestor,
+            &node,
+            None,
+            &error_relay,
+            &assignments,
+        )
+        .expect_err("a missing decoder must fail");
+        assert!(matches!(
+            error.current_context(),
+            MessageErrorHandlingError::CodecUnavailable { .. }
+        ));
+        drop(execution);
+
+        let emitter = parsed_model(
+            "CREATE EMITTER calculate FROM calculations TO SYSLOG output_client MODE NO_ACK RETRY \
+             POLICY BACKOFF 100ms MAX 1s ENCODE USING output_codec INHERIT ALL FLUSH IMMEDIATE ON \
+             MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+        );
+        let mut routing = DomainRoutingSnapshot::default();
+        routing.relay_schemas.insert(
+            named("calculations"),
+            test_schema(&[("value", ParseAsType::I64)]),
+        );
+        install_message_error_test_execution(&runtime, &domain, Some(emitter), routing);
+        let execution = runtime
+            .inner
+            .executions
+            .get(&domain)
+            .expect("test execution should be installed");
+        let error = Runtime::message_error_compile_schemas(
+            &execution,
+            ModelKind::Emitter,
+            &node,
+            None,
+            &error_relay,
+            &assignments,
+        )
+        .expect_err("a missing encoder must fail");
+        assert!(matches!(
+            error.current_context(),
+            MessageErrorHandlingError::CodecUnavailable { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn dlq_dispatch_classifies_missing_runtime_dependencies() {
+        let runtime = Runtime::new();
+        let domain = domain("default");
+        let node = named::<ModelName>("calculate");
+        let error_relay = named::<RelayName>("route_errors");
+        let message = RelayMessage {
+            key: None,
+            record: test_runtime_row([]),
+            acks: AckSet::empty(),
+        };
+        let error = structured_message_error(
+            Timestamp::now(),
+            MessageErrorCode::Evaluation,
+            "non-sensitive evaluation failure".to_string(),
+            MessageErrorOperation::Set,
+            None,
+            [],
+        );
+        let materialized_state = HashMap::default();
+        let assignments = Vec::new();
+        let context = || MessageErrorContext {
+            domain: &domain,
+            node_kind: ModelKind::Junction,
+            node: &node,
+            source_route: None,
+            message: &message,
+            error: &error,
+            partial_output: None,
+            materialized_state: &materialized_state,
+            ingest_metadata: None,
+            execution_now: Timestamp::now(),
+        };
+
+        let failure = runtime
+            .dispatch_message_error_to_dlq(context(), &error_relay, &assignments)
+            .await
+            .expect_err("a missing domain execution must fail");
+        assert!(matches!(
+            failure.current_context(),
+            MessageErrorHandlingError::DomainNotInstantiated { .. }
+        ));
+
+        install_message_error_test_execution(
+            &runtime,
+            &domain,
+            None,
+            DomainRoutingSnapshot::default(),
+        );
+        let failure = runtime
+            .dispatch_message_error_to_dlq(context(), &error_relay, &assignments)
+            .await
+            .expect_err("a missing DLQ schema must fail");
+        assert!(matches!(
+            failure.current_context(),
+            MessageErrorHandlingError::DlqSchemaNotInstantiated { .. }
+        ));
+
+        let mut routing = DomainRoutingSnapshot::default();
+        routing
+            .relay_schemas
+            .insert(error_relay.clone(), test_schema(&[]));
+        install_message_error_test_execution(&runtime, &domain, None, routing);
+        let failure = runtime
+            .dispatch_message_error_to_dlq(context(), &error_relay, &assignments)
+            .await
+            .expect_err("a missing DLQ relay registry must fail");
+        assert!(matches!(
+            failure.current_context(),
+            MessageErrorHandlingError::DlqRelayNotInstantiated { .. }
+        ));
+
+        let mut routing = DomainRoutingSnapshot::default();
+        routing
+            .relay_schemas
+            .insert(error_relay.clone(), test_schema(&[]));
+        routing
+            .relay_registries
+            .insert(error_relay.clone(), RelayRegistry::new());
+        install_message_error_test_execution(&runtime, &domain, None, routing);
+        let failure = runtime
+            .dispatch_message_error_to_dlq(context(), &error_relay, &assignments)
+            .await
+            .expect_err("missing DLQ relay services must fail");
+        assert!(matches!(
+            failure.current_context(),
+            MessageErrorHandlingError::DlqServicesNotInstantiated { .. }
+        ));
+    }
+
     #[tokio::test]
     async fn message_error_set_uses_vm_functions_and_captured_snapshots() {
         let source = test_runtime_row([("input_id".to_string(), RuntimeValue::U32(7))]);
@@ -1183,6 +1882,87 @@ mod tests {
         assert_eq!(digest.len(), 32);
     }
 
+    #[tokio::test]
+    async fn message_error_record_construction_failure_is_distinct_from_the_original_error() {
+        let output_schema = test_optional_schema(&[OptionalTestField {
+            name: "result",
+            ty: ParseAsType::I64,
+            optional: false,
+        }]);
+        let assignments = construction("SET result = 1 / 0").assignments;
+        let program = compile_message_error_set_program(
+            &domain("default"),
+            &named("calculate"),
+            &assignments,
+            output_schema,
+            MessageErrorCompileSchemas {
+                input: None,
+                left: None,
+                right: None,
+                partial_output: None,
+                current_branching: Vec::new(),
+                allow_header_reads: false,
+            },
+            RuntimeVmCompileContext {
+                available_materialized_streams: &HashMap::default(),
+                available_lookups: &HashMap::default(),
+                current_branching: &[],
+                current_branch_schema: None,
+                current_branch_sensitivity: None,
+                udfs: None,
+            },
+        )
+        .expect("message-error SET should compile");
+        let reference = uuid::Uuid::now_v7();
+        let fields = SortedSet::from_unsorted(vec![FieldPath::new("input.secret")]);
+        let original_error = StructuredMessageError {
+            reference,
+            code: MessageErrorCode::External,
+            message: "sensitive-payload-value".to_string(),
+            operation: MessageErrorOperation::Publish,
+            operation_index: None,
+            fields: fields.clone(),
+            occurred_at: Timestamp::now(),
+        };
+        let message = RelayMessage {
+            key: None,
+            record: test_runtime_row([]),
+            acks: AckSet::empty(),
+        };
+
+        let failure = Runtime::execute_message_error_set_program(
+            &program,
+            &message,
+            &original_error,
+            None,
+            &HashMap::default(),
+            None,
+            Timestamp::now(),
+        )
+        .await
+        .expect_err("a failing error-route SET must stop record construction");
+
+        let MessageErrorHandlingError::RecordConstruction {
+            reference: failed_reference,
+            code,
+            operation,
+            fields: failed_fields,
+            source:
+                MessageErrorRecordConstructionError::SideError {
+                    code: side_code, ..
+                },
+        } = failure.current_context()
+        else {
+            panic!("record construction must have its own typed failure: {failure}");
+        };
+        assert_eq!(*failed_reference, reference);
+        assert_eq!(*code, MessageErrorCode::External);
+        assert_eq!(*operation, MessageErrorOperation::Publish);
+        assert_eq!(failed_fields, &fields);
+        assert_eq!(*side_code, nervix_vm::ErrorCode::DivisionByZero);
+        assert!(!failure.to_string().contains("sensitive-payload-value"));
+    }
+
     #[test]
     fn message_error_routes_preserve_branch_identity_without_reconstruction() {
         let incoming = string_branch_key("tenant", "acme");
@@ -1197,11 +1977,13 @@ mod tests {
         assert!(
             preserved_message_error_branch(&[], &incoming, &relay, reference)
                 .expect_err("unbranched error relay must reject a branch")
+                .to_string()
                 .contains("cannot receive branched message error")
         );
         assert!(
             preserved_message_error_branch(&[named("tenant")], &None, &relay, reference,)
                 .expect_err("branched error relay must reject unbranched execution")
+                .to_string()
                 .contains("cannot receive unbranched message error")
         );
     }
