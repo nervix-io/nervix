@@ -65,7 +65,7 @@ pub(super) async fn flush_branch_inferencer_output(
                 processor,
                 error_policies,
                 forwarded.acks.iter(),
-                error,
+                error.to_string(),
             );
             return;
         }

@@ -118,7 +118,7 @@ impl PulsarIngestor {
             .map_err(|reason| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-                reason,
+                reason: reason.to_string(),
             })?;
         let pulsar = Self::client_from_config(&resolved_client.entries)
             .await
