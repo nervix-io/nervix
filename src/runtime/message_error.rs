@@ -628,7 +628,8 @@ impl Runtime {
                     current_branch_sensitivity: None,
                     udfs: Some(&execution.udfs),
                 },
-            )?;
+            )
+            .map_err(|error| format!("{error:#}"))?;
             MessageErrorRoutePlan {
                 schema,
                 target: MessageErrorRouteTarget { registry, services },

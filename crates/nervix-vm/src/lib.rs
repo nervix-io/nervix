@@ -57,9 +57,9 @@ pub use error::{
     CompileError, ErrorCode, RowErrorLengths, RowErrorMask, RowErrors, RuntimeError, SideError,
 };
 pub use frontend::{
-    SemanticNamespaces, lower_branch_construction, lower_expression, lower_finalized_output_filter,
-    lower_generated_route, lower_route_construction, lower_set_only_route,
-    lower_transforming_route,
+    FrontendError, FrontendResult, SemanticNamespaces, lower_branch_construction, lower_expression,
+    lower_finalized_output_filter, lower_generated_route, lower_route_construction,
+    lower_set_only_route, lower_transforming_route,
 };
 pub use ir::{
     CompiledPredicate, CompiledProgram, InputBinding, Instruction, InstructionKind,
@@ -91,5 +91,6 @@ mod test_support {
         let construction =
             nervix_nspl::parse_route_construction(source).map_err(|error| error.to_string())?;
         lower_route_construction(&construction, SemanticNamespaces::new("input", "input"))
+            .map_err(|error| error.to_string())
     }
 }

@@ -382,8 +382,8 @@ pub(in crate::runtime) use node::{RuntimeInner, SharedActiveGraph};
 use planning::PlannedModel;
 use planning::{
     branched_node_specs_from_active_graph, branched_node_specs_from_scheduled_nodes,
-    format_branched_by, materialize_ingestor_route_template,
-    materialize_processor_instance_template, processor_template_for_graph_node,
+    materialize_ingestor_route_template, materialize_processor_instance_template,
+    processor_template_for_graph_node,
 };
 use processor_branch_task::{
     PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, ProcessorBranchHandoff, ProcessorNodeCommand,
@@ -476,7 +476,7 @@ use test_fixtures::{
 };
 use tls::RustlsClientConfigSource;
 pub(in crate::runtime) use vm_compile::{
-    CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders,
+    CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders, KeyProjectionKind,
     MaterializedFieldInterest, MaterializedLookupKeyMode, compile_emitter_filter_map_program,
     compile_key_projection_program, compile_sqs_fifo_group_program,
 };

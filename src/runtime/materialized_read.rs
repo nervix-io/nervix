@@ -657,7 +657,8 @@ impl Runtime {
                             Some(&routing.udfs),
                             execution_now,
                         )
-                        .await?;
+                        .await
+                        .map_err(|error| format!("{error:#}"))?;
                         resolved.insert(
                             format!(
                                 "relay_state.{}.{}",

@@ -624,7 +624,7 @@ impl RelayProcessorNode {
                                     &self.processor,
                                     &self.error_policies,
                                     batch.acks.iter(),
-                                    error.to_string(),
+                                    format!("{error:#}"),
                                 );
                                 return;
                             }

@@ -938,21 +938,6 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
     })
 }
 
-pub(in crate::runtime) fn format_branched_by(branched_by: &[FieldName]) -> String {
-    if branched_by.is_empty() {
-        "()".to_string()
-    } else {
-        format!(
-            "({})",
-            branched_by
-                .iter()
-                .map(|field| field.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
