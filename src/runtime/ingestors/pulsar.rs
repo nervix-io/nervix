@@ -101,7 +101,7 @@ impl PulsarIngestor {
             .map_err(|reason| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-                reason,
+                reason: reason.to_string(),
             })?;
         let pulsar = Self::client_from_config(&resolved_client.entries)
             .await
@@ -187,6 +187,11 @@ impl PulsarIngestor {
                     task_metrics.clone(),
                 );
                 let mut no_ack_messages = Vec::new();
+                // Both ACK root counters belong to this ingestor for as long as it runs, so the
+                // record path holds them instead of resolving them from the shared in-flight maps
+                // per record.
+                let ack_root_trackers =
+                    task_runtime.ingestor_ack_root_trackers(&task_domain, &task_ingestor);
 
                 'ingest: loop {
                     tokio::task::consume_budget().await;
@@ -462,11 +467,8 @@ impl PulsarIngestor {
                                                     retry_delay = next_retry_delay(retry_delay, retry_policy);
                                                     continue 'ingest;
                                                 }
-                                                let (acks, completion) = task_runtime
-                                                    .tracked_ingestor_ack_root(
-                                                        &task_domain,
-                                                        &task_ingestor,
-                                                    );
+                                                let (acks, completion) =
+                                                    ack_root_trackers.tracked_root();
                                                 let dispatch_result = task_runtime
                                                     .dispatch_ingested_records(IngestGroupDispatch {
                                                         collector: &mut collector,
@@ -680,11 +682,8 @@ impl PulsarIngestor {
                                                 let mut dispatch_acks = Vec::with_capacity(messages.len());
                                                 for _ in &messages {
                                                     tokio::task::consume_budget().await;
-                                                    let (acks, completion) = task_runtime
-                                                        .tracked_ingestor_ack_root(
-                                                            &task_domain,
-                                                            &task_ingestor,
-                                                        );
+                                                    let (acks, completion) =
+                                                        ack_root_trackers.tracked_root();
                                                     dispatch_acks.push(
                                                         if !task_branched_senders.is_empty() {
                                                             acks.attached()

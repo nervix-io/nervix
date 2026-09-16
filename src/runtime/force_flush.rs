@@ -302,6 +302,10 @@ impl Drop for DomainForceFlushCompletion {
 }
 
 /// The two independently owned counters every ingestor-created ACK root updates.
+///
+/// An ingestor resolves this pair once and holds it, so cloning it is two refcount bumps and
+/// never a lookup in the shared in-flight maps.
+#[derive(Clone)]
 pub(in crate::runtime) struct IngestorAckRootTrackers {
     domain: Arc<AckRootTracker>,
     ingestor: Arc<AckRootTracker>,
@@ -327,15 +331,6 @@ impl Runtime {
         AckSet::tracked_root(tracker)
     }
 
-    pub(in crate::runtime) fn tracked_ingestor_ack_root(
-        &self,
-        domain: &DomainName,
-        ingestor: &IngestorName,
-    ) -> (AckSet, AckCompletion) {
-        self.ingestor_ack_root_trackers(domain, ingestor)
-            .tracked_root()
-    }
-
     pub(in crate::runtime) fn ingestor_ack_root_trackers(
         &self,
         domain: &DomainName,
@@ -350,16 +345,17 @@ impl Runtime {
                 .or_insert_with(|| Arc::new(AckRootTracker::default()))
                 .clone(),
         };
-        let ingestor_tracker = self
-            .inner
-            .in_flight_by_ingestor
-            .entry(DomainNodeRef::node_in(
-                domain.clone(),
-                ModelKind::Ingestor,
-                ingestor.clone(),
-            ))
-            .or_insert_with(|| Arc::new(AckRootTracker::default()))
-            .clone();
+        let ingestor_entity =
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let ingestor_tracker = match self.inner.in_flight_by_ingestor.get(&ingestor_entity) {
+            Some(tracker) => tracker.value().clone(),
+            None => self
+                .inner
+                .in_flight_by_ingestor
+                .entry(ingestor_entity)
+                .or_insert_with(|| Arc::new(AckRootTracker::default()))
+                .clone(),
+        };
         IngestorAckRootTrackers {
             domain: domain_tracker,
             ingestor: ingestor_tracker,

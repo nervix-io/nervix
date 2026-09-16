@@ -343,15 +343,15 @@ impl Runtime {
                     scope.execution_now,
                 )
                 .await
-                .map_err(|reason| PlannedGeneralError {
+                .map_err(|error| PlannedGeneralError {
                     acks: batch.acks.clone(),
-                    reason,
+                    reason: error.to_string(),
                 })?
                 .into_iter()
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|reason| PlannedGeneralError {
+                .map_err(|error| PlannedGeneralError {
                     acks: batch.acks.clone(),
-                    reason,
+                    reason: error.to_string(),
                 })?
             } else {
                 match output.branch.as_ref() {
@@ -509,15 +509,15 @@ impl Runtime {
                     execution_now,
                 )
                 .await
-                .map_err(|reason| PlannedGeneralError {
+                .map_err(|error| PlannedGeneralError {
                     acks: batch.acks.clone(),
-                    reason,
+                    reason: error.to_string(),
                 })?
                 .into_iter()
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|reason| PlannedGeneralError {
+                .map_err(|error| PlannedGeneralError {
                     acks: batch.acks.clone(),
-                    reason,
+                    reason: error.to_string(),
                 })?
             } else {
                 match output.branch.as_ref() {
@@ -1401,8 +1401,11 @@ impl Runtime {
                         let wait_for_required_state = !interaction.is_terminal_drain();
                         let batch = match runtime
                             .resolve_materialized_dependencies_for_batch(
-                                &mut routing,
-                                &task_domain,
+                                MaterializedDomainHandles {
+                                    routing: &mut routing,
+                                    domain_clock: &domain_clock,
+                                    domain: &task_domain,
+                                },
                                 &task_from_relay,
                                 &task_materialized_state,
                                 batch,

@@ -59,26 +59,26 @@ use nervix_interconnect::{
     Transport,
 };
 use nervix_models::{
-    AckMode, Assignment, BranchName, ClickHouseValueMapping, ClientConfigEntry, ClientName,
-    ClientPoolBounds, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule, CodecName,
-    CodecWireFormat, CoordinationIdentity, CorrelationTimeoutAction, CorrelatorMatchPolicy,
-    CreateClientAzureBlob, CreateClientGcs, CreateClientIcebergRest, CreateClientKafka,
-    CreateClientMqtt, CreateClientNats, CreateClientOtel, CreateClientPulsar, CreateClientRabbitMq,
-    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
-    CreateClientZeroMq, CreateCodec, CreateEmitter, CreateGenerator, CreateIngestor, CreateLookup,
-    CreateReingestor, CreateRelay, CreateSignalingProtocol, CreateUdf, DomainClockAuthority,
-    DomainConfig, DomainName, DomainNodeRef, DomainSchedule, DomainState, EmitSink,
-    EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName, EndpointType,
-    ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy, GeneratorName,
-    IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
-    InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
-    IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
-    Literal as ModelLiteral, LookupName, MaterializedStatePolicy, MessageErrorCode,
-    MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind, ModelName,
-    MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
+    AckMode, Assignment, AtomicTimestamp, BranchName, ClickHouseValueMapping, ClientConfigEntry,
+    ClientName, ClientPoolBounds, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule,
+    CodecName, CodecWireFormat, CoordinationIdentity, CorrelationTimeoutAction,
+    CorrelatorMatchPolicy, CreateClientAzureBlob, CreateClientGcs, CreateClientIcebergRest,
+    CreateClientKafka, CreateClientMqtt, CreateClientNats, CreateClientOtel, CreateClientPulsar,
+    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
+    CreateClientSyslog, CreateClientZeroMq, CreateCodec, CreateEmitter, CreateGenerator,
+    CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateSignalingProtocol,
+    CreateUdf, DomainClockAuthority, DomainConfig, DomainName, DomainNodeRef, DomainSchedule,
+    DomainState, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName,
+    EndpointType, ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy,
+    GeneratorName, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
+    InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
+    IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode,
+    KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
+    MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind,
+    ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
     MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality, OtelMetric,
     OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch, OwnershipStateComponent,
-    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
     PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
     RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
     RemoteRuntimeField, ResourceId, ResourceName, ResourceVersionStatus, RetryPolicy,
@@ -154,10 +154,12 @@ use crate::{
         AckCompletion, AckOutcome, AckProgress, AckRequiredWaitGuard, AckRootTracker, AckSet,
     },
     runtime_schema::{
-        CodecError, CompiledCodec, CompiledSchema, ProtobufDescriptorPool, RuntimeRecordBatch,
-        RuntimeRecordBatchBuilder, RuntimeRecordMetadata, RuntimeRow, RuntimeValue,
-        RuntimeValueColumn, compile_codec_with_protobuf, compile_schema, decode_with_codec,
-        parse_as_type_from_arrow, runtime_value_arrow_array, runtime_value_from_arrow_array,
+        CodecError, CompiledCodec, CompiledSchema, ProtobufDescriptorPool,
+        RuntimeProjectionComponent, RuntimeRecordBatch, RuntimeRecordBatchBuilder,
+        RuntimeRecordMetadata, RuntimeRow, RuntimeSchemaError, RuntimeSchemaOperation,
+        RuntimeValue, RuntimeValueColumn, RuntimeValueLocation, RuntimeVmOperation,
+        compile_codec_with_protobuf, compile_schema, decode_with_codec, parse_as_type_from_arrow,
+        runtime_value_arrow_array, runtime_value_from_arrow_array,
     },
     task_shutdown::JoinShutdown as _,
 };
@@ -245,8 +247,6 @@ mod syslog;
 #[cfg(test)]
 mod test_fixtures;
 
-use std::str::FromStr;
-
 use branch_aggregated_state::{
     BranchAggregatedRuntimeStateSnapshot, ReplicatedBranchAggregatedState,
     decode_branch_aggregated_snapshot, encode_branch_aggregated_snapshot,
@@ -261,9 +261,9 @@ use branch_key::branch_key_display;
 use branch_lru_state::{decode_branch_lru_snapshot, encode_branch_lru_snapshot};
 use branch_runtime::{
     BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL, BranchRuntime, BranchRuntimeMetrics,
-    IngestorRouteRuntime, MaterializedBatchWaitContext, PendingMaterializedBatch,
-    branch_lru_placement, flush_branch_junction, internal_processor_error_policies,
-    output_error_policies, persist_branch_instance_lru_snapshot,
+    IngestorRouteRuntime, MaterializedBatchWaitContext, MaterializedDomainHandles,
+    PendingMaterializedBatch, branch_lru_placement, flush_branch_junction,
+    internal_processor_error_policies, output_error_policies, persist_branch_instance_lru_snapshot,
 };
 use client_config::{
     ParsedRetryPolicy, client_config_entries, client_config_value, client_tls_paths,
@@ -314,7 +314,10 @@ use filter_map::{
     execute_filter_map_program_on_batch, expression_reads_sensitive_source,
     plan_emitter_filter_map_batch, plan_filter_map_messages,
 };
-use force_flush::{DomainForceFlush, DomainForceFlushCompletion, DomainForceFlushParticipant};
+use force_flush::{
+    DomainForceFlush, DomainForceFlushCompletion, DomainForceFlushParticipant,
+    IngestorAckRootTrackers,
+};
 use generator::{GeneratorTaskRouteSpec, GeneratorTaskSpec};
 use http_client::HttpClientConfig;
 use inferencer_output::flush_branch_inferencer_output;
@@ -381,8 +384,8 @@ pub(in crate::runtime) use node::{RuntimeInner, SharedActiveGraph};
 use planning::PlannedModel;
 use planning::{
     branched_node_specs_from_active_graph, branched_node_specs_from_scheduled_nodes,
-    format_branched_by, materialize_ingestor_route_template,
-    materialize_processor_instance_template, processor_template_for_graph_node,
+    materialize_ingestor_route_template, materialize_processor_instance_template,
+    processor_template_for_graph_node,
 };
 use processor_branch_task::{
     PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, ProcessorBranchHandoff, ProcessorNodeCommand,
@@ -409,12 +412,13 @@ use processors::{
     CompiledCorrelatorWhereProgram, CompiledInferencerInputProgram, CompiledReordererProgram,
     CompiledWindowAggregateExpr, CompiledWindowAggregateProgram, CorrelatorBranchState,
     CorrelatorPendingMessage, FilterMapPlan, InferencerFlushContext, InferencerOutputBuffer,
-    IngestorRouteTemplate, JunctionFlushContext, PlannedGeneralError, PlannedMessageError,
-    RelayProcessorNode, RelayProcessorOperationNode, RelayProcessorOperationTemplate,
-    RelayProcessorOutputNode, RelayProcessorOutputTemplate, RelayProcessorOutputsNode,
-    RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate, RelayProcessorTemplate,
-    ReorderKeyPart, ReordererOutputBuffer, ReordererRowOrder, WasmAckContext, WasmAckMap,
-    WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds, WindowFlushContext,
+    IngestorRouteTemplate, JunctionFlushContext, PlannedGeneralError, PlannedGeneralResult,
+    PlannedMessageError, RelayProcessorNode, RelayProcessorOperationNode,
+    RelayProcessorOperationTemplate, RelayProcessorOutputNode, RelayProcessorOutputTemplate,
+    RelayProcessorOutputsNode, RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate,
+    RelayProcessorTemplate, ReorderKeyPart, ReordererOutputBuffer, ReordererRowOrder,
+    WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds,
+    WindowFlushContext,
 };
 use rdkafka::consumer::StreamConsumer;
 pub(in crate::runtime) use reconnect_backoff::RuntimeReconnectBackoff;
@@ -462,19 +466,20 @@ use test_fixtures::{
     OptionalTestField, TWO_ITEM_TEST_CHANNEL_CAPACITY, TestIngestHeaders, attach_loopback_cluster,
     batch_value, branch_model, branched_by, compile_window_aggregate_for_test, concrete_branch_key,
     construction, domain, execute_filter_map_for_test, expression, ingest_metadata_for_test,
-    install_unpaced_test_domain, junction_branch_template, key_label, named, nonzero_capacity,
-    paced_domain_state, processor_branched_by, quiesce_test_batch, row_value, scheduled_model,
-    string_branch_key, test_domain_clock, test_domain_clock_authority,
-    test_ingestor_quiesce_control, test_optional_schema, test_relay_boundary_services, test_schema,
-    u32_branch_key, unpaced_domain_state, validate_wasm_test_output_groups,
-    validate_wasm_test_outputs, vm_input_from_test_rows, wait_for_persisted_runtime_state_lsm,
-    wasm_generated_pool, wasm_guest_column, wasm_guest_stream, wasm_input_acks,
-    wasm_input_for_records, wasm_input_for_values, wasm_test_generated_output, wasm_test_output,
-    window_aggregate, window_inputs, window_outputs, with_inherit_all,
+    install_test_domain_execution, install_unpaced_test_domain, junction_branch_template,
+    key_label, named, nonzero_capacity, paced_domain_state, processor_branched_by,
+    quiesce_test_batch, row_value, scheduled_model, string_branch_key, test_domain_clock,
+    test_domain_clock_authority, test_ingestor_quiesce_control, test_optional_schema,
+    test_relay_boundary_services, test_schema, u32_branch_key, unpaced_domain_state,
+    validate_wasm_test_output_groups, validate_wasm_test_outputs, vm_input_from_test_rows,
+    wait_for_persisted_runtime_state_lsm, wasm_generated_pool, wasm_guest_column,
+    wasm_guest_stream, wasm_input_acks, wasm_input_for_records, wasm_input_for_values,
+    wasm_test_generated_output, wasm_test_output, window_aggregate, window_inputs, window_outputs,
+    with_inherit_all,
 };
 use tls::RustlsClientConfigSource;
 pub(in crate::runtime) use vm_compile::{
-    CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders,
+    CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders, KeyProjectionKind,
     MaterializedFieldInterest, MaterializedLookupKeyMode, compile_emitter_filter_map_program,
     compile_key_projection_program, compile_sqs_fifo_group_program,
 };

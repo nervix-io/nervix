@@ -108,8 +108,9 @@ not pay for a window's state, and a window width does not bound a correlator.
   Consensus replication uses one ordered append stream per follower, bounded at 16 outstanding
   batches and 16 MiB, and charges each batch against the shared command budget for as long as it
   is unacknowledged. That stream reserves its own replication stream slot, so the ownership
-  handoff requests sharing the replication pool never wait behind it. A Raft snapshot moves one bounded section at a time, so its transfer does not
-  grow with the size of the replicated state.
+  handoff requests sharing the replication pool never wait behind it. A Raft snapshot is sealed
+  and moved one bounded section at a time, so neither construction nor transfer grows with the size
+  of the replicated state.
   Keep `MAX BATCH SIZE` well below 32 MiB on any route whose consumer may be scheduled on another
   node. Each node publishes what its pools and budgets are actually holding; see the
   [interconnection metrics](metrics-and-observability.md) for the series to size against.

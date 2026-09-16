@@ -51,6 +51,17 @@ pub(super) struct MaterializedBatchWaitContext<'a> {
     pub(super) quiesce_work: Option<&'a mut NodeQuiesceWorkGuard>,
 }
 
+/// The per-domain handles one batch's materialized-dependency resolution reads.
+///
+/// Every task that resolves dependencies per batch — emitter, reingestor and branch — binds these
+/// once when it starts, so resolution borrows what its caller already holds instead of resolving
+/// the domain's routing and clock again for every batch.
+pub(super) struct MaterializedDomainHandles<'a> {
+    pub(super) routing: &'a mut DomainRoutingCache,
+    pub(super) domain_clock: &'a DomainClock,
+    pub(super) domain: &'a DomainName,
+}
+
 impl PendingMaterializedBatch {
     pub(super) fn new(input_relay: RelayName, batch: RelayRecordBatch) -> Self {
         let required_wait = AckRequiredWaitGuard::new(batch.acks.iter());

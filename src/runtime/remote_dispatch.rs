@@ -18,12 +18,57 @@ pub(super) const REMOTE_ACK_ALIVE_INTERVAL: Duration = Duration::from_millis(100
 
 pub(super) const REMOTE_RELAY_TOTAL_TIMEOUT: Duration = Duration::from_secs(300);
 
-const REMOTE_RELAY_BRANCH_EVICTED: &str = "relay branch generation was evicted before admission";
-
 enum FailedRelayAdmissionResolution {
     Admitted,
-    Failed(String),
-    Indeterminate(String),
+    Failed(Report<RemoteDispatchError>),
+    Indeterminate(Report<RemoteDispatchError>),
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub(super) enum RemoteDispatchError {
+    #[error("relay branch delivery {sequence} to node '{target}' was evicted before admission")]
+    BranchEvicted {
+        target: ClusterNodeName,
+        sequence: u64,
+    },
+    #[error("node '{target}' rejected relay admission")]
+    AdmissionRejected { target: ClusterNodeName },
+    #[error("relay admission response channel from node '{target}' closed")]
+    AdmissionResponseClosed { target: ClusterNodeName },
+    #[error("timed out after {timeout:?} waiting for node '{target}' to admit a relay batch")]
+    AdmissionInactivityTimeout {
+        target: ClusterNodeName,
+        timeout: Duration,
+    },
+    #[error("timed out after {timeout:?} waiting for relay admission from node '{target}'")]
+    AdmissionTotalTimeout {
+        target: ClusterNodeName,
+        timeout: Duration,
+    },
+    #[error("failed to cancel relay delivery {sequence} on node '{target}'")]
+    AdmissionCancellation {
+        target: ClusterNodeName,
+        sequence: u64,
+    },
+    #[error("timed out cancelling relay delivery {sequence} on node '{target}'")]
+    AdmissionCancellationTimeout {
+        target: ClusterNodeName,
+        sequence: u64,
+    },
+    #[error("the outcome of relay delivery {sequence} on node '{target}' is indeterminate")]
+    AdmissionIndeterminate {
+        target: ClusterNodeName,
+        sequence: u64,
+    },
+    #[error("relay delivery {sequence} on node '{target}' returned a non-terminal admission state")]
+    AdmissionNonTerminal {
+        target: ClusterNodeName,
+        sequence: u64,
+    },
+    #[error("failed to send a remote payload to node '{target}'")]
+    Send { target: ClusterNodeName },
+    #[error("timed out sending a remote payload to node '{target}'")]
+    SendTimeout { target: ClusterNodeName },
 }
 
 #[derive(Debug, Clone)]
@@ -130,14 +175,13 @@ impl RemoteDispatcher {
         node_id: &ClusterNodeName,
         message: M,
         timeout: Duration,
-    ) -> Result<M::Response, String>
+    ) -> error_stack::Result<M::Response, nervix_interconnect::RequestError>
     where
         M: InterconnectRequest,
     {
         self.interconnect
             .request_with_timeout(node_id, message, timeout)
             .await
-            .map_err(|error| error.to_string())
     }
 
     /// Open a bounded, flow-controlled stream of one bulk response's bytes.
@@ -145,14 +189,14 @@ impl RemoteDispatcher {
         &self,
         node_id: &ClusterNodeName,
         message: M,
-    ) -> Result<nervix_interconnect::IncomingByteStream, String>
+    ) -> error_stack::Result<
+        nervix_interconnect::IncomingByteStream,
+        nervix_interconnect::RequestError,
+    >
     where
         M: nervix_interconnect::InterconnectStreamRequest,
     {
-        self.interconnect
-            .request_stream(node_id, message)
-            .await
-            .map_err(|error| error.to_string())
+        self.interconnect.request_stream(node_id, message).await
     }
 
     pub(super) async fn dispatch_admitted_relay_payload(
@@ -160,9 +204,12 @@ impl RemoteDispatcher {
         node_id: &ClusterNodeName,
         mut payload: RelayPayload,
         branch_channel: &RelayOutboundSlot,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), RemoteDispatchError> {
         if branch_channel.cancellation().is_cancelled() {
-            return Err(REMOTE_RELAY_BRANCH_EVICTED.to_string());
+            return Err(Report::new(RemoteDispatchError::BranchEvicted {
+                target: node_id.clone(),
+                sequence: payload.delivery.sequence,
+            }));
         }
         let admission_id = self.next_ack_id();
         let delivery = payload.delivery;
@@ -180,7 +227,10 @@ impl RemoteDispatcher {
             biased;
             result = &mut dispatch => result,
             () = branch_channel.cancellation().cancelled() => {
-                Err(REMOTE_RELAY_BRANCH_EVICTED.to_string())
+                Err(Report::new(RemoteDispatchError::BranchEvicted {
+                    target: node_id.clone(),
+                    sequence: delivery.sequence,
+                }))
             },
         };
         if let Err(error) = dispatch_result {
@@ -203,7 +253,10 @@ impl RemoteDispatcher {
             biased;
             result = &mut admission => result,
             () = branch_channel.cancellation().cancelled() => {
-                Err(REMOTE_RELAY_BRANCH_EVICTED.to_string())
+                Err(Report::new(RemoteDispatchError::BranchEvicted {
+                    target: node_id.clone(),
+                    sequence: delivery.sequence,
+                }))
             },
         };
         if let Err(error) = result {
@@ -228,7 +281,7 @@ impl RemoteDispatcher {
         &self,
         node_id: &ClusterNodeName,
         delivery: RelayDelivery,
-        original_error: String,
+        original_error: Report<RemoteDispatchError>,
         cancellation_guard: &mut RelayCancellationGuard,
     ) -> FailedRelayAdmissionResolution {
         let deadline = Instant::now()
@@ -255,24 +308,30 @@ impl RemoteDispatcher {
                     | RelayAdmissionStatus::Unknown,
                 )) => {}
                 Ok(Err(error)) => {
-                    return FailedRelayAdmissionResolution::Indeterminate(format!(
-                        "{original_error}; relay admission outcome is indeterminate because \
-                         cancellation failed: {error}"
-                    ));
+                    let report = error
+                        .change_context(RemoteDispatchError::AdmissionCancellation {
+                            target: node_id.clone(),
+                            sequence: delivery.sequence,
+                        })
+                        .attach_printable(original_error);
+                    return FailedRelayAdmissionResolution::Indeterminate(report);
                 }
                 Err(_) => {
-                    return FailedRelayAdmissionResolution::Indeterminate(format!(
-                        "{original_error}; relay admission outcome is indeterminate because \
-                         cancellation did not resolve within {:?}",
-                        Self::DISPATCH_TIMEOUT
-                    ));
+                    let report = Report::new(RemoteDispatchError::AdmissionCancellationTimeout {
+                        target: node_id.clone(),
+                        sequence: delivery.sequence,
+                    })
+                    .attach_printable(original_error);
+                    return FailedRelayAdmissionResolution::Indeterminate(report);
                 }
             }
             if Instant::now() >= deadline {
-                return FailedRelayAdmissionResolution::Indeterminate(format!(
-                    "{original_error}; relay admission outcome remained unresolved for {:?}",
-                    Self::DISPATCH_TIMEOUT
-                ));
+                let report = Report::new(RemoteDispatchError::AdmissionIndeterminate {
+                    target: node_id.clone(),
+                    sequence: delivery.sequence,
+                })
+                .attach_printable(original_error);
+                return FailedRelayAdmissionResolution::Indeterminate(report);
             }
             sleep(Self::DISPATCH_RETRY_INTERVAL).await;
         };
@@ -283,7 +342,12 @@ impl RemoteDispatcher {
             }
             RelayAdmissionStatus::Rejected(reason) => {
                 cancellation_guard.disarm();
-                FailedRelayAdmissionResolution::Failed(reason)
+                FailedRelayAdmissionResolution::Failed(
+                    Report::new(RemoteDispatchError::AdmissionRejected {
+                        target: node_id.clone(),
+                    })
+                    .attach_printable(reason),
+                )
             }
             RelayAdmissionStatus::Cancelled => {
                 cancellation_guard.disarm();
@@ -291,18 +355,23 @@ impl RemoteDispatcher {
             }
             RelayAdmissionStatus::Retired | RelayAdmissionStatus::Indeterminate => {
                 cancellation_guard.disarm();
-                FailedRelayAdmissionResolution::Indeterminate(format!(
-                    "{original_error}; the receiver no longer retains the exact relay admission \
-                     outcome"
-                ))
+                FailedRelayAdmissionResolution::Indeterminate(
+                    Report::new(RemoteDispatchError::AdmissionIndeterminate {
+                        target: node_id.clone(),
+                        sequence: delivery.sequence,
+                    })
+                    .attach_printable(original_error),
+                )
             }
             RelayAdmissionStatus::Reserved
             | RelayAdmissionStatus::BodyReceived
-            | RelayAdmissionStatus::Unknown => {
-                FailedRelayAdmissionResolution::Indeterminate(format!(
-                    "{original_error}; relay cancellation returned a non-terminal admission state"
-                ))
-            }
+            | RelayAdmissionStatus::Unknown => FailedRelayAdmissionResolution::Indeterminate(
+                Report::new(RemoteDispatchError::AdmissionNonTerminal {
+                    target: node_id.clone(),
+                    sequence: delivery.sequence,
+                })
+                .attach_printable(original_error),
+            ),
         }
     }
 
@@ -310,7 +379,7 @@ impl RemoteDispatcher {
         node_id: &ClusterNodeName,
         mut admission: watch::Receiver<RelayAdmissionUpdate>,
         inactivity_timeout: Duration,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), RemoteDispatchError> {
         let total_deadline = Instant::now()
             .checked_add(REMOTE_RELAY_TOTAL_TIMEOUT)
             .assured("the fixed relay total timeout fits the monotonic clock");
@@ -326,21 +395,31 @@ impl RemoteDispatcher {
                     match update {
                         RelayAdmissionUpdate::Pending | RelayAdmissionUpdate::Alive => {}
                         RelayAdmissionUpdate::Admitted => return Ok(()),
-                        RelayAdmissionUpdate::Rejected(error) => return Err(error),
+                        RelayAdmissionUpdate::Rejected(reason) => {
+                            return Err(Report::new(RemoteDispatchError::AdmissionRejected {
+                                target: node_id.clone(),
+                            })
+                            .attach_printable(reason));
+                        }
                     }
                 }
                 Ok(Err(_)) => {
-                    return Err("relay admission response channel closed".to_string());
+                    return Err(Report::new(RemoteDispatchError::AdmissionResponseClosed {
+                        target: node_id.clone(),
+                    }));
                 }
                 Err(_) => {
                     if Instant::now() >= total_deadline {
-                        return Err(format!(
-                            "timed out after {REMOTE_RELAY_TOTAL_TIMEOUT:?} waiting for cluster \
-                             node '{node_id}' to admit a relay batch"
-                        ));
+                        return Err(Report::new(RemoteDispatchError::AdmissionTotalTimeout {
+                            target: node_id.clone(),
+                            timeout: REMOTE_RELAY_TOTAL_TIMEOUT,
+                        }));
                     }
-                    return Err(format!(
-                        "timed out waiting for cluster node '{node_id}' to admit a relay batch"
+                    return Err(Report::new(
+                        RemoteDispatchError::AdmissionInactivityTimeout {
+                            target: node_id.clone(),
+                            timeout: inactivity_timeout,
+                        },
                     ));
                 }
             }
@@ -433,7 +512,7 @@ impl RemoteDispatcher {
         &self,
         node_id: &ClusterNodeName,
         envelope: Envelope,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), RemoteDispatchError> {
         let deadline = Instant::now()
             .checked_add(Self::DISPATCH_TIMEOUT)
             .assured("the fixed remote dispatch timeout fits the monotonic clock");
@@ -446,18 +525,28 @@ impl RemoteDispatcher {
             .await;
             let error = match result {
                 Ok(Ok(())) => return Ok(()),
-                Ok(Err(error)) => format!("failed to send remote relay payload: {error}"),
+                Ok(Err(error)) => error,
                 Err(_) => {
-                    return Err(format!(
-                        "timed out dispatching remote relay payload to '{node_id}'"
-                    ));
+                    return Err(Report::new(RemoteDispatchError::SendTimeout {
+                        target: node_id.clone(),
+                    }));
                 }
             };
             if Instant::now() >= deadline {
-                return Err(error);
+                return Err(
+                    Report::new(error).change_context(RemoteDispatchError::Send {
+                        target: node_id.clone(),
+                    }),
+                );
             }
             tokio::select! {
-                _ = sleep_until(deadline) => return Err(error),
+                _ = sleep_until(deadline) => {
+                    return Err(
+                        Report::new(error).change_context(RemoteDispatchError::Send {
+                            target: node_id.clone(),
+                        }),
+                    );
+                }
                 _ = sleep(Self::DISPATCH_RETRY_INTERVAL) => {}
             }
         }
@@ -1395,15 +1484,13 @@ mod tests {
             });
         });
 
-        assert_eq!(
-            RemoteDispatcher::await_relay_admission(
-                &ClusterNodeName::parse("relay-owner").expect("valid name"),
-                admission_rx,
-                Duration::from_millis(200),
-            )
-            .await,
-            Ok(())
-        );
+        RemoteDispatcher::await_relay_admission(
+            &ClusterNodeName::parse("relay-owner").expect("valid name"),
+            admission_rx,
+            Duration::from_millis(200),
+        )
+        .await
+        .expect("alive progress should preserve the relay admission wait");
         assert!(
             runtime
                 .inner
@@ -1413,6 +1500,68 @@ mod tests {
                 .is_none(),
             "terminal admission ack must clear pending admission state"
         );
+    }
+
+    #[tokio::test]
+    async fn remote_relay_admission_rejection_preserves_the_typed_reason() {
+        let target = ClusterNodeName::parse("relay-owner").expect("valid name");
+        let (admission_tx, admission_rx) = watch::channel(RelayAdmissionUpdate::Pending);
+        admission_tx.send_replace(RelayAdmissionUpdate::Rejected(
+            "branch is draining".to_string(),
+        ));
+
+        let error =
+            RemoteDispatcher::await_relay_admission(&target, admission_rx, Duration::from_secs(1))
+                .await
+                .expect_err("a rejected relay admission must fail dispatch");
+
+        assert!(matches!(
+            error.current_context(),
+            RemoteDispatchError::AdmissionRejected {
+                target: error_target,
+            } if error_target == &target
+        ));
+    }
+
+    #[tokio::test]
+    async fn remote_relay_admission_reports_a_closed_response_channel() {
+        let target = ClusterNodeName::parse("relay-owner").expect("valid name");
+        let (admission_tx, admission_rx) = watch::channel(RelayAdmissionUpdate::Pending);
+        drop(admission_tx);
+
+        let error =
+            RemoteDispatcher::await_relay_admission(&target, admission_rx, Duration::from_secs(1))
+                .await
+                .expect_err("a closed relay admission response must fail dispatch");
+
+        assert!(matches!(
+            error.current_context(),
+            RemoteDispatchError::AdmissionResponseClosed {
+                target: error_target,
+            } if error_target == &target
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn remote_relay_admission_bounds_the_total_wait() {
+        let target = ClusterNodeName::parse("relay-owner").expect("valid name");
+        let (_admission_tx, admission_rx) = watch::channel(RelayAdmissionUpdate::Pending);
+
+        let error = RemoteDispatcher::await_relay_admission(
+            &target,
+            admission_rx,
+            REMOTE_RELAY_TOTAL_TIMEOUT + Duration::from_secs(1),
+        )
+        .await
+        .expect_err("relay admission must stop at its total deadline");
+
+        assert!(matches!(
+            error.current_context(),
+            RemoteDispatchError::AdmissionTotalTimeout {
+                target: error_target,
+                timeout: REMOTE_RELAY_TOTAL_TIMEOUT,
+            } if error_target == &target
+        ));
     }
 
     #[tokio::test]

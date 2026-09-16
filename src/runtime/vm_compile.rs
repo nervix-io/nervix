@@ -1,4 +1,148 @@
+//! Runtime bindings for programs accepted by the expression VM.
+//!
+//! Layer: data plane.
+//! - **Owns.** Binding planned expression programs to runtime schemas, state and UDFs.
+//! - **Depends on.** Typed execution plans, the expression VM and runtime infrastructure.
+//! - **Must not know.** NSPL text, parser state or control-plane transactions.
+//!
+//! This module still receives semantic Models directly instead of a validated execution plan.
+
+use error_stack::ResultExt as _;
+
 use super::*;
+
+#[derive(Debug, Clone, Copy, strum::Display)]
+pub(in crate::runtime) enum KeyProjectionKind {
+    #[strum(serialize = "deduplicator")]
+    Deduplicator,
+    #[strum(serialize = "reorderer")]
+    Reorderer,
+}
+
+impl KeyProjectionKind {
+    const fn clause(self) -> &'static str {
+        match self {
+            Self::Deduplicator => "DEDUPLICATE ON",
+            Self::Reorderer => "BY",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(in crate::runtime) struct KeyProjectionTarget {
+    kind: KeyProjectionKind,
+    processor: ModelName,
+}
+
+impl std::fmt::Display for KeyProjectionTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} '{}' {}",
+            self.kind,
+            self.processor,
+            self.kind.clause()
+        )
+    }
+}
+
+/// Why the runtime could not bind a semantic expression program to the expression VM.
+#[derive(Debug, Error)]
+pub(in crate::runtime) enum RuntimeVmCompileError {
+    #[error(
+        "materialized relay 'relay_state.{relay}' uses branch fields {materialized_branching:?} \
+         but current input uses {current_branching:?}"
+    )]
+    MaterializedBranchMismatch {
+        relay: RelayName,
+        materialized_branching: Vec<FieldName>,
+        current_branching: Vec<FieldName>,
+    },
+    #[error("materialized relay '{relay}' has no field '{field}'")]
+    MissingMaterializedField { relay: RelayName, field: String },
+    #[error(
+        "message-error metadata has {operations} SET operations for {assignments} lowered \
+         assignments"
+    )]
+    MessageErrorSetCountMismatch {
+        operations: usize,
+        assignments: usize,
+    },
+    #[error("too many ordered {operation:?} operations; index {index} does not fit in u32")]
+    MessageErrorOperationIndexOverflow {
+        operation: MessageErrorOperation,
+        index: usize,
+    },
+    #[error("message-error metadata is missing the filter operation")]
+    MissingMessageErrorFilterOperation,
+    #[error("message-error SET for '{node}' in domain '{domain}' is invalid")]
+    InvalidMessageErrorSet { domain: DomainName, node: ModelName },
+    #[error("failed to rewrite LOOKUP_HASH_MAP calls in message-error SET for '{node}'")]
+    RewriteMessageErrorLookups { node: ModelName },
+    #[error("failed to compile LOOKUP_HASH_MAP calls in message-error SET for '{node}'")]
+    CompileMessageErrorLookups { node: ModelName },
+    #[error("message-error SET compile failed for '{node}': {source}")]
+    CompileMessageErrorSet {
+        node: ModelName,
+        #[source]
+        source: nervix_vm::CompileError,
+    },
+    #[error("{target} requires at least one input relay")]
+    MissingKeyProjectionInput { target: KeyProjectionTarget },
+    #[error("{target} is invalid")]
+    InvalidKeyProjection { target: KeyProjectionTarget },
+    #[error("{target} type inference failed: {source}")]
+    InferKeyProjection {
+        target: KeyProjectionTarget,
+        #[source]
+        source: nervix_vm::CompileError,
+    },
+    #[error("{target} inferred {actual} key fields for {expected} expressions")]
+    KeyProjectionFieldCountMismatch {
+        target: KeyProjectionTarget,
+        expected: usize,
+        actual: usize,
+    },
+    #[error("{target} compile failed: {source}")]
+    CompileKeyProjection {
+        target: KeyProjectionTarget,
+        #[source]
+        source: nervix_vm::CompileError,
+    },
+    #[error("constant expression is invalid")]
+    InvalidConstantExpression,
+    #[error("constant expression type inference failed: {source}")]
+    InferConstantExpression {
+        #[source]
+        source: nervix_vm::CompileError,
+    },
+    #[error("constant expression compile failed: {source}")]
+    CompileConstantExpression {
+        #[source]
+        source: nervix_vm::CompileError,
+    },
+    #[error("failed to build the constant expression input batch: {source}")]
+    BuildConstantInput {
+        #[source]
+        source: nervix_vm::RuntimeError,
+    },
+    #[error("constant expression execution failed: {source}")]
+    ExecuteConstantExpression {
+        #[source]
+        source: nervix_vm::RuntimeError,
+    },
+    #[error("constant expression did not produce exactly one row")]
+    ConstantExpressionRowCount,
+    #[error("failed to read field '{field}' from the constant expression output")]
+    ReadConstantOutput { field: FieldName },
+    #[error("constant expression produced NULL")]
+    NullConstantExpression,
+    #[error("reorderer '{processor}' requires at least one BY expression")]
+    MissingReordererOrder { processor: ModelName },
+}
+
+pub(in crate::runtime) type RuntimeVmCompileResult<T> =
+    error_stack::Result<T, RuntimeVmCompileError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runtime) enum MaterializedLookupKeyMode {
@@ -210,7 +354,7 @@ pub(super) fn referenced_materialized_stream_bindings(
     writable_namespaces: &HashSet<String>,
     available_materialized_streams: &HashMap<RelayName, RuntimeMaterializedRelaySpec>,
     current_branching: &[FieldName],
-) -> Result<(Vec<VmCompileBinding>, MaterializedProgramInterest), String> {
+) -> RuntimeVmCompileResult<(Vec<VmCompileBinding>, MaterializedProgramInterest)> {
     let mut fields_by_relay = HashMap::<RelayName, BTreeSet<String>>::default();
     for (relay, field) in collect_program_field_refs(&parsed.inner) {
         if writable_namespaces.contains(&relay)
@@ -229,12 +373,12 @@ pub(super) fn referenced_materialized_stream_bindings(
             continue;
         };
         if !spec.branching.is_empty() && spec.branching != current_branching {
-            return Err(format!(
-                "materialized relay 'relay_state.{}' uses branch fields ({}) but current input \
-                 uses ({})",
-                relay.as_str(),
-                format_branched_by(&spec.branching),
-                format_branched_by(current_branching),
+            return Err(Report::new(
+                RuntimeVmCompileError::MaterializedBranchMismatch {
+                    relay,
+                    materialized_branching: spec.branching.clone(),
+                    current_branching: current_branching.to_vec(),
+                },
             ));
         }
         fields_by_relay.entry(relay).or_default().insert(field);
@@ -272,14 +416,13 @@ pub(super) fn referenced_materialized_stream_bindings(
                         column_index,
                     })
                     .map_err(|_| {
-                        format!(
-                            "materialized relay '{}' has no field '{}'",
-                            relay.as_str(),
-                            name
-                        )
+                        Report::new(RuntimeVmCompileError::MissingMaterializedField {
+                            relay: relay.clone(),
+                            field: name.clone(),
+                        })
                     })
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<RuntimeVmCompileResult<Vec<_>>>()?;
         bindings.push(
             VmCompileBinding::readonly(
                 format!("relay_state.{}", relay.as_str()),
@@ -348,12 +491,13 @@ pub(super) fn compiled_message_error_sites(
     program: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     set_operations: &[MessageErrorOperation],
     filter_operation: Option<MessageErrorOperation>,
-) -> Result<CompiledMessageErrorSites, String> {
+) -> RuntimeVmCompileResult<CompiledMessageErrorSites> {
     if set_operations.len() != program.inner.set.len() {
-        return Err(format!(
-            "message-error metadata has {} SET operations for {} lowered assignments",
-            set_operations.len(),
-            program.inner.set.len()
+        return Err(Report::new(
+            RuntimeVmCompileError::MessageErrorSetCountMismatch {
+                operations: set_operations.len(),
+                assignments: program.inner.set.len(),
+            },
         ));
     }
     let mut sites = CompiledMessageErrorSites::new();
@@ -366,10 +510,12 @@ pub(super) fn compiled_message_error_sites(
             expression.span,
             CompiledMessageErrorSite {
                 operation: *operation,
-                operation_index: Some(
-                    u32::try_from(index)
-                        .map_err(|_| "too many ordered SET operations".to_string())?,
-                ),
+                operation_index: Some(u32::try_from(index).map_err(|_| {
+                    Report::new(RuntimeVmCompileError::MessageErrorOperationIndexOverflow {
+                        operation: *operation,
+                        index,
+                    })
+                })?),
                 fields: SortedSet::from_unsorted(fields),
             },
         );
@@ -381,7 +527,7 @@ pub(super) fn compiled_message_error_sites(
             expression.span,
             CompiledMessageErrorSite {
                 operation: filter_operation.ok_or_else(|| {
-                    "message-error metadata is missing the filter operation".to_string()
+                    Report::new(RuntimeVmCompileError::MissingMessageErrorFilterOperation)
                 })?,
                 operation_index: None,
                 fields: SortedSet::from_unsorted(fields),
@@ -397,10 +543,12 @@ pub(super) fn compiled_message_error_sites(
             invocation.span,
             CompiledMessageErrorSite {
                 operation: MessageErrorOperation::Invoke,
-                operation_index: Some(
-                    u32::try_from(index)
-                        .map_err(|_| "too many ordered INVOKE operations".to_string())?,
-                ),
+                operation_index: Some(u32::try_from(index).map_err(|_| {
+                    Report::new(RuntimeVmCompileError::MessageErrorOperationIndexOverflow {
+                        operation: MessageErrorOperation::Invoke,
+                        index,
+                    })
+                })?),
                 fields: SortedSet::from_unsorted(fields),
             },
         );
@@ -450,7 +598,7 @@ pub(super) fn compile_message_error_set_program(
     output_schema: Arc<CompiledSchema>,
     schemas: MessageErrorCompileSchemas,
     context: RuntimeVmCompileContext<'_>,
-) -> Result<CompiledProgramWithMaterializedInterest, String> {
+) -> RuntimeVmCompileResult<CompiledProgramWithMaterializedInterest> {
     let parsed = lower_route_construction(
         &RouteConstruction {
             assignments: assignments.to_vec(),
@@ -458,12 +606,9 @@ pub(super) fn compile_message_error_set_program(
         },
         SemanticNamespaces::new("error_output", "error_output"),
     )
-    .map_err(|reason| {
-        format!(
-            "message-error SET for '{}' in domain '{}' is invalid: {reason}",
-            node.as_str(),
-            domain.as_str()
-        )
+    .change_context(RuntimeVmCompileError::InvalidMessageErrorSet {
+        domain: domain.clone(),
+        node: node.clone(),
     })?;
     let set_operations = vec![MessageErrorOperation::Set; parsed.inner.set.len()];
     let error_sites = compiled_message_error_sites(&parsed, &set_operations, None)?;
@@ -519,15 +664,20 @@ pub(super) fn compile_message_error_set_program(
     )?;
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
-        rewrite_lookup_hash_map_program(&parsed, context.available_lookups)
-            .map_err(|error| error.to_string())?;
+        rewrite_lookup_hash_map_program(&parsed, context.available_lookups).map_err(|reason| {
+            Report::new(RuntimeVmCompileError::RewriteMessageErrorLookups { node: node.clone() })
+                .attach_printable(reason)
+        })?;
     let (lookup_hash_maps, lookup_binding) = compile_lookup_hash_map_calls(
         pending_lookup_calls,
         "error_output",
         &bindings,
         context.udfs,
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|reason| {
+        Report::new(RuntimeVmCompileError::CompileMessageErrorLookups { node: node.clone() })
+            .attach_printable(reason)
+    })?;
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
     }
@@ -543,12 +693,11 @@ pub(super) fn compile_message_error_set_program(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|error| {
-        format!(
-            "message-error SET compile failed for '{}': {}",
-            node.as_str(),
-            error.message
-        )
+    .map_err(|source| {
+        Report::new(RuntimeVmCompileError::CompileMessageErrorSet {
+            node: node.clone(),
+            source,
+        })
     })?;
     Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
@@ -671,7 +820,7 @@ pub(super) fn compile_scoped_filter_program(
         compiled_message_error_sites(&parsed, &[], Some(filter_operation)).map_err(|reason| {
             RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
-                reason,
+                reason: format!("{reason:#}"),
             }
         })?;
     let mut local_namespaces =
@@ -694,7 +843,7 @@ pub(super) fn compile_scoped_filter_program(
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
-        reason,
+        reason: format!("{reason:#}"),
     })?;
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
@@ -814,7 +963,7 @@ pub(super) fn compile_processor_output_filter_map_program(
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
-        reason,
+        reason: format!("{reason:#}"),
     })?;
     let original_parsed = parsed.clone();
     let mut bindings = vec![
@@ -860,7 +1009,7 @@ pub(super) fn compile_processor_output_filter_map_program(
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
-        reason,
+        reason: format!("{reason:#}"),
     })?;
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
@@ -958,7 +1107,7 @@ pub(super) fn compile_output_branch_program(
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
-        reason,
+        reason: format!("{reason:#}"),
     })?;
     let original_parsed = parsed.clone();
     let mut bindings = vec![
@@ -983,7 +1132,7 @@ pub(super) fn compile_output_branch_program(
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
-        reason,
+        reason: format!("{reason:#}"),
     })?;
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
@@ -1078,7 +1227,7 @@ pub(super) fn compile_wasm_output_filter_map_program(
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
-        reason,
+        reason: format!("{reason:#}"),
     })?;
 
     let original_parsed = parsed.clone();
@@ -1104,7 +1253,7 @@ pub(super) fn compile_wasm_output_filter_map_program(
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
-        reason,
+        reason: format!("{reason:#}"),
     })?;
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
@@ -1248,7 +1397,7 @@ pub(in crate::runtime) fn compile_emitter_filter_map_program(
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
-        reason,
+        reason: format!("{reason:#}"),
     })?;
 
     let body = compile_emitter_filter_map_part(
@@ -1312,7 +1461,7 @@ pub(in crate::runtime) fn compile_sqs_fifo_group_program(
     let error_sites = compiled_message_error_sites(&parsed, &[MessageErrorOperation::Set], None)
         .map_err(|reason| RuntimeError::BuildDomainExecution {
             domain: domain.as_str().to_string(),
-            reason,
+            reason: format!("{reason:#}"),
         })?;
     compile_emitter_filter_map_part(
         RuntimeCompileTarget {
@@ -1375,7 +1524,7 @@ pub(super) fn compile_emitter_filter_map_part(
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
-        reason,
+        reason: format!("{reason:#}"),
     })?;
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
@@ -1441,20 +1590,20 @@ pub(super) fn compile_emitter_filter_map_part(
 }
 
 pub(in crate::runtime) fn compile_key_projection_program(
-    processor_kind: &str,
+    kind: KeyProjectionKind,
     processor: &ModelName,
-    clause: &str,
     input_relays: &[RelayName],
     expressions: &[nervix_models::Expression],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
-) -> Result<VmCompiledProgram, String> {
+) -> RuntimeVmCompileResult<VmCompiledProgram> {
+    let target = KeyProjectionTarget {
+        kind,
+        processor: processor.clone(),
+    };
     if input_relays.is_empty() {
-        return Err(format!(
-            "{} '{}' {} requires at least one input relay",
-            processor_kind,
-            processor.as_str(),
-            clause
+        return Err(Report::new(
+            RuntimeVmCompileError::MissingKeyProjectionInput { target },
         ));
     }
     let assignments = expressions
@@ -1463,17 +1612,14 @@ pub(in crate::runtime) fn compile_key_projection_program(
         .map(|(index, expression)| {
             Ok(nervix_models::Assignment {
                 target: nervix_models::AssignmentTarget::bare(
-                    FieldName::parse(&format!("key_{index}")).map_err(|error| {
-                        format!(
-                            "{processor_kind} '{}' has invalid key target: {error}",
-                            processor
-                        )
-                    })?,
+                    FieldName::parse(&format!("key_{index}")).assured(
+                        "key targets contain a fixed alphabet and at most one usize of digits",
+                    ),
                 ),
                 value: expression.clone(),
             })
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<RuntimeVmCompileResult<Vec<_>>>()?;
     let parsed = lower_route_construction(
         &RouteConstruction {
             assignments,
@@ -1481,34 +1627,26 @@ pub(in crate::runtime) fn compile_key_projection_program(
         },
         SemanticNamespaces::new("input", "input"),
     )
-    .map_err(|reason| {
-        format!(
-            "{} '{}' {} is invalid: {}",
-            processor_kind,
-            processor.as_str(),
-            clause,
-            reason
-        )
+    .change_context(RuntimeVmCompileError::InvalidKeyProjection {
+        target: target.clone(),
     })?;
     let bindings = vec![VmCompileBinding::writable("input", input_schema.clone())];
     let signatures = runtime_udf_signatures(udfs);
     let key_types =
         infer_vm_set_expr_types_for_bindings_with_udfs(&parsed, bindings.clone(), signatures)
-            .map_err(|error| {
-                format!(
-                    "{} '{}' {} compile failed: {}",
-                    processor_kind,
-                    processor.as_str(),
-                    clause,
-                    error.message
-                )
+            .map_err(|source| {
+                Report::new(RuntimeVmCompileError::InferKeyProjection {
+                    target: target.clone(),
+                    source,
+                })
             })?;
     if key_types.len() != expressions.len() {
-        return Err(format!(
-            "{} '{}' {} inferred a different number of key fields",
-            processor_kind,
-            processor.as_str(),
-            clause
+        return Err(Report::new(
+            RuntimeVmCompileError::KeyProjectionFieldCountMismatch {
+                target,
+                expected: expressions.len(),
+                actual: key_types.len(),
+            },
         ));
     }
     let output_schema = StdArc::new(arrow_schema::Schema::new(
@@ -1532,27 +1670,20 @@ pub(in crate::runtime) fn compile_key_projection_program(
             },
         ),
     )
-    .map_err(|error| {
-        format!(
-            "{} '{}' {} compile failed: {}",
-            processor_kind,
-            processor.as_str(),
-            clause,
-            error.message
-        )
-    })
+    .map_err(|source| Report::new(RuntimeVmCompileError::CompileKeyProjection { target, source }))
 }
 
 pub(super) async fn evaluate_constant_expression_vm(
     expression: &nervix_models::Expression,
     udfs: Option<&UdfExecutor>,
     execution_now: Timestamp,
-) -> Result<RuntimeValue, String> {
+) -> RuntimeVmCompileResult<RuntimeValue> {
     const OUTPUT_NAMESPACE: &str = "constant";
     const OUTPUT_FIELD: &str = "value";
     let assignment = nervix_models::Assignment {
         target: nervix_models::AssignmentTarget::bare(
-            FieldName::parse(OUTPUT_FIELD).map_err(|error| error.to_string())?,
+            FieldName::parse(OUTPUT_FIELD)
+                .assured("value is a language-defined constant output field name"),
         ),
         value: expression.clone(),
     };
@@ -1563,7 +1694,7 @@ pub(super) async fn evaluate_constant_expression_vm(
         },
         SemanticNamespaces::new("input", OUTPUT_NAMESPACE),
     )
-    .map_err(|reason| format!("constant expression is invalid: {reason}"))?;
+    .change_context(RuntimeVmCompileError::InvalidConstantExpression)?;
     let empty_schema = StdArc::new(arrow_schema::Schema::empty());
     let infer_bindings = vec![
         VmCompileBinding::readonly("input", empty_schema.clone()),
@@ -1574,12 +1705,7 @@ pub(super) async fn evaluate_constant_expression_vm(
         infer_bindings,
         runtime_udf_signatures(udfs),
     )
-    .map_err(|error| {
-        format!(
-            "constant expression type inference failed: {}",
-            error.message
-        )
-    })?;
+    .map_err(|source| Report::new(RuntimeVmCompileError::InferConstantExpression { source }))?;
     let output_schema = StdArc::new(arrow_schema::Schema::new(
         inferred
             .into_iter()
@@ -1606,7 +1732,9 @@ pub(super) async fn evaluate_constant_expression_vm(
                 },
             ),
         )
-        .map_err(|error| format!("constant expression compile failed: {}", error.message))?,
+        .map_err(|source| {
+            Report::new(RuntimeVmCompileError::CompileConstantExpression { source })
+        })?,
     );
     let input = VmTypedBatch::try_new_with_row_count(
         compiled.input_schema.clone(),
@@ -1618,7 +1746,7 @@ pub(super) async fn evaluate_constant_expression_vm(
             .collect(),
         1,
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|source| Report::new(RuntimeVmCompileError::BuildConstantInput { source }))?;
     let result = execute_program_with_selection_in_context(
         &compiled,
         &input,
@@ -1628,12 +1756,22 @@ pub(super) async fn evaluate_constant_expression_vm(
         },
     )
     .await
-    .map_err(|error| format!("constant expression execution failed: {error}"))?;
+    .map_err(|source| Report::new(RuntimeVmCompileError::ExecuteConstantExpression { source }))?;
     if !result.selected_rows.is_single(0) {
-        return Err("constant expression did not produce exactly one row".to_string());
+        return Err(Report::new(
+            RuntimeVmCompileError::ConstantExpressionRowCount,
+        ));
     }
-    vm_output_value(&result.batch, 0, OUTPUT_FIELD)?
-        .ok_or_else(|| "constant expression produced NULL".to_string())
+    let output_field = FieldName::parse(OUTPUT_FIELD)
+        .assured("value is a language-defined constant output field name");
+    vm_output_value(&result.batch, 0, OUTPUT_FIELD)
+        .map_err(|reason| {
+            Report::new(RuntimeVmCompileError::ReadConstantOutput {
+                field: output_field,
+            })
+            .attach_printable(reason)
+        })?
+        .ok_or_else(|| Report::new(RuntimeVmCompileError::NullConstantExpression))
 }
 
 pub(super) fn compile_reorderer_program(
@@ -1642,17 +1780,15 @@ pub(super) fn compile_reorderer_program(
     order_by: &[nervix_models::Expression],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
-) -> Result<CompiledReordererProgram, String> {
+) -> RuntimeVmCompileResult<CompiledReordererProgram> {
     if order_by.is_empty() {
-        return Err(format!(
-            "reorderer '{}' requires at least one BY expression",
-            processor.as_str()
-        ));
+        return Err(Report::new(RuntimeVmCompileError::MissingReordererOrder {
+            processor: processor.clone(),
+        }));
     }
     let compiled = compile_key_projection_program(
-        "reorderer",
+        KeyProjectionKind::Reorderer,
         processor,
-        "BY",
         input_relays,
         order_by,
         input_schema,
@@ -1709,7 +1845,7 @@ pub(super) fn compile_ingestor_filter_map_program(
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
-        reason,
+        reason: format!("{reason:#}"),
     })?;
 
     let mut bindings = vec![
@@ -1733,7 +1869,7 @@ pub(super) fn compile_ingestor_filter_map_program(
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
-        reason,
+        reason: format!("{reason:#}"),
     })?;
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
@@ -1828,7 +1964,7 @@ pub(super) fn compile_generator_set_program(
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
-        reason,
+        reason: format!("{reason:#}"),
     })?;
     let mut bindings = vec![
         VmCompileBinding::writable("output", output_schema.clone())
@@ -1958,12 +2094,14 @@ pub(super) fn relay_schema_for_runtime(
     runtime: &Runtime,
     domain: &DomainName,
     relay: &RelayName,
-) -> Result<Arc<CompiledSchema>, String> {
+) -> Result<Arc<CompiledSchema>, Report<DomainRoutingError>> {
     let Some(routing) = runtime.domain_routing(domain) else {
-        return Err(format!("domain '{}' is not instantiated", domain.as_str()));
+        return Err(Report::new(DomainRoutingError::DomainNotInstantiated {
+            domain: domain.clone(),
+        }));
     };
     let routing = routing.load();
-    relay_schema_for_routing(&routing, domain, relay).map_err(|error| error.to_string())
+    relay_schema_for_routing(&routing, domain, relay)
 }
 
 pub(super) fn relay_schema_for_routing(
@@ -1992,12 +2130,204 @@ pub(super) fn relay_branch_schema_for_routing(
 
 #[cfg(test)]
 mod tests {
-    use ahash::HashMap;
+    use ahash::{HashMap, HashSet};
     use nervix_models::{CreateSchema, ModelName, ParseAsType, Timestamp};
     use triomphe::Arc;
 
     use super::*;
     use crate::runtime_schema::{RuntimeValue, compile_schema, test_runtime_row};
+
+    fn program_with_filter(
+        expression: Expr,
+    ) -> nervix_vm::program::SpannedNode<nervix_vm::program::Program> {
+        nervix_vm::program::SpannedNode {
+            inner: nervix_vm::program::Program {
+                filter: Some(nervix_vm::program::SpannedNode {
+                    inner: expression,
+                    span: (0..0).into(),
+                }),
+                set: Vec::new(),
+                invoke: Vec::new(),
+            },
+            span: (0..0).into(),
+        }
+    }
+
+    fn materialized_reference_program(
+        relay: &RelayName,
+        field: &str,
+    ) -> nervix_vm::program::SpannedNode<nervix_vm::program::Program> {
+        program_with_filter(Expr::FieldRef(nervix_vm::program::FieldRef {
+            relay: format!("relay_state.{relay}"),
+            field: field.to_string(),
+        }))
+    }
+
+    #[test]
+    fn message_error_metadata_mismatch_carries_both_counts() {
+        let program = nervix_vm::program::SpannedNode {
+            inner: nervix_vm::program::Program {
+                filter: None,
+                set: Vec::new(),
+                invoke: Vec::new(),
+            },
+            span: (0..0).into(),
+        };
+
+        let error = compiled_message_error_sites(&program, &[MessageErrorOperation::Set], None)
+            .expect_err("metadata and lowered assignments must have equal cardinality");
+
+        let RuntimeVmCompileError::MessageErrorSetCountMismatch {
+            operations,
+            assignments,
+        } = error.current_context()
+        else {
+            panic!("unexpected VM compile error: {error:#}");
+        };
+        assert_eq!((*operations, *assignments), (1, 0));
+    }
+
+    #[test]
+    fn materialized_binding_errors_carry_relay_fields_and_branches() {
+        let relay = named::<RelayName>("state");
+        let value = named::<FieldName>("value");
+        let tenant = named::<FieldName>("tenant");
+        let region = named::<FieldName>("region");
+        let schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            value.as_str(),
+            ArrowDataType::Int64,
+            false,
+        )]));
+        let mut available = HashMap::default();
+        available.insert(
+            relay.clone(),
+            RuntimeMaterializedRelaySpec::new(
+                schema.clone(),
+                VmSchemaSensitivity::default(),
+                vec![tenant.clone()],
+            ),
+        );
+
+        let program = materialized_reference_program(&relay, value.as_str());
+        let error = referenced_materialized_stream_bindings(
+            &program,
+            &HashSet::default(),
+            &available,
+            std::slice::from_ref(&region),
+        )
+        .expect_err("different branch contracts must be rejected");
+        let RuntimeVmCompileError::MaterializedBranchMismatch {
+            relay: actual_relay,
+            materialized_branching,
+            current_branching,
+        } = error.current_context()
+        else {
+            panic!("unexpected VM compile error: {error:#}");
+        };
+        assert_eq!(actual_relay, &relay);
+        assert_eq!(materialized_branching, std::slice::from_ref(&tenant));
+        assert_eq!(current_branching, std::slice::from_ref(&region));
+
+        available.insert(
+            relay.clone(),
+            RuntimeMaterializedRelaySpec::new(schema, VmSchemaSensitivity::default(), Vec::new()),
+        );
+        let missing = "missing";
+        let program = materialized_reference_program(&relay, missing);
+        let error =
+            referenced_materialized_stream_bindings(&program, &HashSet::default(), &available, &[])
+                .expect_err("an unknown materialized field must be rejected");
+        let RuntimeVmCompileError::MissingMaterializedField {
+            relay: actual_relay,
+            field,
+        } = error.current_context()
+        else {
+            panic!("unexpected VM compile error: {error:#}");
+        };
+        assert_eq!(actual_relay, &relay);
+        assert_eq!(field, missing);
+    }
+
+    #[test]
+    fn key_projection_errors_carry_the_processor_kind_and_name() {
+        let processor = named::<ModelName>("ordered_messages");
+        let input_schema = StdArc::new(arrow_schema::Schema::empty());
+        let cases = [
+            (
+                KeyProjectionKind::Deduplicator,
+                "deduplicator 'ordered_messages' DEDUPLICATE ON requires at least one input relay",
+            ),
+            (
+                KeyProjectionKind::Reorderer,
+                "reorderer 'ordered_messages' BY requires at least one input relay",
+            ),
+        ];
+        for (kind, expected) in cases {
+            let error = compile_key_projection_program(
+                kind,
+                &processor,
+                &[],
+                &[],
+                input_schema.clone(),
+                None,
+            )
+            .expect_err("a key projection must have an input relay");
+            let RuntimeVmCompileError::MissingKeyProjectionInput { target } =
+                error.current_context()
+            else {
+                panic!("unexpected VM compile error: {error:#}");
+            };
+            assert_eq!(target.processor, processor);
+            assert_eq!(error.to_string(), expected);
+        }
+
+        let input_relays = [named::<RelayName>("messages")];
+        let expressions = [expression("missing")];
+        let error = compile_key_projection_program(
+            KeyProjectionKind::Deduplicator,
+            &processor,
+            &input_relays,
+            &expressions,
+            input_schema,
+            None,
+        )
+        .expect_err("an unknown key field must fail type inference");
+        let RuntimeVmCompileError::InferKeyProjection { target, .. } = error.current_context()
+        else {
+            panic!("unexpected VM compile error: {error:#}");
+        };
+        assert!(matches!(target.kind, KeyProjectionKind::Deduplicator));
+        assert_eq!(target.processor, processor);
+    }
+
+    #[test]
+    fn missing_filter_metadata_and_reorderer_order_are_typed() {
+        let program = program_with_filter(Expr::Literal(Literal::Bool(true)));
+        let error = compiled_message_error_sites(&program, &[], None)
+            .expect_err("a lowered filter must have operation metadata");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeVmCompileError::MissingMessageErrorFilterOperation
+        ));
+
+        let processor = named::<ModelName>("ordered_messages");
+        let error = compile_reorderer_program(
+            &processor,
+            &[],
+            &[],
+            StdArc::new(arrow_schema::Schema::empty()),
+            None,
+        )
+        .expect_err("a reorderer must declare at least one order expression");
+        let RuntimeVmCompileError::MissingReordererOrder {
+            processor: actual_processor,
+        } = error.current_context()
+        else {
+            panic!("unexpected VM compile error: {error:#}");
+        };
+        assert_eq!(actual_processor, &processor);
+    }
+
     #[test]
     fn filter_map_rejects_branch_namespace_without_branch_schema() {
         let schema = test_schema(&[("tenant", ParseAsType::String)]);

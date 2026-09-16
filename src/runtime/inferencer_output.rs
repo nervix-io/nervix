@@ -65,7 +65,7 @@ pub(super) async fn flush_branch_inferencer_output(
                 processor,
                 error_policies,
                 forwarded.acks.iter(),
-                error,
+                error.to_string(),
             );
             return;
         }
@@ -315,6 +315,7 @@ pub(super) async fn flush_branch_inferencer_output(
                     field,
                 )
                 .map(|column| column.to_array_ref())
+                .map_err(|error| error.to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
         let batch = RecordBatch::try_new(tensor_schema.clone(), columns)

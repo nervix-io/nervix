@@ -84,7 +84,7 @@ impl SqsIngestor {
             .map_err(|reason| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-                reason,
+                reason: reason.to_string(),
             })?;
         let client = Self::client_from_config(&resolved_client.entries)
             .await
@@ -134,6 +134,12 @@ impl SqsIngestor {
                     instance = instance_idx,
                     "started sqs ingestor"
                 );
+
+                // Both ACK root counters belong to this ingestor for as long as it runs, so the
+                // record path holds them instead of resolving them from the shared in-flight maps
+                // per record.
+                let ack_root_trackers =
+                    task_runtime.ingestor_ack_root_trackers(&task_domain, &task_ingestor);
 
                 loop {
                     tokio::task::consume_budget().await;
@@ -209,11 +215,8 @@ impl SqsIngestor {
                                                         let metadata = [IngestMetadataRow::Headers {
                                                             headers: &headers,
                                                         }];
-                                                        let (acks, completion) = task_runtime
-                                                            .tracked_ingestor_ack_root(
-                                                                &task_domain,
-                                                                &task_ingestor,
-                                                            );
+                                                        let (acks, completion) =
+                                                            ack_root_trackers.tracked_root();
                                                         let dispatch_result = task_runtime
                                                             .dispatch_ingested_records(IngestGroupDispatch {
                                                                 collector: &mut collector,

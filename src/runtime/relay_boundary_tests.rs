@@ -968,7 +968,9 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
     let relay = named("notifications");
     let branch = string_branch_key("tenant", "acme");
     let expiring_state = runtime.expiring_stream_state(&domain, &relay);
-    expiring_state.touch(&branch, Timestamp::from_unix_nanos(1));
+    expiring_state
+        .registry
+        .touch(&branch, Timestamp::from_unix_nanos(1));
     let (shutdown, _) = watch::channel(false);
 
     runtime
@@ -997,7 +999,7 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
         )
         .await;
 
-    assert!(expiring_state.contains_key(&branch));
+    assert!(expiring_state.registry.contains_key(&branch));
 }
 
 #[tokio::test]

@@ -1,5 +1,111 @@
 use super::*;
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub(crate) enum RuntimeResourceError {
+    #[error("protobuf descriptor configuration key '{key}' is unsupported")]
+    UnsupportedProtobufConfigKey { key: String },
+    #[error("protobuf resource '{resource}' version {version} has an invalid source path '{path}'")]
+    InvalidProtobufSourcePath {
+        resource: ResourceName,
+        version: u64,
+        path: String,
+    },
+    #[error("protobuf resource '{resource}' version {version} contains no source files")]
+    MissingProtobufSources {
+        resource: ResourceName,
+        version: u64,
+    },
+    #[error(
+        "protobuf resource '{resource}' version {version} has an invalid include path '{path}'"
+    )]
+    InvalidProtobufIncludePath {
+        resource: ResourceName,
+        version: u64,
+        path: String,
+    },
+    #[error("failed to compile protobuf resource '{resource}' version {version}")]
+    ProtobufCompilation {
+        resource: ResourceName,
+        version: u64,
+    },
+    #[error("failed to read protobuf resource directory '{directory}'")]
+    ReadProtobufDirectory { directory: PathBuf },
+    #[error("failed to read an entry in protobuf resource directory '{directory}'")]
+    ReadProtobufDirectoryEntry { directory: PathBuf },
+    #[error("failed to inspect protobuf resource path '{path}'")]
+    InspectProtobufPath { path: PathBuf },
+    #[error(
+        "protobuf descriptors for resource '{resource}' in domain '{domain}' require a resource \
+         store"
+    )]
+    ProtobufStoreUnavailable {
+        domain: DomainName,
+        resource: ResourceName,
+    },
+    #[error(
+        "protobuf descriptor compilation for resource '{resource}' version {version} did not \
+         complete"
+    )]
+    ProtobufTask {
+        resource: ResourceName,
+        version: u64,
+    },
+    #[error("protobuf resource '{resource}' version {version} produced an invalid descriptor set")]
+    InvalidProtobufDescriptorSet {
+        resource: ResourceName,
+        version: u64,
+    },
+    #[error("resource specification '{spec}' has an invalid identifier")]
+    InvalidResourceIdentifier { spec: String },
+    #[error("resource specification '{spec}' names '{actual}' instead of '{expected}'")]
+    ResourceIdentifierMismatch {
+        spec: String,
+        expected: ResourceName,
+        actual: ResourceName,
+    },
+    #[error("resource '{resource}' in domain '{domain}' has an invalid requested version")]
+    InvalidResourceVersion {
+        domain: DomainName,
+        resource: ResourceName,
+    },
+    #[error("resource '{resource}' has no installed versions in domain '{domain}'")]
+    ResourceUnavailable {
+        domain: DomainName,
+        resource: ResourceName,
+    },
+    #[error("client resource '{resource}' in domain '{domain}' requires a resource store")]
+    ClientResourceStoreUnavailable {
+        domain: DomainName,
+        resource: ResourceName,
+    },
+    #[error(
+        "failed to create the mount root for client resource '{resource}' in domain '{domain}'"
+    )]
+    ClientMountRoot {
+        domain: DomainName,
+        resource: ResourceName,
+    },
+    #[error(
+        "client resource '{resource}' version {version} in domain '{domain}' has no content root"
+    )]
+    ClientMountContentMissing {
+        domain: DomainName,
+        resource: ResourceName,
+        version: u64,
+    },
+    #[error("failed to mount client resource '{resource}' version {version} in domain '{domain}'")]
+    ClientMount {
+        domain: DomainName,
+        resource: ResourceName,
+        version: u64,
+    },
+    #[error("client resource mounts are unsupported on this platform")]
+    #[cfg(not(unix))]
+    ClientMountUnsupported,
+    #[error("client configuration entry '{key}' has an invalid template")]
+    ClientConfigTemplate { key: String },
+}
+
 #[derive(Debug)]
 pub(super) struct ProtobufDescriptorCompileConfig {
     pub(super) files: Vec<String>,
@@ -7,7 +113,9 @@ pub(super) struct ProtobufDescriptorCompileConfig {
 }
 
 impl ProtobufDescriptorCompileConfig {
-    pub(super) fn from_entries(entries: &[ClientConfigEntry]) -> Result<Self, String> {
+    pub(super) fn from_entries(
+        entries: &[ClientConfigEntry],
+    ) -> error_stack::Result<Self, RuntimeResourceError> {
         let mut files = Vec::new();
         let mut includes = Vec::new();
         for entry in entries {
@@ -15,9 +123,10 @@ impl ProtobufDescriptorCompileConfig {
                 "file" | "files" => Self::append_paths(&mut files, &entry.value),
                 "include" | "includes" => Self::append_paths(&mut includes, &entry.value),
                 other => {
-                    return Err(format!(
-                        "unsupported protobuf config key '{other}'; expected 'file', 'files', \
-                         'include', or 'includes'"
+                    return Err(Report::new(
+                        RuntimeResourceError::UnsupportedProtobufConfigKey {
+                            key: other.to_string(),
+                        },
                     ));
                 }
             }
@@ -39,25 +148,29 @@ impl ProtobufDescriptorCompileConfig {
         self,
         store: &ResourceStore,
         id: &ResourceId,
-    ) -> Result<prost_types::FileDescriptorSet, String> {
+    ) -> error_stack::Result<prost_types::FileDescriptorSet, RuntimeResourceError> {
         let files = if self.files.is_empty() {
             Self::collect_resource_proto_files(store, id)?
         } else {
             self.files
                 .iter()
                 .map(|path| {
-                    store
-                        .resolve_content_path(id, path)
-                        .map_err(|error| format!("invalid protobuf source path '{path}': {error}"))
+                    store.resolve_content_path(id, path).map_err(|error| {
+                        Report::new(RuntimeResourceError::InvalidProtobufSourcePath {
+                            resource: id.identifier.clone(),
+                            version: id.version,
+                            path: path.clone(),
+                        })
+                        .attach_printable(error)
+                    })
                 })
-                .collect::<Result<Vec<_>, _>>()?
+                .collect::<error_stack::Result<Vec<_>, RuntimeResourceError>>()?
         };
         if files.is_empty() {
-            return Err(format!(
-                "protobuf resource '{}' version {} contains no .proto files",
-                id.identifier.as_str(),
-                id.version
-            ));
+            return Err(Report::new(RuntimeResourceError::MissingProtobufSources {
+                resource: id.identifier.clone(),
+                version: id.version,
+            }));
         }
         let includes = if self.includes.is_empty() {
             vec![store.content_root(id)]
@@ -65,21 +178,31 @@ impl ProtobufDescriptorCompileConfig {
             self.includes
                 .iter()
                 .map(|path| {
-                    store
-                        .resolve_content_path(id, path)
-                        .map_err(|error| format!("invalid protobuf include path '{path}': {error}"))
+                    store.resolve_content_path(id, path).map_err(|error| {
+                        Report::new(RuntimeResourceError::InvalidProtobufIncludePath {
+                            resource: id.identifier.clone(),
+                            version: id.version,
+                            path: path.clone(),
+                        })
+                        .attach_printable(error)
+                    })
                 })
-                .collect::<Result<Vec<_>, _>>()?
+                .collect::<error_stack::Result<Vec<_>, RuntimeResourceError>>()?
         };
 
-        protox::compile(files, includes)
-            .map_err(|error| format!("failed to compile protobuf descriptors: {error}"))
+        protox::compile(files, includes).map_err(|error| {
+            Report::new(RuntimeResourceError::ProtobufCompilation {
+                resource: id.identifier.clone(),
+                version: id.version,
+            })
+            .attach_printable(error)
+        })
     }
 
     pub(super) fn collect_resource_proto_files(
         store: &ResourceStore,
         id: &ResourceId,
-    ) -> Result<Vec<PathBuf>, String> {
+    ) -> error_stack::Result<Vec<PathBuf>, RuntimeResourceError> {
         let root = store.content_root(id);
         let mut files = BTreeSet::new();
         Self::collect_proto_files_recursive(&root, &mut files)?;
@@ -89,26 +212,24 @@ impl ProtobufDescriptorCompileConfig {
     pub(super) fn collect_proto_files_recursive(
         directory: &PathBuf,
         files: &mut BTreeSet<PathBuf>,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), RuntimeResourceError> {
         let entries = std::fs::read_dir(directory).map_err(|error| {
-            format!(
-                "failed to read protobuf resource directory '{}': {error}",
-                directory.display()
-            )
+            Report::new(RuntimeResourceError::ReadProtobufDirectory {
+                directory: directory.clone(),
+            })
+            .attach_printable(error)
         })?;
         for entry in entries {
             let entry = entry.map_err(|error| {
-                format!(
-                    "failed to read protobuf resource directory entry '{}': {error}",
-                    directory.display()
-                )
+                Report::new(RuntimeResourceError::ReadProtobufDirectoryEntry {
+                    directory: directory.clone(),
+                })
+                .attach_printable(error)
             })?;
             let path = entry.path();
             let file_type = entry.file_type().map_err(|error| {
-                format!(
-                    "failed to inspect protobuf resource path '{}': {error}",
-                    path.display()
-                )
+                Report::new(RuntimeResourceError::InspectProtobufPath { path: path.clone() })
+                    .attach_printable(error)
             })?;
             if file_type.is_dir() {
                 Self::collect_proto_files_recursive(&path, files)?;
@@ -146,7 +267,7 @@ impl Runtime {
                     &config.config,
                 )
                 .await
-                .map_err(build_error)?;
+                .map_err(|error| build_error(error.to_string()))?;
             Some(
                 pool.message(&config.message)
                     .map_err(|error| build_error(error.to_string()))?,
@@ -181,7 +302,7 @@ impl Runtime {
                     &config.config,
                 )
                 .await
-                .map_err(build_error)?;
+                .map_err(|error| build_error(error.to_string()))?;
             Some(SignalingProtobufDescriptors {
                 send: pool
                     .message(&config.send_message)
@@ -205,22 +326,39 @@ impl Runtime {
         resource: &ResourceName,
         resource_version: Option<u64>,
         config: &[ClientConfigEntry],
-    ) -> Result<ProtobufDescriptorPool, String> {
-        let store =
-            self.inner.resource_store.load_full().ok_or_else(|| {
-                "protobuf descriptors require an attached resource store".to_string()
-            })?;
+    ) -> error_stack::Result<ProtobufDescriptorPool, RuntimeResourceError> {
+        let Some(store) = self.inner.resource_store.load_full() else {
+            return Err(Report::new(
+                RuntimeResourceError::ProtobufStoreUnavailable {
+                    domain: domain.clone(),
+                    resource: resource.clone(),
+                },
+            ));
+        };
         let id = self.resolve_resource_id(domain, resource, resource_version, resource.as_str())?;
         let compile_config = ProtobufDescriptorCompileConfig::from_entries(config)?;
-        let file_descriptor_set =
-            tokio::task::spawn_blocking(move || compile_config.compile_descriptor_set(&store, &id))
-                .await
-                .map_err(|error| {
-                    format!("failed to join protobuf descriptor compilation task: {error}")
-                })??;
+        let task_resource = id.identifier.clone();
+        let task_version = id.version;
+        let descriptor_id = id.clone();
+        let file_descriptor_set = tokio::task::spawn_blocking(move || {
+            compile_config.compile_descriptor_set(&store, &descriptor_id)
+        })
+        .await
+        .map_err(|error| {
+            Report::new(RuntimeResourceError::ProtobufTask {
+                resource: task_resource,
+                version: task_version,
+            })
+            .attach_printable(error)
+        })??;
 
-        ProtobufDescriptorPool::from_file_descriptor_set(file_descriptor_set)
-            .map_err(|error| error.to_string())
+        ProtobufDescriptorPool::from_file_descriptor_set(file_descriptor_set).map_err(|error| {
+            Report::new(RuntimeResourceError::InvalidProtobufDescriptorSet {
+                resource: id.identifier,
+                version: id.version,
+            })
+            .attach_printable(error)
+        })
     }
 
     pub(crate) fn attach_resource_store(&self, resource_store: StdArc<ResourceStore>) {
@@ -274,32 +412,42 @@ impl Runtime {
         identifier: &ResourceName,
         requested_version: Option<u64>,
         spec: &str,
-    ) -> Result<ResourceId, String> {
+    ) -> error_stack::Result<ResourceId, RuntimeResourceError> {
         if let Some(version) = requested_version {
             return Ok(ResourceId::new(domain.clone(), identifier.clone(), version));
         }
         if let Some((name, version)) = spec.rsplit_once('@') {
-            let parsed = ResourceName::parse(name)
-                .map_err(|_| format!("invalid client resource identifier '{name}'"))?;
+            let parsed = ResourceName::parse(name).map_err(|error| {
+                Report::new(RuntimeResourceError::InvalidResourceIdentifier {
+                    spec: spec.to_string(),
+                })
+                .attach_printable(error)
+            })?;
             if &parsed != identifier {
-                return Err(format!(
-                    "client resource mount '{spec}' resolved to unexpected identifier '{}'",
-                    parsed.as_str()
+                return Err(Report::new(
+                    RuntimeResourceError::ResourceIdentifierMismatch {
+                        spec: spec.to_string(),
+                        expected: identifier.clone(),
+                        actual: parsed,
+                    },
                 ));
             }
-            let version = version
-                .parse::<u64>()
-                .map_err(|_| format!("invalid client resource version '{version}'"))?;
+            let version = version.parse::<u64>().map_err(|error| {
+                Report::new(RuntimeResourceError::InvalidResourceVersion {
+                    domain: domain.clone(),
+                    resource: identifier.clone(),
+                })
+                .attach_printable(error)
+            })?;
             return Ok(ResourceId::new(domain.clone(), identifier.clone(), version));
         }
 
         let resources = self.inner.resource_versions.load();
         let Some(version) = resources.latest_version(domain, identifier) else {
-            return Err(format!(
-                "resource '{}' has no installed versions in domain '{}'",
-                identifier.as_str(),
-                domain.as_str()
-            ));
+            return Err(Report::new(RuntimeResourceError::ResourceUnavailable {
+                domain: domain.clone(),
+                resource: identifier.clone(),
+            }));
         };
         Ok(ResourceId::new(domain.clone(), identifier.clone(), version))
     }
@@ -309,7 +457,7 @@ impl Runtime {
         domain: &DomainName,
         mount: Option<&ResourceName>,
         config: &[nervix_models::ClientConfigEntry],
-    ) -> Result<ResolvedClientConfig, String> {
+    ) -> error_stack::Result<ResolvedClientConfig, RuntimeResourceError> {
         self.resolve_client_config_with_template_vars(domain, mount, config, BTreeMap::default())
     }
 
@@ -319,7 +467,7 @@ impl Runtime {
         mount: Option<&ResourceName>,
         config: &[nervix_models::ClientConfigEntry],
         instance: u64,
-    ) -> Result<ResolvedClientConfig, String> {
+    ) -> error_stack::Result<ResolvedClientConfig, RuntimeResourceError> {
         self.resolve_client_config_with_template_vars(
             domain,
             mount,
@@ -334,7 +482,7 @@ impl Runtime {
         mount: Option<&ResourceName>,
         config: &[nervix_models::ClientConfigEntry],
         mut context: BTreeMap<String, String>,
-    ) -> Result<ResolvedClientConfig, String> {
+    ) -> error_stack::Result<ResolvedClientConfig, RuntimeResourceError> {
         let template_engine = TemplateEngine::new();
         let mut entries = Vec::with_capacity(config.len());
         for entry in config {
@@ -348,7 +496,12 @@ impl Runtime {
                     &entry.key,
                     &entry.value,
                     &context,
-                )?;
+                )
+                .map_err(|_| {
+                    Report::new(RuntimeResourceError::ClientConfigTemplate {
+                        key: entry.key.clone(),
+                    })
+                })?;
             }
             return Ok(ResolvedClientConfig {
                 entries,
@@ -356,35 +509,46 @@ impl Runtime {
             });
         };
 
-        let resource_store = self
-            .inner
-            .resource_store
-            .load_full()
-            .ok_or_else(|| "runtime resource store is not available".to_string())?;
-        let mount_root = tempfile::tempdir()
-            .map_err(|source| format!("failed to create client resource mount root: {source}"))?;
+        let Some(resource_store) = self.inner.resource_store.load_full() else {
+            return Err(Report::new(
+                RuntimeResourceError::ClientResourceStoreUnavailable {
+                    domain: domain.clone(),
+                    resource: mount.clone(),
+                },
+            ));
+        };
+        let mount_root = tempfile::tempdir().map_err(|source| {
+            Report::new(RuntimeResourceError::ClientMountRoot {
+                domain: domain.clone(),
+                resource: mount.clone(),
+            })
+            .attach_printable(source)
+        })?;
         let mut aliases = BTreeMap::new();
         let id = self.resolve_resource_id(domain, mount, None, mount.as_str())?;
         let source_root = resource_store.content_root(&id);
         if !source_root.exists() {
-            return Err(format!(
-                "client resource mount '{}' points to missing content root '{}'",
-                mount.as_str(),
-                source_root.display()
+            return Err(Report::new(
+                RuntimeResourceError::ClientMountContentMissing {
+                    domain: domain.clone(),
+                    resource: mount.clone(),
+                    version: id.version,
+                },
             ));
         }
         let mount_path = mount_root.path().join(mount.as_str());
         #[cfg(unix)]
         std::os::unix::fs::symlink(&source_root, &mount_path).map_err(|source| {
-            format!(
-                "failed to mount client resource '{}' at '{}': {source}",
-                mount.as_str(),
-                mount_path.display()
-            )
+            Report::new(RuntimeResourceError::ClientMount {
+                domain: domain.clone(),
+                resource: mount.clone(),
+                version: id.version,
+            })
+            .attach_printable(source)
         })?;
         #[cfg(not(unix))]
         {
-            return Err("client resource mounts are only supported on unix targets".to_string());
+            return Err(Report::new(RuntimeResourceError::ClientMountUnsupported));
         }
         aliases.insert(mount.as_str().to_string(), mount_path);
 
@@ -395,12 +559,13 @@ impl Runtime {
             );
         }
         for entry in &mut entries {
-            entry.value = render_client_config_template(
-                &template_engine,
-                &entry.key,
-                &entry.value,
-                &context,
-            )?;
+            entry.value =
+                render_client_config_template(&template_engine, &entry.key, &entry.value, &context)
+                    .map_err(|_| {
+                        Report::new(RuntimeResourceError::ClientConfigTemplate {
+                            key: entry.key.clone(),
+                        })
+                    })?;
         }
 
         Ok(ResolvedClientConfig {
@@ -470,6 +635,213 @@ mod tests {
 
     use super::*;
     use crate::resource::ResourceStore;
+
+    #[test]
+    fn protobuf_descriptor_configuration_reports_typed_failures() {
+        let unsupported = ProtobufDescriptorCompileConfig::from_entries(&[ClientConfigEntry {
+            key: "package".to_string(),
+            value: "events".to_string(),
+        }])
+        .expect_err("unsupported protobuf configuration must fail");
+        assert!(matches!(
+            unsupported.current_context(),
+            RuntimeResourceError::UnsupportedProtobufConfigKey { key } if key == "package"
+        ));
+
+        let store_root = tempdir().expect("resource store tempdir");
+        let store = ResourceStore::open(store_root.path(), Executor::default())
+            .expect("resource store should open");
+        let id = ResourceId::new(
+            DomainName::parse("tenant").expect("valid domain"),
+            named("events_proto"),
+            1,
+        );
+
+        let invalid_source = ProtobufDescriptorCompileConfig {
+            files: vec!["../schema.proto".to_string()],
+            includes: Vec::new(),
+        }
+        .compile_descriptor_set(&store, &id)
+        .expect_err("a parent source path must fail");
+        assert!(matches!(
+            invalid_source.current_context(),
+            RuntimeResourceError::InvalidProtobufSourcePath {
+                resource,
+                version: 1,
+                path,
+            } if resource.as_str() == "events_proto" && path == "../schema.proto"
+        ));
+
+        std::fs::create_dir_all(store.content_root(&id))
+            .expect("empty protobuf content root should be created");
+        let missing_sources = ProtobufDescriptorCompileConfig {
+            files: Vec::new(),
+            includes: Vec::new(),
+        }
+        .compile_descriptor_set(&store, &id)
+        .expect_err("an empty protobuf resource must fail");
+        assert!(matches!(
+            missing_sources.current_context(),
+            RuntimeResourceError::MissingProtobufSources {
+                resource,
+                version: 1,
+            } if resource.as_str() == "events_proto"
+        ));
+
+        let invalid_include = ProtobufDescriptorCompileConfig {
+            files: vec!["schema.proto".to_string()],
+            includes: vec!["../includes".to_string()],
+        }
+        .compile_descriptor_set(&store, &id)
+        .expect_err("a parent include path must fail");
+        assert!(matches!(
+            invalid_include.current_context(),
+            RuntimeResourceError::InvalidProtobufIncludePath {
+                resource,
+                version: 1,
+                path,
+            } if resource.as_str() == "events_proto" && path == "../includes"
+        ));
+
+        let compilation = ProtobufDescriptorCompileConfig {
+            files: vec!["missing.proto".to_string()],
+            includes: Vec::new(),
+        }
+        .compile_descriptor_set(&store, &id)
+        .expect_err("a missing protobuf source must fail compilation");
+        assert!(matches!(
+            compilation.current_context(),
+            RuntimeResourceError::ProtobufCompilation {
+                resource,
+                version: 1,
+            } if resource.as_str() == "events_proto"
+        ));
+
+        let missing_directory = store_root.path().join("missing-directory");
+        let directory = ProtobufDescriptorCompileConfig::collect_proto_files_recursive(
+            &missing_directory,
+            &mut BTreeSet::new(),
+        )
+        .expect_err("an unreadable protobuf directory must fail");
+        assert!(matches!(
+            directory.current_context(),
+            RuntimeResourceError::ReadProtobufDirectory { directory }
+                if directory == &missing_directory
+        ));
+    }
+
+    #[tokio::test]
+    async fn protobuf_descriptor_pool_requires_a_resource_store() {
+        let domain = DomainName::parse("tenant").expect("valid domain");
+        let resource = named::<ResourceName>("events_proto");
+        let error = Runtime::new()
+            .compile_protobuf_descriptor_pool(&domain, &resource, Some(1), &[])
+            .await
+            .expect_err("protobuf compilation without a resource store must fail");
+
+        assert!(matches!(
+            error.current_context(),
+            RuntimeResourceError::ProtobufStoreUnavailable {
+                domain: error_domain,
+                resource: error_resource,
+            } if error_domain == &domain && error_resource == &resource
+        ));
+    }
+
+    #[test]
+    fn resource_specification_failures_preserve_typed_identity() {
+        let runtime = Runtime::new();
+        let domain = DomainName::parse("tenant").expect("valid domain");
+        let resource = named::<ResourceName>("dev_tls");
+
+        let invalid_identifier = runtime
+            .resolve_resource_id(&domain, &resource, None, "bad name@1")
+            .expect_err("an invalid resource identifier must fail");
+        assert!(matches!(
+            invalid_identifier.current_context(),
+            RuntimeResourceError::InvalidResourceIdentifier { spec } if spec == "bad name@1"
+        ));
+
+        let mismatch = runtime
+            .resolve_resource_id(&domain, &resource, None, "other_tls@1")
+            .expect_err("a mismatched resource identifier must fail");
+        assert!(matches!(
+            mismatch.current_context(),
+            RuntimeResourceError::ResourceIdentifierMismatch {
+                spec,
+                expected,
+                actual,
+            } if spec == "other_tls@1"
+                && expected == &resource
+                && actual.as_str() == "other_tls"
+        ));
+
+        let invalid_version = runtime
+            .resolve_resource_id(&domain, &resource, None, "dev_tls@latest")
+            .expect_err("a non-numeric resource version must fail");
+        assert!(matches!(
+            invalid_version.current_context(),
+            RuntimeResourceError::InvalidResourceVersion {
+                domain: error_domain,
+                resource: error_resource,
+            } if error_domain == &domain && error_resource == &resource
+        ));
+    }
+
+    #[test]
+    fn client_resource_mount_failures_preserve_domain_and_resource() {
+        let runtime = Runtime::new();
+        let domain = DomainName::parse("tenant").expect("valid domain");
+        let resource = named::<ResourceName>("dev_tls");
+        let unavailable = runtime
+            .resolve_client_config(&domain, Some(&resource), &[])
+            .expect_err("a client mount without a resource store must fail");
+        assert!(matches!(
+            unavailable.current_context(),
+            RuntimeResourceError::ClientResourceStoreUnavailable {
+                domain: error_domain,
+                resource: error_resource,
+            } if error_domain == &domain && error_resource == &resource
+        ));
+
+        let store_root = tempdir().expect("resource store tempdir");
+        let store = ResourceStore::open(store_root.path(), Executor::default())
+            .expect("resource store should open");
+        runtime.attach_resources(
+            StdArc::new(store),
+            ResourceVersionStatus {
+                next_version_by_resource: SortedVec::from_unsorted(vec![ResourceVersionCounter {
+                    domain: domain.clone(),
+                    identifier: resource.clone(),
+                    next_version: 2,
+                }]),
+                versions: SortedVec::from_unsorted(vec![ResourceVersion {
+                    id: ResourceId::new(domain.clone(), resource.clone(), 1),
+                    root_checksum: "root".to_string(),
+                    manifest_checksum: "manifest".to_string(),
+                    file_count: 0,
+                    total_bytes: 0,
+                    archive_bytes: 0,
+                    created_at: Timestamp::from_unix_nanos(0),
+                    created_by_node: ClusterNodeName::parse("node-1").expect("valid name"),
+                }]),
+                replicas: SortedVec::new(),
+                uploads: SortedVec::new(),
+            },
+        );
+        let missing_content = runtime
+            .resolve_client_config(&domain, Some(&resource), &[])
+            .expect_err("a client mount without installed content must fail");
+        assert!(matches!(
+            missing_content.current_context(),
+            RuntimeResourceError::ClientMountContentMissing {
+                domain: error_domain,
+                resource: error_resource,
+                version: 1,
+            } if error_domain == &domain && error_resource == &resource
+        ));
+    }
+
     #[tokio::test]
     async fn client_resource_mounts_expand_into_runtime_paths() {
         let store_root = tempdir().expect("resource store tempdir");
@@ -534,6 +906,21 @@ mod tests {
             "test-ca"
         );
 
+        let template_error = runtime
+            .resolve_client_config(
+                &mount_domain,
+                Some(&named("dev_tls")),
+                &[ClientConfigEntry {
+                    key: "tls_ca_file".to_string(),
+                    value: "{{missing}}/ca.pem".to_string(),
+                }],
+            )
+            .expect_err("an unknown mounted-resource placeholder must fail");
+        assert!(matches!(
+            template_error.current_context(),
+            RuntimeResourceError::ClientConfigTemplate { key } if key == "tls_ca_file"
+        ));
+
         let other_domain = DomainName::parse("other").expect("valid domain");
         let error = runtime
             .resolve_client_config(
@@ -545,10 +932,11 @@ mod tests {
                 }],
             )
             .expect_err("another domain must not see this domain's resource");
-        assert!(
-            error.contains("has no installed versions in domain 'other'"),
-            "unexpected error: {error}"
-        );
+        assert!(matches!(
+            error.current_context(),
+            RuntimeResourceError::ResourceUnavailable { domain, resource }
+                if domain == &other_domain && resource.as_str() == "dev_tls"
+        ));
     }
 
     #[test]
@@ -564,7 +952,11 @@ mod tests {
                 }],
             )
             .expect_err("unknown placeholder should fail");
-        assert!(error.contains("failed to render client config template"));
+        assert!(matches!(
+            error.current_context(),
+            RuntimeResourceError::ClientConfigTemplate { key }
+                if key == "tls_ca_file"
+        ));
     }
 
     #[test]

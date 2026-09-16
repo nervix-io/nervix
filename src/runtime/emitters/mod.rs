@@ -408,6 +408,9 @@ impl EmitterPublishingSettings {
 struct EmitterBatchContext<'a> {
     runtime: &'a Runtime,
     routing: &'a mut DomainRoutingCache,
+    /// Bound once with the task, so resolving a batch's materialized dependencies never re-binds
+    /// the domain's execution.
+    domain_clock: &'a DomainClock,
     domain: &'a DomainName,
     emitter: &'a EmitterName,
     node: &'a ModelName,
@@ -3596,7 +3599,7 @@ impl EmitterTask {
                 emitter: task_emitter.clone(),
                 error_policies: task_error_policies.clone(),
                 udfs,
-                clock: domain_clock,
+                clock: domain_clock.clone(),
             };
             let mut publish_backoff =
                 RuntimeReconnectBackoff::from_policy(task_publishing.retry_policy);
@@ -3641,6 +3644,7 @@ impl EmitterTask {
             let mut batch_context = EmitterBatchContext {
                 runtime: &runtime,
                 routing: &mut routing,
+                domain_clock: &domain_clock,
                 domain: &task_domain,
                 emitter: &task_emitter,
                 node: &task_emitter_node,
@@ -4262,31 +4266,35 @@ fn resolve_emitter_client(
     sink: &EmitSink,
     client: Option<&Model>,
 ) -> Result<Option<ResolvedClientConfig>, RuntimeError> {
+    let resolve = |mount: Option<&ResourceName>, config: &[ClientConfigEntry]| {
+        runtime
+            .resolve_client_config(domain, mount, config)
+            .map_err(|error| error.to_string())
+    };
     let resolved = match (sink, client) {
         (EmitSink::Kafka { .. }, Some(Model::ClientKafka(client))) => {
-            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
+            Some(resolve(client.mount.as_ref(), &client.config))
         }
         (EmitSink::Pulsar { .. }, Some(Model::ClientPulsar(client))) => {
-            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
+            Some(resolve(client.mount.as_ref(), &client.config))
         }
         (EmitSink::RabbitMq { .. }, Some(Model::ClientRabbitMq(client))) => {
-            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
+            Some(resolve(client.mount.as_ref(), &client.config))
         }
         (EmitSink::Redis { .. }, Some(Model::ClientRedis(client))) => {
-            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
+            Some(resolve(client.mount.as_ref(), &client.config))
         }
         (EmitSink::Mqtt { .. }, Some(Model::ClientMqtt(client))) => {
-            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
+            Some(resolve(client.mount.as_ref(), &client.config))
         }
         (EmitSink::Nats { .. }, Some(Model::ClientNats(client))) => {
-            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
+            Some(resolve(client.mount.as_ref(), &client.config))
         }
         (EmitSink::ZeroMq { .. }, Some(Model::ClientZeroMq(client))) => {
-            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
+            Some(resolve(client.mount.as_ref(), &client.config))
         }
         (EmitSink::Syslog { .. }, Some(Model::ClientSyslog(client))) => Some((|| {
-            let resolved =
-                runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config)?;
+            let resolved = resolve(client.mount.as_ref(), &client.config)?;
             let config = crate::runtime::syslog::SyslogClientConfig::parse(
                 &resolved.entries,
                 crate::runtime::syslog::SyslogDirection::Emit,
@@ -4300,25 +4308,25 @@ fn resolve_emitter_client(
             Ok(resolved)
         })()),
         (EmitSink::Sqs { .. }, Some(Model::ClientSqs(client))) => {
-            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
+            Some(resolve(client.mount.as_ref(), &client.config))
         }
         (EmitSink::Sentry { .. }, Some(Model::ClientSentry(client))) => {
-            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
+            Some(resolve(client.mount.as_ref(), &client.config))
         }
         (EmitSink::Otel { .. }, Some(Model::ClientOtel(client))) => {
-            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
+            Some(resolve(client.mount.as_ref(), &client.config))
         }
         (EmitSink::ClickHouse { .. }, Some(Model::ClientClickHouse(client))) => {
-            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
+            Some(resolve(client.mount.as_ref(), &client.config))
         }
         (EmitSink::Postgres { .. }, Some(Model::ClientPostgres(client))) => {
-            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
+            Some(resolve(client.mount.as_ref(), &client.config))
         }
         (EmitSink::MySql { .. }, Some(Model::ClientMySql(client))) => {
-            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
+            Some(resolve(client.mount.as_ref(), &client.config))
         }
         (EmitSink::MongoDb { .. }, Some(Model::ClientMongoDb(client))) => {
-            Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config))
+            Some(resolve(client.mount.as_ref(), &client.config))
         }
         (
             EmitSink::Iceberg {
@@ -4326,21 +4334,21 @@ fn resolve_emitter_client(
                 ..
             },
             Some(Model::ClientS3(client)),
-        ) => Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config)),
+        ) => Some(resolve(client.mount.as_ref(), &client.config)),
         (
             EmitSink::Iceberg {
                 backend: IcebergStorageBackend::Gcs,
                 ..
             },
             Some(Model::ClientGcs(client)),
-        ) => Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config)),
+        ) => Some(resolve(client.mount.as_ref(), &client.config)),
         (
             EmitSink::Iceberg {
                 backend: IcebergStorageBackend::AzureBlob,
                 ..
             },
             Some(Model::ClientAzureBlob(client)),
-        ) => Some(runtime.resolve_client_config(domain, client.mount.as_ref(), &client.config)),
+        ) => Some(resolve(client.mount.as_ref(), &client.config)),
         _ => None,
     };
     resolved
@@ -4495,8 +4503,11 @@ impl EmitterBatchContext<'_> {
         let resolution = self
             .runtime
             .resolve_materialized_dependencies_for_batch(
-                self.routing,
-                self.domain,
+                MaterializedDomainHandles {
+                    routing: &mut *self.routing,
+                    domain_clock: self.domain_clock,
+                    domain: self.domain,
+                },
                 input_relay,
                 self.materialized_state,
                 batch,
@@ -4587,9 +4598,13 @@ impl EmitterBatchContext<'_> {
                 )
                 .await;
                 match evaluated {
-                    Ok(groups) => groups,
+                    Ok(groups) => groups
+                        .into_iter()
+                        .map(|group| group.map_err(|error| error.to_string()))
+                        .collect(),
                     Err(error) => {
-                        self.report_general_error(error.acks.iter(), error.reason);
+                        let error = error.current_context();
+                        self.report_general_error(error.acks.iter(), error.reason.clone());
                         return None;
                     }
                 }

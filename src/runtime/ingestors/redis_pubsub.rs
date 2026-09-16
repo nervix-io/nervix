@@ -38,7 +38,7 @@ impl RedisPubSubIngestor {
             .map_err(|reason| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-                reason,
+                reason: reason.to_string(),
             })?;
         let addr = client_config_value(&resolved_client.entries, "addr", || {
             "missing Redis client config key 'addr'".to_string()
