@@ -16,6 +16,7 @@ mod graph;
 mod mutation;
 mod placement;
 mod relocation;
+mod schedule_delta;
 mod scheduler;
 mod storage;
 #[cfg(test)]
@@ -33,6 +34,7 @@ pub(crate) use placement::{
     PlacementEndpointPairPlan, PlacementPlan, PlacementRequireGroupPlan, PlacementRulePlan,
 };
 pub(crate) use relocation::{RelocationCoverage, RelocationMemberReason, RelocationUnit};
+pub(crate) use schedule_delta::ScheduleDelta;
 #[cfg(feature = "testing")]
 pub use scheduler::SchedulerMode;
 pub(crate) use storage::{Registry, RuntimeChange, RuntimeChanges};

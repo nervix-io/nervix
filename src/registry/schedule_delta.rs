@@ -1,10 +1,19 @@
+//! The runtime activation implied by two domain schedules.
+//!
+//! Layer: decisions.
+//!
+//! - **Owns.** Pure classification of schedule changes into unchanged, dynamic, entity-swap and
+//!   domain-rebuild activation decisions.
+//! - **Depends on.** Scheduled vocabulary and model-change classification.
+//! - **Must not know.** Runtime tasks, control-plane coordination, persistence or presentation.
+
 use nervix_models::{
     DomainSchedule, DynamicModelUpdate, ModelKind, NodeRef, QuiesceLevel, ScheduledNode,
 };
 use sorted_vec::SortedSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ScheduleDelta {
+pub(crate) enum ScheduleDelta {
     Unchanged,
     Dynamic(Vec<DynamicModelUpdate>),
     EntitySwap {
@@ -16,7 +25,7 @@ pub(super) enum ScheduleDelta {
 }
 
 impl ScheduleDelta {
-    pub(super) fn classify(existing: &DomainSchedule, desired: &DomainSchedule) -> Self {
+    pub(crate) fn classify(existing: &DomainSchedule, desired: &DomainSchedule) -> Self {
         if existing == desired {
             return Self::Unchanged;
         }
