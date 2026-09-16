@@ -7,6 +7,33 @@
 
 use super::*;
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RuntimeObservationError {
+    #[error("{reason}")]
+    DomainInstantiation { domain: DomainName, reason: String },
+    #[error("domain '{}' is not instantiated", .domain.as_str())]
+    DomainNotInstantiated { domain: DomainName },
+    #[error(
+        "lookup '{}' is not instantiated in domain '{}'",
+        .lookup.as_str(),
+        .domain.as_str()
+    )]
+    LookupNotInstantiated {
+        domain: DomainName,
+        lookup: LookupName,
+    },
+    #[error(
+        "failed to read lookup '{}' in domain '{}': {error}",
+        .lookup.as_str(),
+        .domain.as_str()
+    )]
+    LookupRecord {
+        domain: DomainName,
+        lookup: LookupName,
+        error: error_stack::Report<crate::runtime_schema::RuntimeSchemaError>,
+    },
+}
+
 pub(super) fn kafka_domain_offset_describe_from_schedule(
     topic: &str,
     instances: NonZeroU64,
@@ -474,7 +501,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
-    ) -> Result<IngestorDescribe, String> {
+    ) -> error_stack::Result<IngestorDescribe, RuntimeObservationError> {
         let memory_backpressure_paused = self.ingestors_paused_for_memory_pressure();
         let quiesce_control = self.ingestor_quiesce_control(domain, ingestor);
         let quiesce_state = match quiesce_control.as_ref() {
@@ -589,18 +616,28 @@ impl Runtime {
         &self,
         domain: &DomainName,
         name: &LookupName,
-    ) -> Result<LocalLookupDescription, String> {
+    ) -> error_stack::Result<LocalLookupDescription, RuntimeObservationError> {
         let Some(execution) = self.inner.executions.get(domain) else {
             if let Some(error) = self.inner.domain_instantiation_errors.get(domain) {
-                return Err(error.value().clone());
+                return Err(error_stack::Report::new(
+                    RuntimeObservationError::DomainInstantiation {
+                        domain: domain.clone(),
+                        reason: error.value().clone(),
+                    },
+                ));
             }
-            return Err(format!("domain '{}' is not instantiated", domain.as_str()));
+            return Err(error_stack::Report::new(
+                RuntimeObservationError::DomainNotInstantiated {
+                    domain: domain.clone(),
+                },
+            ));
         };
         let Some(lookup) = execution.lookups.get(name) else {
-            return Err(format!(
-                "lookup '{}' is not instantiated in domain '{}'",
-                name.as_str(),
-                domain.as_str()
+            return Err(error_stack::Report::new(
+                RuntimeObservationError::LookupNotInstantiated {
+                    domain: domain.clone(),
+                    lookup: name.clone(),
+                },
             ));
         };
         Ok(LocalLookupDescription {
@@ -615,18 +652,28 @@ impl Runtime {
         domain: &DomainName,
         name: &LookupName,
         key: &str,
-    ) -> Result<Option<RuntimeRecordBatch>, String> {
+    ) -> error_stack::Result<Option<RuntimeRecordBatch>, RuntimeObservationError> {
         let Some(execution) = self.inner.executions.get(domain) else {
             if let Some(error) = self.inner.domain_instantiation_errors.get(domain) {
-                return Err(error.value().clone());
+                return Err(error_stack::Report::new(
+                    RuntimeObservationError::DomainInstantiation {
+                        domain: domain.clone(),
+                        reason: error.value().clone(),
+                    },
+                ));
             }
-            return Err(format!("domain '{}' is not instantiated", domain.as_str()));
+            return Err(error_stack::Report::new(
+                RuntimeObservationError::DomainNotInstantiated {
+                    domain: domain.clone(),
+                },
+            ));
         };
         let Some(lookup) = execution.lookups.get(name) else {
-            return Err(format!(
-                "lookup '{}' is not instantiated in domain '{}'",
-                name.as_str(),
-                domain.as_str()
+            return Err(error_stack::Report::new(
+                RuntimeObservationError::LookupNotInstantiated {
+                    domain: domain.clone(),
+                    lookup: name.clone(),
+                },
             ));
         };
         lookup.metrics.observe(1, key.len().arch_into(), None);
@@ -636,20 +683,25 @@ impl Runtime {
             .get(key)
             .map(|row| lookup.batch.slice(*row, 1))
             .transpose()
-            .map_err(|error| error.to_string())
+            .map_err(|error| {
+                error_stack::Report::new(RuntimeObservationError::LookupRecord {
+                    domain: domain.clone(),
+                    lookup: name.clone(),
+                    error,
+                })
+            })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
-
     use ahash::HashMap;
-    use arc_swap::ArcSwapOption;
     use fjall::Database;
-    use nervix_models::{ClusterNodeName, DomainSchedule, IngestorName, ModelKind, ModelName};
+    use nervix_models::{
+        ClusterNodeName, CreateLookup, IngestorName, ModelKind, ModelName, ParseAsType,
+    };
     use tempfile::tempdir;
-    use tokio::{sync::watch, time::Duration};
+    use tokio::time::Duration;
     use triomphe::Arc;
 
     use super::*;
@@ -941,9 +993,133 @@ mod tests {
         let error = runtime
             .query_local_lookup(&domain("default"), &named("zip_codes"), "99926")
             .expect_err("lookup should surface stored instantiation errors");
+        let error = error.to_string();
 
         assert!(error.contains("failed to build domain execution for 'default'"));
         assert!(error.contains("lookup load failed"));
+    }
+
+    #[test]
+    fn lookup_descriptions_classify_missing_runtime_state() {
+        let runtime = Runtime::new();
+        let domain = domain("default");
+        let lookup = named("zip_codes");
+        runtime.inner.domain_instantiation_errors.insert(
+            domain.clone(),
+            "lookup resource could not be decoded".to_string(),
+        );
+
+        let Err(error) = runtime.describe_local_lookup(&domain, &lookup) else {
+            panic!("a recorded domain build failure must be preserved");
+        };
+        assert!(matches!(
+            error.current_context(),
+            RuntimeObservationError::DomainInstantiation { domain: failed, reason }
+                if failed == &domain && reason == "lookup resource could not be decoded"
+        ));
+
+        runtime.inner.domain_instantiation_errors.remove(&domain);
+        let Err(error) = runtime.describe_local_lookup(&domain, &lookup) else {
+            panic!("an absent domain execution must be distinct");
+        };
+        assert!(matches!(
+            error.current_context(),
+            RuntimeObservationError::DomainNotInstantiated { domain: failed }
+                if failed == &domain
+        ));
+
+        install_test_domain_execution(
+            &runtime,
+            &domain,
+            Vec::new(),
+            DomainRoutingSnapshot::default(),
+        );
+        let Err(error) = runtime.describe_local_lookup(&domain, &lookup) else {
+            panic!("an absent lookup runtime must be distinct");
+        };
+        assert!(matches!(
+            error.current_context(),
+            RuntimeObservationError::LookupNotInstantiated {
+                domain: failed_domain,
+                lookup: failed_lookup,
+            } if failed_domain == &domain && failed_lookup == &lookup
+        ));
+    }
+
+    #[test]
+    fn lookup_queries_classify_missing_runtime_state_and_invalid_rows() {
+        let runtime = Runtime::new();
+        let domain = domain("default");
+        let lookup = named::<LookupName>("zip_codes");
+
+        let error = runtime
+            .query_local_lookup(&domain, &lookup, "99926")
+            .expect_err("an absent domain execution must fail");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeObservationError::DomainNotInstantiated { domain: failed }
+                if failed == &domain
+        ));
+
+        install_test_domain_execution(
+            &runtime,
+            &domain,
+            Vec::new(),
+            DomainRoutingSnapshot::default(),
+        );
+        let error = runtime
+            .query_local_lookup(&domain, &lookup, "99926")
+            .expect_err("an absent lookup runtime must fail");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeObservationError::LookupNotInstantiated {
+                domain: failed_domain,
+                lookup: failed_lookup,
+            } if failed_domain == &domain && failed_lookup == &lookup
+        ));
+
+        let schema = test_schema(&[("postal_code", ParseAsType::String)]);
+        let batch = schema
+            .batch_from_test_rows([[(
+                "postal_code".to_string(),
+                RuntimeValue::String("99926".to_string()),
+            )]])
+            .expect("lookup test batch should build");
+        let lookup_runtime = Arc::new(LookupRuntime {
+            model: CreateLookup {
+                name: lookup.clone(),
+                key_field: named("postal_code"),
+                resource: named("postal_codes"),
+                path: "postal_codes.jsonl".to_string(),
+                decode_using_codec: named("postal_code_codec"),
+            },
+            resource_version: 7,
+            schema,
+            batch: Arc::new(batch),
+            entries: Arc::new(HashMap::from_iter([("99926".to_string(), 1)])),
+            metrics: RuntimeMetrics::default().resolve_global_node_message_metrics(
+                &domain,
+                ModelKind::Lookup,
+                &ModelName::from(&lookup),
+                None,
+                "received",
+            ),
+        });
+        let mut routing = DomainRoutingSnapshot::default();
+        routing.lookups.insert(lookup.clone(), lookup_runtime);
+        install_test_domain_execution(&runtime, &domain, Vec::new(), routing);
+
+        let error = runtime
+            .query_local_lookup(&domain, &lookup, "99926")
+            .expect_err("a lookup index outside the Arrow batch must fail");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeObservationError::LookupRecord {
+                domain: failed_domain,
+                lookup: failed_lookup,
+                ..
+            } if failed_domain == &domain && failed_lookup == &lookup
+        ));
     }
 
     #[tokio::test]
@@ -955,29 +1131,11 @@ mod tests {
             domain.clone(),
             "failed to build domain execution for 'default': ingestor start failed".to_string(),
         );
-        let (shutdown, _) = watch::channel(false);
-        runtime.install_domain_execution(
+        install_test_domain_execution(
+            &runtime,
             &domain,
-            DomainExecution {
-                schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
-                start_version: 0,
-                domain_clock: test_domain_clock(&domain),
-                shutdown,
-                graph: StdArc::new(ArcSwapOption::empty()),
-                routing: runtime.stage_domain_routing(&domain, DomainRoutingSnapshot::default()),
-                branched_ingestors: HashMap::default(),
-                branched_entrypoints: HashMap::default(),
-                endpoint_routes: HashMap::default(),
-                node_tasks: HashMap::default(),
-                emitter_tasks: HashMap::default(),
-                generator_tasks: HashMap::default(),
-                reingestor_tasks: HashMap::default(),
-                placement_tasks: HashMap::default(),
-                relay_state_tasks: HashMap::default(),
-                relay_owner_tasks: HashMap::default(),
-                clients: HashMap::default(),
-                tasks: Vec::new(),
-            },
+            Vec::new(),
+            DomainRoutingSnapshot::default(),
         );
 
         let describe = runtime

@@ -6581,6 +6581,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "triomphe",
+ "ubyte",
 ]
 
 [[package]]

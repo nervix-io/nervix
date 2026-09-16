@@ -1371,10 +1371,10 @@ mod tests {
         assert_eq!(value(&batch), 1);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn collection_deadline_releases_every_row_for_its_branch() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_millis(1),
+            interval: tokio::time::Duration::from_millis(50),
             max_batch_size: None,
         };
         let (input, broadcast) = source("events", 2, Some(policy));
@@ -1387,8 +1387,33 @@ mod tests {
             .await
             .expect("second batch must queue");
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let mut interaction = RelayInteraction::new(vec![input], shutdown_rx, None, None)
-            .expect("interaction must build");
+        let counters = triomphe::Arc::new(NodeQuiesceCounters::default());
+        let mut interaction =
+            RelayInteraction::new(vec![input], shutdown_rx, None, Some(counters.clone()))
+                .expect("interaction must build");
+
+        let mut ready = interaction.inputs.pending_snapshot();
+        for expected in [1, 2] {
+            let ReadyInput::Batch(source, batch, work) =
+                interaction.inputs.try_recv_snapshot(&mut ready)
+            else {
+                panic!("queued batch {expected} must be ready")
+            };
+            assert!(
+                interaction
+                    .inputs
+                    .accept(source, batch)
+                    .expect("queued batch must enter its collection")
+                    .is_none(),
+                "neither queued batch reaches a size boundary"
+            );
+            drop(work);
+        }
+        assert!(matches!(
+            interaction.inputs.try_recv_snapshot(&mut ready),
+            ReadyInput::Exhausted
+        ));
+        assert_eq!(counters.outstanding_work(), 2);
 
         let RelayInteractionEvent::Batch { batch, .. } =
             event(&mut interaction, RuntimeWake::never()).await
