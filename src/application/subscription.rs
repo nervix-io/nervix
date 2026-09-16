@@ -1392,7 +1392,7 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::{ResultExt as _};
+    use meticulous::ResultExt as _;
     use nervix_models::{DomainName, SubscriptionDeliveryBehavior};
     use tokio::{sync::mpsc, time::Duration};
 
