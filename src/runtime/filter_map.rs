@@ -1546,9 +1546,358 @@ mod tests {
     use crate::{
         runtime_ack::AckSet,
         runtime_schema::{
-            RuntimeRecordBatch, RuntimeRow, RuntimeValue, compile_schema, test_runtime_row,
+            RuntimeRecordBatch, RuntimeRow, RuntimeValue, RuntimeValueKind, compile_schema,
+            test_runtime_row,
         },
     };
+
+    fn validation_filter_map_program(
+        schema: &Arc<CompiledSchema>,
+    ) -> CompiledProgramWithMaterializedInterest {
+        compile_processor_output_filter_map_program(
+            RuntimeCompileTarget {
+                domain: &domain("default"),
+                identifier: &named("validate_filter_map"),
+            },
+            &[named("input_records")],
+            &named("output_records"),
+            &construction("INHERIT ALL"),
+            RuntimeVmSchemaPair {
+                input: schema.arrow_schema(),
+                input_sensitivity: VmSchemaSensitivity::default(),
+                output: schema.arrow_schema(),
+                output_sensitivity: VmSchemaSensitivity::default(),
+            },
+            None,
+            RuntimeVmCompileContext {
+                available_materialized_streams: &HashMap::default(),
+                available_lookups: &HashMap::default(),
+                current_branching: &[],
+                current_branch_schema: None,
+                current_branch_sensitivity: None,
+                udfs: None,
+            },
+        )
+        .verified("the test construction is valid for the matching schemas")
+        .verified("INHERIT ALL requires a filter-map program")
+    }
+
+    #[tokio::test]
+    async fn filter_map_batch_validates_every_sidecar_length() {
+        let schema = test_schema(&[("value", ParseAsType::I64)]);
+        let program = validation_filter_map_program(&schema);
+        let row = test_runtime_row([("value".to_string(), RuntimeValue::I64(7))]);
+        let carrier = row.one_row_batch();
+        let empty_carrier = carrier
+            .slice(0, 0)
+            .verified("a zero-length slice starts within the one-row batch");
+        let metadata = [row.metadata().clone()];
+        let keys = [None];
+        let side_inputs = HashMap::default();
+        let outcomes = evaluate_filter_map_on_batch(
+            "junction",
+            named::<ModelName>("validate_filter_map"),
+            &program,
+            FilterMapOutcomeInputs {
+                carrier: &empty_carrier,
+                record_metadata: &[],
+                keys: &[],
+                filter_map_metadata: None,
+                side_inputs: &side_inputs,
+            },
+            Timestamp::from_unix_nanos(1),
+        )
+        .await
+        .verified("empty batches do not require sidecar rows");
+        assert!(outcomes.is_empty());
+
+        let error = evaluate_filter_map_on_batch(
+            "junction",
+            named::<ModelName>("validate_filter_map"),
+            &program,
+            FilterMapOutcomeInputs {
+                carrier: &carrier,
+                record_metadata: &[],
+                keys: &keys,
+                filter_map_metadata: None,
+                side_inputs: &side_inputs,
+            },
+            Timestamp::from_unix_nanos(1),
+        )
+        .await
+        .err()
+        .verified("the metadata sidecar is intentionally one row short");
+        assert!(error.current_context().reason.contains("runtime metadata"));
+
+        let error = evaluate_filter_map_on_batch(
+            "junction",
+            named::<ModelName>("validate_filter_map"),
+            &program,
+            FilterMapOutcomeInputs {
+                carrier: &carrier,
+                record_metadata: &metadata,
+                keys: &[],
+                filter_map_metadata: None,
+                side_inputs: &side_inputs,
+            },
+            Timestamp::from_unix_nanos(1),
+        )
+        .await
+        .err()
+        .verified("the key sidecar is intentionally one row short");
+        assert!(error.current_context().reason.contains("branch keys"));
+
+        let empty_ingest_metadata = ingest_metadata_for_test(IngestMetadataKind::Headers, &[]);
+        let error = evaluate_filter_map_on_batch(
+            "junction",
+            named::<ModelName>("validate_filter_map"),
+            &program,
+            FilterMapOutcomeInputs {
+                carrier: &carrier,
+                record_metadata: &metadata,
+                keys: &keys,
+                filter_map_metadata: Some(&empty_ingest_metadata),
+                side_inputs: &side_inputs,
+            },
+            Timestamp::from_unix_nanos(1),
+        )
+        .await
+        .err()
+        .verified("the ingest-metadata sidecar is intentionally one row short");
+        assert!(error.current_context().reason.contains("ingest metadata"));
+    }
+
+    #[test]
+    fn scalar_appenders_preserve_typed_mismatch_and_range_errors() {
+        let wrong_value = RuntimeValue::String("not a scalar match".to_string());
+
+        let field = arrow_schema::Field::new("f32", ArrowDataType::Float32, false);
+        let error = append_filter_map_f32(&mut Float32Builder::new(), &wrong_value, &field)
+            .err()
+            .verified("a STRING cannot be appended to an F32 builder");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeSchemaError::RuntimeValueTypeMismatch {
+                expected: ParseAsType::F32,
+                found: RuntimeValueKind::String,
+                ..
+            }
+        ));
+
+        let field = arrow_schema::Field::new("f64", ArrowDataType::Float64, false);
+        let error = append_filter_map_f64(&mut Float64Builder::new(), &wrong_value, &field)
+            .err()
+            .verified("a STRING cannot be appended to an F64 builder");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeSchemaError::RuntimeValueTypeMismatch {
+                expected: ParseAsType::F64,
+                found: RuntimeValueKind::String,
+                ..
+            }
+        ));
+
+        let field = arrow_schema::Field::new("active", ArrowDataType::Boolean, false);
+        let error = append_filter_map_bool(&mut BooleanBuilder::new(), &wrong_value, &field)
+            .err()
+            .verified("a STRING cannot be appended to a BOOL builder");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeSchemaError::RuntimeValueTypeMismatch {
+                expected: ParseAsType::Bool,
+                found: RuntimeValueKind::String,
+                ..
+            }
+        ));
+
+        let field = arrow_schema::Field::new("text", ArrowDataType::Utf8, false);
+        let integer = RuntimeValue::I64(7);
+        let error = append_filter_map_string(&mut StringBuilder::new(), &integer, &field)
+            .err()
+            .verified("an I64 cannot be appended to a STRING builder");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeSchemaError::RuntimeValueTypeMismatch {
+                expected: ParseAsType::String,
+                found: RuntimeValueKind::I64,
+                ..
+            }
+        ));
+
+        let datetime_type =
+            ArrowDataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some("+00:00".into()));
+        let field = arrow_schema::Field::new("occurred_at", datetime_type, false);
+        let error = append_filter_map_datetime(
+            &mut TimestampNanosecondBuilder::new(),
+            &wrong_value,
+            &field,
+        )
+        .err()
+        .verified("a STRING cannot be appended to a DATETIME builder");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeSchemaError::RuntimeValueTypeMismatch {
+                expected: ParseAsType::Datetime,
+                found: RuntimeValueKind::String,
+                ..
+            }
+        ));
+
+        let outside_nanos = RuntimeValue::Datetime(
+            chrono::FixedOffset::east_opt(0)
+                .verified("zero is a valid UTC offset")
+                .with_ymd_and_hms(3000, 1, 1, 0, 0, 0)
+                .single()
+                .verified("the test date is valid in the proleptic Gregorian calendar"),
+        );
+        let error = append_filter_map_datetime(
+            &mut TimestampNanosecondBuilder::new(),
+            &outside_nanos,
+            &field,
+        )
+        .err()
+        .verified("year 3000 is outside the signed nanosecond timestamp range");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeSchemaError::RuntimeValueOutOfRange {
+                expected: ParseAsType::Datetime,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn nested_appenders_preserve_typed_builder_and_shape_errors() {
+        let item = StdArc::new(arrow_schema::Field::new(
+            "item",
+            ArrowDataType::UInt8,
+            false,
+        ));
+        let list_type = ArrowDataType::List(item.clone());
+        let list_field = arrow_schema::Field::new("items", list_type.clone(), false);
+        let mut wrong_builder = BooleanBuilder::new();
+        let error =
+            append_filter_map_nested_value(&mut wrong_builder, &list_type, None, &list_field)
+                .err()
+                .verified("a BOOL builder cannot accept an Arrow LIST");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeSchemaError::ArrowBuilderTypeMismatch { .. }
+        ));
+
+        let mut list_builder = make_builder(&list_type, 1);
+        let wrong_value = RuntimeValue::Bool(true);
+        let error = append_filter_map_nested_value(
+            list_builder.as_mut(),
+            &list_type,
+            Some(&wrong_value),
+            &list_field,
+        )
+        .err()
+        .verified("a BOOL value cannot initialize a runtime VEC");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeSchemaError::RuntimeValueTypeMismatch {
+                expected: ParseAsType::Vec { .. },
+                found: RuntimeValueKind::Bool,
+                ..
+            }
+        ));
+
+        let fixed_type = ArrowDataType::FixedSizeList(item.clone(), 2);
+        let fixed_field = arrow_schema::Field::new("pair", fixed_type.clone(), false);
+        let mut wrong_builder = BooleanBuilder::new();
+        let error =
+            append_filter_map_nested_value(&mut wrong_builder, &fixed_type, None, &fixed_field)
+                .err()
+                .verified("a BOOL builder cannot accept an Arrow fixed-size list");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeSchemaError::ArrowBuilderTypeMismatch { .. }
+        ));
+
+        let mut fixed_builder = make_builder(&fixed_type, 1);
+        let short_value = RuntimeValue::Array(vec![RuntimeValue::U8(1)]);
+        let error = append_filter_map_nested_value(
+            fixed_builder.as_mut(),
+            &fixed_type,
+            Some(&short_value),
+            &fixed_field,
+        )
+        .err()
+        .verified("one value cannot initialize a two-value runtime ARRAY");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeSchemaError::RuntimeArrayLengthMismatch { found: 1, .. }
+        ));
+
+        let mut fixed_builder = make_builder(&fixed_type, 1);
+        let error = append_filter_map_nested_value(
+            fixed_builder.as_mut(),
+            &fixed_type,
+            Some(&wrong_value),
+            &fixed_field,
+        )
+        .err()
+        .verified("a BOOL value cannot initialize a runtime ARRAY");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeSchemaError::RuntimeValueTypeMismatch {
+                expected: ParseAsType::Array { .. },
+                found: RuntimeValueKind::Bool,
+                ..
+            }
+        ));
+
+        let zero_type = ArrowDataType::FixedSizeList(item.clone(), 0);
+        let zero_field = arrow_schema::Field::new("empty", zero_type.clone(), false);
+        let mut zero_builder = make_builder(&zero_type, 1);
+        let error =
+            append_filter_map_nested_value(zero_builder.as_mut(), &zero_type, None, &zero_field)
+                .err()
+                .verified("a zero-length fixed-size list is not a runtime ARRAY");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeSchemaError::EmptyFixedSizeList { len: 0 }
+        ));
+
+        let negative_type = ArrowDataType::FixedSizeList(item.clone(), -1);
+        let negative_field = arrow_schema::Field::new("negative", negative_type.clone(), false);
+        let values_builder = make_builder(&ArrowDataType::UInt8, 0);
+        let mut negative_builder: Box<dyn ArrayBuilder> =
+            Box::new(FixedSizeListBuilder::with_capacity(values_builder, -1, 0).with_field(item));
+        let error = append_filter_map_nested_value(
+            negative_builder.as_mut(),
+            &negative_type,
+            None,
+            &negative_field,
+        )
+        .err()
+        .verified("a negative fixed-size list length is not a runtime ARRAY");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeSchemaError::EmptyFixedSizeList { len: -1 }
+        ));
+
+        let unsupported_type = ArrowDataType::Binary;
+        let unsupported_field = arrow_schema::Field::new("binary", unsupported_type.clone(), false);
+        let mut builder = BooleanBuilder::new();
+        let error = append_filter_map_nested_value(
+            &mut builder,
+            &unsupported_type,
+            None,
+            &unsupported_field,
+        )
+        .err()
+        .verified("binary runtime values have no scalar representation");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeSchemaError::UnsupportedArrowType {
+                data_type: ArrowDataType::Binary
+            }
+        ));
+    }
+
     #[tokio::test]
     async fn filter_map_can_read_branch_namespace() {
         let input_schema = test_schema(&[
