@@ -13,9 +13,9 @@ use std::{
 };
 
 use error_stack::Report;
-use fjall::{Database, Keyspace, KeyspaceCreateOptions};
+use fjall::{Database, Keyspace, KeyspaceCreateOptions, Readable as _, Snapshot as FjallSnapshot};
 use futures_util::{FutureExt as _, Stream, StreamExt as _, stream};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{Executor, MemoryClass, Reservation, StorageClass};
 use openraft::{
     Snapshot, SnapshotMeta, StoredMembership,
@@ -47,8 +47,8 @@ use crate::{
     replication::{MAX_APPEND_BATCH_ENTRIES, append_batch_target_bytes},
     snapshot::{
         KEY_MANIFEST, SealedSnapshot, SectionWriter, SnapshotGenerations, SnapshotManifest,
-        SnapshotManifestRecord, SnapshotRetention, SnapshotSection, StoredRecord,
-        generation_prefix, section_generation, section_key,
+        SnapshotManifestRecord, SnapshotRetention, SnapshotSection, generation_prefix,
+        section_generation, section_key,
     },
     storage_decode,
     storage_fault::{StorageBoundary, StorageFault},
@@ -62,11 +62,21 @@ struct OpenedStore {
     installing: Option<u64>,
 }
 
-/// One consistent view of the state machine, gathered before its sections are written.
-struct SealedGeneration {
+/// One consistent state-machine view while it is sealed into independently admitted sections.
+struct GenerationSeal {
+    source: FjallSnapshot,
     metadata: StateMetadata,
-    sections: Vec<Vec<u8>>,
+    start: Bound<Vec<u8>>,
+    section_count: u32,
     total_bytes: u64,
+    log_bytes_at_open: u64,
+    complete: bool,
+}
+
+/// The progress one section write made through its generation's consistent state-machine view.
+struct SectionWrite {
+    continuation: Option<Bound<Vec<u8>>>,
+    encoded_bytes: u64,
 }
 
 const KEY_METADATA: &[u8] = b"metadata";
@@ -151,6 +161,14 @@ impl StateMetadata {
         let Some(record) = read_key::<StateMetadataRecord>(sm, KEY_METADATA)? else {
             return Ok(None);
         };
+        record.try_into().map(Some)
+    }
+
+    fn read_from(snapshot: &FjallSnapshot, sm: &Keyspace) -> io::Result<Option<Self>> {
+        let Some(bytes) = snapshot.get(sm, KEY_METADATA).map_err(io::Error::other)? else {
+            return Ok(None);
+        };
+        let record: StateMetadataRecord = storage_decode(bytes.as_ref())?;
         record.try_into().map(Some)
     }
 }
@@ -471,6 +489,69 @@ struct DecodedLogRange {
     continuation: Option<Bound<Vec<u8>>>,
 }
 
+impl GenerationSeal {
+    fn open(inner: &StoreInner) -> io::Result<Self> {
+        let source = inner.db.snapshot();
+        let metadata = StateMetadata::read_from(&source, &inner.sm)?
+            .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
+        Ok(Self {
+            source,
+            metadata,
+            start: Bound::Unbounded,
+            section_count: 0,
+            total_bytes: 0,
+            log_bytes_at_open: inner.log_bytes_since_snapshot.load(Ordering::Relaxed),
+            complete: false,
+        })
+    }
+
+    async fn write_next(
+        &mut self,
+        inner: &StoreInner,
+        generation: u64,
+        section_limit: u64,
+    ) -> io::Result<()> {
+        let source = self.source.clone();
+        let start = self.start.clone();
+        let index = self.section_count;
+        let written = inner
+            .run(MemoryClass::Bulk, move |inner, reservation| {
+                inner.write_generation_section(
+                    source,
+                    generation,
+                    index,
+                    start,
+                    section_limit,
+                    reservation,
+                )
+            })
+            .await?;
+        self.section_count = self
+            .section_count
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
+        self.total_bytes = self
+            .total_bytes
+            .checked_add(written.encoded_bytes)
+            .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
+        match written.continuation {
+            Some(start) => self.start = start,
+            None => self.complete = true,
+        }
+        Ok(())
+    }
+
+    fn into_manifest(self, generation: u64) -> SnapshotManifest {
+        SnapshotManifest {
+            generation,
+            last_applied_log_id: self.metadata.last_applied_log_id,
+            last_membership: self.metadata.last_membership,
+            section_count: self.section_count,
+            total_bytes: self.total_bytes,
+        }
+    }
+}
+
 impl StoreInner {
     pub(super) fn state(&self) -> StateMachineData {
         self.state_machine.read().clone()
@@ -499,7 +580,10 @@ impl StoreInner {
     async fn reserve(executor: &Executor, class: MemoryClass) -> io::Result<Reservation> {
         let unit = match class {
             MemoryClass::Management => executor.limits().management_event_bytes.as_u64(),
-            MemoryClass::Bulk => executor.snapshot().bulk_memory.capacity_bytes / 2,
+            MemoryClass::Bulk => executor
+                .limits()
+                .snapshot_section_working_bytes()
+                .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?,
             MemoryClass::Commands | MemoryClass::Relay => executor.limits().command_bytes.as_u64(),
         };
         let bytes = match class {
@@ -706,49 +790,76 @@ impl StoreInner {
 
     /// Seal one consistent view of the state machine as a new generation and publish it.
     ///
-    /// The read runs on the one ordered consensus storage worker, so the records, the applied
-    /// index and the membership it gathers all belong to the same committed revision.
+    /// The view is opened on the ordered consensus storage worker, so its records, applied index
+    /// and membership belong to one committed revision. Each worker turn seals and synchronizes
+    /// one section from that view, releasing its bulk reservation before the next turn.
     async fn seal_generation(&self) -> io::Result<SnapshotManifest> {
         let section_limit = self.executor.limits().snapshot_section_bytes.as_u64();
         let generation = self.snapshots.claim_generation();
-        let sections = self
-            .run(MemoryClass::Bulk, move |inner, _| {
-                let metadata = StateMetadata::read(&inner.sm)?
-                    .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
-                let mut writer = SectionWriter::new(section_limit);
-                for item in inner.sm.iter() {
-                    let (key, value) = item.into_inner().map_err(io::Error::other)?;
-                    writer.push(StoredRecord {
-                        key: key.to_vec(),
-                        value: value.to_vec(),
-                    })?;
-                }
-                let sealed = writer.finish()?;
-                Ok(SealedGeneration {
-                    metadata,
-                    sections: sealed.sections,
-                    total_bytes: sealed.total_bytes,
+        let result = async {
+            let mut seal = self
+                .run(MemoryClass::Bulk, |inner, _| GenerationSeal::open(inner))
+                .await?;
+            while !seal.complete {
+                tokio::task::consume_budget().await;
+                seal.write_next(self, generation, section_limit).await?;
+            }
+            let log_bytes_at_open = seal.log_bytes_at_open;
+            let manifest = seal.into_manifest(generation);
+            self.publish_manifest(manifest.clone(), None).await?;
+            self.log_bytes_since_snapshot
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    current.checked_sub(log_bytes_at_open)
                 })
-            })
-            .await?;
-        let section_count = u32::try_from(sections.sections.len())
-            .map_err(|_| io::Error::other(StorageFailure::Capacity))?;
-        for (index, bytes) in sections.sections.into_iter().enumerate() {
-            tokio::task::consume_budget().await;
-            let index =
-                u32::try_from(index).map_err(|_| io::Error::other(StorageFailure::Capacity))?;
-            self.stage_section(generation, index, bytes).await?;
+                .assured(
+                    "one snapshot build runs at a time and appended-byte accounting only grows \
+                     while it seals",
+                );
+            Ok(manifest)
         }
-        let manifest = SnapshotManifest {
-            generation,
-            last_applied_log_id: sections.metadata.last_applied_log_id,
-            last_membership: sections.metadata.last_membership,
-            section_count,
-            total_bytes: sections.total_bytes,
-        };
-        self.publish_manifest(manifest.clone(), None).await?;
-        self.log_bytes_since_snapshot.store(0, Ordering::Relaxed);
-        Ok(manifest)
+        .await;
+        if result.is_err() {
+            self.snapshots.abandon(generation);
+        }
+        result
+    }
+
+    /// Seal and synchronize one section from a pinned state-machine view.
+    fn write_generation_section(
+        &self,
+        source: FjallSnapshot,
+        generation: u64,
+        index: u32,
+        start: Bound<Vec<u8>>,
+        section_limit: u64,
+        reservation: &Reservation,
+    ) -> io::Result<SectionWrite> {
+        let mut writer = SectionWriter::new(section_limit);
+        let mut continuation = None;
+        let mut reached_end = true;
+        for item in source.range(&self.sm, (start, Bound::Unbounded)) {
+            let (key, value) = item.into_inner().map_err(io::Error::other)?;
+            if !writer.try_push(&key, &value)? {
+                reached_end = false;
+                break;
+            }
+            continuation = Some(Bound::Excluded(key.to_vec()));
+        }
+        if reached_end {
+            continuation = None;
+        }
+        let bytes = writer
+            .finish()?
+            .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
+        let encoded_bytes = u64::try_from(bytes.len()).map_err(io::Error::other)?;
+        let mut batch = DurableBatch::new(reservation)?;
+        batch.insert(&self.snapshot, &section_key(generation, index), &bytes)?;
+        drop(bytes);
+        self.commit("snapshot_section", batch)?;
+        Ok(SectionWrite {
+            continuation,
+            encoded_bytes,
+        })
     }
 
     /// Write one sealed section of a staged generation.
