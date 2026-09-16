@@ -432,7 +432,9 @@ use relay_boundary::{
     RelayOwnerTask, RelayRegistry, RelayRetention, RelayRuntimeFanIn, RelayStateTask,
     RelayStateTaskSpec, RemoteRuntimeConsumer, addressable_count,
 };
-pub(in crate::runtime) use relay_channel::{RelayDispatchGate, RelayDispatchGateLease};
+pub(in crate::runtime) use relay_channel::{
+    RelayDispatchGate, RelayDispatchGateLease, RelayTryRecv,
+};
 use relay_interaction::{
     RelayInteraction, RelayInteractionCommand, RelayInteractionError, RelayInteractionEvent,
     RelayInteractionInput,
@@ -591,9 +593,7 @@ pub(crate) use observability::{IngestorDescribe, KafkaDomainOffsetDescribe};
 pub(crate) use ownership_handoff_error::{OwnershipHandoffError, OwnershipHandoffResult};
 pub(crate) use relay_batch::{RelayMessage, RelayRecordBatch};
 pub(crate) use relay_boundary::scheduled_relay_owner_nodes;
-pub(crate) use relay_channel::{
-    RelayBroadcast, RelayReceiver as RelaySubscriptionReceiver, RelaySubscriptionRecvError,
-};
+pub(crate) use relay_channel::{RelayBroadcast, RelayReceiver as RelaySubscriptionReceiver};
 pub(crate) use state_replication::StateSyncAck;
 pub(crate) use state_snapshot_transfer::{DescribeStateSnapshot, FetchStateSnapshot};
 pub(crate) use state_store::{
