@@ -24,6 +24,7 @@ Feature: Resource lifecycle
     Then the last command output contains
       """
       resource: fraud_model
+      latest: (none)
       versions: (none)
       """
 
@@ -252,6 +253,87 @@ Feature: Resource lifecycle
       "city":"Chicago"
       """
 
+  @command_completion
+  Scenario Outline: Resource bindings use only completed versions
+    Given a <cluster_size> node nervix cluster is started
+    And node "node-1" has TLS resource directory "tls_v1" for hosts "api.example.com"
+    And node "node-1" has TLS resource directory "tls_v2" for hosts "api.example.com"
+    And node "node-1" has resource directory "invalid_tls_v3" containing
+      """
+      {
+        "tls.crt": "not a certificate",
+        "tls.key": "not a private key"
+      }
+      """
+    And the active domain is "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE DOMAIN {{domain}};
+      CREATE RESOURCE tls_bundle;
+      UPLOAD RESOURCE tls_bundle VERSION '{{tls_v1}}';
+      DESCRIBE RESOURCE tls_bundle;
+      """
+    Then the last command output contains
+      """
+      resource: tls_bundle
+      latest: 1
+      versions: 1
+      """
+    Given resource installation on node "<held_node>" pauses before promotion
+    And client "uploader" is connected to the leader node
+    When client "uploader" selects domain "{{domain}}"
+    And client "uploader" begins uploading resource "tls_bundle" from "{{tls_v2}}" with identity "applying-version" in the background
+    Then the resource installation pause on node "<held_node>" is reached
+    When these NSPL commands fail with "resource 'tls_bundle@2' is not a completed version in domain '{{domain}}'"
+      """
+      CREATE VHOST applying_edge api.example.com WITH TLS tls_bundle VERSION 2;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      DESCRIBE RESOURCE tls_bundle;
+      """
+    Then the last command output contains
+      """
+      resource: tls_bundle
+      latest: 1
+      """
+    When the resource installation pause on node "<held_node>" is released
+    Then the background NSPL execution succeeds
+    When these NSPL commands are executed on the leader node
+      """
+      DESCRIBE RESOURCE tls_bundle;
+      """
+    Then the last command output contains
+      """
+      resource: tls_bundle
+      latest: 2
+      versions: 1,2
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE VHOST edge api.example.com WITH TLS tls_bundle;
+      """
+    When client "uploader" upload of resource "tls_bundle" from "{{invalid_tls_v3}}" with identity "failed-version" fails with "for version 3 failed: failed to refresh HTTP TLS config"
+    When these NSPL commands fail with "resource 'tls_bundle@3' is not a completed version in domain '{{domain}}'"
+      """
+      CREATE VHOST failed_edge failed.example.com WITH TLS tls_bundle VERSION 3;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      DESCRIBE RESOURCE tls_bundle;
+      """
+    Then the last command output contains
+      """
+      resource: tls_bundle
+      latest: 2
+      versions: 1,2,3
+      """
+
+    Examples:
+      | cluster_size | held_node |
+      | 1            | node-1    |
+      | 3            | node-3    |
+
   @resource_upload_idempotency
   Scenario Outline: Upload retry reports one assigned version
     Given a <cluster_size> node nervix cluster is started
@@ -375,6 +457,7 @@ Feature: Resource lifecycle
     Then the last command output contains
       """
       resource: proto
+      latest: 2
       versions: 1,2
       """
 

@@ -139,7 +139,6 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<RuntimeStatePlacement, PreparedRuntimeStateSnapshot, RandomState>,
     pub(in crate::runtime) expiring_stream_states:
         DashMap<RuntimeStatePlacement, Arc<ExpiringRelayState>, RandomState>,
-    pub(in crate::runtime) latest_resource_versions: DashMap<DomainResourceKey, u64, RandomState>,
     pub(in crate::runtime) replicated_deduplicator_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedDeduplicatorState>, RandomState>,
     pub(in crate::runtime) replicated_kafka_offset_states:

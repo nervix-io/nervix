@@ -18,7 +18,7 @@ pub(in crate::runtime) enum LookupRuntimeError {
     #[error("resource store is not attached")]
     ResourceStoreUnavailable,
     #[error(
-        "resource '{resource}' has no installed versions for lookup '{lookup}' in domain \
+        "resource '{resource}' has no completed versions for lookup '{lookup}' in domain \
          '{domain}'"
     )]
     MissingResourceVersion {
@@ -500,23 +500,17 @@ impl Runtime {
         let Some(resource_store) = self.inner.resource_store.load_full() else {
             return Err(Report::new(LookupRuntimeError::ResourceStoreUnavailable));
         };
-        let Some(resource_version) = self
+        let resource_id = self
             .inner
-            .latest_resource_versions
-            .get(&DomainResourceKey {
-                domain: domain.clone(),
-                resource: lookup.resource.clone(),
-            })
-            .map(|value| *value)
-        else {
-            return Err(Report::new(LookupRuntimeError::MissingResourceVersion {
+            .resource_versions
+            .load()
+            .resolve_completed_version(domain, &lookup.resource, None)
+            .change_context(LookupRuntimeError::MissingResourceVersion {
                 domain: domain.clone(),
                 lookup: lookup.name.clone(),
                 resource: lookup.resource.clone(),
-            }));
-        };
-        let resource_id =
-            ResourceId::new(domain.clone(), lookup.resource.clone(), resource_version);
+            })?;
+        let resource_version = resource_id.version;
         let path = resource_store
             .resolve_content_path(&resource_id, &lookup.path)
             .change_context(LookupRuntimeError::ResolveContentPath {

@@ -3651,6 +3651,28 @@ async fn given_runtime_replication_is_configured(
         .expect("snapshot interval must be a valid duration");
 }
 
+#[given(expr = "raft election timeout is configured from {string} to {string}")]
+fn given_raft_election_timeout_is_configured(
+    world: &mut ScenarioWorld,
+    minimum: String,
+    maximum: String,
+) {
+    assert!(
+        world.cluster.is_none(),
+        "raft election timeout must be configured before cluster startup"
+    );
+    let minimum = humantime::parse_duration(&minimum)
+        .assured("the Cucumber scenario supplies a valid minimum election timeout");
+    let maximum = humantime::parse_duration(&maximum)
+        .assured("the Cucumber scenario supplies a valid maximum election timeout");
+    assert!(
+        minimum <= maximum,
+        "minimum raft election timeout must not exceed its maximum"
+    );
+    world.cluster_config.raft_election_timeout_min = minimum;
+    world.cluster_config.raft_election_timeout_max = maximum;
+}
+
 #[given("runtime state replica polling is paused")]
 async fn given_runtime_state_replica_polling_is_paused(world: &mut ScenarioWorld) {
     assert!(

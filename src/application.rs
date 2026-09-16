@@ -2365,9 +2365,11 @@ impl Application {
                 }
             }
         }));
-        if let Err(error) = service.refresh_http_tls_server_config().await {
-            service.broadcast_error(format!("failed to refresh HTTP TLS config: {error}"));
-        }
+        background_tasks.push(
+            service
+                .start_http_tls_resource_observer(shutdown.clone())
+                .await,
+        );
 
         let domain_apply_service = service.clone();
         let domain_apply_shutdown = shutdown.clone();
