@@ -18061,9 +18061,9 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
         cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, TestParallelismArgs>::parsed();
     if cli.tags_filter.is_none() {
         cli.tags_filter = Some(
-            "not @client_wire_expected_failure and not @client_wire_baseline"
+            "(not @client_wire_expected_failure) and (not @client_wire_baseline)"
                 .parse()
-                .assured("the built-in expected-failure tag expression is valid"),
+                .assured("the built-in opt-in scenario tag expression is valid"),
         );
     }
     let concurrency_factor = cli.custom.concurrency_factor();
