@@ -7,6 +7,33 @@
 
 use super::*;
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RuntimeObservationError {
+    #[error("{reason}")]
+    DomainInstantiation { domain: DomainName, reason: String },
+    #[error("domain '{}' is not instantiated", .domain.as_str())]
+    DomainNotInstantiated { domain: DomainName },
+    #[error(
+        "lookup '{}' is not instantiated in domain '{}'",
+        .lookup.as_str(),
+        .domain.as_str()
+    )]
+    LookupNotInstantiated {
+        domain: DomainName,
+        lookup: LookupName,
+    },
+    #[error(
+        "failed to read lookup '{}' in domain '{}': {error}",
+        .lookup.as_str(),
+        .domain.as_str()
+    )]
+    LookupRecord {
+        domain: DomainName,
+        lookup: LookupName,
+        error: error_stack::Report<crate::runtime_schema::RuntimeSchemaError>,
+    },
+}
+
 pub(super) fn kafka_domain_offset_describe_from_schedule(
     topic: &str,
     instances: NonZeroU64,
@@ -474,7 +501,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
-    ) -> Result<IngestorDescribe, String> {
+    ) -> error_stack::Result<IngestorDescribe, RuntimeObservationError> {
         let memory_backpressure_paused = self.ingestors_paused_for_memory_pressure();
         let quiesce_control = self.ingestor_quiesce_control(domain, ingestor);
         let quiesce_state = match quiesce_control.as_ref() {
@@ -589,18 +616,28 @@ impl Runtime {
         &self,
         domain: &DomainName,
         name: &LookupName,
-    ) -> Result<LocalLookupDescription, String> {
+    ) -> error_stack::Result<LocalLookupDescription, RuntimeObservationError> {
         let Some(execution) = self.inner.executions.get(domain) else {
             if let Some(error) = self.inner.domain_instantiation_errors.get(domain) {
-                return Err(error.value().clone());
+                return Err(error_stack::Report::new(
+                    RuntimeObservationError::DomainInstantiation {
+                        domain: domain.clone(),
+                        reason: error.value().clone(),
+                    },
+                ));
             }
-            return Err(format!("domain '{}' is not instantiated", domain.as_str()));
+            return Err(error_stack::Report::new(
+                RuntimeObservationError::DomainNotInstantiated {
+                    domain: domain.clone(),
+                },
+            ));
         };
         let Some(lookup) = execution.lookups.get(name) else {
-            return Err(format!(
-                "lookup '{}' is not instantiated in domain '{}'",
-                name.as_str(),
-                domain.as_str()
+            return Err(error_stack::Report::new(
+                RuntimeObservationError::LookupNotInstantiated {
+                    domain: domain.clone(),
+                    lookup: name.clone(),
+                },
             ));
         };
         Ok(LocalLookupDescription {
@@ -615,18 +652,28 @@ impl Runtime {
         domain: &DomainName,
         name: &LookupName,
         key: &str,
-    ) -> Result<Option<RuntimeRecordBatch>, String> {
+    ) -> error_stack::Result<Option<RuntimeRecordBatch>, RuntimeObservationError> {
         let Some(execution) = self.inner.executions.get(domain) else {
             if let Some(error) = self.inner.domain_instantiation_errors.get(domain) {
-                return Err(error.value().clone());
+                return Err(error_stack::Report::new(
+                    RuntimeObservationError::DomainInstantiation {
+                        domain: domain.clone(),
+                        reason: error.value().clone(),
+                    },
+                ));
             }
-            return Err(format!("domain '{}' is not instantiated", domain.as_str()));
+            return Err(error_stack::Report::new(
+                RuntimeObservationError::DomainNotInstantiated {
+                    domain: domain.clone(),
+                },
+            ));
         };
         let Some(lookup) = execution.lookups.get(name) else {
-            return Err(format!(
-                "lookup '{}' is not instantiated in domain '{}'",
-                name.as_str(),
-                domain.as_str()
+            return Err(error_stack::Report::new(
+                RuntimeObservationError::LookupNotInstantiated {
+                    domain: domain.clone(),
+                    lookup: name.clone(),
+                },
             ));
         };
         lookup.metrics.observe(1, key.len().arch_into(), None);
@@ -636,7 +683,13 @@ impl Runtime {
             .get(key)
             .map(|row| lookup.batch.slice(*row, 1))
             .transpose()
-            .map_err(|error| error.to_string())
+            .map_err(|error| {
+                error_stack::Report::new(RuntimeObservationError::LookupRecord {
+                    domain: domain.clone(),
+                    lookup: name.clone(),
+                    error,
+                })
+            })
     }
 }
 
@@ -941,6 +994,7 @@ mod tests {
         let error = runtime
             .query_local_lookup(&domain("default"), &named("zip_codes"), "99926")
             .expect_err("lookup should surface stored instantiation errors");
+        let error = error.to_string();
 
         assert!(error.contains("failed to build domain execution for 'default'"));
         assert!(error.contains("lookup load failed"));

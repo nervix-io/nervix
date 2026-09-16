@@ -1,7 +1,7 @@
 use dashmap::mapref::entry::Entry as DashMapEntry;
 use nervix_models::{DomainName, NodeRef};
 
-use super::*;
+use super::{message_error::MessageErrorHandlingError, *};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct MessageErrorRouteKey {
@@ -466,7 +466,7 @@ impl Runtime {
         target: MessageErrorRouteTarget,
         flush_policy: RuntimeFlushPolicy,
         delivery: MessageErrorDelivery,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), MessageErrorHandlingError> {
         let failure_route = route.clone();
         let route_runtime = match self.inner.message_error_routes.entry(route.clone()) {
             DashMapEntry::Occupied(entry) => entry.get().clone(),
@@ -481,12 +481,9 @@ impl Runtime {
         await_message_error_ack_alive(&source_acks, route_runtime.sender.send(delivery))
             .await
             .map_err(|_| {
-                format!(
-                    "message-error route for {} '{}' to relay '{}' is stopped",
-                    failure_route.node.kind.as_str(),
-                    failure_route.node.identifier.as_str(),
-                    failure_route.error_relay.as_str()
-                )
+                error_stack::Report::new(MessageErrorHandlingError::DeliveryStopped {
+                    route: failure_route,
+                })
             })
     }
 

@@ -246,8 +246,6 @@ mod syslog;
 #[cfg(test)]
 mod test_fixtures;
 
-use std::str::FromStr;
-
 use branch_aggregated_state::{
     BranchAggregatedRuntimeStateSnapshot, ReplicatedBranchAggregatedState,
     decode_branch_aggregated_snapshot, encode_branch_aggregated_snapshot,

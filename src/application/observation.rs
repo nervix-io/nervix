@@ -667,6 +667,7 @@ impl SessionServiceImpl {
                         ),
                     )
                 })
+                .map_err(|error| error.to_string())
         } else if let Some(owner) = ingestor_node.execution_node() {
             match self
                 .inner
@@ -930,7 +931,7 @@ impl SessionServiceImpl {
                         ModelKind::Ingestor,
                         request.name.clone(),
                     ),
-                    reason,
+                    reason.to_string(),
                 )
             })?;
         let metrics =
@@ -980,7 +981,7 @@ impl SessionServiceImpl {
                     key_field: lookup.key_field.clone(),
                     entry_count: description.entry_count.arch_into(),
                 }),
-                Err(message) => Err(message),
+                Err(message) => Err(message.to_string()),
             }
         } else if let Some(owner) = lookup_node.execution_node() {
             match self
@@ -1044,7 +1045,7 @@ impl SessionServiceImpl {
                     domain: request.domain.clone(),
                     entity: NodeRef::new(ModelKind::Lookup, request.name.clone()),
                 },
-                reason,
+                reason: reason.to_string(),
             })?;
         Ok(LookupDescribeEnvelope {
             resource: description.model.resource,
@@ -1643,7 +1644,8 @@ impl SessionServiceImpl {
             Some(
                 self.inner
                     .runtime
-                    .query_local_lookup(domain, &query.name, &key),
+                    .query_local_lookup(domain, &query.name, &key)
+                    .map_err(|error| error.to_string()),
             )
         } else {
             None
@@ -1757,7 +1759,7 @@ impl SessionServiceImpl {
                     domain: request.domain.clone(),
                     entity: NodeRef::new(ModelKind::Lookup, request.name.clone()),
                 },
-                reason,
+                reason: reason.to_string(),
             })
     }
 
