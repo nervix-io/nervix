@@ -34,7 +34,7 @@ use crate::registry::{
     graph::{ActiveGraph, ensure_drop_targets_are_not_in_use},
     mutation::{
         PlannedMutations, RegistryMutation, RegistryPersistMutation, TransactionMutationPreflight,
-        classify_quiesce, classify_quiesce_level,
+        classify_quiesce,
     },
     placement::{PlacementPlan, ensure_placement_member_shape_change_allowed},
 };
@@ -339,21 +339,23 @@ impl Registry {
         self.plan_mutations_named(domain, mutations, "mixed mutation batch")
     }
 
-    /// Applies every mutation's statement-local checks against the accumulated candidate. If the
-    /// candidate already forms a complete domain graph, it returns the normal plan so callers can
-    /// run boundary validation too. Missing or incompatible cross-model relationships are treated
-    /// as provisionally incomplete because a later statement in the same atomic transaction run
-    /// may repair them.
-    pub(crate) fn preflight_transaction_mutations(
-        &self,
+    /// Plans one transaction model run against the exact Models captured by its caller.
+    ///
+    /// The owned base keeps the decision independent of registry storage and locks. Transaction
+    /// planning can therefore advance several commit steps in written order without rereading a
+    /// newer registry state between them.
+    pub(crate) fn preflight_transaction_mutations_against(
         domain: &DomainName,
+        base_models: ModelIndex,
         mutations: &[RegistryMutation],
+        allow_incomplete_candidate: bool,
     ) -> Result<TransactionMutationPreflight, Report<RegistryError>> {
-        self.plan_mutations_named_with_incomplete_candidate(
+        Self::plan_mutations_against(
             domain,
             mutations,
-            "transaction queue preflight",
-            true,
+            "ordered transaction planning",
+            allow_incomplete_candidate,
+            base_models,
         )
     }
 
@@ -383,6 +385,29 @@ impl Registry {
         operation_name: &str,
         allow_incomplete_candidate: bool,
     ) -> Result<TransactionMutationPreflight, Report<RegistryError>> {
+        let current_models = self
+            .storage
+            .list_models(domain)
+            .change_context(RegistryError::LoadStoredModels)?
+            .into_iter()
+            .map(|record| record.model)
+            .collect::<ModelIndex>();
+        Self::plan_mutations_against(
+            domain,
+            mutations,
+            operation_name,
+            allow_incomplete_candidate,
+            current_models,
+        )
+    }
+
+    fn plan_mutations_against(
+        domain: &DomainName,
+        mutations: &[RegistryMutation],
+        operation_name: &str,
+        allow_incomplete_candidate: bool,
+        current_models: ModelIndex,
+    ) -> Result<TransactionMutationPreflight, Report<RegistryError>> {
         let batch_size = mutations.len();
         info!(
             domain = domain.as_str(),
@@ -391,21 +416,10 @@ impl Registry {
             "planning mutation batch"
         );
 
-        let existing = self
-            .storage
-            .list_models(domain)
-            .change_context(RegistryError::LoadStoredModels)?;
-
-        let current_models = existing
-            .iter()
-            .map(|record| record.model.clone())
-            .collect::<ModelIndex>();
-        let current_state = self.build_domain_state(domain, &current_models)?;
+        let current_state = DomainState::build(domain, &current_models)?;
         let mut candidate = current_models.clone();
-        let mut mutation_quiesce_levels = Vec::with_capacity(mutations.len());
 
         for (mutation_index, mutation) in mutations.iter().enumerate() {
-            let mutation_base = candidate.get(&mutation.target_key()).cloned();
             match mutation {
                 RegistryMutation::Create(model) => {
                     let identifier = model.name();
@@ -794,7 +808,7 @@ impl Registry {
                         model.node_ref() == key
                     });
                     if !allow_incomplete_candidate && !recreated_later {
-                        let candidate_state = self.build_domain_state(domain, &candidate)?;
+                        let candidate_state = DomainState::build(domain, &candidate)?;
                         ensure_drop_targets_are_not_in_use(
                             domain,
                             &candidate_state.graph,
@@ -807,14 +821,6 @@ impl Registry {
                     );
                 }
             }
-            let mutation_candidate = mutation
-                .resulting_key()
-                .as_ref()
-                .and_then(|key| candidate.get(key));
-            mutation_quiesce_levels.push(classify_quiesce_level(
-                mutation_base.as_ref(),
-                mutation_candidate,
-            ));
         }
 
         let drops_in_batch = current_models
@@ -823,20 +829,20 @@ impl Registry {
             .cloned()
             .collect::<HashSet<_>>();
 
-        let domain_state = match self.build_domain_state(domain, &candidate) {
+        let domain_state = match DomainState::build(domain, &candidate) {
             Ok(state) => state,
             // A caller that allows an incomplete candidate is queuing a step of a transaction that
             // later steps complete, so a candidate that does not yet build has no plan to offer
             // and no failure to report. The batch is validated once, on its final models, where a
             // rejection can name the statement that caused it.
-            Err(_) if allow_incomplete_candidate => {
+            Err(error) if allow_incomplete_candidate => {
                 return Ok(TransactionMutationPreflight {
                     planned: None,
-                    mutation_quiesce_levels,
+                    candidate_models: candidate,
+                    incomplete_reason: Some(error.to_string()),
                 });
             }
             Err(err) => {
-                let active_graph = self.active_graph_snapshot(domain);
                 warn!(
                     domain = domain.as_str(),
                     batch_size,
@@ -844,7 +850,7 @@ impl Registry {
                     result = "err",
                     error = %err,
                     "failed to apply mutation batch\n{}",
-                    active_graph
+                    current_state.graph.describe()
                 );
                 return Err(err);
             }
@@ -876,6 +882,7 @@ impl Registry {
             )
         };
 
+        let candidate_models = domain_state.models.clone();
         Ok(TransactionMutationPreflight {
             planned: Some(PlannedMutations {
                 domain: domain.clone(),
@@ -888,7 +895,8 @@ impl Registry {
                 runtime_changes,
                 quiesce,
             }),
-            mutation_quiesce_levels,
+            candidate_models,
+            incomplete_reason: None,
         })
     }
 
@@ -1143,6 +1151,17 @@ impl Registry {
         state.domains.get(domain).map(|ns| ns.graph.clone())
     }
 
+    /// Captures the complete model input for a pure planning decision while holding the registry
+    /// read lock only for the clone. Empty domains have no registry entry and therefore produce an
+    /// empty Model index.
+    pub(crate) fn transaction_planning_models(&self, domain: &DomainName) -> ModelIndex {
+        let state = self.state.read();
+        match state.domains.get(domain) {
+            Some(domain_state) => domain_state.models.clone(),
+            None => ModelIndex::default(),
+        }
+    }
+
     pub(crate) fn placement_plan(
         &self,
         domain: &DomainName,
@@ -1188,13 +1207,6 @@ impl Registry {
         models: &ModelIndex,
     ) -> Result<DomainState, Report<RegistryError>> {
         DomainState::build(domain, models)
-    }
-
-    fn active_graph_snapshot(&self, domain: &DomainName) -> String {
-        match self.active_graph(domain) {
-            Some(graph) => graph.describe(),
-            None => String::new(),
-        }
     }
 }
 
@@ -1912,62 +1924,6 @@ mod tests {
                 kind: ModelKind::Relay,
                 identifier: named("notifications"),
             }]
-        );
-
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn transaction_preflight_classifies_each_mutation_against_its_prefix() {
-        let path = temp_db_path();
-        let registry = Registry::open(&path).expect("registry should open");
-        let domain = DomainName::parse("default").expect("valid domain");
-        registry
-            .apply_batch(
-                &domain,
-                vec![
-                    schema("event_schema"),
-                    relay("notifications", "event_schema"),
-                ],
-            )
-            .expect("initial graph should succeed");
-
-        let preflight = registry
-            .preflight_transaction_mutations(
-                &domain,
-                &[
-                    RegistryMutation::AlterSchema(AlterSchema {
-                        schema: named("event_schema"),
-                        operations: vec![AlterSchemaOperation::AddField {
-                            field: SchemaField {
-                                name: named("note"),
-                                ty: ParseAsType::String,
-                                optional: true,
-                                sensitive: false,
-                            },
-                        }],
-                    }),
-                    RegistryMutation::AlterRelay(AlterRelay {
-                        relay: named("notifications"),
-                        operations: vec![AlterRelayOperation::SetCapacity {
-                            capacity: nonzero!(5usize),
-                        }],
-                    }),
-                ],
-            )
-            .expect("transaction preflight should succeed");
-
-        assert_eq!(
-            preflight.mutation_quiesce_levels(),
-            &[QuiesceLevel::DomainPause, QuiesceLevel::Dynamic]
-        );
-        assert_eq!(
-            preflight
-                .planned()
-                .expect("the candidate graph is complete")
-                .quiesce()
-                .level(),
-            QuiesceLevel::DomainPause
         );
 
         let _ = fs::remove_dir_all(path);

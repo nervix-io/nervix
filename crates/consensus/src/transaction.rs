@@ -17,6 +17,14 @@ use thiserror::Error;
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct TransactionStatement {
+    pub request: TransactionStatementRequest,
+    pub admission: TransactionCommandResult,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct TransactionStatementRequest {
     pub request_reference: CommandExecutionReference,
     pub expected_position: usize,
     pub source: String,
@@ -24,8 +32,42 @@ pub struct TransactionStatement {
 }
 
 impl TransactionStatement {
+    pub fn admitted(
+        request: TransactionStatementRequest,
+        admission: TransactionCommandResult,
+    ) -> Self {
+        Self { request, admission }
+    }
+
+    pub fn source_bytes(&self) -> u64 {
+        self.request.source_bytes()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_admitted(request: TransactionStatementRequest) -> Self {
+        Self::admitted(
+            request,
+            TransactionCommandResult {
+                success: true,
+                message: "admitted".to_string(),
+                diagnostics: Vec::new(),
+                already_existed: false,
+            },
+        )
+    }
+}
+
+impl TransactionStatementRequest {
     pub fn source_bytes(&self) -> u64 {
         self.source.len().arch_into()
+    }
+}
+
+impl std::ops::Deref for TransactionStatement {
+    type Target = TransactionStatementRequest;
+
+    fn deref(&self) -> &Self::Target {
+        &self.request
     }
 }
 
@@ -46,6 +88,12 @@ impl TransactionStatement {
 pub struct TransactionQueueLimits {
     pub max_statements: usize,
     pub max_source_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransactionQueueAdmission {
+    New,
+    Existing(TransactionCommandResult),
 }
 
 #[derive(
@@ -299,32 +347,36 @@ impl ReplicatedTransaction {
         }
     }
 
-    pub fn validate_queue_admission(
+    pub fn queue_admission(
         &self,
         owner: &UserName,
         domain: &DomainName,
-        statement: &TransactionStatement,
+        statement: &TransactionStatementRequest,
         limits: TransactionQueueLimits,
-    ) -> Result<(), TransactionMutationError> {
+    ) -> Result<TransactionQueueAdmission, TransactionMutationError> {
         self.ensure_owner(owner)?;
         self.ensure_domain(domain)?;
-        if !matches!(self.state, TransactionState::Open) {
-            return Err(TransactionMutationError::NotOpen {
-                id: self.id.clone(),
-                state: self.state.as_str().to_string(),
-            });
-        }
+        // Open transactions are capped by `limits.max_statements`, so this identity lookup has
+        // the same configured bound as queue admission itself.
         if let Some(existing) = self
             .statements
             .iter()
             .find(|existing| existing.request_reference == statement.request_reference)
         {
-            if existing == statement {
-                return Ok(());
+            if existing.request == *statement {
+                return Ok(TransactionQueueAdmission::Existing(
+                    existing.admission.clone(),
+                ));
             }
             return Err(TransactionMutationError::RequestConflict {
                 id: self.id.clone(),
                 request_reference: statement.request_reference.clone(),
+            });
+        }
+        if !matches!(self.state, TransactionState::Open) {
+            return Err(TransactionMutationError::NotOpen {
+                id: self.id.clone(),
+                state: self.state.as_str().to_string(),
             });
         }
         if statement.expected_position != self.statements.len() {
@@ -352,7 +404,7 @@ impl ReplicatedTransaction {
                 limit: limits.max_source_bytes,
             });
         }
-        Ok(())
+        Ok(TransactionQueueAdmission::New)
     }
 
     pub(crate) fn queue(
@@ -363,13 +415,9 @@ impl ReplicatedTransaction {
         statement: TransactionStatement,
         limits: TransactionQueueLimits,
     ) -> Result<(), TransactionMutationError> {
-        self.validate_queue_admission(owner, domain, &statement, limits)?;
-        if self
-            .statements
-            .iter()
-            .any(|existing| existing == &statement)
-        {
-            return Ok(());
+        match self.queue_admission(owner, domain, &statement.request, limits)? {
+            TransactionQueueAdmission::Existing(_) => return Ok(()),
+            TransactionQueueAdmission::New => {}
         }
         let next_source_bytes = self
             .queued_source_bytes
@@ -793,13 +841,13 @@ mod tests {
                 &owner,
                 &domain,
                 Timestamp::from_unix_nanos(2),
-                TransactionStatement {
+                TransactionStatement::test_admitted(TransactionStatementRequest {
                     request_reference: CommandExecutionReference::parse("request.0")
                         .assured("the test command reference is an accepted literal"),
                     expected_position: 0,
                     source: "SHOW TRANSACTIONS".to_string(),
                     statement: Statement::ShowTransactions(ShowTransactions),
-                },
+                }),
                 TransactionQueueLimits {
                     max_statements: 2,
                     max_source_bytes: 1024,
