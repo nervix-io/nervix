@@ -130,7 +130,7 @@ impl SyslogIngestor {
             .map_err(|reason| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-                reason,
+                reason: reason.to_string(),
             })?;
         let config = SyslogClientConfig::parse(&resolved.entries, SyslogDirection::Ingest)
             .map_err(|reason| RuntimeError::StartIngestor {

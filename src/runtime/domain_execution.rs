@@ -750,7 +750,7 @@ impl Runtime {
             )
             .map_err(|reason| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
-                reason,
+                reason: reason.to_string(),
             })?;
             let Some(runtime) = self.start_branched_entrypoint_runtime(
                 domain,
@@ -777,7 +777,7 @@ impl Runtime {
             )
             .map_err(|reason| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
-                reason,
+                reason: reason.to_string(),
             })?;
             template
                 .prepare_wasm_processors(self, domain)

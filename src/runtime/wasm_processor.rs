@@ -285,7 +285,9 @@ impl Runtime {
         file: &str,
     ) -> Result<WasmCompiledBranchProcessor, String> {
         let processor = processor.into();
-        let id = self.resolve_resource_id(domain, resource, resource_version, resource.as_str())?;
+        let id = self
+            .resolve_resource_id(domain, resource, resource_version, resource.as_str())
+            .map_err(|error| error.to_string())?;
         let version = id.version;
         let Some(resource_store) = self.inner.resource_store.load_full() else {
             return Err("resource store is not attached".to_string());
@@ -350,7 +352,8 @@ pub(super) async fn ensure_wasm_processor_instance(
             resource,
             resource_version,
             resource.as_str(),
-        )?
+        )
+        .map_err(|error| error.to_string())?
         .version;
     let needs_compile = compiled
         .as_ref()
