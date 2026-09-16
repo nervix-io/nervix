@@ -10,11 +10,12 @@
 //! - **Must not know.** Relays, branches, schedules or the registry. A codec converts a payload and
 //!   answers; it decides nothing about where the result goes.
 
-use std::{borrow::Cow, io::Cursor, num::NonZeroU32, sync::Arc as StdArc};
+use std::{borrow::Cow, fmt, io::Cursor, num::NonZeroU32, sync::Arc as StdArc};
 
 use ahash::{HashMap, HashSet};
 use apache_avro::{
-    Schema as AvroSchema, from_avro_datum, to_avro_datum, types::Value as AvroValue,
+    Schema as AvroSchema, from_avro_datum, to_avro_datum,
+    types::{Value as AvroValue, ValueKind as AvroValueKind},
 };
 use arch_into::ArchInto as _;
 use arrow_array::{
@@ -31,7 +32,7 @@ use arrow_array::{
 };
 use arrow_data::transform::MutableArrayData;
 use arrow_schema::{
-    DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef,
+    ArrowError, DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef,
     Schema as ArrowSchema, TimeUnit as ArrowTimeUnit,
 };
 use arrow_select::{
@@ -172,16 +173,23 @@ pub struct ProtobufDescriptorPool {
 impl ProtobufDescriptorPool {
     pub fn from_file_descriptor_set(
         file_descriptor_set: prost_types::FileDescriptorSet,
-    ) -> Result<Self, String> {
+    ) -> error_stack::Result<Self, RuntimeSchemaError> {
         DescriptorPool::from_file_descriptor_set(file_descriptor_set)
             .map(|pool| Self { pool })
-            .map_err(|source| format!("invalid protobuf descriptor set: {source}"))
+            .map_err(|source| {
+                Report::new(RuntimeSchemaError::InvalidProtobufDescriptorSet { source })
+            })
     }
 
-    pub fn message(&self, message_name: &str) -> Result<MessageDescriptor, String> {
-        self.pool
-            .get_message_by_name(message_name)
-            .ok_or_else(|| format!("protobuf message '{message_name}' was not found"))
+    pub fn message(
+        &self,
+        message_name: &str,
+    ) -> error_stack::Result<MessageDescriptor, RuntimeSchemaError> {
+        self.pool.get_message_by_name(message_name).ok_or_else(|| {
+            Report::new(RuntimeSchemaError::UnknownProtobufMessage {
+                message: message_name.to_string(),
+            })
+        })
     }
 }
 
@@ -444,7 +452,7 @@ impl CompiledSchema {
     pub(crate) fn batch_from_test_rows(
         &self,
         rows: impl IntoIterator<Item = impl IntoIterator<Item = (String, RuntimeValue)>>,
-    ) -> Result<RuntimeRecordBatch, String> {
+    ) -> error_stack::Result<RuntimeRecordBatch, RuntimeSchemaError> {
         let rows = rows
             .into_iter()
             .map(|row| row.into_iter().collect::<Vec<_>>())
@@ -456,14 +464,16 @@ impl CompiledSchema {
                     .iter()
                     .any(|(earlier_name, _)| earlier_name == name)
                 {
-                    return Err(format!(
-                        "test Arrow row {row_index} contains duplicate field '{name}'"
-                    ));
+                    return Err(Report::new(RuntimeSchemaError::DuplicateField {
+                        record: RuntimeRecordSource::TestRow(row_index),
+                        field: name.clone(),
+                    }));
                 }
                 if !self.fields.iter().any(|field| field.name == *name) {
-                    return Err(format!(
-                        "test Arrow row {row_index} contains unknown field '{name}'"
-                    ));
+                    return Err(Report::new(RuntimeSchemaError::UnknownField {
+                        record: RuntimeRecordSource::TestRow(row_index),
+                        field: name.clone(),
+                    }));
                 }
             }
             for field in &self.fields {
@@ -485,25 +495,25 @@ impl CompiledSchema {
     pub(crate) fn runtime_row_from_remote(
         &self,
         record: &RemoteRuntimeRecord,
-    ) -> Result<RuntimeRow, String> {
+    ) -> error_stack::Result<RuntimeRow, RuntimeSchemaError> {
         let metadata = RuntimeRecordMetadata::from_remote(record.metadata.clone());
         let mut seen = HashSet::default();
         for field in &record.fields {
             if !seen.insert(field.name.as_str()) {
-                return Err(format!(
-                    "persisted runtime record contains duplicate field '{}'",
-                    field.name
-                ));
+                return Err(Report::new(RuntimeSchemaError::DuplicateField {
+                    record: RuntimeRecordSource::Persisted,
+                    field: field.name.clone(),
+                }));
             }
             if !self
                 .fields
                 .iter()
                 .any(|expected| expected.name == field.name)
             {
-                return Err(format!(
-                    "persisted runtime record contains unknown field '{}'",
-                    field.name
-                ));
+                return Err(Report::new(RuntimeSchemaError::UnknownField {
+                    record: RuntimeRecordSource::Persisted,
+                    field: field.name.clone(),
+                }));
             }
         }
         let mut builder = self.batch_builder(1);
@@ -519,16 +529,21 @@ impl CompiledSchema {
         builder.finish()?.runtime_row(0, metadata)
     }
 
-    fn validate_arrow_batch(&self, batch: &RuntimeRecordBatch) -> Result<(), String> {
+    fn validate_arrow_batch(
+        &self,
+        batch: &RuntimeRecordBatch,
+    ) -> error_stack::Result<(), RuntimeSchemaError> {
         if batch.schema_ref().as_ref() != self.arrow_schema.as_ref() {
-            return Err("arrow batch schema does not match compiled schema".to_string());
+            return Err(Report::new(RuntimeSchemaError::SchemaMismatch {
+                expected: self.arrow_schema.clone(),
+                found: batch.schema(),
+            }));
         }
         if batch.batch.num_columns() != self.fields.len() {
-            return Err(format!(
-                "arrow batch column count {} does not match schema field count {}",
-                batch.batch.num_columns(),
-                self.fields.len()
-            ));
+            return Err(Report::new(RuntimeSchemaError::ColumnCountMismatch {
+                expected: self.fields.len(),
+                found: batch.batch.num_columns(),
+            }));
         }
         Ok(())
     }
@@ -578,7 +593,9 @@ pub(crate) fn test_runtime_row(
 }
 
 #[cfg(test)]
-fn test_runtime_value_arrow_type(value: &RuntimeValue) -> Result<ArrowDataType, String> {
+fn test_runtime_value_arrow_type(
+    value: &RuntimeValue,
+) -> error_stack::Result<ArrowDataType, RuntimeSchemaError> {
     match value {
         RuntimeValue::U8(_) => Ok(ArrowDataType::UInt8),
         RuntimeValue::I8(_) => Ok(ArrowDataType::Int8),
@@ -597,23 +614,31 @@ fn test_runtime_value_arrow_type(value: &RuntimeValue) -> Result<ArrowDataType, 
         RuntimeValue::F32(_) => Ok(ArrowDataType::Float32),
         RuntimeValue::F64(_) => Ok(ArrowDataType::Float64),
         RuntimeValue::Array(values) => {
-            let element = values
-                .first()
-                .ok_or_else(|| "cannot infer an empty test ARRAY element type".to_string())?;
+            let element = values.first().ok_or_else(|| {
+                Report::new(RuntimeSchemaError::EmptyTestSequence {
+                    kind: RuntimeValueKind::Array,
+                })
+            })?;
+            let length = i32::try_from(values.len()).map_err(|_| {
+                Report::new(RuntimeSchemaError::TestArrayLengthOutOfRange {
+                    length: values.len(),
+                })
+            })?;
             Ok(ArrowDataType::FixedSizeList(
                 ArrowFieldRef::new(ArrowField::new(
                     "item",
                     test_runtime_value_arrow_type(element)?,
                     false,
                 )),
-                i32::try_from(values.len())
-                    .map_err(|_| "test ARRAY length exceeds i32".to_string())?,
+                length,
             ))
         }
         RuntimeValue::Vec(values) => {
-            let element = values
-                .first()
-                .ok_or_else(|| "cannot infer an empty test VEC element type".to_string())?;
+            let element = values.first().ok_or_else(|| {
+                Report::new(RuntimeSchemaError::EmptyTestSequence {
+                    kind: RuntimeValueKind::Vec,
+                })
+            })?;
             Ok(ArrowDataType::List(ArrowFieldRef::new(ArrowField::new(
                 "item",
                 test_runtime_value_arrow_type(element)?,
@@ -662,7 +687,7 @@ impl CompiledCodec {
             .validate_arrow_batch(batch)
             .map_err(|reason| CodecError::InvalidCodec {
                 codec: self.name.as_str().to_string(),
-                reason,
+                reason: reason.to_string(),
             })?;
         Ok(CompiledCodecBatchEncoder { codec: self, batch })
     }
@@ -739,13 +764,12 @@ impl CompiledCodecBatchEncoder<'_> {
                     });
                 };
                 let value = run_jaq_transformation(self.codec, program, row.to_json_value()?)?;
-                *payload =
-                    encode_protobuf_payload(&protobuf.message, &value).map_err(|reason| {
-                        CodecError::ProtobufEncode {
-                            codec: self.codec.name.as_str().to_string(),
-                            reason,
-                        }
-                    })?;
+                *payload = encode_protobuf_payload(&protobuf.message, &value).map_err(|error| {
+                    CodecError::ProtobufEncode {
+                        codec: self.codec.name.as_str().to_string(),
+                        reason: error.to_string(),
+                    }
+                })?;
             }
             CompiledWireSchema::Syslog => syslog::encode_row(&row, payload)?,
         }
@@ -776,9 +800,12 @@ impl RuntimeRecordBatch {
     pub(crate) fn from_record_batch(
         expected_schema: StdArc<ArrowSchema>,
         batch: RecordBatch,
-    ) -> Result<Self, String> {
+    ) -> error_stack::Result<Self, RuntimeSchemaError> {
         if batch.schema().as_ref() != expected_schema.as_ref() {
-            return Err("arrow batch schema does not match expected schema".to_string());
+            return Err(Report::new(RuntimeSchemaError::SchemaMismatch {
+                expected: expected_schema,
+                found: batch.schema(),
+            }));
         }
         Ok(Self { batch })
     }
@@ -802,7 +829,7 @@ impl RuntimeRecordBatch {
     pub(crate) fn from_rows<'a>(
         expected_schema: StdArc<ArrowSchema>,
         rows: impl ExactSizeIterator<Item = &'a RuntimeRow>,
-    ) -> Result<Self, String> {
+    ) -> error_stack::Result<Self, RuntimeSchemaError> {
         let row_count = rows.len();
         if row_count == 0 {
             let columns = expected_schema
@@ -810,8 +837,10 @@ impl RuntimeRecordBatch {
                 .iter()
                 .map(|field| new_empty_array(field.data_type()))
                 .collect::<Vec<_>>();
-            let batch = RecordBatch::try_new(expected_schema.clone(), columns)
-                .map_err(|error| error.to_string())?;
+            let batch =
+                RecordBatch::try_new(expected_schema.clone(), columns).map_err(|source| {
+                    RuntimeSchemaError::arrow(RuntimeSchemaOperation::BuildEmptyBatch, source)
+                })?;
             return Ok(Self { batch });
         }
 
@@ -820,14 +849,16 @@ impl RuntimeRecordBatch {
         let mut selections = Vec::with_capacity(row_count);
         for row in rows {
             if row.batch.schema_ref().as_ref() != expected_schema.as_ref() {
-                return Err("Arrow row schema does not match expected schema".to_string());
+                return Err(Report::new(RuntimeSchemaError::SchemaMismatch {
+                    expected: expected_schema,
+                    found: row.batch.schema(),
+                }));
             }
             if row.row >= row.batch.batch.num_rows() {
-                return Err(format!(
-                    "Arrow batch row {} is outside batch with {} rows",
-                    row.row,
-                    row.batch.batch.num_rows()
-                ));
+                return Err(Report::new(RuntimeSchemaError::RowOutOfBounds {
+                    row: row.row,
+                    rows: row.batch.batch.num_rows(),
+                }));
             }
             let pointer = Arc::as_ptr(&row.batch);
             let source = if let Some(source) = source_indices.get(&pointer) {
@@ -881,14 +912,16 @@ impl RuntimeRecordBatch {
         } else {
             RecordBatch::try_new(expected_schema.clone(), columns)
         }
-        .map_err(|error| error.to_string())?;
+        .map_err(|source| {
+            RuntimeSchemaError::arrow(RuntimeSchemaOperation::BuildSelectedBatch, source)
+        })?;
         Ok(Self { batch })
     }
 
     pub(crate) fn shared_from_rows(
         expected_schema: StdArc<ArrowSchema>,
         rows: &[RuntimeRow],
-    ) -> Result<Arc<Self>, String> {
+    ) -> error_stack::Result<Arc<Self>, RuntimeSchemaError> {
         if let Some(first) = rows.first()
             && first.batch.schema_ref().as_ref() == expected_schema.as_ref()
             && rows.len() == first.batch.batch.num_rows()
@@ -902,12 +935,16 @@ impl RuntimeRecordBatch {
         Self::from_rows(expected_schema, rows.iter()).map(Arc::new)
     }
 
-    pub(crate) fn value(&self, row: usize, name: &str) -> Result<Option<RuntimeValue>, String> {
+    pub(crate) fn value(
+        &self,
+        row: usize,
+        name: &str,
+    ) -> error_stack::Result<Option<RuntimeValue>, RuntimeSchemaError> {
         if row >= self.batch.num_rows() {
-            return Err(format!(
-                "Arrow batch row {row} is outside batch with {} rows",
-                self.batch.num_rows()
-            ));
+            return Err(Report::new(RuntimeSchemaError::RowOutOfBounds {
+                row,
+                rows: self.batch.num_rows(),
+            }));
         }
         // `index_of` reports a missing field as an error, and a missing field is exactly what an
         // absent value means here: the batch carries no column of that name to read.
@@ -922,39 +959,42 @@ impl RuntimeRecordBatch {
         &self,
         row: usize,
         column_index: usize,
-    ) -> Result<Option<RuntimeValue>, String> {
+    ) -> error_stack::Result<Option<RuntimeValue>, RuntimeSchemaError> {
         if row >= self.batch.num_rows() {
-            return Err(format!(
-                "Arrow batch row {row} is outside batch with {} rows",
-                self.batch.num_rows()
-            ));
+            return Err(Report::new(RuntimeSchemaError::RowOutOfBounds {
+                row,
+                rows: self.batch.num_rows(),
+            }));
         }
         let field = self
             .schema_ref()
             .fields()
             .get(column_index)
             .ok_or_else(|| {
-                format!(
-                    "Arrow column index {column_index} is outside schema with {} fields",
-                    self.schema_ref().fields().len()
-                )
+                Report::new(RuntimeSchemaError::ColumnOutOfBounds {
+                    column: column_index,
+                    columns: self.schema_ref().fields().len(),
+                })
             })?;
         let column = self.batch.columns().get(column_index).ok_or_else(|| {
-            format!(
-                "Arrow column index {column_index} is outside batch with {} columns",
-                self.batch.num_columns()
-            )
+            Report::new(RuntimeSchemaError::ColumnOutOfBounds {
+                column: column_index,
+                columns: self.batch.num_columns(),
+            })
         })?;
         runtime_value_from_arrow_array(
             column.as_ref(),
-            &parse_as_type_from_arrow(field.data_type()).map_err(|error| error.to_string())?,
+            &parse_as_type_from_arrow(field.data_type())?,
             field.is_nullable(),
             row,
             field.name(),
         )
     }
 
-    pub(crate) fn row_to_json_string(&self, row: usize) -> Result<String, String> {
+    pub(crate) fn row_to_json_string(
+        &self,
+        row: usize,
+    ) -> error_stack::Result<String, RuntimeSchemaError> {
         self.row_to_json_string_masking(row, &nervix_vm::SchemaSensitivity::default())
     }
 
@@ -962,12 +1002,12 @@ impl RuntimeRecordBatch {
         &self,
         row: usize,
         sensitivity: &nervix_vm::SchemaSensitivity,
-    ) -> Result<String, String> {
+    ) -> error_stack::Result<String, RuntimeSchemaError> {
         if row >= self.batch.num_rows() {
-            return Err(format!(
-                "Arrow batch row {row} is outside batch with {} rows",
-                self.batch.num_rows()
-            ));
+            return Err(Report::new(RuntimeSchemaError::RowOutOfBounds {
+                row,
+                rows: self.batch.num_rows(),
+            }));
         }
         let mut json = JsonMap::new();
         let mut fields = self.schema_ref().fields().iter().collect::<Vec<_>>();
@@ -985,40 +1025,47 @@ impl RuntimeRecordBatch {
         Ok(JsonValue::Object(json).to_string())
     }
 
-    pub(crate) fn slice(&self, offset: usize, length: usize) -> Result<Self, String> {
-        let end = offset.checked_add(length).ok_or_else(|| {
-            format!("Arrow batch slice offset {offset} and length {length} overflow")
-        })?;
+    pub(crate) fn slice(
+        &self,
+        offset: usize,
+        length: usize,
+    ) -> error_stack::Result<Self, RuntimeSchemaError> {
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| Report::new(RuntimeSchemaError::SliceOverflow { offset, length }))?;
         if end > self.batch.num_rows() {
-            return Err(format!(
-                "Arrow batch slice {offset}..{end} is outside batch with {} rows",
-                self.batch.num_rows()
-            ));
+            return Err(Report::new(RuntimeSchemaError::SliceOutOfBounds {
+                offset,
+                end,
+                rows: self.batch.num_rows(),
+            }));
         }
         Ok(Self {
             batch: self.batch.slice(offset, length),
         })
     }
 
-    pub(crate) fn take(&self, rows: &[usize]) -> Result<Self, String> {
-        let indices = UInt64Array::from(
-            rows.iter()
-                .map(|row| {
-                    if *row >= self.batch.num_rows() {
-                        return Err(format!(
-                            "Arrow batch row {row} is outside batch with {} rows",
-                            self.batch.num_rows()
-                        ));
-                    }
-                    Ok::<u64, String>((*row).arch_into())
-                })
-                .collect::<Result<Vec<_>, String>>()?,
-        );
+    pub(crate) fn take(&self, rows: &[usize]) -> error_stack::Result<Self, RuntimeSchemaError> {
+        let mut indices: Vec<u64> = Vec::with_capacity(rows.len());
+        for row in rows {
+            if *row >= self.batch.num_rows() {
+                return Err(Report::new(RuntimeSchemaError::RowOutOfBounds {
+                    row: *row,
+                    rows: self.batch.num_rows(),
+                }));
+            }
+            indices.push((*row).arch_into());
+        }
+        let indices = UInt64Array::from(indices);
         let columns = self
             .batch
             .columns()
             .iter()
-            .map(|column| take(column.as_ref(), &indices, None).map_err(|error| error.to_string()))
+            .map(|column| {
+                take(column.as_ref(), &indices, None).map_err(|source| {
+                    RuntimeSchemaError::arrow(RuntimeSchemaOperation::TakeRows, source)
+                })
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let batch = if columns.is_empty() {
             RecordBatch::try_new_with_options(
@@ -1029,7 +1076,9 @@ impl RuntimeRecordBatch {
         } else {
             RecordBatch::try_new(self.schema(), columns)
         }
-        .map_err(|error| error.to_string())?;
+        .map_err(|source| {
+            RuntimeSchemaError::arrow(RuntimeSchemaOperation::BuildSelectedBatch, source)
+        })?;
         Ok(Self { batch })
     }
 
@@ -1037,37 +1086,42 @@ impl RuntimeRecordBatch {
         &self,
         row: usize,
         metadata: RuntimeRecordMetadata,
-    ) -> Result<RuntimeRow, String> {
+    ) -> error_stack::Result<RuntimeRow, RuntimeSchemaError> {
         RuntimeRow::new(Arc::new(self.clone()), row, metadata)
     }
 
-    pub(crate) fn project(&self, schema: StdArc<ArrowSchema>) -> Result<Self, String> {
-        let columns = schema
-            .fields()
-            .iter()
-            .map(|field| {
-                let index = self
-                    .schema_ref()
-                    .index_of(field.name())
-                    .map_err(|_| format!("Arrow payload is missing field '{}'", field.name()))?;
-                let column = self.batch.column(index);
-                if column.data_type() != field.data_type() {
-                    return Err(format!(
-                        "Arrow payload field '{}' expected {:?}, found {:?}",
-                        field.name(),
-                        field.data_type(),
-                        column.data_type()
-                    ));
-                }
-                if !field.is_nullable() && column.null_count() > 0 {
-                    return Err(format!(
-                        "required Arrow payload field '{}' contains null values",
-                        field.name()
-                    ));
-                }
-                Ok(column.clone())
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+    pub(crate) fn project(
+        &self,
+        schema: StdArc<ArrowSchema>,
+    ) -> error_stack::Result<Self, RuntimeSchemaError> {
+        let mut columns = Vec::with_capacity(schema.fields().len());
+        for field in schema.fields() {
+            let index = self.schema_ref().index_of(field.name()).map_err(|_| {
+                Report::new(RuntimeSchemaError::MissingField {
+                    field: field.name().clone(),
+                })
+            })?;
+            let column = self.batch.column(index);
+            if column.data_type() != field.data_type() {
+                return Err(Report::new(RuntimeSchemaError::ExactTypeMismatch {
+                    location: RuntimeValueLocation::CodecField {
+                        field: field.name().clone(),
+                        elements: Vec::new(),
+                    },
+                    expected: field.data_type().clone(),
+                    found: column.data_type().clone(),
+                }));
+            }
+            if !field.is_nullable() && column.null_count() > 0 {
+                return Err(Report::new(
+                    RuntimeSchemaError::RequiredFieldContainsNulls {
+                        field: field.name().clone(),
+                        nulls: column.null_count(),
+                    },
+                ));
+            }
+            columns.push(column.clone());
+        }
         let batch = if columns.is_empty() {
             RecordBatch::try_new_with_options(
                 schema.clone(),
@@ -1077,34 +1131,46 @@ impl RuntimeRecordBatch {
         } else {
             RecordBatch::try_new(schema.clone(), columns)
         }
-        .map_err(|error| error.to_string())?;
+        .map_err(|source| {
+            RuntimeSchemaError::arrow(RuntimeSchemaOperation::ProjectColumns, source)
+        })?;
         Ok(Self { batch })
     }
 
-    pub(crate) fn filter(&self, predicate: &BooleanArray) -> Result<Self, String> {
+    pub(crate) fn filter(
+        &self,
+        predicate: &BooleanArray,
+    ) -> error_stack::Result<Self, RuntimeSchemaError> {
         if predicate.len() != self.batch.num_rows() {
-            return Err(format!(
-                "arrow filter predicate row count {} does not match batch row count {}",
-                predicate.len(),
-                self.batch.num_rows()
-            ));
+            return Err(Report::new(RuntimeSchemaError::PredicateLengthMismatch {
+                expected: self.batch.num_rows(),
+                found: predicate.len(),
+            }));
         }
-        let batch =
-            filter_record_batch(&self.batch, predicate).map_err(|error| error.to_string())?;
+        let batch = filter_record_batch(&self.batch, predicate).map_err(|source| {
+            RuntimeSchemaError::arrow(RuntimeSchemaOperation::FilterRows, source)
+        })?;
         Ok(Self { batch })
     }
 
-    pub fn concat(batches: &[&Self]) -> Result<Self, String> {
+    pub fn concat(batches: &[&Self]) -> error_stack::Result<Self, RuntimeSchemaError> {
         let Some(first) = batches.first() else {
-            return Err("cannot concat zero arrow batches".to_string());
+            return Err(Report::new(RuntimeSchemaError::EmptyConcatenation));
         };
 
         let schema = first.schema();
-        if batches
+        if let Some((batch, mismatched)) = batches
             .iter()
-            .any(|batch| batch.schema_ref().as_ref() != schema.as_ref())
+            .enumerate()
+            .find(|(_, batch)| batch.schema_ref().as_ref() != schema.as_ref())
         {
-            return Err("cannot concat arrow batches with different schemas".to_string());
+            return Err(Report::new(
+                RuntimeSchemaError::ConcatenationSchemaMismatch {
+                    batch,
+                    expected: schema,
+                    found: mismatched.schema(),
+                },
+            ));
         }
 
         if batches.len() == 1 {
@@ -1120,7 +1186,9 @@ impl RuntimeRecordBatch {
                     .iter()
                     .map(|batch| batch.batch.column(column_index).as_ref())
                     .collect::<Vec<_>>();
-                columns.push(concat_arrow_arrays(&arrays).map_err(|error| error.to_string())?);
+                columns.push(concat_arrow_arrays(&arrays).map_err(|source| {
+                    RuntimeSchemaError::arrow(RuntimeSchemaOperation::ConcatenateColumns, source)
+                })?);
             }
             columns
         };
@@ -1138,7 +1206,7 @@ impl RuntimeRecordBatch {
         } else {
             RecordBatch::try_new(schema.clone(), columns)
         }
-        .map_err(|error| error.to_string())?;
+        .map_err(|source| RuntimeSchemaError::arrow(RuntimeSchemaOperation::FinishBatch, source))?;
 
         Ok(Self { batch })
     }
@@ -1149,12 +1217,12 @@ impl RuntimeRow {
         batch: Arc<RuntimeRecordBatch>,
         row: usize,
         metadata: RuntimeRecordMetadata,
-    ) -> Result<Self, String> {
+    ) -> error_stack::Result<Self, RuntimeSchemaError> {
         if row >= batch.batch.num_rows() {
-            return Err(format!(
-                "Arrow batch row {row} is outside batch with {} rows",
-                batch.batch.num_rows()
-            ));
+            return Err(Report::new(RuntimeSchemaError::RowOutOfBounds {
+                row,
+                rows: batch.batch.num_rows(),
+            }));
         }
         Ok(Self {
             batch,
@@ -1188,11 +1256,17 @@ impl RuntimeRow {
         self
     }
 
-    pub(crate) fn value(&self, name: &str) -> Result<Option<RuntimeValue>, String> {
+    pub(crate) fn value(
+        &self,
+        name: &str,
+    ) -> error_stack::Result<Option<RuntimeValue>, RuntimeSchemaError> {
         self.batch.value(self.row, name)
     }
 
-    pub(crate) fn value_at(&self, column_index: usize) -> Result<Option<RuntimeValue>, String> {
+    pub(crate) fn value_at(
+        &self,
+        column_index: usize,
+    ) -> error_stack::Result<Option<RuntimeValue>, RuntimeSchemaError> {
         self.batch.value_at(self.row, column_index)
     }
 
@@ -1203,20 +1277,20 @@ impl RuntimeRow {
     }
 
     /// This row's columns rendered as one JSON object, for reports that show a record to a user.
-    pub(crate) fn to_json_string(&self) -> Result<String, String> {
+    pub(crate) fn to_json_string(&self) -> error_stack::Result<String, RuntimeSchemaError> {
         self.to_json_string_masking(&nervix_vm::SchemaSensitivity::default())
     }
 
     pub(crate) fn to_json_string_masking(
         &self,
         sensitivity: &nervix_vm::SchemaSensitivity,
-    ) -> Result<String, String> {
+    ) -> error_stack::Result<String, RuntimeSchemaError> {
         self.batch.row_to_json_string_masking(self.row, sensitivity)
     }
 
     /// Render this row in the scalar-field form window-processor state is still persisted in.
     /// See [`CompiledSchema::runtime_row_from_remote`] for why it remains.
-    pub(crate) fn to_remote(&self) -> Result<RemoteRuntimeRecord, String> {
+    pub(crate) fn to_remote(&self) -> error_stack::Result<RemoteRuntimeRecord, RuntimeSchemaError> {
         let mut fields = Vec::with_capacity(self.batch.schema_ref().fields().len());
         for (column_index, field) in self.batch.schema_ref().fields().iter().enumerate() {
             if let Some(value) = self.value_at(column_index)? {
@@ -1234,92 +1308,87 @@ impl RuntimeRow {
 }
 
 impl RuntimeRecordBatchBuilder {
-    fn next_field_index(&self) -> Result<usize, String> {
+    fn next_field_index(&self) -> error_stack::Result<usize, RuntimeSchemaError> {
         let index = self.next_column;
         self.fields.get(index).ok_or_else(|| {
-            format!(
-                "Arrow batch row {} already contains all {} schema fields",
-                self.keep.len(),
-                self.fields.len()
-            )
+            Report::new(RuntimeSchemaError::BuilderRowComplete {
+                row: self.keep.len(),
+                fields: self.fields.len(),
+            })
         })?;
         Ok(index)
     }
 
-    pub(crate) fn append(&mut self, value: Option<&RuntimeValue>) -> Result<(), String> {
+    pub(crate) fn append(
+        &mut self,
+        value: Option<&RuntimeValue>,
+    ) -> error_stack::Result<(), RuntimeSchemaError> {
         let index = self.next_field_index()?;
         let field = &self.fields[index];
         if value.is_none() && !field.optional {
-            return Err(format!(
-                "Arrow batch row {} is missing required field '{}'",
-                self.keep.len(),
-                field.name
-            ));
+            return Err(Report::new(RuntimeSchemaError::MissingRequiredField {
+                row: self.keep.len(),
+                field: field.name.clone(),
+            }));
         }
-        append_runtime_value_to_arrow(
-            self.builders[index].as_mut(),
-            &field.ty,
-            value,
-            &format!("Arrow batch row {} field '{}'", self.keep.len(), field.name),
-        )?;
+        let location = RuntimeValueLocationRef::BatchField {
+            row: self.keep.len(),
+            field: &field.name,
+        };
+        append_runtime_value_to_arrow(self.builders[index].as_mut(), &field.ty, value, &location)?;
         self.next_column += 1;
         Ok(())
     }
 
-    fn append_null(&mut self) -> Result<(), String> {
+    fn append_null(&mut self) -> error_stack::Result<(), RuntimeSchemaError> {
         let index = self.next_field_index()?;
         let field = &self.fields[index];
         if !field.optional {
-            return Err(format!(
-                "Arrow batch row {} is missing required field '{}'",
-                self.keep.len(),
-                field.name
-            ));
+            return Err(Report::new(RuntimeSchemaError::MissingRequiredField {
+                row: self.keep.len(),
+                field: field.name.clone(),
+            }));
         }
-        append_runtime_value_to_arrow(
-            self.builders[index].as_mut(),
-            &field.ty,
-            None,
-            &format!("Arrow batch row {} field '{}'", self.keep.len(), field.name),
-        )?;
+        let location = RuntimeValueLocationRef::BatchField {
+            row: self.keep.len(),
+            field: &field.name,
+        };
+        append_runtime_value_to_arrow(self.builders[index].as_mut(), &field.ty, None, &location)?;
         self.next_column += 1;
         Ok(())
     }
 
-    fn append_json_value(&mut self, value: &JsonValue) -> Result<(), String> {
+    fn append_json_value(
+        &mut self,
+        value: &JsonValue,
+    ) -> error_stack::Result<(), RuntimeSchemaError> {
         let index = self.next_field_index()?;
         let field = &self.fields[index];
-        append_json_value_to_arrow(
-            self.builders[index].as_mut(),
-            &field.ty,
-            value,
-            &format!("field '{}'", field.name),
-        )?;
+        let location = RuntimeValueLocationRef::CodecField { field: &field.name };
+        append_json_value_to_arrow(self.builders[index].as_mut(), &field.ty, value, &location)?;
         self.next_column += 1;
         Ok(())
     }
 
-    fn append_avro_value(&mut self, value: &AvroValue) -> Result<(), String> {
+    fn append_avro_value(
+        &mut self,
+        value: &AvroValue,
+    ) -> error_stack::Result<(), RuntimeSchemaError> {
         let index = self.next_field_index()?;
         let field = &self.fields[index];
-        append_avro_value_to_arrow(
-            self.builders[index].as_mut(),
-            &field.ty,
-            value,
-            &format!("field '{}'", field.name),
-        )?;
+        let location = RuntimeValueLocationRef::CodecField { field: &field.name };
+        append_avro_value_to_arrow(self.builders[index].as_mut(), &field.ty, value, &location)?;
         self.next_column += 1;
         Ok(())
     }
 
-    pub(crate) fn finish_row(&mut self) -> Result<(), String> {
+    pub(crate) fn finish_row(&mut self) -> error_stack::Result<(), RuntimeSchemaError> {
         if self.next_column != self.fields.len() {
-            return Err(format!(
-                "Arrow batch row {} contains {} values for {} schema fields",
-                self.keep.len(),
-                self.next_column,
-                self.fields.len()
-            ));
+            return Err(Report::new(RuntimeSchemaError::BuilderArity {
+                row: self.keep.len(),
+                values: self.next_column,
+                fields: self.fields.len(),
+            }));
         }
         self.keep.push(true);
         self.next_column = 0;
@@ -1340,11 +1409,12 @@ impl RuntimeRecordBatchBuilder {
                 continue;
             }
             let field = &self.fields[index];
+            let location = RuntimeValueLocationRef::AbandonedBatchRow;
             append_runtime_value_to_arrow(
                 self.builders[index].as_mut(),
                 &field.ty,
                 None,
-                "abandoned Arrow batch row",
+                &location,
             )
             .assured("a null append cannot fail on a builder made from the field's own type");
         }
@@ -1378,14 +1448,13 @@ impl RuntimeRecordBatchBuilder {
             .assured("`abandoned` counts entries of `keep`, so it never exceeds their number")
     }
 
-    pub(crate) fn finish(mut self) -> Result<RuntimeRecordBatch, String> {
+    pub(crate) fn finish(mut self) -> error_stack::Result<RuntimeRecordBatch, RuntimeSchemaError> {
         if self.next_column != 0 {
-            return Err(format!(
-                "Arrow batch row {} is incomplete with {} of {} schema fields",
-                self.keep.len(),
-                self.next_column,
-                self.fields.len()
-            ));
+            return Err(Report::new(RuntimeSchemaError::BuilderArity {
+                row: self.keep.len(),
+                values: self.next_column,
+                fields: self.fields.len(),
+            }));
         }
         #[cfg(test)]
         RECORD_COLUMN_SETS_BUILT.with(|count| count.set(count.get() + 1));
@@ -1405,7 +1474,9 @@ impl RuntimeRecordBatchBuilder {
                 .iter()
                 .map(|column| filter_arrow_array(column, &keep))
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| error.to_string())?
+                .map_err(|source| {
+                    RuntimeSchemaError::arrow(RuntimeSchemaOperation::DropAbandonedRows, source)
+                })?
         };
         let batch = if columns.is_empty() {
             RecordBatch::try_new_with_options(
@@ -1416,23 +1487,489 @@ impl RuntimeRecordBatchBuilder {
         } else {
             RecordBatch::try_new(self.schema.clone(), columns)
         }
-        .map_err(|error| error.to_string())?;
+        .map_err(|source| RuntimeSchemaError::arrow(RuntimeSchemaOperation::FinishBatch, source))?;
         Ok(RuntimeRecordBatch { batch })
     }
 }
 
-/// An Arrow type that no Nervix type describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum RuntimeSchemaOperation {
+    #[strum(serialize = "build an empty Arrow batch")]
+    BuildEmptyBatch,
+    #[strum(serialize = "build an Arrow batch from selected rows")]
+    BuildSelectedBatch,
+    #[strum(serialize = "take Arrow rows")]
+    TakeRows,
+    #[strum(serialize = "project Arrow columns")]
+    ProjectColumns,
+    #[strum(serialize = "filter Arrow rows")]
+    FilterRows,
+    #[strum(serialize = "concatenate Arrow columns")]
+    ConcatenateColumns,
+    #[strum(serialize = "drop abandoned Arrow rows")]
+    DropAbandonedRows,
+    #[strum(serialize = "finish an Arrow batch")]
+    FinishBatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum RuntimeValueKind {
+    #[strum(serialize = "U8")]
+    U8,
+    #[strum(serialize = "I8")]
+    I8,
+    #[strum(serialize = "U16")]
+    U16,
+    #[strum(serialize = "I16")]
+    I16,
+    #[strum(serialize = "U32")]
+    U32,
+    #[strum(serialize = "I32")]
+    I32,
+    #[strum(serialize = "U64")]
+    U64,
+    #[strum(serialize = "I64")]
+    I64,
+    #[strum(serialize = "BOOL")]
+    Bool,
+    #[strum(serialize = "STRING")]
+    String,
+    #[strum(serialize = "DATETIME")]
+    Datetime,
+    #[strum(serialize = "F32")]
+    F32,
+    #[strum(serialize = "F64")]
+    F64,
+    #[strum(serialize = "ARRAY")]
+    Array,
+    #[strum(serialize = "VEC")]
+    Vec,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeValueLocation {
+    BatchField {
+        row: usize,
+        field: String,
+        elements: Vec<usize>,
+    },
+    CodecField {
+        field: String,
+        elements: Vec<usize>,
+    },
+    ScalarColumn {
+        elements: Vec<usize>,
+    },
+    AbandonedBatchRow {
+        elements: Vec<usize>,
+    },
+    AbandonedFixedSizeList {
+        elements: Vec<usize>,
+    },
+}
+
+impl RuntimeValueLocation {
+    fn elements(&self) -> &[usize] {
+        match self {
+            Self::BatchField { elements, .. }
+            | Self::CodecField { elements, .. }
+            | Self::ScalarColumn { elements }
+            | Self::AbandonedBatchRow { elements }
+            | Self::AbandonedFixedSizeList { elements } => elements,
+        }
+    }
+
+    fn elements_mut(&mut self) -> &mut Vec<usize> {
+        match self {
+            Self::BatchField { elements, .. }
+            | Self::CodecField { elements, .. }
+            | Self::ScalarColumn { elements }
+            | Self::AbandonedBatchRow { elements }
+            | Self::AbandonedFixedSizeList { elements } => elements,
+        }
+    }
+}
+
+impl fmt::Display for RuntimeValueLocation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BatchField { row, field, .. } => {
+                write!(formatter, "Arrow batch row {row} field '{field}'")?;
+            }
+            Self::CodecField { field, .. } => write!(formatter, "field '{field}'")?,
+            Self::ScalarColumn { .. } => formatter.write_str("runtime scalar column")?,
+            Self::AbandonedBatchRow { .. } => {
+                formatter.write_str("abandoned Arrow batch row")?;
+            }
+            Self::AbandonedFixedSizeList { .. } => {
+                formatter.write_str("abandoned fixed-size list value")?;
+            }
+        }
+        for index in self.elements() {
+            write!(formatter, "[{index}]")?;
+        }
+        Ok(())
+    }
+}
+
+enum RuntimeValueLocationRef<'a> {
+    BatchField {
+        row: usize,
+        field: &'a str,
+    },
+    CodecField {
+        field: &'a str,
+    },
+    ScalarColumn,
+    AbandonedBatchRow,
+    AbandonedFixedSizeList,
+    Element {
+        parent: &'a RuntimeValueLocationRef<'a>,
+        index: usize,
+    },
+}
+
+impl RuntimeValueLocationRef<'_> {
+    fn to_runtime_location(&self) -> RuntimeValueLocation {
+        match self {
+            Self::BatchField { row, field } => RuntimeValueLocation::BatchField {
+                row: *row,
+                field: (*field).to_string(),
+                elements: Vec::new(),
+            },
+            Self::CodecField { field } => RuntimeValueLocation::CodecField {
+                field: (*field).to_string(),
+                elements: Vec::new(),
+            },
+            Self::ScalarColumn => RuntimeValueLocation::ScalarColumn {
+                elements: Vec::new(),
+            },
+            Self::AbandonedBatchRow => RuntimeValueLocation::AbandonedBatchRow {
+                elements: Vec::new(),
+            },
+            Self::AbandonedFixedSizeList => RuntimeValueLocation::AbandonedFixedSizeList {
+                elements: Vec::new(),
+            },
+            Self::Element { parent, index } => {
+                let mut location = parent.to_runtime_location();
+                location.elements_mut().push(*index);
+                location
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum JsonValueKind {
+    #[strum(serialize = "null")]
+    Null,
+    #[strum(serialize = "boolean")]
+    Boolean,
+    #[strum(serialize = "number")]
+    Number,
+    #[strum(serialize = "string")]
+    String,
+    #[strum(serialize = "array")]
+    Array,
+    #[strum(serialize = "object")]
+    Object,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeRecordSource {
+    TestRow(usize),
+    Persisted,
+}
+
+impl fmt::Display for RuntimeRecordSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TestRow(row) => write!(formatter, "test Arrow row {row}"),
+            Self::Persisted => formatter.write_str("persisted runtime record"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyslogHeaderIssue {
+    Empty,
+    TooLong { length: usize, maximum: usize },
+    NonPrintableAscii,
+}
+
+impl fmt::Display for SyslogHeaderIssue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => formatter.write_str("value is empty"),
+            Self::TooLong { maximum, .. } => {
+                write!(
+                    formatter,
+                    "value exceeds the maximum length of {maximum} bytes"
+                )
+            }
+            Self::NonPrintableAscii => {
+                formatter.write_str("value contains characters outside printable US-ASCII")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyslogStructuredDataIssue {
+    MissingElement,
+    InvalidElementIdCharacter,
+    ElementIdLength { length: usize },
+    DuplicateElementId,
+    ElementDelimiter,
+    UnterminatedElement,
+    InvalidParameterNameCharacter,
+    ParameterNameLength { length: usize },
+    DuplicateParameterName,
+    ParameterShape,
+    UnterminatedEscape,
+    InvalidEscape,
+    UnescapedClosingBracket,
+    UnterminatedParameterValue,
+    ParameterDelimiter,
+}
+
+impl fmt::Display for SyslogStructuredDataIssue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingElement => {
+                formatter.write_str("expected '-' or an SD element beginning with '['")
+            }
+            Self::InvalidElementIdCharacter => {
+                formatter.write_str("SD-ID contains an invalid character")
+            }
+            Self::ElementIdLength { length } => {
+                write!(formatter, "SD-ID length {length} is outside 1..=32")
+            }
+            Self::DuplicateElementId => {
+                formatter.write_str("STRUCTURED-DATA contains a duplicate SD-ID")
+            }
+            Self::ElementDelimiter => formatter.write_str("expected a space or ']' after SD-ID"),
+            Self::UnterminatedElement => formatter.write_str("unterminated SD element"),
+            Self::InvalidParameterNameCharacter => {
+                formatter.write_str("PARAM-NAME contains an invalid character")
+            }
+            Self::ParameterNameLength { length } => {
+                write!(formatter, "PARAM-NAME length {length} is outside 1..=32")
+            }
+            Self::DuplicateParameterName => {
+                formatter.write_str("SD element contains a duplicate PARAM-NAME")
+            }
+            Self::ParameterShape => {
+                formatter.write_str("SD parameter must use name=\"value\" shape")
+            }
+            Self::UnterminatedEscape => formatter.write_str("unterminated escape in PARAM-VALUE"),
+            Self::InvalidEscape => formatter.write_str("PARAM-VALUE contains an invalid escape"),
+            Self::UnescapedClosingBracket => formatter.write_str("unescaped ']' in PARAM-VALUE"),
+            Self::UnterminatedParameterValue => formatter.write_str("unterminated PARAM-VALUE"),
+            Self::ParameterDelimiter => {
+                formatter.write_str("expected a space or ']' after PARAM-VALUE")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum ProtobufJsonOperation {
+    #[strum(serialize = "serialize the input JSON")]
+    SerializeInput,
+    #[strum(serialize = "deserialize the protobuf message from JSON")]
+    DeserializeMessage,
+    #[strum(serialize = "finish deserializing the protobuf message")]
+    FinishMessage,
+    #[strum(serialize = "serialize the protobuf message to JSON")]
+    SerializeMessage,
+    #[strum(serialize = "deserialize the protobuf JSON output")]
+    DeserializeOutput,
+}
+
+/// A schema, Arrow record, or scalar projection that cannot satisfy its exact runtime contract.
 #[derive(Debug, Error)]
-pub(crate) enum ArrowTypeError {
+pub enum RuntimeSchemaError {
+    #[error("invalid protobuf descriptor set: {source}")]
+    InvalidProtobufDescriptorSet {
+        #[source]
+        source: prost_reflect::DescriptorError,
+    },
+    #[error("protobuf message '{message}' was not found")]
+    UnknownProtobufMessage { message: String },
+    #[error("{record} contains duplicate field '{field}'")]
+    DuplicateField {
+        record: RuntimeRecordSource,
+        field: String,
+    },
+    #[error("{record} contains unknown field '{field}'")]
+    UnknownField {
+        record: RuntimeRecordSource,
+        field: String,
+    },
+    #[error("Arrow batch schema does not match: expected {expected:?}, found {found:?}")]
+    SchemaMismatch {
+        expected: StdArc<ArrowSchema>,
+        found: StdArc<ArrowSchema>,
+    },
+    #[error("Arrow batch has {found} columns for {expected} schema fields")]
+    ColumnCountMismatch { expected: usize, found: usize },
+    #[error("cannot infer the element type of an empty test {kind}")]
+    EmptyTestSequence { kind: RuntimeValueKind },
+    #[error("test ARRAY length {length} exceeds the Arrow i32 length range")]
+    TestArrayLengthOutOfRange { length: usize },
+    #[error("failed to {operation}: {source}")]
+    ArrowOperation {
+        operation: RuntimeSchemaOperation,
+        #[source]
+        source: ArrowError,
+    },
+    #[error("Arrow batch row {row} is outside batch with {rows} rows")]
+    RowOutOfBounds { row: usize, rows: usize },
+    #[error("Arrow column index {column} is outside collection with {columns} columns")]
+    ColumnOutOfBounds { column: usize, columns: usize },
+    #[error("Arrow field '{field}' is missing")]
+    MissingField { field: String },
+    #[error("{location} expected Arrow type {expected:?}, found {found:?}")]
+    ExactTypeMismatch {
+        location: RuntimeValueLocation,
+        expected: ArrowDataType,
+        found: ArrowDataType,
+    },
+    #[error("required Arrow field '{field}' contains null at row {row}")]
+    RequiredFieldNull { field: String, row: usize },
+    #[error("required Arrow field '{field}' contains {nulls} null values")]
+    RequiredFieldContainsNulls { field: String, nulls: usize },
+    #[error("Arrow filter predicate has {found} rows for a batch with {expected} rows")]
+    PredicateLengthMismatch { expected: usize, found: usize },
+    #[error("Arrow batch slice offset {offset} and length {length} overflow")]
+    SliceOverflow { offset: usize, length: usize },
+    #[error("Arrow batch slice {offset}..{end} is outside batch with {rows} rows")]
+    SliceOutOfBounds {
+        offset: usize,
+        end: usize,
+        rows: usize,
+    },
+    #[error("cannot concatenate zero Arrow batches")]
+    EmptyConcatenation,
+    #[error("Arrow batch {batch} has a different schema: expected {expected:?}, found {found:?}")]
+    ConcatenationSchemaMismatch {
+        batch: usize,
+        expected: StdArc<ArrowSchema>,
+        found: StdArc<ArrowSchema>,
+    },
+    #[error("Arrow batch row {row} already contains all {fields} schema fields")]
+    BuilderRowComplete { row: usize, fields: usize },
+    #[error("Arrow batch row {row} is missing required field '{field}'")]
+    MissingRequiredField { row: usize, field: String },
+    #[error("Arrow batch row {row} contains {values} values for {fields} schema fields")]
+    BuilderArity {
+        row: usize,
+        values: usize,
+        fields: usize,
+    },
+    #[error("{location} expected {expected:?}, found {found}")]
+    RuntimeValueTypeMismatch {
+        location: RuntimeValueLocation,
+        expected: ParseAsType,
+        found: RuntimeValueKind,
+    },
+    #[error("{location} holds a JSON {found}, which is incompatible with {expected:?}")]
+    JsonValueTypeMismatch {
+        location: RuntimeValueLocation,
+        expected: ParseAsType,
+        found: JsonValueKind,
+    },
+    #[error("{location} holds an Avro {found:?}, which is incompatible with {expected:?}")]
+    AvroValueTypeMismatch {
+        location: RuntimeValueLocation,
+        expected: ParseAsType,
+        found: AvroValueKind,
+    },
+    #[error("{location} cannot be represented as {expected:?}")]
+    RuntimeValueOutOfRange {
+        location: RuntimeValueLocation,
+        expected: ParseAsType,
+    },
+    #[error("{location} expected array length {expected}, found {found}")]
+    RuntimeArrayLengthMismatch {
+        location: RuntimeValueLocation,
+        expected: NonZeroU32,
+        found: usize,
+    },
+    #[error(
+        "field '{field}' fixed-size list length {found} does not match schema length {expected}"
+    )]
+    ArrowArrayLengthMismatch {
+        field: String,
+        expected: NonZeroU32,
+        found: i32,
+    },
+    #[error("field '{field}' has negative list offset {offset} at row {row}")]
+    NegativeListOffset {
+        field: String,
+        row: usize,
+        offset: i32,
+    },
+    #[error("field '{field}' has type {found:?}, which is not an array or vector")]
+    NotSequence { field: String, found: ParseAsType },
+    #[error("field '{field}' list contains null at index {index}")]
+    NullListElement { field: String, index: usize },
+    #[error("runtime DATETIME is not valid RFC 3339: {source}")]
+    InvalidRuntimeDatetime {
+        #[source]
+        source: chrono::ParseError,
+    },
+    #[error("failed to decode protobuf message '{message}': {source}")]
+    ProtobufDecode {
+        message: String,
+        #[source]
+        source: prost::DecodeError,
+    },
+    #[error("failed to encode protobuf message '{message}': {source}")]
+    ProtobufEncode {
+        message: String,
+        #[source]
+        source: prost::EncodeError,
+    },
+    #[error("failed to {operation} for protobuf message '{message}': {source}")]
+    ProtobufJson {
+        message: String,
+        operation: ProtobufJsonOperation,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("invalid SYSLOG header at byte {position}: {issue}")]
+    InvalidSyslogHeader {
+        position: usize,
+        issue: SyslogHeaderIssue,
+    },
+    #[error("invalid SYSLOG STRUCTURED-DATA at byte {position}: {issue}")]
+    InvalidSyslogStructuredData {
+        position: usize,
+        issue: SyslogStructuredDataIssue,
+    },
+    #[error("SYSLOG Arrow builder expected column {expected}, received {found}")]
+    SyslogBuilderColumnOrder { expected: usize, found: usize },
+    #[error("unsupported SYSLOG schema field '{field}'")]
+    UnsupportedSyslogField { field: String },
+    #[error("SYSLOG timestamp is outside the Arrow nanosecond range")]
+    SyslogTimestampOutOfRange,
     #[error("runtime record materialization does not support Arrow type {data_type}")]
-    Unsupported { data_type: ArrowDataType },
+    UnsupportedArrowType { data_type: ArrowDataType },
     #[error("fixed-size list length {len} is not a positive count")]
     EmptyFixedSizeList { len: i32 },
 }
 
+impl RuntimeSchemaError {
+    fn arrow(operation: RuntimeSchemaOperation, source: ArrowError) -> Report<Self> {
+        Report::new(Self::ArrowOperation { operation, source })
+    }
+}
+
 pub(crate) fn parse_as_type_from_arrow(
     data_type: &ArrowDataType,
-) -> Result<ParseAsType, Report<ArrowTypeError>> {
+) -> error_stack::Result<ParseAsType, RuntimeSchemaError> {
     match data_type {
         ArrowDataType::UInt8 => Ok(ParseAsType::U8),
         ArrowDataType::Int8 => Ok(ParseAsType::I8),
@@ -1456,7 +1993,7 @@ pub(crate) fn parse_as_type_from_arrow(
                 Err(_) => None,
             };
             let Some(size) = size else {
-                return Err(Report::new(ArrowTypeError::EmptyFixedSizeList {
+                return Err(Report::new(RuntimeSchemaError::EmptyFixedSizeList {
                     len: *len,
                 }));
             };
@@ -1465,7 +2002,7 @@ pub(crate) fn parse_as_type_from_arrow(
                 len: size,
             })
         }
-        other => Err(Report::new(ArrowTypeError::Unsupported {
+        other => Err(Report::new(RuntimeSchemaError::UnsupportedArrowType {
             data_type: other.clone(),
         })),
     }
@@ -1475,11 +2012,12 @@ pub(crate) fn runtime_value_arrow_array(
     data_type: &ArrowDataType,
     value: Option<&RuntimeValue>,
     len: usize,
-) -> Result<ArrayRef, String> {
-    let ty = parse_as_type_from_arrow(data_type).map_err(|error| error.to_string())?;
+) -> error_stack::Result<ArrayRef, RuntimeSchemaError> {
+    let ty = parse_as_type_from_arrow(data_type)?;
     let mut builder = make_builder(data_type, len);
+    let location = RuntimeValueLocationRef::ScalarColumn;
     for _ in 0..len {
-        append_runtime_value_to_arrow(builder.as_mut(), &ty, value, "runtime scalar column")?;
+        append_runtime_value_to_arrow(builder.as_mut(), &ty, value, &location)?;
     }
     Ok(builder.finish())
 }
@@ -1529,6 +2067,26 @@ impl RuntimeRecordMetadata {
 }
 
 impl RuntimeValue {
+    fn kind(&self) -> RuntimeValueKind {
+        match self {
+            Self::U8(_) => RuntimeValueKind::U8,
+            Self::I8(_) => RuntimeValueKind::I8,
+            Self::U16(_) => RuntimeValueKind::U16,
+            Self::I16(_) => RuntimeValueKind::I16,
+            Self::U32(_) => RuntimeValueKind::U32,
+            Self::I32(_) => RuntimeValueKind::I32,
+            Self::U64(_) => RuntimeValueKind::U64,
+            Self::I64(_) => RuntimeValueKind::I64,
+            Self::Bool(_) => RuntimeValueKind::Bool,
+            Self::String(_) => RuntimeValueKind::String,
+            Self::Datetime(_) => RuntimeValueKind::Datetime,
+            Self::F32(_) => RuntimeValueKind::F32,
+            Self::F64(_) => RuntimeValueKind::F64,
+            Self::Array(_) => RuntimeValueKind::Array,
+            Self::Vec(_) => RuntimeValueKind::Vec,
+        }
+    }
+
     pub fn to_remote(&self) -> RemoteRuntimeValue {
         match self {
             Self::U8(v) => RemoteRuntimeValue::U8(*v),
@@ -1711,7 +2269,7 @@ impl From<&RuntimeValue> for SerializableRuntimeValue {
 }
 
 impl TryFrom<SerializableRuntimeValue> for RuntimeValue {
-    type Error = String;
+    type Error = Report<RuntimeSchemaError>;
 
     fn try_from(value: SerializableRuntimeValue) -> Result<Self, Self::Error> {
         match value {
@@ -1727,7 +2285,9 @@ impl TryFrom<SerializableRuntimeValue> for RuntimeValue {
             SerializableRuntimeValue::String(v) => Ok(Self::String(v)),
             SerializableRuntimeValue::Datetime(v) => DateTime::parse_from_rfc3339(&v)
                 .map(Self::Datetime)
-                .map_err(|error| error.to_string()),
+                .map_err(|source| {
+                    Report::new(RuntimeSchemaError::InvalidRuntimeDatetime { source })
+                }),
             SerializableRuntimeValue::F32(v) => Ok(Self::F32(OrderedFloat(v))),
             SerializableRuntimeValue::F64(v) => Ok(Self::F64(OrderedFloat(v))),
             SerializableRuntimeValue::Array(values) => Ok(Self::Array(
@@ -1923,7 +2483,7 @@ fn finish_decoded_row(
             .finish_row()
             .map_err(|reason| CodecError::InvalidCodec {
                 codec: codec.name.as_str().to_string(),
-                reason,
+                reason: reason.to_string(),
             }),
         Err(error) => {
             builder.abandon_row();
@@ -2019,24 +2579,40 @@ impl<'a> ArrowCodecValue<'a> {
         self.array.is_null(self.row_index)
     }
 
-    fn typed<T: 'static>(&self, arrow_type: &str) -> Result<&'a T, String> {
+    fn typed<T: 'static>(&self) -> error_stack::Result<&'a T, RuntimeSchemaError> {
         self.array.as_any().downcast_ref::<T>().ok_or_else(|| {
-            format!(
-                "field '{}' is not a {arrow_type} at row {}",
-                self.field, self.row_index
-            )
+            Report::new(RuntimeSchemaError::ExactTypeMismatch {
+                location: RuntimeValueLocation::CodecField {
+                    field: self.field.to_string(),
+                    elements: Vec::new(),
+                },
+                expected: arrow_data_type(self.ty),
+                found: self.array.data_type().clone(),
+            })
         })
     }
 
-    fn sequence(&self) -> Result<ArrowCodecSequence<'a>, String> {
+    fn sequence(&self) -> error_stack::Result<ArrowCodecSequence<'a>, RuntimeSchemaError> {
         match self.ty {
             ParseAsType::Vec { element } => {
-                let array = self.typed::<ListArray>("ListArray")?;
+                let array = self.typed::<ListArray>()?;
                 let offsets = array.value_offsets();
-                let start = usize::try_from(offsets[self.row_index])
-                    .map_err(|_| format!("field '{}' has a negative list offset", self.field))?;
-                let end = usize::try_from(offsets[self.row_index + 1])
-                    .map_err(|_| format!("field '{}' has a negative list offset", self.field))?;
+                let start_offset = offsets[self.row_index];
+                let start = usize::try_from(start_offset).map_err(|_| {
+                    Report::new(RuntimeSchemaError::NegativeListOffset {
+                        field: self.field.to_string(),
+                        row: self.row_index,
+                        offset: start_offset,
+                    })
+                })?;
+                let end_offset = offsets[self.row_index + 1];
+                let end = usize::try_from(end_offset).map_err(|_| {
+                    Report::new(RuntimeSchemaError::NegativeListOffset {
+                        field: self.field.to_string(),
+                        row: self.row_index,
+                        offset: end_offset,
+                    })
+                })?;
                 Ok(ArrowCodecSequence {
                     codec: self.codec,
                     array: array.values().as_ref(),
@@ -2046,20 +2622,23 @@ impl<'a> ArrowCodecValue<'a> {
                 })
             }
             ParseAsType::Array { element, len } => {
-                let array = self.typed::<FixedSizeListArray>("FixedSizeListArray")?;
-                if array.value_length() != i32::try_from(len.get()).unwrap_or(i32::MAX) {
-                    return Err(format!(
-                        "field '{}' fixed-size list length {} does not match schema length {}",
-                        self.field,
-                        array.value_length(),
-                        len
-                    ));
+                let array = self.typed::<FixedSizeListArray>()?;
+                let expected_length = i32::try_from(len.get())
+                    .assured("an NSPL ARRAY length is bounded by Arrow's signed i32 length");
+                if array.value_length() != expected_length {
+                    return Err(Report::new(RuntimeSchemaError::ArrowArrayLengthMismatch {
+                        field: self.field.to_string(),
+                        expected: *len,
+                        found: array.value_length(),
+                    }));
                 }
-                let start = usize::try_from(array.value_offset(self.row_index)).map_err(|_| {
-                    format!(
-                        "field '{}' has a negative fixed-size list offset",
-                        self.field
-                    )
+                let start_offset = array.value_offset(self.row_index);
+                let start = usize::try_from(start_offset).map_err(|_| {
+                    Report::new(RuntimeSchemaError::NegativeListOffset {
+                        field: self.field.to_string(),
+                        row: self.row_index,
+                        offset: start_offset,
+                    })
                 })?;
                 let end = start
                     .checked_add(len.get().arch_into())
@@ -2072,15 +2651,18 @@ impl<'a> ArrowCodecValue<'a> {
                     rows: start..end,
                 })
             }
-            _ => Err(format!("field '{}' is not an array or vector", self.field)),
+            _ => Err(Report::new(RuntimeSchemaError::NotSequence {
+                field: self.field.to_string(),
+                found: self.ty.clone(),
+            })),
         }
     }
 
-    fn encode_field_error(&self, reason: impl Into<String>) -> CodecError {
+    fn encode_field_error(&self, reason: impl fmt::Display) -> CodecError {
         CodecError::EncodeField {
             codec: self.codec.name.as_str().to_string(),
             field: self.field.to_string(),
-            reason: reason.into(),
+            reason: reason.to_string(),
         }
     }
 
@@ -2119,7 +2701,7 @@ impl<'a> ArrowCodecValue<'a> {
     fn to_avro_boolean(&self) -> Result<AvroValue, CodecError> {
         if let ParseAsType::Bool = self.ty {
             return self
-                .typed::<BooleanArray>("BooleanArray")
+                .typed::<BooleanArray>()
                 .map(|array| AvroValue::Boolean(array.value(self.row_index)))
                 .map_err(|reason| self.encode_field_error(reason));
         }
@@ -2129,31 +2711,31 @@ impl<'a> ArrowCodecValue<'a> {
     fn to_avro_int(&self) -> Result<AvroValue, CodecError> {
         let value = match self.ty {
             ParseAsType::I8 => i32::from(
-                self.typed::<Int8Array>("Int8Array")
+                self.typed::<Int8Array>()
                     .map_err(|reason| self.encode_field_error(reason))?
                     .value(self.row_index),
             ),
             ParseAsType::I16 => i32::from(
-                self.typed::<Int16Array>("Int16Array")
+                self.typed::<Int16Array>()
                     .map_err(|reason| self.encode_field_error(reason))?
                     .value(self.row_index),
             ),
             ParseAsType::I32 => self
-                .typed::<Int32Array>("Int32Array")
+                .typed::<Int32Array>()
                 .map_err(|reason| self.encode_field_error(reason))?
                 .value(self.row_index),
             ParseAsType::U8 => i32::from(
-                self.typed::<UInt8Array>("UInt8Array")
+                self.typed::<UInt8Array>()
                     .map_err(|reason| self.encode_field_error(reason))?
                     .value(self.row_index),
             ),
             ParseAsType::U16 => i32::from(
-                self.typed::<UInt16Array>("UInt16Array")
+                self.typed::<UInt16Array>()
                     .map_err(|reason| self.encode_field_error(reason))?
                     .value(self.row_index),
             ),
             ParseAsType::U32 => i32::try_from(
-                self.typed::<UInt32Array>("UInt32Array")
+                self.typed::<UInt32Array>()
                     .map_err(|reason| self.encode_field_error(reason))?
                     .value(self.row_index),
             )
@@ -2166,41 +2748,41 @@ impl<'a> ArrowCodecValue<'a> {
     fn to_avro_long(&self) -> Result<AvroValue, CodecError> {
         let value = match self.ty {
             ParseAsType::I8 => i64::from(
-                self.typed::<Int8Array>("Int8Array")
+                self.typed::<Int8Array>()
                     .map_err(|reason| self.encode_field_error(reason))?
                     .value(self.row_index),
             ),
             ParseAsType::I16 => i64::from(
-                self.typed::<Int16Array>("Int16Array")
+                self.typed::<Int16Array>()
                     .map_err(|reason| self.encode_field_error(reason))?
                     .value(self.row_index),
             ),
             ParseAsType::I32 => i64::from(
-                self.typed::<Int32Array>("Int32Array")
+                self.typed::<Int32Array>()
                     .map_err(|reason| self.encode_field_error(reason))?
                     .value(self.row_index),
             ),
             ParseAsType::I64 => self
-                .typed::<Int64Array>("Int64Array")
+                .typed::<Int64Array>()
                 .map_err(|reason| self.encode_field_error(reason))?
                 .value(self.row_index),
             ParseAsType::U8 => i64::from(
-                self.typed::<UInt8Array>("UInt8Array")
+                self.typed::<UInt8Array>()
                     .map_err(|reason| self.encode_field_error(reason))?
                     .value(self.row_index),
             ),
             ParseAsType::U16 => i64::from(
-                self.typed::<UInt16Array>("UInt16Array")
+                self.typed::<UInt16Array>()
                     .map_err(|reason| self.encode_field_error(reason))?
                     .value(self.row_index),
             ),
             ParseAsType::U32 => i64::from(
-                self.typed::<UInt32Array>("UInt32Array")
+                self.typed::<UInt32Array>()
                     .map_err(|reason| self.encode_field_error(reason))?
                     .value(self.row_index),
             ),
             ParseAsType::U64 => i64::try_from(
-                self.typed::<UInt64Array>("UInt64Array")
+                self.typed::<UInt64Array>()
                     .map_err(|reason| self.encode_field_error(reason))?
                     .value(self.row_index),
             )
@@ -2213,7 +2795,7 @@ impl<'a> ArrowCodecValue<'a> {
     fn to_avro_float(&self) -> Result<AvroValue, CodecError> {
         if let ParseAsType::F32 = self.ty {
             return self
-                .typed::<Float32Array>("Float32Array")
+                .typed::<Float32Array>()
                 .map(|array| AvroValue::Float(array.value(self.row_index)))
                 .map_err(|reason| self.encode_field_error(reason));
         }
@@ -2223,11 +2805,11 @@ impl<'a> ArrowCodecValue<'a> {
     fn to_avro_double(&self) -> Result<AvroValue, CodecError> {
         match self.ty {
             ParseAsType::F32 => self
-                .typed::<Float32Array>("Float32Array")
+                .typed::<Float32Array>()
                 .map(|array| AvroValue::Double(f64::from(array.value(self.row_index))))
                 .map_err(|reason| self.encode_field_error(reason)),
             ParseAsType::F64 => self
-                .typed::<Float64Array>("Float64Array")
+                .typed::<Float64Array>()
                 .map(|array| AvroValue::Double(array.value(self.row_index)))
                 .map_err(|reason| self.encode_field_error(reason)),
             _ => Err(self.encode_field_error("expected float-compatible value")),
@@ -2237,11 +2819,11 @@ impl<'a> ArrowCodecValue<'a> {
     fn to_avro_string(&self) -> Result<AvroValue, CodecError> {
         match self.ty {
             ParseAsType::String => self
-                .typed::<StringArray>("StringArray")
+                .typed::<StringArray>()
                 .map(|array| AvroValue::String(array.value(self.row_index).to_string()))
                 .map_err(|reason| self.encode_field_error(reason)),
             ParseAsType::Datetime => self
-                .typed::<TimestampNanosecondArray>("TimestampNanosecondArray")
+                .typed::<TimestampNanosecondArray>()
                 .map(|array| {
                     AvroValue::String(
                         DateTime::from_timestamp_nanos(array.value(self.row_index))
@@ -2298,35 +2880,31 @@ impl Serialize for ArrowCodecValue<'_> {
         }
 
         macro_rules! serialize_primitive {
-            ($array:ty, $arrow_type:literal, $method:ident) => {{
-                let array = self
-                    .typed::<$array>($arrow_type)
-                    .map_err(serde::ser::Error::custom)?;
+            ($array:ty, $method:ident) => {{
+                let array = self.typed::<$array>().map_err(serde::ser::Error::custom)?;
                 serializer.$method(array.value(self.row_index))
             }};
         }
 
         match self.ty {
-            ParseAsType::U8 => serialize_primitive!(UInt8Array, "UInt8Array", serialize_u8),
-            ParseAsType::I8 => serialize_primitive!(Int8Array, "Int8Array", serialize_i8),
-            ParseAsType::U16 => serialize_primitive!(UInt16Array, "UInt16Array", serialize_u16),
-            ParseAsType::I16 => serialize_primitive!(Int16Array, "Int16Array", serialize_i16),
-            ParseAsType::U32 => serialize_primitive!(UInt32Array, "UInt32Array", serialize_u32),
-            ParseAsType::I32 => serialize_primitive!(Int32Array, "Int32Array", serialize_i32),
-            ParseAsType::U64 => serialize_primitive!(UInt64Array, "UInt64Array", serialize_u64),
-            ParseAsType::I64 => serialize_primitive!(Int64Array, "Int64Array", serialize_i64),
-            ParseAsType::Bool => {
-                serialize_primitive!(BooleanArray, "BooleanArray", serialize_bool)
-            }
+            ParseAsType::U8 => serialize_primitive!(UInt8Array, serialize_u8),
+            ParseAsType::I8 => serialize_primitive!(Int8Array, serialize_i8),
+            ParseAsType::U16 => serialize_primitive!(UInt16Array, serialize_u16),
+            ParseAsType::I16 => serialize_primitive!(Int16Array, serialize_i16),
+            ParseAsType::U32 => serialize_primitive!(UInt32Array, serialize_u32),
+            ParseAsType::I32 => serialize_primitive!(Int32Array, serialize_i32),
+            ParseAsType::U64 => serialize_primitive!(UInt64Array, serialize_u64),
+            ParseAsType::I64 => serialize_primitive!(Int64Array, serialize_i64),
+            ParseAsType::Bool => serialize_primitive!(BooleanArray, serialize_bool),
             ParseAsType::String => {
                 let array = self
-                    .typed::<StringArray>("StringArray")
+                    .typed::<StringArray>()
                     .map_err(serde::ser::Error::custom)?;
                 serializer.serialize_str(array.value(self.row_index))
             }
             ParseAsType::Datetime => {
                 let array = self
-                    .typed::<TimestampNanosecondArray>("TimestampNanosecondArray")
+                    .typed::<TimestampNanosecondArray>()
                     .map_err(serde::ser::Error::custom)?;
                 serializer.serialize_str(
                     &DateTime::from_timestamp_nanos(array.value(self.row_index))
@@ -2334,12 +2912,8 @@ impl Serialize for ArrowCodecValue<'_> {
                         .to_rfc3339(),
                 )
             }
-            ParseAsType::F32 => {
-                serialize_primitive!(Float32Array, "Float32Array", serialize_f32)
-            }
-            ParseAsType::F64 => {
-                serialize_primitive!(Float64Array, "Float64Array", serialize_f64)
-            }
+            ParseAsType::F32 => serialize_primitive!(Float32Array, serialize_f32),
+            ParseAsType::F64 => serialize_primitive!(Float64Array, serialize_f64),
             ParseAsType::Array { .. } | ParseAsType::Vec { .. } => self
                 .sequence()
                 .map_err(serde::ser::Error::custom)?
@@ -2438,32 +3012,62 @@ fn decode_cbor(
 pub(crate) fn decode_protobuf_payload(
     message: &MessageDescriptor,
     payload: &[u8],
-) -> Result<JsonValue, String> {
-    let message =
-        DynamicMessage::decode(message.clone(), payload).map_err(|source| source.to_string())?;
-    protobuf_message_to_json(&message)
+) -> error_stack::Result<JsonValue, RuntimeSchemaError> {
+    let message_name = message.full_name().to_string();
+    let message = DynamicMessage::decode(message.clone(), payload).map_err(|source| {
+        Report::new(RuntimeSchemaError::ProtobufDecode {
+            message: message_name.clone(),
+            source,
+        })
+    })?;
+    protobuf_message_to_json(&message_name, &message)
 }
 
 /// Encode a JSON value as protobuf bytes for `message`.
 pub(crate) fn encode_protobuf_payload(
     message: &MessageDescriptor,
     value: &JsonValue,
-) -> Result<Vec<u8>, String> {
-    let encoded_json = serde_json::to_vec(value).map_err(|source| source.to_string())?;
+) -> error_stack::Result<Vec<u8>, RuntimeSchemaError> {
+    let message_name = message.full_name().to_string();
+    let encoded_json = serde_json::to_vec(value).map_err(|source| {
+        Report::new(RuntimeSchemaError::ProtobufJson {
+            message: message_name.clone(),
+            operation: ProtobufJsonOperation::SerializeInput,
+            source,
+        })
+    })?;
     let mut deserializer = serde_json::Deserializer::from_slice(&encoded_json);
     let options = ProtobufDeserializeOptions::new().deny_unknown_fields(true);
     let message =
         DynamicMessage::deserialize_with_options(message.clone(), &mut deserializer, &options)
-            .map_err(|source| source.to_string())?;
-    deserializer.end().map_err(|source| source.to_string())?;
+            .map_err(|source| {
+                Report::new(RuntimeSchemaError::ProtobufJson {
+                    message: message_name.clone(),
+                    operation: ProtobufJsonOperation::DeserializeMessage,
+                    source,
+                })
+            })?;
+    deserializer.end().map_err(|source| {
+        Report::new(RuntimeSchemaError::ProtobufJson {
+            message: message_name.clone(),
+            operation: ProtobufJsonOperation::FinishMessage,
+            source,
+        })
+    })?;
     let mut encoded = Vec::new();
-    message
-        .encode(&mut encoded)
-        .map_err(|source| source.to_string())?;
+    message.encode(&mut encoded).map_err(|source| {
+        Report::new(RuntimeSchemaError::ProtobufEncode {
+            message: message_name,
+            source,
+        })
+    })?;
     Ok(encoded)
 }
 
-fn protobuf_message_to_json(message: &DynamicMessage) -> Result<JsonValue, String> {
+fn protobuf_message_to_json(
+    message_name: &str,
+    message: &DynamicMessage,
+) -> error_stack::Result<JsonValue, RuntimeSchemaError> {
     let mut encoded = Vec::new();
     let mut serializer = serde_json::Serializer::new(&mut encoded);
     let options = ProtobufSerializeOptions::new()
@@ -2471,8 +3075,20 @@ fn protobuf_message_to_json(message: &DynamicMessage) -> Result<JsonValue, Strin
         .stringify_64_bit_integers(false);
     message
         .serialize_with_options(&mut serializer, &options)
-        .map_err(|source| source.to_string())?;
-    serde_json::from_slice(&encoded).map_err(|source| source.to_string())
+        .map_err(|source| {
+            Report::new(RuntimeSchemaError::ProtobufJson {
+                message: message_name.to_string(),
+                operation: ProtobufJsonOperation::SerializeMessage,
+                source,
+            })
+        })?;
+    serde_json::from_slice(&encoded).map_err(|source| {
+        Report::new(RuntimeSchemaError::ProtobufJson {
+            message: message_name.to_string(),
+            operation: ProtobufJsonOperation::DeserializeOutput,
+            source,
+        })
+    })
 }
 
 fn decode_json_value(
@@ -2515,7 +3131,7 @@ fn decode_json_value(
                     .append_null()
                     .map_err(|reason| CodecError::InvalidCodec {
                         codec: codec.name.as_str().to_string(),
-                        reason,
+                        reason: reason.to_string(),
                     })?;
                 continue;
             }
@@ -2530,7 +3146,7 @@ fn decode_json_value(
                     .append_null()
                     .map_err(|reason| CodecError::InvalidCodec {
                         codec: codec.name.as_str().to_string(),
-                        reason,
+                        reason: reason.to_string(),
                     })?;
                 continue;
             }
@@ -2558,7 +3174,7 @@ fn decode_json_value(
             .map_err(|reason| CodecError::ParseField {
                 codec: codec.name.as_str().to_string(),
                 field: field.name.clone(),
-                reason,
+                reason: reason.to_string(),
             })?;
     }
     Ok(())
@@ -2611,7 +3227,7 @@ fn decode_avro(
                     .append_null()
                     .map_err(|reason| CodecError::InvalidCodec {
                         codec: codec.name.as_str().to_string(),
-                        reason,
+                        reason: reason.to_string(),
                     })?;
                 continue;
             }
@@ -2635,7 +3251,7 @@ fn decode_avro(
                     .append_null()
                     .map_err(|reason| CodecError::InvalidCodec {
                         codec: codec.name.as_str().to_string(),
-                        reason,
+                        reason: reason.to_string(),
                     })?;
                 continue;
             }
@@ -2650,7 +3266,7 @@ fn decode_avro(
             .map_err(|reason| CodecError::ParseField {
                 codec: codec.name.as_str().to_string(),
                 field: field.name.clone(),
-                reason,
+                reason: reason.to_string(),
             })?;
     }
     Ok(())
@@ -2660,19 +3276,21 @@ fn append_json_value_to_arrow(
     builder: &mut dyn ArrayBuilder,
     ty: &ParseAsType,
     value: &JsonValue,
-    context: &str,
-) -> Result<(), String> {
+    location: &RuntimeValueLocationRef<'_>,
+) -> error_stack::Result<(), RuntimeSchemaError> {
     let incompatible = || {
-        format!(
-            "{context} holds a JSON {}, which is incompatible with {ty:?}",
-            json_value_kind(value)
-        )
+        Report::new(RuntimeSchemaError::JsonValueTypeMismatch {
+            location: location.to_runtime_location(),
+            expected: ty.clone(),
+            found: json_value_kind(value),
+        })
     };
 
     macro_rules! append_primitive {
         ($builder:ty, $parsed:expr) => {{
             let parsed = ($parsed).ok_or_else(&incompatible)?;
-            typed_arrow_builder::<$builder>(builder, context)?.append_value(parsed);
+            typed_arrow_builder::<$builder>(builder, &arrow_data_type(ty), location)?
+                .append_value(parsed);
             Ok(())
         }};
     }
@@ -2723,17 +3341,29 @@ fn append_json_value_to_arrow(
         ParseAsType::Array { element, len } => {
             let values = value.as_array().ok_or_else(&incompatible)?;
             if values.len() != len.get().arch_into() {
-                return Err(incompatible());
+                return Err(Report::new(
+                    RuntimeSchemaError::RuntimeArrayLengthMismatch {
+                        location: location.to_runtime_location(),
+                        expected: *len,
+                        found: values.len(),
+                    },
+                ));
             }
             let builder = typed_arrow_builder::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>(
-                builder, context,
+                builder,
+                &arrow_data_type(ty),
+                location,
             )?;
             for (index, value) in values.iter().enumerate() {
+                let element_location = RuntimeValueLocationRef::Element {
+                    parent: location,
+                    index,
+                };
                 if let Err(error) = append_json_value_to_arrow(
                     builder.values().as_mut(),
                     element,
                     value,
-                    &format!("{context}[{index}]"),
+                    &element_location,
                 ) {
                     close_partial_fixed_size_list(builder, element, len.get().arch_into());
                     return Err(error);
@@ -2744,14 +3374,21 @@ fn append_json_value_to_arrow(
         }
         ParseAsType::Vec { element } => {
             let values = value.as_array().ok_or_else(&incompatible)?;
-            let builder =
-                typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(builder, context)?;
+            let builder = typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(
+                builder,
+                &arrow_data_type(ty),
+                location,
+            )?;
             for (index, value) in values.iter().enumerate() {
+                let element_location = RuntimeValueLocationRef::Element {
+                    parent: location,
+                    index,
+                };
                 append_json_value_to_arrow(
                     builder.values().as_mut(),
                     element,
                     value,
-                    &format!("{context}[{index}]"),
+                    &element_location,
                 )?;
             }
             builder.append(true);
@@ -2764,15 +3401,22 @@ fn append_avro_value_to_arrow(
     builder: &mut dyn ArrayBuilder,
     ty: &ParseAsType,
     value: &AvroValue,
-    context: &str,
-) -> Result<(), String> {
+    location: &RuntimeValueLocationRef<'_>,
+) -> error_stack::Result<(), RuntimeSchemaError> {
     let value = avro_value_payload(value);
-    let incompatible = || format!("{context} {value:?} is incompatible with {ty:?}");
+    let incompatible = || {
+        Report::new(RuntimeSchemaError::AvroValueTypeMismatch {
+            location: location.to_runtime_location(),
+            expected: ty.clone(),
+            found: AvroValueKind::from(value),
+        })
+    };
 
     macro_rules! append_primitive {
         ($builder:ty, $parsed:expr) => {{
             let parsed = ($parsed).ok_or_else(&incompatible)?;
-            typed_arrow_builder::<$builder>(builder, context)?.append_value(parsed);
+            typed_arrow_builder::<$builder>(builder, &arrow_data_type(ty), location)?
+                .append_value(parsed);
             Ok(())
         }};
     }
@@ -2853,17 +3497,29 @@ fn append_avro_value_to_arrow(
                 return Err(incompatible());
             };
             if values.len() != len.get().arch_into() {
-                return Err(incompatible());
+                return Err(Report::new(
+                    RuntimeSchemaError::RuntimeArrayLengthMismatch {
+                        location: location.to_runtime_location(),
+                        expected: *len,
+                        found: values.len(),
+                    },
+                ));
             }
             let builder = typed_arrow_builder::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>(
-                builder, context,
+                builder,
+                &arrow_data_type(ty),
+                location,
             )?;
             for (index, value) in values.iter().enumerate() {
+                let element_location = RuntimeValueLocationRef::Element {
+                    parent: location,
+                    index,
+                };
                 if let Err(error) = append_avro_value_to_arrow(
                     builder.values().as_mut(),
                     element,
                     value,
-                    &format!("{context}[{index}]"),
+                    &element_location,
                 ) {
                     close_partial_fixed_size_list(builder, element, len.get().arch_into());
                     return Err(error);
@@ -2876,14 +3532,21 @@ fn append_avro_value_to_arrow(
             let AvroValue::Array(values) = value else {
                 return Err(incompatible());
             };
-            let builder =
-                typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(builder, context)?;
+            let builder = typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(
+                builder,
+                &arrow_data_type(ty),
+                location,
+            )?;
             for (index, value) in values.iter().enumerate() {
+                let element_location = RuntimeValueLocationRef::Element {
+                    parent: location,
+                    index,
+                };
                 append_avro_value_to_arrow(
                     builder.values().as_mut(),
                     element,
                     value,
-                    &format!("{context}[{index}]"),
+                    &element_location,
                 )?;
             }
             builder.append(true);
@@ -2894,12 +3557,20 @@ fn append_avro_value_to_arrow(
 
 fn typed_arrow_builder<'a, T: 'static>(
     builder: &'a mut dyn ArrayBuilder,
-    context: &str,
-) -> Result<&'a mut T, String> {
-    builder
+    expected: &ArrowDataType,
+    location: &RuntimeValueLocationRef<'_>,
+) -> error_stack::Result<&'a mut T, RuntimeSchemaError> {
+    if !builder.as_any().is::<T>() {
+        return Err(Report::new(RuntimeSchemaError::ExactTypeMismatch {
+            location: location.to_runtime_location(),
+            expected: expected.clone(),
+            found: builder.finish_cloned().data_type().clone(),
+        }));
+    }
+    Ok(builder
         .as_any_mut()
         .downcast_mut::<T>()
-        .ok_or_else(|| format!("{context} has an incompatible Arrow builder"))
+        .verified("the builder's concrete type was checked immediately above"))
 }
 
 fn avro_value_payload(value: &AvroValue) -> &AvroValue {
@@ -2967,12 +3638,13 @@ fn close_partial_fixed_size_list(
             "a fixed-size list builder holds `len` child values for every value it closed",
         );
     let placeholder = placeholder_value(element);
+    let location = RuntimeValueLocationRef::AbandonedFixedSizeList;
     for _ in written..len {
         append_runtime_value_to_arrow(
             builder.values().as_mut(),
             element,
             Some(&placeholder),
-            "abandoned fixed-size list value",
+            &location,
         )
         .assured("a placeholder of the element's own type fits the builder made from that type");
     }
@@ -3008,26 +3680,25 @@ fn append_runtime_value_to_arrow(
     builder: &mut dyn ArrayBuilder,
     ty: &ParseAsType,
     value: Option<&RuntimeValue>,
-    context: &str,
-) -> Result<(), String> {
+    location: &RuntimeValueLocationRef<'_>,
+) -> error_stack::Result<(), RuntimeSchemaError> {
     macro_rules! append_primitive {
         ($builder:ty, $variant:path, $map:expr) => {{
-            let builder = builder
-                .as_any_mut()
-                .downcast_mut::<$builder>()
-                .ok_or_else(|| format!("{context} has an incompatible Arrow builder"))?;
+            let builder = typed_arrow_builder::<$builder>(builder, &arrow_data_type(ty), location)?;
             match value {
-                Some($variant(value)) => {
-                    builder.append_value($map(value).ok_or_else(|| {
-                        format!("{context} value cannot be represented as {ty:?}")
-                    })?)
-                }
+                Some($variant(value)) => builder.append_value($map(value).ok_or_else(|| {
+                    Report::new(RuntimeSchemaError::RuntimeValueOutOfRange {
+                        location: location.to_runtime_location(),
+                        expected: ty.clone(),
+                    })
+                })?),
                 None => builder.append_null(),
                 Some(value) => {
-                    return Err(format!(
-                        "{context} expected {ty:?}, got {}",
-                        runtime_value_type_name(value)
-                    ));
+                    return Err(Report::new(RuntimeSchemaError::RuntimeValueTypeMismatch {
+                        location: location.to_runtime_location(),
+                        expected: ty.clone(),
+                        found: value.kind(),
+                    }));
                 }
             }
             Ok(())
@@ -3089,34 +3760,43 @@ fn append_runtime_value_to_arrow(
             ))
         }
         ParseAsType::Array { element, len } => {
-            let builder = builder
-                .as_any_mut()
-                .downcast_mut::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>()
-                .ok_or_else(|| format!("{context} has an incompatible Arrow array builder"))?;
+            let builder = typed_arrow_builder::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>(
+                builder,
+                &arrow_data_type(ty),
+                location,
+            )?;
             let values = match value {
                 Some(RuntimeValue::Array(values)) if values.len() == len.get().arch_into() => {
                     Some(values)
                 }
                 Some(RuntimeValue::Array(values)) => {
-                    return Err(format!(
-                        "{context} expected array length {len}, got {}",
-                        values.len()
+                    return Err(Report::new(
+                        RuntimeSchemaError::RuntimeArrayLengthMismatch {
+                            location: location.to_runtime_location(),
+                            expected: *len,
+                            found: values.len(),
+                        },
                     ));
                 }
                 None => None,
                 Some(value) => {
-                    return Err(format!(
-                        "{context} expected ARRAY, got {}",
-                        runtime_value_type_name(value)
-                    ));
+                    return Err(Report::new(RuntimeSchemaError::RuntimeValueTypeMismatch {
+                        location: location.to_runtime_location(),
+                        expected: ty.clone(),
+                        found: value.kind(),
+                    }));
                 }
             };
             for index in 0..len.get().arch_into() {
+                let element_location = RuntimeValueLocationRef::Element {
+                    parent: location,
+                    index,
+                };
                 if let Err(error) = append_runtime_value_to_arrow(
                     builder.values().as_mut(),
                     element,
                     values.map(|values| &values[index]),
-                    &format!("{context}[{index}]"),
+                    &element_location,
                 ) {
                     close_partial_fixed_size_list(builder, element, len.get().arch_into());
                     return Err(error);
@@ -3126,53 +3806,39 @@ fn append_runtime_value_to_arrow(
             Ok(())
         }
         ParseAsType::Vec { element } => {
-            let builder = builder
-                .as_any_mut()
-                .downcast_mut::<ListBuilder<Box<dyn ArrayBuilder>>>()
-                .ok_or_else(|| format!("{context} has an incompatible Arrow vector builder"))?;
+            let builder = typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(
+                builder,
+                &arrow_data_type(ty),
+                location,
+            )?;
             let values = match value {
                 Some(RuntimeValue::Vec(values)) => Some(values),
                 None => None,
                 Some(value) => {
-                    return Err(format!(
-                        "{context} expected VEC, got {}",
-                        runtime_value_type_name(value)
-                    ));
+                    return Err(Report::new(RuntimeSchemaError::RuntimeValueTypeMismatch {
+                        location: location.to_runtime_location(),
+                        expected: ty.clone(),
+                        found: value.kind(),
+                    }));
                 }
             };
             if let Some(values) = values {
                 for (index, value) in values.iter().enumerate() {
+                    let element_location = RuntimeValueLocationRef::Element {
+                        parent: location,
+                        index,
+                    };
                     append_runtime_value_to_arrow(
                         builder.values().as_mut(),
                         element,
                         Some(value),
-                        &format!("{context}[{index}]"),
+                        &element_location,
                     )?;
                 }
             }
             builder.append(values.is_some());
             Ok(())
         }
-    }
-}
-
-fn runtime_value_type_name(value: &RuntimeValue) -> &'static str {
-    match value {
-        RuntimeValue::U8(_) => "U8",
-        RuntimeValue::I8(_) => "I8",
-        RuntimeValue::U16(_) => "U16",
-        RuntimeValue::I16(_) => "I16",
-        RuntimeValue::U32(_) => "U32",
-        RuntimeValue::I32(_) => "I32",
-        RuntimeValue::U64(_) => "U64",
-        RuntimeValue::I64(_) => "I64",
-        RuntimeValue::Bool(_) => "BOOL",
-        RuntimeValue::String(_) => "STRING",
-        RuntimeValue::Datetime(_) => "DATETIME",
-        RuntimeValue::F32(_) => "F32",
-        RuntimeValue::F64(_) => "F64",
-        RuntimeValue::Array(_) => "ARRAY",
-        RuntimeValue::Vec(_) => "VEC",
     }
 }
 
@@ -3193,7 +3859,7 @@ impl RuntimeValueColumn {
     pub(crate) fn new(
         field: impl Into<String>,
         array: ArrayRef,
-    ) -> Result<Self, Report<ArrowTypeError>> {
+    ) -> error_stack::Result<Self, RuntimeSchemaError> {
         let ty = parse_as_type_from_arrow(array.data_type())?;
         Ok(Self {
             field: field.into(),
@@ -3203,7 +3869,10 @@ impl RuntimeValueColumn {
     }
 
     /// The value at `row`, or `None` where the column is null there.
-    pub(crate) fn nullable_value_at(&self, row: usize) -> Result<Option<RuntimeValue>, String> {
+    pub(crate) fn nullable_value_at(
+        &self,
+        row: usize,
+    ) -> error_stack::Result<Option<RuntimeValue>, RuntimeSchemaError> {
         runtime_value_from_arrow_array(self.array.as_ref(), &self.ty, true, row, &self.field)
     }
 }
@@ -3214,133 +3883,85 @@ pub(crate) fn runtime_value_from_arrow_array(
     optional: bool,
     row_index: usize,
     field: &str,
-) -> Result<Option<RuntimeValue>, String> {
+) -> error_stack::Result<Option<RuntimeValue>, RuntimeSchemaError> {
+    if row_index >= array.len() {
+        return Err(Report::new(RuntimeSchemaError::RowOutOfBounds {
+            row: row_index,
+            rows: array.len(),
+        }));
+    }
     if array.is_null(row_index) {
         return if optional {
             Ok(None)
         } else {
-            Err(format!(
-                "arrow batch field '{field}' contains null at row {row_index}"
-            ))
+            Err(Report::new(RuntimeSchemaError::RequiredFieldNull {
+                field: field.to_string(),
+                row: row_index,
+            }))
         };
     }
 
     match ty {
         ParseAsType::U8 => Ok(Some(RuntimeValue::U8(
-            array
-                .as_any()
-                .downcast_ref::<UInt8Array>()
-                .ok_or_else(|| format!("field '{field}' is not a UInt8Array"))?
-                .value(row_index),
+            typed_arrow_array::<UInt8Array>(array, ty, field)?.value(row_index),
         ))),
         ParseAsType::I8 => Ok(Some(RuntimeValue::I8(
-            array
-                .as_any()
-                .downcast_ref::<Int8Array>()
-                .ok_or_else(|| format!("field '{field}' is not an Int8Array"))?
-                .value(row_index),
+            typed_arrow_array::<Int8Array>(array, ty, field)?.value(row_index),
         ))),
         ParseAsType::U16 => Ok(Some(RuntimeValue::U16(
-            array
-                .as_any()
-                .downcast_ref::<UInt16Array>()
-                .ok_or_else(|| format!("field '{field}' is not a UInt16Array"))?
-                .value(row_index),
+            typed_arrow_array::<UInt16Array>(array, ty, field)?.value(row_index),
         ))),
         ParseAsType::I16 => Ok(Some(RuntimeValue::I16(
-            array
-                .as_any()
-                .downcast_ref::<Int16Array>()
-                .ok_or_else(|| format!("field '{field}' is not an Int16Array"))?
-                .value(row_index),
+            typed_arrow_array::<Int16Array>(array, ty, field)?.value(row_index),
         ))),
         ParseAsType::U32 => Ok(Some(RuntimeValue::U32(
-            array
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .ok_or_else(|| format!("field '{field}' is not a UInt32Array"))?
-                .value(row_index),
+            typed_arrow_array::<UInt32Array>(array, ty, field)?.value(row_index),
         ))),
         ParseAsType::I32 => Ok(Some(RuntimeValue::I32(
-            array
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .ok_or_else(|| format!("field '{field}' is not an Int32Array"))?
-                .value(row_index),
+            typed_arrow_array::<Int32Array>(array, ty, field)?.value(row_index),
         ))),
         ParseAsType::U64 => Ok(Some(RuntimeValue::U64(
-            array
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-                .ok_or_else(|| format!("field '{field}' is not a UInt64Array"))?
-                .value(row_index),
+            typed_arrow_array::<UInt64Array>(array, ty, field)?.value(row_index),
         ))),
         ParseAsType::I64 => Ok(Some(RuntimeValue::I64(
-            array
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .ok_or_else(|| format!("field '{field}' is not an Int64Array"))?
-                .value(row_index),
+            typed_arrow_array::<Int64Array>(array, ty, field)?.value(row_index),
         ))),
         ParseAsType::Bool => Ok(Some(RuntimeValue::Bool(
-            array
-                .as_any()
-                .downcast_ref::<BooleanArray>()
-                .ok_or_else(|| format!("field '{field}' is not a BooleanArray"))?
-                .value(row_index),
+            typed_arrow_array::<BooleanArray>(array, ty, field)?.value(row_index),
         ))),
         ParseAsType::String => Ok(Some(RuntimeValue::String(
-            array
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| format!("field '{field}' is not a StringArray"))?
+            typed_arrow_array::<StringArray>(array, ty, field)?
                 .value(row_index)
                 .to_string(),
         ))),
         ParseAsType::Datetime => Ok(Some(RuntimeValue::Datetime(
             DateTime::from_timestamp_nanos(
-                array
-                    .as_any()
-                    .downcast_ref::<TimestampNanosecondArray>()
-                    .ok_or_else(|| format!("field '{field}' is not a TimestampNanosecondArray"))?
-                    .value(row_index),
+                typed_arrow_array::<TimestampNanosecondArray>(array, ty, field)?.value(row_index),
             )
             .fixed_offset(),
         ))),
         ParseAsType::F32 => Ok(Some(RuntimeValue::F32(OrderedFloat(
-            array
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .ok_or_else(|| format!("field '{field}' is not a Float32Array"))?
-                .value(row_index),
+            typed_arrow_array::<Float32Array>(array, ty, field)?.value(row_index),
         )))),
         ParseAsType::F64 => Ok(Some(RuntimeValue::F64(OrderedFloat(
-            array
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .ok_or_else(|| format!("field '{field}' is not a Float64Array"))?
-                .value(row_index),
+            typed_arrow_array::<Float64Array>(array, ty, field)?.value(row_index),
         )))),
         ParseAsType::Vec { element } => {
-            let array = array
-                .as_any()
-                .downcast_ref::<ListArray>()
-                .ok_or_else(|| format!("field '{field}' is not a ListArray"))?;
+            let array = typed_arrow_array::<ListArray>(array, ty, field)?;
             let values = array.value(row_index);
             let values = runtime_values_from_arrow_slice(values.as_ref(), element, field)?;
             Ok(Some(RuntimeValue::Vec(values)))
         }
         ParseAsType::Array { element, len } => {
-            let array = array
-                .as_any()
-                .downcast_ref::<FixedSizeListArray>()
-                .ok_or_else(|| format!("field '{field}' is not a FixedSizeListArray"))?;
-            if array.value_length() != i32::try_from(len.get()).unwrap_or(i32::MAX) {
-                return Err(format!(
-                    "field '{field}' fixed-size list length {} does not match schema length {}",
-                    array.value_length(),
-                    len
-                ));
+            let array = typed_arrow_array::<FixedSizeListArray>(array, ty, field)?;
+            let expected_length = i32::try_from(len.get())
+                .assured("an NSPL ARRAY length is bounded by Arrow's signed i32 length");
+            if array.value_length() != expected_length {
+                return Err(Report::new(RuntimeSchemaError::ArrowArrayLengthMismatch {
+                    field: field.to_string(),
+                    expected: *len,
+                    found: array.value_length(),
+                }));
             }
             let values = array.value(row_index);
             let values = runtime_values_from_arrow_slice(values.as_ref(), element, field)?;
@@ -3349,28 +3970,49 @@ pub(crate) fn runtime_value_from_arrow_array(
     }
 }
 
+fn typed_arrow_array<'a, T: 'static>(
+    array: &'a dyn Array,
+    ty: &ParseAsType,
+    field: &str,
+) -> error_stack::Result<&'a T, RuntimeSchemaError> {
+    array.as_any().downcast_ref::<T>().ok_or_else(|| {
+        Report::new(RuntimeSchemaError::ExactTypeMismatch {
+            location: RuntimeValueLocation::CodecField {
+                field: field.to_string(),
+                elements: Vec::new(),
+            },
+            expected: arrow_data_type(ty),
+            found: array.data_type().clone(),
+        })
+    })
+}
+
 fn runtime_values_from_arrow_slice(
     array: &dyn Array,
     element: &ParseAsType,
     field: &str,
-) -> Result<Vec<RuntimeValue>, String> {
+) -> error_stack::Result<Vec<RuntimeValue>, RuntimeSchemaError> {
     (0..array.len())
         .map(|index| {
-            runtime_value_from_arrow_array(array, element, true, index, field)?
-                .ok_or_else(|| format!("field '{field}' list contains null at index {index}"))
+            runtime_value_from_arrow_array(array, element, true, index, field)?.ok_or_else(|| {
+                Report::new(RuntimeSchemaError::NullListElement {
+                    field: field.to_string(),
+                    index,
+                })
+            })
         })
         .collect()
 }
 
 /// The JSON kind of `value`, for a diagnostic that must describe a payload value without quoting it.
-fn json_value_kind(value: &JsonValue) -> &'static str {
+fn json_value_kind(value: &JsonValue) -> JsonValueKind {
     match value {
-        JsonValue::Null => "null",
-        JsonValue::Bool(_) => "boolean",
-        JsonValue::Number(_) => "number",
-        JsonValue::String(_) => "string",
-        JsonValue::Array(_) => "array",
-        JsonValue::Object(_) => "object",
+        JsonValue::Null => JsonValueKind::Null,
+        JsonValue::Bool(_) => JsonValueKind::Boolean,
+        JsonValue::Number(_) => JsonValueKind::Number,
+        JsonValue::String(_) => JsonValueKind::String,
+        JsonValue::Array(_) => JsonValueKind::Array,
+        JsonValue::Object(_) => JsonValueKind::Object,
     }
 }
 
@@ -4405,7 +5047,9 @@ mod tests {
         ])
     }
 
-    fn concat_test_rows(rows: &[RuntimeRow]) -> Result<RuntimeRecordBatch, String> {
+    fn concat_test_rows(
+        rows: &[RuntimeRow],
+    ) -> error_stack::Result<RuntimeRecordBatch, RuntimeSchemaError> {
         let batches = rows
             .iter()
             .map(RuntimeRow::one_row_batch)
@@ -4419,7 +5063,7 @@ mod tests {
         decode_with_codec(codec, Cow::Borrowed(payload), &mut builder)?;
         builder.finish().map_err(|reason| CodecError::InvalidCodec {
             codec: codec.name.as_str().to_string(),
-            reason,
+            reason: reason.to_string(),
         })
     }
 
@@ -4441,7 +5085,7 @@ mod tests {
             .project(codec.schema.arrow_schema())
             .map_err(|reason| CodecError::InvalidCodec {
                 codec: codec.name.as_str().to_string(),
-                reason,
+                reason: reason.to_string(),
             })?;
         let encoder = codec.batch_encoder(&batch)?;
         let mut payload = Vec::new();
@@ -4458,7 +5102,7 @@ mod tests {
             .batch_from_test_rows([fields])
             .map_err(|reason| CodecError::InvalidCodec {
                 codec: codec.name.as_str().to_string(),
-                reason,
+                reason: reason.to_string(),
             })?;
         let encoder = codec.batch_encoder(&batch)?;
         let mut payload = Vec::new();
@@ -4649,10 +5293,13 @@ mod tests {
 
         let batch = concat_test_rows(&records).expect("rows should concatenate as Arrow");
         assert_eq!(batch.batch().num_rows(), 2);
-        assert_eq!(batch.value(0, "user_id"), Ok(Some(RuntimeValue::U32(42))));
         assert_eq!(
-            batch.value(1, "tenant"),
-            Ok(Some(RuntimeValue::String("beta".to_string())))
+            batch.value(0, "user_id").expect("readable value"),
+            Some(RuntimeValue::U32(42))
+        );
+        assert_eq!(
+            batch.value(1, "tenant").expect("readable value"),
+            Some(RuntimeValue::String("beta".to_string()))
         );
     }
 
@@ -4686,8 +5333,11 @@ mod tests {
             .expect("nickname column should be strings");
         assert!(nickname.is_null(0));
 
-        assert_eq!(batch.value(0, "user_id"), Ok(Some(RuntimeValue::U32(42))));
-        assert_eq!(batch.value(0, "nickname"), Ok(None));
+        assert_eq!(
+            batch.value(0, "user_id").expect("readable value"),
+            Some(RuntimeValue::U32(42))
+        );
+        assert_eq!(batch.value(0, "nickname").expect("readable value"), None);
     }
 
     #[test]
@@ -4716,12 +5366,12 @@ mod tests {
 
         assert_eq!(concatenated.batch().num_rows(), 2);
         assert_eq!(
-            concatenated.value(0, "user_id"),
-            Ok(Some(RuntimeValue::U32(42)))
+            concatenated.value(0, "user_id").expect("readable value"),
+            Some(RuntimeValue::U32(42))
         );
         assert_eq!(
-            concatenated.value(1, "user_id"),
-            Ok(Some(RuntimeValue::U32(7)))
+            concatenated.value(1, "user_id").expect("readable value"),
+            Some(RuntimeValue::U32(7))
         );
     }
 
@@ -5703,7 +6353,24 @@ mod tests {
                 ("active".to_string(), RuntimeValue::Bool(true)),
             ]])
             .expect_err("must reject");
-        assert!(err.contains("latency"));
+        let RuntimeSchemaError::RuntimeValueTypeMismatch {
+            location,
+            expected,
+            found,
+        } = err.current_context()
+        else {
+            panic!("expected a typed runtime value mismatch, got {err}");
+        };
+        assert_eq!(
+            location,
+            &RuntimeValueLocation::BatchField {
+                row: 0,
+                field: "latency".to_string(),
+                elements: Vec::new(),
+            }
+        );
+        assert_eq!(expected, &ParseAsType::F64);
+        assert_eq!(found, &RuntimeValueKind::String);
     }
 
     #[test]
@@ -5789,7 +6456,12 @@ mod tests {
                 ),
             ]])
             .expect_err("missing required field must fail before encoding");
-        assert!(error.contains("created_at"));
+        let RuntimeSchemaError::MissingRequiredField { row, field } = error.current_context()
+        else {
+            panic!("expected a typed missing required field, got {error}");
+        };
+        assert_eq!(*row, 0);
+        assert_eq!(field, "created_at");
     }
 
     #[test]

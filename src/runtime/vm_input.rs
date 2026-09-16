@@ -449,7 +449,10 @@ pub(super) async fn compute_lookup_hash_map_columns(
             let Some(key_column) = key_column.as_ref() else {
                 continue;
             };
-            if let Some(value) = key_column.nullable_value_at(output_row)? {
+            if let Some(value) = key_column
+                .nullable_value_at(output_row)
+                .map_err(|error| error.to_string())?
+            {
                 row_keys[input_row] = Some(value.to_key_fragment());
             }
         }
@@ -463,7 +466,10 @@ pub(super) async fn compute_lookup_hash_map_columns(
                 else {
                     return Ok(None);
                 };
-                call.lookup_runtime.batch.value(row, &call.lookup_field)
+                call.lookup_runtime
+                    .batch
+                    .value(row, &call.lookup_field)
+                    .map_err(|error| error.to_string())
             })
             .collect::<Result<Vec<_>, String>>()?;
         let column = runtime_values_input_column(
@@ -499,6 +505,7 @@ pub(super) fn vm_output_value(
         row,
         field_name,
     )
+    .map_err(|error| error.to_string())
 }
 
 pub(super) fn vm_typed_batch_to_runtime_batch(
@@ -506,6 +513,7 @@ pub(super) fn vm_typed_batch_to_runtime_batch(
 ) -> Result<RuntimeRecordBatch, String> {
     let record_batch = batch.to_record_batch().map_err(|error| error.to_string())?;
     RuntimeRecordBatch::from_record_batch(batch.schema().clone(), record_batch)
+        .map_err(|error| error.to_string())
 }
 
 pub(super) fn vm_typed_batch_selected_rows_to_runtime_batch(
@@ -545,6 +553,7 @@ pub(super) fn vm_typed_batch_selected_rows_to_runtime_batch(
     }
     .map_err(|error| error.to_string())?;
     RuntimeRecordBatch::from_record_batch(batch.schema().clone(), record_batch)
+        .map_err(|error| error.to_string())
 }
 
 pub(super) fn runtime_value_type_name(value: &RuntimeValue) -> &'static str {

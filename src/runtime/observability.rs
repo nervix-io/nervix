@@ -636,6 +636,7 @@ impl Runtime {
             .get(key)
             .map(|row| lookup.batch.slice(*row, 1))
             .transpose()
+            .map_err(|error| error.to_string())
     }
 }
 

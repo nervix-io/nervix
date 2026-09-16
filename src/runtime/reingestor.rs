@@ -514,7 +514,7 @@ impl Runtime {
                     .take(&success_input_rows)
                     .map_err(|reason| PlannedGeneralError {
                         acks: batch.acks.clone(),
-                        reason,
+                        reason: reason.to_string(),
                     })?;
             let input_keys = success_input_rows
                 .iter()

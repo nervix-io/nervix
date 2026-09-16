@@ -207,7 +207,7 @@ pub(super) fn vm_partial_output_row_to_runtime_batch(
         RecordBatch::try_new(schema.clone(), columns)
     }
     .map_err(|error| error.to_string())?;
-    RuntimeRecordBatch::from_record_batch(schema, record_batch)
+    RuntimeRecordBatch::from_record_batch(schema, record_batch).map_err(|error| error.to_string())
 }
 
 pub(super) fn invalid_output_fields(batch: &VmTypedBatch, row: usize) -> Vec<FieldPath> {
@@ -1033,6 +1033,7 @@ impl Runtime {
         }
         let output = vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &[0])?;
         RuntimeRow::new(Arc::new(output), 0, message.record.metadata().clone())
+            .map_err(|error| error.to_string())
     }
 }
 

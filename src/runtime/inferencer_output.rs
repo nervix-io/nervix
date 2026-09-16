@@ -320,6 +320,7 @@ pub(super) async fn flush_branch_inferencer_output(
         let batch = RecordBatch::try_new(tensor_schema.clone(), columns)
             .map_err(|error| error.to_string())?;
         RuntimeRecordBatch::from_record_batch(tensor_schema, batch)
+            .map_err(|error| error.to_string())
     })();
     let tensor_batch = match tensor_batch_result {
         Ok(batch) => batch,
