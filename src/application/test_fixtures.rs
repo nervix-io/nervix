@@ -442,8 +442,8 @@ pub(in crate::application) async fn build_test_service(
     let expected_leader = test_node_name(id);
     let interconnect = test_interconnect("test", &expected_leader).await;
     let executor = nervix_execution::Executor::default();
-    let consensus = Consensus::from_database(
-        db,
+    let consensus = Consensus::open(
+        path.join("consensus"),
         ConsensusSettings {
             cluster_name: "test".to_string(),
             node_id: expected_leader.clone(),

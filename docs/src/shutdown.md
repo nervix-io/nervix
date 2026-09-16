@@ -433,8 +433,9 @@ stops the runtime, consensus, cluster membership, and the interconnect in that o
 releases the node's storage.
 
 Consensus stops Raft and then waits for its storage to reach an idle barrier, which proves every
-earlier durable write has returned and released the store, before the database handle is dropped.
-The database is released last, after the services that hold handles to it.
+earlier durable write has returned and released the store, before its dedicated database handle is
+dropped. The registry and runtime database is released separately after the services that hold its
+handles. Terminal teardown does not finish until both database locks have been released.
 
 The interconnect rejects new admission, cancels pool and operation waiters, and begins a graceful
 HTTP/2 shutdown, giving active transport work up to ten seconds before closing the remaining

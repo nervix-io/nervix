@@ -1034,8 +1034,9 @@ impl FjallStore {
                 reservation,
                 move |reservation, _| {
                     for name in db.list_keyspace_names() {
-                        // This namespace contains exactly these four storage-owned keyspaces.
-                        if name.starts_with("raft_") && !KEYSPACE_NAMES.contains(&name.as_ref()) {
+                        // Consensus owns this complete database, so every keyspace must be one of
+                        // the four that make up its current durable shape.
+                        if !KEYSPACE_NAMES.contains(&name.as_ref()) {
                             return Err(io::Error::other(StorageFailure::InvalidState));
                         }
                     }

@@ -40,7 +40,6 @@ use domain_clock::{
     run_domain_clock_authority_reconciliation,
 };
 use error_stack::{Report, ResultExt};
-use fjall::Database;
 use futures_util::{
     StreamExt,
     future::join_all,
@@ -50,6 +49,7 @@ use http_endpoint::{serve_http, serve_https};
 use interconnect_relay::InterconnectRelayPayloadLane;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{ConsensusSettings, RaftRetentionPolicy, TransactionState};
+use nervix_execution::Executor;
 use nervix_interconnect::{
     ActivateOwnershipHandoffStateRequest as RemoteActivateOwnershipHandoffStateRequest,
     ApplicationHealthProbe,
@@ -787,13 +787,8 @@ impl Application {
             "starting nervix server"
         );
 
-        let db = Database::builder(&db_path)
-            .open()
-            .map_err(|err| {
-                error!(db_path = db_path.display().to_string(), error = %err, "failed to open shared fjall database");
-                err
-            })
-            .change_context(AppError::OpenRegistry)?;
+        let executor = Executor::default();
+        let db = ApplicationStartup::open_node_database(db_path.clone(), &executor).await?;
         let registry = Arc::new(
             match Registry::from_database(db.clone(), Some(db_path.as_path())) {
                 Ok(registry) => registry,
@@ -804,6 +799,7 @@ impl Application {
             },
         );
         let runtime = Runtime::with_persistence_and_temp_dir(
+            executor,
             Some(db.clone()),
             state_snapshot_interval,
             fault_injection.clone(),
@@ -829,6 +825,7 @@ impl Application {
         })?;
         let mut startup = ApplicationStartup {
             db,
+            consensus_path: ApplicationStartup::consensus_database_path(&db_path),
             resource_store,
             registry,
             runtime,
@@ -966,6 +963,7 @@ impl Application {
             .await?;
         let ApplicationStartup {
             db,
+            consensus_path: _,
             resource_store,
             registry,
             runtime,
