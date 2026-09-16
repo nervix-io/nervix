@@ -25,7 +25,7 @@ use tracing::{error, info, warn};
 use super::{
     cluster_status::render_cluster_status,
     domain_lifecycle::DomainAlterError,
-    ownership_handoff::mark_complete_ownership_transitions,
+    ownership_handoff::{mark_complete_ownership_transitions, planned_ownership_moves},
     scheduling::ScheduleTransition,
     session_service::{SessionServiceImpl, create_registry_error_response, find_identifier_span},
     subscription::SessionSubscriptions,
@@ -33,7 +33,7 @@ use super::{
 };
 use crate::{
     proto::{CommandResult, CommandResultKind, Diagnostic, SessionResponse},
-    registry::{RegistryError, RegistryMutation},
+    registry::{EntityGatePlan, RegistryError, RegistryMutation, ScheduleDelta},
     runtime::RuntimeError,
 };
 
@@ -43,6 +43,8 @@ struct TransactionModelDecision {
     schedule: Option<DomainSchedule>,
     classified_level: QuiesceLevel,
     planned_relocations: usize,
+    model_gate: EntityGatePlan,
+    ownership_gate: EntityGatePlan,
 }
 
 /// One statement of a model-mutation batch that reached the registry: which statement it was,
@@ -693,6 +695,8 @@ impl SessionServiceImpl {
                             .effects
                             .ownership_moves
                             .len(),
+                        model_gate: plan.model_gate.clone(),
+                        ownership_gate: plan.ownership_gate.clone(),
                     })
                 }
                 None => None,
@@ -730,6 +734,13 @@ impl SessionServiceImpl {
                 QuiesceLevel::Dynamic
             };
             let affected_entities = planned.quiesce().affected_entities().to_vec();
+            let entity_pause_roots = planned
+                .quiesce()
+                .changed()
+                .iter()
+                .filter(|change| change.level.requires_entity_pause())
+                .map(|change| change.node.clone())
+                .collect::<Vec<_>>();
             let is_noop = planned.is_noop();
             let mut cluster_entity_gate = None;
             let mut ownership_handoff = None;
@@ -796,15 +807,22 @@ impl SessionServiceImpl {
             } else {
                 ScheduleTransition::default()
             };
+            let schedule_delta =
+                ScheduleDelta::between(expected_schedule.as_ref(), prepared_schedule.as_ref());
             let classified_level = match &transaction_decision {
                 Some(decision) => decision.classified_level,
                 None => {
-                    if matches!(domain_state.status, DomainStatus::Running)
-                        && planned_relocations > 0
-                    {
-                        base_classified_level.max(QuiesceLevel::EntityPause)
+                    if !matches!(domain_state.status, DomainStatus::Running) {
+                        QuiesceLevel::Dynamic
                     } else {
+                        let ownership_level = if planned_relocations > 0 {
+                            QuiesceLevel::EntityPause
+                        } else {
+                            QuiesceLevel::Dynamic
+                        };
                         base_classified_level
+                            .max(ownership_level)
+                            .max(schedule_delta.quiesce_level())
                     }
                 }
             };
@@ -812,6 +830,48 @@ impl SessionServiceImpl {
             if let Some(prepared_schedule) = prepared_schedule.as_mut() {
                 mark_complete_ownership_transitions(expected_schedule.as_ref(), prepared_schedule);
             }
+            let model_gate = match &transaction_decision {
+                Some(decision) => decision.model_gate.clone(),
+                None if matches!(domain_state.status, DomainStatus::Running)
+                    && classified_level.requires_entity_pause() =>
+                {
+                    let mut affected_entities = if base_classified_level.requires_entity_pause() {
+                        affected_entities.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    let mut changed_entities = if base_classified_level.requires_entity_pause() {
+                        entity_pause_roots.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    let schedule_gate_entities = schedule_delta.entity_gate_entities();
+                    affected_entities.extend(schedule_gate_entities.iter().cloned());
+                    changed_entities.extend(schedule_gate_entities);
+                    EntityGatePlan::for_model_change(
+                        expected_schedule.as_ref(),
+                        affected_entities,
+                        changed_entities,
+                    )
+                }
+                None => EntityGatePlan::default(),
+            };
+            let ownership_gate = match &transaction_decision {
+                Some(decision) => decision.ownership_gate.clone(),
+                None => {
+                    let moved_entities = planned_ownership_moves(
+                        expected_schedule.as_ref(),
+                        prepared_schedule.as_ref(),
+                    )
+                    .into_iter()
+                    .map(|moved| moved.entity);
+                    EntityGatePlan::for_ownership_handoff(
+                        expected_schedule.as_ref(),
+                        prepared_schedule.as_ref(),
+                        moved_entities,
+                    )
+                }
+            };
             let transaction_schedule = transaction_step
                 .is_some()
                 .then(|| (expected_schedule.clone(), prepared_schedule.clone()));
@@ -851,17 +911,15 @@ impl SessionServiceImpl {
                 }
                 return response;
             }
-            if !is_noop && base_classified_level.requires_entity_pause() {
-                let relays = self
-                    .inner
-                    .runtime
-                    .entity_pause_relays(&domain, &affected_entities);
+            if !is_noop && !model_gate.affected_entities().is_empty() {
+                let relays = model_gate.relays();
+                let affected_entities = model_gate.affected_entities();
                 let deadline =
                     tokio::time::Instant::now() + self.inner.runtime.entity_gate_deadline();
                 let gate = match Box::pin(self.engage_cluster_entity_gates(
                     &domain,
-                    &relays,
-                    &affected_entities,
+                    relays,
+                    affected_entities,
                     EntityGatePurpose::ModelAlteration,
                     deadline,
                 ))
@@ -874,8 +932,8 @@ impl SessionServiceImpl {
                 self.inner.runtime.pause_entity_gate_if_armed(&domain).await;
                 if let Err(error) = Box::pin(self.wait_for_cluster_entity_drain(
                     &gate,
-                    &relays,
-                    &affected_entities,
+                    relays,
+                    affected_entities,
                     EntityGatePurpose::ModelAlteration,
                     &[],
                     deadline,
@@ -888,21 +946,23 @@ impl SessionServiceImpl {
                 cluster_entity_gate = Some(gate);
             }
             if !is_noop && planned_relocations > 0 {
-                ownership_handoff = match Box::pin(self.begin_planned_ownership_handoff(
-                    &domain,
-                    expected_schedule.as_ref(),
-                    prepared_schedule.as_ref(),
-                ))
-                .await
-                {
-                    Ok(handoff) => handoff,
-                    Err(error) => {
-                        if let Some(gate) = cluster_entity_gate.take() {
-                            Box::pin(self.release_cluster_entity_gates(gate)).await;
+                ownership_handoff =
+                    match Box::pin(self.begin_planned_ownership_handoff_with_exact_gate(
+                        &domain,
+                        expected_schedule.as_ref(),
+                        prepared_schedule.as_ref(),
+                        &ownership_gate,
+                    ))
+                    .await
+                    {
+                        Ok(handoff) => handoff,
+                        Err(error) => {
+                            if let Some(gate) = cluster_entity_gate.take() {
+                                Box::pin(self.release_cluster_entity_gates(gate)).await;
+                            }
+                            return command_error(error.to_string());
                         }
-                        return command_error(error.to_string());
-                    }
-                };
+                    };
             }
 
             if !is_noop {
@@ -1272,7 +1332,7 @@ impl SessionServiceImpl {
             }
 
             if refresh_http_tls
-                && let Err(error) = Box::pin(self.refresh_http_tls_server_config()).await
+                && let Err(error) = Box::pin(self.refresh_http_tls_server_config(None)).await
             {
                 if transaction_step.is_some() {
                     transaction_application_failure = Some(format!(

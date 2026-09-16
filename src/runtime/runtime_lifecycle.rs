@@ -136,7 +136,6 @@ impl Runtime {
                 prepared_forced_runtime_state_recoveries: DashMap::default(),
                 prepared_runtime_state_snapshots: DashMap::default(),
                 expiring_stream_states: DashMap::default(),
-                latest_resource_versions: DashMap::default(),
                 replicated_deduplicator_states: DashMap::default(),
                 replicated_kafka_offset_states: DashMap::default(),
                 replicated_materialized_stream_states: DashMap::default(),

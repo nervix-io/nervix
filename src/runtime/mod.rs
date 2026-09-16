@@ -81,10 +81,10 @@ use nervix_models::{
     OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
     PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
     RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
-    RemoteRuntimeField, ResourceId, ResourceName, ResourceVersionStatus, RetryPolicy,
-    RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes, SignalingProtocolName,
-    SignalingWireFormat, SqsFifoGroup, SqsIngestMode, StructuredMessageError, SubscriptionName,
-    Timestamp,
+    RemoteRuntimeField, ResourceId, ResourceName, ResourceVersionResolutionError,
+    ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledModel, ScheduledNode,
+    ScheduledNodes, SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
+    StructuredMessageError, SubscriptionName, Timestamp,
 };
 #[cfg(test)]
 use nervix_models::{CreateClientHttp, CreateClientPrometheus, CreateClientWebsockets};
@@ -148,7 +148,7 @@ use crate::{
         MessageMetricsHandle, NodeBatchMetricsSpec, NodeInputMetricsHandle, RelayMetricRecorders,
         RelayMetricsHandle, RuntimeMetrics, RuntimeMetricsSnapshot,
     },
-    registry::{ActiveGraph, RuntimeChange, RuntimeChanges},
+    registry::{ActiveGraph, RuntimeChange, RuntimeChanges, ScheduleDelta},
     resource::ResourceStore,
     runtime_ack::{
         AckCompletion, AckOutcome, AckProgress, AckRequiredWaitGuard, AckRootTracker, AckSet,
@@ -235,7 +235,6 @@ mod runtime_lifecycle;
 mod schedule_apply;
 mod snapshot_staging;
 
-mod schedule_delta;
 mod scheduled_node;
 mod service_url;
 mod shared_clients;
@@ -289,8 +288,8 @@ use domain_clock::{
 #[cfg(test)]
 use domain_execution::DomainRouting;
 use domain_execution::{
-    DomainExecution, DomainResourceKey, DomainRoutingError, DomainRoutingSnapshot,
-    ObservedDomainTick, RuntimeDomainState,
+    DomainExecution, DomainRoutingError, DomainRoutingSnapshot, ObservedDomainTick,
+    RuntimeDomainState,
 };
 pub(crate) use domain_execution::{DomainRoutingCache, SharedDomainRouting};
 use domain_rebuild::{branch_relays_from_branched_specs, relay_branching_schema_for_runtime};
@@ -440,7 +439,6 @@ use relay_interaction::{
 };
 use remote_dispatch::{REMOTE_ACK_ALIVE_INTERVAL, RemoteDispatchRegistry, RemoteDispatcher};
 use reorderer::{ReordererFlushContext, flush_branch_reorderer_output, reorder_key_part};
-use schedule_delta::ScheduleDelta;
 use scheduled_node::{
     EmitterTaskBuildDeps, EmitterTaskDeps, ExecutionBuildDeps, ScheduledNodePlacement,
     ScheduledNodeTask,

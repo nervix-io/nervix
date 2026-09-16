@@ -12,7 +12,7 @@ use nervix_models::{
     AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction, AlterPlacement,
     AlterPlacementOperation, AlterReingestor, AlterRelay, AlterReorderer, AlterSchema,
     AlterWireSchema, AvroType, CborType, DomainName, DropModel, JsonType, Model, ModelChangeAspect,
-    ModelIndex, ModelKind, NodeRef, QuiesceLevel, Statement,
+    ModelIndex, ModelKind, NodeRef, QuiesceLevel, StatePurge, Statement,
 };
 use nervix_recovery::Discarded;
 use thiserror::Error;
@@ -243,6 +243,7 @@ pub(crate) struct PlannedMutations {
     pub(in crate::registry) batch_size: usize,
     pub(in crate::registry) operation_name: String,
     pub(in crate::registry) base_models: ModelIndex,
+    pub(in crate::registry) base_graph: ActiveGraph,
     pub(in crate::registry) domain_state: DomainState,
     pub(in crate::registry) models_to_persist: HashMap<NodeRef, RegistryPersistMutation>,
     pub(in crate::registry) drops_in_batch: HashSet<NodeRef>,
@@ -278,6 +279,14 @@ impl PlannedMutations {
 
     pub(crate) fn candidate_graph(&self) -> Option<ActiveGraph> {
         self.runtime_changes.graph.clone()
+    }
+
+    pub(crate) fn base_graph(&self) -> &ActiveGraph {
+        &self.base_graph
+    }
+
+    pub(crate) fn resulting_graph(&self) -> &ActiveGraph {
+        &self.domain_state.graph
     }
 
     /// Every model the batch would create or replace, ordered by kind and identifier so boundary
@@ -317,9 +326,17 @@ impl PlannedMutations {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChangedModelImpact {
+    pub(crate) node: NodeRef,
+    pub(crate) level: QuiesceLevel,
+    pub(crate) state_resets: Vec<StatePurge>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct QuiescePlan {
     level: QuiesceLevel,
     affected_entities: Vec<NodeRef>,
+    changed: Vec<ChangedModelImpact>,
 }
 
 impl QuiescePlan {
@@ -330,49 +347,79 @@ impl QuiescePlan {
     pub(crate) fn affected_entities(&self) -> &[NodeRef] {
         &self.affected_entities
     }
+
+    pub(crate) fn changed(&self) -> &[ChangedModelImpact] {
+        &self.changed
+    }
 }
 
 pub(in crate::registry) fn classify_quiesce(
     base: &ModelIndex,
     candidate: &ModelIndex,
+    base_graph: &ActiveGraph,
     candidate_graph: &ActiveGraph,
 ) -> QuiescePlan {
     let mut level = QuiesceLevel::Dynamic;
     let mut affected_entities = Vec::new();
-    let mut gated_seeds = HashSet::<NodeRef>::default();
+    let mut changed = Vec::new();
 
     for (key, base_model) in base {
-        let change_level = match candidate.get(key) {
+        let (change_level, state_resets) = match candidate.get(key) {
             Some(candidate_model) => {
                 let aspects = base_model.change_aspects_against(candidate_model);
                 if aspects.is_empty() {
                     continue;
                 }
-                aspects.quiesce_level()
+                (aspects.quiesce_level(), aspects.state_purges())
             }
-            None => ModelChangeAspect::EntityDropped.quiesce_level(),
+            None => (ModelChangeAspect::EntityDropped.quiesce_level(), Vec::new()),
         };
         level = level.max(change_level);
-        if change_level.requires_entity_pause() {
-            gated_seeds.insert(key.clone());
-        }
-        affected_entities.push(NodeRef {
-            kind: key.kind,
-            identifier: key.identifier.clone(),
+        changed.push(ChangedModelImpact {
+            node: key.clone(),
+            level: change_level,
+            state_resets,
         });
     }
 
     for key in candidate.nodes().filter(|key| !base.contains(key)) {
-        level = level.max(ModelChangeAspect::EntityCreated.quiesce_level());
-        affected_entities.push(NodeRef {
-            kind: key.kind,
-            identifier: key.identifier.clone(),
+        let change_level = ModelChangeAspect::EntityCreated.quiesce_level();
+        level = level.max(change_level);
+        changed.push(ChangedModelImpact {
+            node: key.clone(),
+            level: change_level,
+            state_resets: Vec::new(),
         });
     }
 
-    // An entity-paused change also disturbs everything downstream of it, so the gate has to cover
-    // the dependent dataflow nodes and not just the models the batch names.
-    affected_entities.extend(candidate_graph.dependent_dataflow_entities(&gated_seeds));
+    if level.requires_domain_pause() {
+        for graph in [base_graph, candidate_graph] {
+            affected_entities.extend(
+                graph
+                    .whole_impact()
+                    .nodes
+                    .into_iter()
+                    .filter(|coverage| coverage.branches.is_some())
+                    .map(|coverage| coverage.node),
+            );
+        }
+    } else {
+        for change in &changed {
+            if !change.level.requires_entity_pause() {
+                continue;
+            }
+            for graph in [base_graph, candidate_graph] {
+                affected_entities.extend(
+                    graph
+                        .downstream_impact(&change.node)
+                        .nodes
+                        .into_iter()
+                        .filter(|coverage| coverage.branches.is_some())
+                        .map(|coverage| coverage.node),
+                );
+            }
+        }
+    }
 
     affected_entities.sort_by(|left, right| {
         left.kind
@@ -384,5 +431,6 @@ pub(in crate::registry) fn classify_quiesce(
     QuiescePlan {
         level,
         affected_entities,
+        changed,
     }
 }

@@ -8,7 +8,7 @@
   "data_plane_lock_acquisitions": 179,
   "discarded_results": 0,
   "files_over_3000_lines": 11,
-  "model_matches_in_data_plane": 125,
+  "model_matches_in_data_plane": 119,
   "parser_imports_outside_edges": 0,
   "result_string_errors": 167,
   "string_node_ids": 0,

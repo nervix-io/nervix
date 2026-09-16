@@ -36,7 +36,10 @@ use super::{
     entity_gate::{ClusterEntityGate, ENTITY_GATE_RELEASE_RETRY_INTERVAL},
     session_service::SessionServiceImpl,
 };
-use crate::runtime::{OwnershipHandoffError, OwnershipHandoffResult, Runtime};
+use crate::{
+    registry::{EntityGatePlan, ownership_handoff_relays_for_schedule},
+    runtime::{OwnershipHandoffError, OwnershipHandoffResult, Runtime},
+};
 
 pub(in crate::application) const FORCED_OWNERSHIP_RECOVERY_BUDGET: Duration =
     Duration::from_secs(5);
@@ -730,6 +733,28 @@ impl SessionServiceImpl {
         current: Option<&nervix_models::DomainSchedule>,
         planned: Option<&nervix_models::DomainSchedule>,
     ) -> Result<Option<PlannedOwnershipHandoff>, Report<DomainAlterError>> {
+        self.begin_planned_ownership_handoff_with_gate(domain, current, planned, None)
+            .await
+    }
+
+    pub(in crate::application) async fn begin_planned_ownership_handoff_with_exact_gate(
+        &self,
+        domain: &DomainName,
+        current: Option<&nervix_models::DomainSchedule>,
+        planned: Option<&nervix_models::DomainSchedule>,
+        gate: &EntityGatePlan,
+    ) -> Result<Option<PlannedOwnershipHandoff>, Report<DomainAlterError>> {
+        self.begin_planned_ownership_handoff_with_gate(domain, current, planned, Some(gate))
+            .await
+    }
+
+    async fn begin_planned_ownership_handoff_with_gate(
+        &self,
+        domain: &DomainName,
+        current: Option<&nervix_models::DomainSchedule>,
+        planned: Option<&nervix_models::DomainSchedule>,
+        gate: Option<&EntityGatePlan>,
+    ) -> Result<Option<PlannedOwnershipHandoff>, Report<DomainAlterError>> {
         let moves = planned_ownership_moves(current, planned);
         if moves.is_empty() {
             return Ok(None);
@@ -830,11 +855,22 @@ impl SessionServiceImpl {
                 ),
             }));
         }
-        let affected_entities = moves
+        let moved_entities = moves
             .iter()
             .map(|moved| moved.entity.clone())
             .collect::<Vec<_>>();
-        let relays = Runtime::ownership_handoff_relays_for_schedule(current, &affected_entities);
+        let affected_entities = match gate {
+            Some(gate) => gate.affected_entities(),
+            None => moved_entities.as_slice(),
+        };
+        let computed_relays;
+        let relays = match gate {
+            Some(gate) => gate.relays(),
+            None => {
+                computed_relays = ownership_handoff_relays_for_schedule(current, affected_entities);
+                computed_relays.as_slice()
+            }
+        };
         let former_owners = moves
             .iter()
             .map(|moved| moved.former_owner.clone())
@@ -866,8 +902,8 @@ impl SessionServiceImpl {
         let gate = self
             .engage_cluster_entity_gates(
                 domain,
-                &relays,
-                &affected_entities,
+                relays,
+                affected_entities,
                 EntityGatePurpose::OwnershipHandoff,
                 activation_deadline,
             )
@@ -878,8 +914,8 @@ impl SessionServiceImpl {
         if let Err(error) = self
             .wait_for_cluster_entity_drain(
                 &gate,
-                &relays,
-                &affected_entities,
+                relays,
+                affected_entities,
                 EntityGatePurpose::OwnershipHandoff,
                 &former_owners,
                 preparation_deadline,

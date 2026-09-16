@@ -42,7 +42,10 @@ conflict. Once the client has supplied the complete declared archive and the clu
 installation continues if that request disconnects. An interrupted partial body has not admitted a
 complete upload and can be sent again with the same identity.
 
-`DESCRIBE RESOURCE <name>` shows the resource and its completed versions.
+`DESCRIBE RESOURCE <name>` reports `latest` as the highest completed version, or `(none)` when no
+upload has completed. Its `versions` list and version details include every version whose metadata
+has been published, including a version whose upload is still applying or finished with failure.
+This keeps incomplete upload diagnostics visible without making that version eligible for use.
 
 `DESCRIBE RESOURCE <name> VERSION <n>` shows the detailed state for one version, including:
 
@@ -56,9 +59,14 @@ does not poll them to finish an upload.
 
 ## Versioning
 
-Versions are monotonically increasing integers assigned by the cluster leader per domain and resource name.
+Versions are monotonically increasing integers assigned by the cluster leader per domain and
+resource name. A resource binding may select only a completed version. An explicit `VERSION <n>`
+therefore fails while that upload is applying and remains unavailable if the upload fails. A
+binding that omits a version selects the highest completed version, so a newer applying or failed
+version does not displace the last usable one.
 
-There is no `latest` keyword in NSPL. If a model omits a version and chooses "latest" behavior, that behavior belongs to the model semantics, not to the resource system itself.
+There is no `latest` keyword in NSPL. `latest` in `DESCRIBE RESOURCE` is an observation of the
+version an omitted-version binding can currently select.
 
 ## Upload Format
 

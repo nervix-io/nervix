@@ -9,10 +9,11 @@ use std::{borrow::Borrow, collections::BTreeMap, io};
 
 use error_stack::Report;
 use imbl::{OrdMap, ordmap::DiffItem};
+use meticulous::ResultExt as _;
 use nervix_models::{
     ClusterSchedule, DomainName, DomainSchedule, ResourceId, ResourceName, ResourceNodeState,
     ResourceNodeStatus, ResourceReplicaKey, ResourceUpload, ResourceUploadKey, ResourceUploadState,
-    ResourceVersion, ResourceVersionCounter, ResourceVersionStatus,
+    ResourceUploads, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use triomphe::Arc;
@@ -439,7 +440,10 @@ impl From<&ResourceRecords> for ResourceVersionStatus {
                 .collect(),
             versions: resources.versions.values().cloned().collect(),
             replicas: resources.replicas.values().cloned().collect(),
-            uploads: resources.uploads.values().cloned().collect(),
+            uploads: ResourceUploads::try_from_uploads(resources.uploads.values().cloned())
+                .assured(
+                    "the monotonically allocated resource version belongs to exactly one upload",
+                ),
         }
     }
 }
