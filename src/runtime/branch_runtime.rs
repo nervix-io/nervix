@@ -17,6 +17,8 @@ pub(super) struct BranchRuntime {
     pub(super) key: Option<BranchKey>,
     pub(super) runtime: Runtime,
     pub(super) domain: DomainName,
+    pub(super) routing: Option<DomainRoutingCache>,
+    pub(super) routing_snapshot: Option<StdArc<DomainRoutingSnapshot>>,
     pub(super) domain_clock: DomainClock,
     pub(super) source_kind: ModelKind,
     pub(super) source: RelayName,
@@ -198,6 +200,43 @@ impl BranchDispatchLanes {
 }
 
 impl BranchRuntime {
+    pub(super) fn refresh_domain_routing(&mut self) -> Result<(), Report<DomainRoutingError>> {
+        if self.routing.is_none() {
+            self.routing = self.runtime.domain_routing_cache(&self.domain);
+        }
+        let Some(routing) = self.routing.as_mut() else {
+            return Err(Report::new(DomainRoutingError::DomainNotInstantiated {
+                domain: self.domain.clone(),
+            }));
+        };
+        let current = routing.load();
+        let changed = self
+            .routing_snapshot
+            .as_ref()
+            .is_none_or(|snapshot| !StdArc::ptr_eq(snapshot, current));
+        if changed {
+            self.routing_snapshot = Some(current.clone());
+        }
+        Ok(())
+    }
+
+    pub(super) fn domain_routing(
+        &self,
+    ) -> Result<&DomainRoutingSnapshot, Report<DomainRoutingError>> {
+        self.routing_snapshot.as_deref().ok_or_else(|| {
+            Report::new(DomainRoutingError::SnapshotNotResolved {
+                domain: self.domain.clone(),
+            })
+        })
+    }
+
+    pub(super) fn relay_schema(
+        &self,
+        relay: &RelayName,
+    ) -> Result<Arc<CompiledSchema>, Report<DomainRoutingError>> {
+        relay_schema_for_routing(self.domain_routing()?, &self.domain, relay)
+    }
+
     pub(super) async fn evict(&mut self) {
         for processor in self.processors.values_mut() {
             processor.drop_collected_inputs("processor branch was evicted");
@@ -212,28 +251,31 @@ impl BranchRuntime {
         if self.relay_state_epoch == Some(current_epoch) {
             return;
         }
-        let desired_relays = match self.runtime.inner.executions.get(&self.domain) {
-            Some(execution) => execution
-                .materialized_stream_specs
-                .keys()
-                .filter(|relay| {
-                    !execution
-                        .materialized_stream_owner_nodes
-                        .get(*relay)
-                        .is_some_and(Option::is_some)
-                })
-                .cloned()
-                .collect::<HashSet<_>>(),
-            None => HashSet::default(),
+        let (desired_relays, relay_schema) = match self.domain_routing() {
+            Ok(routing) => {
+                let desired_relays = routing
+                    .materialized_stream_specs
+                    .keys()
+                    .filter(|relay| {
+                        !routing
+                            .materialized_stream_owner_nodes
+                            .get(*relay)
+                            .is_some_and(Option::is_some)
+                    })
+                    .cloned()
+                    .collect::<HashSet<_>>();
+                let relay_schema = routing
+                    .materialized_stream_specs
+                    .get(relay)
+                    .map(|spec| spec.schema.clone());
+                (desired_relays, relay_schema)
+            }
+            Err(_) => (HashSet::default(), None),
         };
         self.materialized_states
             .retain(|identifier, _| desired_relays.contains(identifier));
         if desired_relays.contains(relay) && !self.materialized_states.contains_key(relay) {
-            let schema = if let Some(execution) = self.runtime.inner.executions.get(&self.domain)
-                && let Some(spec) = execution.materialized_stream_specs.get(relay)
-            {
-                spec.schema.clone()
-            } else {
+            let Some(schema) = relay_schema else {
                 warn!(
                     domain = self.domain.as_str(),
                     relay = relay.as_str(),
@@ -298,7 +340,12 @@ impl BranchRuntime {
         relay: &RelayName,
         batch: &RelayRecordBatch,
     ) {
-        if self.runtime.relay_is_cluster_scheduled(&self.domain, relay) {
+        if self
+            .domain_routing()
+            .ok()
+            .and_then(|routing| routing.materialized_stream_owner_nodes.get(relay))
+            .is_some_and(Option::is_some)
+        {
             return;
         }
         self.reconcile_materialized_state_membership(relay).await;
@@ -371,6 +418,10 @@ impl BranchRuntime {
         graph: &SharedActiveGraph,
         processor_id: &ModelName,
     ) {
+        if let Err(error) = self.refresh_domain_routing() {
+            warn!(error = %error, "failed to refresh routing for pending processor work");
+            return;
+        }
         let Some(mut processor) = self.processors.remove(processor_id) else {
             return;
         };
@@ -390,6 +441,10 @@ impl BranchRuntime {
         graph: &SharedActiveGraph,
         updated_relay: &RelayName,
     ) {
+        if let Err(error) = self.refresh_domain_routing() {
+            warn!(error = %error, "failed to refresh routing for materialized-state waiters");
+            return;
+        }
         let processor_ids = self
             .processors
             .iter()
@@ -419,6 +474,12 @@ impl BranchRuntime {
     }
 
     pub(super) async fn dispatch(&mut self, graph: &SharedActiveGraph, batch: RelayRecordBatch) {
+        if let Err(error) = self.refresh_domain_routing() {
+            for ack in &batch.acks {
+                ack.no_ack(error.to_string());
+            }
+            return;
+        }
         let root_relay = self.root_relay.clone();
         if let Some(source_input) = &self.metrics.source_input {
             source_input.observe(
@@ -494,6 +555,12 @@ impl BranchRuntime {
         incoming_relay: &RelayName,
         batch: RelayRecordBatch,
     ) {
+        if let Err(error) = self.refresh_domain_routing() {
+            for ack in &batch.acks {
+                ack.no_ack(error.to_string());
+            }
+            return;
+        }
         let Some(mut processor) = self.processors.remove(processor_id) else {
             for ack in batch.acks.iter() {
                 ack.no_ack("processor is not instantiated for this branch");
@@ -590,6 +657,10 @@ impl BranchRuntime {
         graph: &SharedActiveGraph,
         snapshot: &DomainExecutionSnapshot,
     ) {
+        if let Err(error) = self.refresh_domain_routing() {
+            warn!(error = %error, "failed to refresh routing for processor tick");
+            return;
+        }
         let processor_ids = self.processors.keys().cloned().collect::<Vec<_>>();
         for processor_id in processor_ids {
             let Some(mut processor) = self.processors.remove(&processor_id) else {
@@ -605,7 +676,15 @@ impl BranchRuntime {
         graph: &SharedActiveGraph,
         snapshot: &DomainExecutionSnapshot,
     ) {
+        if let Err(error) = self.refresh_domain_routing() {
+            warn!(error = %error, "failed to refresh routing for processor flush");
+            return;
+        }
         let now = snapshot.now();
+        let routing =
+            self.routing_snapshot.as_ref().cloned().verified(
+                "the routing refresh above returned unless it installed a current snapshot",
+            );
         let processor_ids = self.processors.keys().cloned().collect::<Vec<_>>();
         for processor_id in processor_ids {
             tokio::task::consume_budget().await;
@@ -615,11 +694,7 @@ impl BranchRuntime {
             processor.flush_all_collected_inputs(graph, self).await;
             processor.flush_guest_buffers(graph, self, now).await;
             let current = graph.load_full();
-            processor.refresh(
-                &self.runtime,
-                &self.domain,
-                current.as_ref().map(StdArc::clone),
-            );
+            processor.refresh(&routing, current.as_ref().map(StdArc::clone));
             processor.flush_route_buffers(graph, self, now).await;
             processor.tick(graph, self, snapshot).await;
             self.processors.insert(processor_id, processor);

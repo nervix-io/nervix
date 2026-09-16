@@ -58,22 +58,22 @@ impl ProcessorMaterializedState<'_> {
     /// prevent by dropping that buffered work with the branch.
     pub(super) async fn resolve(
         &self,
-        runtime: &Runtime,
-        domain: &DomainName,
-        node_kind: ModelKind,
-        node: &ModelName,
+        routing: &DomainRoutingSnapshot,
+        context: &ProcessorOutputDispatchContext<'_>,
         branch_key: &Option<BranchKey>,
-        execution_now: Timestamp,
     ) -> Result<HashMap<String, RuntimeValue>, String> {
         match self {
             Self::Admitted(values) => Ok((*values).clone()),
             Self::ResolvedAtDispatch(dependencies) => {
-                match runtime
+                match context
+                    .branch
+                    .runtime
                     .resolve_materialized_dependencies(
-                        domain,
+                        routing,
+                        &context.branch.domain,
                         branch_key,
                         dependencies,
-                        execution_now,
+                        context.execution_now,
                     )
                     .await?
                 {
@@ -81,14 +81,14 @@ impl ProcessorMaterializedState<'_> {
                     MaterializedDependencyResolution::Skip => Err(format!(
                         "{} '{}' requires materialized state that was evicted after the batch was \
                          admitted",
-                        node_kind.as_str(),
-                        node.as_str()
+                        context.node_kind.as_str(),
+                        context.processor.as_str()
                     )),
                     MaterializedDependencyResolution::Wait => Err(format!(
                         "{} '{}' awaits materialized state that was evicted after the batch was \
                          admitted",
-                        node_kind.as_str(),
-                        node.as_str()
+                        context.node_kind.as_str(),
+                        context.processor.as_str()
                     )),
                 }
             }
@@ -169,7 +169,10 @@ pub(super) fn processor_output_input_sensitivity(
     let Some(relay) = relays.first() else {
         return VmSchemaSensitivity::default();
     };
-    let Ok(schema) = relay_schema_for_runtime(&branch.runtime, &branch.domain, relay) else {
+    let Ok(routing) = branch.domain_routing() else {
+        return VmSchemaSensitivity::default();
+    };
+    let Ok(schema) = relay_schema_for_routing(routing, &branch.domain, relay) else {
         return VmSchemaSensitivity::default();
     };
     schema.vm_sensitivity()
@@ -367,6 +370,27 @@ pub(super) async fn dispatch_selected_processor_outputs(
         return Some(Vec::new());
     }
 
+    let routing = match context.branch.routing_snapshot.as_ref().cloned() {
+        Some(routing) => routing,
+        None => {
+            context
+                .branch
+                .runtime
+                .handle_internal_processor_error_for_acks(
+                    &context.branch.domain,
+                    context.node_kind,
+                    context.processor,
+                    context.error_policies,
+                    batch.acks.iter(),
+                    format!(
+                        "domain '{}' routing was not resolved for this batch",
+                        context.branch.domain.as_str()
+                    ),
+                );
+            return None;
+        }
+    };
+
     let output_relays = outputs
         .routes
         .iter()
@@ -381,8 +405,8 @@ pub(super) async fn dispatch_selected_processor_outputs(
             continue;
         }
         tokio::task::consume_budget().await;
-        let output_schema = match relay_schema_for_runtime(
-            &context.branch.runtime,
+        let output_schema = match relay_schema_for_routing(
+            &routing,
             &context.branch.domain,
             &output_relays[output_index],
         ) {
@@ -425,14 +449,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
     // already evaluated, and so every route of this batch observes one snapshot.
     let side_inputs = match context
         .materialized_state
-        .resolve(
-            &context.branch.runtime,
-            &context.branch.domain,
-            context.node_kind,
-            context.processor,
-            &batch.key,
-            context.execution_now,
-        )
+        .resolve(&routing, &context, &batch.key)
         .await
     {
         Ok(side_inputs) => side_inputs,

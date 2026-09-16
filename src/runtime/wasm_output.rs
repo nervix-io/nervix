@@ -787,50 +787,8 @@ pub(super) async fn dispatch_wasm_output_route(
                 );
             return None;
         };
-        let materialized_stream_specs = materialized_stream_specs_for_graph(
-            &context.branch.runtime,
-            &context.branch.domain,
-            context.graph,
-        );
-        let mut current_branching = Vec::new();
-        if let Some(execution) = context
-            .branch
-            .runtime
-            .inner
-            .executions
-            .get(&context.branch.domain)
-            && let Some(branching) = execution.relay_branchings.get(primary_input_relay)
-        {
-            current_branching = branching.clone();
-        }
-        let current_branch_schema = relay_branch_schema_for_runtime(
-            &context.branch.runtime,
-            &context.branch.domain,
-            primary_input_relay,
-        );
-        let available_lookups = match context
-            .branch
-            .runtime
-            .inner
-            .executions
-            .get(&context.branch.domain)
-        {
-            Some(execution) => execution.lookups.clone(),
-            None => HashMap::default(),
-        };
-        let udfs = context
-            .branch
-            .runtime
-            .inner
-            .executions
-            .get(&context.branch.domain)
-            .map(|execution| execution.udfs.clone());
-        let output_schema = match relay_schema_for_runtime(
-            &context.branch.runtime,
-            &context.branch.domain,
-            &output.relay,
-        ) {
-            Ok(schema) => schema,
+        let routing = match context.branch.domain_routing() {
+            Ok(routing) => routing,
             Err(error) => {
                 context
                     .branch
@@ -841,11 +799,35 @@ pub(super) async fn dispatch_wasm_output_route(
                         context.processor,
                         context.error_policies,
                         decoded.batch.acks.iter(),
-                        error,
+                        error.to_string(),
                     );
                 return None;
             }
         };
+        let current_branching = routing
+            .relay_branchings
+            .get(primary_input_relay)
+            .cloned()
+            .unwrap_or_default();
+        let current_branch_schema = relay_branch_schema_for_routing(routing, primary_input_relay);
+        let output_schema =
+            match relay_schema_for_routing(routing, &context.branch.domain, &output.relay) {
+                Ok(schema) => schema,
+                Err(error) => {
+                    context
+                        .branch
+                        .runtime
+                        .handle_internal_processor_error_for_acks(
+                            &context.branch.domain,
+                            context.node_kind,
+                            context.processor,
+                            context.error_policies,
+                            decoded.batch.acks.iter(),
+                            error.to_string(),
+                        );
+                    return None;
+                }
+            };
         match compile_wasm_output_filter_map_program(
             &context.branch.domain,
             context.processor,
@@ -853,12 +835,12 @@ pub(super) async fn dispatch_wasm_output_route(
             output_schema.arrow_schema(),
             output_schema.vm_sensitivity(),
             RuntimeVmCompileContext {
-                available_materialized_streams: &materialized_stream_specs,
-                available_lookups: &available_lookups,
+                available_materialized_streams: &routing.materialized_stream_specs,
+                available_lookups: &routing.lookups,
                 current_branching: &current_branching,
                 current_branch_schema: current_branch_schema.as_ref(),
                 current_branch_sensitivity: None,
-                udfs: udfs.as_ref(),
+                udfs: Some(&routing.udfs),
             },
         ) {
             Ok(program) => output.compiled_program = program,
@@ -933,24 +915,31 @@ pub(super) async fn dispatch_wasm_output_route(
         return None;
     };
     let execution_now = context.execution_now;
-    let owner_nodes = match context
-        .branch
-        .runtime
-        .inner
-        .executions
-        .get(&context.branch.domain)
-    {
-        Some(execution) => execution.materialized_stream_owner_nodes.clone(),
-        None => HashMap::default(),
+    let routing = match context.branch.domain_routing() {
+        Ok(routing) => routing,
+        Err(error) => {
+            context
+                .branch
+                .runtime
+                .handle_internal_processor_error_for_acks(
+                    &context.branch.domain,
+                    context.node_kind,
+                    context.processor,
+                    context.error_policies,
+                    decoded.batch.acks.iter(),
+                    error.to_string(),
+                );
+            return None;
+        }
     };
     let side_inputs = match context
         .branch
         .runtime
         .load_materialized_side_inputs(
+            routing,
             &context.branch.domain,
             &decoded.batch.key,
             &program.materialized_interest,
-            &owner_nodes,
         )
         .await
     {

@@ -1457,10 +1457,11 @@ impl Runtime {
         domain: &DomainName,
         key: &Option<BranchKey>,
     ) {
-        let Some(execution) = self.inner.executions.get(domain) else {
+        let Some(routing) = self.domain_routing(domain) else {
             return;
         };
-        for services in execution.relay_services.values() {
+        let routing = routing.load();
+        for services in routing.relay_services.values() {
             services.remove_branch_slots(key);
         }
     }
@@ -1576,43 +1577,26 @@ impl Runtime {
         domain: &DomainName,
         relay: &RelayName,
     ) -> Result<RelaySubscriptionReceiver<RelayRecordBatch>, RuntimeError> {
-        let Some(execution) = self.inner.executions.get(domain) else {
+        let Some(routing) = self.domain_routing(domain) else {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: domain.as_str().to_string(),
                 relay: relay.as_str().to_string(),
             });
         };
-        if !execution.relay_registries.contains_key(relay) {
+        let routing = routing.load();
+        if !routing.relay_registries.contains_key(relay) {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: domain.as_str().to_string(),
                 relay: relay.as_str().to_string(),
             });
         }
-        let Some(services) = execution.relay_services.get(relay) else {
+        let Some(services) = routing.relay_services.get(relay) else {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: domain.as_str().to_string(),
                 relay: relay.as_str().to_string(),
             });
         };
         Ok(services.subscription_receiver())
-    }
-
-    pub(in crate::runtime) fn relay_is_cluster_scheduled(
-        &self,
-        domain: &DomainName,
-        relay: &RelayName,
-    ) -> bool {
-        self.inner.executions.get(domain).is_some_and(|execution| {
-            execution
-                .schedule
-                .nodes
-                .values()
-                .find(|node| {
-                    node.kind() == ModelKind::Relay && node.identifier == ModelName::from(&*relay)
-                })
-                .and_then(ScheduledNode::execution_node)
-                .is_some()
-        })
     }
 
     pub(in crate::runtime) fn spawn_relay_owner_task(

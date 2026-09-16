@@ -98,8 +98,9 @@ impl Runtime {
         domain: &DomainName,
         signaling_protocol: &SignalingProtocolName,
     ) -> Option<Arc<CompiledSignalingProtocol>> {
-        let execution = self.inner.executions.get(domain)?;
-        execution
+        let routing = self.domain_routing(domain)?;
+        routing
+            .load()
             .signaling_protocols
             .get(signaling_protocol)
             .cloned()

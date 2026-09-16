@@ -36,13 +36,15 @@ impl RelayProcessorNode {
 
     pub(super) async fn resolve_materialized_dependencies(
         &self,
-        branch: &BranchRuntime,
+        branch: &mut BranchRuntime,
         branch_key: &Option<BranchKey>,
         execution_now: Timestamp,
     ) -> Result<MaterializedDependencyResolution, String> {
+        let routing = branch.domain_routing().map_err(|error| error.to_string())?;
         branch
             .runtime
             .resolve_materialized_dependencies(
+                routing,
                 &branch.domain,
                 branch_key,
                 &self.materialized_state,
@@ -53,8 +55,7 @@ impl RelayProcessorNode {
 
     pub(super) fn refresh(
         &mut self,
-        runtime: &Runtime,
-        domain: &DomainName,
+        routing: &DomainRoutingSnapshot,
         graph: Option<StdArc<ActiveGraph>>,
     ) {
         let changed = match (&self.last_graph, &graph) {
@@ -80,7 +81,7 @@ impl RelayProcessorNode {
         };
 
         if requires_reinitialization {
-            if let Some(error) = self.apply_refreshed_graph(runtime, domain, graph.as_ref()) {
+            if let Some(error) = self.apply_refreshed_graph(routing, graph.as_ref()) {
                 warn!(
                     kind = self.kind.as_str(),
                     processor = self.processor.as_str(),
@@ -99,8 +100,7 @@ impl RelayProcessorNode {
 
     pub(super) fn apply_refreshed_graph(
         &mut self,
-        runtime: &Runtime,
-        domain: &DomainName,
+        routing: &DomainRoutingSnapshot,
         graph: Option<&StdArc<ActiveGraph>>,
     ) -> Option<String> {
         let Some(graph) = graph else {
@@ -110,18 +110,12 @@ impl RelayProcessorNode {
                 self.processor.as_str()
             ));
         };
-        let Some(execution) = runtime.inner.executions.get(domain) else {
-            return Some(format!(
-                "domain '{}' has no execution for processor refresh",
-                domain.as_str()
-            ));
-        };
         let template = match processor_template_for_graph_node(
             graph,
             self.kind,
             &self.processor,
-            &execution.relay_schemas,
-            Some(&execution.udfs),
+            &routing.relay_schemas,
+            Some(&routing.udfs),
         ) {
             Ok(template) => template,
             Err(error) => return Some(error),
@@ -183,7 +177,6 @@ impl RelayProcessorNode {
 
     pub(super) async fn filter_input_batch(
         &mut self,
-        graph: &SharedActiveGraph,
         branch: &mut BranchRuntime,
         incoming_relay: &RelayName,
         batch: RelayRecordBatch,
@@ -192,7 +185,6 @@ impl RelayProcessorNode {
     ) -> Option<RelayRecordBatch> {
         let batch = self
             .filter_input_batch_with_kind(
-                graph,
                 branch,
                 incoming_relay,
                 batch,
@@ -204,7 +196,6 @@ impl RelayProcessorNode {
             )
             .await?;
         self.filter_input_batch_with_kind(
-            graph,
             branch,
             incoming_relay,
             batch,
@@ -354,7 +345,6 @@ impl RelayProcessorNode {
 
     async fn filter_input_batch_with_kind(
         &mut self,
-        graph: &SharedActiveGraph,
         branch: &mut BranchRuntime,
         incoming_relay: &RelayName,
         batch: RelayRecordBatch,
@@ -382,8 +372,22 @@ impl RelayProcessorNode {
             }
         };
         if needs_compile {
+            let routing = match branch.domain_routing() {
+                Ok(routing) => routing,
+                Err(error) => {
+                    branch.runtime.handle_internal_processor_error_for_acks(
+                        &branch.domain,
+                        self.kind,
+                        &self.processor,
+                        &self.error_policies,
+                        batch.acks.iter(),
+                        error.to_string(),
+                    );
+                    return None;
+                }
+            };
             let input_schema =
-                match relay_schema_for_runtime(&branch.runtime, &branch.domain, incoming_relay) {
+                match relay_schema_for_routing(routing, &branch.domain, incoming_relay) {
                     Ok(schema) => schema,
                     Err(error) => {
                         branch.runtime.handle_internal_processor_error_for_acks(
@@ -392,31 +396,18 @@ impl RelayProcessorNode {
                             &self.processor,
                             &self.error_policies,
                             batch.acks.iter(),
-                            error,
+                            error.to_string(),
                         );
                         return None;
                     }
                 };
-            let materialized_stream_specs =
-                materialized_stream_specs_for_graph(&branch.runtime, &branch.domain, graph);
-            let mut current_branching = Vec::new();
-            if let Some(execution) = branch.runtime.inner.executions.get(&branch.domain)
-                && let Some(branching) = execution.relay_branchings.get(incoming_relay)
-            {
-                current_branching = branching.clone();
-            }
-            let current_branch_schema =
-                relay_branch_schema_for_runtime(&branch.runtime, &branch.domain, incoming_relay);
-            let available_lookups = match branch.runtime.inner.executions.get(&branch.domain) {
-                Some(execution) => execution.lookups.clone(),
-                None => HashMap::default(),
-            };
-            let udfs = branch
-                .runtime
-                .inner
-                .executions
-                .get(&branch.domain)
-                .map(|execution| execution.udfs.clone());
+            let materialized_stream_specs = &routing.materialized_stream_specs;
+            let current_branching = routing
+                .relay_branchings
+                .get(incoming_relay)
+                .cloned()
+                .unwrap_or_default();
+            let current_branch_schema = relay_branch_schema_for_routing(routing, incoming_relay);
             let filter_scope = match kind {
                 ProcessorInputFilterKind::FromWhere => self.source_filter_scope(incoming_relay),
                 ProcessorInputFilterKind::FilterWhere => RuntimeFilterScope::Source {
@@ -437,12 +428,12 @@ impl RelayProcessorNode {
                 },
                 kind.error_operation(),
                 RuntimeVmCompileContext {
-                    available_materialized_streams: &materialized_stream_specs,
-                    available_lookups: &available_lookups,
+                    available_materialized_streams: materialized_stream_specs,
+                    available_lookups: &routing.lookups,
                     current_branching: &current_branching,
                     current_branch_schema: current_branch_schema.as_ref(),
                     current_branch_sensitivity: None,
-                    udfs: udfs.as_ref(),
+                    udfs: Some(&routing.udfs),
                 },
                 filter_scope,
             ) {
@@ -526,7 +517,21 @@ impl RelayProcessorNode {
         Box::pin(async move {
             let current = graph.load_full();
             let current = current.as_ref().map(StdArc::clone);
-            self.refresh(&branch.runtime, &branch.domain, current);
+            let routing = match branch.domain_routing() {
+                Ok(routing) => routing,
+                Err(error) => {
+                    branch.runtime.handle_internal_processor_error_for_acks(
+                        &branch.domain,
+                        self.kind,
+                        &self.processor,
+                        &self.error_policies,
+                        batch.acks.iter(),
+                        error.to_string(),
+                    );
+                    return;
+                }
+            };
+            self.refresh(routing, current);
             let execution_snapshot = match branch.runtime.domain_execution_snapshot(&branch.domain)
             {
                 Ok(snapshot) => snapshot,
@@ -581,7 +586,6 @@ impl RelayProcessorNode {
             };
             let Some(batch) = self
                 .filter_input_batch(
-                    graph,
                     branch,
                     incoming_relay,
                     batch,
@@ -620,7 +624,7 @@ impl RelayProcessorNode {
                                     &self.processor,
                                     &self.error_policies,
                                     batch.acks.iter(),
-                                    error,
+                                    error.to_string(),
                                 );
                                 return;
                             }
@@ -987,7 +991,7 @@ impl RelayProcessorNode {
                                     &self.processor,
                                     &self.error_policies,
                                     batch.acks.iter(),
-                                    error,
+                                    error.to_string(),
                                 );
                                 return;
                             }
@@ -1235,12 +1239,8 @@ impl RelayProcessorNode {
                             );
                             return;
                         };
-                        let left_schema = match relay_schema_for_runtime(
-                            &branch.runtime,
-                            &branch.domain,
-                            left_relay,
-                        ) {
-                            Ok(schema) => schema,
+                        let routing = match branch.domain_routing() {
+                            Ok(routing) => routing,
                             Err(error) => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
                                     &branch.domain,
@@ -1253,24 +1253,36 @@ impl RelayProcessorNode {
                                 return;
                             }
                         };
-                        let right_schema = match relay_schema_for_runtime(
-                            &branch.runtime,
-                            &branch.domain,
-                            right_relay,
-                        ) {
-                            Ok(schema) => schema,
-                            Err(error) => {
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind,
-                                    &self.processor,
-                                    &self.error_policies,
-                                    batch.acks.iter(),
-                                    error.to_string(),
-                                );
-                                return;
-                            }
-                        };
+                        let left_schema =
+                            match relay_schema_for_routing(routing, &branch.domain, left_relay) {
+                                Ok(schema) => schema,
+                                Err(error) => {
+                                    branch.runtime.handle_internal_processor_error_for_acks(
+                                        &branch.domain,
+                                        self.kind,
+                                        &self.processor,
+                                        &self.error_policies,
+                                        batch.acks.iter(),
+                                        error.to_string(),
+                                    );
+                                    return;
+                                }
+                            };
+                        let right_schema =
+                            match relay_schema_for_routing(routing, &branch.domain, right_relay) {
+                                Ok(schema) => schema,
+                                Err(error) => {
+                                    branch.runtime.handle_internal_processor_error_for_acks(
+                                        &branch.domain,
+                                        self.kind,
+                                        &self.processor,
+                                        &self.error_policies,
+                                        batch.acks.iter(),
+                                        error.to_string(),
+                                    );
+                                    return;
+                                }
+                            };
                         match compile_correlator_where_program(
                             &self.processor,
                             correlate_where,
@@ -1380,9 +1392,24 @@ impl RelayProcessorNode {
                     let Some(right_relay) = right_relays.first() else {
                         return;
                     };
+                    let routing = match branch.domain_routing() {
+                        Ok(routing) => routing,
+                        Err(error) => {
+                            branch.runtime.handle_internal_processor_error_for_acks(
+                                &branch.domain,
+                                self.kind,
+                                &self.processor,
+                                &self.error_policies,
+                                correlations.iter().flat_map(|(left, right)| {
+                                    [&left.message.acks, &right.message.acks]
+                                }),
+                                error.to_string(),
+                            );
+                            return;
+                        }
+                    };
                     let left_schema =
-                        match relay_schema_for_runtime(&branch.runtime, &branch.domain, left_relay)
-                        {
+                        match relay_schema_for_routing(routing, &branch.domain, left_relay) {
                             Ok(schema) => schema,
                             Err(error) => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
@@ -1393,55 +1420,35 @@ impl RelayProcessorNode {
                                     correlations.iter().flat_map(|(left, right)| {
                                         [&left.message.acks, &right.message.acks]
                                     }),
-                                    error,
+                                    error.to_string(),
                                 );
                                 return;
                             }
                         };
-                    let right_schema = match relay_schema_for_runtime(
-                        &branch.runtime,
-                        &branch.domain,
-                        right_relay,
-                    ) {
-                        Ok(schema) => schema,
-                        Err(error) => {
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind,
-                                &self.processor,
-                                &self.error_policies,
-                                correlations.iter().flat_map(|(left, right)| {
-                                    [&left.message.acks, &right.message.acks]
-                                }),
-                                error,
-                            );
-                            return;
-                        }
-                    };
-                    let materialized_stream_specs =
-                        materialized_stream_specs_for_graph(&branch.runtime, &branch.domain, graph);
-                    let mut current_branching = Vec::new();
-                    if let Some(execution) = branch.runtime.inner.executions.get(&branch.domain)
-                        && let Some(branching) = execution.relay_branchings.get(left_relay)
-                    {
-                        current_branching = branching.clone();
-                    }
-                    let current_branch_schema = relay_branch_schema_for_runtime(
-                        &branch.runtime,
-                        &branch.domain,
-                        left_relay,
-                    );
-                    let available_lookups =
-                        match branch.runtime.inner.executions.get(&branch.domain) {
-                            Some(execution) => execution.lookups.clone(),
-                            None => HashMap::default(),
+                    let right_schema =
+                        match relay_schema_for_routing(routing, &branch.domain, right_relay) {
+                            Ok(schema) => schema,
+                            Err(error) => {
+                                branch.runtime.handle_internal_processor_error_for_acks(
+                                    &branch.domain,
+                                    self.kind,
+                                    &self.processor,
+                                    &self.error_policies,
+                                    correlations.iter().flat_map(|(left, right)| {
+                                        [&left.message.acks, &right.message.acks]
+                                    }),
+                                    error.to_string(),
+                                );
+                                return;
+                            }
                         };
-                    let udfs = branch
-                        .runtime
-                        .inner
-                        .executions
-                        .get(&branch.domain)
-                        .map(|execution| execution.udfs.clone());
+                    let current_branching = routing
+                        .relay_branchings
+                        .get(left_relay)
+                        .cloned()
+                        .unwrap_or_default();
+                    let current_branch_schema =
+                        relay_branch_schema_for_routing(routing, left_relay);
                     for (output_index, compiled_output_program) in compiled_output_programs
                         .iter_mut()
                         .enumerate()
@@ -1468,8 +1475,8 @@ impl RelayProcessorNode {
                             );
                             return;
                         }
-                        let output_schema = match relay_schema_for_runtime(
-                            &branch.runtime,
+                        let output_schema = match relay_schema_for_routing(
+                            routing,
                             &branch.domain,
                             &output.relay,
                         ) {
@@ -1483,7 +1490,7 @@ impl RelayProcessorNode {
                                     correlations.iter().flat_map(|(left, right)| {
                                         [&left.message.acks, &right.message.acks]
                                     }),
-                                    error,
+                                    error.to_string(),
                                 );
                                 return;
                             }
@@ -1499,12 +1506,12 @@ impl RelayProcessorNode {
                             output_sensitivity: output_schema.vm_sensitivity(),
                             construction: &output.construction,
                             runtime: RuntimeVmCompileContext {
-                                available_materialized_streams: &materialized_stream_specs,
-                                available_lookups: &available_lookups,
+                                available_materialized_streams: &routing.materialized_stream_specs,
+                                available_lookups: &routing.lookups,
                                 current_branching: &current_branching,
                                 current_branch_schema: current_branch_schema.as_ref(),
                                 current_branch_sensitivity: None,
-                                udfs: udfs.as_ref(),
+                                udfs: Some(&routing.udfs),
                             },
                         }
                         .compile();

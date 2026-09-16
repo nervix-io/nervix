@@ -83,24 +83,23 @@ pub(super) async fn flush_branch_wasm_processor(
         );
         return;
     };
-    let input_schema =
-        match relay_schema_for_runtime(&branch.runtime, &branch.domain, primary_input_relay) {
-            Ok(schema) => schema,
-            Err(error) => {
-                branch.runtime.handle_internal_processor_error_for_acks(
-                    &branch.domain,
-                    node_kind,
-                    processor,
-                    error_policies,
-                    forwarded.acks.iter(),
-                    error,
-                );
-                return;
-            }
-        };
+    let input_schema = match branch.relay_schema(primary_input_relay) {
+        Ok(schema) => schema,
+        Err(error) => {
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                node_kind,
+                processor,
+                error_policies,
+                forwarded.acks.iter(),
+                error.to_string(),
+            );
+            return;
+        }
+    };
     let mut output_schemas = Vec::with_capacity(output_routes.routes.len());
     for output in &output_routes.routes {
-        match relay_schema_for_runtime(&branch.runtime, &branch.domain, &output.relay) {
+        match branch.relay_schema(&output.relay) {
             Ok(schema) => output_schemas.push((output.relay.clone(), schema)),
             Err(error) => {
                 branch.runtime.handle_internal_processor_error_for_acks(
@@ -109,7 +108,7 @@ pub(super) async fn flush_branch_wasm_processor(
                     processor,
                     error_policies,
                     forwarded.acks.iter(),
-                    error,
+                    error.to_string(),
                 );
                 return;
             }

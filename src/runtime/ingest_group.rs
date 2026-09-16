@@ -375,6 +375,7 @@ pub(super) struct IngestRouteCollector {
     pub(super) row_bound: usize,
     pub(super) context: Option<IngestGroupContext>,
     metrics: MessageMetricsHandle,
+    routing: Option<DomainRoutingCache>,
     pub(super) pending: PendingIngestGroup,
     pub(super) routed: IndexMap<RoutedGroupKey, Vec<RelayMessage>, RandomState>,
     pub(super) flush_at: Option<Instant>,
@@ -395,6 +396,7 @@ impl IngestRouteCollector {
             row_bound,
             context: None,
             metrics,
+            routing: None,
             pending: PendingIngestGroup::new(kind, row_bound),
             routed: IndexMap::with_hasher(RandomState::default()),
             flush_at: None,
@@ -496,6 +498,22 @@ impl IngestRouteCollector {
             PendingIngestGroup::new(self.kind, self.row_bound),
         );
         Ok(Some((context, pending.into_rows()?)))
+    }
+
+    fn routing_snapshot(
+        &mut self,
+        runtime: &Runtime,
+        domain: &DomainName,
+    ) -> Result<StdArc<DomainRoutingSnapshot>, Report<DomainRoutingError>> {
+        if self.routing.is_none() {
+            self.routing = runtime.domain_routing_cache(domain);
+        }
+        let Some(routing) = self.routing.as_mut() else {
+            return Err(Report::new(DomainRoutingError::DomainNotInstantiated {
+                domain: domain.clone(),
+            }));
+        };
+        Ok(routing.load().clone())
     }
 
     pub(super) fn push(&mut self, relay: &RelayName, message: RelayMessage) {
@@ -840,6 +858,9 @@ impl Runtime {
         if collector.is_empty() {
             return Ok(());
         }
+        let routing = collector
+            .routing_snapshot(self, domain)
+            .map_err(|error| error.to_string())?;
         if let Some((context, rows)) = collector.take_pending()? {
             if context.domain != *domain || context.ingestor != *ingestor {
                 return Err(format!(
@@ -850,13 +871,14 @@ impl Runtime {
                     ingestor.as_str()
                 ));
             }
-            self.execute_ingest_group(&context, rows, collector).await?;
+            self.execute_ingest_group(&routing, &context, rows, collector)
+                .await?;
         }
         if collector.is_empty() {
             return Ok(());
         }
         let groups = collector.drain_groups();
-        let Some(execution) = self.inner.executions.get(domain) else {
+        if routing.passive_only {
             let error = format!("domain '{}' is not running", domain.as_str());
             for group in &groups {
                 self.handle_general_error_for_acks(
@@ -869,9 +891,7 @@ impl Runtime {
                 );
             }
             return Err(error);
-        };
-        let relay_schemas = execution.relay_schemas.clone();
-        drop(execution);
+        }
 
         let mut first_error = None;
         for RoutedGroup { relay, messages } in groups {
@@ -880,7 +900,7 @@ impl Runtime {
                 .iter()
                 .map(|message| message.acks.clone())
                 .collect::<Vec<_>>();
-            let Some(schema) = relay_schemas.get(&relay).cloned() else {
+            let Some(schema) = routing.relay_schemas.get(&relay).cloned() else {
                 let error = format!(
                     "stream '{}' schema is not instantiated in domain '{}'",
                     relay.as_str(),
@@ -995,6 +1015,7 @@ impl Runtime {
     /// keeping errors and acknowledgements attributable to their original records.
     pub(super) async fn execute_ingest_group(
         &self,
+        routing: &DomainRoutingSnapshot,
         context: &IngestGroupContext,
         mut rows: IngestGroupRows,
         collector: &mut IngestRouteCollector,
@@ -1029,16 +1050,12 @@ impl Runtime {
         let execution_now = ingestion_time.now();
 
         if let Some(filter_where) = filter_where {
-            let owner_nodes = match self.inner.executions.get(domain) {
-                Some(execution) => execution.materialized_stream_owner_nodes.clone(),
-                None => HashMap::default(),
-            };
             let side_inputs = self
                 .load_materialized_side_inputs(
+                    routing,
                     domain,
                     &None,
                     &filter_where.materialized_interest,
-                    &owner_nodes,
                 )
                 .await?;
             let keys = vec![None; rows.len()];
@@ -1101,12 +1118,6 @@ impl Runtime {
         if rows.is_empty() {
             return Ok(());
         }
-
-        let Some(execution) = self.inner.executions.get(domain) else {
-            return Err(format!("domain '{}' is not instantiated", domain.as_str()));
-        };
-        let owner_nodes = execution.materialized_stream_owner_nodes.clone();
-        drop(execution);
 
         // Timestamp resolution and admission stay per record: `TIMESTAMP AT` reads a
         // field of the record itself, and a paced domain admits each event on its own
@@ -1173,10 +1184,10 @@ impl Runtime {
             let outcomes = if let Some(filter_map) = output.compiled_program.as_ref() {
                 let side_inputs = self
                     .load_materialized_side_inputs(
+                        routing,
                         domain,
                         &None,
                         &filter_map.materialized_interest,
-                        &owner_nodes,
                     )
                     .await?;
                 let keys = vec![None; rows.len()];
@@ -1227,10 +1238,10 @@ impl Runtime {
                     let input_keys = vec![None; input_rows.len()];
                     let side_inputs = self
                         .load_materialized_side_inputs(
+                            routing,
                             domain,
                             &None,
                             &branch_program.program.materialized_interest,
-                            &owner_nodes,
                         )
                         .await?;
                     branch_state_snapshot = relay_state_snapshot_from_side_inputs(&side_inputs);
@@ -2088,6 +2099,8 @@ mod tests {
             key: root_key.clone(),
             runtime: runtime.clone(),
             domain: root_domain.clone(),
+            routing: None,
+            routing_snapshot: None,
             domain_clock: test_domain_clock(&root_domain),
             source_kind: ModelKind::Ingestor,
             source: root_source,

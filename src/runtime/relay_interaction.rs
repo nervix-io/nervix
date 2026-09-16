@@ -1371,7 +1371,7 @@ mod tests {
         assert_eq!(value(&batch), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn collection_deadline_releases_every_row_for_its_branch() {
         let policy = RuntimeInputCollectPolicy {
             interval: tokio::time::Duration::from_millis(1),

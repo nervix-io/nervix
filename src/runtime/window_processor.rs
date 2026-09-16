@@ -185,22 +185,21 @@ pub(super) async fn flush_ready_window_processor(
         let mut route_failed = false;
         for (output_index, compiled_aggregate) in compiled_aggregates.iter().enumerate() {
             let output_relay = output_routes.routes[output_index].relay.clone();
-            let output_schema =
-                match relay_schema_for_runtime(&branch.runtime, &branch.domain, &output_relay) {
-                    Ok(schema) => schema,
-                    Err(error) => {
-                        branch.runtime.handle_internal_processor_error_for_acks(
-                            &branch.domain,
-                            node_kind,
-                            processor,
-                            error_policies,
-                            state.entries.iter().map(|entry| &entry.message.acks),
-                            error,
-                        );
-                        route_failed = true;
-                        break;
-                    }
-                };
+            let output_schema = match branch.relay_schema(&output_relay) {
+                Ok(schema) => schema,
+                Err(error) => {
+                    branch.runtime.handle_internal_processor_error_for_acks(
+                        &branch.domain,
+                        node_kind,
+                        processor,
+                        error_policies,
+                        state.entries.iter().map(|entry| &entry.message.acks),
+                        error.to_string(),
+                    );
+                    route_failed = true;
+                    break;
+                }
+            };
             let output_batch = match evaluate_window_aggregate(
                 compiled_aggregate,
                 state,

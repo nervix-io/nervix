@@ -18,6 +18,9 @@ impl Runtime {
         domain: &DomainName,
         relay: &RelayName,
     ) -> Result<Vec<MaterializedRecordReport>, String> {
+        let routing = self
+            .domain_routing(domain)
+            .map(|routing| routing.load_full());
         let states = self
             .inner
             .replicated_materialized_stream_states
@@ -40,7 +43,11 @@ impl Runtime {
         for (placement, state) in states {
             found = true;
             for record in state.records() {
-                if !self.materialized_stream_key_is_visible(&placement, &record.branch) {
+                if !self.materialized_stream_key_is_visible(
+                    routing.as_deref(),
+                    &placement,
+                    &record.branch,
+                ) {
                     continue;
                 }
                 reports.push(materialized_record_report(&record)?);
@@ -54,7 +61,10 @@ impl Runtime {
                 relay,
                 None,
             );
-            if let Some(restored) = self.open_stored_materialized_snapshot(&placement).await? {
+            if let Some(restored) = self
+                .open_stored_materialized_snapshot(None, &placement)
+                .await?
+            {
                 for record in restored.records {
                     reports.push(materialized_record_report(&MaterializedGenerationRecord {
                         branch: record.branch,
@@ -74,6 +84,7 @@ impl Runtime {
     /// branch, and both answer with that branch's record alone.
     async fn local_materialized_record(
         &self,
+        routing: &DomainRoutingSnapshot,
         domain: &DomainName,
         relay: &RelayName,
         branch_key: &Option<BranchKey>,
@@ -87,7 +98,7 @@ impl Runtime {
             let Some(state) = state else {
                 continue;
             };
-            if !self.materialized_stream_key_is_visible(&placement, branch_key) {
+            if !self.materialized_stream_key_is_visible(Some(routing), &placement, branch_key) {
                 continue;
             }
             if let Some(record) = state.record(branch_key) {
@@ -95,7 +106,10 @@ impl Runtime {
             }
         }
         for placement in self.materialized_record_placements(domain, relay, branch_key) {
-            let Some(restored) = self.open_stored_materialized_snapshot(&placement).await? else {
+            let Some(restored) = self
+                .open_stored_materialized_snapshot(Some(routing), &placement)
+                .await?
+            else {
                 continue;
             };
             if let Some(record) = restored
@@ -141,6 +155,7 @@ impl Runtime {
     /// Open the sealed snapshot this node persisted for a placement, if it has one.
     async fn open_stored_materialized_snapshot(
         &self,
+        routing: Option<&DomainRoutingSnapshot>,
         placement: &RuntimeStatePlacement,
     ) -> Result<Option<RestoredMaterializedSnapshot>, String> {
         let Some(store) = &self.inner.state_store else {
@@ -152,7 +167,7 @@ impl Runtime {
         else {
             return Ok(None);
         };
-        let Some(schema) = self.materialized_relay_schema(placement) else {
+        let Some(schema) = self.materialized_relay_schema(routing, placement) else {
             return Ok(None);
         };
         let sealed = self
@@ -174,6 +189,7 @@ impl Runtime {
 
     fn materialized_relay_schema(
         &self,
+        routing: Option<&DomainRoutingSnapshot>,
         placement: &RuntimeStatePlacement,
     ) -> Option<StdArc<arrow_schema::Schema>> {
         if let Some(state) = self
@@ -187,8 +203,15 @@ impl Runtime {
                     .clone(),
             );
         }
-        let execution = self.inner.executions.get(&placement.domain)?;
-        execution
+        if let Some(routing) = routing {
+            return routing
+                .materialized_stream_specs
+                .get(&RelayName::from(&placement.identifier))
+                .map(|spec| spec.schema.clone());
+        }
+        let published = self.domain_routing(&placement.domain)?;
+        published
+            .load()
             .materialized_stream_specs
             .get(&RelayName::from(&placement.identifier))
             .map(|spec| spec.schema.clone())
@@ -196,13 +219,14 @@ impl Runtime {
 
     pub(super) async fn local_materialized_stream_values_for_branch(
         &self,
+        routing: &DomainRoutingSnapshot,
         domain: &DomainName,
         relay: &RelayName,
         branch_key: &Option<BranchKey>,
         fields: &[MaterializedFieldInterest],
     ) -> Result<Option<Vec<Option<RuntimeValue>>>, String> {
         let Some(record) = self
-            .local_materialized_record(domain, relay, branch_key)
+            .local_materialized_record(routing, domain, relay, branch_key)
             .await?
         else {
             return Ok(None);
@@ -238,10 +262,10 @@ impl Runtime {
 
     pub(super) async fn load_materialized_relay_values(
         &self,
+        routing: &DomainRoutingSnapshot,
         domain: &DomainName,
         branch_key: &Option<BranchKey>,
         read: MaterializedRelayRead<'_>,
-        owner_nodes: &HashMap<RelayName, Option<ClusterNodeName>>,
     ) -> Result<Option<Vec<Option<RuntimeValue>>>, String> {
         let MaterializedRelayRead {
             relay,
@@ -261,7 +285,8 @@ impl Runtime {
             }
             MaterializedLookupKeyMode::Root => None,
         };
-        let owner = owner_nodes
+        let owner = routing
+            .materialized_stream_owner_nodes
             .get(relay)
             .and_then(|node| node.as_ref())
             .cloned();
@@ -280,6 +305,7 @@ impl Runtime {
                 .await;
         }
         self.local_materialized_stream_values_for_branch(
+            routing,
             domain,
             relay,
             &placement_branch_key,
@@ -290,11 +316,12 @@ impl Runtime {
 
     pub(super) fn materialized_stream_key_is_visible(
         &self,
+        routing: Option<&DomainRoutingSnapshot>,
         placement: &RuntimeStatePlacement,
         key: &Option<BranchKey>,
     ) -> bool {
-        let scheduled = if let Some(execution) = self.inner.executions.get(&placement.domain)
-            && let Some(owner) = execution
+        let scheduled = if let Some(routing) = routing
+            && let Some(owner) = routing
                 .materialized_stream_owner_nodes
                 .get(&RelayName::from(&placement.identifier))
         {
@@ -333,7 +360,7 @@ impl Runtime {
             relay,
             None,
         );
-        let Some(schema) = self.materialized_relay_schema(&placement) else {
+        let Some(schema) = self.materialized_relay_schema(None, &placement) else {
             return Ok(Vec::new());
         };
         let Some(restored) = self
@@ -362,9 +389,11 @@ impl Runtime {
     /// named scalar fields on the way, and nothing is rebuilt into a row on arrival.
     pub(in crate::runtime) async fn materialized_records_from_owner(
         &self,
+        routing: &mut DomainRoutingCache,
         domain: &DomainName,
         relay: &RelayName,
     ) -> Result<Vec<MaterializedGenerationRecord>, String> {
+        let routing = routing.load().clone();
         let placement = self.state_placement(
             domain,
             RuntimeStateKind::MaterializedRelay,
@@ -372,17 +401,15 @@ impl Runtime {
             relay,
             None,
         );
-        let owner = if let Some(execution) = self.inner.executions.get(domain)
-            && let Some(owner) = execution.materialized_stream_owner_nodes.get(relay)
-        {
-            owner.clone()
-        } else {
-            None
-        };
+        let owner = routing
+            .materialized_stream_owner_nodes
+            .get(relay)
+            .cloned()
+            .flatten();
         if let Some(owner) = owner
             && !self.is_local_node(&owner)
         {
-            let Some(schema) = self.materialized_relay_schema(&placement) else {
+            let Some(schema) = self.materialized_relay_schema(Some(&routing), &placement) else {
                 return Ok(Vec::new());
             };
             let Some(restored) = self
@@ -418,7 +445,10 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         if states.is_empty() {
-            let Some(restored) = self.open_stored_materialized_snapshot(&placement).await? else {
+            let Some(restored) = self
+                .open_stored_materialized_snapshot(Some(&routing), &placement)
+                .await?
+            else {
                 return Ok(Vec::new());
             };
             return Ok(restored
@@ -433,7 +463,11 @@ impl Runtime {
         let mut records = Vec::new();
         for (placement, state) in states {
             for record in state.records() {
-                if self.materialized_stream_key_is_visible(&placement, &record.branch) {
+                if self.materialized_stream_key_is_visible(
+                    Some(&routing),
+                    &placement,
+                    &record.branch,
+                ) {
                     records.push(record);
                 }
             }
@@ -475,10 +509,10 @@ impl Runtime {
 
     pub(crate) async fn load_materialized_side_inputs(
         &self,
+        routing: &DomainRoutingSnapshot,
         domain: &DomainName,
         branch_key: &Option<BranchKey>,
         interest: &MaterializedProgramInterest,
-        owner_nodes: &HashMap<RelayName, Option<ClusterNodeName>>,
     ) -> Result<HashMap<String, RuntimeValue>, String> {
         let mut values = HashMap::default();
         if interest.relays.is_empty() {
@@ -489,6 +523,7 @@ impl Runtime {
             tokio::task::consume_budget().await;
             let Some(relay_values) = self
                 .load_materialized_relay_values(
+                    routing,
                     domain,
                     branch_key,
                     MaterializedRelayRead {
@@ -497,7 +532,6 @@ impl Runtime {
                         schema: &relay_interest.schema,
                         fields: &relay_interest.fields,
                     },
-                    owner_nodes,
                 )
                 .await?
             else {
@@ -523,21 +557,17 @@ impl Runtime {
 
     pub(in crate::runtime) async fn load_materialized_dependency_values(
         &self,
+        routing: &DomainRoutingSnapshot,
         domain: &DomainName,
         branch_key: &Option<BranchKey>,
         relay: &RelayName,
-        owner_nodes: &HashMap<RelayName, Option<ClusterNodeName>>,
     ) -> Result<Option<HashMap<String, RuntimeValue>>, String> {
-        let Some(execution) = self.inner.executions.get(domain) else {
-            return Err(format!("domain '{}' is not instantiated", domain));
-        };
-        let Some(spec) = execution.materialized_stream_specs.get(relay).cloned() else {
+        let Some(spec) = routing.materialized_stream_specs.get(relay) else {
             return Err(format!(
                 "materialized relay '{}' is not instantiated in domain '{}'",
                 relay, domain
             ));
         };
-        drop(execution);
 
         let key_mode = if spec.branching.is_empty() {
             MaterializedLookupKeyMode::Root
@@ -546,6 +576,7 @@ impl Runtime {
         };
         let Some(field_values) = self
             .load_materialized_relay_values(
+                routing,
                 domain,
                 branch_key,
                 MaterializedRelayRead {
@@ -554,7 +585,6 @@ impl Runtime {
                     schema: &spec.schema,
                     fields: &spec.fields,
                 },
-                owner_nodes,
             )
             .await?
         else {
@@ -578,6 +608,7 @@ impl Runtime {
 
     pub(in crate::runtime) async fn resolve_materialized_dependencies(
         &self,
+        routing: &DomainRoutingSnapshot,
         domain: &DomainName,
         branch_key: &Option<BranchKey>,
         dependencies: &[nervix_models::MaterializedStateDependency],
@@ -586,21 +617,11 @@ impl Runtime {
         if dependencies.is_empty() {
             return Ok(MaterializedDependencyResolution::Ready(HashMap::default()));
         }
-        let owner_nodes = match self.inner.executions.get(domain) {
-            Some(execution) => execution.materialized_stream_owner_nodes.clone(),
-            None => HashMap::default(),
-        };
         let mut resolved = HashMap::default();
-        let udfs = self.udf_executor(domain);
         for dependency in dependencies {
             tokio::task::consume_budget().await;
             if let Some(values) = self
-                .load_materialized_dependency_values(
-                    domain,
-                    branch_key,
-                    &dependency.relay,
-                    &owner_nodes,
-                )
+                .load_materialized_dependency_values(routing, domain, branch_key, &dependency.relay)
                 .await?
             {
                 resolved.extend(values);
@@ -623,7 +644,7 @@ impl Runtime {
                         }
                         let value = evaluate_constant_expression_vm(
                             &assignment.value,
-                            udfs.as_ref(),
+                            Some(&routing.udfs),
                             execution_now,
                         )
                         .await?;
@@ -643,6 +664,7 @@ impl Runtime {
 
     pub(in crate::runtime) async fn resolve_materialized_dependencies_for_batch(
         &self,
+        routing: &mut DomainRoutingCache,
         domain: &DomainName,
         input_relay: &RelayName,
         dependencies: &[nervix_models::MaterializedStateDependency],
@@ -666,7 +688,13 @@ impl Runtime {
                 .now();
             let changed = self.inner.materialized_state_changed.notified();
             match self
-                .resolve_materialized_dependencies(domain, &batch.key, dependencies, execution_now)
+                .resolve_materialized_dependencies(
+                    routing.load(),
+                    domain,
+                    &batch.key,
+                    dependencies,
+                    execution_now,
+                )
                 .await?
             {
                 MaterializedDependencyResolution::Ready(values) => {
@@ -792,28 +820,24 @@ mod tests {
         let relay_registries = [(named("input"), RelayRegistry::new())]
             .into_iter()
             .collect();
-        runtime.inner.executions.insert(
-            domain.clone(),
+        runtime.install_domain_execution(
+            &domain,
             DomainExecution {
                 schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
-                passive_only: false,
                 start_version: 0,
                 domain_clock: test_domain_clock(&domain),
                 shutdown,
                 graph: StdArc::new(ArcSwapOption::empty()),
-                relay_registries,
-                relay_schemas: HashMap::default(),
-                relay_services: HashMap::default(),
-                relay_branchings: HashMap::default(),
-                relay_branching_schemas: HashMap::default(),
-                materialized_stream_specs,
-                materialized_stream_owner_nodes: HashMap::default(),
+                routing: runtime.stage_domain_routing(
+                    &domain,
+                    DomainRoutingSnapshot {
+                        relay_registries,
+                        materialized_stream_specs,
+                        ..DomainRoutingSnapshot::default()
+                    },
+                ),
                 branched_ingestors: HashMap::default(),
                 branched_entrypoints: HashMap::default(),
-                codecs: HashMap::default(),
-                signaling_protocols: HashMap::default(),
-                lookups: HashMap::default(),
-                udfs: nervix_roto::UdfExecutor::default(),
                 endpoint_routes: HashMap::default(),
                 node_tasks: HashMap::default(),
                 emitter_tasks: HashMap::default(),
@@ -826,6 +850,10 @@ mod tests {
                 tasks: Vec::new(),
             },
         );
+        let mut routing = runtime
+            .domain_routing_cache(&domain)
+            .expect("the test domain execution publishes routing");
+        let routing_snapshot = routing.load().clone();
 
         let default = nervix_models::MaterializedStateDependency {
             relay: named("profiles"),
@@ -845,7 +873,13 @@ mod tests {
         };
         let execution_now = Timestamp::from_unix_nanos(946_684_800_000_000_000);
         let resolved = runtime
-            .resolve_materialized_dependencies(&domain, &None, &[default], execution_now)
+            .resolve_materialized_dependencies(
+                &routing_snapshot,
+                &domain,
+                &None,
+                &[default],
+                execution_now,
+            )
             .await
             .expect("default dependency should resolve");
         let MaterializedDependencyResolution::Ready(values) = resolved else {
@@ -874,6 +908,7 @@ mod tests {
         assert!(matches!(
             runtime
                 .resolve_materialized_dependencies(
+                    &routing_snapshot,
                     &domain,
                     &None,
                     &[wait.clone(), skip.clone()],
@@ -886,6 +921,7 @@ mod tests {
         assert!(matches!(
             runtime
                 .resolve_materialized_dependencies(
+                    &routing_snapshot,
                     &domain,
                     &None,
                     &[skip, wait],
@@ -918,32 +954,35 @@ mod tests {
             relay: named("profiles"),
             policy: nervix_models::MaterializedStatePolicy::RequiredWait,
         }];
-        let resolution = runtime.resolve_materialized_dependencies_for_batch(
-            &domain,
-            &input_relay,
-            &dependencies,
-            retained,
-            MaterializedBatchWaitContext {
-                shutdown_rx: &mut shutdown_rx,
-                wait_for_required_state: true,
-                quiesce_work: None,
-            },
-        );
-        tokio::pin!(resolution);
-        assert!(
-            timeout(Duration::from_millis(50), &mut resolution)
-                .await
-                .is_err(),
-            "an empty non-owner relay registry must not evict retained branch work"
-        );
-        shutdown_tx.send_replace(true);
-        assert!(
-            timeout(Duration::from_secs(1), &mut resolution)
-                .await
-                .expect("shutdown should release retained branch work")
-                .expect("retained branch resolution should not fail")
-                .is_none()
-        );
+        {
+            let resolution = runtime.resolve_materialized_dependencies_for_batch(
+                &mut routing,
+                &domain,
+                &input_relay,
+                &dependencies,
+                retained,
+                MaterializedBatchWaitContext {
+                    shutdown_rx: &mut shutdown_rx,
+                    wait_for_required_state: true,
+                    quiesce_work: None,
+                },
+            );
+            tokio::pin!(resolution);
+            assert!(
+                timeout(Duration::from_millis(50), &mut resolution)
+                    .await
+                    .is_err(),
+                "an empty non-owner relay registry must not evict retained branch work"
+            );
+            shutdown_tx.send_replace(true);
+            assert!(
+                timeout(Duration::from_secs(1), &mut resolution)
+                    .await
+                    .expect("shutdown should release retained branch work")
+                    .expect("retained branch resolution should not fail")
+                    .is_none()
+            );
+        }
         assert!(matches!(
             completion.wait().await,
             AckOutcome::NoAck(reason)
@@ -965,6 +1004,7 @@ mod tests {
         assert!(
             runtime
                 .resolve_materialized_dependencies_for_batch(
+                    &mut routing,
                     &domain,
                     &named("input"),
                     &[nervix_models::MaterializedStateDependency {
