@@ -9,20 +9,29 @@
 
 use super::*;
 
-/// One resource as a domain owns it, which is how installed resource versions are tracked.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct DomainResourceKey {
-    pub(super) domain: DomainName,
-    pub(super) resource: ResourceName,
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub(super) enum DomainRoutingError {
+    #[error("domain '{domain}' is not instantiated")]
+    DomainNotInstantiated { domain: DomainName },
+    #[error("domain '{domain}' routing was not resolved for this operation")]
+    SnapshotNotResolved { domain: DomainName },
+    #[error("stream '{relay}' schema is not instantiated in domain '{domain}'")]
+    RelaySchemaNotInstantiated {
+        domain: DomainName,
+        relay: RelayName,
+    },
 }
 
-pub(super) struct DomainExecution {
-    pub(super) schedule: DomainSchedule,
+/// The immutable routing state one installed domain publishes to its data-plane tasks.
+///
+/// Hot Path 06 keeps the schemas and placement descriptors beside the services they describe:
+/// deriving them used to require several contended execution-map reads for every batch. Every
+/// field that can change together during a schedule apply lives in this one value, so readers
+/// observe either the preceding revision or its complete replacement.
+#[derive(Clone)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct DomainRoutingSnapshot {
     pub(super) passive_only: bool,
-    pub(super) start_version: u64,
-    pub(super) domain_clock: DomainClock,
-    pub(super) shutdown: watch::Sender<bool>,
-    pub(super) graph: SharedActiveGraph,
     pub(super) relay_registries: HashMap<RelayName, RelayRegistry>,
     pub(super) relay_schemas: HashMap<RelayName, Arc<CompiledSchema>>,
     pub(super) relay_services: HashMap<RelayName, Arc<RelayBoundaryServices>>,
@@ -32,10 +41,84 @@ pub(super) struct DomainExecution {
     pub(super) relay_branching_schemas: HashMap<RelayName, Option<StdArc<arrow_schema::Schema>>>,
     pub(super) materialized_stream_specs: HashMap<RelayName, RuntimeMaterializedRelaySpec>,
     pub(super) materialized_stream_owner_nodes: HashMap<RelayName, Option<ClusterNodeName>>,
-    pub(super) branched_ingestors: HashMap<ModelName, Vec<BranchedIngestorSpec>>,
-    pub(super) branched_entrypoints: HashMap<ModelName, Vec<Arc<IngestorRouteRuntime>>>,
     pub(super) codecs: HashMap<CodecName, Arc<CompiledCodec>>,
     pub(super) signaling_protocols: HashMap<SignalingProtocolName, Arc<CompiledSignalingProtocol>>,
+}
+
+pub(crate) type SharedDomainRouting = StdArc<ArcSwap<DomainRoutingSnapshot>>;
+pub(crate) type DomainRoutingCache = Cache<SharedDomainRouting, StdArc<DomainRoutingSnapshot>>;
+
+/// Lifecycle-owned staging and publication for one domain's routing state.
+///
+/// `current` shares the published allocation until lifecycle code first mutates it. `Arc::make_mut`
+/// then creates the next complete revision, which remains private until `publish` replaces the
+/// ArcSwap value in one operation.
+pub(super) struct DomainRouting {
+    current: StdArc<DomainRoutingSnapshot>,
+    published: SharedDomainRouting,
+}
+
+impl DomainRouting {
+    pub(super) fn new(snapshot: DomainRoutingSnapshot) -> Self {
+        let current = StdArc::new(snapshot);
+        let published = StdArc::new(ArcSwap::from(current.clone()));
+        Self { current, published }
+    }
+
+    pub(super) fn with_publisher(
+        snapshot: DomainRoutingSnapshot,
+        published: SharedDomainRouting,
+    ) -> Self {
+        Self {
+            current: StdArc::new(snapshot),
+            published,
+        }
+    }
+
+    pub(super) fn shared(&self) -> SharedDomainRouting {
+        self.published.clone()
+    }
+
+    pub(super) fn publish(&mut self) {
+        self.published.store(self.current.clone());
+    }
+
+    pub(super) fn deactivate(&mut self) {
+        self.passive_only = true;
+        self.publish();
+    }
+}
+
+impl std::ops::Deref for DomainRouting {
+    type Target = DomainRoutingSnapshot;
+
+    fn deref(&self) -> &Self::Target {
+        &self.current
+    }
+}
+
+impl std::ops::DerefMut for DomainRouting {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        StdArc::make_mut(&mut self.current)
+    }
+}
+
+/// One resource as a domain owns it, which is how installed resource versions are tracked.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct DomainResourceKey {
+    pub(super) domain: DomainName,
+    pub(super) resource: ResourceName,
+}
+
+pub(super) struct DomainExecution {
+    pub(super) schedule: DomainSchedule,
+    pub(super) start_version: u64,
+    pub(super) domain_clock: DomainClock,
+    pub(super) shutdown: watch::Sender<bool>,
+    pub(super) graph: SharedActiveGraph,
+    pub(super) routing: DomainRouting,
+    pub(super) branched_ingestors: HashMap<ModelName, Vec<BranchedIngestorSpec>>,
+    pub(super) branched_entrypoints: HashMap<ModelName, Vec<Arc<IngestorRouteRuntime>>>,
     pub(super) endpoint_routes: HashMap<EndpointName, EndpointRoute>,
     pub(super) node_tasks: HashMap<NodeRef, ScheduledNodeTask>,
     pub(super) emitter_tasks: HashMap<NodeRef, ScheduledEmitterTask>,
@@ -50,6 +133,20 @@ pub(super) struct DomainExecution {
     pub(super) relay_owner_tasks: HashMap<RelayName, RelayOwnerTask>,
     pub(super) clients: HashMap<ClientName, Arc<Model>>,
     pub(super) tasks: Vec<JoinHandle<()>>,
+}
+
+impl std::ops::Deref for DomainExecution {
+    type Target = DomainRoutingSnapshot;
+
+    fn deref(&self) -> &Self::Target {
+        &self.routing
+    }
+}
+
+impl std::ops::DerefMut for DomainExecution {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.routing
+    }
 }
 
 impl DomainExecution {
@@ -102,6 +199,31 @@ pub(super) struct RuntimeDomainState {
 }
 
 impl Runtime {
+    /// Resolves the stable publication handle for a domain. Data-plane tasks call this once when
+    /// they are created and retain a `DomainRoutingCache`; lifecycle and observability callers may
+    /// resolve it directly because they are not batch paths.
+    pub(crate) fn domain_routing(&self, domain: &DomainName) -> Option<SharedDomainRouting> {
+        self.inner
+            .domain_routings
+            .get(domain)
+            .map(|routing| routing.value().clone())
+    }
+
+    pub(super) fn stage_domain_routing(
+        &self,
+        domain: &DomainName,
+        snapshot: DomainRoutingSnapshot,
+    ) -> DomainRouting {
+        match self.domain_routing(domain) {
+            Some(published) => DomainRouting::with_publisher(snapshot, published),
+            None => DomainRouting::new(snapshot),
+        }
+    }
+
+    pub(crate) fn domain_routing_cache(&self, domain: &DomainName) -> Option<DomainRoutingCache> {
+        self.domain_routing(domain).map(DomainRoutingCache::new)
+    }
+
     pub(crate) fn subscribe_domain_state(&self) -> watch::Receiver<u64> {
         self.inner.domain_status_changed.subscribe()
     }
@@ -205,7 +327,8 @@ impl Runtime {
         domain: &DomainName,
         graph: Option<ActiveGraph>,
     ) -> Result<(), RuntimeError> {
-        if let Some((_, existing)) = self.inner.executions.remove(domain) {
+        if let Some((_, mut existing)) = self.inner.executions.remove(domain) {
+            existing.routing.deactivate();
             self.stop_domain_execution(domain, existing).await;
         }
 
@@ -824,24 +947,29 @@ impl Runtime {
                         .collect::<Vec<_>>(),
                     Vec::new(),
                 ),
-                passive_only: false,
                 start_version,
                 domain_clock,
                 shutdown: shutdown_tx,
                 graph: domain_graph.clone(),
-                relay_registries,
-                relay_schemas,
-                relay_services,
-                lookups: lookup_runtimes,
-                udfs: udf_executor,
-                relay_branchings,
-                relay_branching_schemas,
-                materialized_stream_specs,
-                materialized_stream_owner_nodes,
+                routing: self.stage_domain_routing(
+                    domain,
+                    DomainRoutingSnapshot {
+                        passive_only: false,
+                        relay_registries,
+                        relay_schemas,
+                        relay_services,
+                        lookups: lookup_runtimes,
+                        udfs: udf_executor,
+                        relay_branchings,
+                        relay_branching_schemas,
+                        materialized_stream_specs,
+                        materialized_stream_owner_nodes,
+                        codecs,
+                        signaling_protocols,
+                    },
+                ),
                 branched_ingestors: Self::branched_specs_by_identifier(&branched_specs.entrypoints),
                 branched_entrypoints,
-                codecs,
-                signaling_protocols,
                 endpoint_routes,
                 node_tasks,
                 emitter_tasks,
@@ -870,6 +998,45 @@ mod tests {
 
     use super::*;
     use crate::runtime::domain_clock::DomainClockAccessError;
+
+    #[test]
+    fn routing_cache_observes_only_complete_published_revisions() {
+        let relay = named::<RelayName>("state");
+        let first_owner = named::<ClusterNodeName>("node-a");
+        let second_owner = named::<ClusterNodeName>("node-b");
+        let mut routing = DomainRouting::new(DomainRoutingSnapshot {
+            passive_only: false,
+            materialized_stream_owner_nodes: [(relay.clone(), Some(first_owner.clone()))]
+                .into_iter()
+                .collect(),
+            ..DomainRoutingSnapshot::default()
+        });
+        let mut cache = DomainRoutingCache::new(routing.shared());
+        let first_revision = cache.load().clone();
+
+        routing.passive_only = true;
+        routing
+            .materialized_stream_owner_nodes
+            .insert(relay.clone(), Some(second_owner.clone()));
+
+        let staged_revision = cache.load().clone();
+        assert!(StdArc::ptr_eq(&first_revision, &staged_revision));
+        assert!(!staged_revision.passive_only);
+        assert_eq!(
+            staged_revision.materialized_stream_owner_nodes.get(&relay),
+            Some(&Some(first_owner))
+        );
+
+        routing.publish();
+
+        let second_revision = cache.load().clone();
+        assert!(!StdArc::ptr_eq(&first_revision, &second_revision));
+        assert!(second_revision.passive_only);
+        assert_eq!(
+            second_revision.materialized_stream_owner_nodes.get(&relay),
+            Some(&Some(second_owner))
+        );
+    }
 
     #[test]
     fn sync_domains_stops_ingestion_when_paced_domain_stops() {

@@ -26,7 +26,7 @@ use std::{
 };
 
 use ahash::{HashMap, HashMapExt, HashSet, RandomState};
-use arc_swap::{ArcSwap, ArcSwapOption};
+use arc_swap::{ArcSwap, ArcSwapOption, cache::Cache};
 use arch_into::ArchInto as _;
 use arrow_array::{
     Array, ArrayRef, BooleanArray, ListArray, RecordBatch, RecordBatchOptions, StringArray,
@@ -286,9 +286,13 @@ use domain_clock::{
     DomainClockLifecycle, LogicalDeadline, checked_add_duration_to_timestamp,
     wait_for_branch_deadline,
 };
+#[cfg(test)]
+use domain_execution::DomainRouting;
 use domain_execution::{
-    DomainExecution, DomainResourceKey, ObservedDomainTick, RuntimeDomainState,
+    DomainExecution, DomainResourceKey, DomainRoutingError, DomainRoutingSnapshot,
+    ObservedDomainTick, RuntimeDomainState,
 };
+pub(crate) use domain_execution::{DomainRoutingCache, SharedDomainRouting};
 use domain_rebuild::{branch_relays_from_branched_specs, relay_branching_schema_for_runtime};
 use domain_wire_schemas::DomainWireSchemas;
 use emitter_supervision::{
@@ -484,9 +488,9 @@ use vm_compile::{
     compile_output_branch_program, compile_processor_output_filter_map_program,
     compile_processor_output_program, compile_reorderer_program, compile_scoped_filter_program,
     compile_wasm_output_filter_map_program, compiled_message_error_sites,
-    evaluate_constant_expression_vm, materialized_stream_specs_for_graph,
-    referenced_materialized_stream_bindings, relay_branch_schema_for_runtime,
-    relay_schema_for_runtime, runtime_udf_compile_options, runtime_udf_signatures,
+    evaluate_constant_expression_vm, referenced_materialized_stream_bindings,
+    relay_branch_schema_for_routing, relay_schema_for_routing, relay_schema_for_runtime,
+    runtime_udf_compile_options, runtime_udf_signatures,
 };
 use vm_input::{
     SharedBatchColumns, VmInputProjectionSources, compute_lookup_hash_map_columns,

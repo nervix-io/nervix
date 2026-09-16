@@ -295,12 +295,12 @@ impl Runtime {
         schedule: &DomainSchedule,
         reassignments: &[NodeRef],
         local_node_id: Option<&ClusterNodeName>,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<bool, RuntimeError> {
         let Some(local_node_id) = local_node_id else {
-            return Ok(());
+            return Ok(false);
         };
         if reassignments.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         let shutdown = match self.inner.executions.get(domain) {
             Some(execution) => execution.shutdown.clone(),
@@ -480,7 +480,7 @@ impl Runtime {
                                     relay.as_str()
                                 ),
                             })?;
-                    let installed = self
+                    let _installed_revision = self
                         .install_materialized_snapshot_from(
                             previous_owner,
                             &read,
@@ -496,9 +496,6 @@ impl Runtime {
                                 relay.as_str()
                             ),
                         })?;
-                    if installed.is_some() {
-                        self.inner.materialized_state_changed.notify_waiters();
-                    }
                 }
             }
             let placement = self.build_scheduled_node_placement(
@@ -605,10 +602,7 @@ impl Runtime {
                 execution.placement_tasks.insert(entity.clone(), tasks);
             }
         }
-        if relay_states_moved {
-            self.bump_relay_state_epoch(domain);
-        }
-        Ok(())
+        Ok(relay_states_moved)
     }
 
     pub(super) async fn swap_scheduled_nodes(
@@ -686,7 +680,8 @@ impl Runtime {
         // desired fingerprints before constructing state so the post-swap stale-state purge does
         // not discard the newly attached state instance.
         self.install_state_schema_fingerprints(&schedule);
-        self.rebind_reassigned_nodes(domain, &schedule, reassignments, local_node_id)
+        let mut materialized_routing_changed = self
+            .rebind_reassigned_nodes(domain, &schedule, reassignments, local_node_id)
             .await?;
 
         for entity in entities {
@@ -845,7 +840,7 @@ impl Runtime {
                         }
                     }
                 }
-                self.bump_relay_state_epoch(domain);
+                materialized_routing_changed = true;
                 if was_materialized && !desired_materialized {
                     self.purge_materialized_relay_state(
                         domain,
@@ -1602,6 +1597,7 @@ impl Runtime {
 
         self.apply_dynamic_model_updates(domain, dynamic_updates)
             .await?;
+        let mut routing_published = false;
         if let Some(mut execution) = self.inner.executions.get_mut(domain) {
             if let Some(local_node_id) = local_node_id {
                 let remote_consumers =
@@ -1623,6 +1619,14 @@ impl Runtime {
                 }
             }
             execution.schedule = schedule;
+            execution.routing.publish();
+            routing_published = true;
+        }
+        if routing_published && materialized_routing_changed {
+            // Readers must refresh only after the owner map is published. Waking them while the
+            // replacement is staged lets a waiter consume the signal against the previous owner.
+            self.bump_relay_state_epoch(domain);
+            self.inner.materialized_state_changed.notify_waiters();
         }
         local_gate_hold.release();
         Ok(())

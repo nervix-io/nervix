@@ -407,6 +407,7 @@ impl EmitterPublishingSettings {
 
 struct EmitterBatchContext<'a> {
     runtime: &'a Runtime,
+    routing: &'a mut DomainRoutingCache,
     domain: &'a DomainName,
     emitter: &'a EmitterName,
     node: &'a ModelName,
@@ -3481,6 +3482,10 @@ impl EmitterTask {
         let task_flush_policy = emitter.flush_policy.clone();
         let task_error_policies = emitter.error_policies.clone();
         let task_materialized_state = emitter.materialized_state.clone();
+        let routing_relay = inputs
+            .first()
+            .map(|(relay, _)| relay.clone())
+            .verified("the registry validated that every emitter has at least one input");
         let fault_injection = runtime.inner.fault_injection.clone();
         let runtime = runtime.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
@@ -3522,6 +3527,21 @@ impl EmitterTask {
         let task_stop_signal = stop_signal.clone();
 
         let task = tokio::spawn(async move {
+            let shared_routing = match runtime
+                .wait_for_domain_routing(&task_domain, &routing_relay)
+                .await
+            {
+                Ok(routing) => routing,
+                Err(error) => {
+                    runtime.events().report_error(format!(
+                        "emitter '{}' in domain '{}' could not bind its routing snapshot: {error}",
+                        task_emitter.as_str(),
+                        task_domain.as_str(),
+                    ));
+                    return;
+                }
+            };
+            let mut routing = DomainRoutingCache::new(shared_routing);
             // The emitter's explicit FLUSH EACH and COMMIT EACH cadences are domain logical
             // durations, so every emitter binds the domain clock whether or not it collects input.
             let domain_clock = match runtime.bind_domain_clock(&task_domain) {
@@ -3618,8 +3638,9 @@ impl EmitterTask {
                 runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
             }
             let task_emitter_node = ModelName::from(&task_emitter);
-            let batch_context = EmitterBatchContext {
+            let mut batch_context = EmitterBatchContext {
                 runtime: &runtime,
+                routing: &mut routing,
                 domain: &task_domain,
                 emitter: &task_emitter,
                 node: &task_emitter_node,
@@ -4463,7 +4484,7 @@ impl EmitterBatchContext<'_> {
     /// wait for required state ended without it, or resolution failed and its acknowledgments
     /// have already been reported.
     async fn resolve_materialized_dependencies(
-        &self,
+        &mut self,
         input_relay: &RelayName,
         batch: RelayRecordBatch,
         wait: MaterializedBatchWaitContext<'_>,
@@ -4474,6 +4495,7 @@ impl EmitterBatchContext<'_> {
         let resolution = self
             .runtime
             .resolve_materialized_dependencies_for_batch(
+                self.routing,
                 self.domain,
                 input_relay,
                 self.materialized_state,
@@ -4510,7 +4532,7 @@ impl EmitterBatchContext<'_> {
     }
 
     async fn process(
-        &self,
+        &mut self,
         input_relay: &RelayName,
         batch: RelayRecordBatch,
         shutdown_rx: &mut watch::Receiver<bool>,

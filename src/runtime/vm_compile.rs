@@ -1881,55 +1881,35 @@ pub(super) fn compile_processor_output_program(
     if output.compiled_program.is_some() {
         return Ok(());
     }
+    let routing = context
+        .branch
+        .domain_routing()
+        .map_err(|reason| PlannedGeneralError {
+            acks: batch.acks.clone(),
+            reason: reason.to_string(),
+        })?;
     let input_relays = context.filter_source.relays(context.input_relays);
-    let materialized_stream_specs = materialized_stream_specs_for_graph(
-        &context.branch.runtime,
-        &context.branch.domain,
-        context.graph,
-    );
+    let materialized_stream_specs = routing.materialized_stream_specs.clone();
     let current_branching = if let Some(relay) = input_relays.first()
-        && let Some(execution) = context
-            .branch
-            .runtime
-            .inner
-            .executions
-            .get(&context.branch.domain)
-        && let Some(branching) = execution.relay_branchings.get(relay)
+        && let Some(branching) = routing.relay_branchings.get(relay)
     {
         branching.clone()
     } else {
         Default::default()
     };
     let current_branch_schema = if let Some(relay) = input_relays.first() {
-        relay_branch_schema_for_runtime(&context.branch.runtime, &context.branch.domain, relay)
+        relay_branch_schema_for_routing(routing, relay)
     } else {
         None
     };
-    let available_lookups = match context
-        .branch
-        .runtime
-        .inner
-        .executions
-        .get(&context.branch.domain)
-    {
-        Some(execution) => execution.lookups.clone(),
-        None => HashMap::default(),
-    };
-    let udfs = context
-        .branch
-        .runtime
-        .inner
-        .executions
-        .get(&context.branch.domain)
-        .map(|execution| execution.udfs.clone());
     let input_sensitivity = processor_output_input_sensitivity(context.branch, &input_relays);
     let compile_context = RuntimeVmCompileContext {
         available_materialized_streams: &materialized_stream_specs,
-        available_lookups: &available_lookups,
+        available_lookups: &routing.lookups,
         current_branching: &current_branching,
         current_branch_schema: current_branch_schema.as_ref(),
         current_branch_sensitivity: None,
-        udfs: udfs.as_ref(),
+        udfs: Some(&routing.udfs),
     };
     let compiled = match context.filter_source {
         ProcessorOutputFilterSource::OutputRelay => compile_finalized_output_filter_program(
@@ -1977,40 +1957,35 @@ pub(super) fn relay_schema_for_runtime(
     domain: &DomainName,
     relay: &RelayName,
 ) -> Result<Arc<CompiledSchema>, String> {
-    let Some(execution) = runtime.inner.executions.get(domain) else {
+    let Some(routing) = runtime.domain_routing(domain) else {
         return Err(format!("domain '{}' is not instantiated", domain.as_str()));
     };
-    execution.relay_schemas.get(relay).cloned().ok_or_else(|| {
-        format!(
-            "stream '{}' schema is not instantiated in domain '{}'",
-            relay.as_str(),
-            domain.as_str()
-        )
+    let routing = routing.load();
+    relay_schema_for_routing(&routing, domain, relay).map_err(|error| error.to_string())
+}
+
+pub(super) fn relay_schema_for_routing(
+    routing: &DomainRoutingSnapshot,
+    domain: &DomainName,
+    relay: &RelayName,
+) -> Result<Arc<CompiledSchema>, Report<DomainRoutingError>> {
+    routing.relay_schemas.get(relay).cloned().ok_or_else(|| {
+        Report::new(DomainRoutingError::RelaySchemaNotInstantiated {
+            domain: domain.clone(),
+            relay: relay.clone(),
+        })
     })
 }
 
-pub(super) fn relay_branch_schema_for_runtime(
-    runtime: &Runtime,
-    domain: &DomainName,
+pub(super) fn relay_branch_schema_for_routing(
+    routing: &DomainRoutingSnapshot,
     relay: &RelayName,
 ) -> Option<StdArc<arrow_schema::Schema>> {
-    runtime
-        .inner
-        .executions
-        .get(domain)
-        .and_then(|execution| execution.relay_branching_schemas.get(relay).cloned())
+    routing
+        .relay_branching_schemas
+        .get(relay)
+        .cloned()
         .flatten()
-}
-
-pub(super) fn materialized_stream_specs_for_graph(
-    runtime: &Runtime,
-    domain: &DomainName,
-    _graph: &SharedActiveGraph,
-) -> HashMap<RelayName, RuntimeMaterializedRelaySpec> {
-    let Some(execution) = runtime.inner.executions.get(domain) else {
-        return HashMap::default();
-    };
-    execution.materialized_stream_specs.clone()
 }
 
 #[cfg(test)]

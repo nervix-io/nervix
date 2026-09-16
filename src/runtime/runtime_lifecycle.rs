@@ -89,6 +89,7 @@ impl Runtime {
                 emitter_retry_statuses: DashMap::default(),
                 emitter_confirmation_waits: DashMap::default(),
                 executions: DashMap::default(),
+                domain_routings: DashMap::default(),
                 message_error_routes: DashMap::default(),
                 compiled_domain_udfs: DashMap::default(),
                 schedule_apply_lock: Mutex::new(()),
@@ -400,7 +401,8 @@ impl Runtime {
 
     pub(super) async fn abort_domain_execution_start(&self, domain: &DomainName) {
         self.stop_domain_ingestors(domain).await;
-        if let Some((_, execution)) = self.inner.executions.remove(domain) {
+        if let Some((_, mut execution)) = self.inner.executions.remove(domain) {
+            execution.routing.deactivate();
             self.stop_domain_execution(domain, execution).await;
         }
         self.clear_domain_graph_handle(domain).await;
@@ -441,7 +443,8 @@ impl Runtime {
             self.stop_domain_ingestors(domain).await;
         }
         for domain in &domains {
-            if let Some((_, execution)) = self.inner.executions.remove(domain) {
+            if let Some((_, mut execution)) = self.inner.executions.remove(domain) {
+                execution.routing.deactivate();
                 self.stop_domain_execution(domain, execution).await;
             }
             self.clear_domain_ingestor_quiescence(domain);

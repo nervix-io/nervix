@@ -1,6 +1,6 @@
 Feature: Altering schemas on a running domain
-  @alter_running_domain
-  Scenario Outline: ALTER drains old-schema work before resuming on the new graph
+  @alter_running_domain @routing_snapshot_alter
+  Scenario Outline: ALTER publishes one routing snapshot around in-flight work
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -62,9 +62,9 @@ Feature: Altering schemas on a running domain
       """
       BEGIN;
       ALTER WIRE JSON SCHEMA running_event_wire
-        ADD FIELD note string OPTIONAL;
+        ADD FIELD note string;
       ALTER SCHEMA running_event
-        ADD FIELD note STRING OPTIONAL;
+        ADD FIELD note STRING;
       DROP EMITTER running_event_out;
       CREATE EMITTER running_event_out
         FROM running_events
