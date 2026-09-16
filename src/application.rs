@@ -142,6 +142,7 @@ mod peer_grpc;
 mod relocation;
 mod resource;
 mod runtime_admission;
+mod schedule_planning;
 mod scheduling;
 mod service_tasks;
 mod session_service;

@@ -15,20 +15,19 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
     ConsensusError, ConsensusTransactionError, ReplicatedTransaction, TransactionApplyingStep,
     TransactionCommandResult, TransactionCommitAdvance, TransactionDiagnostic, TransactionOutcome,
-    TransactionQueueLimits, TransactionState, TransactionStatement, TransactionStepEffect,
-    TransactionStepResult,
+    TransactionQueueAdmission, TransactionQueueLimits, TransactionState, TransactionStatement,
+    TransactionStatementRequest, TransactionStepEffect, TransactionStepResult,
 };
 use nervix_models::{
-    ActualExecutionStepImpact, CanonicalImpactSet, CommandExecutionReference,
-    DomainLifecycleAction, DomainLifecycleImpact, DomainName, DomainStatus,
-    ExecutionStepImpactReport, ImpactAttribution, ImpactDiagnostic, ImpactDiagnosticKind,
-    ImpactEffects, ImpactNodeCoverage, ImpactReportCompleteness, OwnershipMoveImpact,
-    PauseRequirement, PlannedExecutionStepImpact, QuiesceLevel, QuiesceSubgraph,
-    ResourceCatalogAction, ResourceCatalogImpact, ResourceName, Statement,
-    TransactionOperationRange, UserName,
+    ActualExecutionStepImpact, CanonicalImpactSet, CommandExecutionReference, DomainName,
+    DomainSchedule, DomainState, DomainStatus, ExecutionStepImpactReport, ImpactDiagnostic,
+    ImpactDiagnosticKind, ImpactNodeCoverage, ImpactPlanningBasis, ImpactReportCompleteness, Model,
+    ModelIndex, OwnershipMoveImpact, PauseRequirement, PlannedExecutionStepImpact, ResourceName,
+    Statement, TransactionOperationNumber, TransactionOperationRange, UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
 use parking_lot::Mutex as ParkingMutex;
+use serde::Serialize;
 use thiserror::Error;
 use tokio::{
     sync::mpsc,
@@ -45,7 +44,7 @@ use super::{
         command_ok_already_existed, parse_request_domain, quiesce_level_message,
     },
     ownership_handoff::{mark_complete_ownership_transitions, planned_ownership_moves},
-    scheduling::PreparedDomainSchedule,
+    schedule_planning::DomainSchedulePlanningSnapshot,
     session_service::SessionServiceImpl,
     subscription::{PendingSessionCommand, SessionSubscriptions},
 };
@@ -55,7 +54,11 @@ use crate::{
         CommandResult, CommandResultKind, Diagnostic, SessionResponse,
         TransactionState as ApiTransactionState, TransactionStatus as ApiTransactionStatus,
     },
-    registry::RegistryMutation,
+    registry::{
+        PlannedTransaction, PlannedTransactionStep, PlannedTransactionStepKind, Registry,
+        RegistryMutation, TransactionPlanningError, TransactionPlanningSnapshot,
+        TransactionScheduleDecision,
+    },
     runtime::RuntimeError,
 };
 
@@ -70,6 +73,53 @@ pub(in crate::application) const DEFAULT_TRANSACTION_MAX_STATEMENTS: usize = 256
 pub(in crate::application) const DEFAULT_TRANSACTION_MAX_SOURCE_BYTES: u64 = 1024 * 1024;
 
 pub(in crate::application) const DEFAULT_TRANSACTION_MAX_OPEN: usize = 1024;
+
+#[derive(Serialize)]
+struct TransactionPlanningBasisInput<'a> {
+    domain: &'a DomainState,
+    models: Vec<&'a Model>,
+    resources: Vec<&'a ResourceName>,
+    schedule: Option<&'a DomainSchedule>,
+    live_voters: &'a [nervix_models::ClusterNodeName],
+    cluster_nodes: &'a [nervix_models::ClusterNodeName],
+    replica_count: usize,
+    scheduler_mode: &'a str,
+}
+
+fn transaction_planning_basis(
+    domain: &DomainState,
+    models: &ModelIndex,
+    resources: &BTreeSet<ResourceName>,
+    schedule: Option<&DomainSchedule>,
+    schedule_inputs: &DomainSchedulePlanningSnapshot,
+) -> Result<ImpactPlanningBasis, Report<TransactionPlanningError>> {
+    let mut ordered_models = models.models().collect::<Vec<_>>();
+    ordered_models.sort_by_key(|model| model.node_ref());
+    let resources = resources.iter().collect();
+    let input = TransactionPlanningBasisInput {
+        domain,
+        models: ordered_models,
+        resources,
+        schedule,
+        live_voters: schedule_inputs.live_voters(),
+        cluster_nodes: schedule_inputs.cluster_nodes(),
+        replica_count: schedule_inputs.replica_count(),
+        scheduler_mode: schedule_inputs.mode_name(),
+    };
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&input, &mut encoded).map_err(|error| {
+        Report::new(TransactionPlanningError::PlanningBasisEncoding).attach(error)
+    })?;
+    Ok(ImpactPlanningBasis::new(*blake3::hash(&encoded).as_bytes()))
+}
+
+fn transaction_planning_error_message(error: &Report<TransactionPlanningError>) -> String {
+    let context = error.to_string();
+    match error.downcast_ref::<String>() {
+        Some(message) => format!("{context}: {message}"),
+        None => context,
+    }
+}
 
 #[derive(Debug, Error)]
 pub(in crate::application) enum TransactionCommitError {
@@ -87,8 +137,6 @@ pub(in crate::application) enum TransactionCommitError {
     SynchronizeRegistry { id: String },
     #[error("failed to recover transaction '{id}' domain quiescence")]
     RecoverQuiescence { id: String },
-    #[error("failed to prepare schedule for domain '{domain}': {reason}")]
-    PrepareSchedule { domain: DomainName, reason: String },
     #[error("transaction '{id}' commit task failed")]
     TaskJoin { id: String },
     #[error("transaction '{id}' commit was cancelled because the node's shutdown deadline passed")]
@@ -107,7 +155,7 @@ impl TransactionCommitError {
 pub(in crate::application) struct TransactionModelStepContext<'a> {
     pub(in crate::application) transaction: &'a ReplicatedTransaction,
     pub(in crate::application) first_statement: usize,
-    pub(in crate::application) statement_count: usize,
+    pub(in crate::application) planned_step: PlannedTransactionStep,
     pub(in crate::application) outcome:
         &'a ParkingMutex<Option<Result<ReplicatedTransaction, Report<TransactionCommitError>>>>,
 }
@@ -242,6 +290,34 @@ fn replicated_command_result(result: &CommandResult) -> TransactionCommandResult
     }
 }
 
+fn admitted_command_result(
+    admission: &TransactionCommandResult,
+    transaction: &ReplicatedTransaction,
+) -> CommandResult {
+    let mut result = CommandResult {
+        success: admission.success,
+        message: admission.message.clone(),
+        diagnostics: admission
+            .diagnostics
+            .iter()
+            .map(|diagnostic| Diagnostic {
+                message: diagnostic.message.clone(),
+                span_start: diagnostic.span_start,
+                span_end: diagnostic.span_end,
+            })
+            .collect(),
+        kind: if admission.success {
+            i32::from(CommandResultKind::Ok)
+        } else {
+            i32::from(CommandResultKind::Error)
+        },
+        already_existed: admission.already_existed,
+        ..Default::default()
+    };
+    result.transaction = Some(transaction_status(transaction));
+    result
+}
+
 fn transaction_commit_result(transaction: &ReplicatedTransaction) -> CommandResult {
     let success = matches!(
         transaction.finished_outcome(),
@@ -306,6 +382,32 @@ fn transaction_commit_result(transaction: &ReplicatedTransaction) -> CommandResu
     };
     result.transaction = Some(transaction_status(transaction));
     result
+}
+
+fn failed_transaction_step_impact(
+    first_statement: usize,
+    statement_count: usize,
+    message: String,
+) -> ExecutionStepImpactReport {
+    let operations =
+        TransactionOperationRange::from_index_and_count(first_statement, statement_count).assured(
+            "a commit step contains at least one queued statement in its addressable range",
+        );
+    let completeness = ImpactReportCompleteness::incomplete(vec![ImpactDiagnostic {
+        kind: ImpactDiagnosticKind::Planning,
+        operation: Some(operations.first()),
+        message,
+    }])
+    .assured("a failed planning step supplies one diagnostic");
+    ExecutionStepImpactReport::new(
+        operations,
+        PlannedExecutionStepImpact {
+            completeness,
+            pause: PauseRequirement::NoPause,
+            effects: Default::default(),
+        },
+        ActualExecutionStepImpact::unattempted(),
+    )
 }
 
 fn standalone_transaction_result(transaction: &ReplicatedTransaction) -> CommandResult {
@@ -654,7 +756,7 @@ impl SessionServiceImpl {
                 return command_error("invalid domain".to_string());
             }
         };
-        let queued = TransactionStatement {
+        let queued = TransactionStatementRequest {
             request_reference: command.request_reference,
             expected_position: command
                 .expected_transaction_position
@@ -669,18 +771,22 @@ impl SessionServiceImpl {
             max_statements: self.inner.transaction_max_statements,
             max_source_bytes: self.inner.transaction_max_source_bytes,
         };
-        if let Err(error) =
-            transaction.validate_queue_admission(&subscriptions.user, &domain, &queued, limits)
-        {
-            return command_error(error.to_string());
+        match transaction.queue_admission(&subscriptions.user, &domain, &queued, limits) {
+            Ok(TransactionQueueAdmission::Existing(admission)) => {
+                return admitted_command_result(&admission, &transaction);
+            }
+            Ok(TransactionQueueAdmission::New) => {}
+            Err(error) => return command_error(error.to_string()),
         }
-        let quiesce_level = match self
+        let admission = match self
             .preflight_transaction_statement(&transaction, &queued)
             .await
         {
-            Ok(quiesce_level) => quiesce_level,
+            Ok(admission) => admission,
             Err(error) => return command_error(error),
         };
+        let request_reference = queued.request_reference.clone();
+        let queued = TransactionStatement::admitted(queued, replicated_command_result(&admission));
         match self
             .inner
             .consensus
@@ -695,13 +801,14 @@ impl SessionServiceImpl {
             .await
         {
             Ok(transaction) => {
-                let message = match quiesce_level {
-                    Some(quiesce_level) => quiesce_level_message(quiesce_level),
-                    None => String::new(),
-                };
-                let mut result = command_ok(message);
-                result.transaction = Some(transaction_status(&transaction));
-                result
+                // A transaction contains at most `transaction_max_statements` entries, so this
+                // lookup is bounded by the queue limit checked before the proposal.
+                let admitted = transaction
+                    .statements
+                    .iter()
+                    .find(|statement| statement.request_reference == request_reference)
+                    .verified("a successful queue proposal retains the admitted statement");
+                admitted_command_result(&admitted.admission, &transaction)
             }
             Err(error) => self.transaction_consensus_error_response(error).await,
         }
@@ -726,81 +833,62 @@ impl SessionServiceImpl {
             max_statements: self.inner.transaction_max_statements,
             max_source_bytes: self.inner.transaction_max_source_bytes,
         };
-        let queued = TransactionStatement {
+        let queued = TransactionStatementRequest {
             request_reference,
             expected_position: 0,
             source,
             statement,
         };
 
-        let current = self
+        let mut current = self
             .inner
             .consensus
             .current_transaction(&transaction_id)
             .await;
-        let transaction = match current {
-            Some(transaction) => transaction,
-            None => {
-                let candidate = ReplicatedTransaction::open(
-                    transaction_id.clone(),
-                    domain.clone(),
-                    owner.clone(),
-                    current_timestamp(),
-                );
-                if let Err(error) =
-                    candidate.validate_queue_admission(&owner, &domain, &queued, limits)
-                {
-                    return command_error(error.to_string());
-                }
-                if let Err(error) = self
-                    .preflight_transaction_statement(&candidate, &queued)
-                    .await
-                {
-                    return command_error(error);
-                }
-                match self
-                    .inner
-                    .consensus
-                    .open_transaction(candidate, self.inner.transaction_max_open)
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(error) => return self.transaction_consensus_error_response(error).await,
-                }
-                match self
-                    .inner
-                    .consensus
-                    .queue_transaction_statement(
-                        transaction_id.clone(),
-                        owner.clone(),
-                        domain.clone(),
-                        current_timestamp(),
-                        queued.clone(),
-                        limits,
-                    )
-                    .await
-                {
-                    Ok(transaction) => transaction,
-                    Err(error) => {
-                        let existing = self
-                            .inner
-                            .consensus
-                            .current_transaction(&transaction_id)
-                            .await;
-                        match existing {
-                            Some(transaction)
-                                if transaction.statements.first() == Some(&queued) =>
-                            {
-                                transaction
-                            }
-                            _ => {
-                                return self.transaction_consensus_error_response(error).await;
-                            }
-                        }
-                    }
-                }
+        let mut prepared = None;
+        if current.is_none() {
+            let candidate = ReplicatedTransaction::open(
+                transaction_id.clone(),
+                domain.clone(),
+                owner.clone(),
+                current_timestamp(),
+            );
+            if let Err(error) = candidate.queue_admission(&owner, &domain, &queued, limits) {
+                return command_error(error.to_string());
             }
-        };
+            let admission = match self
+                .preflight_transaction_statement(&candidate, &queued)
+                .await
+            {
+                Ok(admission) => admission,
+                Err(error) => return command_error(error),
+            };
+            prepared = Some(TransactionStatement::admitted(
+                queued.clone(),
+                replicated_command_result(&admission),
+            ));
+            if let Err(error) = self
+                .inner
+                .consensus
+                .open_transaction(candidate, self.inner.transaction_max_open)
+                .await
+                && self
+                    .inner
+                    .consensus
+                    .current_transaction(&transaction_id)
+                    .await
+                    .is_none()
+            {
+                return self.transaction_consensus_error_response(error).await;
+            }
+            current = self
+                .inner
+                .consensus
+                .current_transaction(&transaction_id)
+                .await;
+        }
+        let mut transaction =
+            current.verified("the durable command transaction was opened or observed above");
 
         if transaction.owner != owner || transaction.domain != domain {
             return command_error(format!(
@@ -809,46 +897,49 @@ impl SessionServiceImpl {
             ));
         }
         if let TransactionState::Open = &transaction.state {
-            match transaction.statements.as_slice() {
-                [] => {
-                    if let Err(error) = self
-                        .preflight_transaction_statement(&transaction, &queued)
-                        .await
-                    {
-                        return command_error(error);
-                    }
-                    if let Err(error) = self
+            match transaction.queue_admission(&owner, &domain, &queued, limits) {
+                Ok(TransactionQueueAdmission::Existing(_)) => {}
+                Ok(TransactionQueueAdmission::New) => {
+                    let admitted = match prepared.take() {
+                        Some(admitted) => admitted,
+                        None => {
+                            let admission = match self
+                                .preflight_transaction_statement(&transaction, &queued)
+                                .await
+                            {
+                                Ok(admission) => admission,
+                                Err(error) => return command_error(error),
+                            };
+                            TransactionStatement::admitted(
+                                queued.clone(),
+                                replicated_command_result(&admission),
+                            )
+                        }
+                    };
+                    transaction = match self
                         .inner
                         .consensus
                         .queue_transaction_statement(
                             transaction_id.clone(),
                             owner.clone(),
-                            domain,
+                            domain.clone(),
                             current_timestamp(),
-                            queued.clone(),
+                            admitted,
                             limits,
                         )
                         .await
                     {
-                        return self.transaction_consensus_error_response(error).await;
-                    }
+                        Ok(transaction) => transaction,
+                        Err(error) => {
+                            return self.transaction_consensus_error_response(error).await;
+                        }
+                    };
                 }
-                [existing] if existing == &queued => {}
-                _ => {
-                    return command_error(format!(
-                        "durable command transaction '{}' contains a different request",
-                        transaction.id
-                    ));
-                }
+                Err(error) => return command_error(error.to_string()),
             }
         }
 
-        let current = self
-            .inner
-            .consensus
-            .current_transaction(&transaction_id)
-            .await
-            .verified("the durable command transaction was opened or observed above");
+        let current = transaction;
         let committing = match &current.state {
             TransactionState::Open => match self
                 .inner
@@ -884,182 +975,175 @@ impl SessionServiceImpl {
         }
     }
 
+    async fn plan_transaction_statements(
+        &self,
+        domain: &DomainName,
+        statements: &[Statement],
+        first_operation_index: usize,
+        allow_incomplete_final_model_run: bool,
+    ) -> Result<PlannedTransaction, Report<TransactionPlanningError>> {
+        if self.inner.runtime.domain_alter_is_active(domain) {
+            return Err(Report::new(
+                TransactionPlanningError::ConcurrentDomainAlter {
+                    domain: domain.clone(),
+                },
+            ));
+        }
+        let models = self.inner.registry.transaction_planning_models(domain);
+        let (control, schedule_inputs) = tokio::join!(
+            self.inner.consensus.transaction_control_snapshot(domain),
+            self.capture_domain_schedule_planning_snapshot(),
+        );
+        let domain_state = control.domain.ok_or_else(|| {
+            Report::new(TransactionPlanningError::DomainNotFound {
+                domain: domain.clone(),
+            })
+        })?;
+        let resources = control
+            .resources
+            .next_version_by_resource
+            .iter()
+            .filter(|counter| counter.domain == *domain)
+            .map(|counter| counter.identifier.clone())
+            .collect::<BTreeSet<_>>();
+        let basis = transaction_planning_basis(
+            &domain_state,
+            &models,
+            &resources,
+            control.schedule.as_ref(),
+            &schedule_inputs,
+        )?;
+        let snapshot = TransactionPlanningSnapshot {
+            domain: domain_state.clone(),
+            models,
+            resources,
+            schedule: control.schedule,
+            basis,
+        };
+        let planning_domain = domain.clone();
+        let plan = Registry::plan_transaction(
+            snapshot,
+            statements,
+            first_operation_index,
+            allow_incomplete_final_model_run,
+            |graph, placement, current, attribution| {
+                let prepared = schedule_inputs.prepare(&planning_domain, graph, placement, current);
+                let ownership_moves = planned_ownership_moves(current, prepared.schedule.as_ref())
+                    .into_iter()
+                    .map(|moved| OwnershipMoveImpact {
+                        node: ImpactNodeCoverage::all_executions(moved.entity),
+                        source: moved.former_owner,
+                        destination: moved.destination,
+                        attribution: attribution.clone(),
+                    });
+                TransactionScheduleDecision {
+                    schedule: prepared.schedule,
+                    ownership_moves: CanonicalImpactSet::new(ownership_moves),
+                }
+            },
+        )?;
+        for step in plan.steps() {
+            tokio::task::consume_budget().await;
+            let PlannedTransactionStepKind::Models { plan: model_plan } = &step.kind else {
+                continue;
+            };
+            let Some(planned) = &model_plan.planned else {
+                continue;
+            };
+            self.validate_changed_model_bindings(domain, domain_state.config.pace, planned)
+                .await
+                .map_err(|message| {
+                    Report::new(TransactionPlanningError::ExternalModelValidation {
+                        operation: step.impact.operations().first(),
+                    })
+                    .attach(message)
+                })?;
+            self.prepare_planned_domain_udfs(planned)
+                .await
+                .map_err(|message| {
+                    Report::new(TransactionPlanningError::UdfPreparation {
+                        operation: step.impact.operations().first(),
+                    })
+                    .attach(message)
+                })?;
+        }
+        Ok(plan)
+    }
+
+    fn transaction_admission_result(
+        candidate: &Statement,
+        plan: &PlannedTransaction,
+        candidate_index: usize,
+    ) -> CommandResult {
+        let number = TransactionOperationNumber::from_index(candidate_index)
+            .assured("a candidate index belongs to the transaction prefix just planned");
+        // Planning emits at most one step per statement, and transaction admission bounds the
+        // prefix by `transaction_max_statements`.
+        let step = plan
+            .steps()
+            .iter()
+            .find(|step| step.impact.operations().contains(number))
+            .verified("the ordered plan assigns every accepted operation to one execution step");
+        let already_existed = match &step.kind {
+            PlannedTransactionStepKind::Models { plan } => plan.no_op_operations.contains(&number),
+            PlannedTransactionStepKind::CreateResource {
+                already_existed, ..
+            } => *already_existed,
+            PlannedTransactionStepKind::AlterDomain { .. }
+            | PlannedTransactionStepKind::StartDomain { .. }
+            | PlannedTransactionStepKind::StopDomain { .. } => false,
+        };
+        let mut result = if already_existed {
+            let target = match candidate {
+                Statement::Create(create) => format!("model '{}'", create.body.name().as_str()),
+                Statement::CreateResource(create) => {
+                    format!("resource '{}'", create.body.identifier.as_str())
+                }
+                _ => "configuration".to_string(),
+            };
+            command_ok_already_existed(format!("{target} already exists"))
+        } else {
+            command_ok(String::new())
+        };
+        append_command_output(
+            &mut result.message,
+            &quiesce_level_message(step.impact.planned().pause.level()),
+        );
+        result
+    }
+
     async fn preflight_transaction_statement(
         &self,
         transaction: &ReplicatedTransaction,
-        candidate: &TransactionStatement,
-    ) -> Result<Option<QuiesceLevel>, String> {
-        let (mut domains, resources) = tokio::join!(
-            self.inner.consensus.current_domains(),
-            self.inner.consensus.current_resources(),
-        );
-        let mut resource_names = resources
-            .next_version_by_resource
-            .iter()
-            .filter(|counter| counter.domain == transaction.domain)
-            .map(|counter| counter.identifier.clone())
-            .collect::<BTreeSet<_>>();
-        let domain_id = &transaction.domain;
-        let mut model_mutations = Vec::<RegistryMutation>::new();
-        let candidate_is_model_mutation = candidate.statement.is_model_mutation();
-        let mut candidate_quiesce_level =
-            candidate_is_model_mutation.then_some(QuiesceLevel::Dynamic);
-
-        for queued in transaction
+        candidate: &TransactionStatementRequest,
+    ) -> Result<CommandResult, String> {
+        let mut statements = transaction
             .statements
             .iter()
-            .chain(std::iter::once(candidate))
-        {
-            match &queued.statement {
-                Statement::AlterDomain(alter) => {
-                    let domain = domains
-                        .get_mut(domain_id)
-                        .ok_or_else(|| format!("domain '{}' does not exist", domain_id.as_str()))?;
-                    if let DomainStatus::Paused = domain.status {
-                        return Err(format!(
-                            "domain '{}' is paused by a model alteration",
-                            domain_id.as_str()
-                        ));
-                    }
-                    domain.config.placement = alter.policy;
-                }
-                Statement::StartDomain(start) => {
-                    let domain = domains
-                        .get_mut(domain_id)
-                        .ok_or_else(|| format!("domain '{}' does not exist", domain_id.as_str()))?;
-                    if let DomainStatus::Running = domain.status {
-                        return Err(format!(
-                            "domain '{}' is already running",
-                            domain_id.as_str()
-                        ));
-                    }
-                    if let DomainStatus::Paused = domain.status {
-                        return Err(format!(
-                            "domain '{}' is paused for a model alteration",
-                            domain_id.as_str()
-                        ));
-                    }
-                    domain.status = DomainStatus::Running;
-                    domain.last_start = start.start.clone();
-                    domain.start_version = domain.start_version.checked_add(1).assured(
-                        "a domain cannot be started 2^64 times in the lifetime of a cluster",
-                    );
-                }
-                Statement::StopDomain(_) => {
-                    let domain = domains
-                        .get_mut(domain_id)
-                        .ok_or_else(|| format!("domain '{}' does not exist", domain_id.as_str()))?;
-                    if let DomainStatus::Stopped = domain.status {
-                        return Err(format!(
-                            "domain '{}' is already stopped",
-                            domain_id.as_str()
-                        ));
-                    }
-                    domain.status = DomainStatus::Stopped;
-                    domain.clock = None;
-                }
-                Statement::CreateResource(create) => {
-                    if !resource_names.insert(create.identifier.clone()) && !create.if_not_exists {
-                        return Err(format!(
-                            "resource '{}' already exists",
-                            create.identifier.as_str()
-                        ));
-                    }
-                }
-                statement if statement.is_model_mutation() => {
-                    let domain = domains
-                        .get(domain_id)
-                        .ok_or_else(|| format!("domain '{}' does not exist", domain_id.as_str()))?;
-                    if self.inner.runtime.domain_alter_is_active(domain_id) {
-                        return Err(DomainAlterError::ConcurrentAlter {
-                            domain: domain_id.clone(),
-                        }
-                        .to_string());
-                    }
-                    if let DomainStatus::Paused = domain.status {
-                        return Err(format!(
-                            "domain '{}' is paused by a model alteration",
-                            domain_id.as_str()
-                        ));
-                    }
-                    if let Statement::Create(create) = statement
-                        && create.if_not_exists
-                        && self
-                            .inner
-                            .registry
-                            .contains(domain_id, create.body.kind(), create.body.name())
-                            .map_err(|error| error.to_string())?
-                    {
-                        continue;
-                    }
-                    model_mutations.push(Self::transaction_registry_mutation(statement));
-                }
-                _ => {
-                    return Err(format!(
-                        "{} is not valid transaction content",
-                        transaction_statement_label(&queued.statement)
-                    ));
-                }
-            }
-        }
-
-        if model_mutations.is_empty() {
-            return Ok(candidate_quiesce_level);
-        }
-        tokio::task::consume_budget().await;
-        let preflight = self
-            .inner
-            .registry
-            .preflight_transaction_mutations(domain_id, &model_mutations)
+            .map(|queued| queued.statement.clone())
+            .collect::<Vec<_>>();
+        statements.push(candidate.statement.clone());
+        let plan = self
+            .plan_transaction_statements(&transaction.domain, &statements, 0, true)
+            .await
+            .map_err(|error| {
+                format!(
+                    "transaction statement failed preflight: {}",
+                    transaction_planning_error_message(&error)
+                )
+            })?;
+        plan.report()
             .map_err(|error| format!("transaction statement failed preflight: {error}"))?;
-        if candidate_is_model_mutation {
-            candidate_quiesce_level = preflight.mutation_quiesce_levels().last().copied();
-        }
-        let Some(planned) = preflight.planned() else {
-            return Ok(candidate_quiesce_level);
-        };
-        let domain = domains
-            .get(domain_id)
-            .verified("replaying the transaction resolved this domain before reaching the step");
-        self.validate_changed_model_bindings(domain_id, domain.config.pace, planned)
-            .await?;
-        self.prepare_planned_domain_udfs(planned).await?;
-        self.prepare_domain_schedule(
-            domain_id,
-            planned.candidate_graph(),
-            domain.config.placement,
-        )
-        .await?;
-        Ok(candidate_quiesce_level)
+        Ok(Self::transaction_admission_result(
+            &candidate.statement,
+            &plan,
+            candidate.expected_position,
+        ))
     }
 
     fn transaction_registry_mutation(statement: &Statement) -> RegistryMutation {
-        match statement {
-            Statement::Create(create) => RegistryMutation::Create(create.body.clone()),
-            Statement::AlterSchema(alter) => RegistryMutation::AlterSchema(alter.clone()),
-            Statement::AlterWireJsonSchema(alter) => {
-                RegistryMutation::AlterWireJsonSchema(alter.clone())
-            }
-            Statement::AlterWireCborSchema(alter) => {
-                RegistryMutation::AlterWireCborSchema(alter.clone())
-            }
-            Statement::AlterWireAvroSchema(alter) => {
-                RegistryMutation::AlterWireAvroSchema(alter.clone())
-            }
-            Statement::AlterRelay(alter) => RegistryMutation::AlterRelay(alter.clone()),
-            Statement::AlterJunction(alter) => RegistryMutation::AlterJunction(alter.clone()),
-            Statement::AlterDeduplicator(alter) => {
-                RegistryMutation::AlterDeduplicator(alter.clone())
-            }
-            Statement::AlterReorderer(alter) => RegistryMutation::AlterReorderer(alter.clone()),
-            Statement::AlterEmitter(alter) => RegistryMutation::AlterEmitter(alter.clone()),
-            Statement::AlterIngestor(alter) => RegistryMutation::AlterIngestor(alter.clone()),
-            Statement::AlterReingestor(alter) => RegistryMutation::AlterReingestor(alter.clone()),
-            Statement::AlterGenerator(alter) => RegistryMutation::AlterGenerator(alter.clone()),
-            Statement::AlterPlacement(alter) => RegistryMutation::AlterPlacement(alter.clone()),
-            Statement::Drop(drop) => RegistryMutation::Drop(drop.clone()),
-            _ => unreachable!("transaction registry mutation requires a model mutation"),
-        }
+        RegistryMutation::try_from(statement)
+            .assured("transaction registry mutation requires a model mutation")
     }
 
     pub(in crate::application) async fn revert_bound_transaction(
@@ -1281,19 +1365,86 @@ impl SessionServiceImpl {
             };
             Box::pin(self.recover_transaction_quiescence(&transaction, first_statement)).await?;
 
+            let mut step_end = first_statement
+                .checked_add(1)
+                .assured("the next commit statement is in the transaction statement sequence");
             if first.statement.is_model_mutation() {
-                let domain = transaction.domain.clone();
-                let mut statements = Vec::new();
-                let mut sources = Vec::new();
-                for queued in transaction.statements.iter().skip(first_statement) {
-                    if !queued.statement.is_model_mutation() {
-                        break;
-                    }
-                    statements.push(queued.statement.clone());
-                    sources.push(queued.source.clone());
+                while transaction
+                    .statements
+                    .get(step_end)
+                    .is_some_and(|queued| queued.statement.is_model_mutation())
+                {
+                    step_end = step_end
+                        .checked_add(1)
+                        .assured("a transaction statement count is below usize::MAX");
                 }
-                let statement_count = statements.len();
+            }
+            let remaining = transaction
+                .statements
+                .get(first_statement..step_end)
+                .verified("the exact commit step is bounded by the transaction statement sequence")
+                .iter()
+                .map(|queued| queued.statement.clone())
+                .collect::<Vec<_>>();
+            let plan = Box::pin(self.plan_transaction_statements(
+                &transaction.domain,
+                &remaining,
+                first_statement,
+                false,
+            ))
+            .await;
+            let plan = match plan {
+                Ok(plan) => plan,
+                Err(error) => {
+                    let planning_error = transaction_planning_error_message(&error);
+                    let message =
+                        format!("transaction step failed refreshed preflight: {planning_error}");
+                    let impact = failed_transaction_step_impact(
+                        first_statement,
+                        remaining.len(),
+                        planning_error,
+                    );
+                    let advanced = Box::pin(self.record_transaction_step(
+                        &transaction,
+                        impact,
+                        command_error(message),
+                        None,
+                    ))
+                    .await?;
+                    return Box::pin(
+                        self.record_transaction_application_completion(&advanced, None),
+                    )
+                    .await;
+                }
+            };
+            let planned_step = plan.first_step().cloned().ok_or_else(|| {
+                Report::new(TransactionCommitError::InvalidProgress {
+                    id: transaction.id.clone(),
+                })
+            })?;
+            let planned_range = planned_step.impact.operations();
+            if planned_range.first_index() != first_statement {
+                return Err(Report::new(TransactionCommitError::InvalidProgress {
+                    id: transaction.id.clone(),
+                }));
+            }
+
+            if matches!(planned_step.kind, PlannedTransactionStepKind::Models { .. }) {
+                let domain = transaction.domain.clone();
+                let statements = transaction
+                    .statements
+                    .get(planned_range.first_index()..planned_range.end_index())
+                    .verified("the planned model run is a range of this transaction");
+                let sources = statements
+                    .iter()
+                    .map(|queued| queued.source.as_str())
+                    .collect::<Vec<_>>();
+                let statements = statements
+                    .iter()
+                    .map(|queued| queued.statement.clone())
+                    .collect::<Vec<_>>();
                 let outcome = ParkingMutex::new(None);
+                let planned_impact = planned_step.impact.clone();
                 let result = Box::pin(self.process_model_mutation_batch_with_transaction(
                     statements,
                     &sources.join("; "),
@@ -1301,7 +1452,7 @@ impl SessionServiceImpl {
                     Some(TransactionModelStepContext {
                         transaction: &transaction,
                         first_statement,
-                        statement_count,
+                        planned_step,
                         outcome: &outcome,
                     }),
                 ))
@@ -1320,10 +1471,8 @@ impl SessionServiceImpl {
                     None if !result.success => {
                         Box::pin(self.record_transaction_step(
                             &transaction,
-                            first_statement,
-                            statement_count,
+                            planned_impact,
                             result,
-                            None,
                             None,
                         ))
                         .await?
@@ -1340,9 +1489,11 @@ impl SessionServiceImpl {
                 continue;
             }
 
-            let advanced = Box::pin(
-                self.execute_transaction_configuration_step(&transaction, first_statement),
-            )
+            let advanced = Box::pin(self.execute_transaction_configuration_step(
+                &transaction,
+                first_statement,
+                planned_step,
+            ))
             .await?;
             if matches!(advanced.state, TransactionState::Finished(_)) {
                 return Ok(advanced);
@@ -1564,12 +1715,13 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn record_transaction_step(
         &self,
         transaction: &ReplicatedTransaction,
-        first_statement: usize,
-        statement_count: usize,
+        mut impact: ExecutionStepImpactReport,
         result: CommandResult,
-        quiesce_level: Option<QuiesceLevel>,
         effect: Option<TransactionStepEffect>,
     ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
+        let operations = impact.operations();
+        let first_statement = operations.first_index();
+        let statement_count = operations.operation_count().get();
         let next_statement = first_statement
             .checked_add(statement_count)
             .assured("a recorded commit step counts statements of the transaction it belongs to");
@@ -1583,13 +1735,7 @@ impl SessionServiceImpl {
             })
         };
         let effect = if result.success { effect } else { None };
-        let impact = Self::transaction_step_impact(
-            transaction,
-            first_statement,
-            statement_count,
-            quiesce_level,
-            effect.as_ref(),
-        );
+        *impact.actual_mut() = ActualExecutionStepImpact::applying();
         self.inner
             .consensus
             .advance_transaction_commit(TransactionCommitAdvance {
@@ -1608,170 +1754,32 @@ impl SessionServiceImpl {
             .map_err(|error| Report::new(TransactionCommitError::Proposal(error)))
     }
 
-    fn transaction_step_impact(
-        transaction: &ReplicatedTransaction,
-        first_statement: usize,
-        statement_count: usize,
-        quiesce_level: Option<QuiesceLevel>,
-        effect: Option<&TransactionStepEffect>,
-    ) -> ExecutionStepImpactReport {
-        let operations =
-            TransactionOperationRange::from_index_and_count(first_statement, statement_count)
-                .assured(
-                    "a transaction execution step contains queued statements in its addressable \
-                     range",
-                );
-        let attribution = ImpactAttribution::for_range(operations);
-        let statements = transaction
-            .statements
-            .get(first_statement..operations.end_index())
-            .assured("the recorded execution step is a range of this transaction's statements");
-        let contains_model_mutation = statements
-            .iter()
-            .any(|queued| queued.statement.is_model_mutation());
-        let needs_classified_pause = contains_model_mutation
-            || statements
-                .iter()
-                .any(|queued| matches!(queued.statement, Statement::AlterDomain(_)));
-        let pause = match quiesce_level {
-            Some(QuiesceLevel::Dynamic) => PauseRequirement::NoPause,
-            Some(QuiesceLevel::EntityPause) => PauseRequirement::Subgraph {
-                scope: QuiesceSubgraph::new(transaction.domain.clone(), [], []),
-            },
-            Some(QuiesceLevel::DomainPause) => PauseRequirement::Domain {
-                domain: transaction.domain.clone(),
-            },
-            None => PauseRequirement::NoPause,
-        };
-        let mut diagnostics = Vec::new();
-        if quiesce_level.is_none() && needs_classified_pause {
-            diagnostics.push(ImpactDiagnostic {
-                kind: ImpactDiagnosticKind::Planning,
-                operation: Some(operations.first()),
-                message: "the step failed before its pause scope was fully established".to_string(),
-            });
-        }
-        if let PauseRequirement::Subgraph { .. } = &pause {
-            diagnostics.push(ImpactDiagnostic {
-                kind: ImpactDiagnosticKind::Topology,
-                operation: Some(operations.first()),
-                message: "the execution result does not contain its subgraph and gate boundaries"
-                    .to_string(),
-            });
-        }
-        if contains_model_mutation {
-            diagnostics.push(ImpactDiagnostic {
-                kind: ImpactDiagnosticKind::Topology,
-                operation: Some(operations.first()),
-                message: "the execution result does not contain operation contributions and the \
-                          complete before/after topology"
-                    .to_string(),
-            });
-        }
-        let completeness = if diagnostics.is_empty() {
-            ImpactReportCompleteness::Complete
-        } else {
-            ImpactReportCompleteness::incomplete(diagnostics)
-                .assured("the incomplete step collected at least one diagnostic")
-        };
-
-        let lifecycle = statements
-            .iter()
-            .filter_map(|queued| match queued.statement {
-                Statement::StartDomain(_) => Some(DomainLifecycleImpact {
-                    domain: transaction.domain.clone(),
-                    action: DomainLifecycleAction::Start,
-                    attribution: attribution.clone(),
-                }),
-                Statement::StopDomain(_) => Some(DomainLifecycleImpact {
-                    domain: transaction.domain.clone(),
-                    action: DomainLifecycleAction::Stop,
-                    attribution: attribution.clone(),
-                }),
-                _ => None,
-            });
-        let lifecycle = CanonicalImpactSet::new(lifecycle);
-        let resources = statements.iter().filter_map(|queued| {
-            let Statement::CreateResource(create) = &queued.statement else {
-                return None;
-            };
-            Some(ResourceCatalogImpact {
-                resource: create.identifier.clone(),
-                action: ResourceCatalogAction::Create,
-                attribution: attribution.clone(),
-            })
-        });
-        let resource_catalog = CanonicalImpactSet::new(resources);
-        let ownership_moves = if let Some(
-            TransactionStepEffect::ReplaceDomainSchedule {
-                expected_schedule,
-                schedule,
-                ..
-            }
-            | TransactionStepEffect::PutDomainAndSchedule {
-                expected_schedule,
-                schedule,
-                ..
-            },
-        ) = effect
-        {
-            let ownership_moves =
-                planned_ownership_moves(expected_schedule.as_deref(), schedule.as_deref())
-                    .into_iter()
-                    .map(|moved| OwnershipMoveImpact {
-                        node: ImpactNodeCoverage::all_executions(moved.entity),
-                        source: moved.former_owner,
-                        destination: moved.destination,
-                        attribution: attribution.clone(),
-                    });
-            CanonicalImpactSet::new(ownership_moves)
-        } else {
-            CanonicalImpactSet::default()
-        };
-        let effects = ImpactEffects {
-            lifecycle,
-            ownership_moves,
-            resource_catalog,
-            ..ImpactEffects::default()
-        };
-
-        ExecutionStepImpactReport::new(
-            operations,
-            PlannedExecutionStepImpact {
-                completeness,
-                pause,
-                effects,
-            },
-            ActualExecutionStepImpact::applying(),
-        )
-    }
-
     async fn execute_transaction_configuration_step(
         &self,
         transaction: &ReplicatedTransaction,
         statement_index: usize,
+        planned_step: PlannedTransactionStep,
     ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
         let queued = transaction.statements.get(statement_index).verified(
             "the caller checked this index against the same statement list before dispatching the \
              step",
         );
+        let impact = planned_step.impact;
+        let planned_kind = planned_step.kind;
         let mut ownership_handoff = None;
-        let mut step_quiesce_level = None;
         let domain_id = &transaction.domain;
-        let _alter_guard = if let Statement::AlterDomain(_) = &queued.statement {
+        let _alter_guard = if let PlannedTransactionStepKind::AlterDomain { .. } = &planned_kind {
             let Some(guard) = self.inner.runtime.try_begin_domain_alter(domain_id) else {
                 return self
                     .record_transaction_step(
                         transaction,
-                        statement_index,
-                        1,
+                        impact,
                         command_error(
                             DomainAlterError::ConcurrentAlter {
                                 domain: domain_id.clone(),
                             }
                             .to_string(),
                         ),
-                        None,
                         None,
                     )
                     .await;
@@ -1780,79 +1788,33 @@ impl SessionServiceImpl {
         } else {
             None
         };
-        let (result, effect) = match &queued.statement {
-            Statement::AlterDomain(alter) => {
-                let Some(previous) = self.inner.consensus.current_domain(domain_id).await else {
-                    return self
-                        .record_transaction_step(
-                            transaction,
-                            statement_index,
-                            1,
-                            command_error(format!(
-                                "domain '{}' does not exist",
-                                domain_id.as_str()
-                            )),
-                            None,
-                            None,
-                        )
-                        .await;
-                };
-                if let DomainStatus::Paused = previous.status {
-                    (
-                        command_error(format!(
-                            "domain '{}' is paused by a model alteration",
-                            domain_id.as_str()
-                        )),
-                        None,
-                    )
-                } else if previous.config.placement == alter.policy {
-                    step_quiesce_level = Some(QuiesceLevel::Dynamic);
+        let (result, effect) = match planned_kind {
+            PlannedTransactionStepKind::AlterDomain { plan } => {
+                let placement = plan.next.config.placement;
+                let quiesce_level = impact.planned().pause.level();
+                let relocations = impact.planned().effects.ownership_moves.len();
+                if plan.previous.config.placement == placement {
                     (
                         command_ok(format!(
                             "domain '{}' placement is already {}; {}\nplanned relocations: 0",
                             domain_id.as_str(),
-                            alter.policy.as_ref(),
-                            quiesce_level_message(QuiesceLevel::Dynamic)
+                            placement.as_ref(),
+                            quiesce_level_message(quiesce_level)
                         )),
                         None,
                     )
                 } else {
-                    let graph = self.inner.registry.active_graph(domain_id);
-                    let expected_schedule = self
-                        .inner
-                        .consensus
-                        .current_schedule()
-                        .await
-                        .domain(domain_id)
-                        .cloned();
-                    let PreparedDomainSchedule {
-                        mut schedule,
-                        relocations,
-                    } = self
-                        .prepare_domain_schedule(domain_id, graph, alter.policy)
-                        .await
-                        .map_err(|reason| {
-                            Report::new(TransactionCommitError::PrepareSchedule {
-                                domain: domain_id.clone(),
-                                reason,
-                            })
-                        })?;
-                    let quiesce_level =
-                        if matches!(previous.status, DomainStatus::Running) && relocations > 0 {
-                            QuiesceLevel::EntityPause
-                        } else {
-                            QuiesceLevel::Dynamic
-                        };
-                    step_quiesce_level = Some(quiesce_level);
-                    let mut next = previous.clone();
-                    next.config.placement = alter.policy;
+                    let mut schedule = plan.schedule;
                     if let Some(schedule) = schedule.as_mut() {
-                        mark_complete_ownership_transitions(expected_schedule.as_ref(), schedule);
+                        mark_complete_ownership_transitions(
+                            plan.expected_schedule.as_ref(),
+                            schedule,
+                        );
                     }
                     let handoff = if relocations > 0 {
                         self.begin_planned_ownership_handoff(
                             domain_id,
-                            expected_schedule.as_ref(),
+                            plan.expected_schedule.as_ref(),
                             schedule.as_ref(),
                         )
                         .await
@@ -1867,13 +1829,13 @@ impl SessionServiceImpl {
                                     "set domain '{}' placement to {}; {}\nplanned relocations: \
                                      {relocations}",
                                     domain_id.as_str(),
-                                    alter.policy.as_ref(),
+                                    placement.as_ref(),
                                     quiesce_level_message(quiesce_level)
                                 )),
                                 Some(TransactionStepEffect::PutDomainAndSchedule {
-                                    expected_domain: Box::new(previous),
-                                    expected_schedule: expected_schedule.map(Box::new),
-                                    domain: Box::new(next),
+                                    expected_domain: Box::new(plan.previous),
+                                    expected_schedule: plan.expected_schedule.map(Box::new),
+                                    domain: Box::new(plan.next),
                                     schedule: schedule.map(Box::new),
                                 }),
                             )
@@ -1882,165 +1844,93 @@ impl SessionServiceImpl {
                     }
                 }
             }
-            Statement::CreateResource(create) => {
-                let resources = self.inner.consensus.current_resources().await;
-                if resources.is_declared(domain_id, &create.identifier) {
-                    if create.if_not_exists {
-                        (
-                            command_ok_already_existed(format!(
-                                "resource '{}' already exists",
-                                create.identifier.as_str()
-                            )),
-                            None,
-                        )
-                    } else {
-                        (
-                            command_error(format!(
-                                "resource '{}' already exists",
-                                create.identifier.as_str()
-                            )),
-                            None,
-                        )
-                    }
+            PlannedTransactionStepKind::CreateResource {
+                resource,
+                already_existed,
+            } => {
+                if already_existed {
+                    (
+                        command_ok_already_existed(format!(
+                            "resource '{}' already exists",
+                            resource.as_str()
+                        )),
+                        None,
+                    )
                 } else {
                     (
-                        command_ok(format!("created resource '{}'", create.identifier.as_str())),
+                        command_ok(format!("created resource '{}'", resource.as_str())),
                         Some(TransactionStepEffect::CreateResourceCatalog {
-                            identifier: create.identifier.clone(),
+                            identifier: resource,
                         }),
                     )
                 }
             }
-            Statement::StartDomain(start) => {
-                let Some(domain) = self.inner.consensus.current_domain(domain_id).await else {
-                    return self
-                        .record_transaction_step(
-                            transaction,
-                            statement_index,
-                            1,
-                            command_error(format!(
-                                "domain '{}' does not exist",
-                                domain_id.as_str()
-                            )),
-                            None,
-                            None,
-                        )
-                        .await;
+            PlannedTransactionStepKind::StartDomain { previous } => {
+                let Statement::StartDomain(start) = &queued.statement else {
+                    return Err(Report::new(TransactionCommitError::InvalidProgress {
+                        id: transaction.id.clone(),
+                    }));
                 };
-                if let DomainStatus::Running = domain.status {
-                    (
-                        command_error(format!(
-                            "domain '{}' is already running",
+                let authority = if previous.config.pace.is_paced() {
+                    match self.selected_domain_clock_authority(domain_id).await {
+                        Some(authority) => Ok(Some(authority)),
+                        None => Err(format!(
+                            "no live voter is available to own the clock for domain '{}'",
                             domain_id.as_str()
                         )),
-                        None,
-                    )
-                } else if let DomainStatus::Paused = domain.status {
-                    (
-                        command_error(format!(
-                            "domain '{}' is paused for a model alteration",
-                            domain_id.as_str()
-                        )),
-                        None,
-                    )
-                } else {
-                    let authority = if domain.config.pace.is_paced() {
-                        match self.selected_domain_clock_authority(domain_id).await {
-                            Some(authority) => Ok(Some(authority)),
-                            None => Err(format!(
-                                "no live voter is available to own the clock for domain '{}'",
-                                domain_id.as_str()
-                            )),
-                        }
-                    } else {
-                        Ok(None)
-                    };
-                    match authority {
-                        Ok(authority) => {
-                            match self
-                                .resolve_domain_start(domain_id, &domain, &start.start)
-                                .await
-                            {
-                                Ok(resolved_start) => (
-                                    command_ok(format!("starting domain '{}'", domain_id.as_str())),
-                                    Some(TransactionStepEffect::StartDomain {
-                                        domain_id: domain_id.clone(),
-                                        expected_start_version: domain.start_version,
-                                        start: resolved_start.concrete_start,
-                                        clock: domain
-                                            .config
-                                            .pace
-                                            .is_paced()
-                                            .then_some(resolved_start.clock),
-                                        authority,
-                                    }),
-                                ),
-                                Err(error) => (
-                                    command_error(format!(
-                                        "failed to construct domain clock start for '{}': {error}",
-                                        domain_id.as_str()
-                                    )),
-                                    None,
-                                ),
-                            }
-                        }
-                        Err(message) => (command_error(message), None),
                     }
-                }
-            }
-            Statement::StopDomain(_) => {
-                let Some(domain) = self.inner.consensus.current_domain(domain_id).await else {
-                    return self
-                        .record_transaction_step(
-                            transaction,
-                            statement_index,
-                            1,
-                            command_error(format!(
-                                "domain '{}' does not exist",
-                                domain_id.as_str()
-                            )),
-                            None,
-                            None,
-                        )
-                        .await;
-                };
-                if let DomainStatus::Stopped = domain.status {
-                    (
-                        command_error(format!(
-                            "domain '{}' is already stopped",
-                            domain_id.as_str()
-                        )),
-                        None,
-                    )
                 } else {
-                    (
-                        command_ok(format!("stopped domain '{}'", domain_id.as_str())),
-                        Some(TransactionStepEffect::StopDomain {
-                            domain_id: domain_id.clone(),
-                            expected_start_version: domain.start_version,
-                        }),
-                    )
+                    Ok(None)
+                };
+                match authority {
+                    Ok(authority) => {
+                        match self
+                            .resolve_domain_start(domain_id, &previous, &start.start)
+                            .await
+                        {
+                            Ok(resolved_start) => (
+                                command_ok(format!("starting domain '{}'", domain_id.as_str())),
+                                Some(TransactionStepEffect::StartDomain {
+                                    domain_id: domain_id.clone(),
+                                    expected_start_version: previous.start_version,
+                                    start: resolved_start.concrete_start,
+                                    clock: previous
+                                        .config
+                                        .pace
+                                        .is_paced()
+                                        .then_some(resolved_start.clock),
+                                    authority,
+                                }),
+                            ),
+                            Err(error) => (
+                                command_error(format!(
+                                    "failed to construct domain clock start for '{}': {error}",
+                                    domain_id.as_str()
+                                )),
+                                None,
+                            ),
+                        }
+                    }
+                    Err(message) => (command_error(message), None),
                 }
             }
-            _ => (
-                command_error(format!(
-                    "{} is not valid transaction content",
-                    transaction_statement_label(&queued.statement)
-                )),
-                None,
+            PlannedTransactionStepKind::StopDomain { previous } => (
+                command_ok(format!("stopped domain '{}'", domain_id.as_str())),
+                Some(TransactionStepEffect::StopDomain {
+                    domain_id: domain_id.clone(),
+                    expected_start_version: previous.start_version,
+                }),
             ),
+            PlannedTransactionStepKind::Models { .. } => {
+                return Err(Report::new(TransactionCommitError::InvalidProgress {
+                    id: transaction.id.clone(),
+                }));
+            }
         };
 
         let succeeded = result.success;
         let advanced = match self
-            .record_transaction_step(
-                transaction,
-                statement_index,
-                1,
-                result,
-                step_quiesce_level,
-                effect,
-            )
+            .record_transaction_step(transaction, impact, result, effect)
             .await
         {
             Ok(advanced) => advanced,
@@ -2269,9 +2159,10 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
     use nervix_models::{
         CreateRelay, CreateSchema, DomainName, ExecutionStepOutcome, ImpactReportCompleteness,
-        ModelName,
+        ModelName, TransactionOperationNumber,
     };
     use tokio::sync::mpsc;
 
@@ -2285,6 +2176,23 @@ mod tests {
         proto,
         proto::{CommandRequest, TransactionState as ApiTransactionState},
     };
+
+    #[test]
+    fn planning_error_message_includes_attached_validation_detail() {
+        let operation = TransactionOperationNumber::from_index(0)
+            .assured("the first test transaction operation is addressable");
+        let error =
+            error_stack::Report::new(super::TransactionPlanningError::ExternalModelValidation {
+                operation,
+            })
+            .attach("paced ingestor requires TIMESTAMP NOW".to_string());
+
+        assert_eq!(
+            super::transaction_planning_error_message(&error),
+            "transaction operation 1 failed external model validation: paced ingestor requires \
+             TIMESTAMP NOW"
+        );
+    }
 
     #[tokio::test]
     async fn process_command_commits_explicit_transaction_without_trailing_semicolon() {

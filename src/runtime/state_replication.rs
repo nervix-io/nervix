@@ -20,7 +20,6 @@ pub(crate) struct StateSyncAck {
     pub(crate) placement: RuntimeStatePlacement,
     pub(crate) lsm: u64,
 }
-
 mod handoff;
 mod preparation;
 mod published_branch_state;

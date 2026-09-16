@@ -62,10 +62,11 @@ configuration/lifecycle, and `CREATE RESOURCE`. Keep `CREATE DOMAIN`, `CREATE US
 statements, subscriptions, `USE`, resource uploads, and node administration outside the
 transaction. Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
 verification. Queue admission preflights each statement against the replicated prefix without
-applying effects; a queued model mutation reports its statement-local quiesce level, while
-`COMMIT` reports only the maximum level actually executed and does not repeat statement outputs.
-Correct a rejected statement and continue the same transaction. Do not imply that one undivided
-request can mix those phases.
+applying effects. Consecutive model mutations form one atomic run and report the run's effective
+base-to-final quiesce level at the current prefix; a lifecycle, domain, or resource statement ends
+that run, and a later run cannot repair it. `COMMIT` reports only the maximum level actually
+executed and does not repeat statement outputs. Correct a rejected statement and continue the same
+transaction. Do not imply that one undivided request can mix those phases.
 
 Treat a successful administrative command as a completed effect. After `UPLOAD RESOURCE`, model or
 lookup creation, `START`, `STOP`, placement changes, or `COMMIT` returns `OK`, issue the dependent
