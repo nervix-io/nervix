@@ -266,7 +266,7 @@ impl IcebergRejectedRecord {
         let record = self
             .batch
             .runtime_row(self.row, self.metadata.clone())
-            .map_err(|reason| (reason, self.acks.clone()))?;
+            .map_err(|reason| (reason.to_string(), self.acks.clone()))?;
         Ok((
             RelayMessage {
                 key: self.key.clone(),

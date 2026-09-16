@@ -2674,12 +2674,20 @@ impl NodeHandle {
 
     async fn ensure_database_unlocked(&self) -> io::Result<()> {
         let db_path = self.spec.db_path()?;
-        database_opens(db_path).await.map_err(|error| {
+        database_opens(db_path.clone()).await.map_err(|error| {
             io::Error::other(format!(
-                "node '{}' returned before releasing its database lock: {error}",
+                "node '{}' returned before releasing its node database lock: {error}",
                 self.spec.node_id
             ))
-        })
+        })?;
+        database_opens(db_path.join("consensus"))
+            .await
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "node '{}' returned before releasing its consensus database lock: {error}",
+                    self.spec.node_id
+                ))
+            })
     }
 
     async fn wait_until_ready(&mut self) -> io::Result<()> {

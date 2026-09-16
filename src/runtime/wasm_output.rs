@@ -438,7 +438,7 @@ impl WasmOutputValidator<'_> {
         let batch = RuntimeRecordBatch::from_record_batch(destination_schema, record_batch)
             .map_err(|reason| WasmOutputError::OutputBatchBuild {
                 output_relay: output_relay.clone(),
-                reason,
+                reason: reason.to_string(),
             })?;
         Ok(WasmMaterializedOutput {
             output_route_index,

@@ -196,9 +196,9 @@ impl CompiledCodec {
                             reason: error.to_string(),
                         })
                     }
-                    Err(reason) => Err(CodecError::ProtobufDecode {
+                    Err(error) => Err(CodecError::ProtobufDecode {
                         codec: self.name.as_str().to_string(),
-                        reason,
+                        reason: error.to_string(),
                     }),
                 };
                 UnfoldedPayload::unfold(self, program, std::iter::once(input))

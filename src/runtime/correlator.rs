@@ -226,14 +226,14 @@ impl CorrelatorMatchedBatch {
             .iter()
             .map(|(_, right)| &right.message.record)
             .collect::<Vec<_>>();
-        let left = RuntimeRecordBatch::from_rows(
-            left_rows[0].batch().schema(),
-            left_rows.iter().copied(),
-        )?;
+        let left =
+            RuntimeRecordBatch::from_rows(left_rows[0].batch().schema(), left_rows.iter().copied())
+                .map_err(|error| error.to_string())?;
         let right = RuntimeRecordBatch::from_rows(
             right_rows[0].batch().schema(),
             right_rows.iter().copied(),
-        )?;
+        )
+        .map_err(|error| error.to_string())?;
         let materialized_state = correlations
             .iter()
             .map(|(left, right)| CorrelatorMaterializedState {
@@ -319,7 +319,8 @@ impl CorrelatorMatchedBatch {
         })?;
         Ok(RelayMessage {
             key,
-            record: RuntimeRow::new(self.carrier.clone(), row, metadata)?,
+            record: RuntimeRow::new(self.carrier.clone(), row, metadata)
+                .map_err(|error| error.to_string())?,
             acks,
         })
     }
@@ -608,7 +609,7 @@ pub(super) fn correlator_input_batch(
         RecordBatch::try_new(schema.clone(), columns)
     }
     .map_err(|error| error.to_string())?;
-    RuntimeRecordBatch::from_record_batch(schema, batch)
+    RuntimeRecordBatch::from_record_batch(schema, batch).map_err(|error| error.to_string())
 }
 
 pub(super) fn correlator_output_metadata(
@@ -915,7 +916,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                                     structured_message_error(
                                         execution_now,
                                         MessageErrorCode::Internal,
-                                        error,
+                                        error.to_string(),
                                         MessageErrorOperation::Finalize,
                                         None,
                                         std::iter::empty(),
@@ -1286,7 +1287,8 @@ mod tests {
             right: Arc::new(HashMap::default()),
         }];
         let combined = correlator_input_batch(&left, &right, &[], &materialized_state)
-            .and_then(|batch| batch.runtime_row(0, RuntimeRecordMetadata::test()))
+            .expect("correlator inputs should form one Arrow batch")
+            .runtime_row(0, RuntimeRecordMetadata::test())
             .expect("correlator inputs should form one Arrow row");
 
         assert_eq!(row_value(&combined, "left.id"), Some(RuntimeValue::U32(1)));

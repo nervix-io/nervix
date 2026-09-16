@@ -146,7 +146,7 @@ pub(super) fn pending_output_batches_by_key(
                 output_index,
                 input_rows: rows.iter().map(|row| input_rows[*row]).collect(),
                 key,
-                batch: batch.take(&rows)?,
+                batch: batch.take(&rows).map_err(|error| error.to_string())?,
                 metadata: rows.iter().map(|row| metadata[*row].clone()).collect(),
             })
         })

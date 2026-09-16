@@ -242,9 +242,9 @@ impl CompiledSignalingProtocol {
                     .map(Message::Text)
                     .map_err(|error| error.to_string())
             }
-            CompiledSignalingWire::Protobuf { send, .. } => {
-                encode_protobuf_payload(send, &value).map(Message::Binary)
-            }
+            CompiledSignalingWire::Protobuf { send, .. } => encode_protobuf_payload(send, &value)
+                .map(Message::Binary)
+                .map_err(|error| error.to_string()),
         }
     }
 

@@ -14,7 +14,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
     io,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc as StdArc,
         atomic::{AtomicU64, Ordering},
@@ -1457,29 +1457,9 @@ impl Consensus {
         path: impl AsRef<Path>,
         settings: ConsensusSettings,
     ) -> Result<Self, ConsensusError> {
-        let path = path.as_ref().to_path_buf();
-        let reservation = settings
-            .executor
-            .reserve(nervix_execution::MemoryClass::Management, 4096)
+        let db = Self::open_database(path.as_ref().to_path_buf(), &settings.executor)
             .await
-            .map_err(|error| ConsensusError::Storage(io::Error::other(error)))?;
-        let db = settings
-            .executor
-            .run_storage(
-                nervix_execution::StorageClass::Consensus,
-                reservation,
-                move |_, _| Database::builder(path).open(),
-            )
-            .await
-            .map_err(|error| ConsensusError::Storage(io::Error::other(error)))?
-            .map_err(|error| ConsensusError::Storage(io::Error::other(error)))?;
-        Self::from_database(db, settings).await
-    }
-
-    pub async fn from_database(
-        db: Database,
-        settings: ConsensusSettings,
-    ) -> Result<Self, ConsensusError> {
+            .map_err(ConsensusError::Storage)?;
         let store = FjallStore::from_database(db, settings.executor.clone())
             .await
             .map_err(ConsensusError::Storage)?;
@@ -1489,11 +1469,14 @@ impl Consensus {
     }
 
     #[cfg(feature = "testing")]
-    pub async fn from_database_with_test_probe(
-        db: Database,
+    pub async fn open_with_test_probe(
+        path: impl AsRef<Path>,
         settings: ConsensusSettings,
         test_probe: ConsensusTestProbe,
     ) -> Result<Self, Report<ConsensusError>> {
+        let db = Self::open_database(path.as_ref().to_path_buf(), &settings.executor)
+            .await
+            .map_err(ConsensusError::Storage)?;
         let store = FjallStore::from_database_with_storage_fault(
             db,
             settings.executor.clone(),
@@ -1502,6 +1485,24 @@ impl Consensus {
         .await
         .map_err(ConsensusError::Storage)?;
         Self::from_store(store, settings, test_probe).await
+    }
+
+    async fn open_database(
+        path: PathBuf,
+        executor: &nervix_execution::Executor,
+    ) -> io::Result<Database> {
+        let reservation = executor
+            .reserve(nervix_execution::MemoryClass::Management, 4096)
+            .await
+            .map_err(io::Error::other)?;
+        executor
+            .run_storage(
+                nervix_execution::StorageClass::Consensus,
+                reservation,
+                move |_, _| Database::builder(path).open().map_err(io::Error::other),
+            )
+            .await
+            .map_err(io::Error::other)?
     }
 
     async fn from_store<Recorder>(

@@ -276,7 +276,8 @@ impl PendingIngestGroup {
         let batch = self
             .records
             .ok_or_else(|| "ingest group closed without opening its record builder".to_string())?
-            .finish()?;
+            .finish()
+            .map_err(|error| error.to_string())?;
         if batch.batch().num_rows() != row_count {
             return Err(format!(
                 "ingest group has {row_count} records and {} decoded rows",
@@ -322,7 +323,7 @@ impl IngestGroupRows {
                 self.record_metadata.len()
             )
         })?;
-        RuntimeRow::new(self.batch.clone(), row, metadata)
+        RuntimeRow::new(self.batch.clone(), row, metadata).map_err(|error| error.to_string())
     }
 
     /// Keeps only the rows selected by `keep`, moving records, metadata and acks
@@ -331,7 +332,11 @@ impl IngestGroupRows {
         let selected = |row: usize| keep.get(row).copied().unwrap_or(false);
         let predicate = BooleanArray::from_iter((0..self.len()).map(|row| Some(selected(row))));
         Ok(Self {
-            batch: Arc::new(self.batch.filter(&predicate)?),
+            batch: Arc::new(
+                self.batch
+                    .filter(&predicate)
+                    .map_err(|error| error.to_string())?,
+            ),
             record_metadata: self
                 .record_metadata
                 .into_iter()
@@ -677,7 +682,7 @@ impl BranchedEntrypointBatch {
         let filtered_batch = self
             .batch
             .filter(&predicate)
-            .map_err(|error| (error, self.acks.clone()))?;
+            .map_err(|error| (error.to_string(), self.acks.clone()))?;
         let mut metadata = Vec::with_capacity(selected_rows.len());
         let mut acks = Vec::with_capacity(selected_rows.len());
         for row in selected_rows {
@@ -1095,7 +1100,9 @@ impl Runtime {
                     .map(|(_, record)| record.one_row_batch())
                     .collect::<Vec<_>>();
                 let batch_refs = batches.iter().collect::<Vec<_>>();
-                rows.batch = Arc::new(RuntimeRecordBatch::concat(&batch_refs)?);
+                rows.batch = Arc::new(
+                    RuntimeRecordBatch::concat(&batch_refs).map_err(|error| error.to_string())?,
+                );
             }
         }
         if rows.is_empty() {
@@ -1222,8 +1229,12 @@ impl Runtime {
                         .iter()
                         .map(|(_, batch)| batch)
                         .collect::<Vec<_>>();
-                    let output_batch = RuntimeRecordBatch::concat(&output_batches)?;
-                    let input_batch = rows.batch.take(&input_rows)?;
+                    let output_batch = RuntimeRecordBatch::concat(&output_batches)
+                        .map_err(|error| error.to_string())?;
+                    let input_batch = rows
+                        .batch
+                        .take(&input_rows)
+                        .map_err(|error| error.to_string())?;
                     let input_keys = vec![None; input_rows.len()];
                     let side_inputs = self
                         .load_materialized_side_inputs(

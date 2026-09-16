@@ -29,7 +29,9 @@ nervix-server \
   Once the user exists, remove the flag from normal startup.
 
 Every flag has a `NERVIX_*` environment variable twin, such as `NERVIX_NODE_ID`. Control-plane
-state is persisted under `./.nervix-db` by default; use `--db-path` to relocate it.
+state is persisted under `./.nervix-db` by default; use `--db-path` to relocate it. The directory
+contains the node database for registry and runtime state and a separate `consensus` database whose
+journal carries only Raft state.
 
 The server exposes:
 

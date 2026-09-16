@@ -36,6 +36,10 @@ Consensus acknowledges votes, appended log entries, and applied administrative w
 synchronizing both data and filesystem metadata. The storage device and filesystem must honor
 these synchronization requests. This uses Fjall's
 [full synchronization contract](https://docs.rs/fjall/latest/fjall/enum.PersistMode.html#variant.SyncAll).
+Consensus has a dedicated Fjall database and journal under `<db-path>/consensus`; the registry and
+runtime-state keyspaces remain in the node database at `<db-path>`. A consensus synchronization
+therefore neither flushes data-plane writes nor waits behind their journal writes, and journal
+rotation and its memtable flushes stay isolated between those databases.
 Durable log entries, votes, state-machine records, snapshot manifests, and snapshot sections use
 Nervix-owned `rkyv` shapes. Recovery validates each archive before converting it into OpenRaft or
 semantic state.

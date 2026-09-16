@@ -86,6 +86,7 @@ impl RelayRecordBatch {
             ));
         }
         RuntimeRow::new(self.batch.clone(), row, self.metadata[row].clone())
+            .map_err(|error| error.to_string())
     }
 
     pub(super) fn single(
@@ -123,7 +124,8 @@ impl RelayRecordBatch {
         {
             return Err("stream message row schema does not match relay schema".to_string());
         }
-        let batch = RuntimeRecordBatch::shared_from_rows(schema.arrow_schema(), &records)?;
+        let batch = RuntimeRecordBatch::shared_from_rows(schema.arrow_schema(), &records)
+            .map_err(|error| error.to_string())?;
         Ok(Self {
             key,
             keys,
@@ -239,7 +241,7 @@ impl RelayRecordBatch {
         } = self;
         let batch = match batch.take(rows) {
             Ok(batch) => batch,
-            Err(error) => return Err((error, acks)),
+            Err(error) => return Err((error.to_string(), acks)),
         };
         fn select<T>(values: Vec<T>, rows: &[usize]) -> Vec<T> {
             let mut selected = Vec::with_capacity(rows.len());
@@ -329,7 +331,9 @@ impl RelayRecordBatch {
             Ok(batch) => batch,
             Err(reason) => {
                 return Err(Box::new(RelayRecordBatchReorderFailure {
-                    error: RelayRecordBatchReorderError::Arrow { reason },
+                    error: RelayRecordBatchReorderError::Arrow {
+                        reason: reason.to_string(),
+                    },
                     batch: self,
                 }));
             }
@@ -388,7 +392,7 @@ impl RelayRecordBatch {
             .collect::<Result<Vec<_>, _>>()
         {
             Ok(rows) => rows,
-            Err(error) => return Err(Box::new((error, self))),
+            Err(error) => return Err(Box::new((error.to_string(), self))),
         };
         let Self { keys, acks, .. } = self;
         let mut messages = Vec::with_capacity(row_count);
@@ -428,7 +432,7 @@ impl RelayRecordBatch {
                 .collect::<Vec<_>>();
             match RuntimeRecordBatch::concat(&runtime_batches) {
                 Ok(batch) => batch,
-                Err(error) => return Err(Box::new((error, batches))),
+                Err(error) => return Err(Box::new((error.to_string(), batches))),
             }
         };
 
@@ -623,7 +627,7 @@ pub(super) fn build_stream_record_batch_preserving_acks(
     }
     let batch = match RuntimeRecordBatch::shared_from_rows(schema.arrow_schema(), &records) {
         Ok(batch) => batch,
-        Err(error) => return Err((error, acks)),
+        Err(error) => return Err((error.to_string(), acks)),
     };
     let keys = vec![key.clone(); records.len()];
     Ok(RelayRecordBatch {
@@ -741,12 +745,12 @@ mod tests {
 
         assert!(StdArc::ptr_eq(&input_column, batch.batch.batch().column(0)));
         assert_eq!(
-            batch.batch.value(0, "value"),
-            Ok(Some(RuntimeValue::I64(10)))
+            batch.batch.value(0, "value").expect("readable value"),
+            Some(RuntimeValue::I64(10))
         );
         assert_eq!(
-            batch.batch.value(2, "value"),
-            Ok(Some(RuntimeValue::I64(30)))
+            batch.batch.value(2, "value").expect("readable value"),
+            Some(RuntimeValue::I64(30))
         );
     }
 
@@ -775,12 +779,12 @@ mod tests {
         let sparse = batch.take(&[0, 2]).expect("sparse take");
         assert_eq!(sparse.message_count(), 2);
         assert_eq!(
-            sparse.batch.value(0, "value"),
-            Ok(Some(RuntimeValue::I64(10)))
+            sparse.batch.value(0, "value").expect("readable value"),
+            Some(RuntimeValue::I64(10))
         );
         assert_eq!(
-            sparse.batch.value(1, "value"),
-            Ok(Some(RuntimeValue::I64(30)))
+            sparse.batch.value(1, "value").expect("readable value"),
+            Some(RuntimeValue::I64(30))
         );
     }
 
