@@ -733,6 +733,7 @@ impl SessionServiceImpl {
             let is_noop = planned.is_noop();
             let mut cluster_entity_gate = None;
             let mut ownership_handoff = None;
+            // Ordered plans and direct model commits share this schedule publication boundary.
             #[cfg(feature = "testing")]
             if !is_noop
                 && self
