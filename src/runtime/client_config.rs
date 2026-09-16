@@ -373,4 +373,31 @@ mod tests {
             .contains("missing Prometheus client config key 'addr'")
         );
     }
+
+    #[test]
+    fn client_config_reports_template_and_tls_identity_shape_errors() {
+        let template = render_client_config_template(
+            &TemplateEngine::new(),
+            "password",
+            "{{",
+            &serde_json::json!({}),
+        )
+        .expect_err("an incomplete template must fail compilation");
+        assert!(matches!(
+            template.current_context(),
+            ClientConfigError::CompileTemplate { key } if key == "password"
+        ));
+
+        let tls = ClientTlsPaths {
+            ca_file: None,
+            cert_file: Some(PathBuf::from("client.pem")),
+            key_file: None,
+        };
+        let identity = client_identity_pem(&tls)
+            .expect_err("a TLS identity requires both certificate and key files");
+        assert!(matches!(
+            identity.current_context(),
+            ClientConfigError::IncompleteTlsIdentity
+        ));
+    }
 }

@@ -1597,3 +1597,96 @@ impl KafkaIngestor {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unavailable_consumer() -> StreamConsumer {
+        let consumer: StreamConsumer = ClientConfig::new()
+            .set("bootstrap.servers", "127.0.0.1:1")
+            .set("group.id", "nervix-kafka-typed-error-test")
+            .set("socket.timeout.ms", "10")
+            .set("enable.auto.commit", "false")
+            .create()
+            .expect("an unavailable broker still permits local consumer construction");
+        consumer
+            .subscribe(&["events"])
+            .expect("the test topic subscription should be valid");
+        consumer
+    }
+
+    #[tokio::test]
+    async fn kafka_control_operations_preserve_typed_failure_context() {
+        let consumer = unavailable_consumer();
+
+        let metadata = KafkaIngestor::topic_partitions(&consumer, "events")
+            .expect_err("metadata lookup against an unavailable broker must fail");
+        assert!(matches!(
+            metadata.current_context(),
+            KafkaIngestorError::FetchMetadata { .. }
+        ));
+
+        let timestamps = KafkaIngestor::offsets_for_partitions_by_timestamp(
+            &consumer,
+            "events",
+            [0],
+            Timestamp::from_unix_nanos(0),
+        )
+        .expect_err("timestamp lookup against an unavailable broker must fail");
+        assert!(matches!(
+            timestamps.current_context(),
+            KafkaIngestorError::ResolveTimestampOffsets { .. }
+        ));
+
+        let watermark = KafkaIngestor::normalized_resume_offset(&consumer, "events", 0, 10)
+            .expect_err("watermark lookup against an unavailable broker must fail");
+        assert!(matches!(
+            watermark.current_context(),
+            KafkaIngestorError::FetchWatermarks { .. }
+        ));
+
+        let stored = [(
+            KafkaTopicPartition {
+                topic: "events".to_string(),
+                partition: 0,
+            },
+            Offset::Stored,
+        )]
+        .into_iter()
+        .collect();
+        let unsupported =
+            KafkaIngestor::concrete_next_offsets_from_assignment(&consumer, "events", &stored)
+                .expect_err("stored offsets are not concrete domain offsets");
+        assert!(matches!(
+            unsupported.current_context(),
+            KafkaIngestorError::UnsupportedDomainOffset { .. }
+        ));
+
+        for offset in [Offset::Beginning, Offset::End] {
+            let offsets = [(
+                KafkaTopicPartition {
+                    topic: "events".to_string(),
+                    partition: 0,
+                },
+                offset,
+            )]
+            .into_iter()
+            .collect();
+            let error =
+                KafkaIngestor::concrete_next_offsets_from_assignment(&consumer, "events", &offsets)
+                    .expect_err("concrete boundary offsets require broker watermarks");
+            assert!(matches!(
+                error.current_context(),
+                KafkaIngestorError::FetchWatermarks { .. }
+            ));
+        }
+
+        let seek = KafkaIngestor::seek_offset(&consumer, "events", 0, 10)
+            .expect_err("an unassigned consumer cannot seek");
+        assert!(matches!(
+            seek.current_context(),
+            KafkaIngestorError::Seek { .. }
+        ));
+    }
+}

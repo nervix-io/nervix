@@ -505,6 +505,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use nervix_models::Timestamp;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
 
@@ -566,5 +567,121 @@ mod tests {
             url.as_str(),
             "http://prometheus:9090/base/api/v1/query?query=vector%281%29"
         );
+    }
+
+    async fn query_response(
+        status: &str,
+        body: &str,
+    ) -> Result<Vec<PrometheusVectorResult>, Report<PrometheusIngestorError>> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test Prometheus listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test Prometheus listener should have an address");
+        let status = status.to_string();
+        let body = body.to_string();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("test Prometheus listener should accept");
+            let mut request = [0_u8; 2048];
+            let _ = stream
+                .read(&mut request)
+                .await
+                .expect("test Prometheus request should be readable");
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: \
+                 {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("test Prometheus response should be writable");
+        });
+        let result = PrometheusIngestor::query_vector(
+            &HttpClient::new(),
+            &format!("http://{address}"),
+            "up",
+            None,
+        )
+        .await;
+        server
+            .await
+            .expect("test Prometheus response task should finish");
+        result
+    }
+
+    #[tokio::test]
+    async fn prometheus_query_failures_have_distinct_typed_contexts() {
+        let unavailable =
+            PrometheusIngestor::query_vector(&HttpClient::new(), "http://127.0.0.1:1", "up", None)
+                .await
+                .expect_err("an unavailable endpoint must fail the request");
+        assert!(matches!(
+            unavailable.current_context(),
+            PrometheusIngestorError::QueryRequest
+        ));
+
+        let status = query_response("503 Service Unavailable", "{}")
+            .await
+            .expect_err("a non-success status must fail");
+        assert!(matches!(
+            status.current_context(),
+            PrometheusIngestorError::QueryStatus { .. }
+        ));
+
+        let decode = query_response("200 OK", "not-json")
+            .await
+            .expect_err("a malformed response must fail decoding");
+        assert!(matches!(
+            decode.current_context(),
+            PrometheusIngestorError::DecodeResponse
+        ));
+
+        let rejected = query_response(
+            "200 OK",
+            r#"{"status":"error","data":{"resultType":"vector","result":[]}}"#,
+        )
+        .await
+        .expect_err("an unsuccessful Prometheus payload must fail");
+        assert!(matches!(
+            rejected.current_context(),
+            PrometheusIngestorError::QueryRejected { .. }
+        ));
+
+        let result_type = query_response(
+            "200 OK",
+            r#"{"status":"success","data":{"resultType":"matrix","result":[]}}"#,
+        )
+        .await
+        .expect_err("a non-vector Prometheus payload must fail");
+        assert!(matches!(
+            result_type.current_context(),
+            PrometheusIngestorError::UnsupportedResultType { .. }
+        ));
+    }
+
+    #[test]
+    fn prometheus_helpers_classify_parse_failures() {
+        let address = PrometheusIngestor::query_url("not a URL", Vec::new())
+            .expect_err("an invalid address must fail");
+        assert!(matches!(
+            address.current_context(),
+            PrometheusIngestorError::InvalidAddress
+        ));
+
+        let sample = PrometheusVectorResult {
+            metric: BTreeMap::new(),
+            value: (1.0, "not-a-number".to_string()),
+        };
+        let value = PrometheusIngestor::sample_payload(&sample)
+            .expect_err("an invalid sample value must fail");
+        assert!(matches!(
+            value.current_context(),
+            PrometheusIngestorError::InvalidSampleValue
+        ));
     }
 }

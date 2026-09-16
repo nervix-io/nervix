@@ -647,6 +647,84 @@ mod tests {
         .expect("the metering value codec should compile")
     }
 
+    #[test]
+    fn metadata_shape_failures_keep_their_typed_context() {
+        let mut kafka_builders = IngestMetadataBuilders::new(IngestMetadataKind::Kafka, 1);
+        let mismatch = kafka_builders
+            .append(&IngestMetadataRow::Headers {
+                headers: &NoIngestHeaders,
+            })
+            .expect_err("a header row cannot be appended to Kafka metadata builders");
+        assert!(matches!(
+            mismatch.current_context(),
+            IngestMetadataError::BuilderKindMismatch {
+                builders: IngestMetadataKind::Kafka,
+                row: IngestMetadataKind::Headers,
+            }
+        ));
+
+        kafka_builders.rows = 1;
+        let integration = kafka_builders
+            .finish()
+            .expect_err("declared rows without integration values must fail");
+        assert!(matches!(
+            integration.current_context(),
+            IngestMetadataError::BuildIntegrationColumns
+        ));
+
+        let mut header_builders = IngestMetadataBuilders::new(IngestMetadataKind::Headers, 1);
+        header_builders
+            .append(&IngestMetadataRow::Headers {
+                headers: &NoIngestHeaders,
+            })
+            .expect("the matching metadata row should append");
+        header_builders.rows = 2;
+        let headers = header_builders
+            .finish()
+            .expect_err("header and integration row counts must agree");
+        assert!(matches!(
+            headers.current_context(),
+            IngestMetadataError::HeaderRowCountMismatch {
+                integration_rows: 2,
+                header_name_rows: 1,
+                header_value_rows: 1,
+            }
+        ));
+
+        let mut builders = IngestMetadataBuilders::new(IngestMetadataKind::Headers, 1);
+        builders
+            .append(&IngestMetadataRow::Headers {
+                headers: &NoIngestHeaders,
+            })
+            .expect("the matching metadata row should append");
+        let metadata = builders.finish().expect("valid metadata should finish");
+        let array: ArrayRef = StdArc::new(StringArray::from(vec!["value"]));
+        let out_of_bounds = IngestFilterMapMetadata {
+            columns: metadata.columns.clone(),
+            rows: Arc::new(vec![1]),
+        }
+        .selected_array(&array)
+        .expect_err("a projection cannot address a missing physical row");
+        assert!(matches!(
+            out_of_bounds.current_context(),
+            IngestMetadataError::RowOutOfBounds {
+                row: 1,
+                column_rows: 1,
+            }
+        ));
+
+        let selection = metadata
+            .select(&[])
+            .expect_err("selection and metadata row counts must agree");
+        assert!(matches!(
+            selection.current_context(),
+            IngestMetadataError::SelectionRowCountMismatch {
+                selection_rows: 0,
+                metadata_rows: 1,
+            }
+        ));
+    }
+
     #[tokio::test]
     async fn ingest_group_builds_one_metadata_column_set_for_all_of_its_messages() {
         let topic = "metering_events";

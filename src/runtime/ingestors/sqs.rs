@@ -456,22 +456,33 @@ impl SqsIngestor {
             .send()
             .await
             .map_err(|source| {
-                if source
+                let missing = source
                     .as_service_error()
-                    .is_some_and(|error| error.is_queue_does_not_exist())
-                {
-                    return Report::new(SqsIngestorError::MissingQueue {
-                        queue: queue.to_string(),
-                    })
-                    .attach_printable(source.to_string());
-                }
-                Report::new(SqsIngestorError::ResolveQueue {
-                    queue: queue.to_string(),
-                })
-                .attach_printable(source.to_string())
+                    .is_some_and(|error| error.is_queue_does_not_exist());
+                Self::queue_lookup_error(queue, missing, source.to_string())
             })?
             .queue_url()
             .map(ToOwned::to_owned);
+        Self::require_queue_url(queue, queue_url)
+    }
+
+    fn queue_lookup_error(queue: &str, missing: bool, reason: String) -> Report<SqsIngestorError> {
+        let report = if missing {
+            Report::new(SqsIngestorError::MissingQueue {
+                queue: queue.to_string(),
+            })
+        } else {
+            Report::new(SqsIngestorError::ResolveQueue {
+                queue: queue.to_string(),
+            })
+        };
+        report.attach_printable(reason)
+    }
+
+    fn require_queue_url(
+        queue: &str,
+        queue_url: Option<String>,
+    ) -> Result<String, Report<SqsIngestorError>> {
         match queue_url {
             Some(queue_url) => Ok(queue_url),
             None => Err(Report::new(SqsIngestorError::MissingQueueUrl {
@@ -501,5 +512,50 @@ impl SqsIngestor {
             );
         }
         Cow::Borrowed("")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqs_queue_lookup_failures_are_distinct_and_keep_their_source_message() {
+        let missing = SqsIngestor::queue_lookup_error(
+            "missing-queue",
+            true,
+            "service reported a missing queue".to_string(),
+        );
+        assert!(matches!(
+            missing.current_context(),
+            SqsIngestorError::MissingQueue { queue } if queue == "missing-queue"
+        ));
+        assert_eq!(
+            sqs_ingestor_error_message(&missing),
+            "service reported a missing queue"
+        );
+
+        let connection =
+            SqsIngestor::queue_lookup_error("orders", false, "connection refused".to_string());
+        assert!(matches!(
+            connection.current_context(),
+            SqsIngestorError::ResolveQueue { queue } if queue == "orders"
+        ));
+        assert_eq!(
+            sqs_ingestor_error_message(&connection),
+            "connection refused"
+        );
+
+        assert_eq!(
+            SqsIngestor::require_queue_url("orders", Some("queue-url".to_string()))
+                .expect("a returned queue URL should be accepted"),
+            "queue-url"
+        );
+        let no_url = SqsIngestor::require_queue_url("orders", None)
+            .expect_err("a successful response without a queue URL must fail");
+        assert!(matches!(
+            no_url.current_context(),
+            SqsIngestorError::MissingQueueUrl { queue } if queue == "orders"
+        ));
     }
 }

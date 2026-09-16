@@ -136,6 +136,13 @@ impl<'a> RustlsClientConfigSource<'a> {
 mod tests {
     use super::*;
 
+    fn entry(key: &str, value: &std::path::Path) -> nervix_models::ClientConfigEntry {
+        nervix_models::ClientConfigEntry {
+            key: key.to_string(),
+            value: value.to_string_lossy().into_owned(),
+        }
+    }
+
     #[test]
     fn default_root_store_includes_public_webpki_roots() {
         let roots = RustlsClientConfigSource::root_store_with_default_roots();
@@ -148,5 +155,69 @@ mod tests {
         RustlsClientConfigSource::new(&entries)
             .build_with_default_roots()
             .expect("default-root TLS config should build");
+    }
+
+    #[test]
+    fn rustls_client_config_classifies_invalid_certificate_material() {
+        let root = tempfile::tempdir().expect("temporary TLS directory should open");
+        let malformed_certificate = root.path().join("malformed-certificate.pem");
+        std::fs::write(
+            &malformed_certificate,
+            b"-----BEGIN CERTIFICATE-----\n!!!\n-----END CERTIFICATE-----\n",
+        )
+        .expect("the malformed certificate fixture should be writable");
+        let malformed_ca = [entry("tls_ca_file", &malformed_certificate)];
+        let error = RustlsClientConfigSource::new(&malformed_ca)
+            .build()
+            .expect_err("malformed CA PEM must fail parsing");
+        assert!(matches!(
+            error.current_context(),
+            TlsClientConfigError::ParseCaCertificate { .. }
+        ));
+
+        let invalid_certificate = root.path().join("invalid-certificate.pem");
+        std::fs::write(
+            &invalid_certificate,
+            b"-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n",
+        )
+        .expect("the invalid certificate fixture should be writable");
+        let invalid_ca = [entry("tls_ca_file", &invalid_certificate)];
+        let error = RustlsClientConfigSource::new(&invalid_ca)
+            .build()
+            .expect_err("invalid CA DER must fail trust-store insertion");
+        assert!(matches!(
+            error.current_context(),
+            TlsClientConfigError::AddCaCertificate { .. }
+        ));
+
+        let empty_certificate = root.path().join("empty-certificate.pem");
+        let invalid_key = root.path().join("invalid-key.pem");
+        std::fs::write(&empty_certificate, b"")
+            .expect("the empty certificate fixture should be writable");
+        std::fs::write(&invalid_key, b"not a private key")
+            .expect("the invalid key fixture should be writable");
+        let identity = [
+            entry("tls_cert_file", &empty_certificate),
+            entry("tls_key_file", &invalid_key),
+        ];
+        let error = RustlsClientConfigSource::new(&identity)
+            .build()
+            .expect_err("invalid private-key PEM must fail parsing");
+        assert!(matches!(
+            error.current_context(),
+            TlsClientConfigError::ParseClientKey
+        ));
+
+        let malformed_identity = [
+            entry("tls_cert_file", &malformed_certificate),
+            entry("tls_key_file", &invalid_key),
+        ];
+        let error = RustlsClientConfigSource::new(&malformed_identity)
+            .build()
+            .expect_err("malformed client certificate PEM must fail parsing");
+        assert!(matches!(
+            error.current_context(),
+            TlsClientConfigError::ParseClientCertificate
+        ));
     }
 }

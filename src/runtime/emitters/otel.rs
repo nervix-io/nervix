@@ -2192,6 +2192,98 @@ mod tests {
     }
 
     #[test]
+    fn typed_otel_value_errors_classify_invalid_exact_types_and_ranges() {
+        let null_resource_array =
+            nervix_models::Expression::Array(vec![nervix_models::Expression::Literal(
+                ModelLiteral::Null,
+            )]);
+        let error = OtelEmitter::literal_any_value(&null_resource_array)
+            .expect_err("resource arrays cannot contain nulls");
+        assert!(matches!(
+            error.current_context(),
+            OtelValueError::NullResourceArrayElement
+        ));
+
+        let dynamic_resource =
+            nervix_models::Expression::Field(nervix_models::FieldReference::bare(named("dynamic")));
+        let error = OtelEmitter::literal_any_value(&dynamic_resource)
+            .expect_err("resource expressions must be literal");
+        assert!(matches!(
+            error.current_context(),
+            OtelValueError::InvalidResourceExpression
+        ));
+
+        let unsigned: ArrayRef = StdArc::new(UInt64Array::from(vec![u64::MAX]));
+        let error = integer_as_i64(&unsigned, 0)
+            .expect_err("the OTLP signed integer range must be enforced");
+        assert!(matches!(
+            error.current_context(),
+            OtelValueError::SignedIntegerRange
+        ));
+
+        let negative_i8: ArrayRef = StdArc::new(Int8Array::from(vec![-1]));
+        let negative_i16: ArrayRef = StdArc::new(Int16Array::from(vec![-1]));
+        let negative_i32: ArrayRef = StdArc::new(Int32Array::from(vec![-1]));
+        let negative_i64: ArrayRef = StdArc::new(Int64Array::from(vec![-1]));
+        for array in [&negative_i8, &negative_i16, &negative_i32, &negative_i64] {
+            let error = integer_as_u64(array, 0)
+                .expect_err("negative integers cannot become OTLP unsigned values");
+            assert!(matches!(
+                error.current_context(),
+                OtelValueError::NegativeUnsigned
+            ));
+        }
+
+        let boolean: ArrayRef = StdArc::new(BooleanArray::from(vec![true]));
+        for error in [
+            integer_as_i64(&boolean, 0).expect_err("a boolean is not an integer"),
+            integer_as_u64(&boolean, 0).expect_err("a boolean is not an unsigned integer"),
+        ] {
+            assert!(matches!(
+                error.current_context(),
+                OtelValueError::ExpectedInteger { .. }
+            ));
+        }
+        let numeric = numeric_as_f64(&boolean, 0).expect_err("a boolean is not numeric");
+        assert!(matches!(
+            numeric.current_context(),
+            OtelValueError::ExpectedNumeric { .. }
+        ));
+        let metric = number_value_at(&boolean, 0).expect_err("a boolean is not a metric number");
+        assert!(matches!(
+            metric.current_context(),
+            OtelValueError::ExpectedMetricNumeric { .. }
+        ));
+        let list = list_value(&boolean, 0).expect_err("a boolean is not a list");
+        assert!(matches!(
+            list.current_context(),
+            OtelValueError::ExpectedList { .. }
+        ));
+
+        let nullable_list: ArrayRef = StdArc::new(ListArray::from_iter_primitive::<
+            arrow_array::types::Int64Type,
+            _,
+            _,
+        >([Some(vec![None])]));
+        let null_element = any_value_at(&nullable_list, 0)
+            .expect_err("OTLP attribute arrays cannot contain null elements");
+        assert!(matches!(
+            null_element.current_context(),
+            OtelValueError::NullAttributeArrayElement
+        ));
+
+        let binary: ArrayRef = StdArc::new(arrow_array::BinaryArray::from(vec![Some(
+            b"opaque".as_slice(),
+        )]));
+        let unsupported =
+            any_value_at(&binary, 0).expect_err("binary values are not an OTLP attribute type");
+        assert!(matches!(
+            unsupported.current_context(),
+            OtelValueError::UnsupportedAttributeType { .. }
+        ));
+    }
+
+    #[test]
     fn classifies_otlp_statuses_and_extracts_http_retry_after() {
         assert!(matches!(
             OtelTransport::grpc_failure(GrpcStatus::invalid_argument("bad record")),

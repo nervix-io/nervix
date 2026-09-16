@@ -644,6 +644,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn signaling_frame_error_message_prefers_printable_source_detail() {
+        let source = Report::new(SignalingFrameEncodeError::Native { format: "JSON" })
+            .attach_printable("invalid frame value");
+        assert_eq!(
+            signaling_frame_encode_error_message(&source),
+            "invalid frame value"
+        );
+
+        let context = Report::new(SignalingFrameEncodeError::Text { format: "RAW" });
+        assert_eq!(
+            signaling_frame_encode_error_message(&context),
+            "failed to encode RAW signaling frame as UTF-8 text"
+        );
+
+        let opaque = Report::new(SignalingFrameEncodeError::Protobuf {
+            message: "events.Envelope".to_string(),
+        })
+        .attach(17_u64);
+        assert_eq!(
+            signaling_frame_encode_error_message(&opaque),
+            "failed to encode signaling frame as protobuf message 'events.Envelope'"
+        );
+    }
+
     /// A send step followed by a wait step, the ordinary shape of a one-exchange handshake.
     fn steps(sends: &[&str], matchers: &[&str]) -> Vec<SignalingStep> {
         vec![

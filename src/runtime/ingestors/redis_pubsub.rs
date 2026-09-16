@@ -440,3 +440,60 @@ impl RedisPubSubIngestor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use nervix_models::ClientConfigEntry;
+
+    use super::*;
+
+    fn entry(key: &str, value: impl Into<String>) -> ClientConfigEntry {
+        ClientConfigEntry {
+            key: key.to_string(),
+            value: value.into(),
+        }
+    }
+
+    #[test]
+    fn redis_client_reports_typed_url_and_tls_configuration_errors() {
+        let invalid = RedisPubSubIngestor::client_from_config("not a URL", &[])
+            .expect_err("an invalid Redis URL must fail");
+        assert!(matches!(
+            invalid.current_context(),
+            RedisPubSubIngestorError::ClientConfig
+        ));
+
+        let incomplete = [entry("tls_cert_file", "client.pem")];
+        let error = RedisPubSubIngestor::client_from_config("rediss://localhost:6379", &incomplete)
+            .expect_err("a Redis TLS certificate requires a private key");
+        assert!(matches!(
+            error.current_context(),
+            RedisPubSubIngestorError::IncompleteTlsIdentity
+        ));
+
+        let root = tempfile::tempdir().expect("temporary Redis TLS directory should open");
+        let certificate = root.path().join("certificate.pem");
+        let key = root.path().join("key.pem");
+        std::fs::write(&certificate, b"invalid certificate")
+            .expect("the Redis certificate fixture should be writable");
+        std::fs::write(&key, b"invalid private key")
+            .expect("the Redis key fixture should be writable");
+        let tls = [
+            entry("tls_cert_file", certificate.to_string_lossy().into_owned()),
+            entry("tls_key_file", key.to_string_lossy().into_owned()),
+        ];
+        let error = RedisPubSubIngestor::client_from_config("rediss://localhost:6379", &tls)
+            .expect_err("invalid Redis TLS material must fail client construction");
+        assert!(matches!(
+            error.current_context(),
+            RedisPubSubIngestorError::BuildClient
+        ));
+
+        let error = RedisPubSubIngestor::client_from_config("redis://[", &[])
+            .expect_err("a malformed Redis client URL must fail construction");
+        assert!(matches!(
+            error.current_context(),
+            RedisPubSubIngestorError::ClientConfig | RedisPubSubIngestorError::BuildClient
+        ));
+    }
+}

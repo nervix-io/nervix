@@ -1532,4 +1532,70 @@ mod tests {
             Duration::from_secs(10)
         );
     }
+
+    #[test]
+    fn mqtt_client_reports_typed_address_and_tls_configuration_errors() {
+        let invalid_address = [ClientConfigEntry {
+            key: "addr".to_string(),
+            value: "not a URL".to_string(),
+        }];
+        let error = match MqttIngestor::client_from_config_for_test(&invalid_address, "client") {
+            Ok(_) => panic!("an invalid MQTT address must fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.current_context(),
+            MqttIngestorError::InvalidAddress
+        ));
+
+        let missing_ca = [ClientConfigEntry {
+            key: "addr".to_string(),
+            value: "mqtts://localhost:8883".to_string(),
+        }];
+        let error = match MqttIngestor::client_from_config_for_test(&missing_ca, "client") {
+            Ok(_) => panic!("MQTTS requires an explicit CA file"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.current_context(),
+            MqttIngestorError::MissingTlsCa
+        ));
+
+        let root = tempfile::tempdir().expect("temporary MQTT TLS directory should open");
+        let ca = root.path().join("ca.pem");
+        let cert = root.path().join("client.pem");
+        std::fs::write(&ca, b"test CA").expect("the MQTT CA fixture should be writable");
+        std::fs::write(&cert, b"test certificate")
+            .expect("the MQTT certificate fixture should be writable");
+        let incomplete_identity = [
+            ClientConfigEntry {
+                key: "addr".to_string(),
+                value: "mqtts://localhost:8883".to_string(),
+            },
+            ClientConfigEntry {
+                key: "tls_ca_file".to_string(),
+                value: ca.to_string_lossy().into_owned(),
+            },
+            ClientConfigEntry {
+                key: "tls_cert_file".to_string(),
+                value: cert.to_string_lossy().into_owned(),
+            },
+        ];
+        let error = match MqttIngestor::client_from_config_for_test(&incomplete_identity, "client")
+        {
+            Ok(_) => panic!("a client certificate without a key must fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.current_context(),
+            MqttIngestorError::IncompleteTlsIdentity
+        ));
+
+        let error = MqttIngestor::client_id_template(&[], "fallback", nonzero!(2u64))
+            .expect_err("multiple MQTT instances require a client ID template");
+        assert!(matches!(
+            error.current_context(),
+            MqttIngestorError::MissingClientIdTemplate { .. }
+        ));
+    }
 }

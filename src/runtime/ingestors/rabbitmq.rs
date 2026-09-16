@@ -556,3 +556,46 @@ impl RabbitMqIngestor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use nervix_models::ClientConfigEntry;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn rabbitmq_connection_failures_keep_typed_context() {
+        let unavailable = [ClientConfigEntry {
+            key: "addr".to_string(),
+            value: "amqp://127.0.0.1:1/%2f".to_string(),
+        }];
+        let error = RabbitMqIngestor::connection_from_config(&unavailable)
+            .await
+            .expect_err("an unavailable RabbitMQ broker must fail connection");
+        assert!(matches!(
+            error.current_context(),
+            RabbitMqIngestorError::Connect
+        ));
+
+        let root = tempfile::tempdir().expect("temporary RabbitMQ TLS directory should open");
+        let ca = root.path().join("ca.pem");
+        std::fs::write(&ca, [0xff]).expect("the non-UTF-8 RabbitMQ CA fixture should be writable");
+        let invalid_ca = [
+            ClientConfigEntry {
+                key: "addr".to_string(),
+                value: "amqps://127.0.0.1:1/%2f".to_string(),
+            },
+            ClientConfigEntry {
+                key: "tls_ca_file".to_string(),
+                value: ca.to_string_lossy().into_owned(),
+            },
+        ];
+        let error = RabbitMqIngestor::connection_from_config(&invalid_ca)
+            .await
+            .expect_err("a non-UTF-8 RabbitMQ CA must fail parsing");
+        assert!(matches!(
+            error.current_context(),
+            RabbitMqIngestorError::ParseCaCertificate
+        ));
+    }
+}

@@ -239,20 +239,32 @@ impl SqsEmitter {
             .send()
             .await
             .map_err(|source| {
-                if source
+                let missing = source
                     .as_service_error()
-                    .is_some_and(|error| error.is_queue_does_not_exist())
-                {
-                    return Report::new(EmitterRuntimeError::MissingExternalEntity {
-                        kind: "SQS queue",
-                        name: queue.to_string(),
-                    })
-                    .attach_printable(source.to_string());
-                }
-                emitter_init_error(source)
+                    .is_some_and(|error| error.is_queue_does_not_exist());
+                Self::queue_lookup_error(queue, missing, source.to_string())
             })?
             .queue_url()
             .map(ToOwned::to_owned);
+        Self::require_queue_url(queue, queue_url)
+    }
+
+    fn queue_lookup_error(
+        queue: &str,
+        missing: bool,
+        reason: String,
+    ) -> Report<EmitterRuntimeError> {
+        if missing {
+            return Report::new(EmitterRuntimeError::MissingExternalEntity {
+                kind: "SQS queue",
+                name: queue.to_string(),
+            })
+            .attach_printable(reason);
+        }
+        emitter_init_error(reason)
+    }
+
+    fn require_queue_url(queue: &str, queue_url: Option<String>) -> EmitterRuntimeResult<String> {
         match queue_url {
             Some(queue_url) => Ok(queue_url),
             None => Err(emitter_init_error(format!(
@@ -655,6 +667,106 @@ mod tests {
                 bytes: SQS_MAX_REQUEST_BYTES + 1,
                 maximum: SQS_MAX_REQUEST_BYTES,
             }
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_sqs_body_and_attribute_shapes_with_typed_errors() {
+        let position = BrokerRecordPosition {
+            batch_index: 0,
+            row_index: 0,
+        };
+        let build = |payload, headers| {
+            PreparedSqsRecord::new(position, payload, headers, Ok(None), AckSet::empty())
+        };
+
+        let body =
+            build(vec![0], Vec::new()).expect_err("SQS must reject a forbidden body character");
+        assert_eq!(
+            body.current_context(),
+            &SqsRecordError::ForbiddenBodyCharacter
+        );
+
+        let too_many = (0..11)
+            .map(|index| (format!("attribute_{index}"), "value".to_string()))
+            .collect();
+        let count =
+            build(vec![b'x'], too_many).expect_err("SQS must reject more than ten attributes");
+        assert_eq!(
+            count.current_context(),
+            &SqsRecordError::AttributeCount {
+                count: 11,
+                maximum: 10,
+            }
+        );
+
+        let empty = build(vec![b'x'], vec![(String::new(), "value".to_string())])
+            .expect_err("SQS attribute names cannot be empty");
+        assert_eq!(
+            empty.current_context(),
+            &SqsRecordError::AttributeNameLength
+        );
+
+        let reserved = build(
+            vec![b'x'],
+            vec![("AWS.trace".to_string(), "value".to_string())],
+        )
+        .expect_err("SQS attribute names cannot use reserved prefixes");
+        assert!(matches!(
+            reserved.current_context(),
+            SqsRecordError::ReservedAttributePrefix { .. }
+        ));
+
+        let name = build(
+            vec![b'x'],
+            vec![("bad..name".to_string(), "value".to_string())],
+        )
+        .expect_err("SQS attribute names cannot contain repeated dots");
+        assert!(matches!(
+            name.current_context(),
+            SqsRecordError::InvalidAttributeName { .. }
+        ));
+
+        let value = build(vec![b'x'], vec![("valid".to_string(), "\0".to_string())])
+            .expect_err("SQS attribute values cannot contain forbidden characters");
+        assert!(matches!(
+            value.current_context(),
+            SqsRecordError::ForbiddenAttributeCharacter { .. }
+        ));
+    }
+
+    #[test]
+    fn sqs_queue_lookup_distinguishes_missing_entities_from_connection_failures() {
+        let missing = SqsEmitter::queue_lookup_error(
+            "missing-queue",
+            true,
+            "service reported a missing queue".to_string(),
+        );
+        assert!(matches!(
+            missing.current_context(),
+            EmitterRuntimeError::MissingExternalEntity {
+                kind: "SQS queue",
+                name,
+            } if name == "missing-queue"
+        ));
+
+        let connection =
+            SqsEmitter::queue_lookup_error("orders", false, "connection refused".to_string());
+        assert_eq!(
+            connection.current_context(),
+            &EmitterRuntimeError::InitializeSink
+        );
+
+        assert_eq!(
+            SqsEmitter::require_queue_url("orders", Some("queue-url".to_string()))
+                .expect("a returned queue URL should be accepted"),
+            "queue-url"
+        );
+        let no_url = SqsEmitter::require_queue_url("orders", None)
+            .expect_err("a successful response without a queue URL must fail");
+        assert_eq!(
+            no_url.current_context(),
+            &EmitterRuntimeError::InitializeSink
         );
     }
 

@@ -121,4 +121,47 @@ mod tests {
         .expect_err("invalid prometheus timeout");
         assert!(err.to_string().contains("Prometheus timeout_ms"));
     }
+
+    #[test]
+    fn http_client_classifies_invalid_tls_material() {
+        let root = tempfile::tempdir().expect("temporary TLS directory should open");
+        let invalid = root.path().join("invalid.pem");
+        std::fs::write(
+            &invalid,
+            b"-----BEGIN CERTIFICATE-----\n!!!\n-----END CERTIFICATE-----\n",
+        )
+        .expect("the invalid TLS fixture should be writable");
+        let invalid = invalid.to_string_lossy().into_owned();
+
+        let ca_entries = [ClientConfigEntry {
+            key: "tls_ca_file".to_string(),
+            value: invalid.clone(),
+        }];
+        let ca = HttpClientConfig::new(&ca_entries, "HTTP")
+            .build()
+            .expect_err("an invalid CA certificate must fail");
+        assert!(matches!(
+            ca.current_context(),
+            HttpClientConfigError::ParseCaCertificate { label: "HTTP" }
+                | HttpClientConfigError::Build { label: "HTTP" }
+        ));
+
+        let identity_entries = [
+            ClientConfigEntry {
+                key: "tls_cert_file".to_string(),
+                value: invalid.clone(),
+            },
+            ClientConfigEntry {
+                key: "tls_key_file".to_string(),
+                value: invalid,
+            },
+        ];
+        let identity = HttpClientConfig::new(&identity_entries, "HTTP")
+            .build()
+            .expect_err("an invalid client identity must fail");
+        assert!(matches!(
+            identity.current_context(),
+            HttpClientConfigError::ParseClientIdentity { label: "HTTP" }
+        ));
+    }
 }

@@ -5201,6 +5201,82 @@ mod tests {
         );
     }
 
+    #[test]
+    fn publish_batch_rejects_misaligned_groups_and_row_updates() {
+        let groups =
+            match EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100))
+                .with_sqs_message_groups(Vec::new())
+            {
+                Ok(_) => panic!("SQS groups must stay aligned with source rows"),
+                Err(error) => error,
+            };
+        assert_eq!(
+            *groups.current_context(),
+            EmitterRuntimeError::SqsGroupCountMismatch {
+                group_count: 0,
+                row_count: 1,
+            }
+        );
+
+        let mut delivered =
+            EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100));
+        let error = delivered
+            .mark_delivered(1)
+            .expect_err("delivery cannot address a missing row");
+        assert_eq!(
+            *error.current_context(),
+            EmitterRuntimeError::DeliveryRowOutOfBounds {
+                row: 1,
+                row_count: 1,
+            }
+        );
+
+        delivered.batch.acks.clear();
+        let error = delivered
+            .mark_delivered(0)
+            .expect_err("delivery requires the row's acknowledgement set");
+        assert_eq!(
+            *error.current_context(),
+            EmitterRuntimeError::AcknowledgementRowOutOfBounds {
+                row: 0,
+                row_count: 0,
+            }
+        );
+
+        let mut rejected =
+            EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100));
+        let error = rejected
+            .mark_rejected(1)
+            .expect_err("rejection cannot address a missing row");
+        assert_eq!(
+            *error.current_context(),
+            EmitterRuntimeError::RejectionRowOutOfBounds {
+                row: 1,
+                row_count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn emitter_config_adapters_preserve_typed_context() {
+        let missing = emitter_read_tls_file(
+            &PathBuf::from("/definitely/missing/nervix-emitter-ca.pem"),
+            "TLS CA certificate",
+        )
+        .expect_err("a missing TLS file must fail");
+        assert_eq!(
+            missing.current_context(),
+            &EmitterRuntimeError::InvalidSinkConfig
+        );
+
+        let invalid_url = emitter_service_url_has_scheme("not a URL", "test addr", "https")
+            .expect_err("an invalid service URL must fail");
+        assert_eq!(
+            invalid_url.current_context(),
+            &EmitterRuntimeError::InvalidSinkConfig
+        );
+    }
+
     #[tokio::test]
     async fn publish_batch_ack_helpers_preserve_and_complete_all_roots() {
         let (acks, completion) = AckSet::root();
