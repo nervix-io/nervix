@@ -42,12 +42,12 @@ fn register_counting_handler(transport: &Transport) {
             let stream = futures_util::stream::unfold(
                 (opening.start, items),
                 |(start, mut items)| async move {
-                    let item = match items.next().await {
-                        Ok(Some(item)) => item,
+                    let charged = match items.next().await {
+                        Ok(Some(charged)) => charged,
                         Ok(None) => return None,
                         Err(error) => return Some((Err(error), (start, items))),
                     };
-                    let answered = item.value.checked_add(start)?;
+                    let answered = charged.item.value.checked_add(start)?;
                     Some((Ok(CountingAnswer { value: answered }), (start, items)))
                 },
             );
@@ -230,6 +230,82 @@ impl InterconnectDuplexRequest for AppendLikeStream {
     const CLASS: PoolClass = PoolClass::Replication;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Append;
     const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+}
+
+/// How many frames the holding handler is given before the test reads what its class is charged.
+const HELD_FRAMES: u64 = 4;
+
+/// A follower whose Raft core is behind holds decoded batches instead of answering them, because
+/// it answers a batch only once it has appended it durably. The charge for each decoded frame has
+/// to stay with the frame for exactly that long: released at the decode boundary it would leave
+/// the node holding batches no budget can see, and no backpressure would ever reach the leader.
+#[tokio::test]
+async fn frames_a_handler_holds_stay_charged_to_its_class_until_it_drops_them() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_b,
+        executor_b,
+        ..
+    } = connected_transports().await;
+    let (held_tx, mut held_rx) = mpsc::unbounded_channel();
+    transport_b
+        .register_duplex_handler::<AppendLikeStream, _, _>(move |_context, _opening, items| {
+            let held = held_tx.clone();
+            async move {
+                // Decode every frame and hold it, answering none, as a follower does while its
+                // core has not caught up with what the leader has already sent.
+                tokio::spawn(async move {
+                    let mut items = items;
+                    while let Ok(Some(charged)) = items.next().await {
+                        if held.send(charged).is_err() {
+                            break;
+                        }
+                    }
+                });
+                Ok(DuplexResponses::new(futures_util::stream::pending()))
+            }
+        })
+        .assured("the fresh test transport has no append handler with this name");
+
+    let (mut sender, _receiver) = transport_a
+        .open_duplex_stream(&node_b, AppendLikeStream)
+        .await
+        .expect("the append-like stream should open");
+    let idle = executor_b.snapshot().commands_memory.reserved_bytes;
+
+    for value in 0..HELD_FRAMES {
+        sender
+            .send(CountingItem { value })
+            .await
+            .expect("the responder keeps accepting frames while it holds the earlier ones");
+    }
+    let mut held = Vec::new();
+    for _ in 0..HELD_FRAMES {
+        let charged = timeout(Duration::from_secs(10), held_rx.recv())
+            .await
+            .expect("every frame should be decoded before the test deadline")
+            .expect("the holding handler should still be running");
+        held.push(charged);
+    }
+
+    let charged = executor_b.snapshot().commands_memory.reserved_bytes;
+    assert!(
+        charged > idle,
+        "frames the handler still holds must stay charged to its class: it held {idle} bytes \
+         before they arrived and {charged} while holding {HELD_FRAMES} of them"
+    );
+
+    drop(held);
+    let released = executor_b.snapshot().commands_memory.reserved_bytes;
+    assert!(
+        released < charged,
+        "dropping the decoded frames must return their charge: the class held {charged} bytes \
+         while they were held and {released} after they were dropped"
+    );
+
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
 }
 
 #[tokio::test]
