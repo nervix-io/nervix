@@ -75,7 +75,8 @@ impl ProcessorMaterializedState<'_> {
                         dependencies,
                         context.execution_now,
                     )
-                    .await?
+                    .await
+                    .map_err(|error| error.to_string())?
                 {
                     MaterializedDependencyResolution::Ready(values) => Ok(values),
                     MaterializedDependencyResolution::Skip => Err(format!(
