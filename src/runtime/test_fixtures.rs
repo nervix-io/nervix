@@ -67,7 +67,8 @@ pub(super) fn vm_input_from_test_rows(
         .iter()
         .map(RuntimeRow::one_row_batch)
         .collect::<Vec<_>>();
-    let carrier = RuntimeRecordBatch::concat(&batches.iter().collect::<Vec<_>>())?;
+    let carrier = RuntimeRecordBatch::concat(&batches.iter().collect::<Vec<_>>())
+        .map_err(|error| error.to_string())?;
     let keys = vec![None; rows.len()];
     let side_inputs = HashMap::default();
     let lookup_columns = HashMap::default();

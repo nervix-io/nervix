@@ -11,10 +11,15 @@ use arrow_array::{
     builder::{StringBuilder, TimestampNanosecondBuilder, UInt8Builder},
 };
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, Utc};
+use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_models::{CreateCodec, ParseAsType};
 
-use super::{ArrowCodecRow, CodecError, CompiledCodec, CompiledSchema, RuntimeRecordBatchBuilder};
+use super::{
+    ArrowCodecRow, CodecError, CompiledCodec, CompiledSchema, RuntimeRecordBatchBuilder,
+    RuntimeSchemaError, RuntimeValueLocation, SyslogHeaderIssue, SyslogStructuredDataIssue,
+    arrow_data_type,
+};
 
 const DEFAULT_PRIORITY: u8 = 13;
 
@@ -132,7 +137,7 @@ pub(super) fn encode_row(row: &ArrowCodecRow<'_>, payload: &mut Vec<u8>) -> Resu
     let structured_data = optional_string(row, "structured_data")?;
     if let Some(structured_data) = structured_data {
         let consumed = structured_data_prefix(structured_data, true)
-            .map_err(|reason| encode_field_error(row, "structured_data", reason))?;
+            .map_err(|error| encode_field_error(row, "structured_data", error.to_string()))?;
         if consumed != structured_data.len() {
             return Err(encode_field_error(
                 row,
@@ -499,28 +504,53 @@ fn format_rfc5424_timestamp(value: &DateTime<FixedOffset>) -> String {
     formatted
 }
 
-fn validate_header_shape(value: &str, max_len: usize) -> Result<(), String> {
+fn validate_header_shape(
+    value: &str,
+    max_len: usize,
+) -> error_stack::Result<(), RuntimeSchemaError> {
     if value.is_empty() {
-        return Err("value is empty".to_string());
+        return Err(Report::new(RuntimeSchemaError::InvalidSyslogHeader {
+            position: 0,
+            issue: SyslogHeaderIssue::Empty,
+        }));
     }
     if value.len() > max_len {
-        return Err(format!(
-            "value exceeds the maximum length of {max_len} bytes"
-        ));
+        return Err(Report::new(RuntimeSchemaError::InvalidSyslogHeader {
+            position: max_len,
+            issue: SyslogHeaderIssue::TooLong {
+                length: value.len(),
+                maximum: max_len,
+            },
+        }));
     }
-    if value.bytes().any(|byte| !(b'!'..=b'~').contains(&byte)) {
-        return Err("value contains characters outside printable US-ASCII".to_string());
+    if let Some((position, _)) = value
+        .bytes()
+        .enumerate()
+        .find(|(_, byte)| !(b'!'..=b'~').contains(byte))
+    {
+        return Err(Report::new(RuntimeSchemaError::InvalidSyslogHeader {
+            position,
+            issue: SyslogHeaderIssue::NonPrintableAscii,
+        }));
     }
     Ok(())
 }
 
-fn structured_data_prefix(value: &str, strict_escapes: bool) -> Result<usize, String> {
+fn structured_data_prefix(
+    value: &str,
+    strict_escapes: bool,
+) -> error_stack::Result<usize, RuntimeSchemaError> {
     let bytes = value.as_bytes();
     if bytes.first() == Some(&b'-') {
         return Ok(1);
     }
     if bytes.first() != Some(&b'[') {
-        return Err("expected '-' or an SD element beginning with '['".to_string());
+        return Err(Report::new(
+            RuntimeSchemaError::InvalidSyslogStructuredData {
+                position: 0,
+                issue: SyslogStructuredDataIssue::MissingElement,
+            },
+        ));
     }
     let mut element_ids = HashSet::default();
     let mut cursor = 0;
@@ -532,16 +562,31 @@ fn structured_data_prefix(value: &str, strict_escapes: bool) -> Result<usize, St
             && *byte != b']'
         {
             if !valid_sd_name_byte(*byte) {
-                return Err("SD-ID contains an invalid character".to_string());
+                return Err(Report::new(
+                    RuntimeSchemaError::InvalidSyslogStructuredData {
+                        position: cursor,
+                        issue: SyslogStructuredDataIssue::InvalidElementIdCharacter,
+                    },
+                ));
             }
             cursor += 1;
         }
         let id_len = cursor - id_start;
         if id_len == 0 || id_len > 32 {
-            return Err(format!("SD-ID length {id_len} is outside 1..=32"));
+            return Err(Report::new(
+                RuntimeSchemaError::InvalidSyslogStructuredData {
+                    position: id_start,
+                    issue: SyslogStructuredDataIssue::ElementIdLength { length: id_len },
+                },
+            ));
         }
         if !element_ids.insert(&bytes[id_start..cursor]) {
-            return Err("STRUCTURED-DATA contains a duplicate SD-ID".to_string());
+            return Err(Report::new(
+                RuntimeSchemaError::InvalidSyslogStructuredData {
+                    position: id_start,
+                    issue: SyslogStructuredDataIssue::DuplicateElementId,
+                },
+            ));
         }
         let mut parameter_names = HashSet::default();
         loop {
@@ -551,27 +596,61 @@ fn structured_data_prefix(value: &str, strict_escapes: bool) -> Result<usize, St
                     break;
                 }
                 Some(b' ') => cursor += 1,
-                Some(_) => return Err("expected a space or ']' after SD-ID".to_string()),
-                None => return Err("unterminated SD element".to_string()),
+                Some(_) => {
+                    return Err(Report::new(
+                        RuntimeSchemaError::InvalidSyslogStructuredData {
+                            position: cursor,
+                            issue: SyslogStructuredDataIssue::ElementDelimiter,
+                        },
+                    ));
+                }
+                None => {
+                    return Err(Report::new(
+                        RuntimeSchemaError::InvalidSyslogStructuredData {
+                            position: cursor,
+                            issue: SyslogStructuredDataIssue::UnterminatedElement,
+                        },
+                    ));
+                }
             }
             let name_start = cursor;
             while let Some(byte) = bytes.get(cursor)
                 && *byte != b'='
             {
                 if !valid_sd_name_byte(*byte) {
-                    return Err("PARAM-NAME contains an invalid character".to_string());
+                    return Err(Report::new(
+                        RuntimeSchemaError::InvalidSyslogStructuredData {
+                            position: cursor,
+                            issue: SyslogStructuredDataIssue::InvalidParameterNameCharacter,
+                        },
+                    ));
                 }
                 cursor += 1;
             }
             let name_len = cursor - name_start;
             if name_len == 0 || name_len > 32 {
-                return Err(format!("PARAM-NAME length {name_len} is outside 1..=32"));
+                return Err(Report::new(
+                    RuntimeSchemaError::InvalidSyslogStructuredData {
+                        position: name_start,
+                        issue: SyslogStructuredDataIssue::ParameterNameLength { length: name_len },
+                    },
+                ));
             }
             if !parameter_names.insert(&bytes[name_start..cursor]) {
-                return Err("SD element contains a duplicate PARAM-NAME".to_string());
+                return Err(Report::new(
+                    RuntimeSchemaError::InvalidSyslogStructuredData {
+                        position: name_start,
+                        issue: SyslogStructuredDataIssue::DuplicateParameterName,
+                    },
+                ));
             }
             if bytes.get(cursor) != Some(&b'=') || bytes.get(cursor + 1) != Some(&b'"') {
-                return Err("SD parameter must use name=\"value\" shape".to_string());
+                return Err(Report::new(
+                    RuntimeSchemaError::InvalidSyslogStructuredData {
+                        position: cursor,
+                        issue: SyslogStructuredDataIssue::ParameterShape,
+                    },
+                ));
             }
             cursor += 2;
             loop {
@@ -582,10 +661,20 @@ fn structured_data_prefix(value: &str, strict_escapes: bool) -> Result<usize, St
                     }
                     Some(b'\\') => {
                         let Some(escaped) = bytes.get(cursor + 1) else {
-                            return Err("unterminated escape in PARAM-VALUE".to_string());
+                            return Err(Report::new(
+                                RuntimeSchemaError::InvalidSyslogStructuredData {
+                                    position: cursor,
+                                    issue: SyslogStructuredDataIssue::UnterminatedEscape,
+                                },
+                            ));
                         };
                         if strict_escapes && !matches!(escaped, b'"' | b'\\' | b']') {
-                            return Err("PARAM-VALUE contains an invalid escape".to_string());
+                            return Err(Report::new(
+                                RuntimeSchemaError::InvalidSyslogStructuredData {
+                                    position: cursor + 1,
+                                    issue: SyslogStructuredDataIssue::InvalidEscape,
+                                },
+                            ));
                         }
                         cursor += if matches!(escaped, b'"' | b'\\' | b']') {
                             2
@@ -594,14 +683,31 @@ fn structured_data_prefix(value: &str, strict_escapes: bool) -> Result<usize, St
                         };
                     }
                     Some(b']') => {
-                        return Err("unescaped ']' in PARAM-VALUE".to_string());
+                        return Err(Report::new(
+                            RuntimeSchemaError::InvalidSyslogStructuredData {
+                                position: cursor,
+                                issue: SyslogStructuredDataIssue::UnescapedClosingBracket,
+                            },
+                        ));
                     }
                     Some(_) => cursor += 1,
-                    None => return Err("unterminated PARAM-VALUE".to_string()),
+                    None => {
+                        return Err(Report::new(
+                            RuntimeSchemaError::InvalidSyslogStructuredData {
+                                position: cursor,
+                                issue: SyslogStructuredDataIssue::UnterminatedParameterValue,
+                            },
+                        ));
+                    }
                 }
             }
             if !matches!(bytes.get(cursor), Some(b' ') | Some(b']')) {
-                return Err("expected a space or ']' after PARAM-VALUE".to_string());
+                return Err(Report::new(
+                    RuntimeSchemaError::InvalidSyslogStructuredData {
+                        position: cursor,
+                        issue: SyslogStructuredDataIssue::ParameterDelimiter,
+                    },
+                ));
             }
         }
     }
@@ -629,19 +735,25 @@ fn append_row(
             "msg_id" => append_string(builder, index, parsed.msg_id),
             "structured_data" => append_string(builder, index, parsed.structured_data),
             "message" => append_string(builder, index, Some(parsed.message)),
-            unknown => Err(format!("unsupported SYSLOG schema field '{unknown}'")),
+            unknown => Err(Report::new(RuntimeSchemaError::UnsupportedSyslogField {
+                field: unknown.to_string(),
+            })),
         }
-        .map_err(|reason| decode_error(codec, reason))?;
+        .map_err(|error| decode_error(codec, error.to_string()))?;
     }
     Ok(())
 }
 
-fn prepare_append(builder: &mut RuntimeRecordBatchBuilder, index: usize) -> Result<(), String> {
+fn prepare_append(
+    builder: &mut RuntimeRecordBatchBuilder,
+    index: usize,
+) -> error_stack::Result<(), RuntimeSchemaError> {
     let next = builder.next_field_index()?;
     if next != index {
-        return Err(format!(
-            "SYSLOG Arrow builder expected column {next}, received {index}"
-        ));
+        return Err(Report::new(RuntimeSchemaError::SyslogBuilderColumnOrder {
+            expected: next,
+            found: index,
+        }));
     }
     Ok(())
 }
@@ -650,17 +762,24 @@ fn append_u8(
     builder: &mut RuntimeRecordBatchBuilder,
     index: usize,
     value: u8,
-) -> Result<(), String> {
+) -> error_stack::Result<(), RuntimeSchemaError> {
     prepare_append(builder, index)?;
+    let field = builder.fields[index].name.clone();
+    let expected = arrow_data_type(&builder.fields[index].ty);
+    if !builder.builders[index].as_any().is::<UInt8Builder>() {
+        return Err(Report::new(RuntimeSchemaError::ExactTypeMismatch {
+            location: RuntimeValueLocation::CodecField {
+                field,
+                elements: Vec::new(),
+            },
+            expected,
+            found: builder.builders[index].finish_cloned().data_type().clone(),
+        }));
+    }
     builder.builders[index]
         .as_any_mut()
         .downcast_mut::<UInt8Builder>()
-        .ok_or_else(|| {
-            format!(
-                "SYSLOG field '{}' is not a U8 column",
-                builder.fields[index].name
-            )
-        })?
+        .verified("the SYSLOG U8 builder's concrete type was checked immediately above")
         .append_value(value);
     builder.next_column += 1;
     Ok(())
@@ -670,17 +789,24 @@ fn append_string(
     builder: &mut RuntimeRecordBatchBuilder,
     index: usize,
     value: Option<&str>,
-) -> Result<(), String> {
+) -> error_stack::Result<(), RuntimeSchemaError> {
     prepare_append(builder, index)?;
+    let field = builder.fields[index].name.clone();
+    let expected = arrow_data_type(&builder.fields[index].ty);
+    if !builder.builders[index].as_any().is::<StringBuilder>() {
+        return Err(Report::new(RuntimeSchemaError::ExactTypeMismatch {
+            location: RuntimeValueLocation::CodecField {
+                field,
+                elements: Vec::new(),
+            },
+            expected,
+            found: builder.builders[index].finish_cloned().data_type().clone(),
+        }));
+    }
     builder.builders[index]
         .as_any_mut()
         .downcast_mut::<StringBuilder>()
-        .ok_or_else(|| {
-            format!(
-                "SYSLOG field '{}' is not a STRING column",
-                builder.fields[index].name
-            )
-        })?
+        .verified("the SYSLOG STRING builder's concrete type was checked immediately above")
         .append_option(value);
     builder.next_column += 1;
     Ok(())
@@ -690,24 +816,34 @@ fn append_datetime(
     builder: &mut RuntimeRecordBatchBuilder,
     index: usize,
     value: Option<&DateTime<FixedOffset>>,
-) -> Result<(), String> {
+) -> error_stack::Result<(), RuntimeSchemaError> {
     prepare_append(builder, index)?;
     let value = value
         .map(|value| {
             value
                 .timestamp_nanos_opt()
-                .ok_or_else(|| "SYSLOG timestamp is outside nanosecond range".to_string())
+                .ok_or_else(|| Report::new(RuntimeSchemaError::SyslogTimestampOutOfRange))
         })
         .transpose()?;
+    let field = builder.fields[index].name.clone();
+    let expected = arrow_data_type(&builder.fields[index].ty);
+    if !builder.builders[index]
+        .as_any()
+        .is::<TimestampNanosecondBuilder>()
+    {
+        return Err(Report::new(RuntimeSchemaError::ExactTypeMismatch {
+            location: RuntimeValueLocation::CodecField {
+                field,
+                elements: Vec::new(),
+            },
+            expected,
+            found: builder.builders[index].finish_cloned().data_type().clone(),
+        }));
+    }
     builder.builders[index]
         .as_any_mut()
         .downcast_mut::<TimestampNanosecondBuilder>()
-        .ok_or_else(|| {
-            format!(
-                "SYSLOG field '{}' is not a DATETIME column",
-                builder.fields[index].name
-            )
-        })?
+        .verified("the SYSLOG DATETIME builder's concrete type was checked immediately above")
         .append_option(value);
     builder.next_column += 1;
     Ok(())
@@ -803,7 +939,40 @@ fn header_value<'a>(
     let value = optional_string(row, name)?;
     if let Some(value) = value {
         validate_header_shape(value, max_len)
-            .map_err(|reason| encode_field_error(row, name, reason))?;
+            .map_err(|error| encode_field_error(row, name, error.to_string()))?;
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_header_reports_the_offending_byte_and_typed_reason() {
+        let error = validate_header_shape("host name", 255)
+            .expect_err("a space is not valid in an RFC 5424 header value");
+
+        assert!(matches!(
+            error.current_context(),
+            RuntimeSchemaError::InvalidSyslogHeader {
+                position: 4,
+                issue: SyslogHeaderIssue::NonPrintableAscii,
+            }
+        ));
+    }
+
+    #[test]
+    fn invalid_structured_data_reports_the_offending_byte_and_typed_reason() {
+        let error = structured_data_prefix("[bad=id]", true)
+            .expect_err("an equals sign is not valid in an SD-ID");
+
+        assert!(matches!(
+            error.current_context(),
+            RuntimeSchemaError::InvalidSyslogStructuredData {
+                position: 4,
+                issue: SyslogStructuredDataIssue::InvalidElementIdCharacter,
+            }
+        ));
+    }
 }

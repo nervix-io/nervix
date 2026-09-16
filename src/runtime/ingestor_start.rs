@@ -513,11 +513,14 @@ impl Runtime {
             row_lines.extend(std::iter::repeat_n(line_number, messages));
         }
 
-        let batch = builder.finish()?;
+        let batch = builder.finish().map_err(|error| error.to_string())?;
         let mut entries = HashMap::new();
         for (row, line_number) in row_lines.into_iter().enumerate() {
             tokio::task::consume_budget().await;
-            let Some(value) = batch.value(row, lookup.key_field.as_str())? else {
+            let Some(value) = batch
+                .value(row, lookup.key_field.as_str())
+                .map_err(|error| error.to_string())?
+            else {
                 return Err(format!(
                     "lookup '{}' line {} is missing key field '{}'",
                     lookup.name.as_str(),
