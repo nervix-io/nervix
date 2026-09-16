@@ -350,7 +350,7 @@ impl Runtime {
                     .await
                     .map_err(|reason| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
-                        reason,
+                        reason: format!("{reason:#}"),
                     })?;
                 }
                 _ => {}
@@ -922,7 +922,7 @@ impl Runtime {
                 .await
                 .map_err(|reason| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
-                    reason,
+                    reason: format!("{reason:#}"),
                 })?;
             let entity = NodeRef {
                 kind: node_spec.spec.kind,

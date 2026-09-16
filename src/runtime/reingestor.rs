@@ -384,7 +384,7 @@ impl Runtime {
             )
             .map_err(|reason| PlannedGeneralError {
                 acks: batch.acks.clone(),
-                reason,
+                reason: format!("{reason:#}"),
             })?;
             return Ok((pending, Vec::new()));
         };
@@ -549,7 +549,7 @@ impl Runtime {
             )
             .map_err(|reason| PlannedGeneralError {
                 acks: batch.acks.clone(),
-                reason,
+                reason: format!("{reason:#}"),
             })?
         };
 
@@ -713,7 +713,7 @@ impl Runtime {
                         reingestor,
                         error_policies,
                         error_acks.iter(),
-                        error,
+                        format!("{error:#}"),
                     );
                     return;
                 }

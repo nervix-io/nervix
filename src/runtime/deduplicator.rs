@@ -1,6 +1,6 @@
 use std::{sync::Arc as StdArc, time::Duration};
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use nervix_expiry_map::ExpiryMap;
 use nervix_models::{Expression, ModelName, RelayName, Timestamp};
 use nervix_vm::CompiledProgram as VmCompiledProgram;
@@ -9,8 +9,8 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use triomphe::Arc;
 
 use super::{
-    KeyProjectionKind, PersistedRuntimeStateEntry, ReorderKeyPart, RuntimePersistenceError,
-    RuntimeStatePlacement, UdfExecutor, checked_add_duration_to_timestamp,
+    KeyProjectionKind, PersistedRuntimeStateEntry, ProcessorCompileError, ReorderKeyPart,
+    RuntimePersistenceError, RuntimeStatePlacement, UdfExecutor, checked_add_duration_to_timestamp,
     compile_key_projection_program,
     published_generation::{Generation, PublishedGenerations},
 };
@@ -133,11 +133,12 @@ pub(super) fn compile_deduplicator_key_program(
     deduplicate_on: &[Expression],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
-) -> Result<CompiledDeduplicatorKeyProgram, String> {
+) -> error_stack::Result<CompiledDeduplicatorKeyProgram, ProcessorCompileError> {
     if deduplicate_on.is_empty() {
-        return Err(format!(
-            "deduplicator '{}' requires at least one DEDUPLICATE ON expression",
-            processor.as_str()
+        return Err(Report::new(
+            ProcessorCompileError::DeduplicatorWithoutKeys {
+                processor: processor.clone(),
+            },
         ));
     }
     let compiled = compile_key_projection_program(
@@ -148,7 +149,9 @@ pub(super) fn compile_deduplicator_key_program(
         input_schema,
         udfs,
     )
-    .map_err(|error| format!("{error:#}"))?;
+    .change_context_lazy(|| ProcessorCompileError::DeduplicatorKeyProgram {
+        processor: processor.clone(),
+    })?;
     Ok(CompiledDeduplicatorKeyProgram {
         key_column_offset: 0,
         key_count: deduplicate_on.len(),
