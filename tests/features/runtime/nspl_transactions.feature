@@ -644,6 +644,157 @@ Feature: NSPL transactions
       | 1            |
       | 3            |
 
+  @transaction_ordered_planning
+  Scenario Outline: A later execution step cannot repair an incomplete model run
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Given client "owner" is connected to the leader node
+    And client "observer" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE RELAY ordered_boundary_events
+        SCHEMA ordered_boundary_schema
+        UNBRANCHED
+        CAPACITY 1;
+      """
+    And client "owner" fails to execute these NSPL commands
+      """
+      CREATE RESOURCE ordered_boundary_resource;
+      """
+    Then the last command error contains
+      """
+      ordered_boundary_schema
+      """
+    When client "observer" executes these NSPL commands
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the last command output contains
+      """
+      state=OPEN pending=1
+      """
+    When client "owner" executes these NSPL commands
+      """
+      CREATE SCHEMA ordered_boundary_schema (
+        value STRING
+      );
+      CREATE RESOURCE ordered_boundary_resource;
+      COMMIT;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE RELAY ordered_boundary_events;
+      DESCRIBE RESOURCE ordered_boundary_resource;
+      """
+    Then the last command output contains
+      """
+      resource: ordered_boundary_resource
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @transaction_ordered_planning
+  Scenario Outline: Atomic model runs use their base-to-final effect and ordered lifecycle state
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA ordered_effective_schema (
+        value STRING
+      );
+      START;
+      """
+    Then node "node-1" eventually reports status containing "{{domain}} status=Running"
+    Given client "owner" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      DROP SCHEMA ordered_effective_schema;
+      """
+    Then the last command output contains
+      """
+      quiesce level: DYNAMIC
+      """
+    When client "owner" executes these NSPL commands
+      """
+      CREATE SCHEMA ordered_effective_schema (
+        value STRING,
+        changed STRING OPTIONAL
+      );
+      """
+    Then the last command output contains
+      """
+      quiesce level: DOMAIN_PAUSE
+      """
+    When client "owner" executes these NSPL commands
+      """
+      COMMIT;
+      BEGIN;
+      ALTER SCHEMA ordered_effective_schema
+        ADD FIELD cancelled STRING OPTIONAL;
+      """
+    Then the last command output contains
+      """
+      quiesce level: DOMAIN_PAUSE
+      """
+    When client "owner" executes these NSPL commands
+      """
+      ALTER SCHEMA ordered_effective_schema
+        DROP FIELD cancelled;
+      """
+    Then the last command output contains
+      """
+      quiesce level: DYNAMIC
+      """
+    When client "owner" executes these NSPL commands
+      """
+      COMMIT;
+      BEGIN;
+      STOP;
+      ALTER SCHEMA ordered_effective_schema
+        ADD FIELD stopped_change STRING OPTIONAL;
+      """
+    Then the last command output contains
+      """
+      quiesce level: DYNAMIC
+      """
+    When client "owner" executes these NSPL commands
+      """
+      START;
+      ALTER SCHEMA ordered_effective_schema
+        DROP FIELD stopped_change;
+      """
+    Then the last command output contains
+      """
+      quiesce level: DOMAIN_PAUSE
+      """
+    When client "owner" executes these NSPL commands
+      """
+      CREATE IF NOT EXISTS SCHEMA ordered_effective_schema (
+        value STRING,
+        changed STRING OPTIONAL
+      );
+      COMMIT;
+      """
+    Then the last command output contains
+      """
+      quiesce level: DOMAIN_PAUSE
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario: Replicated transaction limits are enforced consistently
     Given the transaction statement limit is configured as 1
     And the transaction source byte limit is configured as 30

@@ -20,6 +20,7 @@ mod scheduler;
 mod storage;
 #[cfg(test)]
 mod test_fixtures;
+mod transaction;
 mod validation;
 
 /// What the decisions layer exposes. Everything else this module and its submodules declare is
@@ -35,3 +36,7 @@ pub(crate) use relocation::{RelocationCoverage, RelocationMemberReason, Relocati
 #[cfg(feature = "testing")]
 pub use scheduler::SchedulerMode;
 pub(crate) use storage::{Registry, RuntimeChange, RuntimeChanges};
+pub(crate) use transaction::{
+    PlannedTransaction, PlannedTransactionStep, PlannedTransactionStepKind,
+    TransactionPlanningError, TransactionPlanningSnapshot, TransactionScheduleDecision,
+};

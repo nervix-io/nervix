@@ -8,10 +8,15 @@
 //!   reconcile what a committed model changes.
 //! - **Must not know.** How a listener delivered the statement.
 
-use meticulous::OptionExt as _;
+use std::collections::BTreeSet;
+
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{ConsensusError, TransactionStepEffect};
 use nervix_interconnect::EntityGatePurpose;
-use nervix_models::{DomainName, DomainStatus, ModelKind, ModelName, QuiesceLevel, Statement};
+use nervix_models::{
+    DomainName, DomainSchedule, DomainStatus, ModelKind, ModelName, QuiesceLevel, Statement,
+    TransactionOperationNumber,
+};
 use nervix_nspl::client_statement::ClientStatement;
 use tokio::sync::mpsc;
 use tonic::Status;
@@ -31,6 +36,14 @@ use crate::{
     registry::{RegistryError, RegistryMutation},
     runtime::RuntimeError,
 };
+
+struct TransactionModelDecision {
+    planned: crate::registry::PlannedMutations,
+    expected_schedule: Option<DomainSchedule>,
+    schedule: Option<DomainSchedule>,
+    classified_level: QuiesceLevel,
+    planned_relocations: usize,
+}
 
 /// One statement of a model-mutation batch that reached the registry: which statement it was,
 /// the model it changed, and the message its own result reports.
@@ -302,6 +315,8 @@ impl SessionServiceImpl {
         &self,
         statements: Vec<Statement>,
         domain: &DomainName,
+        no_op_operations: Option<&BTreeSet<TransactionOperationNumber>>,
+        first_operation_index: usize,
     ) -> CollectedModelMutations {
         let mut results = vec![None; statements.len()];
         let mut mutations = Vec::new();
@@ -315,13 +330,24 @@ impl SessionServiceImpl {
                     let model = create.body;
                     let model_id = model.name();
                     let model_kind = model.kind();
-                    if self
-                        .inner
-                        .registry
-                        .contains(domain, model_kind, &model_id)
-                        .unwrap_or(false)
-                        && if_not_exists
-                    {
+                    let absolute_index = first_operation_index
+                        .checked_add(index)
+                        .assured("a collected model mutation is in its transaction step range");
+                    let operation = TransactionOperationNumber::from_index(absolute_index).assured(
+                        "a configured transaction statement limit keeps indices addressable",
+                    );
+                    let planned_noop = match no_op_operations {
+                        Some(no_op_operations) => no_op_operations.contains(&operation),
+                        None => false,
+                    };
+                    let existing_noop = no_op_operations.is_none()
+                        && self
+                            .inner
+                            .registry
+                            .contains(domain, model_kind, &model_id)
+                            .unwrap_or(false)
+                        && if_not_exists;
+                    if planned_noop || existing_noop {
                         results[index] = Some(command_ok_already_existed(format!(
                             "model '{}' already exists in domain '{}'",
                             model_id.as_str(),
@@ -606,7 +632,27 @@ impl SessionServiceImpl {
             mutations,
             applied,
             refresh_http_tls,
-        } = self.collect_model_mutations(statements, &domain);
+        } = {
+            let no_op_operations = match transaction_step.as_ref() {
+                Some(step) => match &step.planned_step.kind {
+                    crate::registry::PlannedTransactionStepKind::Models { plan } => {
+                        Some(&plan.no_op_operations)
+                    }
+                    _ => None,
+                },
+                None => None,
+            };
+            let first_operation_index = match transaction_step.as_ref() {
+                Some(step) => step.first_statement,
+                None => 0,
+            };
+            self.collect_model_mutations(
+                statements,
+                &domain,
+                no_op_operations,
+                first_operation_index,
+            )
+        };
         // Validation, quiescence, persistence, and activation are separate control-plane phases.
         // Keep their futures indirect so this coordinator does not reserve all of their state in
         // one debug poll frame.
@@ -621,16 +667,49 @@ impl SessionServiceImpl {
                 .verified(
                     "every arm that records a mutation records an applied model in the same step",
                 );
-            let planned = match self.inner.registry.plan_mutations(&domain, &mutations) {
-                Ok(planned) => planned,
-                Err(err) => {
-                    warn!(
-                        domain = domain.as_str(),
-                        error = %err,
-                        "failed to plan model mutation batch"
-                    );
-                    return create_registry_error_response(query, &domain, &error_target, &err);
+            let transaction_decision = match transaction_step.as_ref() {
+                Some(step) => {
+                    let crate::registry::PlannedTransactionStepKind::Models { plan } =
+                        &step.planned_step.kind
+                    else {
+                        return command_error(
+                            "transaction model execution received a non-model plan".to_string(),
+                        );
+                    };
+                    let Some(planned) = plan.planned.clone() else {
+                        return command_error(
+                            "transaction model execution received an incomplete plan".to_string(),
+                        );
+                    };
+                    Some(TransactionModelDecision {
+                        planned,
+                        expected_schedule: plan.expected_schedule.clone(),
+                        schedule: plan.schedule.clone(),
+                        classified_level: step.planned_step.impact.planned().pause.level(),
+                        planned_relocations: step
+                            .planned_step
+                            .impact
+                            .planned()
+                            .effects
+                            .ownership_moves
+                            .len(),
+                    })
                 }
+                None => None,
+            };
+            let planned = match &transaction_decision {
+                Some(decision) => decision.planned.clone(),
+                None => match self.inner.registry.plan_mutations(&domain, &mutations) {
+                    Ok(planned) => planned,
+                    Err(err) => {
+                        warn!(
+                            domain = domain.as_str(),
+                            error = %err,
+                            "failed to plan model mutation batch"
+                        );
+                        return create_registry_error_response(query, &domain, &error_target, &err);
+                    }
+                },
             };
             if let Err(error) = Box::pin(self.validate_changed_model_bindings(
                 &domain,
@@ -654,36 +733,48 @@ impl SessionServiceImpl {
             let is_noop = planned.is_noop();
             let mut cluster_entity_gate = None;
             let mut ownership_handoff = None;
+            // Ordered plans and direct model commits share this schedule publication boundary.
+            #[cfg(feature = "testing")]
+            if !is_noop
+                && self
+                    .inner
+                    .runtime
+                    .take_armed_schedule_publication_fault(&domain)
+            {
+                let error = format!(
+                    "injected schedule publication fault for domain '{}'",
+                    domain.as_str()
+                );
+                return CommandResult {
+                    success: false,
+                    message: format!(
+                        "failed to publish schedule for domain '{}'",
+                        domain.as_str()
+                    ),
+                    diagnostics: vec![Diagnostic {
+                        message: error,
+                        span_start: 0,
+                        span_end: u32::try_from(query.len()).unwrap_or(0),
+                    }],
+                    kind: i32::from(CommandResultKind::Error),
+                    ..Default::default()
+                };
+            }
             let ScheduleTransition {
                 expected_schedule,
                 mut prepared_schedule,
                 planned_relocations,
-            } = if !is_noop {
-                #[cfg(feature = "testing")]
-                if self
-                    .inner
-                    .runtime
-                    .take_armed_schedule_publication_fault(&domain)
-                {
-                    let error = format!(
-                        "injected schedule publication fault for domain '{}'",
-                        domain.as_str()
-                    );
-                    return CommandResult {
-                        success: false,
-                        message: format!(
-                            "failed to publish schedule for domain '{}'",
-                            domain.as_str()
-                        ),
-                        diagnostics: vec![Diagnostic {
-                            message: error,
-                            span_start: 0,
-                            span_end: u32::try_from(query.len()).unwrap_or(0),
-                        }],
-                        kind: i32::from(CommandResultKind::Error),
-                        ..Default::default()
-                    };
+            } = if let Some(decision) = &transaction_decision {
+                if is_noop {
+                    ScheduleTransition::default()
+                } else {
+                    ScheduleTransition {
+                        expected_schedule: decision.expected_schedule.clone(),
+                        prepared_schedule: decision.schedule.clone(),
+                        planned_relocations: decision.planned_relocations,
+                    }
                 }
+            } else if !is_noop {
                 let expected_schedule = Box::pin(self.inner.consensus.current_schedule())
                     .await
                     .domain(&domain)
@@ -705,12 +796,17 @@ impl SessionServiceImpl {
             } else {
                 ScheduleTransition::default()
             };
-            let classified_level = if matches!(domain_state.status, DomainStatus::Running)
-                && planned_relocations > 0
-            {
-                base_classified_level.max(QuiesceLevel::EntityPause)
-            } else {
-                base_classified_level
+            let classified_level = match &transaction_decision {
+                Some(decision) => decision.classified_level,
+                None => {
+                    if matches!(domain_state.status, DomainStatus::Running)
+                        && planned_relocations > 0
+                    {
+                        base_classified_level.max(QuiesceLevel::EntityPause)
+                    } else {
+                        base_classified_level
+                    }
+                }
             };
             let requires_domain_pause = classified_level.requires_domain_pause();
             if let Some(prepared_schedule) = prepared_schedule.as_mut() {
@@ -883,10 +979,8 @@ impl SessionServiceImpl {
                     };
                     match Box::pin(self.record_transaction_step(
                         transaction_step.transaction,
-                        transaction_step.first_statement,
-                        transaction_step.statement_count,
+                        transaction_step.planned_step.impact.clone(),
                         step_result,
-                        Some(classified_level),
                         Some(effect),
                     ))
                     .await
@@ -1212,10 +1306,8 @@ impl SessionServiceImpl {
         {
             match Box::pin(self.record_transaction_step(
                 transaction_step.transaction,
-                transaction_step.first_statement,
-                transaction_step.statement_count,
+                transaction_step.planned_step.impact.clone(),
                 result.clone(),
-                Some(QuiesceLevel::Dynamic),
                 None,
             ))
             .await
