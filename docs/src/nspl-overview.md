@@ -649,7 +649,7 @@ CREATE [IF NOT EXISTS] VHOST <name> <hostname>, ...
   [WITH TLS <resource> [VERSION <n>]];
 ```
 
-If `VERSION <n>` is omitted from `WITH TLS`, the VHOST resolves the latest uploaded version of that resource.
+If `VERSION <n>` is omitted from `WITH TLS`, the VHOST resolves the latest completed version of that resource. Explicit versions must also be completed before they can be bound.
 
 Session-only commands:
 
