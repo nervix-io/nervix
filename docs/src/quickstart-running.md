@@ -64,6 +64,9 @@ The server registers both signals before it starts anything else. A signal that 
 node is still starting takes effect as soon as startup completes, while its shutdown deadline runs
 from the moment the signal arrived. A node that cannot register the signals refuses to start.
 
+[Shutdown And Recovery](shutdown.md) describes the phases, what the node drains before it exits,
+what each ending preserves, and how to read a shutdown that did not finish.
+
 ## Connect A Client
 
 [`nervix-cli`](client-tools-cli.md) is the interactive NSPL client. With no arguments it connects

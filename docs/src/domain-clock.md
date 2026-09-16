@@ -173,7 +173,7 @@ progress delivery, or local installation. Those services remain active during ap
 support so work admitted before listener shutdown can still take execution snapshots and wait on
 logical deadlines, and so a committed ownership handoff can install the schedule and clock state it
 needs. Terminal teardown cancels them only after drain support completes or explicitly reports
-abandonment.
+abandonment. See [Shutdown And Recovery](./shutdown.md) for the phases these services span.
 
 The receiver first gets the reporting node name from the mutually authenticated interconnect. It
 accepts progress only when the domain already exists and is not stopped, and the report matches the

@@ -123,7 +123,7 @@ impl Runtime {
         schema: &std::sync::Arc<arrow_schema::Schema>,
         after_revision: Option<u64>,
     ) -> Result<Option<RestoredMaterializedSnapshot>, String> {
-        let Some(dispatcher) = self.inner.remote_dispatcher.read().clone() else {
+        let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
             return Err("remote dispatcher unavailable".to_string());
         };
         let described = dispatcher

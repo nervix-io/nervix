@@ -101,6 +101,47 @@ class RatchetGateTests(unittest.TestCase):
             self.assertEqual(status, 0)
             self.assertEqual(listing, "src/lib.rs:2: x as u32\n")
 
+    def test_string_error_conversion_requires_an_error_stack_result(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            string_error = """
+enum ParseError { Invalid }
+
+fn parse() -> Result<(), String> {
+    Ok(())
+}
+"""
+            write_repository(root, {"src/lib.rs": string_error})
+            run("--root", str(root), "--update")
+
+            bare_error = """
+enum ParseError { Invalid }
+
+fn parse() -> Result<(), ParseError> {
+    Ok(())
+}
+"""
+            (root / "src" / "lib.rs").write_text(bare_error, encoding="utf-8")
+            status, report, _ = run("--root", str(root))
+
+            self.assertEqual(status, 1)
+            self.assertIn("result_string_errors: 1 -> 0", report)
+            self.assertIn("bare_error_signatures: 0 -> 1 (+1)", report)
+
+            reported_error = """
+enum ParseError { Invalid }
+
+fn parse() -> error_stack::Result<(), ParseError> {
+    Ok(())
+}
+"""
+            (root / "src" / "lib.rs").write_text(reported_error, encoding="utf-8")
+            status, report, errors = run("--root", str(root))
+
+            self.assertEqual(status, 0)
+            self.assertEqual(errors, "")
+            self.assertIn("result_string_errors: 1 -> 0", report)
+
 
 class CountTests(unittest.TestCase):
     def test_as_casts_ignore_comments_literals_imports_and_unit_tests(self) -> None:
@@ -393,6 +434,38 @@ mod tests {
             )
 
             self.assertEqual(count(root, "data_plane_lock_acquisitions"), 8)
+
+    def test_data_plane_cluster_awaits_count_only_product_runtime_calls(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(
+                root,
+                {
+                    "src/runtime/remote_dispatch.rs": """
+async fn dispatch(runtime: Runtime) {
+    runtime
+        .cluster
+        .interested_nodes("orders")
+        .await;
+    let snapshot = runtime.cluster.subscription_interest_index();
+    let example = "runtime.cluster.interested_nodes().await";
+    // runtime.cluster.interested_nodes().await;
+}
+
+#[cfg(test)]
+async fn test_dispatch(runtime: Runtime) {
+    runtime.cluster.interested_nodes("orders").await;
+}
+""",
+                    "src/application.rs": """
+async fn reconcile(service: Service) {
+    service.cluster.live_nodes().await;
+}
+""",
+                },
+            )
+
+            self.assertEqual(count(root, "data_plane_cluster_awaits"), 1)
 
     def test_write_once_rwlocks_count_only_arc_and_name_struct_fields(self) -> None:
         with TemporaryDirectory() as directory:

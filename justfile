@@ -79,6 +79,11 @@ test-lib *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --lib -- {{ args }}
 
+# Run the bounded-execution unit tests, which live in the nervix-execution crate rather than the
+# server lib.
+test-execution *args:
+    cargo test --package nervix-execution --lib -- {{ args }}
+
 # Run the expression VM unit tests, which live in the nervix-vm crate rather than the server lib.
 test-vm *args:
     cargo test --package nervix-vm --lib -- {{ args }}

@@ -17,7 +17,7 @@
 //! instead.
 
 use std::{
-    fs::{File, OpenOptions},
+    fs::OpenOptions,
     io,
     os::unix::process::ExitStatusExt as _,
     path::{Path, PathBuf},
@@ -26,6 +26,7 @@ use std::{
 };
 
 use bytes::{BufMut as _, Bytes, BytesMut};
+use meticulous::OptionExt as _;
 use nervix_recovery::Discarded as _;
 use nervix_server::proto::{UploadResourceRequest, UploadResourceStart, upload_resource_request};
 use nix::{
@@ -37,9 +38,10 @@ use tempfile::TempDir;
 use tokio::{
     net::TcpStream,
     process::{Child, Command},
+    sync::watch,
     time::{sleep, timeout},
 };
-use tokio_util::task::AbortOnDropHandle;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use super::cluster::{
     InterconnectTestCa, TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestCertificateValidity,
@@ -64,6 +66,7 @@ const HELD_UPLOAD_IDENTITY: &str = "held-upload";
 /// would take far longer than any scenario to finish.
 const HELD_UPLOAD_DECLARED_BYTES: u64 = 1024 * 1024;
 const SLOW_UPLOAD_CHUNK_INTERVAL: Duration = Duration::from_millis(100);
+const HTTP_LOAD_INTERVAL: Duration = Duration::from_millis(10);
 /// gRPC prefixes every message on a stream with a compression flag byte and a four-byte big-endian
 /// message length.
 const GRPC_MESSAGE_PREFIX_BYTES: usize = 5;
@@ -108,6 +111,8 @@ impl ServerProcessLaunch {
 pub(crate) enum ServerProcessOption {
     /// `--drain-timeout`.
     DrainTimeout(Duration),
+    /// `--state-snapshot-interval`.
+    StateSnapshotInterval(Duration),
     /// `--shutdown-timeout`.
     ShutdownTimeout(Duration),
 }
@@ -119,6 +124,11 @@ impl ServerProcessOption {
                 command
                     .arg("--drain-timeout")
                     .arg(humantime::format_duration(timeout).to_string());
+            }
+            Self::StateSnapshotInterval(interval) => {
+                command
+                    .arg("--state-snapshot-interval")
+                    .arg(humantime::format_duration(interval).to_string());
             }
             Self::ShutdownTimeout(timeout) => {
                 command
@@ -182,6 +192,82 @@ impl Drop for ServerProcessPorts {
     }
 }
 
+/// The stable launch configuration retained when a scenario restarts the same server.
+#[derive(Debug)]
+struct ServerProcessConfiguration {
+    launch: ServerProcessLaunch,
+    options: Vec<ServerProcessOption>,
+    ports: ServerProcessPorts,
+    certificate_authority: PathBuf,
+    certificate: PathBuf,
+    private_key: PathBuf,
+    temp_dir: PathBuf,
+}
+
+impl ServerProcessConfiguration {
+    fn spawn(&self, root: &Path) -> io::Result<Child> {
+        let log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(root.join("server.log"))?;
+        let error_log = log.try_clone()?;
+
+        let mut command = self.launch.command();
+        command
+            .arg("--addr")
+            .arg(loopback(self.ports.grpc))
+            .arg("--grpc-advertise-addr")
+            .arg(loopback(self.ports.grpc))
+            .arg("--http-listen-addr")
+            .arg(loopback(self.ports.http))
+            .arg("--https-listen-addr")
+            .arg(loopback(self.ports.https))
+            .arg("--observability-listen-addr")
+            .arg(loopback(self.ports.observability))
+            .arg("--web-console-listen-addr")
+            .arg(loopback(self.ports.web_console))
+            .arg("--cluster-id")
+            .arg(CLUSTER_ID)
+            .arg("--node-id")
+            .arg(NODE_ID)
+            .arg("--interconnect-listen-addr")
+            .arg(loopback(self.ports.interconnect))
+            .arg("--interconnect-advertise-addr")
+            .arg(loopback(self.ports.interconnect))
+            .arg("--interconnect-tls-ca")
+            .arg(&self.certificate_authority)
+            .arg("--interconnect-tls-cert")
+            .arg(&self.certificate)
+            .arg("--interconnect-tls-key")
+            .arg(&self.private_key)
+            .arg("--allow-bootstrap")
+            .arg("--default-user")
+            .arg(TEST_AUTH_USERNAME)
+            .arg("--init-default-user-password")
+            .arg(TEST_AUTH_PASSWORD)
+            .arg("--db-path")
+            .arg(root.join("db"))
+            .arg("--temp-dir")
+            .arg(&self.temp_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(error_log))
+            .kill_on_drop(true);
+        for option in &self.options {
+            option.apply_to(&mut command);
+        }
+        // Any `NERVIX_*` variable the scenario runner carries would silently reconfigure the
+        // server, and `RUST_LOG` would replace the log filter the server ships with.
+        for (name, _) in std::env::vars_os() {
+            if name.to_string_lossy().starts_with("NERVIX_") {
+                command.env_remove(&name);
+            }
+        }
+        command.env_remove("RUST_LOG");
+        command.spawn()
+    }
+}
+
 /// A started `nervix-server` process and everything it was given.
 ///
 /// Dropping it kills the process, so a failed scenario never leaves a server running.
@@ -189,10 +275,10 @@ impl Drop for ServerProcessPorts {
 pub(crate) struct ServerProcess {
     child: Child,
     exit_status: Option<ExitStatus>,
-    ports: ServerProcessPorts,
+    configuration: ServerProcessConfiguration,
+    /// Byte offset where the current process launch began in the shared append-only log.
+    log_start: u64,
     root: TempDir,
-    launch: ServerProcessLaunch,
-    options: Vec<ServerProcessOption>,
 }
 
 impl ServerProcess {
@@ -204,24 +290,45 @@ impl ServerProcess {
             .prefix("nervix-server-process-")
             .tempdir()?;
         let certificate_authority = InterconnectTestCa::new(&root)?;
-        certificate_authority.issue_node_with_identity(
+        let (certificate, private_key) = certificate_authority.issue_node_with_identity(
             CLUSTER_ID,
             NODE_ID,
             TestCertificateValidity::Current,
             root.path(),
         )?;
-        std::fs::create_dir_all(root.path().join("temp"))?;
-        let ports = ServerProcessPorts::allocate()?;
-        let child = spawn_server_process(&launch, options, root.path(), &ports, false)?;
+        let temp_dir = root.path().join("temp");
+        std::fs::create_dir_all(&temp_dir)?;
+        let configuration = ServerProcessConfiguration {
+            launch,
+            options: options.to_vec(),
+            ports: ServerProcessPorts::allocate()?,
+            certificate_authority: certificate_authority.path.clone(),
+            certificate,
+            private_key,
+            temp_dir,
+        };
+        let child = configuration.spawn(root.path())?;
 
         Ok(Self {
             child,
             exit_status: None,
-            ports,
+            configuration,
+            log_start: 0,
             root,
-            launch,
-            options: options.to_vec(),
         })
+    }
+
+    /// Reopens this process's existing database on the same isolated ports.
+    pub(crate) async fn restart(&mut self) -> io::Result<()> {
+        if self.observe_exit()?.is_none() {
+            return Err(io::Error::other(
+                "cannot restart nervix-server before its preceding process exits",
+            ));
+        }
+        self.log_start = std::fs::metadata(self.root.path().join("server.log"))?.len();
+        self.child = self.configuration.spawn(self.root.path())?;
+        self.exit_status = None;
+        self.wait_until_ready().await
     }
 
     /// Waits until the server answers an authenticated command, which also proves that its
@@ -273,8 +380,93 @@ impl ServerProcess {
         path: &str,
         payload: &str,
     ) -> io::Result<()> {
-        let uri = format!("http://{}{path}", loopback(self.ports.http));
+        let uri = format!("http://{}{path}", loopback(self.configuration.ports.http));
         publish_http_uri_with_headers(uri, host, payload.as_bytes(), "application/json", &[]).await
+    }
+
+    /// Repeats one HTTP publish until the recovered runtime has installed the endpoint.
+    pub(crate) async fn publish_http_eventually(
+        &mut self,
+        host: &str,
+        path: &str,
+        payload: &str,
+    ) -> io::Result<()> {
+        let admitted = timeout(LOG_TIMEOUT, self.poll_http_admission(host, path, payload)).await;
+        match admitted {
+            Ok(result) => result,
+            Err(_) => Err(io::Error::other(format!(
+                "nervix-server did not admit an HTTP payload within {}\n{}",
+                humantime::format_duration(LOG_TIMEOUT),
+                self.log_tail()
+            ))),
+        }
+    }
+
+    async fn poll_http_admission(
+        &mut self,
+        host: &str,
+        path: &str,
+        payload: &str,
+    ) -> io::Result<()> {
+        loop {
+            tokio::task::consume_budget().await;
+            if let Some(status) = self.observe_exit()? {
+                return Err(io::Error::other(format!(
+                    "nervix-server exited with {} before it admitted the HTTP payload\n{}",
+                    describe_exit(status),
+                    self.log_tail()
+                )));
+            }
+            if self.publish_http(host, path, payload).await.is_ok() {
+                return Ok(());
+            }
+            sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    /// Starts a bounded-rate HTTP load that replaces `{{load_id}}` in each payload template.
+    pub(crate) fn start_http_load(
+        &self,
+        host: &str,
+        path: &str,
+        first_id: u64,
+        payload_templates: Vec<String>,
+    ) -> io::Result<ServerProcessHttpLoad> {
+        if payload_templates.is_empty() {
+            return Err(io::Error::other(
+                "server process HTTP load requires at least one payload template",
+            ));
+        }
+        if payload_templates
+            .iter()
+            .any(|payload| !payload.contains("{{load_id}}"))
+        {
+            return Err(io::Error::other(
+                "every server process HTTP load payload must contain {{load_id}}",
+            ));
+        }
+
+        let uri = format!("http://{}{path}", loopback(self.configuration.ports.http));
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let (observation_tx, observation) = watch::channel(HttpLoadObservation::default());
+        let host = host.to_string();
+        let task = tokio::spawn(async move {
+            run_http_load(
+                task_cancellation,
+                observation_tx,
+                uri,
+                host,
+                first_id,
+                payload_templates,
+            )
+            .await;
+        });
+        Ok(ServerProcessHttpLoad {
+            cancellation,
+            observation,
+            _task: AbortOnDropHandle::new(task),
+        })
     }
 
     pub(crate) fn send_signal(&self, signal: Signal) -> io::Result<()> {
@@ -306,24 +498,6 @@ impl ServerProcess {
         Ok(status)
     }
 
-    /// Starts the same executable again with the same ports, credentials and persisted database.
-    pub(crate) async fn restart(&mut self) -> io::Result<()> {
-        if self.observe_exit()?.is_none() {
-            return Err(io::Error::other(
-                "cannot restart nervix-server while its previous process is still running",
-            ));
-        }
-        self.child = spawn_server_process(
-            &self.launch,
-            &self.options,
-            self.root.path(),
-            &self.ports,
-            true,
-        )?;
-        self.exit_status = None;
-        self.wait_until_ready().await
-    }
-
     pub(crate) fn has_exited(&self) -> bool {
         self.exit_status.is_some()
     }
@@ -337,10 +511,17 @@ impl ServerProcess {
         Ok(status)
     }
 
-    /// Everything the process has written to standard output and standard error so far.
+    /// Everything the current process launch has written to standard output and standard error.
     pub(crate) fn log(&self) -> io::Result<String> {
         let bytes = std::fs::read(self.root.path().join("server.log"))?;
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        let log_start = usize::try_from(self.log_start).map_err(io::Error::other)?;
+        let current = bytes.get(log_start..).ok_or_else(|| {
+            io::Error::other(format!(
+                "server log shrank below the current launch offset {}",
+                self.log_start
+            ))
+        })?;
+        Ok(String::from_utf8_lossy(current).into_owned())
     }
 
     pub(crate) async fn wait_for_log(&mut self, fragment: &str) -> io::Result<()> {
@@ -396,7 +577,7 @@ impl ServerProcess {
         resource: &str,
         progress: HeldUploadProgress,
     ) -> io::Result<HeldResourceUpload> {
-        let stream = TcpStream::connect(loopback(self.ports.grpc)).await?;
+        let stream = TcpStream::connect(loopback(self.configuration.ports.grpc)).await?;
         let (send_request, mut connection) = h2::client::handshake(stream)
             .await
             .map_err(io::Error::other)?;
@@ -413,7 +594,7 @@ impl ServerProcess {
             .method(http::Method::POST)
             .uri(format!(
                 "http://{}{UPLOAD_RESOURCE_PATH}",
-                loopback(self.ports.grpc)
+                loopback(self.configuration.ports.grpc)
             ))
             .header(http::header::CONTENT_TYPE, "application/grpc")
             .header(http::header::TE, "trailers")
@@ -499,15 +680,21 @@ impl ServerProcess {
     }
 
     pub(crate) fn grpc_uri(&self) -> String {
-        format!("http://{}", loopback(self.ports.grpc))
+        format!("http://{}", loopback(self.configuration.ports.grpc))
     }
 
     pub(crate) fn observability_uri(&self, path: &str) -> String {
-        format!("http://{}{path}", loopback(self.ports.observability))
+        format!(
+            "http://{}{path}",
+            loopback(self.configuration.ports.observability)
+        )
     }
 
     pub(crate) fn web_console_websocket_uri(&self) -> String {
-        format!("ws://{}/console/ws", loopback(self.ports.web_console))
+        format!(
+            "ws://{}/console/ws",
+            loopback(self.configuration.ports.web_console)
+        )
     }
 
     pub(crate) fn process_id(&self) -> io::Result<u32> {
@@ -517,76 +704,141 @@ impl ServerProcess {
     }
 }
 
-fn spawn_server_process(
-    launch: &ServerProcessLaunch,
-    options: &[ServerProcessOption],
-    root: &Path,
-    ports: &ServerProcessPorts,
-    append_log: bool,
-) -> io::Result<Child> {
-    let log_path = root.join("server.log");
-    let log = if append_log {
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_path)?
-    } else {
-        File::create(log_path)?
-    };
-    let error_log = log.try_clone()?;
-    let mut command = launch.command();
-    command
-        .arg("--addr")
-        .arg(loopback(ports.grpc))
-        .arg("--grpc-advertise-addr")
-        .arg(loopback(ports.grpc))
-        .arg("--http-listen-addr")
-        .arg(loopback(ports.http))
-        .arg("--https-listen-addr")
-        .arg(loopback(ports.https))
-        .arg("--observability-listen-addr")
-        .arg(loopback(ports.observability))
-        .arg("--web-console-listen-addr")
-        .arg(loopback(ports.web_console))
-        .arg("--cluster-id")
-        .arg(CLUSTER_ID)
-        .arg("--node-id")
-        .arg(NODE_ID)
-        .arg("--interconnect-listen-addr")
-        .arg(loopback(ports.interconnect))
-        .arg("--interconnect-advertise-addr")
-        .arg(loopback(ports.interconnect))
-        .arg("--interconnect-tls-ca")
-        .arg(root.join("interconnect-ca.pem"))
-        .arg("--interconnect-tls-cert")
-        .arg(root.join("interconnect.pem"))
-        .arg("--interconnect-tls-key")
-        .arg(root.join("interconnect-key.pem"))
-        .arg("--allow-bootstrap")
-        .arg("--default-user")
-        .arg(TEST_AUTH_USERNAME)
-        .arg("--init-default-user-password")
-        .arg(TEST_AUTH_PASSWORD)
-        .arg("--db-path")
-        .arg(root.join("db"))
-        .arg("--temp-dir")
-        .arg(root.join("temp"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(error_log))
-        .kill_on_drop(true);
-    for option in options {
-        option.apply_to(&mut command);
+#[derive(Clone, Debug, Default)]
+struct HttpLoadObservation {
+    admitted: u64,
+    failure: Option<String>,
+}
+
+/// HTTP traffic that remains active until its process exits or the scenario drops it.
+pub(crate) struct ServerProcessHttpLoad {
+    cancellation: CancellationToken,
+    observation: watch::Receiver<HttpLoadObservation>,
+    _task: AbortOnDropHandle<()>,
+}
+
+impl std::fmt::Debug for ServerProcessHttpLoad {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServerProcessHttpLoad")
+            .field("observation", &*self.observation.borrow())
+            .finish_non_exhaustive()
     }
-    // Any `NERVIX_*` variable the scenario runner carries would silently reconfigure the server,
-    // and `RUST_LOG` would replace the log filter the server ships with.
-    for (name, _) in std::env::vars_os() {
-        if name.to_string_lossy().starts_with("NERVIX_") {
-            command.env_remove(&name);
+}
+
+impl ServerProcessHttpLoad {
+    pub(crate) async fn wait_for_admissions(&mut self, expected: u64) -> io::Result<()> {
+        let observed = timeout(LOG_TIMEOUT, self.poll_for_admissions(expected)).await;
+        match observed {
+            Ok(result) => result,
+            Err(_) => Err(io::Error::other(format!(
+                "server process admitted {} of {expected} HTTP load payloads within {}",
+                self.observation.borrow().admitted,
+                humantime::format_duration(LOG_TIMEOUT),
+            ))),
         }
     }
-    command.env_remove("RUST_LOG");
-    command.spawn()
+
+    async fn poll_for_admissions(&mut self, expected: u64) -> io::Result<()> {
+        loop {
+            tokio::task::consume_budget().await;
+            let current = self.observation.borrow().clone();
+            if current.admitted >= expected {
+                return Ok(());
+            }
+            if let Some(failure) = current.failure {
+                return Err(io::Error::other(format!(
+                    "server process HTTP load stopped after {} admissions: {failure}",
+                    current.admitted
+                )));
+            }
+            self.observation.changed().await.map_err(|_| {
+                io::Error::other("server process HTTP load ended without a terminal observation")
+            })?;
+        }
+    }
+}
+
+impl Drop for ServerProcessHttpLoad {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
+}
+
+async fn run_http_load(
+    cancellation: CancellationToken,
+    observation: watch::Sender<HttpLoadObservation>,
+    uri: String,
+    host: String,
+    first_id: u64,
+    payload_templates: Vec<String>,
+) {
+    let mut admitted = 0_u64;
+    let mut load_id = first_id;
+    let mut template_index = 0_usize;
+    loop {
+        tokio::task::consume_budget().await;
+        let payload_template = payload_templates
+            .get(template_index)
+            .assured("the template index is kept below the non-empty template list length");
+        let payload = payload_template.replace("{{load_id}}", &load_id.to_string());
+        let published = tokio::select! {
+            () = cancellation.cancelled() => return,
+            result = publish_http_uri_with_headers(
+                uri.clone(),
+                &host,
+                payload.as_bytes(),
+                "application/json",
+                &[],
+            ) => result,
+        };
+        if let Err(error) = published {
+            observation.send_replace(HttpLoadObservation {
+                admitted,
+                failure: Some(error.to_string()),
+            });
+            return;
+        }
+
+        let Some(next_admitted) = admitted.checked_add(1) else {
+            observation.send_replace(HttpLoadObservation {
+                admitted,
+                failure: Some("HTTP load admission count overflowed u64".to_string()),
+            });
+            return;
+        };
+        admitted = next_admitted;
+        observation.send_replace(HttpLoadObservation {
+            admitted,
+            failure: None,
+        });
+
+        let Some(next_load_id) = load_id.checked_add(1) else {
+            observation.send_replace(HttpLoadObservation {
+                admitted,
+                failure: Some("HTTP load identity overflowed u64".to_string()),
+            });
+            return;
+        };
+        load_id = next_load_id;
+        let Some(next_template_index) = template_index.checked_add(1) else {
+            observation.send_replace(HttpLoadObservation {
+                admitted,
+                failure: Some("HTTP load template index overflowed usize".to_string()),
+            });
+            return;
+        };
+        template_index = if next_template_index == payload_templates.len() {
+            0
+        } else {
+            next_template_index
+        };
+
+        tokio::select! {
+            () = cancellation.cancelled() => return,
+            () = sleep(HTTP_LOAD_INTERVAL) => {}
+        }
+    }
 }
 
 /// An accepted upload stream kept open until it is dropped.

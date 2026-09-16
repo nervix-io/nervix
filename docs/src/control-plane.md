@@ -48,7 +48,9 @@ command of a write or none of them. Domain configuration and schedule changes wi
 therefore recover together. Transaction effects recover with the corresponding commit
 progress. Updating a resource replica writes that replica and application metadata; it does not
 rewrite unrelated domains or schedules. Log purging atomically stores its deletion boundary with
-the deleted entries.
+the deleted entries. Catch-up and replay read committed log ranges in bounded chunks, stopping at
+one command-sized target or 1,024 entries before yielding the storage worker and applying that
+chunk. A backlog may span any number of chunks without being materialized as one reader allocation.
 
 Observers see a coherent state revision only after durable success. Change notifications identify
 committed revisions and may coalesce intermediate revisions; readers retrieve a coherent current
@@ -381,6 +383,9 @@ forms, and the plan output.
 independent units after one times out. Its result lists every successful move and failure. Any failed
 unit makes the command unsuccessful, while a later `DRAIN NODE` retries the units still owned by the
 cordoned node. Endpoint and Syslog listeners bind on every live node and are not schedule units.
+
+[Shutdown And Recovery](shutdown.md) is the complete account of stopping a node and recovering from
+a forced ending. This section states how a graceful shutdown uses the planned handoff above.
 
 A server process begins graceful shutdown when it receives its first `SIGINT` or `SIGTERM`. It
 registers both signals before it starts any other work and supervises them until it exits, so a

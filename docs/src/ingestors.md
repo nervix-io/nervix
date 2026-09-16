@@ -184,8 +184,11 @@ move. It also ignores `ON QUIESCE`. Already admitted payloads continue through t
 buffers are force-flushed whatever their `FLUSH EACH` cadence, and Nervix waits for their ACK roots
 to resolve before the source session stops, so offsets, acknowledgements, and deletes complete for
 work that reached its sinks. A root still unresolved when the drain timeout passes is negatively
-acknowledged, and the source's redelivery contract applies. See
-[Planned Ownership Handoffs And Failover](control-plane.md#planned-ownership-handoffs-and-failover).
+acknowledged, and the source's redelivery contract applies. A raw quiesce buffer is outside runtime
+graph work, so a shutdown discards what it retained instead of replaying it. See
+[Planned Ownership Handoffs And Failover](control-plane.md#planned-ownership-handoffs-and-failover)
+and [Shutdown And Recovery](shutdown.md#connector-contracts) for the per-source acknowledgement and
+redelivery contract at shutdown.
 
 Ordinary model-alteration quiesce still does not wait for downstream ACK chains. Already admitted
 route batches continue downstream, and a source item not yet acknowledged, committed, or deleted is

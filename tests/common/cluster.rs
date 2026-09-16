@@ -431,6 +431,48 @@ fn observability_metric_reaches(
     false
 }
 
+/// The highest value one series reached for as long as it was sampled.
+///
+/// A gauge that has to stay inside a bound is not proved by one reading: the value a step happens
+/// to catch says nothing about the peak the work under test reached between readings. This samples
+/// for the whole time the work runs and keeps the highest value seen, so the assertion is about the
+/// window rather than an instant inside it. Scrape failures are skipped rather than ending the
+/// sampling, because a node that is busy answering the work under test is the case being measured.
+pub(crate) async fn sample_peak_observability_metric(
+    url: String,
+    metric_name: String,
+    label_fragments: Vec<String>,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> f64 {
+    let client = reqwest::Client::new();
+    let mut peak = 0.0_f64;
+    loop {
+        tokio::task::consume_budget().await;
+        if let Ok(response) = client.get(&url).send().await
+            && let Ok(body) = response.text().await
+        {
+            for line in body.lines() {
+                if line.starts_with('#') || !line_starts_with_metric(line, &metric_name) {
+                    continue;
+                }
+                if !label_fragments
+                    .iter()
+                    .all(|fragment| line.contains(fragment.as_str()))
+                {
+                    continue;
+                }
+                if let Some(value) = parse_prometheus_sample_value(line) {
+                    peak = peak.max(value);
+                }
+            }
+        }
+        tokio::select! {
+            () = cancellation.cancelled() => return peak,
+            () = sleep(POLL_INTERVAL) => {}
+        }
+    }
+}
+
 /// The label names an interconnection series may carry. Every dimension here is a closed set of
 /// values fixed at compile time, so no branch key, peer identity or operation id can widen one.
 const BOUNDED_INTERCONNECTION_LABELS: &[&str] =
@@ -1487,6 +1529,54 @@ impl Cluster {
             .get(node_id)
             .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
         Ok(handle.spec.base_dir.clone())
+    }
+
+    /// Where one node exposes its metrics, as an owned address a sampling task can keep after the
+    /// step that started it has returned.
+    pub(crate) fn observability_metrics_url(&self, node_id: &str) -> io::Result<String> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
+        Ok(format!(
+            "http://{}/metrics",
+            handle.spec.observability_addr()
+        ))
+    }
+
+    /// Read one series once, for a value a scenario compares others against rather than waits for.
+    pub(crate) async fn read_observability_metric(
+        &self,
+        node_id: &str,
+        metric_name: &str,
+        label_fragments: &[String],
+    ) -> io::Result<f64> {
+        let url = self.observability_metrics_url(node_id)?;
+        let client = reqwest::Client::new();
+        let response = timeout(STATUS_TIMEOUT, async {
+            let response = client.get(&url).send().await?;
+            response.text().await
+        })
+        .await
+        .map_err(io::Error::other)?
+        .map_err(io::Error::other)?;
+        for line in response.lines() {
+            if line.starts_with('#') || !line_starts_with_metric(line, metric_name) {
+                continue;
+            }
+            if !label_fragments
+                .iter()
+                .all(|fragment| line.contains(fragment.as_str()))
+            {
+                continue;
+            }
+            if let Some(value) = parse_prometheus_sample_value(line) {
+                return Ok(value);
+            }
+        }
+        Err(io::Error::other(format!(
+            "node '{node_id}' exposed no sample of '{metric_name}' with labels {label_fragments:?}"
+        )))
     }
 
     pub(crate) fn node_ids(&self) -> Vec<String> {

@@ -99,8 +99,8 @@ pub(super) struct RelayBoundaryServices {
     pub(super) attached_runtime_consumer_count: AtomicUsize,
     pub(super) detached_runtime_consumer_count: AtomicUsize,
     pub(super) remote_runtime_consumers: ArcSwap<Vec<RemoteRuntimeConsumer>>,
-    pub(super) remote_dispatcher: Option<Arc<RemoteDispatcher>>,
-    pub(super) owner_node: RwLock<Option<ClusterNodeName>>,
+    pub(super) remote_dispatcher: Option<StdArc<RemoteDispatcher>>,
+    pub(super) owner_node: ArcSwapOption<ClusterNodeName>,
     pub(super) ingress_slots: DashMap<Option<BranchKey>, Arc<RelayOutboundSlot>, RandomState>,
     pub(super) outbound_slots: DashMap<RelayOutboundChannel, Arc<RelayOutboundSlot>, RandomState>,
 }
@@ -208,7 +208,7 @@ pub(super) struct RelayBoundaryBuilder {
 #[derive(Debug)]
 pub(super) struct RelayConsumerFanout {
     pub(super) dispatch_gate: Arc<RelayDispatchGate>,
-    pub(super) owner_buffer: RwLock<Option<Arc<RelayOwnerBuffer>>>,
+    pub(super) owner_buffer: ArcSwapOption<RelayOwnerBuffer>,
     pub(super) owner_capacity: AtomicUsize,
     pub(super) owner_pending_batches: Arc<AtomicUsize>,
     pub(super) subscriptions: RelayBroadcast<RelayRecordBatch>,
@@ -408,7 +408,7 @@ impl RelayConsumerFanout {
         let dispatch_capacity = NonZeroUsize::MIN;
         Self {
             dispatch_gate: Arc::new(RelayDispatchGate::new()),
-            owner_buffer: RwLock::new(None),
+            owner_buffer: ArcSwapOption::empty(),
             owner_capacity: AtomicUsize::new(capacity.get()),
             owner_pending_batches: Arc::new(AtomicUsize::new(0)),
             subscriptions: RelayBroadcast::with_capacity(dispatch_capacity),
@@ -423,7 +423,8 @@ impl RelayConsumerFanout {
 
     pub(super) fn set_capacity(&self, capacity: NonZeroUsize) {
         self.owner_capacity.store(capacity.get(), Ordering::Release);
-        if let Some(buffer) = self.owner_buffer.read().as_ref() {
+        let owner_buffer = self.owner_buffer.load();
+        if let Some(buffer) = owner_buffer.as_deref() {
             buffer.set_capacity(capacity);
         }
     }
@@ -434,22 +435,25 @@ impl RelayConsumerFanout {
     ) -> RelayRuntimeConsumerReceiver {
         let capacity = NonZeroUsize::new(self.owner_capacity.load(Ordering::Acquire))
             .verified("relay capacity is validated as nonzero before it is stored");
-        let buffer = Arc::new(RelayOwnerBuffer::with_capacity(capacity, metrics));
+        let buffer = StdArc::new(RelayOwnerBuffer::with_capacity(capacity, metrics));
         let receiver = buffer.new_receiver();
-        *self.owner_buffer.write() = Some(buffer);
+        self.owner_buffer.store(Some(buffer));
         receiver
     }
 
     pub(super) fn deactivate_owner_buffer(&self) {
-        *self.owner_buffer.write() = None;
+        self.owner_buffer.store(None);
     }
 
-    pub(super) fn owner_buffer(&self) -> Option<Arc<RelayOwnerBuffer>> {
-        self.owner_buffer.read().clone()
+    /// The owner buffer held in full, for a caller that keeps it across an await.
+    pub(super) fn owner_buffer(&self) -> Option<StdArc<RelayOwnerBuffer>> {
+        self.owner_buffer.load_full()
     }
 
     pub(super) fn owner_buffer_len(&self) -> Option<(usize, usize)> {
-        self.owner_buffer()
+        let owner_buffer = self.owner_buffer.load();
+        owner_buffer
+            .as_deref()
             .map(|buffer| (buffer.len(), buffer.capacity()))
     }
 
@@ -653,7 +657,7 @@ impl RelayBoundaryFanout {
         }
     }
 
-    pub(super) fn owner_buffer(&self) -> Option<Arc<RelayOwnerBuffer>> {
+    pub(super) fn owner_buffer(&self) -> Option<StdArc<RelayOwnerBuffer>> {
         match self {
             Self::Direct(fanout) => fanout.owner_buffer(),
             Self::BranchCollapse(branch_collapse) => branch_collapse.fanout.owner_buffer(),
@@ -927,7 +931,7 @@ impl RelayBoundaryServices {
         attached_runtime_consumer_count: usize,
         detached_runtime_consumer_count: usize,
         remote_runtime_consumers: Vec<RemoteRuntimeConsumer>,
-        remote_dispatcher: Option<Arc<RemoteDispatcher>>,
+        remote_dispatcher: Option<StdArc<RemoteDispatcher>>,
     ) -> Self {
         Self {
             fanout,
@@ -935,7 +939,7 @@ impl RelayBoundaryServices {
             detached_runtime_consumer_count: AtomicUsize::new(detached_runtime_consumer_count),
             remote_runtime_consumers: ArcSwap::from_pointee(remote_runtime_consumers),
             remote_dispatcher,
-            owner_node: RwLock::new(None),
+            owner_node: ArcSwapOption::empty(),
             ingress_slots: DashMap::default(),
             outbound_slots: DashMap::default(),
         }
@@ -946,13 +950,13 @@ impl RelayBoundaryServices {
     }
 
     pub(super) fn replace_owner_node(&self, owner_node: Option<ClusterNodeName>) {
-        *self.owner_node.write() = owner_node;
+        self.owner_node.store(owner_node.map(StdArc::new));
     }
 
     pub(super) fn is_owned_by(&self, node_id: Option<&ClusterNodeName>) -> bool {
-        self.owner_node
-            .read()
-            .as_ref()
+        let owner_node = self.owner_node.load();
+        owner_node
+            .as_deref()
             .is_none_or(|owner| Some(owner) == node_id)
     }
 
@@ -1039,7 +1043,7 @@ impl RelayBoundaryServices {
     ) -> RelayDispatchResult {
         let dispatch_gate = self.fanout.dispatch_gate();
         let _dispatch_permit = dispatch_gate.acquire_dispatch().await;
-        let Some(owner_node) = self.owner_node.read().clone() else {
+        let Some(owner_node) = self.owner_node.load_full() else {
             for ack in batch.acks.iter() {
                 ack.no_ack("relay owner is unavailable");
             }
@@ -1051,12 +1055,7 @@ impl RelayBoundaryServices {
             }
             return Err(Box::new(batch.clone()));
         };
-        let Some(local_node_id) = dispatcher.local_node_id() else {
-            for ack in batch.acks.iter() {
-                ack.no_ack("local node id is unavailable for relay owner delivery");
-            }
-            return Err(Box::new(batch.clone()));
-        };
+        let local_node_id = dispatcher.local_node_id();
         let ingress_slot = self.ingress_slot(&batch.key);
         let _slot = ingress_slot.gate.lock().await;
         let batch_ipc = match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
@@ -1231,12 +1230,7 @@ impl RelayBoundaryServices {
                 AckMode::Detached => batch.detached(),
             };
             let remote_acks = if consumer.mode == AckMode::Attached {
-                let Some(local_node_id) = dispatcher.local_node_id() else {
-                    for ack in remote_batch.acks.iter() {
-                        ack.no_ack("local node id is unavailable for attached remote delivery");
-                    }
-                    return Err(Box::new(batch.clone()));
-                };
+                let local_node_id = dispatcher.local_node_id();
                 remote_batch
                     .acks
                     .iter()
@@ -1471,6 +1465,13 @@ impl Runtime {
         }
     }
 
+    /// Whether this node owns the relay `services` serve. A relay whose schedule names no owner is
+    /// owned wherever it runs.
+    pub(in crate::runtime) fn owns_relay(&self, services: &RelayBoundaryServices) -> bool {
+        let dispatcher = self.inner.remote_dispatcher.load();
+        services.is_owned_by(dispatcher.as_deref().map(RemoteDispatcher::local_node_id))
+    }
+
     pub(super) async fn fanout_relay_owner_batch(
         &self,
         domain: &DomainName,
@@ -1623,7 +1624,11 @@ impl Runtime {
         retention: RelayRetention,
     ) -> RelayOwnerTask {
         let (shutdown, mut shutdown_rx) = watch::channel(false);
-        let physical_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
+        let dispatcher = self.inner.remote_dispatcher.load();
+        let physical_node_id = dispatcher
+            .as_deref()
+            .map(RemoteDispatcher::local_node_id)
+            .cloned();
         let global_metrics = self.inner.metrics.resolve_relay_metrics(
             domain,
             relay,

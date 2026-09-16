@@ -331,14 +331,9 @@ impl Runtime {
                             warn!(error = %error, "failed to apply replicated kafka offset snapshot");
                             break;
                         }
-                        let dispatcher = runtime.inner.remote_dispatcher.read().clone();
-                        if let Some(dispatcher) = dispatcher {
-                            let local_node_id =
-                                runtime.inner.remote_dispatch.local_node_id.read().clone();
-                            let Some(local_node_id) = local_node_id else {
-                                continue;
-                            };
-                            if let Err(error) = dispatcher
+                        let dispatcher = runtime.inner.remote_dispatcher.load_full();
+                        if let Some(dispatcher) = dispatcher
+                            && let Err(error) = dispatcher
                                 .dispatch(
                                     &primary_node,
                                     Envelope::Control(
@@ -351,9 +346,8 @@ impl Runtime {
                                     ),
                                 )
                                 .await
-                            {
-                                warn!(node_id = %local_node_id, error = %error, "failed to acknowledge replicated kafka offset snapshot");
-                            }
+                        {
+                            warn!(node_id = %dispatcher.local_node_id(), error = %error, "failed to acknowledge replicated kafka offset snapshot");
                         }
                     }
                     Ok(None) => {}
@@ -547,14 +541,9 @@ impl Runtime {
                 {
                     Ok(Some(revision)) => {
                         runtime.inner.materialized_state_changed.notify_waiters();
-                        let dispatcher = runtime.inner.remote_dispatcher.read().clone();
-                        if let Some(dispatcher) = dispatcher {
-                            let local_node_id =
-                                runtime.inner.remote_dispatch.local_node_id.read().clone();
-                            let Some(local_node_id) = local_node_id else {
-                                continue;
-                            };
-                            if let Err(error) = dispatcher
+                        let dispatcher = runtime.inner.remote_dispatcher.load_full();
+                        if let Some(dispatcher) = dispatcher
+                            && let Err(error) = dispatcher
                                 .dispatch(
                                     &primary_node,
                                     Envelope::Control(
@@ -567,9 +556,8 @@ impl Runtime {
                                     ),
                                 )
                                 .await
-                            {
-                                warn!(node_id = %local_node_id, error = %error, "failed to acknowledge replicated materialized relay snapshot");
-                            }
+                        {
+                            warn!(node_id = %dispatcher.local_node_id(), error = %error, "failed to acknowledge replicated materialized relay snapshot");
                         }
                     }
                     Ok(None) => {}
@@ -626,14 +614,9 @@ impl Runtime {
                             warn!(error = %error, "failed to apply replicated branch-aggregated state snapshot");
                             continue;
                         }
-                        let dispatcher = runtime.inner.remote_dispatcher.read().clone();
-                        if let Some(dispatcher) = dispatcher {
-                            let local_node_id =
-                                runtime.inner.remote_dispatch.local_node_id.read().clone();
-                            let Some(local_node_id) = local_node_id else {
-                                continue;
-                            };
-                            if let Err(error) = dispatcher
+                        let dispatcher = runtime.inner.remote_dispatcher.load_full();
+                        if let Some(dispatcher) = dispatcher
+                            && let Err(error) = dispatcher
                                 .dispatch(
                                     &primary_node,
                                     Envelope::Control(
@@ -646,9 +629,8 @@ impl Runtime {
                                     ),
                                 )
                                 .await
-                            {
-                                warn!(node_id = %local_node_id, error = %error, "failed to acknowledge replicated branch-aggregated state snapshot");
-                            }
+                        {
+                            warn!(node_id = %dispatcher.local_node_id(), error = %error, "failed to acknowledge replicated branch-aggregated state snapshot");
                         }
                     }
                     Ok(None) => {}

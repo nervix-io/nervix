@@ -27,7 +27,7 @@ use nervix_vm::{
 use crate::{
     jaq_program::StatefulJaqProgram,
     registry::{
-        error::RegistryError,
+        error::{OtelMappingIssue, OtelMappingSection, OtelMappingSignal, RegistryError},
         validation::{
             branching::relay_declared_branch,
             expression::{
@@ -217,7 +217,9 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
             resource,
             ..
         } => {
-            validate_otel_mapping_contract(signal, values, attributes, resource).map_err(invalid)?
+            validate_otel_mapping_contract(
+                domain, identifier, signal, values, attributes, resource,
+            )?;
         }
         EmitSink::Kafka { .. }
         | EmitSink::Pulsar { .. }
@@ -239,28 +241,30 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
 }
 
 fn validate_otel_mapping_contract(
+    domain: &DomainName,
+    identifier: &ModelName,
     signal: &OtelSignal,
     values: &[OtelValueMapping],
     attributes: &[OtelValueMapping],
     resource: &[OtelValueMapping],
-) -> Result<(), String> {
+) -> error_stack::Result<(), RegistryError> {
     /// The `VALUES` contract one OTEL signal imposes: what it may name, what it must name, and
     /// whether delta temporality adds `start_time` to the required keys.
     struct SignalContract {
-        label: &'static str,
+        signal: OtelMappingSignal,
         allowed: &'static [&'static str],
         required: &'static [&'static str],
         delta: bool,
     }
 
     let SignalContract {
-        label: signal_label,
+        signal,
         allowed,
         required,
         delta,
     } = match signal {
         OtelSignal::Logs => SignalContract {
-            label: "LOGS",
+            signal: OtelMappingSignal::Logs,
             allowed: &[
                 "time",
                 "severity_text",
@@ -273,7 +277,7 @@ fn validate_otel_mapping_contract(
             delta: false,
         },
         OtelSignal::Traces => SignalContract {
-            label: "TRACES",
+            signal: OtelMappingSignal::Traces,
             allowed: &[
                 "trace_id",
                 "span_id",
@@ -290,19 +294,19 @@ fn validate_otel_mapping_contract(
         },
         OtelSignal::Metric(metric) => match metric.kind {
             OtelMetricKind::Gauge => SignalContract {
-                label: "METRIC GAUGE",
+                signal: OtelMappingSignal::MetricGauge,
                 allowed: &["time", "start_time", "value"],
                 required: &["time", "value"],
                 delta: false,
             },
             OtelMetricKind::Sum { temporality, .. } => SignalContract {
-                label: "METRIC SUM",
+                signal: OtelMappingSignal::MetricSum,
                 allowed: &["time", "start_time", "value"],
                 required: &["time", "value"],
                 delta: temporality == OtelAggregationTemporality::Delta,
             },
             OtelMetricKind::Histogram { temporality } => SignalContract {
-                label: "METRIC HISTOGRAM",
+                signal: OtelMappingSignal::MetricHistogram,
                 allowed: &[
                     "time",
                     "start_time",
@@ -319,40 +323,53 @@ fn validate_otel_mapping_contract(
         },
     };
 
+    let invalid = |issue| {
+        Report::new(RegistryError::InvalidOtelMapping {
+            domain: domain.clone(),
+            identifier: identifier.clone(),
+            issue,
+        })
+    };
+
     let mut value_keys = HashSet::default();
     for mapping in values {
         if !allowed.contains(&mapping.column.as_str()) {
-            return Err(format!(
-                "OTEL {signal_label} VALUES does not support key '{}'",
-                mapping.column
-            ));
+            return Err(invalid(OtelMappingIssue::UnsupportedValue {
+                signal,
+                key: mapping.column.clone(),
+            }));
         }
         if !value_keys.insert(mapping.column.as_str()) {
-            return Err(format!(
-                "OTEL {signal_label} VALUES contains duplicate key '{}'",
-                mapping.column
-            ));
+            return Err(invalid(OtelMappingIssue::DuplicateValue {
+                signal,
+                key: mapping.column.clone(),
+            }));
         }
     }
     for key in required {
         if !value_keys.contains(key) {
-            return Err(format!("OTEL {signal_label} VALUES requires key '{key}'"));
+            return Err(invalid(OtelMappingIssue::MissingValue { signal, key }));
         }
     }
     if delta && !value_keys.contains("start_time") {
-        return Err(format!(
-            "OTEL {signal_label} DELTA VALUES requires key 'start_time'"
-        ));
+        return Err(invalid(OtelMappingIssue::MissingDeltaValue {
+            signal,
+            key: "start_time",
+        }));
     }
 
-    for (label, mappings) in [("ATTRIBUTES", attributes), ("RESOURCE", resource)] {
+    for (section, mappings) in [
+        (OtelMappingSection::Attributes, attributes),
+        (OtelMappingSection::Resource, resource),
+    ] {
         let mut keys = HashSet::default();
         for mapping in mappings {
             if !keys.insert(mapping.column.as_str()) {
-                return Err(format!(
-                    "OTEL {label} contains duplicate key '{}'",
-                    mapping.column
-                ));
+                return Err(invalid(OtelMappingIssue::DuplicateMetadata {
+                    signal,
+                    section,
+                    key: mapping.column.clone(),
+                }));
             }
         }
     }
@@ -1243,6 +1260,7 @@ mod tests {
         else {
             unreachable!("emitter helper must build an emitter model")
         };
+        let identifier = ModelName::from(&emitter.name);
         emitter.encode_using_codec = None;
         emitter.publishing_mode = EmitterPublishingMode::RequestAck {
             retry_policy: RetryPolicy {
@@ -1260,26 +1278,31 @@ mod tests {
             resource: Vec::new(),
             scope: None,
         };
-        validate_emitter_publishing_contract(
-            &domain,
-            &ModelName::from(&emitter.name),
-            &models,
-            &emitter,
-        )
-        .expect("complete OTEL LOGS mappings must be accepted");
+        validate_emitter_publishing_contract(&domain, &identifier, &models, &emitter)
+            .expect("complete OTEL LOGS mappings must be accepted");
 
         let EmitSink::Otel { values, .. } = emitter.sink.as_mut() else {
             unreachable!("test emitter must remain OTEL")
         };
         values.push(otel_mapping("body"));
-        let error = validate_emitter_publishing_contract(
-            &domain,
-            &ModelName::from(&emitter.name),
-            &models,
-            &emitter,
-        )
-        .expect_err("duplicate OTEL VALUES keys must be rejected");
-        assert!(format!("{error:#}").contains("duplicate key 'body'"));
+        let error = validate_emitter_publishing_contract(&domain, &identifier, &models, &emitter)
+            .expect_err("duplicate OTEL VALUES keys must be rejected");
+        assert_eq!(
+            error.current_context(),
+            &RegistryError::InvalidOtelMapping {
+                domain: domain.clone(),
+                identifier: identifier.clone(),
+                issue: OtelMappingIssue::DuplicateValue {
+                    signal: OtelMappingSignal::Logs,
+                    key: "body".to_string(),
+                },
+            }
+        );
+        assert_eq!(
+            format!("{error:#}"),
+            "model 'emit' in domain 'default' is invalid: OTEL LOGS VALUES contains duplicate key \
+             'body'"
+        );
 
         *emitter.sink = EmitSink::Otel {
             client: named("otel_main"),
@@ -1297,14 +1320,24 @@ mod tests {
             resource: Vec::new(),
             scope: None,
         };
-        let error = validate_emitter_publishing_contract(
-            &domain,
-            &ModelName::from(&emitter.name),
-            &models,
-            &emitter,
-        )
-        .expect_err("DELTA metric streams without start_time must be rejected");
-        assert!(format!("{error:#}").contains("DELTA VALUES requires key 'start_time'"));
+        let error = validate_emitter_publishing_contract(&domain, &identifier, &models, &emitter)
+            .expect_err("DELTA metric streams without start_time must be rejected");
+        assert_eq!(
+            error.current_context(),
+            &RegistryError::InvalidOtelMapping {
+                domain: domain.clone(),
+                identifier,
+                issue: OtelMappingIssue::MissingDeltaValue {
+                    signal: OtelMappingSignal::MetricSum,
+                    key: "start_time",
+                },
+            }
+        );
+        assert_eq!(
+            format!("{error:#}"),
+            "model 'emit' in domain 'default' is invalid: OTEL METRIC SUM DELTA VALUES requires \
+             key 'start_time'"
+        );
     }
 
     #[test]

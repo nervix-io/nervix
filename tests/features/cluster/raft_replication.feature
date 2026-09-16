@@ -21,6 +21,7 @@ Feature: Pipelined raft replication and bounded log retention
     Then within "60s" node "node-3" recovers by installing a raft snapshot
     And within "60s" node "node-3" has applied 40 domains named "compacted"
 
+  @shutdown_qualification
   Scenario: An interrupted snapshot installation finishes on the next start
     Given raft snapshots after 8 entries retaining 2 covered entries
     And a 3 node nervix cluster is started
@@ -35,7 +36,7 @@ Feature: Pipelined raft replication and bounded log retention
     Then within "60s" node "node-3" recovers by installing a raft snapshot
     And within "60s" node "node-3" has applied 40 domains named "interrupted"
 
-  @exclusive @raft_io_expected_failure
+  @exclusive
   Scenario: Durable follower catch-up stays bounded and preserves its append stream
     Given a 3 node nervix cluster is started
     And node "node-3" is stopped
@@ -43,3 +44,4 @@ Feature: Pipelined raft replication and bounded log retention
     Given consensus commits on node "node-3" take "2ms"
     When node "node-3" starts catching up while the leader keeps creating domains named "durable_live"
     Then node "node-3" applies 1024 domains named "durable_backlog" and the concurrent writes within its durable storage bound using at most 2 append streams
+    And node "node-3" held its queued append batches inside its commands memory budget while catching up

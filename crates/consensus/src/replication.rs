@@ -17,15 +17,26 @@
 //! for the whole idle bound, no answer arrives and the follower accepts none of the leader's bytes.
 //! The bound belongs to this crate rather than to OpenRaft's soft TTL, which follows the heartbeat
 //! interval and so measures leader liveness instead of follower storage.
+//!
+//! Receiving has its own bound. A follower keeps at most `resident_replication_batches` decoded
+//! batches on one stream, each charged to the Commands class from the moment it is decoded until
+//! OpenRaft answers it. The slot is taken before the frame is decoded, so reaching the bound stops
+//! this node reading rather than decoding a batch it has nowhere to put: the leader's flow-control
+//! window closes and it stops sending, instead of this node accumulating batches no budget
+//! measures. The executor validates at startup that the class holds the whole window beside one
+//! batch being encoded, so a full window can always produce the answer that releases it. Batches
+//! belonging to a stream the leader has already torn down are released with the stream rather than
+//! staying queued behind it.
 
 use std::{pin::pin, time::Duration};
 
+use arch_into::ArchInto as _;
 use futures_util::{Stream, StreamExt as _, stream::BoxStream};
 use meticulous::OptionExt as _;
-use nervix_execution::Executor;
+use nervix_execution::{Executor, Reservation};
 use nervix_interconnect::{
-    DuplexItems, DuplexReceiver, DuplexSendProgress, DuplexSender, InterconnectDuplexRequest as _,
-    Transport,
+    ChargedItem, DuplexItems, DuplexReceiver, DuplexSendProgress, DuplexSender,
+    InterconnectDuplexRequest as _, Transport,
 };
 use nervix_models::ClusterNodeName;
 use nervix_recovery::Discarded as _;
@@ -399,23 +410,46 @@ where
 
 impl ProtocolReceiver {
     /// Answer one follower-side append stream, preserving the leader's submission order.
+    ///
+    /// Every decoded batch stays charged until OpenRaft answers it, and no more than the resident
+    /// window are decoded at once, so a core that has fallen behind stops this node reading
+    /// instead of queueing batches its budget never sees.
     pub(crate) fn answer_append_stream(
         &self,
         peer_node_id: ClusterNodeName,
         items: DuplexItems<wire::AppendEntriesRecord>,
     ) -> BoxStream<'static, Result<wire::StreamAppendResultRecord, wire::ConsensusRequestError>>
     {
+        let window: usize = self
+            .inner
+            .store
+            .limits()
+            .resident_replication_batches
+            .get()
+            .arch_into();
+        // One slot per resident batch. Holding the charge here is what bounds the window: it is
+        // returned only when the answer to the batch it covers has been produced.
+        let (charged, release) = mpsc::channel::<Reservation>(window);
         let requests = futures_util::stream::unfold(
-            (items, peer_node_id),
-            |(mut items, peer_node_id)| async move {
-                let record = match items.next().await {
-                    Ok(Some(record)) => record,
+            (items, peer_node_id, charged),
+            |(mut items, peer_node_id, charged)| async move {
+                // Taking the slot before the frame is decoded is what closes the leader's
+                // flow-control window, rather than decoding a batch with nowhere to put it.
+                let Ok(slot) = charged.reserve_owned().await else {
+                    return None;
+                };
+                let decoded = match items.next().await {
+                    Ok(Some(decoded)) => decoded,
                     Ok(None) => return None,
                     Err(error) => {
                         debug!(%error, "raft append stream ended");
                         return None;
                     }
                 };
+                let ChargedItem {
+                    item: record,
+                    charge,
+                } = decoded;
                 if let Err(error) =
                     validate_protocol_origin(&peer_node_id, record.origin_node_id(), "replication")
                 {
@@ -429,14 +463,27 @@ impl ProtocolReceiver {
                         return None;
                     }
                 };
-                Some((request, (items, peer_node_id)))
+                let charged = slot.send(charge);
+                Some((request, (items, peer_node_id, charged)))
             },
         );
         let answers = self.inner.raft.stream_append(requests);
-        Box::pin(answers.map(|answer| match answer {
-            Ok(result) => Ok(wire::StreamAppendResultRecord::from(result)),
-            Err(fatal) => Err(wire::ConsensusRequestError::raft(fatal)),
-        }))
+        let answers = futures_util::stream::unfold(
+            (Box::pin(answers), release),
+            |(mut answers, mut release)| async move {
+                let answer = answers.next().await?;
+                // The batch this answer belongs to has been appended durably, so it is no longer
+                // resident here and its charge opens the window for the next frame.
+                let released = release.recv().await;
+                drop(released);
+                let answer = match answer {
+                    Ok(result) => Ok(wire::StreamAppendResultRecord::from(result)),
+                    Err(fatal) => Err(wire::ConsensusRequestError::raft(fatal)),
+                };
+                Some((answer, (answers, release)))
+            },
+        );
+        Box::pin(answers)
     }
 }
 

@@ -869,10 +869,11 @@ impl Runtime {
             control.update_declared_mode(ingestor.quiesce.mode(), active_supported_by_source);
             return control.clone();
         }
+        let dispatcher = self.inner.remote_dispatcher.load();
         let metric_labels = self.inner.metrics.register_ingestor_quiesce(
             domain,
             &ingestor.name,
-            self.inner.remote_dispatch.local_node_id.read().as_ref(),
+            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
         );
         let control = Arc::new(IngestorQuiesceControl::new(
             ingestor.quiesce.mode().clone(),

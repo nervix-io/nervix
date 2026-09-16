@@ -226,9 +226,11 @@ Memory and CPU execution are isolated by class:
 
 The total interconnect memory budget is 256 MiB. Reservations cannot borrow from another class. The
 relay budget holds two worst-case operations, each consisting of a 32 MiB encoded body, a 32 MiB
-decoded batch, and 16 MiB of decode scratch space. Startup validates the relationships among
-operation limits and these budgets, including the paired work that must fit for independent
-operations to keep making progress.
+decoded batch, and 16 MiB of decode scratch space. The commands and replication budget holds the
+four decoded replication batches a follower keeps resident beside one batch being encoded, so a
+follower whose receive window is full can still produce the answer that releases it. Startup
+validates the relationships among operation limits and these budgets, including the paired work
+that must fit for independent operations to keep making progress.
 
 ## Exchange Forms
 
@@ -368,6 +370,14 @@ reads its stop request only between rounds, and a round exchanges with each sele
 under a one-second request timeout. Closing the path first makes an exchange still waiting on a
 peer that is itself stopping fail at once, instead of holding teardown for the rest of the round.
 
+Session subscription interest also propagates through gossip. The key encoding is private to the
+cluster layer: whenever the live-node state watcher changes, each node rebuilds an immutable index
+from domain and relay to the interested node incarnations and publishes it through `ArcSwap`. A
+relay owner loads that snapshot and performs borrowed domain and relay lookups, so per-batch remote
+fan-out neither formats a gossip key nor waits on the gossip mutex. Subscription creation waits for
+the exact subscriber incarnation to appear in every live node's published index before it reports
+success. A withdrawal disappears from fan-out when the next gossip state snapshot is published.
+
 Consensus separates traffic according to the progress it protects:
 
 - heartbeats, votes, leadership notifications, linearizable runtime-admission reads, and other
@@ -380,6 +390,13 @@ The ordered append stream can keep multiple batches in flight while preserving f
 consensus-level window bounds a follower to 16 outstanding batches and 16 MiB of unacknowledged log
 data. Heartbeats and elections remain on management capacity, so a full append window does not block
 leadership traffic.
+
+A follower bounds the same stream from its own side. It keeps at most four decoded batches resident
+at once, each charged to the commands and replication budget from the moment it is decoded until its
+Raft core answers it, which happens only once the batch has been appended durably. A follower that
+reaches the bound stops reading frames, so the leader's flow-control window closes and it stops
+sending rather than growing the follower's memory. Decoded batches belonging to a stream the leader
+has already torn down are released with that stream instead of staying queued behind it.
 
 The append stream opens under its five-second setup deadline. A follower answers a batch only after
 appending it durably, so the leader does not time out individual answers. While a batch is
@@ -521,6 +538,9 @@ drain; remaining connections and handlers are then closed. Connection setup and 
 handshakes remain inside this bound. A repeated `SIGINT` or `SIGTERM`, or the shutdown deadline
 passing, ends the process without running the rest of its shutdown, so its peers observe its
 connections ending exactly as they do when the process crashes.
+
+See [Shutdown And Recovery](./shutdown.md) for the complete phase contract, the deadline and exit
+statuses, and what each ending preserves.
 
 ## Failure Ownership And Persistence
 

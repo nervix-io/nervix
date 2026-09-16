@@ -161,6 +161,10 @@ pub struct OperationLimits {
     /// The complete encoded body of one Raft replication batch. A batch carries whole commands, so
     /// it must hold the largest one beside the entries already gathered ahead of it.
     pub replication_batch_bytes: ByteUnit,
+    /// How many decoded replication batches one follower keeps resident while its Raft core has
+    /// not answered them. A follower answers a batch only after appending it durably, so batches
+    /// decoded ahead of that answer stay charged; this is what bounds how many may.
+    pub resident_replication_batches: NonZeroU32,
     /// One management or discovery event.
     pub management_event_bytes: ByteUnit,
     /// The application body a bulk transfer submits at a time.
@@ -184,6 +188,7 @@ impl Default for OperationLimits {
             relay_scratch_bytes: ByteUnit::Mebibyte(16),
             command_bytes: ByteUnit::Mebibyte(1),
             replication_batch_bytes: ByteUnit::Mebibyte(2),
+            resident_replication_batches: NonZeroU32::new(4).unwrap_or(NonZeroU32::MIN),
             management_event_bytes: ByteUnit::Kibibyte(64),
             bulk_chunk_bytes: ByteUnit::Kibibyte(64),
             snapshot_header_bytes: ByteUnit::Kibibyte(64),
@@ -314,12 +319,23 @@ impl ExecutionConfig {
                 },
             ));
         }
-        let commands_required = self
-            .limits
-            .replication_batch_bytes
-            .as_u64()
-            .checked_mul(2)
-            .ok_or_else(|| Report::new(ExecutionConfigError::UnaddressableReplicationBatch))?;
+        // A follower keeps every decoded batch charged until its Raft core answers it, and it
+        // encodes that answer against this same class. The budget therefore has to hold the whole
+        // resident window beside one batch being encoded: a window that filled the class would
+        // leave no room to produce the answer that releases it.
+        let resident_batches = u64::from(self.limits.resident_replication_batches.get());
+        let Some(charged_batches) = resident_batches.checked_add(1) else {
+            return Err(Report::new(
+                ExecutionConfigError::UnaddressableReplicationBatch,
+            ));
+        };
+        let Some(commands_required) =
+            charged_batches.checked_mul(self.limits.replication_batch_bytes.as_u64())
+        else {
+            return Err(Report::new(
+                ExecutionConfigError::UnaddressableReplicationBatch,
+            ));
+        };
         Ok(ValidatedConfig {
             workers: self.workers,
             budgets: ValidatedBudgets {
@@ -332,7 +348,7 @@ impl ExecutionConfig {
                 commands: permits(
                     MemoryClass::Commands.as_str(),
                     self.budgets.commands,
-                    "pair of replication batches",
+                    "resident replication batches beside one being encoded",
                     commands_required,
                 )?,
                 relay: permits(

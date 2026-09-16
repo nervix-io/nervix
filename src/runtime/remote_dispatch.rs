@@ -40,19 +40,23 @@ struct RemoteRelayAdmissionContext<'a> {
     admitted: &'a mut bool,
 }
 
-/// Node identity and the remote acknowledgement correlation registry. The runtime and the
-/// `RemoteDispatcher` it attaches must observe one instance of this: the dispatcher allocates the
-/// correlation ids that the runtime resolves when acknowledgements come back over the
-/// interconnect, and both answer questions about which node they are running on.
+/// The remote acknowledgement correlation registry. The runtime and the `RemoteDispatcher` it
+/// attaches must observe one instance of this: the dispatcher allocates the correlation ids that
+/// the runtime resolves when acknowledgements come back over the interconnect.
 pub(super) struct RemoteDispatchRegistry {
-    pub(super) local_node_id: RwLock<Option<ClusterNodeName>>,
-    pub(super) local_node_incarnation: RwLock<Option<ClusterNodeIncarnation>>,
     pub(super) next_ack_id: AtomicU64,
     pub(super) pending_acks: DashMap<u64, AckSet, RandomState>,
     pub(super) pending_relay_admissions:
         DashMap<u64, watch::Sender<RelayAdmissionUpdate>, RandomState>,
 }
 
+/// How this node reaches the rest of its cluster. The node attaches it once, after joining the
+/// cluster, and never replaces it.
+///
+/// It is also the node's identity. The interconnect authenticates the node under its name and the
+/// cluster handle carries the incarnation gossip announced for this run, so a runtime holding a
+/// dispatcher always knows which node it runs on, and a runtime holding none has not joined a
+/// cluster.
 pub(super) struct RemoteDispatcher {
     pub(super) cluster: Arc<cluster::ClusterHandle>,
     pub(super) interconnect: Transport,
@@ -80,8 +84,14 @@ impl RemoteDispatcher {
         &self.executor
     }
 
-    pub(super) fn local_node_id(&self) -> Option<ClusterNodeName> {
-        self.registry.local_node_id.read().clone()
+    /// The node this dispatcher speaks for.
+    pub(super) fn local_node_id(&self) -> &ClusterNodeName {
+        self.interconnect.node_id()
+    }
+
+    /// The incarnation that tells this run of the node apart from its earlier and later runs.
+    pub(super) fn local_node_incarnation(&self) -> ClusterNodeIncarnation {
+        self.cluster.local_incarnation()
     }
 
     pub(super) fn next_ack_id(&self) -> u64 {
@@ -154,9 +164,6 @@ impl RemoteDispatcher {
         if branch_channel.cancellation().is_cancelled() {
             return Err(REMOTE_RELAY_BRANCH_EVICTED.to_string());
         }
-        let local_node_id = self
-            .local_node_id()
-            .ok_or_else(|| "local node id is unavailable for relay delivery".to_string())?;
         let admission_id = self.next_ack_id();
         let delivery = payload.delivery;
         let mut cancellation_guard = self
@@ -164,7 +171,7 @@ impl RemoteDispatcher {
             .relay_cancellation_guard(node_id.clone(), delivery);
         payload.admission = Some(RemoteAckRegistration {
             ack_id: admission_id,
-            reply_node_id: local_node_id,
+            reply_node_id: self.local_node_id().clone(),
         });
         let admission = self.register_pending_relay_admission(admission_id);
         let dispatch = self.dispatch(node_id, Envelope::RelayPayload(payload));
@@ -348,25 +355,23 @@ impl RemoteDispatcher {
         batch: &RelayRecordBatch,
         excluded_nodes: &BTreeSet<ClusterNodeName>,
     ) {
-        let Some(local_node_id) = self.local_node_id() else {
+        let local_node_id = self.local_node_id();
+        let interest_index = self.cluster.subscription_interest_index();
+        let Some(interested_nodes) = interest_index.nodes(domain.as_str(), relay.as_str()) else {
             return;
         };
-        let interested_nodes = self
-            .cluster
-            .nodes_with_subscription_interest(domain.as_str(), relay.as_str())
-            .await;
         // One encode for the whole fanout. Every interested node carries this same allocation,
         // and the first one serializes it inside its own outbound slot: the slot is what orders
         // the batches a node receives, so an encode performed ahead of it lets a later batch
         // overtake an earlier one.
         let mut encoded_body: Option<ChargedBytes> = None;
-        for node_id in interested_nodes {
+        for node_id in interested_nodes.keys() {
             tokio::task::consume_budget().await;
-            if node_id == local_node_id || excluded_nodes.contains(&node_id) {
+            if node_id == local_node_id || excluded_nodes.contains(node_id) {
                 continue;
             }
             let outbound_slot = services.outbound_slot(
-                &node_id,
+                node_id,
                 relay,
                 RelayPayloadKind::SubscriptionFanout,
                 &batch.key,
@@ -393,7 +398,7 @@ impl RemoteDispatcher {
             let delivery = outbound_slot.next_delivery();
             if let Err(error) = self
                 .dispatch_admitted_relay_payload(
-                    &node_id,
+                    node_id,
                     RelayPayload {
                         delivery,
                         kind: RelayPayloadKind::SubscriptionFanout,
@@ -491,21 +496,32 @@ pub(in crate::runtime) struct RemoteRelayTarget {
 }
 
 impl Runtime {
+    /// Publishes how this node reaches its cluster, and with it the node's identity, once the node
+    /// has joined the cluster. `interconnect` is the transport bound under this node's name.
     pub(crate) fn attach_remote_dispatcher(
         &self,
-        local_node_id: ClusterNodeName,
         cluster: Arc<cluster::ClusterHandle>,
         interconnect: Transport,
     ) {
-        *self.inner.remote_dispatch.local_node_id.write() = Some(local_node_id);
-        *self.inner.remote_dispatch.local_node_incarnation.write() =
-            Some(cluster.local_incarnation());
-        *self.inner.remote_dispatcher.write() = Some(Arc::new(RemoteDispatcher {
+        let dispatcher = RemoteDispatcher {
             cluster,
             interconnect,
             executor: self.inner.executor.clone(),
             registry: self.inner.remote_dispatch.clone(),
-        }));
+        };
+        self.inner
+            .remote_dispatcher
+            .store(Some(StdArc::new(dispatcher)));
+    }
+
+    /// Whether `node_id` names this node. A node that has not joined a cluster has no name, so no
+    /// node is local to it.
+    pub(in crate::runtime) fn is_local_node(&self, node_id: &ClusterNodeName) -> bool {
+        let dispatcher = self.inner.remote_dispatcher.load();
+        let Some(dispatcher) = dispatcher.as_deref() else {
+            return false;
+        };
+        dispatcher.local_node_id() == node_id
     }
 
     pub(in crate::runtime) async fn inject_remote_stream_boundary_message(
@@ -592,7 +608,7 @@ impl Runtime {
         admission: &RemoteAckRegistration,
         outcome: RemoteAckOutcome,
     ) {
-        let Some(dispatcher) = self.inner.remote_dispatcher.read().clone() else {
+        let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
             return;
         };
         if let Err(error) = dispatcher
@@ -699,9 +715,7 @@ impl Runtime {
         } = self
             .wait_for_remote_stream_target(&remote.domain, &remote.relay)
             .await?;
-        if owner_ingress
-            && !services.is_owned_by(self.inner.remote_dispatch.local_node_id.read().as_ref())
-        {
+        if owner_ingress && !self.owns_relay(&services) {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: remote.domain.as_str().to_string(),
                 relay: remote.relay.as_str().to_string(),
@@ -1011,7 +1025,7 @@ impl Runtime {
         let Some(ack) = ack else {
             return;
         };
-        let Some(dispatcher) = self.inner.remote_dispatcher.read().clone() else {
+        let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
             return;
         };
         self.spawn_remote_ack_watcher_task(async move {

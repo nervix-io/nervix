@@ -1,3 +1,4 @@
+@shutdown_qualification
 Feature: Deduplicator state replication
   Scenario Outline: Deduplicator suppression survives a cluster restart from persisted snapshots
     Given Kafka is running

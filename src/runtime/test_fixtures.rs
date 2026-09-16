@@ -15,11 +15,11 @@ use arrow_ipc::writer::StreamWriter;
 use arrow_schema::Schema as ArrowSchema;
 use nervix_models::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BranchName, BranchSelection,
-    ClusterNodeName, CreateBranch, CreateSchema, DomainConfig, DomainName, DomainPace, DomainState,
-    DomainStatus, ErrorPolicies, Expression, FieldName, FieldReference, FieldScope,
-    IngestQuiesceMode, IngestorName, MessageErrorPolicy, ModelKind, ModelName, OutputBranch,
-    ParseAsType, ProcessorOutput, ProcessorOutputs, RelayName, ScheduledNode, SchemaField,
-    SchemaName, Timestamp,
+    ClusterNodeIncarnation, ClusterNodeName, CreateBranch, CreateSchema, DomainConfig, DomainName,
+    DomainPace, DomainState, DomainStatus, ErrorPolicies, Expression, FieldName, FieldReference,
+    FieldScope, IngestQuiesceMode, IngestorName, MessageErrorPolicy, ModelKind, ModelName,
+    OutputBranch, ParseAsType, ProcessorOutput, ProcessorOutputs, RelayName, ScheduledNode,
+    SchemaField, SchemaName, Timestamp,
 };
 use nervix_vm::window::lower_window_assignments;
 use nervix_wasm::{
@@ -295,6 +295,36 @@ pub(super) fn test_relay_boundary_services() -> Arc<super::RelayBoundaryServices
         Vec::new(),
         None,
     ))
+}
+
+/// Attaches `runtime` to a cluster of one node on loopback, named `node_id`, the way a starting
+/// node attaches to the cluster it joined. The runtime then learns its identity and incarnation
+/// from a real transport and cluster handle, and the incarnation that cluster announced is
+/// returned for the requests a test builds on the node's behalf.
+pub(super) async fn attach_loopback_cluster(
+    runtime: &super::Runtime,
+    node_id: &ClusterNodeName,
+) -> ClusterNodeIncarnation {
+    let interconnect = crate::application::test_fixtures::test_interconnect("test", node_id).await;
+    // Nothing serves gRPC or the web console in a runtime test. Gossip only announces these
+    // addresses, so they name the interconnect listener.
+    let interconnect_addr = interconnect.local_addr();
+    let cluster = crate::cluster::start_cluster(crate::cluster::ClusterSettings {
+        cluster_id: "test".to_string(),
+        node_id: node_id.clone(),
+        grpc_listen_addr: interconnect_addr,
+        grpc_advertise_addr: interconnect_addr.to_string(),
+        web_console_advertise_addr: format!("http://{interconnect_addr}"),
+        interconnect_advertise_addr: interconnect_addr.into(),
+        bootstrap_host: None,
+        interconnect: interconnect.clone(),
+        node_unavailability_timeout: Duration::from_secs(10),
+    })
+    .await
+    .expect("a loopback cluster of one node should start");
+    let incarnation = cluster.local_incarnation();
+    runtime.attach_remote_dispatcher(Arc::new(cluster), interconnect);
+    incarnation
 }
 
 pub(super) fn test_ingestor_quiesce_control(

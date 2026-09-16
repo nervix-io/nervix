@@ -121,6 +121,26 @@ nervix-cli --server http://<node-address>:31390
 The [web console](client-tools-web-console.md) is available at
 `http://<node-address>:31420/console/`. Omit `localAccess` for an in-cluster-only deployment.
 
+## Shutdown And Grace Periods
+
+Deleting a pod, draining a Kubernetes node, or rolling the StatefulSet sends `SIGTERM`, which starts
+graceful shutdown. A Nervix node ends its own shutdown within its shutdown timeout, 50 seconds by
+default, which covers the 30-second default drain timeout and the services that stop after it. The
+operator sets `terminationGracePeriodSeconds: 60` so the kubelet waits longer than that, and a node
+that cannot finish exits on its own rather than being killed partway through its drain. If you raise
+`NERVIX_SHUTDOWN_TIMEOUT`, raise the grace period with it.
+
+Note that `/readyz` reports whether the node currently knows a Raft leader; it does not turn
+negative when a node begins terminating. A draining node is therefore not removed from Service
+endpoints by readiness alone. It stops accepting new client connections itself in the first
+shutdown phase, and it keeps serving already-admitted work until its drain finishes.
+
+A terminating node moves its scheduled work to a live peer when one is available, and otherwise
+completes everything it has admitted in place. Rolling one pod at a time keeps a peer available to
+receive that work, so ownership moves instead of waiting for the pod to come back. See
+[Shutdown And Recovery](shutdown.md) for the phases, the drain guarantees, and what each ending
+preserves.
+
 ## Production Considerations
 
 Both the chart and the example currently default to rolling `latest` image tags. Pin reviewed
