@@ -16,7 +16,7 @@ use std::{
 use ahash::{HashMap, HashMapExt};
 use arch_into::ArchInto as _;
 use arrow_arith::{
-    aggregate::sum as arrow_sum,
+    aggregate::sum_checked as arrow_sum_checked,
     boolean::{and_kleene, is_null, not, or_kleene},
     numeric::{add, div, mul, neg, rem, sub},
 };
@@ -26,7 +26,8 @@ use arrow_array::{
     StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
     builder::{
         BooleanBuilder, Float32Builder, Float64Builder, Int8Builder, Int16Builder, Int32Builder,
-        Int64Builder, StringBuilder, UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
+        Int64Builder, PrimitiveBuilder, StringBuilder, UInt8Builder, UInt16Builder, UInt32Builder,
+        UInt64Builder,
     },
     new_null_array,
     types::{
@@ -67,7 +68,7 @@ use crate::{
         RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace, RegisterType, ScalarValue,
     },
     program::{BinaryOp, FunctionName, Span, UnaryOp},
-    semantics::BuiltinLowering,
+    semantics::{BuiltinLowering, CaseMapping},
 };
 
 pub const SPAWN_BLOCKING_ROW_THRESHOLD: usize = 1_024;
@@ -1383,25 +1384,13 @@ macro_rules! define_float_binary {
                     BinaryOp::Rem => execute_float_arithmetic!(
                         left, right, $array, $typed_variant, row_errors, span, |lhs, rhs| lhs % rhs
                     ),
-                    // The arrow comparison kernels order floats by the IEEE 754 total order,
-                    // which makes NaN equal to itself and greater than every other value.
-                    // Float comparisons here keep Rust's IEEE semantics, where any comparison
-                    // against NaN is false, so they evaluate row by row instead.
                     BinaryOp::Eq
                     | BinaryOp::NotEq
                     | BinaryOp::Gt
                     | BinaryOp::Lt
                     | BinaryOp::GtEq
                     | BinaryOp::LtEq => {
-                        let mut builder = BooleanBuilder::with_capacity(left.len());
-                        for row in 0..left.len() {
-                            if left.is_null(row) || right.is_null(row) {
-                                builder.append_null();
-                            } else {
-                                builder.append_value(compare_floats(left.value(row), right.value(row), op));
-                            }
-                        }
-                        Ok(TypedArray::Boolean(builder.finish()))
+                        Ok(TypedArray::Boolean(compare_float_columns(left, right, op)))
                     }
                     BinaryOp::And | BinaryOp::Or => Err(RuntimeError::InvalidRegisterType {
                         reg: RegisterRef::new(RegisterSpace::Temp, RegisterType::$reg_ty, 0),
@@ -1417,6 +1406,31 @@ define_float_binary!(
     (execute_binary_f32, Float32Array, Float32, Float32);
     (execute_binary_f64, Float64Array, Float64, Float64)
 );
+
+/// Compares two float columns row by row with IEEE 754 semantics: NaN is unequal to every value
+/// including itself, every ordering comparison against NaN is false, and `0.0` equals `-0.0`. The
+/// arrow comparison kernels order floats by the IEEE 754 total order instead, which makes NaN equal
+/// to itself and greater than every other value and separates `0.0` from `-0.0`, so neither a float
+/// comparison nor a function that decides float equality uses them.
+fn compare_float_columns<T>(
+    left: &PrimitiveArray<T>,
+    right: &PrimitiveArray<T>,
+    op: BinaryOp,
+) -> BooleanArray
+where
+    T: ArrowPrimitiveType,
+    T::Native: PartialOrd,
+{
+    let mut builder = BooleanBuilder::with_capacity(left.len());
+    for row in 0..left.len() {
+        if left.is_null(row) || right.is_null(row) {
+            builder.append_null();
+        } else {
+            builder.append_value(compare_floats(left.value(row), right.value(row), op));
+        }
+    }
+    builder.finish()
+}
 
 fn execute_binary_bool(
     left: &BooleanArray,
@@ -1500,12 +1514,27 @@ fn compare_with_arrow_ord(
     }
 }
 
-fn execute_nullif_arrow(left: &dyn Array, right: &dyn Array) -> Result<TypedArray, RuntimeError> {
-    let left_datum: &dyn Datum = &left;
-    let right_datum: &dyn Datum = &right;
-    let predicate = eq(left_datum, right_datum)
-        .map_err(|error| arrow_kernel_error("nullif eq kernel failed", error))?;
-    let output = nullif(left, &predicate)
+/// `nullif` returns null exactly where `=` holds, so it decides equality the way `=` does. Float
+/// operands use the IEEE 754 comparison `=` evaluates, and every other type uses the arrow equality
+/// kernel, which agrees with `=` for them.
+fn execute_nullif(left: &TypedArray, right: &TypedArray) -> Result<TypedArray, RuntimeError> {
+    let predicate = match (left, right) {
+        (TypedArray::Float32(left), TypedArray::Float32(right)) => {
+            compare_float_columns(left, right, BinaryOp::Eq)
+        }
+        (TypedArray::Float64(left), TypedArray::Float64(right)) => {
+            compare_float_columns(left, right, BinaryOp::Eq)
+        }
+        _ => {
+            let left = left.as_array();
+            let right = right.as_array();
+            let left_datum: &dyn Datum = &left;
+            let right_datum: &dyn Datum = &right;
+            eq(left_datum, right_datum)
+                .map_err(|error| arrow_kernel_error("nullif eq kernel failed", error))?
+        }
+    };
+    let output = nullif(left.as_array(), &predicate)
         .map_err(|error| arrow_kernel_error("nullif kernel failed", error))?;
     array_ref_to_typed_array(output)
 }
@@ -1539,8 +1568,12 @@ fn execute_builtin(
         BuiltinLowering::Now => Ok(TypedArray::Datetime(execute_now(row_count, context.now))),
         BuiltinLowering::UuidV4 => Ok(TypedArray::Utf8(execute_uuid_v4(row_count))),
         BuiltinLowering::UuidV7 => Ok(TypedArray::Utf8(execute_uuid_v7(row_count, context.now))),
-        BuiltinLowering::Lower => Ok(TypedArray::Utf8(execute_lower(as_utf8(&values[0])?))),
-        BuiltinLowering::Upper => Ok(TypedArray::Utf8(execute_upper(as_utf8(&values[0])?))),
+        BuiltinLowering::Lower => Ok(TypedArray::Utf8(
+            CaseMapping::Lower.execute(as_utf8(&values[0])?),
+        )),
+        BuiltinLowering::Upper => Ok(TypedArray::Utf8(
+            CaseMapping::Upper.execute(as_utf8(&values[0])?),
+        )),
         BuiltinLowering::Trim | BuiltinLowering::Btrim => {
             Ok(TypedArray::Utf8(execute_trim(as_utf8(&values[0])?)))
         }
@@ -1555,7 +1588,7 @@ fn execute_builtin(
         BuiltinLowering::Ascii => Ok(TypedArray::Int64(execute_ascii(as_utf8(&values[0])?))),
         BuiltinLowering::Coalesce => execute_coalesce_arrow(&values),
         BuiltinLowering::IsNull => Ok(TypedArray::Boolean(execute_is_null_typed(&values[0]))),
-        BuiltinLowering::NullIf => execute_nullif_arrow(values[0].as_array(), values[1].as_array()),
+        BuiltinLowering::NullIf => execute_nullif(&values[0], &values[1]),
         BuiltinLowering::Abs => execute_abs_typed(&values[0], row_errors, span),
         BuiltinLowering::Acos => {
             execute_unary_math_f64(&values[0], row_errors, span, "acos", |v| v.acos())
@@ -1568,7 +1601,7 @@ fn execute_builtin(
         }
         BuiltinLowering::Ceil => execute_ceil(&values[0], row_errors, span),
         BuiltinLowering::Concat => Ok(TypedArray::Utf8(execute_concat(&values)?)),
-        BuiltinLowering::Sum => execute_list_sum(&values[0]),
+        BuiltinLowering::Sum => execute_list_sum(&values[0], row_errors, span),
         BuiltinLowering::First => execute_list_item(&values[0], ListItem::First, None),
         BuiltinLowering::Last => execute_list_item(&values[0], ListItem::Last, None),
         BuiltinLowering::Count => Ok(TypedArray::Int64(execute_list_count(&values[0])?)),
@@ -1784,8 +1817,15 @@ fn execute_list_count(input: &TypedArray) -> Result<Int64Array, RuntimeError> {
     Ok(Int64Array::new(lengths.into(), list.nulls().cloned()))
 }
 
+/// Sums each row's list with the checks `+` applies to the same operands. An integer sum that
+/// overflows reports an overflow and a float sum that is not finite reports an invalid argument,
+/// and either failure nulls that row's sum. Null elements are skipped, and an empty list or one
+/// whose elements are all null has no sum.
 fn execute_list_sum_for_primitive<T>(
     list: ListColumn<'_>,
+    is_finite: fn(T::Native) -> bool,
+    row_errors: &mut RowErrors,
+    span: Span,
 ) -> Result<PrimitiveArray<T>, RuntimeError>
 where
     T: ArrowNumericType,
@@ -1797,38 +1837,93 @@ where
         .ok_or_else(|| RuntimeError::InvalidBatch {
             message: format!("list values are not backed by {:?}", T::DATA_TYPE),
         })?;
-    Ok(PrimitiveArray::<T>::from_iter((0..list.len()).map(|row| {
+    let mut builder = PrimitiveBuilder::<T>::with_capacity(list.len());
+    for row in 0..list.len() {
         if list.is_null(row) {
-            return None;
+            builder.append_null();
+            continue;
         }
         let range = list.value_range(row);
-        let values = values.slice(range.start, range.len());
-        arrow_sum(&values)
-    })))
+        let elements = values.slice(range.start, range.len());
+        match arrow_sum_checked(&elements) {
+            Ok(Some(total)) => {
+                if is_finite(total) {
+                    builder.append_value(total);
+                } else {
+                    builder.append_null();
+                    push_error(
+                        row_errors,
+                        row,
+                        ErrorCode::InvalidArgument,
+                        "floating-point sum produced a non-finite result",
+                        span,
+                    );
+                }
+            }
+            Ok(None) => builder.append_null(),
+            Err(ArrowError::ArithmeticOverflow(_)) => {
+                builder.append_null();
+                push_error(
+                    row_errors,
+                    row,
+                    ErrorCode::Overflow,
+                    "integer sum overflowed",
+                    span,
+                );
+            }
+            Err(error) => return Err(arrow_kernel_error("list sum kernel failed", error)),
+        }
+    }
+    Ok(builder.finish())
 }
 
-fn execute_list_sum(input: &TypedArray) -> Result<TypedArray, RuntimeError> {
+fn execute_list_sum(
+    input: &TypedArray,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> Result<TypedArray, RuntimeError> {
     let list = ListColumn::from_typed(input)?;
+    // Every integer value is finite, so an integer sum can only fail by overflowing.
     match list.element_data_type() {
-        DataType::UInt8 => execute_list_sum_for_primitive::<UInt8Type>(list).map(TypedArray::UInt8),
-        DataType::Int8 => execute_list_sum_for_primitive::<Int8Type>(list).map(TypedArray::Int8),
+        DataType::UInt8 => {
+            execute_list_sum_for_primitive::<UInt8Type>(list, |_| true, row_errors, span)
+                .map(TypedArray::UInt8)
+        }
+        DataType::Int8 => {
+            execute_list_sum_for_primitive::<Int8Type>(list, |_| true, row_errors, span)
+                .map(TypedArray::Int8)
+        }
         DataType::UInt16 => {
-            execute_list_sum_for_primitive::<UInt16Type>(list).map(TypedArray::UInt16)
+            execute_list_sum_for_primitive::<UInt16Type>(list, |_| true, row_errors, span)
+                .map(TypedArray::UInt16)
         }
-        DataType::Int16 => execute_list_sum_for_primitive::<Int16Type>(list).map(TypedArray::Int16),
+        DataType::Int16 => {
+            execute_list_sum_for_primitive::<Int16Type>(list, |_| true, row_errors, span)
+                .map(TypedArray::Int16)
+        }
         DataType::UInt32 => {
-            execute_list_sum_for_primitive::<UInt32Type>(list).map(TypedArray::UInt32)
+            execute_list_sum_for_primitive::<UInt32Type>(list, |_| true, row_errors, span)
+                .map(TypedArray::UInt32)
         }
-        DataType::Int32 => execute_list_sum_for_primitive::<Int32Type>(list).map(TypedArray::Int32),
+        DataType::Int32 => {
+            execute_list_sum_for_primitive::<Int32Type>(list, |_| true, row_errors, span)
+                .map(TypedArray::Int32)
+        }
         DataType::UInt64 => {
-            execute_list_sum_for_primitive::<UInt64Type>(list).map(TypedArray::UInt64)
+            execute_list_sum_for_primitive::<UInt64Type>(list, |_| true, row_errors, span)
+                .map(TypedArray::UInt64)
         }
-        DataType::Int64 => execute_list_sum_for_primitive::<Int64Type>(list).map(TypedArray::Int64),
+        DataType::Int64 => {
+            execute_list_sum_for_primitive::<Int64Type>(list, |_| true, row_errors, span)
+                .map(TypedArray::Int64)
+        }
         DataType::Float32 => {
-            execute_list_sum_for_primitive::<Float32Type>(list).map(TypedArray::Float32)
+            execute_list_sum_for_primitive::<Float32Type>(list, f32::is_finite, row_errors, span)
+                .map(TypedArray::Float32)
         }
         DataType::Float64 => {
-            execute_list_sum_for_primitive::<Float64Type>(list).map(TypedArray::Float64)
+            execute_list_sum_for_primitive::<Float64Type>(list, f64::is_finite, row_errors, span)
+                .map(TypedArray::Float64)
         }
         other => Err(RuntimeError::InvalidBatch {
             message: format!("sum requires numeric ARRAY or VEC elements, found {other:?}"),
@@ -1954,29 +2049,57 @@ fn string_builder_like(input: &StringArray) -> StringBuilder {
     StringBuilder::with_capacity(input.len(), value_bytes)
 }
 
-/// ASCII case conversion never changes a value's byte length, and never touches a byte of a
-/// multi-byte sequence because those are all outside the ASCII range. Offsets and validity
-/// therefore carry over unchanged and only the value bytes are rewritten, which keeps the
-/// whole operation one pass over the buffer instead of an allocation per row.
-fn execute_ascii_case(input: &StringArray, convert: fn(&u8) -> u8) -> StringArray {
-    let values = input.values().iter().map(convert).collect::<Vec<u8>>();
-    StringArray::try_new(
-        input.offsets().clone(),
-        values.into(),
-        input.nulls().cloned(),
-    )
-    .verified(
-        "the output reuses the input's offsets and null buffer and maps bytes one to one, so \
-         try_new's invariants still hold",
-    )
-}
+/// Columnar execution of the case mapping `CaseMapping::apply` defines for one value.
+impl CaseMapping {
+    fn execute(self, input: &StringArray) -> StringArray {
+        let offsets = input.value_offsets();
+        let start = usize::try_from(offsets[0])
+            .assured("arrow offset and width buffers are non-negative by construction");
+        let end = usize::try_from(offsets[input.len()])
+            .assured("arrow offset and width buffers are non-negative by construction");
+        let visible = &input.values().as_slice()[start..end];
+        if visible.is_ascii() {
+            self.execute_ascii(input)
+        } else {
+            self.execute_unicode(input)
+        }
+    }
 
-fn execute_lower(input: &StringArray) -> StringArray {
-    execute_ascii_case(input, u8::to_ascii_lowercase)
-}
+    /// Over ASCII text the Unicode mapping is the per-byte ASCII mapping, which never changes a
+    /// value's byte length. Offsets and validity therefore carry over unchanged and only the value
+    /// bytes are rewritten, which keeps the whole operation one pass over the buffer instead of an
+    /// allocation per row. A sliced column shares its buffer with bytes outside the slice, and the
+    /// ASCII mapping leaves any non-ASCII byte among them untouched.
+    fn execute_ascii(self, input: &StringArray) -> StringArray {
+        let bytes = input.values().as_slice();
+        let values = match self {
+            Self::Lower => bytes.to_ascii_lowercase(),
+            Self::Upper => bytes.to_ascii_uppercase(),
+        };
+        StringArray::try_new(
+            input.offsets().clone(),
+            values.into(),
+            input.nulls().cloned(),
+        )
+        .verified(
+            "the output reuses the input's offsets and null buffer and maps bytes one to one, so \
+             try_new's invariants still hold",
+        )
+    }
 
-fn execute_upper(input: &StringArray) -> StringArray {
-    execute_ascii_case(input, u8::to_ascii_uppercase)
+    /// Outside ASCII a mapping can change a value's length, as `ß` uppercases to `SS`, so every
+    /// value is rebuilt through the whole-value mapping.
+    fn execute_unicode(self, input: &StringArray) -> StringArray {
+        let mut builder = string_builder_like(input);
+        for value in input.iter() {
+            let Some(value) = value else {
+                builder.append_null();
+                continue;
+            };
+            builder.append_value(self.apply(value));
+        }
+        builder.finish()
+    }
 }
 
 /// Rebuilds one UTF-8 column from borrowed slices of its input while carrying the input validity
@@ -3972,6 +4095,158 @@ mod tests {
     }
 
     #[test]
+    fn case_discards_float_function_errors_from_unselected_arms() {
+        let parsed = parse_program(
+            "SET grown = CASE WHEN input.exponent < 700.0 THEN exp(input.exponent) ELSE 0.0 END, \
+             rounded = CASE WHEN input.value < 1000.0 THEN round(input.value) ELSE 0.0 END",
+        )
+        .expect("must parse");
+        let schema = schema(vec![
+            Field::new("exponent", DataType::Float64, true),
+            Field::new("value", DataType::Float64, true),
+        ]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![
+                Field::new("grown", DataType::Float64, true),
+                Field::new("rounded", DataType::Float64, true),
+            ],
+        );
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Float64(Float64Array::from(vec![Some(0.0), Some(1000.0)])),
+                TypedArray::Float64(Float64Array::from(vec![Some(2.5), Some(f64::INFINITY)])),
+            ],
+        )
+        .expect("batch must build");
+
+        let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+
+        let TypedArray::Float64(grown) = output_column(&output, "grown") else {
+            panic!("grown must be Float64");
+        };
+        let TypedArray::Float64(rounded) = output_column(&output, "rounded") else {
+            panic!("rounded must be Float64");
+        };
+
+        assert_eq!(grown.value(0), 1.0);
+        assert_eq!(rounded.value(0), 3.0);
+        // The second row selects both ELSE arms. `exp(1000.0)` and `round(inf)` are not finite and
+        // would each report an error, but only a selected arm may report one.
+        assert_eq!(grown.value(1), 0.0);
+        assert_eq!(rounded.value(1), 0.0);
+        assert!(output.errors().is_error_free());
+    }
+
+    #[test]
+    fn list_item_functions_reject_nested_elements() {
+        let detection =
+            DataType::FixedSizeList(StdArc::new(Field::new("item", DataType::Float32, true)), 6);
+        let detections = DataType::List(StdArc::new(Field::new("item", detection.clone(), true)));
+        let input_schema = schema(vec![Field::new("detections", detections, true)]);
+        let output_schema = with_output_fields(
+            &input_schema,
+            vec![Field::new("detection", detection, true)],
+        );
+
+        for program in [
+            "SET detection = first(input.detections)",
+            "SET detection = last(input.detections)",
+            "SET detection = nth(input.detections, 0)",
+        ] {
+            let parsed = parse_program(program).expect("must parse");
+            let compiled = compile_program_for_bindings(
+                &parsed,
+                output_schema.clone(),
+                [CompileBinding::writable("input", input_schema.clone())],
+            );
+            let Err(error) = compiled else {
+                panic!("`{program}` selects a nested element and must be rejected");
+            };
+            assert_eq!(error.code, "unsupported_function");
+            assert!(
+                error
+                    .message
+                    .contains("requires ARRAY or VEC elements of a scalar type"),
+                "unexpected rejection for `{program}`: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn list_sum_reports_the_errors_the_addition_operator_reports() {
+        let integers: ArrayRef = StdArc::new(ListArray::from_iter_primitive::<Int64Type, _, _>([
+            Some(vec![Some(1), Some(2), Some(3)]),
+            Some(vec![Some(i64::MAX), Some(1)]),
+            Some(vec![]),
+            None,
+        ]));
+        let floats: ArrayRef = StdArc::new(ListArray::from_iter_primitive::<Float64Type, _, _>([
+            Some(vec![Some(1.5), Some(2.5)]),
+            Some(vec![Some(f64::MAX), Some(f64::MAX)]),
+            Some(vec![]),
+            None,
+        ]));
+        let parsed =
+            parse_program("SET total = sum(input.integers), float_total = sum(input.floats)")
+                .expect("must parse");
+        let schema = schema(vec![
+            Field::new("integers", integers.data_type().clone(), true),
+            Field::new("floats", floats.data_type().clone(), true),
+        ]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![
+                Field::new("total", DataType::Int64, true),
+                Field::new("float_total", DataType::Float64, true),
+            ],
+        );
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![TypedArray::Generic(integers), TypedArray::Generic(floats)],
+        )
+        .expect("batch must build");
+
+        let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+
+        let TypedArray::Int64(total) = output_column(&output, "total") else {
+            panic!("total must be Int64");
+        };
+        let TypedArray::Float64(float_total) = output_column(&output, "float_total") else {
+            panic!("float_total must be Float64");
+        };
+
+        assert_eq!(total.value(0), 6);
+        assert_eq!(float_total.value(0), 4.0);
+        assert!(output.errors().row(0).is_empty());
+        // `i64::MAX + 1` overflows and `f64::MAX + f64::MAX` is not finite, so the row reports what
+        // `+` reports for the same operands instead of wrapping or emitting a non-finite value.
+        assert!(total.is_null(1));
+        assert!(float_total.is_null(1));
+        let row_codes = output
+            .errors()
+            .row(1)
+            .iter()
+            .map(|error| error.code)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            row_codes,
+            vec![ErrorCode::Overflow, ErrorCode::InvalidArgument]
+        );
+        // An empty list has no sum and a null list stays null. Neither is an error.
+        assert!(total.is_null(2));
+        assert!(float_total.is_null(2));
+        assert!(output.errors().row(2).is_empty());
+        assert!(total.is_null(3));
+        assert!(float_total.is_null(3));
+        assert!(output.errors().row(3).is_empty());
+    }
+
+    #[test]
     fn executes_array_builtins() {
         let values: ArrayRef = StdArc::new(
             ListArray::from_iter_primitive::<Int64Type, _, _>([
@@ -4868,28 +5143,227 @@ mod tests {
     }
 
     #[test]
-    fn converts_ascii_case_over_sliced_and_multibyte_values() {
+    fn converts_case_with_unicode_mappings_over_sliced_and_multibyte_values() {
         let input = StringArray::from(vec![
-            Some("skipped"),
+            Some("skipped-ü"),
             Some("MiXeD"),
             None,
             Some("grüßen-ok"),
+            Some(""),
+            Some("\u{39f}\u{394}\u{39f}\u{3a3}"),
         ]);
         // A sliced column still points at the full value buffer, so offsets and validity have
-        // to stay aligned with the untouched bytes ahead of the slice.
-        let sliced = input.slice(1, 3);
+        // to stay aligned with the untouched bytes around the slice. This slice holds only ASCII
+        // text between non-ASCII neighbours.
+        let ascii = input.slice(1, 2);
+        assert_eq!(
+            CaseMapping::Upper.execute(&ascii),
+            StringArray::from(vec![Some("MIXED"), None])
+        );
+        assert_eq!(
+            CaseMapping::Lower.execute(&ascii),
+            StringArray::from(vec![Some("mixed"), None])
+        );
 
-        let upper = execute_ascii_case(&sliced, u8::to_ascii_uppercase);
-        let lower = execute_ascii_case(&sliced, u8::to_ascii_lowercase);
+        let sliced = input.slice(1, 5);
 
-        assert_eq!(upper.len(), 3);
+        let upper = CaseMapping::Upper.execute(&sliced);
+        let lower = CaseMapping::Lower.execute(&sliced);
+
+        assert_eq!(upper.len(), 5);
         assert_eq!(upper.value(0), "MIXED");
         assert!(upper.is_null(1));
-        // Case conversion is ASCII-only, so the multi-byte characters pass through unchanged.
-        assert_eq!(upper.value(2), "GRüßEN-OK");
+        // Case conversion uses Unicode's full mappings, so `ß` uppercases to `SS` and the output
+        // value is longer than the input it was built from.
+        assert_eq!(upper.value(2), "GRÜSSEN-OK");
+        assert_eq!(upper.value(3), "");
+        assert_eq!(upper.value(4), "\u{39f}\u{394}\u{39f}\u{3a3}");
         assert_eq!(lower.value(0), "mixed");
         assert!(lower.is_null(1));
         assert_eq!(lower.value(2), "grüßen-ok");
+        assert_eq!(lower.value(3), "");
+        // A trailing sigma lowercases to its final form. The condition is contextual but not
+        // locale-dependent, so it belongs to the one mapping both folding and execution apply.
+        assert_eq!(lower.value(4), "\u{3bf}\u{3b4}\u{3bf}\u{3c2}");
+    }
+
+    #[test]
+    fn folded_and_executed_case_calls_produce_the_same_value() {
+        let texts = [
+            "",
+            "plain ascii",
+            "Grüßen",
+            // A capital sigma lowercases to its final form only at the end of a word.
+            "\u{39f}\u{394}\u{39f}\u{3a3} \u{3a3}\u{39f}\u{3a3}",
+            // A dotted capital I lowercases to two scalar values.
+            "\u{130}stanbul",
+            // A titlecase digraph has distinct lowercase and uppercase forms.
+            "\u{1c5}emal",
+        ];
+        for function in ["lower", "upper"] {
+            for text in texts {
+                let source =
+                    format!("SET folded = {function}('{text}'), executed = {function}(input.raw)");
+                let parsed = parse_program(&source).expect("must parse");
+                let schema = schema(vec![Field::new("raw", DataType::Utf8, true)]);
+                let compiled = compile_program_with_output_fields(
+                    &parsed,
+                    schema.clone(),
+                    vec![
+                        Field::new("folded", DataType::Utf8, true),
+                        Field::new("executed", DataType::Utf8, true),
+                    ],
+                );
+                // The literal call folds away, leaving the column call as the only case builtin.
+                let case_builtins = compiled
+                    .instructions
+                    .iter()
+                    .filter(|instruction| {
+                        matches!(
+                            instruction.kind,
+                            InstructionKind::Builtin {
+                                lowering: BuiltinLowering::Lower | BuiltinLowering::Upper,
+                                ..
+                            }
+                        )
+                    })
+                    .count();
+                assert_eq!(case_builtins, 1, "{source}");
+                let batch = TypedBatch::try_new(
+                    schema,
+                    vec![TypedArray::Utf8(StringArray::from(vec![Some(text)]))],
+                )
+                .expect("batch must build");
+
+                let output =
+                    execute_program_sync(&compiled, &batch).expect("execution must succeed");
+
+                let TypedArray::Utf8(folded) = output_column(&output, "folded") else {
+                    panic!("folded must be Utf8");
+                };
+                let TypedArray::Utf8(executed) = output_column(&output, "executed") else {
+                    panic!("executed must be Utf8");
+                };
+                assert_eq!(folded.value(0), executed.value(0), "{source}");
+            }
+        }
+    }
+
+    #[test]
+    fn function_aliases_evaluate_like_their_canonical_names() {
+        let parsed = parse_program(
+            "SET ceil_value = ceil(input.amount), ceiling_value = ceiling(input.amount), \
+             pow_value = pow(input.amount, 2.0), power_value = power(input.amount, 2.0), \
+             substr_value = substr(input.text, 2, 3), substring_value = substring(input.text, 2, \
+             3), trim_value = trim(input.text), btrim_value = btrim(input.text), length_value = \
+             length(input.text), char_length_value = char_length(input.text)",
+        )
+        .expect("must parse");
+        let schema = schema(vec![
+            Field::new("amount", DataType::Float64, true),
+            Field::new("text", DataType::Utf8, true),
+        ]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![
+                Field::new("ceil_value", DataType::Float64, true),
+                Field::new("ceiling_value", DataType::Float64, true),
+                Field::new("pow_value", DataType::Float64, true),
+                Field::new("power_value", DataType::Float64, true),
+                Field::new("substr_value", DataType::Utf8, true),
+                Field::new("substring_value", DataType::Utf8, true),
+                Field::new("trim_value", DataType::Utf8, true),
+                Field::new("btrim_value", DataType::Utf8, true),
+                Field::new("length_value", DataType::Int64, true),
+                Field::new("char_length_value", DataType::Int64, true),
+            ],
+        );
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Float64(Float64Array::from(vec![Some(1.25), Some(-2.5), None])),
+                TypedArray::Utf8(StringArray::from(vec![Some(" grüßen "), Some(""), None])),
+            ],
+        )
+        .expect("batch must build");
+
+        let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+
+        for (canonical, alias) in [
+            ("ceil_value", "ceiling_value"),
+            ("pow_value", "power_value"),
+            ("substr_value", "substring_value"),
+            ("trim_value", "btrim_value"),
+            ("length_value", "char_length_value"),
+        ] {
+            assert_eq!(
+                output_column(&output, canonical).as_array(),
+                output_column(&output, alias).as_array(),
+                "{alias} must evaluate like {canonical}"
+            );
+        }
+        assert!(output.errors().is_error_free());
+    }
+
+    #[test]
+    fn nullif_uses_the_same_equality_as_the_comparison_operator() {
+        let parsed = parse_program(
+            "SET equal = input.left = input.right, nullified = is_null(nullif(input.left, \
+             input.right))",
+        )
+        .expect("must parse");
+        let schema = schema(vec![
+            Field::new("left", DataType::Float64, true),
+            Field::new("right", DataType::Float64, true),
+        ]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![
+                Field::new("equal", DataType::Boolean, true),
+                Field::new("nullified", DataType::Boolean, true),
+            ],
+        );
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Float64(Float64Array::from(vec![
+                    Some(f64::NAN),
+                    Some(0.0),
+                    Some(1.5),
+                    None,
+                ])),
+                TypedArray::Float64(Float64Array::from(vec![
+                    Some(f64::NAN),
+                    Some(-0.0),
+                    Some(1.5),
+                    Some(1.5),
+                ])),
+            ],
+        )
+        .expect("batch must build");
+
+        let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+
+        let TypedArray::Boolean(equal) = output_column(&output, "equal") else {
+            panic!("equal must be Boolean");
+        };
+        let TypedArray::Boolean(nullified) = output_column(&output, "nullified") else {
+            panic!("nullified must be Boolean");
+        };
+
+        // `nullif` nulls its first argument exactly where `=` holds. NaN equals nothing, including
+        // itself, and `0.0` equals `-0.0`.
+        assert!(!equal.value(0));
+        assert!(!nullified.value(0));
+        assert!(equal.value(1));
+        assert!(nullified.value(1));
+        assert!(equal.value(2));
+        assert!(nullified.value(2));
+        // A null operand makes the comparison null and leaves the already-null value in place.
+        assert!(equal.is_null(3));
+        assert!(nullified.value(3));
     }
 
     #[test]
