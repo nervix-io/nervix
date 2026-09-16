@@ -453,7 +453,7 @@ impl Runtime {
                     Ok(branches) => branches,
                     Err(error) => {
                         warn!(
-                            error,
+                            error = %error,
                             "failed to decode replicated branch lifecycle checkpoint"
                         );
                         continue;

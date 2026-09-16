@@ -1,4 +1,71 @@
+use error_stack::ResultExt as _;
+
 use super::*;
+
+#[derive(Debug, Error)]
+pub(crate) enum MaterializedReadError {
+    #[error("failed to open stored {placement}")]
+    StoredSnapshot { placement: RuntimeStatePlacement },
+    #[error("failed to fetch {placement} from node '{target}'")]
+    RemoteSnapshot {
+        target: ClusterNodeName,
+        placement: RuntimeStatePlacement,
+    },
+    #[error(
+        "failed to read field '{field}' from materialized relay '{relay}' in domain '{domain}'"
+    )]
+    Field {
+        domain: DomainName,
+        relay: RelayName,
+        branch: Option<BranchKey>,
+        field: String,
+    },
+    #[error("materialized relay '{relay}' in domain '{domain}' requires a concrete branch")]
+    CurrentBranchRequired {
+        domain: DomainName,
+        relay: RelayName,
+        branch: Option<BranchKey>,
+    },
+    #[error("materialized relay '{relay}' is not instantiated in domain '{domain}'")]
+    RelayUnavailable {
+        domain: DomainName,
+        relay: RelayName,
+        branch: Option<BranchKey>,
+    },
+    #[error("materialized relay '{relay}' is declared more than once in domain '{domain}'")]
+    DuplicateDependency {
+        domain: DomainName,
+        relay: RelayName,
+        branch: Option<BranchKey>,
+    },
+    #[error(
+        "failed to evaluate default field '{field}' for materialized relay '{relay}' in domain \
+         '{domain}'"
+    )]
+    DefaultExpression {
+        domain: DomainName,
+        relay: RelayName,
+        branch: Option<BranchKey>,
+        field: FieldName,
+    },
+    #[error(
+        "default materialized relay '{relay}' in domain '{domain}' did not initialize required \
+         field '{field}'"
+    )]
+    DefaultRequiredField {
+        domain: DomainName,
+        relay: RelayName,
+        branch: Option<BranchKey>,
+        field: String,
+    },
+    #[error("failed to read the execution clock for domain '{domain}'")]
+    DomainClock {
+        domain: DomainName,
+        branch: Option<BranchKey>,
+    },
+    #[error("failed to render a materialized record")]
+    RecordReport { branch: Option<BranchKey> },
+}
 
 pub(super) struct MaterializedRelayRead<'a> {
     pub(super) relay: &'a RelayName,
@@ -17,7 +84,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> Result<Vec<MaterializedRecordReport>, String> {
+    ) -> error_stack::Result<Vec<MaterializedRecordReport>, MaterializedReadError> {
         let routing = self
             .domain_routing(domain)
             .map(|routing| routing.load_full());
@@ -88,7 +155,7 @@ impl Runtime {
         domain: &DomainName,
         relay: &RelayName,
         branch_key: &Option<BranchKey>,
-    ) -> Result<Option<MaterializedGenerationRecord>, String> {
+    ) -> error_stack::Result<Option<MaterializedGenerationRecord>, MaterializedReadError> {
         for placement in self.materialized_record_placements(domain, relay, branch_key) {
             let state = self
                 .inner
@@ -157,13 +224,15 @@ impl Runtime {
         &self,
         routing: Option<&DomainRoutingSnapshot>,
         placement: &RuntimeStatePlacement,
-    ) -> Result<Option<RestoredMaterializedSnapshot>, String> {
+    ) -> error_stack::Result<Option<RestoredMaterializedSnapshot>, MaterializedReadError> {
         let Some(store) = &self.inner.state_store else {
             return Ok(None);
         };
-        let Some(snapshot) = store
-            .latest_snapshot(placement)
-            .map_err(|error| error.to_string())?
+        let Some(snapshot) = store.latest_snapshot(placement).change_context(
+            MaterializedReadError::StoredSnapshot {
+                placement: placement.clone(),
+            },
+        )?
         else {
             return Ok(None);
         };
@@ -175,7 +244,9 @@ impl Runtime {
             .executor
             .charge_owned(nervix_execution::MemoryClass::Bulk, snapshot.payload)
             .await
-            .map_err(|error| error.to_string())?;
+            .change_context(MaterializedReadError::StoredSnapshot {
+                placement: placement.clone(),
+            })?;
         RestoredMaterializedSnapshot::open(
             &self.inner.executor,
             &schema,
@@ -184,7 +255,9 @@ impl Runtime {
         )
         .await
         .map(Some)
-        .map_err(|error| error.to_string())
+        .change_context(MaterializedReadError::StoredSnapshot {
+            placement: placement.clone(),
+        })
     }
 
     fn materialized_relay_schema(
@@ -224,7 +297,7 @@ impl Runtime {
         relay: &RelayName,
         branch_key: &Option<BranchKey>,
         fields: &[MaterializedFieldInterest],
-    ) -> Result<Option<Vec<Option<RuntimeValue>>>, String> {
+    ) -> error_stack::Result<Option<Vec<Option<RuntimeValue>>>, MaterializedReadError> {
         let Some(record) = self
             .local_materialized_record(routing, domain, relay, branch_key)
             .await?
@@ -234,10 +307,14 @@ impl Runtime {
         fields
             .iter()
             .map(|field| {
-                record
-                    .row
-                    .value_at(field.column_index)
-                    .map_err(|error| error.to_string())
+                record.row.value_at(field.column_index).change_context(
+                    MaterializedReadError::Field {
+                        domain: domain.clone(),
+                        relay: relay.clone(),
+                        branch: branch_key.clone(),
+                        field: field.name.clone(),
+                    },
+                )
             })
             .collect::<Result<Vec<_>, _>>()
             .map(Some)
@@ -251,7 +328,7 @@ impl Runtime {
         branch_key: &Option<BranchKey>,
         schema: &StdArc<arrow_schema::Schema>,
         fields: &[MaterializedFieldInterest],
-    ) -> Result<Option<Vec<Option<RuntimeValue>>>, String> {
+    ) -> error_stack::Result<Option<Vec<Option<RuntimeValue>>>, MaterializedReadError> {
         let Some(record) = self
             .remote_materialized_record(target_node_id, domain, relay, branch_key, schema)
             .await?
@@ -261,10 +338,14 @@ impl Runtime {
         fields
             .iter()
             .map(|field| {
-                record
-                    .row
-                    .value_at(field.column_index)
-                    .map_err(|error| error.to_string())
+                record.row.value_at(field.column_index).change_context(
+                    MaterializedReadError::Field {
+                        domain: domain.clone(),
+                        relay: relay.clone(),
+                        branch: branch_key.clone(),
+                        field: field.name.clone(),
+                    },
+                )
             })
             .collect::<Result<Vec<_>, _>>()
             .map(Some)
@@ -276,7 +357,7 @@ impl Runtime {
         domain: &DomainName,
         branch_key: &Option<BranchKey>,
         read: MaterializedRelayRead<'_>,
-    ) -> Result<Option<Vec<Option<RuntimeValue>>>, String> {
+    ) -> error_stack::Result<Option<Vec<Option<RuntimeValue>>>, MaterializedReadError> {
         let MaterializedRelayRead {
             relay,
             key_mode,
@@ -286,10 +367,11 @@ impl Runtime {
         let placement_branch_key = match key_mode {
             MaterializedLookupKeyMode::CurrentBranch => {
                 let Some(key) = branch_key.as_ref() else {
-                    return Err(format!(
-                        "materialized relay '{}' requires a current branch key",
-                        relay.as_str()
-                    ));
+                    return Err(Report::new(MaterializedReadError::CurrentBranchRequired {
+                        domain: domain.clone(),
+                        relay: relay.clone(),
+                        branch: branch_key.clone(),
+                    }));
                 };
                 Some(key.clone())
             }
@@ -362,7 +444,7 @@ impl Runtime {
         target_node_id: &ClusterNodeName,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> Result<Vec<MaterializedRecordReport>, String> {
+    ) -> error_stack::Result<Vec<MaterializedRecordReport>, MaterializedReadError> {
         let placement = self.state_placement(
             domain,
             RuntimeStateKind::MaterializedRelay,
@@ -375,7 +457,11 @@ impl Runtime {
         };
         let Some(restored) = self
             .fetch_sealed_materialized_snapshot(target_node_id, &placement, &schema, None)
-            .await?
+            .await
+            .change_context(MaterializedReadError::RemoteSnapshot {
+                target: target_node_id.clone(),
+                placement: placement.clone(),
+            })?
         else {
             return Ok(Vec::new());
         };
@@ -388,7 +474,7 @@ impl Runtime {
                     row: record.row,
                 })
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<error_stack::Result<Vec<_>, MaterializedReadError>>()?;
         reports.sort_by(|left, right| left.branch.cmp(&right.branch));
         Ok(reports)
     }
@@ -402,7 +488,7 @@ impl Runtime {
         routing: &mut DomainRoutingCache,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> Result<Vec<MaterializedGenerationRecord>, String> {
+    ) -> error_stack::Result<Vec<MaterializedGenerationRecord>, MaterializedReadError> {
         let routing = routing.load().clone();
         let placement = self.state_placement(
             domain,
@@ -424,7 +510,11 @@ impl Runtime {
             };
             let Some(restored) = self
                 .fetch_sealed_materialized_snapshot(&owner, &placement, &schema, None)
-                .await?
+                .await
+                .change_context(MaterializedReadError::RemoteSnapshot {
+                    target: owner.clone(),
+                    placement: placement.clone(),
+                })?
             else {
                 return Ok(Vec::new());
             };
@@ -493,7 +583,7 @@ impl Runtime {
         relay: &RelayName,
         branch_key: &Option<BranchKey>,
         schema: &StdArc<arrow_schema::Schema>,
-    ) -> Result<Option<MaterializedGenerationRecord>, String> {
+    ) -> error_stack::Result<Option<MaterializedGenerationRecord>, MaterializedReadError> {
         let placement = self.state_placement(
             domain,
             RuntimeStateKind::MaterializedRelay,
@@ -503,7 +593,11 @@ impl Runtime {
         );
         let Some(restored) = self
             .fetch_sealed_materialized_snapshot(target_node_id, &placement, schema, None)
-            .await?
+            .await
+            .change_context(MaterializedReadError::RemoteSnapshot {
+                target: target_node_id.clone(),
+                placement: placement.clone(),
+            })?
         else {
             return Ok(None);
         };
@@ -523,7 +617,7 @@ impl Runtime {
         domain: &DomainName,
         branch_key: &Option<BranchKey>,
         interest: &MaterializedProgramInterest,
-    ) -> Result<HashMap<String, RuntimeValue>, String> {
+    ) -> error_stack::Result<HashMap<String, RuntimeValue>, MaterializedReadError> {
         let mut values = HashMap::default();
         if interest.relays.is_empty() {
             return Ok(values);
@@ -571,12 +665,13 @@ impl Runtime {
         domain: &DomainName,
         branch_key: &Option<BranchKey>,
         relay: &RelayName,
-    ) -> Result<Option<HashMap<String, RuntimeValue>>, String> {
+    ) -> error_stack::Result<Option<HashMap<String, RuntimeValue>>, MaterializedReadError> {
         let Some(spec) = routing.materialized_stream_specs.get(relay) else {
-            return Err(format!(
-                "materialized relay '{}' is not instantiated in domain '{}'",
-                relay, domain
-            ));
+            return Err(Report::new(MaterializedReadError::RelayUnavailable {
+                domain: domain.clone(),
+                relay: relay.clone(),
+                branch: branch_key.clone(),
+            }));
         };
 
         let key_mode = if spec.branching.is_empty() {
@@ -623,13 +718,21 @@ impl Runtime {
         branch_key: &Option<BranchKey>,
         dependencies: &[nervix_models::MaterializedStateDependency],
         execution_now: Timestamp,
-    ) -> Result<MaterializedDependencyResolution, String> {
+    ) -> error_stack::Result<MaterializedDependencyResolution, MaterializedReadError> {
         if dependencies.is_empty() {
             return Ok(MaterializedDependencyResolution::Ready(HashMap::default()));
         }
         let mut resolved = HashMap::default();
+        let mut declared = HashSet::default();
         for dependency in dependencies {
             tokio::task::consume_budget().await;
+            if !declared.insert(dependency.relay.clone()) {
+                return Err(Report::new(MaterializedReadError::DuplicateDependency {
+                    domain: domain.clone(),
+                    relay: dependency.relay.clone(),
+                    branch: branch_key.clone(),
+                }));
+            }
             if let Some(values) = self
                 .load_materialized_dependency_values(routing, domain, branch_key, &dependency.relay)
                 .await?
@@ -645,6 +748,14 @@ impl Runtime {
                     return Ok(MaterializedDependencyResolution::Wait);
                 }
                 MaterializedStatePolicy::Default(assignments) => {
+                    let Some(spec) = routing.materialized_stream_specs.get(&dependency.relay)
+                    else {
+                        return Err(Report::new(MaterializedReadError::RelayUnavailable {
+                            domain: domain.clone(),
+                            relay: dependency.relay.clone(),
+                            branch: branch_key.clone(),
+                        }));
+                    };
                     for assignment in assignments {
                         if matches!(
                             assignment.value,
@@ -657,7 +768,16 @@ impl Runtime {
                             Some(&routing.udfs),
                             execution_now,
                         )
-                        .await?;
+                        .await
+                        .map_err(|reason| {
+                            Report::new(MaterializedReadError::DefaultExpression {
+                                domain: domain.clone(),
+                                relay: dependency.relay.clone(),
+                                branch: branch_key.clone(),
+                                field: assignment.target.field.clone(),
+                            })
+                            .attach_printable(reason)
+                        })?;
                         resolved.insert(
                             format!(
                                 "relay_state.{}.{}",
@@ -665,6 +785,23 @@ impl Runtime {
                             ),
                             value,
                         );
+                    }
+                    for field in spec
+                        .schema
+                        .fields()
+                        .iter()
+                        .filter(|field| !field.is_nullable())
+                    {
+                        let qualified =
+                            format!("relay_state.{}.{}", dependency.relay.as_str(), field.name());
+                        if !resolved.contains_key(&qualified) {
+                            return Err(Report::new(MaterializedReadError::DefaultRequiredField {
+                                domain: domain.clone(),
+                                relay: dependency.relay.clone(),
+                                branch: branch_key.clone(),
+                                field: field.name().clone(),
+                            }));
+                        }
                     }
                 }
             }
@@ -680,21 +817,30 @@ impl Runtime {
         dependencies: &[nervix_models::MaterializedStateDependency],
         batch: RelayRecordBatch,
         wait: MaterializedBatchWaitContext<'_>,
-    ) -> Result<Option<(RelayRecordBatch, HashMap<String, RuntimeValue>, Timestamp)>, String> {
+    ) -> error_stack::Result<
+        Option<(RelayRecordBatch, HashMap<String, RuntimeValue>, Timestamp)>,
+        MaterializedReadError,
+    > {
         let MaterializedBatchWaitContext {
             shutdown_rx,
             wait_for_required_state,
             mut quiesce_work,
         } = wait;
-        let domain_clock = self
-            .bind_domain_clock(domain)
-            .map_err(|error| error.to_string())?;
+        let domain_clock =
+            self.bind_domain_clock(domain)
+                .change_context(MaterializedReadError::DomainClock {
+                    domain: domain.clone(),
+                    branch: batch.key.clone(),
+                })?;
         let mut required_wait = None;
         loop {
             tokio::task::consume_budget().await;
             let execution_now = domain_clock
                 .snapshot()
-                .map_err(|error| error.to_string())?
+                .change_context(MaterializedReadError::DomainClock {
+                    domain: domain.clone(),
+                    branch: batch.key.clone(),
+                })?
                 .now();
             let changed = self.inner.materialized_state_changed.notified();
             match self
@@ -766,13 +912,14 @@ impl Runtime {
 /// Render one materialized record for the public relay-state report.
 fn materialized_record_report(
     record: &MaterializedGenerationRecord,
-) -> Result<MaterializedRecordReport, String> {
+) -> error_stack::Result<MaterializedRecordReport, MaterializedReadError> {
     Ok(MaterializedRecordReport {
         branch: branch_key_display(&record.branch).to_string(),
-        payload: record
-            .row
-            .to_json_string()
-            .map_err(|error| error.to_string())?,
+        payload: record.row.to_json_string().change_context(
+            MaterializedReadError::RecordReport {
+                branch: record.branch.clone(),
+            },
+        )?,
         ingested_at_low_watermark: record.row.metadata().ingested_at_low_watermark(),
         ingested_at_high_watermark: record.row.metadata().ingested_at_high_watermark(),
     })
@@ -890,7 +1037,7 @@ mod tests {
                 &routing_snapshot,
                 &domain,
                 &None,
-                &[default],
+                std::slice::from_ref(&default),
                 execution_now,
             )
             .await
@@ -909,6 +1056,62 @@ mod tests {
                 execution_now.as_datetime().fixed_offset()
             ))
         );
+
+        let concrete_branch = string_branch_key("tenant", "acme");
+        let duplicate_error = runtime
+            .resolve_materialized_dependencies(
+                &routing_snapshot,
+                &domain,
+                &concrete_branch,
+                &[default.clone(), default.clone()],
+                execution_now,
+            )
+            .await
+            .err()
+            .expect("a repeated dependency must be a typed failure");
+        assert!(matches!(
+            duplicate_error.current_context(),
+            MaterializedReadError::DuplicateDependency {
+                domain: error_domain,
+                relay,
+                branch,
+            } if error_domain == &domain
+                && relay == &named("profiles")
+                && branch == &concrete_branch
+        ));
+
+        let incomplete_default = nervix_models::MaterializedStateDependency {
+            relay: named("profiles"),
+            policy: nervix_models::MaterializedStatePolicy::Default(vec![Assignment {
+                target: AssignmentTarget::bare(named("note")),
+                value: Expression::Literal(nervix_models::Literal::String(
+                    "optional only".to_string(),
+                )),
+            }]),
+        };
+        let incomplete_error = runtime
+            .resolve_materialized_dependencies(
+                &routing_snapshot,
+                &domain,
+                &concrete_branch,
+                &[incomplete_default],
+                execution_now,
+            )
+            .await
+            .err()
+            .expect("a default that omits a required field must be a typed failure");
+        assert!(matches!(
+            incomplete_error.current_context(),
+            MaterializedReadError::DefaultRequiredField {
+                domain: error_domain,
+                relay,
+                branch,
+                field,
+            } if error_domain == &domain
+                && relay == &named("profiles")
+                && branch == &concrete_branch
+                && field == "status"
+        ));
 
         let wait = nervix_models::MaterializedStateDependency {
             relay: named("profiles"),

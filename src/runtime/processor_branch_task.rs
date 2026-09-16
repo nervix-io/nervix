@@ -1044,7 +1044,7 @@ pub(super) async fn checkpoint_all_processor_branch_instances(
     }
     let placement = branch_lru_placement(runtime, domain, template);
     let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())
-        .map_err(OwnershipHandoffError::checkpoint)?;
+        .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?;
     Ok(PersistedRuntimeStateEntry {
         lsm: instances.version(),
         schema_fingerprint: placement.schema_fingerprint,
@@ -1190,7 +1190,9 @@ pub(super) fn restore_processor_branch_lru_snapshot(
     let Some(snapshot) = snapshot else {
         return Ok(0);
     };
-    for (key, last_ingestion) in decode_branch_lru_snapshot(&snapshot.payload)? {
+    for (key, last_ingestion) in
+        decode_branch_lru_snapshot(&snapshot.payload).map_err(|error| error.to_string())?
+    {
         let entry = spawn_processor_branch_task(
             ProcessorRuntimeContext::new(runtime.clone(), domain.clone(), graph.clone()),
             template,

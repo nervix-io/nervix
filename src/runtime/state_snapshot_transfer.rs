@@ -16,8 +16,8 @@
 use std::time::Duration;
 
 use nervix_interconnect::{
-    InterconnectRequest, InterconnectStreamRequest, PoolClass, RequestSubquota,
-    StatePlacementEnvelope,
+    InterconnectRequest, InterconnectStreamRequest, PoolClass, RemoteOperationFailure,
+    RequestSubquota, StatePlacementEnvelope,
 };
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -29,22 +29,20 @@ pub(crate) struct DescribeStateSnapshot {
 }
 
 impl InterconnectRequest for DescribeStateSnapshot {
-    type Response = DescribedStateSnapshot;
+    type Response = Result<DescribedStateSnapshot, RemoteOperationFailure>;
 
     const NAME: &'static str = "describe_state_snapshot";
     const CLASS: PoolClass = PoolClass::Commands;
     const TIMEOUT: Duration = Duration::from_secs(5);
 }
 
-/// What the owner sealed, or why it sealed nothing.
+/// What the owner sealed when the request succeeded.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) enum DescribedStateSnapshot {
     /// The requester already holds the owner's current revision. Nothing was scanned or encoded.
     Current,
     /// A generation is sealed and its bytes are ready to be fetched.
     Sealed(SealedSnapshotEnvelope),
-    /// The owner cannot serve this state, and says why.
-    Unavailable(String),
 }
 
 /// Everything a receiver checks a transfer against before it accepts one byte of it.

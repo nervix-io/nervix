@@ -41,7 +41,7 @@ impl Runtime {
                 let mut checkpoints = Vec::with_capacity(persisted.checkpoints.len());
                 for (placement, snapshot) in persisted.checkpoints {
                     let placement = RuntimeStatePlacement::from_remote(placement)
-                        .map_err(RuntimePersistenceError::DecodeState)?;
+                        .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
                     checkpoints.push((placement, snapshot));
                 }
                 prepared_runtime_state_handoffs.insert(

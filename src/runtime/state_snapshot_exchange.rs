@@ -16,11 +16,15 @@
 
 use std::time::Duration;
 
+use error_stack::{Report, ResultExt as _};
 use futures_util::stream;
 use meticulous::ResultExt as _;
 use nervix_execution::ChargedBytes;
-use nervix_interconnect::{StreamHandlerError, StreamingResponse};
+use nervix_interconnect::{
+    RemoteOperationFailure, RemoteOperationSubject, StreamHandlerError, StreamingResponse,
+};
 use nervix_models::ClusterNodeName;
+use thiserror::Error;
 
 use super::{
     RestoredMaterializedSnapshot, Runtime, RuntimeStatePlacement, SealedSource,
@@ -35,6 +39,77 @@ use super::{
 /// control request rather than the same.
 const DESCRIBE_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[derive(Debug, Error)]
+pub(in crate::runtime) enum MaterializedSnapshotExchangeError {
+    #[error("the remote dispatcher is unavailable while fetching {placement} from '{target}'")]
+    DispatcherUnavailable {
+        target: ClusterNodeName,
+        placement: RuntimeStatePlacement,
+    },
+    #[error("failed to describe {placement} on node '{target}'")]
+    Describe {
+        target: ClusterNodeName,
+        placement: RuntimeStatePlacement,
+    },
+    #[error("node '{target}' could not provide {placement}: {failure}")]
+    RemoteFailure {
+        target: ClusterNodeName,
+        placement: RuntimeStatePlacement,
+        failure: RemoteOperationFailure,
+    },
+    #[error("node '{target}' offered {placement} with another schema fingerprint")]
+    SchemaMismatch {
+        target: ClusterNodeName,
+        placement: RuntimeStatePlacement,
+        offered: [u8; 32],
+    },
+    #[error("failed to open the transfer for {placement} on node '{target}'")]
+    OpenTransfer {
+        target: ClusterNodeName,
+        placement: RuntimeStatePlacement,
+    },
+    #[error(
+        "node '{target}' declared {declared} bytes for {placement} but opened a {actual}-byte \
+         transfer"
+    )]
+    TransferLength {
+        target: ClusterNodeName,
+        placement: RuntimeStatePlacement,
+        declared: u64,
+        actual: u64,
+    },
+    #[error("failed to stage {placement} from node '{target}'")]
+    Stage {
+        target: ClusterNodeName,
+        placement: RuntimeStatePlacement,
+    },
+    #[error("failed while receiving {placement} from node '{target}'")]
+    Receive {
+        target: ClusterNodeName,
+        placement: RuntimeStatePlacement,
+    },
+    #[error("failed to write a staged chunk of {placement} from node '{target}'")]
+    WriteChunk {
+        target: ClusterNodeName,
+        placement: RuntimeStatePlacement,
+    },
+    #[error("failed to verify staged {placement} from node '{target}'")]
+    Verify {
+        target: ClusterNodeName,
+        placement: RuntimeStatePlacement,
+    },
+    #[error("failed to open transferred {placement} from node '{target}'")]
+    OpenSnapshot {
+        target: ClusterNodeName,
+        placement: RuntimeStatePlacement,
+    },
+    #[error("failed to install transferred {placement} from node '{target}'")]
+    Install {
+        target: ClusterNodeName,
+        placement: RuntimeStatePlacement,
+    },
+}
+
 impl Runtime {
     /// Describe what this node would transfer for a placement, sealing a generation if the
     /// requester needs one.
@@ -42,30 +117,27 @@ impl Runtime {
         &self,
         placement: &RuntimeStatePlacement,
         after_revision: Option<u64>,
-    ) -> DescribedStateSnapshot {
+    ) -> Result<DescribedStateSnapshot, RemoteOperationFailure> {
+        let subject = RemoteOperationSubject::state(&placement.to_remote());
         let state = self
             .inner
             .replicated_materialized_stream_states
             .get(placement)
             .map(|state| super::ReplicatedMaterializedRelayState::read(state.value()));
         let Some(state) = state else {
-            return DescribedStateSnapshot::Unavailable(format!(
-                "this node is not currently assigned materialized state for {} '{}'",
-                placement.kind.as_str(),
-                placement.identifier.as_str()
-            ));
+            return Err(RemoteOperationFailure::unavailable(subject));
         };
         match state.seal_after(&self.inner.executor, after_revision).await {
-            Ok(Some(sealed)) => DescribedStateSnapshot::Sealed(SealedSnapshotEnvelope {
+            Ok(Some(sealed)) => Ok(DescribedStateSnapshot::Sealed(SealedSnapshotEnvelope {
                 length: sealed.descriptor.length,
                 digest: sealed.descriptor.digest,
                 schema_fingerprint: sealed.descriptor.schema_fingerprint,
                 revision: sealed.descriptor.revision,
                 fence: sealed.descriptor.fence,
                 branch_generation: sealed.descriptor.branch_generation,
-            }),
-            Ok(None) => DescribedStateSnapshot::Current,
-            Err(error) => DescribedStateSnapshot::Unavailable(error.to_string()),
+            })),
+            Ok(None) => Ok(DescribedStateSnapshot::Current),
+            Err(error) => Err(RemoteOperationFailure::failed(subject, error.to_string())),
         }
     }
 
@@ -78,7 +150,7 @@ impl Runtime {
         request: FetchStateSnapshot,
     ) -> Result<StreamingResponse, StreamHandlerError> {
         let placement = RuntimeStatePlacement::from_remote(request.placement)
-            .map_err(StreamHandlerError::new)?;
+            .map_err(|error| StreamHandlerError::new(error.to_string()))?;
         let state = self
             .inner
             .replicated_materialized_stream_states
@@ -122,9 +194,15 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         schema: &std::sync::Arc<arrow_schema::Schema>,
         after_revision: Option<u64>,
-    ) -> Result<Option<RestoredMaterializedSnapshot>, String> {
+    ) -> error_stack::Result<Option<RestoredMaterializedSnapshot>, MaterializedSnapshotExchangeError>
+    {
         let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
-            return Err("remote dispatcher unavailable".to_string());
+            return Err(Report::new(
+                MaterializedSnapshotExchangeError::DispatcherUnavailable {
+                    target: target_node_id.clone(),
+                    placement: placement.clone(),
+                },
+            ));
         };
         let described = dispatcher
             .request_with_timeout(
@@ -135,15 +213,32 @@ impl Runtime {
                 },
                 DESCRIBE_TIMEOUT,
             )
-            .await?;
+            .await
+            .map_err(|reason| {
+                Report::new(MaterializedSnapshotExchangeError::Describe {
+                    target: target_node_id.clone(),
+                    placement: placement.clone(),
+                })
+                .attach_printable(reason)
+            })?
+            .map_err(|failure| {
+                Report::new(MaterializedSnapshotExchangeError::RemoteFailure {
+                    target: target_node_id.clone(),
+                    placement: placement.clone(),
+                    failure,
+                })
+            })?;
         let envelope = match described {
             DescribedStateSnapshot::Current => return Ok(None),
-            DescribedStateSnapshot::Unavailable(reason) => return Err(reason),
             DescribedStateSnapshot::Sealed(envelope) => envelope,
         };
         if envelope.schema_fingerprint != placement.schema_fingerprint {
-            return Err(format!(
-                "node '{target_node_id}' offered a materialized relay snapshot of another schema"
+            return Err(Report::new(
+                MaterializedSnapshotExchangeError::SchemaMismatch {
+                    target: target_node_id.clone(),
+                    placement: placement.clone(),
+                    offered: envelope.schema_fingerprint,
+                },
             ));
         }
         let mut body = dispatcher
@@ -154,12 +249,22 @@ impl Runtime {
                     revision: envelope.revision,
                 },
             )
-            .await?;
+            .await
+            .map_err(|reason| {
+                Report::new(MaterializedSnapshotExchangeError::OpenTransfer {
+                    target: target_node_id.clone(),
+                    placement: placement.clone(),
+                })
+                .attach_printable(reason)
+            })?;
         if body.content_length() != envelope.length {
-            return Err(format!(
-                "node '{target_node_id}' offered {} snapshot bytes and is sending {}",
-                envelope.length,
-                body.content_length()
+            return Err(Report::new(
+                MaterializedSnapshotExchangeError::TransferLength {
+                    target: target_node_id.clone(),
+                    placement: placement.clone(),
+                    declared: envelope.length,
+                    actual: body.content_length(),
+                },
             ));
         }
         let mut staged = self
@@ -167,22 +272,32 @@ impl Runtime {
             .snapshot_staging
             .stage(envelope.length)
             .await
-            .map_err(|error| error.to_string())?;
-        while let Some(chunk) = body
-            .next_chunk()
-            .await
-            .map_err(|error| format!("snapshot transfer failed: {error}"))?
+            .change_context(MaterializedSnapshotExchangeError::Stage {
+                target: target_node_id.clone(),
+                placement: placement.clone(),
+            })?;
+        while let Some(chunk) =
+            body.next_chunk()
+                .await
+                .change_context(MaterializedSnapshotExchangeError::Receive {
+                    target: target_node_id.clone(),
+                    placement: placement.clone(),
+                })?
         {
             tokio::task::consume_budget().await;
-            staged
-                .write_chunk(chunk)
-                .await
-                .map_err(|error| error.to_string())?;
+            staged.write_chunk(chunk).await.change_context(
+                MaterializedSnapshotExchangeError::WriteChunk {
+                    target: target_node_id.clone(),
+                    placement: placement.clone(),
+                },
+            )?;
         }
-        let staged = staged
-            .finish(envelope.digest)
-            .await
-            .map_err(|error| error.to_string())?;
+        let staged = staged.finish(envelope.digest).await.change_context(
+            MaterializedSnapshotExchangeError::Verify {
+                target: target_node_id.clone(),
+                placement: placement.clone(),
+            },
+        )?;
         RestoredMaterializedSnapshot::open(
             &self.inner.executor,
             schema,
@@ -191,7 +306,10 @@ impl Runtime {
         )
         .await
         .map(Some)
-        .map_err(|error| error.to_string())
+        .change_context(MaterializedSnapshotExchangeError::OpenSnapshot {
+            target: target_node_id.clone(),
+            placement: placement.clone(),
+        })
     }
 
     /// Refresh one materialized relay state from the node that owns it, installing whatever it
@@ -202,7 +320,7 @@ impl Runtime {
         state: &MaterializedRelayStateRead,
         installer: &super::MaterializedRelaySnapshotInstaller,
         after_revision: Option<u64>,
-    ) -> Result<Option<u64>, String> {
+    ) -> error_stack::Result<Option<u64>, MaterializedSnapshotExchangeError> {
         let Some(restored) = self
             .fetch_sealed_materialized_snapshot(
                 target_node_id,
@@ -215,9 +333,13 @@ impl Runtime {
             return Ok(None);
         };
         let revision = restored.revision;
-        installer
-            .install(restored)
-            .map_err(|error| error.to_string())?;
+        installer.install(restored).map_err(|error| {
+            Report::new(MaterializedSnapshotExchangeError::Install {
+                target: target_node_id.clone(),
+                placement: state.placement().clone(),
+            })
+            .attach_printable(error)
+        })?;
         Ok(Some(revision))
     }
 }

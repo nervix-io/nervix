@@ -51,6 +51,7 @@ impl RelayProcessorNode {
                 execution_now,
             )
             .await
+            .map_err(|error| error.to_string())
     }
 
     pub(super) fn refresh(
