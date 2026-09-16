@@ -1401,8 +1401,11 @@ impl Runtime {
                         let wait_for_required_state = !interaction.is_terminal_drain();
                         let batch = match runtime
                             .resolve_materialized_dependencies_for_batch(
-                                &mut routing,
-                                &task_domain,
+                                MaterializedDomainHandles {
+                                    routing: &mut routing,
+                                    domain_clock: &domain_clock,
+                                    domain: &task_domain,
+                                },
                                 &task_from_relay,
                                 &task_materialized_state,
                                 batch,

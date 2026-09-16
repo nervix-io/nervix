@@ -408,6 +408,9 @@ impl EmitterPublishingSettings {
 struct EmitterBatchContext<'a> {
     runtime: &'a Runtime,
     routing: &'a mut DomainRoutingCache,
+    /// Bound once with the task, so resolving a batch's materialized dependencies never re-binds
+    /// the domain's execution.
+    domain_clock: &'a DomainClock,
     domain: &'a DomainName,
     emitter: &'a EmitterName,
     node: &'a ModelName,
@@ -3596,7 +3599,7 @@ impl EmitterTask {
                 emitter: task_emitter.clone(),
                 error_policies: task_error_policies.clone(),
                 udfs,
-                clock: domain_clock,
+                clock: domain_clock.clone(),
             };
             let mut publish_backoff =
                 RuntimeReconnectBackoff::from_policy(task_publishing.retry_policy);
@@ -3641,6 +3644,7 @@ impl EmitterTask {
             let mut batch_context = EmitterBatchContext {
                 runtime: &runtime,
                 routing: &mut routing,
+                domain_clock: &domain_clock,
                 domain: &task_domain,
                 emitter: &task_emitter,
                 node: &task_emitter_node,
@@ -4499,8 +4503,11 @@ impl EmitterBatchContext<'_> {
         let resolution = self
             .runtime
             .resolve_materialized_dependencies_for_batch(
-                self.routing,
-                self.domain,
+                MaterializedDomainHandles {
+                    routing: &mut *self.routing,
+                    domain_clock: self.domain_clock,
+                    domain: self.domain,
+                },
                 input_relay,
                 self.materialized_state,
                 batch,
