@@ -1976,8 +1976,14 @@ impl SessionServiceImpl {
                     .collect::<Vec<_>>()
                     .join(",")
             };
+            let latest =
+                match resources.resolve_completed_version(domain, &describe.identifier, None) {
+                    Ok(id) => id.version.to_string(),
+                    Err(_) => "(none)".to_string(),
+                };
             let mut lines = vec![
                 format!("resource: {}", describe.identifier.as_str()),
+                format!("latest: {latest}"),
                 format!("versions: {version_numbers}"),
             ];
             lines.push("version_details:".to_string());
@@ -2410,9 +2416,13 @@ mod tests {
             error: None,
         };
         proposer
-            .publish_resource_upload(upload_v1, manifest_v1.resource.clone(), replica_v1)
+            .publish_resource_upload(upload_v1.clone(), manifest_v1.resource.clone(), replica_v1)
             .await
             .expect("resource version should persist");
+        proposer
+            .complete_resource_upload(upload_v1)
+            .await
+            .expect("resource upload should complete");
         let upload_v2 = ResourceUploadKey::new(
             UserName::parse("admin").expect("valid user name"),
             resource_domain.clone(),
@@ -2428,7 +2438,7 @@ mod tests {
             .expect("resource upload should begin");
         proposer
             .publish_resource_upload(
-                upload_v2,
+                upload_v2.clone(),
                 manifest_v2.resource.clone(),
                 nervix_models::ResourceNodeStatus {
                     key: nervix_models::ResourceReplicaKey::new(
@@ -2446,6 +2456,10 @@ mod tests {
             )
             .await
             .expect("resource version should persist");
+        proposer
+            .complete_resource_upload(upload_v2)
+            .await
+            .expect("resource upload should complete");
         proposer
             .put_domain(DomainState {
                 id: DomainName::parse("default").expect("valid domain"),
@@ -2511,6 +2525,7 @@ mod tests {
 
         assert!(result.success, "command must succeed: {}", result.message);
         assert!(result.message.contains("resource: fraud_model"));
+        assert!(result.message.contains("latest: 2"));
         assert!(result.message.contains("versions: 1,2"));
         assert!(result.message.contains("version_details:"));
         assert!(result.message.contains("- version=1 root_checksum="));

@@ -39,7 +39,8 @@ Feature: Pipelined raft replication and bounded log retention
 
   @exclusive
   Scenario: Durable follower catch-up stays bounded and preserves its append stream
-    Given a 3 node nervix cluster is started
+    Given raft election timeout is configured from "15s" to "20s"
+    And a 3 node nervix cluster is started
     And node "node-3" is stopped
     When 1024 domains named "durable_backlog" are created on the leader node
     Given consensus commits on node "node-3" take "2ms"

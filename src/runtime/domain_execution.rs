@@ -103,13 +103,6 @@ impl std::ops::DerefMut for DomainRouting {
     }
 }
 
-/// One resource as a domain owns it, which is how installed resource versions are tracked.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct DomainResourceKey {
-    pub(super) domain: DomainName,
-    pub(super) resource: ResourceName,
-}
-
 pub(super) struct DomainExecution {
     pub(super) schedule: DomainSchedule,
     pub(super) start_version: u64,
