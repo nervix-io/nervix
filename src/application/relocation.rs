@@ -24,8 +24,10 @@ use super::{
 };
 use crate::{
     proto::CommandResult,
-    registry::{ActiveGraph, RelocationCoverage, RelocationMemberReason, RelocationUnit},
-    runtime::Runtime,
+    registry::{
+        ActiveGraph, RelocationCoverage, RelocationMemberReason, RelocationUnit,
+        ownership_handoff_relays_for_schedule,
+    },
 };
 
 /// One unit member with the assignment the relocation gives it.
@@ -354,7 +356,7 @@ impl SessionServiceImpl {
             QuiesceLevel::Dynamic
         };
         let gated_relays = if let QuiesceLevel::EntityPause = level {
-            Runtime::ownership_handoff_relays_for_schedule(current, &moved)
+            ownership_handoff_relays_for_schedule(current, &moved)
         } else {
             Vec::new()
         };

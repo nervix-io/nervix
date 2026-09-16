@@ -84,7 +84,7 @@ pub(in crate::registry) fn add_materialized_state_dependency_edges(
         )?;
         ensure_stream_is_materialized(domain, identifier, models, &dependency.relay)?;
         validate_materialized_state_default(domain, identifier, models, dependency)?;
-        graph.add_edge(relay, source, EdgeKind::RequiredBy);
+        graph.add_edge(relay, source, EdgeKind::MaterializedState);
     }
     Ok(())
 }

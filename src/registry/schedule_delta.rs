@@ -1,10 +1,21 @@
+//! The runtime activation implied by two domain schedules.
+//!
+//! Layer: decisions.
+//!
+//! - **Owns.** Pure classification of schedule changes into unchanged, dynamic, entity-swap and
+//!   domain-rebuild activation decisions.
+//! - **Depends on.** Scheduled vocabulary and model-change classification.
+//! - **Must not know.** Runtime tasks, control-plane coordination, persistence or presentation.
+
 use nervix_models::{
     DomainSchedule, DynamicModelUpdate, ModelKind, NodeRef, QuiesceLevel, ScheduledNode,
 };
 use sorted_vec::SortedSet;
 
+use super::graph::is_schedulable_model;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ScheduleDelta {
+pub(crate) enum ScheduleDelta {
     Unchanged,
     Dynamic(Vec<DynamicModelUpdate>),
     EntitySwap {
@@ -16,11 +27,42 @@ pub(super) enum ScheduleDelta {
 }
 
 impl ScheduleDelta {
-    pub(super) fn classify(existing: &DomainSchedule, desired: &DomainSchedule) -> Self {
+    pub(crate) fn between(
+        existing: Option<&DomainSchedule>,
+        desired: Option<&DomainSchedule>,
+    ) -> Self {
+        match (existing, desired) {
+            (Some(existing), Some(desired)) => Self::classify(existing, desired),
+            (None, None) => Self::Unchanged,
+            (Some(existing), None) => {
+                if Self::has_executable_nodes(existing) {
+                    Self::Rebuild
+                } else {
+                    Self::Dynamic(Vec::new())
+                }
+            }
+            (None, Some(desired)) => {
+                if Self::has_executable_nodes(desired) {
+                    Self::Rebuild
+                } else {
+                    Self::Dynamic(Vec::new())
+                }
+            }
+        }
+    }
+
+    fn has_executable_nodes(schedule: &DomainSchedule) -> bool {
+        schedule
+            .nodes
+            .values()
+            .any(|node| is_schedulable_model(node.config.as_ref()))
+    }
+
+    pub(crate) fn classify(existing: &DomainSchedule, desired: &DomainSchedule) -> Self {
         if existing == desired {
             return Self::Unchanged;
         }
-        if existing.domain != desired.domain || existing.nodes.len() != desired.nodes.len() {
+        if existing.domain != desired.domain {
             return Self::Rebuild;
         }
 
@@ -29,7 +71,10 @@ impl ScheduleDelta {
         let mut reassignments = Vec::new();
         for (identity, desired_node) in &desired.nodes {
             let Some(existing_node) = existing.nodes.get(identity) else {
-                return Self::Rebuild;
+                if is_schedulable_model(desired_node.config.as_ref()) {
+                    return Self::Rebuild;
+                }
+                continue;
             };
             if !existing_node.has_same_assignment_as(desired_node) {
                 reassignments.push(desired_node.identity());
@@ -73,6 +118,12 @@ impl ScheduleDelta {
                 QuiesceLevel::DomainPause => return Self::Rebuild,
             }
         }
+        if existing.nodes.iter().any(|(identity, existing_node)| {
+            !desired.nodes.contains_key(identity)
+                && is_schedulable_model(existing_node.config.as_ref())
+        }) {
+            return Self::Rebuild;
+        }
 
         if entities.is_empty() && reassignments.is_empty() {
             // The schedules still differ somewhere the runtime does not execute, such as a
@@ -84,6 +135,26 @@ impl ScheduleDelta {
             reassignments: SortedSet::from_unsorted(reassignments).into_vec(),
             dynamic_updates: updates,
         }
+    }
+
+    pub(crate) const fn quiesce_level(&self) -> QuiesceLevel {
+        match self {
+            Self::Unchanged | Self::Dynamic(_) => QuiesceLevel::Dynamic,
+            Self::EntitySwap { .. } => QuiesceLevel::EntityPause,
+            Self::Rebuild => QuiesceLevel::DomainPause,
+        }
+    }
+
+    pub(crate) fn entity_gate_entities(&self) -> Vec<NodeRef> {
+        let Self::EntitySwap {
+            entities,
+            reassignments,
+            ..
+        } = self
+        else {
+            return Vec::new();
+        };
+        SortedSet::from_unsorted(entities.iter().chain(reassignments).cloned().collect()).into_vec()
     }
 
     fn same_schedule_residue(
@@ -185,6 +256,20 @@ mod tests {
             .expect("fixture schedule must contain a node")
     }
 
+    fn placement_node(policy: PlacementPolicy) -> ScheduledNode {
+        ScheduledNode::new(Model::Placement(
+            CreatePlacement::new(
+                named("keep_local"),
+                vec![named("event_source")],
+                vec![named("events")],
+                policy,
+                Some(nonzero!(1u64)),
+            )
+            .expect("valid placement"),
+        ))
+        .with_schema_fingerprint([1; 32])
+    }
+
     fn schedule(capacity: NonZeroUsize) -> DomainSchedule {
         DomainSchedule::new(
             DomainName::parse("testing").expect("valid domain"),
@@ -248,6 +333,38 @@ mod tests {
         assert_eq!(
             ScheduleDelta::classify(&existing, &existing),
             ScheduleDelta::Unchanged
+        );
+    }
+
+    #[test]
+    fn control_plane_only_schedule_appearance_and_disappearance_are_dynamic() {
+        let control_plane_only = DomainSchedule::new(
+            DomainName::parse("testing").expect("valid domain"),
+            vec![placement_node(PlacementPolicy::PreferColocation)],
+            Vec::new(),
+        );
+
+        assert_eq!(
+            ScheduleDelta::between(None, Some(&control_plane_only)),
+            ScheduleDelta::Dynamic(Vec::new())
+        );
+        assert_eq!(
+            ScheduleDelta::between(Some(&control_plane_only), None),
+            ScheduleDelta::Dynamic(Vec::new())
+        );
+    }
+
+    #[test]
+    fn executable_schedule_appearance_and_disappearance_rebuild() {
+        let executable = schedule(nonzero!(1usize));
+
+        assert_eq!(
+            ScheduleDelta::between(None, Some(&executable)),
+            ScheduleDelta::Rebuild
+        );
+        assert_eq!(
+            ScheduleDelta::between(Some(&executable), None),
+            ScheduleDelta::Rebuild
         );
     }
 
@@ -483,20 +600,32 @@ mod tests {
     }
 
     #[test]
+    fn adding_a_placement_only_applies_the_assignments_it_changes() {
+        let existing = ingestor_schedule("ingress_a");
+        let mut desired = ingestor_schedule("ingress_a");
+        desired.nodes[0].primary_node = Some(ClusterNodeName::parse("node-2").expect("valid name"));
+        desired.nodes[0].assigned_nodes =
+            vec![ClusterNodeName::parse("node-2").expect("valid name")];
+        push_scheduled(
+            &mut desired,
+            placement_node(PlacementPolicy::RequireColocation),
+        );
+
+        assert_eq!(
+            ScheduleDelta::classify(&existing, &desired),
+            ScheduleDelta::EntitySwap {
+                entities: Vec::new(),
+                reassignments: vec![NodeRef {
+                    kind: ModelKind::Ingestor,
+                    identifier: named("event_source"),
+                }],
+                dynamic_updates: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
     fn a_placement_policy_change_only_applies_its_reassignments() {
-        let placement_node = |policy: PlacementPolicy| {
-            ScheduledNode::new(Model::Placement(
-                CreatePlacement::new(
-                    named("keep_local"),
-                    vec![named("event_source")],
-                    vec![named("events")],
-                    policy,
-                    Some(nonzero!(1u64)),
-                )
-                .expect("valid placement"),
-            ))
-            .with_schema_fingerprint([1; 32])
-        };
         let mut existing = ingestor_schedule("ingress_a");
         push_scheduled(
             &mut existing,
