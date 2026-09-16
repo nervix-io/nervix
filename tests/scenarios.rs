@@ -119,6 +119,8 @@ const DURABLE_CATCH_UP_STORAGE_COMMITS_PER_ENTRY: u32 = 2;
 const DURABLE_CATCH_UP_MARGIN: Duration = Duration::from_secs(5);
 const DURABLE_CATCH_UP_WRITE_CADENCE: Duration = Duration::from_millis(100);
 const MAX_DURABLE_CATCH_UP_WRITES: usize = 128;
+/// The execution class a follower charges its decoded append batches to.
+const COMMANDS_MEMORY_LABEL: &str = "class=\"commands\"";
 const WEB_CONSOLE_FEATURE_NAMES: [&str; 2] =
     ["Web console NSPL REPL", "Web console execution graph"];
 const DEPENDENCY_LIFECYCLE_HELPER_ENV: &str = "NERVIX_DEPENDENCY_LIFECYCLE_HELPER";
@@ -147,6 +149,17 @@ struct DurableCatchUpWriter {
     cancellation: CancellationToken,
     prefix: String,
     task: AbortOnDropHandle<Result<usize, String>>,
+}
+
+/// A follower's commands-class memory, sampled for the whole time it spends catching up.
+///
+/// The batches it has decoded and not yet answered are charged to that class, and they are held
+/// only while its Raft core is behind. Sampling throughout catches the peak the catch-up reached
+/// rather than whatever the class happened to hold once it was over.
+struct FollowerCommandsMemoryObservation {
+    node_id: String,
+    cancellation: CancellationToken,
+    task: AbortOnDropHandle<f64>,
 }
 
 #[derive(cucumber::World, Default)]
@@ -200,6 +213,7 @@ struct ScenarioWorld {
     burst_raft_retention_peak: Option<nervix_consensus::RaftLogRetention>,
     durable_catch_up: Option<DurableCatchUpObservation>,
     durable_catch_up_writer: Option<DurableCatchUpWriter>,
+    follower_commands_memory: Option<FollowerCommandsMemoryObservation>,
     cluster_config: TestClusterConfig,
     temp_root: Option<TempDir>,
     formatter_root: Option<TempDir>,
@@ -3136,6 +3150,30 @@ async fn when_node_starts_durable_catch_up(
         }
     }));
 
+    // Sampling starts before the follower does, so the whole catch-up is inside the window. The
+    // sampler skips scrapes the starting node has not answered yet.
+    let metrics_url = world
+        .cluster()
+        .observability_metrics_url(&follower)
+        .unwrap_or_else(|error| {
+            panic!("failed to resolve the catch-up follower's metrics endpoint: {error}")
+        });
+    let memory_cancellation = CancellationToken::new();
+    let sampler_cancellation = memory_cancellation.clone();
+    let memory_task = AbortOnDropHandle::new(tokio::spawn(
+        crate::common::cluster::sample_peak_observability_metric(
+            metrics_url,
+            "nervix_execution_memory_reserved_bytes".to_string(),
+            vec![COMMANDS_MEMORY_LABEL.to_string()],
+            sampler_cancellation,
+        ),
+    ));
+    world.follower_commands_memory = Some(FollowerCommandsMemoryObservation {
+        node_id: follower.clone(),
+        cancellation: memory_cancellation,
+        task: memory_task,
+    });
+
     world.durable_catch_up = Some(DurableCatchUpObservation {
         follower: follower.clone(),
         initial_leader: leader,
@@ -3250,6 +3288,52 @@ async fn then_node_catches_up_within_durable_storage_bound(
         elapsed,
         observation.commit_delay,
         observation.initial_leader,
+    );
+}
+
+#[then(
+    expr = "node {string} held its queued append batches inside its commands memory budget while \
+            catching up"
+)]
+async fn then_follower_held_append_batches_inside_its_commands_budget(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let observation = world
+        .follower_commands_memory
+        .take()
+        .verified("the scenario started a follower commands-memory observation");
+    assert_eq!(
+        node_id, observation.node_id,
+        "the memory assertion must observe the follower it sampled"
+    );
+    observation.cancellation.cancel();
+    let peak = observation
+        .task
+        .await
+        .unwrap_or_else(|error| panic!("the follower memory sampler task failed: {error}"));
+    let capacity = world
+        .cluster()
+        .read_observability_metric(
+            &node_id,
+            "nervix_execution_memory_capacity_bytes",
+            &[COMMANDS_MEMORY_LABEL.to_string()],
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to read the follower's commands memory budget: {error}")
+        });
+
+    assert!(
+        peak > 0.0,
+        "follower '{node_id}' must charge the append batches it holds while catching up, but its \
+         commands class never reported a reservation against its {capacity} byte budget"
+    );
+    assert!(
+        peak < capacity,
+        "follower '{node_id}' must hold its queued append batches inside its commands budget: the \
+         class peaked at {peak} bytes against a {capacity} byte budget while it caught up"
     );
 }
 
@@ -17510,15 +17594,8 @@ async fn run_dependency_lifecycle_helper(scope: String) -> Option<String> {
 }
 
 async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
-    let mut cli =
+    let cli =
         cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, TestParallelismArgs>::parsed();
-    if cli.tags_filter.is_none() {
-        cli.tags_filter = Some(
-            "not @raft_io_expected_failure"
-                .parse()
-                .assured("the built-in RAFT-IO tag expression is valid"),
-        );
-    }
     let concurrency_factor = cli.custom.concurrency_factor();
     let default_max_concurrent_scenarios = parallelism.max_concurrent_scenarios(concurrency_factor);
     let effective_max_concurrent_scenarios = cli

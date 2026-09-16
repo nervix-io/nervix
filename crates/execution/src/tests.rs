@@ -124,6 +124,31 @@ fn a_management_budget_below_one_event_fails_to_start() {
     );
 }
 
+/// A follower charges every decoded replication batch until its Raft core answers it, and encodes
+/// that answer against the same class. A budget that cannot hold the whole resident window beside
+/// one batch being encoded would let a full window leave no room to produce the answer that
+/// releases it, so the node refuses to start instead of deadlocking on its first catch-up.
+#[test]
+fn a_commands_budget_below_the_resident_replication_window_fails_to_start() {
+    let error = Executor::new(ExecutionConfig {
+        budgets: MemoryBudgets {
+            commands: ByteUnit::Mebibyte(8),
+            ..MemoryBudgets::default()
+        },
+        ..ExecutionConfig::default()
+    })
+    .expect_err("a commands budget below the resident replication window is rejected");
+    assert_eq!(
+        *error.current_context(),
+        ExecutionConfigError::BudgetBelowOperation {
+            class: "commands",
+            operation: "resident replication batches beside one being encoded",
+            budget: ByteUnit::Mebibyte(8).as_u64(),
+            required: ByteUnit::Mebibyte(10).as_u64(),
+        }
+    );
+}
+
 #[tokio::test]
 async fn a_reservation_holds_its_class_until_it_is_dropped() {
     let executor = small_executor();
