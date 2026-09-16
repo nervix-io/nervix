@@ -113,6 +113,14 @@ fn transaction_planning_basis(
     Ok(ImpactPlanningBasis::new(*blake3::hash(&encoded).as_bytes()))
 }
 
+fn transaction_planning_error_message(error: &Report<TransactionPlanningError>) -> String {
+    let context = error.to_string();
+    match error.downcast_ref::<String>() {
+        Some(message) => format!("{context}: {message}"),
+        None => context,
+    }
+}
+
 #[derive(Debug, Error)]
 pub(in crate::application) enum TransactionCommitError {
     #[error(transparent)]
@@ -1118,7 +1126,12 @@ impl SessionServiceImpl {
         let plan = self
             .plan_transaction_statements(&transaction.domain, &statements, 0, true)
             .await
-            .map_err(|error| format!("transaction statement failed preflight: {error}"))?;
+            .map_err(|error| {
+                format!(
+                    "transaction statement failed preflight: {}",
+                    transaction_planning_error_message(&error)
+                )
+            })?;
         plan.report()
             .map_err(|error| format!("transaction statement failed preflight: {error}"))?;
         Ok(Self::transaction_admission_result(
@@ -1383,11 +1396,13 @@ impl SessionServiceImpl {
             let plan = match plan {
                 Ok(plan) => plan,
                 Err(error) => {
-                    let message = format!("transaction step failed refreshed preflight: {error}");
+                    let planning_error = transaction_planning_error_message(&error);
+                    let message =
+                        format!("transaction step failed refreshed preflight: {planning_error}");
                     let impact = failed_transaction_step_impact(
                         first_statement,
                         remaining.len(),
-                        error.to_string(),
+                        planning_error,
                     );
                     let advanced = Box::pin(self.record_transaction_step(
                         &transaction,
@@ -2144,9 +2159,10 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
     use nervix_models::{
         CreateRelay, CreateSchema, DomainName, ExecutionStepOutcome, ImpactReportCompleteness,
-        ModelName,
+        ModelName, TransactionOperationNumber,
     };
     use tokio::sync::mpsc;
 
@@ -2160,6 +2176,23 @@ mod tests {
         proto,
         proto::{CommandRequest, TransactionState as ApiTransactionState},
     };
+
+    #[test]
+    fn planning_error_message_includes_attached_validation_detail() {
+        let operation = TransactionOperationNumber::from_index(0)
+            .assured("the first test transaction operation is addressable");
+        let error =
+            error_stack::Report::new(super::TransactionPlanningError::ExternalModelValidation {
+                operation,
+            })
+            .attach("paced ingestor requires TIMESTAMP NOW".to_string());
+
+        assert_eq!(
+            super::transaction_planning_error_message(&error),
+            "transaction operation 1 failed external model validation: paced ingestor requires \
+             TIMESTAMP NOW"
+        );
+    }
 
     #[tokio::test]
     async fn process_command_commits_explicit_transaction_without_trailing_semicolon() {
