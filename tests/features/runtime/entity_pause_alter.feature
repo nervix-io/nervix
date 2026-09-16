@@ -192,3 +192,79 @@ Feature: Entity-pause model alterations
       | cluster_size |
       | 1            |
       | 3            |
+
+  @transaction_exact_entity_scope
+  Scenario Outline: A transaction entity pause leaves a disjoint graph live and resumes every shared path
+    Given entity gate deadline is configured as "10s"
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA scoped_event ( seq I64 );
+      CREATE SCHEMA scoped_output ( seq I64, route STRING );
+      CREATE WIRE JSON SCHEMA scoped_wire MODE STRICT ( seq integer );
+      CREATE CODEC scoped_codec FROM WIRE JSON SCHEMA scoped_wire TO SCHEMA scoped_event;
+      CREATE RELAY affected_input SCHEMA scoped_event UNBRANCHED;
+      CREATE RELAY affected_output SCHEMA scoped_output UNBRANCHED;
+      CREATE RELAY disjoint_input SCHEMA scoped_event UNBRANCHED;
+      CREATE RELAY disjoint_output SCHEMA scoped_output UNBRANCHED;
+      CREATE VHOST affected_edge http-{{test_id}}-affected-scope.example.com;
+      CREATE VHOST disjoint_edge http-{{test_id}}-disjoint-scope.example.com;
+      CREATE ENDPOINT affected_ingress ON affected_edge PATH '/events' TYPE HTTP;
+      CREATE ENDPOINT disjoint_ingress ON disjoint_edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR affected_source
+        FROM ENDPOINT affected_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING scoped_codec
+        TO affected_input INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR disjoint_source
+        FROM ENDPOINT disjoint_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING scoped_codec
+        TO disjoint_input INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE JUNCTION altered_path FROM affected_input UNBRANCHED
+        TO affected_output SET seq = input.seq, route = 'altered'
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE JUNCTION shared_path FROM affected_input UNBRANCHED
+        TO affected_output SET seq = input.seq, route = 'shared'
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE JUNCTION disjoint_path FROM disjoint_input UNBRANCHED
+        TO disjoint_output SET seq = input.seq, route = 'disjoint'
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION affected_subscription TO affected_output;
+      CREATE SUBSCRIPTION disjoint_subscription TO disjoint_output;
+      START;
+      """
+    Given the entity gate for domain "{{domain}}" pauses after engagement
+    When these NSPL commands begin executing in the background
+      """
+      BEGIN;
+      ALTER JUNCTION altered_path SET DETACHED;
+      COMMIT;
+      """
+    Then the entity gate pause for domain "{{domain}}" is reached
+    When http payload is posted to node "node-1" with host "http-{{test_id}}-disjoint-scope.example.com" path "/events"
+      """
+      {"seq":10}
+      """
+    Then within "5s" the relay subscription receives payloads containing all fragments
+      """
+      "seq":10 | "route":"disjoint"
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}-affected-scope.example.com" path "/events"
+      """
+      {"seq":20}
+      """
+    And the entity gate pause for domain "{{domain}}" is released
+    Then the background NSPL execution succeeds
+    And within "5s" the relay subscription receives payloads containing all fragments
+      """
+      "seq":20 | "route":"altered"
+      "seq":20 | "route":"shared"
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

@@ -7,6 +7,8 @@
 //!   answers.
 //! - **Depends on.** The vocabulary and the dataflow-graph description.
 //! - **Must not know.** How a node is placed or executed.
+use std::collections::BTreeSet;
+
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use error_stack::Report;
 use meticulous::{OptionExt, ResultExt};
@@ -15,9 +17,9 @@ use nervix_dataflow_graph::{
     DataflowMetricRef, DataflowNode, DataflowNodeRole, DataflowProcessorKind, DataflowSchemaField,
 };
 use nervix_models::{
-    CreateSchema, DomainName, DomainSchedule, FieldName, IngestSource, Model, ModelIndex,
-    ModelKind, ModelName, NodeRef, ParseAsType, PlacementPolicy, RelayName, SchemaField,
-    SchemaName,
+    ConcreteBranchCoverage, CreateSchema, DomainName, DomainSchedule, FieldName, ImpactEdgeKind,
+    ImpactNodeCoverage, IngestSource, Model, ModelIndex, ModelKind, ModelName, NodeRef,
+    ParseAsType, PlacementPolicy, RelayName, SchemaField, SchemaName,
 };
 use petgraph::{
     Direction, algo::is_cyclic_directed, graph::DiGraph, prelude::NodeIndex, visit::EdgeRef,
@@ -41,6 +43,19 @@ pub(crate) struct ActiveGraph {
 pub(crate) struct DataflowGraphCounts {
     pub(crate) nodes: usize,
     pub(crate) relays: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct UnattributedImpactEdge {
+    pub(crate) source: ImpactNodeCoverage,
+    pub(crate) target: ImpactNodeCoverage,
+    pub(crate) kind: ImpactEdgeKind,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct UnattributedImpactTopology {
+    pub(crate) nodes: BTreeSet<ImpactNodeCoverage>,
+    pub(crate) edges: BTreeSet<UnattributedImpactEdge>,
 }
 
 impl ActiveGraph {
@@ -131,41 +146,114 @@ impl ActiveGraph {
         self.graph.node_weights().cloned().collect()
     }
 
-    pub(in crate::registry) fn dependent_dataflow_entities(
-        &self,
-        seeds: &HashSet<NodeRef>,
-    ) -> HashSet<NodeRef> {
-        let mut pending = seeds
-            .iter()
-            .filter_map(|key| self.indices.get(key).copied())
-            .collect::<Vec<_>>();
-        let mut visited = HashSet::default();
-        let mut affected = HashSet::default();
+    pub(crate) fn node_impact(&self, seed: &NodeRef) -> UnattributedImpactTopology {
+        let indices = self
+            .indices
+            .get(seed)
+            .copied()
+            .into_iter()
+            .collect::<HashSet<_>>();
+        self.impact_for_indices(&indices)
+    }
 
+    pub(crate) fn nodes_impact(&self, selected: &BTreeSet<NodeRef>) -> UnattributedImpactTopology {
+        let indices = selected
+            .iter()
+            .filter_map(|node| self.indices.get(node).copied())
+            .collect::<HashSet<_>>();
+        self.impact_for_indices(&indices)
+    }
+
+    pub(crate) fn downstream_impact(&self, seed: &NodeRef) -> UnattributedImpactTopology {
+        let mut pending = self
+            .indices
+            .get(seed)
+            .copied()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut selected = HashSet::default();
         while let Some(index) = pending.pop() {
-            if !visited.insert(index) {
+            if !selected.insert(index) {
                 continue;
-            }
-            let node = self
-                .graph
-                .node_weight(index)
-                .verified("this index came from the same graph, which is not modified here");
-            if node.is_dataflow_node() {
-                affected.insert(NodeRef {
-                    kind: node.kind,
-                    identifier: node.identifier.clone(),
-                });
             }
             pending.extend(
                 self.graph
                     .edges_directed(index, Direction::Outgoing)
                     .filter_map(|edge| {
-                        (*edge.weight() == EdgeKind::RequiredBy).then_some(edge.target())
+                        edge.weight()
+                            .propagates_impact_downstream()
+                            .then_some(edge.target())
                     }),
             );
         }
+        self.impact_for_indices(&selected)
+    }
 
-        affected
+    pub(crate) fn whole_impact(&self) -> UnattributedImpactTopology {
+        let indices = self.graph.node_indices().collect::<HashSet<_>>();
+        self.impact_for_indices(&indices)
+    }
+
+    pub(crate) fn with_configuration_dependencies(
+        &self,
+        topology: &UnattributedImpactTopology,
+    ) -> UnattributedImpactTopology {
+        let mut pending = topology
+            .nodes
+            .iter()
+            .filter_map(|coverage| self.indices.get(&coverage.node).copied())
+            .collect::<Vec<_>>();
+        let mut selected = HashSet::default();
+        while let Some(index) = pending.pop() {
+            if !selected.insert(index) {
+                continue;
+            }
+            pending.extend(
+                self.graph
+                    .edges_directed(index, Direction::Incoming)
+                    .filter_map(|edge| {
+                        edge.weight()
+                            .is_configuration_dependency()
+                            .then_some(edge.source())
+                    }),
+            );
+        }
+        self.impact_for_indices(&selected)
+    }
+
+    fn impact_for_indices(&self, indices: &HashSet<NodeIndex>) -> UnattributedImpactTopology {
+        let nodes = indices
+            .iter()
+            .map(|index| {
+                self.graph
+                    .node_weight(*index)
+                    .verified("this index belongs to the graph being projected")
+                    .impact_coverage()
+            })
+            .collect::<BTreeSet<_>>();
+        let edges = self
+            .graph
+            .edge_references()
+            .filter(|edge| indices.contains(&edge.source()) && indices.contains(&edge.target()))
+            .map(|edge| {
+                let source = self
+                    .graph
+                    .node_weight(edge.source())
+                    .verified("this endpoint belongs to the graph being projected")
+                    .impact_coverage();
+                let target = self
+                    .graph
+                    .node_weight(edge.target())
+                    .verified("this endpoint belongs to the graph being projected")
+                    .impact_coverage();
+                UnattributedImpactEdge {
+                    source,
+                    target,
+                    kind: edge.weight().impact_kind(),
+                }
+            })
+            .collect::<BTreeSet<_>>();
+        UnattributedImpactTopology { nodes, edges }
     }
 
     pub(in crate::registry) fn schema_fingerprint_for_index(&self, index: NodeIndex) -> [u8; 32] {
@@ -207,7 +295,9 @@ impl ActiveGraph {
                 self.graph
                     .edges_directed(index, Direction::Incoming)
                     .filter_map(|edge| {
-                        (*edge.weight() == EdgeKind::RequiredBy).then_some(edge.source())
+                        edge.weight()
+                            .is_configuration_dependency()
+                            .then_some(edge.source())
                     }),
             );
         }
@@ -391,6 +481,7 @@ const fn dataflow_edge_kind(kind: EdgeKind) -> DataflowEdgeKind {
         EdgeKind::SendsTo => DataflowEdgeKind::Data,
         EdgeKind::CorrelationTimeout => DataflowEdgeKind::CorrelationTimeout,
         EdgeKind::MessageError => DataflowEdgeKind::MessageError,
+        EdgeKind::MaterializedState => DataflowEdgeKind::StateLink,
     }
 }
 
@@ -422,6 +513,30 @@ impl ActiveNode {
     /// How this node is addressed: the kind it is and the name it carries, together.
     pub(in crate::registry) fn node_ref(&self) -> NodeRef {
         NodeRef::new(self.kind, self.identifier.clone())
+    }
+
+    pub(in crate::registry) fn impact_coverage(&self) -> ImpactNodeCoverage {
+        let node = self.node_ref();
+        if !is_schedulable_model(self.config.as_ref()) {
+            return ImpactNodeCoverage::configuration(node);
+        }
+
+        let declared_branch = match self.config.as_ref() {
+            Model::Relay(relay) => relay.branching.branch(),
+            model => model_branch_selection(model).and_then(|selection| selection.branch_ref()),
+        };
+        let branches = match declared_branch {
+            Some(branch) => ConcreteBranchCoverage::AllOfBranch {
+                branch: branch.clone(),
+            },
+            None if self.effective_branching.is_some()
+                && matches!(self.kind, ModelKind::Emitter | ModelKind::Reingestor) =>
+            {
+                ConcreteBranchCoverage::All
+            }
+            None => ConcreteBranchCoverage::Unbranched,
+        };
+        ImpactNodeCoverage::execution(node, branches)
     }
 
     fn dataflow_id(&self) -> String {
@@ -744,6 +859,7 @@ pub(crate) enum EdgeKind {
     SendsTo,
     CorrelationTimeout,
     MessageError,
+    MaterializedState,
 }
 
 impl EdgeKind {
@@ -753,8 +869,29 @@ impl EdgeKind {
 
     pub(in crate::registry) const fn is_runtime_flow_edge(self) -> bool {
         match self {
-            Self::RequiredBy => false,
+            Self::RequiredBy | Self::MaterializedState => false,
             Self::SendsTo | Self::CorrelationTimeout | Self::MessageError => true,
+        }
+    }
+
+    pub(in crate::registry) const fn propagates_impact_downstream(self) -> bool {
+        matches!(
+            self,
+            Self::SendsTo | Self::CorrelationTimeout | Self::MessageError | Self::MaterializedState
+        )
+    }
+
+    pub(in crate::registry) const fn is_configuration_dependency(self) -> bool {
+        matches!(self, Self::RequiredBy | Self::MaterializedState)
+    }
+
+    pub(in crate::registry) const fn impact_kind(self) -> ImpactEdgeKind {
+        match self {
+            Self::RequiredBy => ImpactEdgeKind::ConfigurationDependency,
+            Self::SendsTo => ImpactEdgeKind::Dataflow,
+            Self::CorrelationTimeout => ImpactEdgeKind::CorrelationTimeout,
+            Self::MessageError => ImpactEdgeKind::MessageError,
+            Self::MaterializedState => ImpactEdgeKind::MaterializedState,
         }
     }
 }
@@ -868,7 +1005,7 @@ pub(in crate::registry) fn has_required_by_cycle(graph: &DiGraph<ActiveNode, Edg
     }
 
     for edge in graph.edge_references() {
-        if *edge.weight() != EdgeKind::RequiredBy {
+        if !edge.weight().is_configuration_dependency() {
             continue;
         }
         let source = *node_map
@@ -895,7 +1032,7 @@ pub(in crate::registry) fn ensure_drop_targets_are_not_in_use(
 
         let mut blockers = Vec::new();
         for blocker_index in graph.graph.edges_directed(index, Direction::Outgoing) {
-            if *blocker_index.weight() != EdgeKind::RequiredBy {
+            if !blocker_index.weight().is_configuration_dependency() {
                 continue;
             }
             let blocker = graph
@@ -928,11 +1065,12 @@ pub(in crate::registry) fn ensure_drop_targets_are_not_in_use(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{collections::BTreeSet, fs};
 
     use nervix_models::{
-        Assignment, AssignmentTarget, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
-        MessageErrorPolicy,
+        Assignment, AssignmentTarget, BranchSelection, CorrelationTimeoutAction,
+        CorrelationTimeoutPolicy, MaterializedRelayState, MaterializedStateDependency,
+        MaterializedStatePolicy, MessageErrorPolicy, OutputBranch,
     };
 
     use super::*;
@@ -940,7 +1078,7 @@ mod tests {
         storage::Registry,
         test_fixtures::{
             branch_for_relay, branch_schema, client_model, codec, emitter,
-            explicitly_unbranched_relay, full_graph_batch, ingestor_with_params,
+            explicitly_unbranched_relay, full_graph_batch, ingestor_with_params, junction,
             materialized_relay, named, processor, relay_branched_by_relay_branch,
             relay_branched_like, schema, temp_db_path, unbranched_correlator, unbranched_ingestor,
             wasm_processor, wire_schema,
@@ -962,6 +1100,97 @@ mod tests {
             .expect("graph should be installed");
         assert_eq!(graph.node_count(), 12);
         assert_eq!(graph.edge_count(), 21);
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn impact_traversal_distinguishes_flow_state_and_configuration_dependencies() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = DomainName::parse("default").expect("valid domain");
+        let mut state_model = explicitly_unbranched_relay("state", "event_schema");
+        let Model::Relay(state) = &mut state_model else {
+            unreachable!("the relay fixture constructs a relay model");
+        };
+        state.materialized_state = Some(MaterializedRelayState::LastByTimestamp);
+        let mut consumer_model = junction("consume", &["input"], "output");
+        let Model::Junction(consumer) = &mut consumer_model else {
+            unreachable!("the junction fixture constructs a junction model");
+        };
+        consumer.branched_by = BranchSelection::unbranched();
+        for route in &mut consumer.output_routes.routes {
+            route.branch = Some(OutputBranch::Unbranched);
+        }
+        consumer
+            .materialized_state
+            .push(MaterializedStateDependency {
+                relay: named("state"),
+                policy: MaterializedStatePolicy::RequiredSkip,
+            });
+
+        registry
+            .apply_batch(
+                &domain,
+                vec![
+                    schema("event_schema"),
+                    explicitly_unbranched_relay("input", "event_schema"),
+                    state_model,
+                    explicitly_unbranched_relay("output", "event_schema"),
+                    consumer_model,
+                ],
+            )
+            .expect("the state-dependent graph should validate");
+        let graph = registry
+            .active_graph(&domain)
+            .expect("the graph should be installed");
+
+        let state_impact =
+            graph.downstream_impact(&NodeRef::new(ModelKind::Relay, named::<ModelName>("state")));
+        let state_nodes = state_impact
+            .nodes
+            .iter()
+            .map(|coverage| coverage.node.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            state_nodes,
+            BTreeSet::from([
+                NodeRef::new(ModelKind::Relay, named::<ModelName>("state")),
+                NodeRef::new(ModelKind::Junction, named::<ModelName>("consume")),
+                NodeRef::new(ModelKind::Relay, named::<ModelName>("output")),
+            ])
+        );
+        assert!(state_impact.edges.iter().any(|edge| {
+            edge.source.node.kind == ModelKind::Relay
+                && edge.source.node.identifier == named::<ModelName>("state")
+                && edge.target.node.kind == ModelKind::Junction
+                && edge.kind == nervix_models::ImpactEdgeKind::MaterializedState
+        }));
+        let affected_topology = graph.with_configuration_dependencies(&state_impact);
+        let parallel_input_edges = affected_topology
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.source.node == NodeRef::new(ModelKind::Relay, named::<ModelName>("input"))
+                    && edge.target.node
+                        == NodeRef::new(ModelKind::Junction, named::<ModelName>("consume"))
+            })
+            .map(|edge| edge.kind)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            parallel_input_edges,
+            BTreeSet::from([
+                nervix_models::ImpactEdgeKind::ConfigurationDependency,
+                nervix_models::ImpactEdgeKind::Dataflow,
+            ])
+        );
+
+        let configuration_impact = graph.downstream_impact(&NodeRef::new(
+            ModelKind::Schema,
+            named::<ModelName>("event_schema"),
+        ));
+        assert_eq!(configuration_impact.nodes.len(), 1);
+        assert!(configuration_impact.edges.is_empty());
 
         let _ = fs::remove_dir_all(path);
     }
@@ -1086,10 +1315,10 @@ mod tests {
             )
             .expect("wasm processor graph should succeed");
 
-        let dataflow_graph = registry
+        let graph = registry
             .active_graph(&domain)
-            .expect("graph should be installed")
-            .to_dataflow_graph(domain.as_str());
+            .expect("graph should be installed");
+        let dataflow_graph = graph.to_dataflow_graph(domain.as_str());
 
         let node_ids = dataflow_graph
             .nodes
@@ -1122,7 +1351,6 @@ mod tests {
                 ("wasm_processor:filter_events", "relay:filtered_events"),
             ])
         );
-
         let _ = fs::remove_dir_all(path);
     }
 
@@ -1147,10 +1375,10 @@ mod tests {
             )
             .expect("client reuse graph should succeed");
 
-        let dataflow_graph = registry
+        let graph = registry
             .active_graph(&domain)
-            .expect("graph should be installed")
-            .to_dataflow_graph(domain.as_str());
+            .expect("graph should be installed");
+        let dataflow_graph = graph.to_dataflow_graph(domain.as_str());
 
         let node_ids = dataflow_graph
             .nodes
@@ -1239,10 +1467,10 @@ mod tests {
             )
             .expect("correlator graph should succeed");
 
-        let dataflow_graph = registry
+        let graph = registry
             .active_graph(&domain)
-            .expect("graph should be installed")
-            .to_dataflow_graph(domain.as_str());
+            .expect("graph should be installed");
+        let dataflow_graph = graph.to_dataflow_graph(domain.as_str());
 
         let node_ids = dataflow_graph
             .nodes
@@ -1293,6 +1521,18 @@ mod tests {
                 ),
             ])
         );
+        let impact = graph.downstream_impact(&NodeRef::new(
+            ModelKind::Correlator,
+            named::<ModelName>("match_events"),
+        ));
+        let impact_kinds = impact
+            .edges
+            .iter()
+            .map(|edge| edge.kind)
+            .collect::<BTreeSet<_>>();
+        assert!(impact_kinds.contains(&nervix_models::ImpactEdgeKind::Dataflow));
+        assert!(impact_kinds.contains(&nervix_models::ImpactEdgeKind::CorrelationTimeout));
+        assert!(impact_kinds.contains(&nervix_models::ImpactEdgeKind::MessageError));
 
         let _ = fs::remove_dir_all(path);
     }

@@ -583,92 +583,7 @@ impl Runtime {
         let Some(execution) = self.inner.executions.get(domain) else {
             return Vec::new();
         };
-        Self::entity_pause_relays_for_schedule(&execution.schedule, affected_entities)
-    }
-
-    pub(in crate::runtime) fn entity_pause_relays_for_schedule(
-        schedule: &DomainSchedule,
-        affected_entities: &[NodeRef],
-    ) -> Vec<RelayName> {
-        let processor_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
-        let mut relays = Vec::new();
-        for entity in affected_entities {
-            if entity.kind == ModelKind::Relay {
-                relays.push(RelayName::from(&entity.identifier));
-                continue;
-            }
-            if let Some(processor) = processor_specs.processor(entity.kind, &entity.identifier) {
-                relays.extend(processor.spec.input_relays.clone());
-                continue;
-            }
-            let Some(node) = schedule
-                .nodes
-                .get(&NodeRef::new(entity.kind, entity.identifier.clone()))
-            else {
-                continue;
-            };
-            match node.config.as_ref() {
-                Model::Emitter(emitter) => relays.extend(emitter.from.from.clone()),
-                Model::Reingestor(reingestor) => relays.extend(reingestor.from.from.clone()),
-                Model::Generator(generator) => {
-                    relays.push(generator.materialized_relay.clone());
-                }
-                _ => {}
-            }
-        }
-        relays.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-        relays.dedup();
-        relays
-    }
-
-    pub(crate) fn ownership_handoff_relays_for_schedule(
-        schedule: &DomainSchedule,
-        affected_entities: &[NodeRef],
-    ) -> Vec<RelayName> {
-        let mut relays = Self::entity_pause_relays_for_schedule(schedule, affected_entities);
-        let affected = affected_entities.iter().cloned().collect::<HashSet<_>>();
-        let processor_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
-        relays.retain(|relay| {
-            let mut has_producer = false;
-            let mut has_unaffected_producer = false;
-            for node in schedule.nodes.values() {
-                let produces_relay = if let Some(processor) =
-                    processor_specs.processor(node.kind(), &node.identifier)
-                {
-                    processor.spec.output_relays().contains(relay)
-                } else {
-                    match node.config.as_ref() {
-                        Model::Ingestor(ingestor) => {
-                            ingestor.output_routes.relays().any(|out| out == relay)
-                        }
-                        Model::Reingestor(reingestor) => {
-                            reingestor.output_routes.relays().any(|out| out == relay)
-                        }
-                        Model::Generator(generator) => {
-                            generator.output_routes.relays().any(|out| out == relay)
-                        }
-                        _ => false,
-                    }
-                };
-                if !produces_relay {
-                    continue;
-                }
-
-                has_producer = true;
-                if !has_unaffected_producer {
-                    has_unaffected_producer = !affected.contains(&node.identity());
-                }
-            }
-
-            if !has_producer {
-                return true;
-            }
-            if has_unaffected_producer {
-                return true;
-            }
-            false
-        });
-        relays
+        crate::registry::entity_pause_relays_for_schedule(&execution.schedule, affected_entities)
     }
 
     pub(in crate::runtime) fn engage_entity_gates(
@@ -1988,7 +1903,7 @@ mod tests {
         };
 
         assert_eq!(
-            Runtime::entity_pause_relays_for_schedule(&schedule, &[entity]),
+            crate::registry::entity_pause_relays_for_schedule(&schedule, &[entity]),
             vec![named("source_a"), named("source_b")]
         );
         let remote_consumers = Runtime::remote_runtime_consumers_for_schedule(
@@ -2037,11 +1952,11 @@ mod tests {
         });
 
         assert_eq!(
-            Runtime::entity_pause_relays_for_schedule(&schedule, &affected),
+            crate::registry::entity_pause_relays_for_schedule(&schedule, &affected),
             vec![named("corridor_stage"), named("inbound")]
         );
         assert_eq!(
-            Runtime::ownership_handoff_relays_for_schedule(&schedule, &affected),
+            crate::registry::ownership_handoff_relays_for_schedule(&schedule, &affected),
             vec![named("inbound")]
         );
     }

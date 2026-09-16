@@ -641,7 +641,9 @@ impl Runtime {
         )
         .into_vec();
         let mut relays = self.entity_pause_relays(domain, &gated);
-        relays.extend(Self::entity_pause_relays_for_schedule(&schedule, &gated));
+        relays.extend(crate::registry::entity_pause_relays_for_schedule(
+            &schedule, &gated,
+        ));
         relays.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         relays.dedup();
         let mut local_gate_hold = self.engage_entity_gates(

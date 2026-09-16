@@ -179,6 +179,24 @@ with different content is rejected. Limits are checked before preflight and the 
 planner runs from a refreshed snapshot during `COMMIT`, because other sessions may change relevant
 control-plane state after admission.
 
+The plan records affected topology on both sides of every execution step. The before side retains
+nodes and edges that the step drops or rewires; the after side records the graph that activation
+will install. Edges distinguish configuration dependencies, normal delivery, message-error and
+correlation-timeout routes, and materialized-state reads. Downstream pause traversal follows only
+relations that can carry records or state effects, while the reported topology also retains the
+configuration dependencies needed to explain those nodes. Parallel relations between the same two
+nodes remain separate, and every node and edge retains all operations that contributed to it.
+
+An entity pause names its concrete branch coverage and the admission relays from the current
+schedule. Shared relay gates and every member of an affected hard placement group are included in
+that scope. Schedule entity swaps raise the effective scope to an entity pause, while a schedule
+rebuild raises it to a domain pause before activation begins. A domain pause covers every execution
+node in the before and after graphs. Changed, paused, force-flushed, ownership-moved, activated,
+rebuilt, and state-reset nodes remain separate effects in the report; because engaging any entity
+gate requests a domain-wide force flush, that flush effect covers the full current execution graph.
+Commit uses the gate plan and schedule delta captured for this report, so execution cannot silently
+widen the planned scope with a second decision.
+
 An accumulated model run that already forms a complete graph receives the full registry, binding,
 UDF, and scheduling preflight. Cross-model completeness may remain provisional only for the
 unfinished final model run. An intermediate schema/codec mismatch or temporarily referenced model

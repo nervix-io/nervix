@@ -11,20 +11,27 @@ use std::collections::{BTreeMap, BTreeSet};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    ActualExecutionStepImpact, CanonicalImpactSet, ConfigurationImpact, ConfigurationTransition,
-    DomainLifecycleAction, DomainLifecycleImpact, DomainName, DomainSchedule,
-    DomainState as ControlDomainState, DomainStatus, ExecutionStepImpactReport, ImpactAttribution,
-    ImpactDiagnostic, ImpactDiagnosticKind, ImpactEffects, ImpactPlanningBasis,
-    ImpactReportCompleteness, ImpactReportError, ModelChangeAspect, ModelIndex, NodeRef,
-    OperationImpactReason, OperationImpactReport, OwnershipMoveImpact, PauseRequirement,
-    PlacementPolicy, PlannedExecutionStepImpact, QuiesceLevel, QuiesceSubgraph,
-    ResourceCatalogAction, ResourceCatalogImpact, ResourceName, Statement, TransactionImpactReport,
+    ActivationAction, ActivationImpact, ActualExecutionStepImpact, AffectedTopology,
+    AttributedGateBoundary, AttributedImpactNode, CanonicalImpactSet, ConfigurationImpact,
+    ConfigurationTransition, DomainLifecycleAction, DomainLifecycleImpact, DomainName,
+    DomainSchedule, DomainState as ControlDomainState, DomainStatus, DynamicModelUpdate,
+    ExecutionStepImpactReport, ForceFlushImpact, ImpactAttribution, ImpactDiagnostic,
+    ImpactDiagnosticKind, ImpactEffects, ImpactNodeCoverage, ImpactPlanningBasis,
+    ImpactReportCompleteness, ImpactReportError, ImpactTopology, ImpactTopologyEdge,
+    ModelChangeAspect, ModelIndex, NodeRef, OperationImpactReason, OperationImpactReport,
+    OwnershipMoveImpact, PauseRequirement, PlacementPolicy, PlannedExecutionStepImpact,
+    QuiesceLevel, QuiesceSubgraph, RebuildImpact, RebuildReason, ResourceCatalogAction,
+    ResourceCatalogImpact, ResourceName, StateResetImpact, Statement, TransactionImpactReport,
     TransactionOperation, TransactionOperationNumber, TransactionOperationRange,
     TransactionPosition,
 };
 use thiserror::Error;
 
-use crate::registry::{ActiveGraph, PlannedMutations, Registry, RegistryError, RegistryMutation};
+use super::graph::{UnattributedImpactEdge, UnattributedImpactTopology};
+use crate::registry::{
+    ActiveGraph, EntityGatePlan, PlannedMutations, Registry, RegistryError, RegistryMutation,
+    ScheduleDelta, entity_pause_relays_for_schedule, gate_boundary, scheduled_impact_coverage,
+};
 
 /// Every mutable control-plane input one planning pass may inspect.
 #[derive(Debug, Clone)]
@@ -77,6 +84,8 @@ pub(crate) struct PlannedModelTransactionStep {
     pub(crate) expected_schedule: Option<DomainSchedule>,
     pub(crate) schedule: Option<DomainSchedule>,
     pub(crate) no_op_operations: BTreeSet<TransactionOperationNumber>,
+    pub(crate) model_gate: EntityGatePlan,
+    pub(crate) ownership_gate: EntityGatePlan,
 }
 
 /// The captured state transition and schedule decision for one domain alteration.
@@ -86,6 +95,7 @@ pub(crate) struct PlannedAlterDomainTransactionStep {
     pub(crate) next: ControlDomainState,
     pub(crate) expected_schedule: Option<DomainSchedule>,
     pub(crate) schedule: Option<DomainSchedule>,
+    pub(crate) ownership_gate: EntityGatePlan,
 }
 
 /// A complete ordered decision. Admission can project its public semantic report; commit consumes
@@ -207,6 +217,73 @@ struct ModelRunPlanningInput<'a> {
     allow_incomplete: bool,
 }
 
+#[derive(Default)]
+struct ImpactTopologyBuilder {
+    nodes: BTreeMap<ImpactNodeCoverage, BTreeSet<TransactionOperationNumber>>,
+    edges: BTreeMap<UnattributedImpactEdge, BTreeSet<TransactionOperationNumber>>,
+}
+
+impl ImpactTopologyBuilder {
+    fn add(&mut self, topology: UnattributedImpactTopology, attribution: &ImpactAttribution) {
+        for node in topology.nodes {
+            self.nodes
+                .entry(node)
+                .or_default()
+                .extend(attribution.operations().iter().copied());
+        }
+        for edge in topology.edges {
+            self.edges
+                .entry(edge)
+                .or_default()
+                .extend(attribution.operations().iter().copied());
+        }
+    }
+
+    fn into_topology(self) -> ImpactTopology {
+        let nodes = self
+            .nodes
+            .into_iter()
+            .map(|(coverage, operations)| AttributedImpactNode {
+                coverage,
+                attribution: impact_attribution(operations),
+            });
+        let edges = self
+            .edges
+            .into_iter()
+            .map(|(edge, operations)| ImpactTopologyEdge {
+                source: edge.source,
+                target: edge.target,
+                kind: edge.kind,
+                attribution: impact_attribution(operations),
+            });
+        ImpactTopology {
+            nodes: CanonicalImpactSet::new(nodes),
+            edges: CanonicalImpactSet::new(edges),
+        }
+    }
+}
+
+struct CompletedModelImpact {
+    effects: ImpactEffects,
+    subgraph: QuiesceSubgraph,
+    model_gate: EntityGatePlan,
+    ownership_gate: EntityGatePlan,
+}
+
+struct ModelImpactInput<'a> {
+    domain: &'a DomainName,
+    before: &'a ModelIndex,
+    after: &'a ModelIndex,
+    touched_by_node: &'a BTreeMap<NodeRef, Vec<TransactionOperationNumber>>,
+    fallback_attribution: &'a ImpactAttribution,
+    planned: Option<&'a PlannedMutations>,
+    current_schedule: Option<&'a DomainSchedule>,
+    next_schedule: Option<&'a DomainSchedule>,
+    ownership_moves: &'a CanonicalImpactSet<OwnershipMoveImpact>,
+    schedule_delta: &'a ScheduleDelta,
+    running: bool,
+}
+
 impl Registry {
     /// Plans `statements` from `first_operation_index` in their written order. The callback is a
     /// synchronous schedule decision over topology inputs captured beside `snapshot`.
@@ -305,8 +382,8 @@ impl Registry {
                     let changed = previous.config.placement != alter.policy;
                     domain_state.config.placement = alter.policy;
                     let expected_schedule = current_schedule.clone();
-                    let schedule_decision = if changed {
-                        let graph =
+                    let active_graph = if changed {
+                        Some(
                             crate::registry::domain_state::DomainState::build(&domain, &models)
                                 .map_err(|error| {
                                     Report::new(TransactionPlanningError::ModelPreflight {
@@ -314,9 +391,14 @@ impl Registry {
                                         error,
                                     })
                                 })?
-                                .graph;
+                                .graph,
+                        )
+                    } else {
+                        None
+                    };
+                    let schedule_decision = if let Some(graph) = &active_graph {
                         schedule(
-                            (graph.node_count() > 0).then_some(graph),
+                            (graph.node_count() > 0).then_some(graph.clone()),
                             alter.policy,
                             current_schedule.as_ref(),
                             &attribution,
@@ -328,6 +410,15 @@ impl Registry {
                         }
                     };
                     let ownership_moves = schedule_decision.ownership_moves;
+                    let completed = complete_placement_impact(
+                        &domain,
+                        active_graph.as_ref(),
+                        expected_schedule.as_ref(),
+                        schedule_decision.schedule.as_ref(),
+                        &ownership_moves,
+                        &attribution,
+                        matches!(domain_state.status, DomainStatus::Running),
+                    );
                     pause = effective_pause(
                         &domain,
                         &domain_state.status,
@@ -336,16 +427,14 @@ impl Registry {
                         } else {
                             QuiesceLevel::EntityPause
                         },
+                        completed.subgraph,
                     );
                     reasons = if changed {
                         vec![OperationImpactReason::DomainPlacement]
                     } else {
                         Vec::new()
                     };
-                    contribution = ImpactEffects {
-                        ownership_moves: ownership_moves.clone(),
-                        ..ImpactEffects::default()
-                    };
+                    contribution = completed.effects;
                     current_schedule = schedule_decision.schedule.clone();
                     kind = PlannedTransactionStepKind::AlterDomain {
                         plan: Box::new(PlannedAlterDomainTransactionStep {
@@ -353,6 +442,7 @@ impl Registry {
                             next: domain_state.clone(),
                             expected_schedule,
                             schedule: schedule_decision.schedule,
+                            ownership_gate: completed.ownership_gate,
                         }),
                     };
                 }
@@ -457,7 +547,7 @@ impl Registry {
                     }));
                 }
             }
-            let completeness = completeness_for_pause(number, &pause, Vec::new());
+            let completeness = completeness_for_pause(Vec::new());
             operations.push(OperationImpactReport {
                 number,
                 operation,
@@ -592,12 +682,6 @@ impl Registry {
         let candidate_models = preflight.candidate_models().clone();
         let incomplete_reason = preflight.incomplete_reason().map(ToOwned::to_owned);
         let attribution = ImpactAttribution::for_range(range);
-        let step_effects = model_step_effects(
-            &base_models,
-            &candidate_models,
-            &touched_by_node,
-            &attribution,
-        );
         let mut diagnostics = Vec::new();
         if let Some(reason) = &incomplete_reason {
             diagnostics.push(ImpactDiagnostic {
@@ -606,16 +690,6 @@ impl Registry {
                 message: reason.to_string(),
             });
         }
-        if !step_effects.changed_configuration.is_empty() {
-            diagnostics.push(ImpactDiagnostic {
-                kind: ImpactDiagnosticKind::Topology,
-                operation: Some(range.first()),
-                message: "the exact affected topology and derived runtime effects are not planned \
-                          yet"
-                .to_string(),
-            });
-        }
-
         let expected_schedule = current_schedule.clone();
         let (planned, next_schedule, ownership_moves, base_level) = match preflight.planned {
             Some(planned) => {
@@ -649,25 +723,46 @@ impl Registry {
                 QuiesceLevel::Dynamic,
             ),
         };
-        let effective_level = if ownership_moves.is_empty() {
-            base_level
+        let schedule_delta =
+            ScheduleDelta::between(expected_schedule.as_ref(), next_schedule.as_ref());
+        let ownership_level = if ownership_moves.is_empty() {
+            QuiesceLevel::Dynamic
         } else {
-            base_level.max(QuiesceLevel::EntityPause)
+            QuiesceLevel::EntityPause
         };
+        let effective_level = base_level
+            .max(ownership_level)
+            .max(schedule_delta.quiesce_level());
+        let completed = complete_model_impact(ModelImpactInput {
+            domain,
+            before: &base_models,
+            after: &candidate_models,
+            touched_by_node: &touched_by_node,
+            fallback_attribution: &attribution,
+            planned: planned.as_ref(),
+            current_schedule: expected_schedule.as_ref(),
+            next_schedule: next_schedule.as_ref(),
+            ownership_moves: &ownership_moves,
+            schedule_delta: &schedule_delta,
+            running: matches!(domain_state.status, DomainStatus::Running),
+        });
         let pause = if incomplete_reason.is_some() {
             PauseRequirement::NoPause
         } else {
-            effective_pause(domain, &domain_state.status, effective_level)
+            effective_pause(
+                domain,
+                &domain_state.status,
+                effective_level,
+                completed.subgraph.clone(),
+            )
         };
-        let completeness = completeness_for_pause(range.first(), &pause, diagnostics);
-        let mut effects = step_effects;
-        effects.ownership_moves = ownership_moves;
+        let completeness = completeness_for_pause(diagnostics);
         let impact = ExecutionStepImpactReport::new(
             range,
             PlannedExecutionStepImpact {
                 completeness,
                 pause,
-                effects,
+                effects: completed.effects,
             },
             ActualExecutionStepImpact::unattempted(),
         );
@@ -681,6 +776,8 @@ impl Registry {
                         expected_schedule,
                         schedule: next_schedule.clone(),
                         no_op_operations,
+                        model_gate: completed.model_gate,
+                        ownership_gate: completed.ownership_gate,
                     }),
                 },
             },
@@ -823,6 +920,769 @@ fn model_step_effects(
     }
 }
 
+fn complete_model_impact(input: ModelImpactInput<'_>) -> CompletedModelImpact {
+    let ModelImpactInput {
+        domain,
+        before,
+        after,
+        touched_by_node,
+        fallback_attribution,
+        planned,
+        current_schedule,
+        next_schedule,
+        ownership_moves,
+        schedule_delta,
+        running,
+    } = input;
+    let mut effects = model_step_effects(before, after, touched_by_node, fallback_attribution);
+    effects.ownership_moves = ownership_moves.clone();
+
+    let mut before_topology = ImpactTopologyBuilder::default();
+    let mut after_topology = ImpactTopologyBuilder::default();
+    let mut pause_nodes =
+        BTreeMap::<ImpactNodeCoverage, BTreeSet<TransactionOperationNumber>>::new();
+    let mut pause_entity_operations =
+        BTreeMap::<NodeRef, BTreeSet<TransactionOperationNumber>>::new();
+    let mut state_resets = Vec::new();
+
+    if let Some(planned) = planned {
+        for change in planned.quiesce().changed() {
+            let attribution = attribution_for_node(
+                &change.node,
+                touched_by_node,
+                fallback_attribution,
+                ownership_moves,
+            );
+            let before_impact = impact_for_change(planned.base_graph(), &change.node, change.level);
+            let after_impact =
+                impact_for_change(planned.resulting_graph(), &change.node, change.level);
+            if change.level.requires_entity_pause() {
+                add_pause_nodes(
+                    &mut pause_nodes,
+                    &mut pause_entity_operations,
+                    &before_impact,
+                    &attribution,
+                );
+                add_pause_nodes(
+                    &mut pause_nodes,
+                    &mut pause_entity_operations,
+                    &after_impact,
+                    &attribution,
+                );
+            }
+            before_topology.add(
+                planned
+                    .base_graph()
+                    .with_configuration_dependencies(&before_impact),
+                &attribution,
+            );
+            after_topology.add(
+                planned
+                    .resulting_graph()
+                    .with_configuration_dependencies(&after_impact),
+                &attribution,
+            );
+
+            let coverage = coverage_for_node(planned.resulting_graph(), &change.node)
+                .or_else(|| coverage_for_node(planned.base_graph(), &change.node));
+            if let Some(coverage) = coverage {
+                state_resets.extend(change.state_resets.iter().copied().map(|state| {
+                    StateResetImpact {
+                        node: coverage.clone(),
+                        state,
+                        attribution: attribution.clone(),
+                    }
+                }));
+            }
+        }
+    }
+
+    let mut activations = Vec::new();
+    let mut rebuilds = Vec::new();
+    if let Some(planned) = planned {
+        add_schedule_impact(
+            schedule_delta,
+            planned,
+            touched_by_node,
+            fallback_attribution,
+            ownership_moves,
+            &mut before_topology,
+            &mut after_topology,
+            &mut activations,
+            &mut rebuilds,
+        );
+    }
+
+    let mut model_gate_entities = BTreeSet::new();
+    let mut model_gate_roots = BTreeSet::new();
+    if let Some(planned) = planned
+        && planned.quiesce().level().requires_entity_pause()
+    {
+        model_gate_entities.extend(planned.quiesce().affected_entities().iter().cloned());
+        model_gate_roots.extend(
+            planned
+                .quiesce()
+                .changed()
+                .iter()
+                .filter(|change| change.level.requires_entity_pause())
+                .map(|change| change.node.clone()),
+        );
+    }
+    let schedule_gate_entities = schedule_delta.entity_gate_entities();
+    model_gate_entities.extend(schedule_gate_entities.iter().cloned());
+    model_gate_roots.extend(schedule_gate_entities);
+    let model_gate = if running
+        && schedule_delta.quiesce_level() != QuiesceLevel::DomainPause
+        && !model_gate_entities.is_empty()
+    {
+        EntityGatePlan::for_model_change(current_schedule, model_gate_entities, model_gate_roots)
+    } else {
+        EntityGatePlan::default()
+    };
+    add_model_gate_pause_nodes(
+        &model_gate,
+        current_schedule,
+        fallback_attribution,
+        &mut pause_nodes,
+        &mut pause_entity_operations,
+    );
+    let moved_entities = ownership_moves
+        .as_slice()
+        .iter()
+        .map(|moved| moved.node.node.clone())
+        .collect::<Vec<_>>();
+    let ownership_gate =
+        EntityGatePlan::for_ownership_handoff(current_schedule, next_schedule, moved_entities);
+    if running {
+        add_ownership_pause_nodes(
+            &ownership_gate,
+            current_schedule,
+            next_schedule,
+            ownership_moves,
+            fallback_attribution,
+            &mut pause_nodes,
+            &mut pause_entity_operations,
+        );
+    }
+
+    let no_ownership_gate = EntityGatePlan::default();
+    let reported_ownership_gate = if running {
+        &ownership_gate
+    } else {
+        &no_ownership_gate
+    };
+    let gate_boundaries = attributed_gate_boundaries(
+        &model_gate,
+        reported_ownership_gate,
+        current_schedule,
+        next_schedule,
+        &pause_entity_operations,
+        fallback_attribution,
+    );
+    let attributed_nodes =
+        pause_nodes
+            .into_iter()
+            .map(|(coverage, operations)| AttributedImpactNode {
+                coverage,
+                attribution: impact_attribution(operations),
+            });
+    let subgraph = QuiesceSubgraph::new(domain.clone(), attributed_nodes, gate_boundaries);
+
+    let should_force_flush = running
+        && (planned.is_some_and(|planned| planned.quiesce().level() != QuiesceLevel::Dynamic)
+            || !ownership_moves.is_empty()
+            || matches!(
+                schedule_delta,
+                ScheduleDelta::EntitySwap { .. } | ScheduleDelta::Rebuild
+            ));
+    if should_force_flush && let Some(planned) = planned {
+        let force_flushes = planned
+            .base_graph()
+            .whole_impact()
+            .nodes
+            .into_iter()
+            .filter(|coverage| coverage.branches.is_some())
+            .map(|node| ForceFlushImpact {
+                node,
+                attribution: fallback_attribution.clone(),
+            });
+        effects.force_flushes = CanonicalImpactSet::new(force_flushes);
+    }
+
+    effects.topology = AffectedTopology {
+        before: before_topology.into_topology(),
+        after: after_topology.into_topology(),
+    };
+    effects.activations = CanonicalImpactSet::new(activations);
+    effects.rebuilds = CanonicalImpactSet::new(rebuilds);
+    effects.state_resets = CanonicalImpactSet::new(state_resets);
+    CompletedModelImpact {
+        effects,
+        subgraph,
+        model_gate,
+        ownership_gate,
+    }
+}
+
+fn complete_placement_impact(
+    domain: &DomainName,
+    graph: Option<&ActiveGraph>,
+    current_schedule: Option<&DomainSchedule>,
+    next_schedule: Option<&DomainSchedule>,
+    ownership_moves: &CanonicalImpactSet<OwnershipMoveImpact>,
+    attribution: &ImpactAttribution,
+    running: bool,
+) -> CompletedModelImpact {
+    let moved_entities = ownership_moves
+        .as_slice()
+        .iter()
+        .map(|moved| moved.node.node.clone());
+    let ownership_gate =
+        EntityGatePlan::for_ownership_handoff(current_schedule, next_schedule, moved_entities);
+    let mut pause_nodes =
+        BTreeMap::<ImpactNodeCoverage, BTreeSet<TransactionOperationNumber>>::new();
+    let mut pause_entity_operations =
+        BTreeMap::<NodeRef, BTreeSet<TransactionOperationNumber>>::new();
+    if running {
+        add_ownership_pause_nodes(
+            &ownership_gate,
+            current_schedule,
+            next_schedule,
+            ownership_moves,
+            attribution,
+            &mut pause_nodes,
+            &mut pause_entity_operations,
+        );
+    }
+    let no_ownership_gate = EntityGatePlan::default();
+    let reported_ownership_gate = if running {
+        &ownership_gate
+    } else {
+        &no_ownership_gate
+    };
+    let gate_boundaries = attributed_gate_boundaries(
+        &EntityGatePlan::default(),
+        reported_ownership_gate,
+        current_schedule,
+        next_schedule,
+        &pause_entity_operations,
+        attribution,
+    );
+    let subgraph = QuiesceSubgraph::new(
+        domain.clone(),
+        pause_nodes
+            .into_iter()
+            .map(|(coverage, operations)| AttributedImpactNode {
+                coverage,
+                attribution: impact_attribution(operations),
+            }),
+        gate_boundaries,
+    );
+
+    let mut effects = ImpactEffects {
+        ownership_moves: ownership_moves.clone(),
+        ..ImpactEffects::default()
+    };
+    if let Some(graph) = graph {
+        let affected = ownership_gate
+            .affected_entities()
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let affected = graph.nodes_impact(&affected);
+        let topology = graph.with_configuration_dependencies(&affected);
+        let mut before = ImpactTopologyBuilder::default();
+        before.add(topology.clone(), attribution);
+        let mut after = ImpactTopologyBuilder::default();
+        after.add(topology, attribution);
+        effects.topology = AffectedTopology {
+            before: before.into_topology(),
+            after: after.into_topology(),
+        };
+        if running && !ownership_moves.is_empty() {
+            effects.force_flushes = CanonicalImpactSet::new(
+                graph
+                    .whole_impact()
+                    .nodes
+                    .into_iter()
+                    .filter(|coverage| coverage.branches.is_some())
+                    .map(|node| ForceFlushImpact {
+                        node,
+                        attribution: attribution.clone(),
+                    }),
+            );
+        }
+    }
+
+    let mut activations = Vec::new();
+    let mut rebuilds = Vec::new();
+    for moved in ownership_moves {
+        let before = scheduled_coverage(current_schedule, &moved.node.node);
+        let after = scheduled_coverage(next_schedule, &moved.node.node);
+        if let Some(node) = before {
+            activations.push(ActivationImpact {
+                node,
+                action: ActivationAction::Deactivate,
+                attribution: moved.attribution.clone(),
+            });
+        }
+        if let Some(node) = after {
+            activations.push(ActivationImpact {
+                node: node.clone(),
+                action: ActivationAction::Activate,
+                attribution: moved.attribution.clone(),
+            });
+            rebuilds.push(RebuildImpact {
+                node,
+                reason: RebuildReason::Ownership,
+                attribution: moved.attribution.clone(),
+            });
+        }
+    }
+    effects.activations = CanonicalImpactSet::new(activations);
+    effects.rebuilds = CanonicalImpactSet::new(rebuilds);
+    CompletedModelImpact {
+        effects,
+        subgraph,
+        model_gate: EntityGatePlan::default(),
+        ownership_gate,
+    }
+}
+
+fn scheduled_coverage(
+    schedule: Option<&DomainSchedule>,
+    entity: &NodeRef,
+) -> Option<ImpactNodeCoverage> {
+    let schedule = schedule?;
+    let node = schedule.nodes.get(entity)?;
+    Some(scheduled_impact_coverage(node))
+}
+
+fn impact_for_change(
+    graph: &ActiveGraph,
+    node: &NodeRef,
+    level: QuiesceLevel,
+) -> UnattributedImpactTopology {
+    match level {
+        QuiesceLevel::Dynamic => graph.node_impact(node),
+        QuiesceLevel::EntityPause => graph.downstream_impact(node),
+        QuiesceLevel::DomainPause => graph.whole_impact(),
+    }
+}
+
+fn add_pause_nodes(
+    nodes: &mut BTreeMap<ImpactNodeCoverage, BTreeSet<TransactionOperationNumber>>,
+    by_entity: &mut BTreeMap<NodeRef, BTreeSet<TransactionOperationNumber>>,
+    topology: &UnattributedImpactTopology,
+    attribution: &ImpactAttribution,
+) {
+    for coverage in topology
+        .nodes
+        .iter()
+        .filter(|coverage| coverage.branches.is_some())
+    {
+        let operations = attribution.operations().iter().copied();
+        nodes
+            .entry(coverage.clone())
+            .or_default()
+            .extend(operations.clone());
+        by_entity
+            .entry(coverage.node.clone())
+            .or_default()
+            .extend(operations);
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the schedule effect projection writes each independent report role into its owner"
+)]
+fn add_schedule_impact(
+    delta: &ScheduleDelta,
+    planned: &PlannedMutations,
+    touched_by_node: &BTreeMap<NodeRef, Vec<TransactionOperationNumber>>,
+    fallback_attribution: &ImpactAttribution,
+    ownership_moves: &CanonicalImpactSet<OwnershipMoveImpact>,
+    before_topology: &mut ImpactTopologyBuilder,
+    after_topology: &mut ImpactTopologyBuilder,
+    activations: &mut Vec<ActivationImpact>,
+    rebuilds: &mut Vec<RebuildImpact>,
+) {
+    match delta {
+        ScheduleDelta::Unchanged => {}
+        ScheduleDelta::Dynamic(updates) => {
+            for node in dynamic_update_nodes(updates) {
+                let attribution = attribution_for_node(
+                    &node,
+                    touched_by_node,
+                    fallback_attribution,
+                    ownership_moves,
+                );
+                let before_impact = planned.base_graph().node_impact(&node);
+                before_topology.add(
+                    planned
+                        .base_graph()
+                        .with_configuration_dependencies(&before_impact),
+                    &attribution,
+                );
+                let after_impact = planned.resulting_graph().node_impact(&node);
+                if let Some(coverage) = after_impact.nodes.iter().next().cloned() {
+                    activations.push(ActivationImpact {
+                        node: coverage,
+                        action: ActivationAction::Activate,
+                        attribution: attribution.clone(),
+                    });
+                }
+                after_topology.add(
+                    planned
+                        .resulting_graph()
+                        .with_configuration_dependencies(&after_impact),
+                    &attribution,
+                );
+            }
+        }
+        ScheduleDelta::EntitySwap {
+            entities,
+            reassignments,
+            dynamic_updates,
+        } => {
+            for (nodes, reason) in [
+                (entities.as_slice(), RebuildReason::Configuration),
+                (reassignments.as_slice(), RebuildReason::Ownership),
+            ] {
+                for node in nodes {
+                    let attribution = attribution_for_node(
+                        node,
+                        touched_by_node,
+                        fallback_attribution,
+                        ownership_moves,
+                    );
+                    let before_impact = planned.base_graph().node_impact(node);
+                    let after_impact = planned.resulting_graph().node_impact(node);
+                    add_activation_pair(
+                        &before_impact,
+                        &after_impact,
+                        reason,
+                        &attribution,
+                        activations,
+                        rebuilds,
+                    );
+                    before_topology.add(
+                        planned
+                            .base_graph()
+                            .with_configuration_dependencies(&before_impact),
+                        &attribution,
+                    );
+                    after_topology.add(
+                        planned
+                            .resulting_graph()
+                            .with_configuration_dependencies(&after_impact),
+                        &attribution,
+                    );
+                }
+            }
+            for node in dynamic_update_nodes(dynamic_updates) {
+                if entities.contains(&node) || reassignments.contains(&node) {
+                    continue;
+                }
+                let attribution = attribution_for_node(
+                    &node,
+                    touched_by_node,
+                    fallback_attribution,
+                    ownership_moves,
+                );
+                let after_impact = planned.resulting_graph().node_impact(&node);
+                if let Some(coverage) = after_impact.nodes.iter().next().cloned() {
+                    activations.push(ActivationImpact {
+                        node: coverage,
+                        action: ActivationAction::Activate,
+                        attribution: attribution.clone(),
+                    });
+                }
+                let before_impact = planned.base_graph().node_impact(&node);
+                before_topology.add(
+                    planned
+                        .base_graph()
+                        .with_configuration_dependencies(&before_impact),
+                    &attribution,
+                );
+                after_topology.add(
+                    planned
+                        .resulting_graph()
+                        .with_configuration_dependencies(&after_impact),
+                    &attribution,
+                );
+            }
+        }
+        ScheduleDelta::Rebuild => {
+            let before_impact = planned.base_graph().whole_impact();
+            let after_impact = planned.resulting_graph().whole_impact();
+            for coverage in before_impact
+                .nodes
+                .iter()
+                .filter(|coverage| coverage.branches.is_some())
+            {
+                activations.push(ActivationImpact {
+                    node: coverage.clone(),
+                    action: ActivationAction::Deactivate,
+                    attribution: fallback_attribution.clone(),
+                });
+            }
+            for coverage in after_impact
+                .nodes
+                .iter()
+                .filter(|coverage| coverage.branches.is_some())
+            {
+                activations.push(ActivationImpact {
+                    node: coverage.clone(),
+                    action: ActivationAction::Activate,
+                    attribution: fallback_attribution.clone(),
+                });
+                rebuilds.push(RebuildImpact {
+                    node: coverage.clone(),
+                    reason: RebuildReason::Configuration,
+                    attribution: fallback_attribution.clone(),
+                });
+                if !ownership_moves.is_empty() {
+                    rebuilds.push(RebuildImpact {
+                        node: coverage.clone(),
+                        reason: RebuildReason::Ownership,
+                        attribution: merged_ownership_attribution(
+                            ownership_moves,
+                            fallback_attribution,
+                        ),
+                    });
+                }
+            }
+            before_topology.add(before_impact, fallback_attribution);
+            after_topology.add(after_impact, fallback_attribution);
+        }
+    }
+}
+
+fn add_activation_pair(
+    before: &UnattributedImpactTopology,
+    after: &UnattributedImpactTopology,
+    reason: RebuildReason,
+    attribution: &ImpactAttribution,
+    activations: &mut Vec<ActivationImpact>,
+    rebuilds: &mut Vec<RebuildImpact>,
+) {
+    if let Some(coverage) = before.nodes.iter().next().cloned() {
+        activations.push(ActivationImpact {
+            node: coverage,
+            action: ActivationAction::Deactivate,
+            attribution: attribution.clone(),
+        });
+    }
+    if let Some(coverage) = after.nodes.iter().next().cloned() {
+        activations.push(ActivationImpact {
+            node: coverage.clone(),
+            action: ActivationAction::Activate,
+            attribution: attribution.clone(),
+        });
+        rebuilds.push(RebuildImpact {
+            node: coverage,
+            reason,
+            attribution: attribution.clone(),
+        });
+    }
+}
+
+fn dynamic_update_nodes(updates: &[DynamicModelUpdate]) -> BTreeSet<NodeRef> {
+    updates
+        .iter()
+        .map(|update| match update {
+            DynamicModelUpdate::RelayCapacity { relay, .. } => {
+                NodeRef::new(nervix_models::ModelKind::Relay, relay.clone())
+            }
+            DynamicModelUpdate::Processor { kind, processor } => {
+                NodeRef::new(*kind, processor.clone())
+            }
+            DynamicModelUpdate::Emitter { emitter, .. } => {
+                NodeRef::new(nervix_models::ModelKind::Emitter, emitter.clone())
+            }
+        })
+        .collect()
+}
+
+fn add_ownership_pause_nodes(
+    gate: &EntityGatePlan,
+    current: Option<&DomainSchedule>,
+    desired: Option<&DomainSchedule>,
+    ownership_moves: &CanonicalImpactSet<OwnershipMoveImpact>,
+    fallback_attribution: &ImpactAttribution,
+    nodes: &mut BTreeMap<ImpactNodeCoverage, BTreeSet<TransactionOperationNumber>>,
+    by_entity: &mut BTreeMap<NodeRef, BTreeSet<TransactionOperationNumber>>,
+) {
+    let attribution = merged_ownership_attribution(ownership_moves, fallback_attribution);
+    for entity in gate.affected_entities() {
+        let moved = ownership_moves
+            .as_slice()
+            .iter()
+            .find(|moved| &moved.node.node == entity);
+        let entity_attribution = match moved {
+            Some(moved) => &moved.attribution,
+            None => &attribution,
+        };
+        by_entity
+            .entry(entity.clone())
+            .or_default()
+            .extend(entity_attribution.operations().iter().copied());
+        for schedule in [current, desired].into_iter().flatten() {
+            let Some(scheduled) = schedule.nodes.get(entity) else {
+                continue;
+            };
+            nodes
+                .entry(scheduled_impact_coverage(scheduled))
+                .or_default()
+                .extend(entity_attribution.operations().iter().copied());
+        }
+    }
+}
+
+fn add_model_gate_pause_nodes(
+    gate: &EntityGatePlan,
+    current: Option<&DomainSchedule>,
+    fallback_attribution: &ImpactAttribution,
+    nodes: &mut BTreeMap<ImpactNodeCoverage, BTreeSet<TransactionOperationNumber>>,
+    by_entity: &mut BTreeMap<NodeRef, BTreeSet<TransactionOperationNumber>>,
+) {
+    let Some(schedule) = current else {
+        return;
+    };
+    for entity in gate.affected_entities() {
+        let operations = by_entity
+            .get(entity)
+            .cloned()
+            .unwrap_or_else(|| fallback_attribution.operations().iter().copied().collect());
+        by_entity
+            .entry(entity.clone())
+            .or_default()
+            .extend(operations.iter().copied());
+        let Some(scheduled) = schedule.nodes.get(entity) else {
+            continue;
+        };
+        nodes
+            .entry(scheduled_impact_coverage(scheduled))
+            .or_default()
+            .extend(operations);
+    }
+}
+
+fn attributed_gate_boundaries(
+    model_gate: &EntityGatePlan,
+    ownership_gate: &EntityGatePlan,
+    current: Option<&DomainSchedule>,
+    desired: Option<&DomainSchedule>,
+    entity_operations: &BTreeMap<NodeRef, BTreeSet<TransactionOperationNumber>>,
+    fallback_attribution: &ImpactAttribution,
+) -> Vec<AttributedGateBoundary> {
+    if current.is_none() && desired.is_none() {
+        return Vec::new();
+    }
+    let mut boundaries =
+        BTreeMap::<nervix_models::ImpactGateBoundary, BTreeSet<TransactionOperationNumber>>::new();
+    for (gate, schedules) in [
+        (model_gate, [current, desired]),
+        (ownership_gate, [current, None]),
+    ] {
+        for entity in gate.affected_entities() {
+            let operations = entity_operations
+                .get(entity)
+                .cloned()
+                .unwrap_or_else(|| fallback_attribution.operations().iter().copied().collect());
+            for schedule in schedules.into_iter().flatten() {
+                for relay in
+                    entity_pause_relays_for_schedule(schedule, std::slice::from_ref(entity))
+                {
+                    if !gate.relays().contains(&relay) {
+                        continue;
+                    }
+                    let boundary = gate_boundary_for_schedules(current, desired, &relay);
+                    let Some(boundary) = boundary else {
+                        continue;
+                    };
+                    boundaries
+                        .entry(boundary)
+                        .or_default()
+                        .extend(operations.iter().copied());
+                }
+            }
+        }
+    }
+    boundaries
+        .into_iter()
+        .map(|(boundary, operations)| AttributedGateBoundary {
+            boundary,
+            attribution: impact_attribution(operations),
+        })
+        .collect()
+}
+
+fn gate_boundary_for_schedules(
+    current: Option<&DomainSchedule>,
+    desired: Option<&DomainSchedule>,
+    relay: &nervix_models::RelayName,
+) -> Option<nervix_models::ImpactGateBoundary> {
+    if let Some(schedule) = current
+        && let Some(boundary) = gate_boundary(schedule, relay)
+    {
+        return Some(boundary);
+    }
+    if let Some(schedule) = desired {
+        return gate_boundary(schedule, relay);
+    }
+    None
+}
+
+fn coverage_for_node(graph: &ActiveGraph, node: &NodeRef) -> Option<ImpactNodeCoverage> {
+    graph.node_impact(node).nodes.into_iter().next()
+}
+
+fn attribution_for_node(
+    node: &NodeRef,
+    touched_by_node: &BTreeMap<NodeRef, Vec<TransactionOperationNumber>>,
+    fallback: &ImpactAttribution,
+    ownership_moves: &CanonicalImpactSet<OwnershipMoveImpact>,
+) -> ImpactAttribution {
+    if let Some(operations) = touched_by_node.get(node) {
+        return ImpactAttribution::new(operations.iter().copied())
+            .assured("every touched node has at least one contributing operation");
+    }
+    if let Some(moved) = ownership_moves
+        .as_slice()
+        .iter()
+        .find(|moved| &moved.node.node == node)
+    {
+        return moved.attribution.clone();
+    }
+    fallback.clone()
+}
+
+fn merged_ownership_attribution(
+    ownership_moves: &CanonicalImpactSet<OwnershipMoveImpact>,
+    fallback: &ImpactAttribution,
+) -> ImpactAttribution {
+    let operations = ownership_moves
+        .as_slice()
+        .iter()
+        .flat_map(|moved| moved.attribution.operations().iter().copied())
+        .collect::<BTreeSet<_>>();
+    if operations.is_empty() {
+        fallback.clone()
+    } else {
+        impact_attribution(operations)
+    }
+}
+
+fn impact_attribution(
+    operations: impl IntoIterator<Item = TransactionOperationNumber>,
+) -> ImpactAttribution {
+    ImpactAttribution::new(operations)
+        .assured("every attributed impact item has at least one contributing operation")
+}
+
 fn model_keys(before: &ModelIndex, after: &ModelIndex) -> BTreeSet<NodeRef> {
     before.nodes().chain(after.nodes()).cloned().collect()
 }
@@ -831,33 +1691,21 @@ fn effective_pause(
     domain: &DomainName,
     status: &DomainStatus,
     level: QuiesceLevel,
+    subgraph: QuiesceSubgraph,
 ) -> PauseRequirement {
     if !matches!(status, DomainStatus::Running) {
         return PauseRequirement::NoPause;
     }
     match level {
         QuiesceLevel::Dynamic => PauseRequirement::NoPause,
-        QuiesceLevel::EntityPause => PauseRequirement::Subgraph {
-            scope: QuiesceSubgraph::new(domain.clone(), [], []),
-        },
+        QuiesceLevel::EntityPause => PauseRequirement::Subgraph { scope: subgraph },
         QuiesceLevel::DomainPause => PauseRequirement::Domain {
             domain: domain.clone(),
         },
     }
 }
 
-fn completeness_for_pause(
-    operation: TransactionOperationNumber,
-    pause: &PauseRequirement,
-    mut diagnostics: Vec<ImpactDiagnostic>,
-) -> ImpactReportCompleteness {
-    if let PauseRequirement::Subgraph { .. } = pause {
-        diagnostics.push(ImpactDiagnostic {
-            kind: ImpactDiagnosticKind::Topology,
-            operation: Some(operation),
-            message: "the exact subgraph and gate boundaries are not planned yet".to_string(),
-        });
-    }
+fn completeness_for_pause(diagnostics: Vec<ImpactDiagnostic>) -> ImpactReportCompleteness {
     if diagnostics.is_empty() {
         ImpactReportCompleteness::Complete
     } else {
@@ -906,13 +1754,18 @@ mod tests {
     use std::collections::BTreeSet;
 
     use nervix_models::{
-        AlterSchema, AlterSchemaOperation, CreateResource, CreateStatement, DomainConfig,
-        DomainPace, DomainStartPoint, DropModel, FieldName, ImpactPlanningBasis, Model, ModelKind,
-        ParseAsType, ResourceName, SchemaField, Statement,
+        AckMode, AlterJunction, AlterProcessorOperation, AlterRelay, AlterRelayOperation,
+        AlterSchema, AlterSchemaOperation, BranchSelection, ClusterNodeName,
+        ConcreteBranchCoverage, CreateResource, CreateStatement, DomainConfig, DomainPace,
+        DomainStartPoint, DropModel, FieldName, ImpactEdgeKind, ImpactPlanningBasis, Model,
+        ModelKind, OutputBranch, ParseAsType, ResourceName, SchemaField, Statement,
     };
+    use nonzero_ext::nonzero;
 
     use super::*;
-    use crate::registry::test_fixtures::{named, relay, schema};
+    use crate::registry::test_fixtures::{
+        client_model, codec, ingestor, junction, named, relay, schema, wire_schema,
+    };
 
     fn domain_state(status: DomainStatus) -> ControlDomainState {
         ControlDomainState {
@@ -939,6 +1792,43 @@ mod tests {
             schedule: None,
             basis: ImpactPlanningBasis::new([7; 32]),
         }
+    }
+
+    fn scheduled_snapshot(
+        status: DomainStatus,
+        models: impl IntoIterator<Item = Model>,
+    ) -> TransactionPlanningSnapshot {
+        let domain = named("default");
+        let models = models.into_iter().collect::<ModelIndex>();
+        let graph = crate::registry::domain_state::DomainState::build(&domain, &models)
+            .assured("the transaction test graph is valid")
+            .graph;
+        let node = ClusterNodeName::parse("node-a")
+            .assured("the scheduler fixture node is an identifier-shaped literal");
+        let schedule = graph.schedule_for_domain(&domain, &[node], 0, PlacementPolicy::Neutral);
+        TransactionPlanningSnapshot {
+            domain: domain_state(status),
+            models,
+            resources: BTreeSet::new(),
+            schedule: Some(schedule),
+            basis: ImpactPlanningBasis::new([7; 32]),
+        }
+    }
+
+    fn unbranched_junction(name: &str, input: &str, output: &str) -> Model {
+        let mut model = junction(name, &[input], output);
+        let Model::Junction(junction) = &mut model else {
+            unreachable!("the junction fixture constructs a junction model");
+        };
+        junction.branched_by = BranchSelection::unbranched();
+        for route in &mut junction.output_routes.routes {
+            route.branch = Some(OutputBranch::Unbranched);
+        }
+        model
+    }
+
+    fn node_ref(kind: ModelKind, name: &str) -> NodeRef {
+        NodeRef::new(kind, named::<nervix_models::ModelName>(name))
     }
 
     fn preserve_schedule(
@@ -1143,6 +2033,412 @@ mod tests {
                 .ownership_moves
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn stopped_schedule_move_keeps_the_execution_gate_without_reporting_a_pause() {
+        let domain = named("default");
+        let moved = node_ref(ModelKind::Relay, "events");
+        let expected_moved = moved.clone();
+        let source = ClusterNodeName::parse("node-a")
+            .assured("the source node fixture is an identifier-shaped literal");
+        let destination = ClusterNodeName::parse("node-b")
+            .assured("the destination node fixture is an identifier-shaped literal");
+        let statement = Statement::AlterRelay(AlterRelay {
+            relay: named("events"),
+            operations: vec![AlterRelayOperation::SetCapacity {
+                capacity: nonzero!(32usize),
+            }],
+        });
+        let plan = Registry::plan_transaction(
+            scheduled_snapshot(
+                DomainStatus::Stopped,
+                [schema("event_schema"), relay("events", "event_schema")],
+            ),
+            &[statement],
+            0,
+            false,
+            move |graph, placement, _current, attribution| TransactionScheduleDecision {
+                schedule: graph.map(|graph| {
+                    graph.schedule_for_domain(
+                        &domain,
+                        std::slice::from_ref(&destination),
+                        0,
+                        placement,
+                    )
+                }),
+                ownership_moves: CanonicalImpactSet::new([OwnershipMoveImpact {
+                    node: ImpactNodeCoverage::all_executions(moved.clone()),
+                    source: source.clone(),
+                    destination: destination.clone(),
+                    attribution: attribution.clone(),
+                }]),
+            },
+        )
+        .assured("the stopped relay change has a captured ownership transition");
+        let step = plan
+            .first_step()
+            .verified("the relay alteration produces one execution step");
+        assert_eq!(step.impact.planned().pause, PauseRequirement::NoPause);
+        let PlannedTransactionStepKind::Models { plan } = &step.kind else {
+            unreachable!("the relay alteration produces a model step");
+        };
+        assert_eq!(plan.ownership_gate.affected_entities(), &[expected_moved]);
+        assert_eq!(plan.ownership_gate.relays(), &[named("events")]);
+    }
+
+    #[test]
+    fn entity_pause_report_and_execution_share_the_exact_affected_graph() {
+        let domain = named("default");
+        let cluster_node = ClusterNodeName::parse("node-a")
+            .assured("the scheduler fixture node is an identifier-shaped literal");
+        let models = [
+            schema("event_schema"),
+            wire_schema("event_wire"),
+            codec("event_codec", "event_schema"),
+            client_model("input_client"),
+            client_model("disjoint_client"),
+            relay("input", "event_schema"),
+            relay("middle", "event_schema"),
+            relay("output", "event_schema"),
+            relay("disjoint_input", "event_schema"),
+            relay("disjoint_output", "event_schema"),
+            ingestor("input_ingestor", "input", "event_codec", "input_client"),
+            ingestor(
+                "disjoint_ingestor",
+                "disjoint_input",
+                "event_codec",
+                "disjoint_client",
+            ),
+            unbranched_junction("changed", "input", "middle"),
+            unbranched_junction("downstream", "middle", "output"),
+            unbranched_junction("disjoint", "disjoint_input", "disjoint_output"),
+        ];
+        let statements = [
+            Statement::AlterJunction(AlterJunction {
+                junction: named("changed"),
+                operations: vec![AlterProcessorOperation::SetMode {
+                    mode: AckMode::Detached,
+                }],
+            }),
+            Statement::AlterRelay(AlterRelay {
+                relay: named("disjoint_input"),
+                operations: vec![AlterRelayOperation::SetCapacity {
+                    capacity: nonzero!(32usize),
+                }],
+            }),
+        ];
+        let plan = Registry::plan_transaction(
+            scheduled_snapshot(DomainStatus::Running, models),
+            &statements,
+            0,
+            false,
+            move |graph, placement, _current, _attribution| TransactionScheduleDecision {
+                schedule: graph.map(|graph| {
+                    graph.schedule_for_domain(
+                        &domain,
+                        std::slice::from_ref(&cluster_node),
+                        0,
+                        placement,
+                    )
+                }),
+                ownership_moves: CanonicalImpactSet::default(),
+            },
+        )
+        .assured("the junction mode change has a complete scheduled plan");
+        let step = plan
+            .first_step()
+            .verified("the single alteration produces one execution step");
+        assert!(step.impact.planned().completeness.is_complete());
+        let PauseRequirement::Subgraph { scope } = &step.impact.planned().pause else {
+            unreachable!("changing junction acknowledgement mode requires an entity pause");
+        };
+        let expected_nodes = BTreeSet::from([
+            node_ref(ModelKind::Junction, "changed"),
+            node_ref(ModelKind::Relay, "middle"),
+            node_ref(ModelKind::Junction, "downstream"),
+            node_ref(ModelKind::Relay, "output"),
+        ]);
+        let paused_nodes = scope
+            .nodes()
+            .iter()
+            .map(|node| {
+                assert_eq!(
+                    node.coverage.branches,
+                    Some(ConcreteBranchCoverage::Unbranched)
+                );
+                node.coverage.node.clone()
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(paused_nodes, expected_nodes);
+        assert!(!paused_nodes.contains(&node_ref(ModelKind::Ingestor, "input_ingestor")));
+        assert!(!paused_nodes.contains(&node_ref(ModelKind::Ingestor, "disjoint_ingestor")));
+        assert!(!paused_nodes.contains(&node_ref(ModelKind::Relay, "disjoint_input")));
+        let expected_relays = BTreeSet::from([named("input")]);
+        let gate_relays = scope
+            .gate_boundaries()
+            .iter()
+            .map(|gate| gate.boundary.relay.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(gate_relays, expected_relays);
+
+        let PlannedTransactionStepKind::Models { plan: model_plan } = &step.kind else {
+            unreachable!("the alteration produces a model step");
+        };
+        assert_eq!(
+            model_plan
+                .model_gate
+                .affected_entities()
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            expected_nodes
+        );
+        assert_eq!(
+            model_plan
+                .model_gate
+                .relays()
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            expected_relays
+        );
+
+        let effects = &step.impact.planned().effects;
+        let topology_nodes = effects
+            .topology
+            .before
+            .nodes
+            .as_slice()
+            .iter()
+            .map(|node| node.coverage.node.clone())
+            .collect::<BTreeSet<_>>();
+        assert!(topology_nodes.contains(&node_ref(ModelKind::Relay, "input")));
+        assert!(!topology_nodes.contains(&node_ref(ModelKind::Junction, "disjoint")));
+        let input_edge_kinds = effects
+            .topology
+            .before
+            .edges
+            .as_slice()
+            .iter()
+            .filter(|edge| {
+                edge.source.node == node_ref(ModelKind::Relay, "input")
+                    && edge.target.node == node_ref(ModelKind::Junction, "changed")
+            })
+            .map(|edge| edge.kind)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            input_edge_kinds,
+            BTreeSet::from([
+                ImpactEdgeKind::ConfigurationDependency,
+                ImpactEdgeKind::Dataflow,
+            ])
+        );
+        let force_flushed_nodes = effects
+            .force_flushes
+            .as_slice()
+            .iter()
+            .map(|flush| flush.node.node.clone())
+            .collect::<BTreeSet<_>>();
+        assert!(force_flushed_nodes.contains(&node_ref(ModelKind::Junction, "disjoint")));
+    }
+
+    #[test]
+    fn schedule_reassignment_raises_a_dynamic_change_to_an_entity_pause() {
+        let domain = named("default");
+        let destination = ClusterNodeName::parse("node-b")
+            .assured("the scheduler fixture node is an identifier-shaped literal");
+        let statement = Statement::AlterRelay(AlterRelay {
+            relay: named("events"),
+            operations: vec![AlterRelayOperation::SetCapacity {
+                capacity: nonzero!(32usize),
+            }],
+        });
+        let plan = Registry::plan_transaction(
+            scheduled_snapshot(
+                DomainStatus::Running,
+                [schema("event_schema"), relay("events", "event_schema")],
+            ),
+            &[statement],
+            0,
+            false,
+            move |graph, placement, _current, _attribution| TransactionScheduleDecision {
+                schedule: graph.map(|graph| {
+                    graph.schedule_for_domain(
+                        &domain,
+                        std::slice::from_ref(&destination),
+                        0,
+                        placement,
+                    )
+                }),
+                ownership_moves: CanonicalImpactSet::default(),
+            },
+        )
+        .assured("the dynamic relay change has a captured reassignment");
+        let step = plan
+            .first_step()
+            .verified("the relay alteration produces one execution step");
+        let PauseRequirement::Subgraph { scope } = &step.impact.planned().pause else {
+            unreachable!("a scheduled entity swap requires an entity pause");
+        };
+        let relay = node_ref(ModelKind::Relay, "events");
+        assert_eq!(
+            scope
+                .nodes()
+                .iter()
+                .map(|node| node.coverage.node.clone())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([relay.clone()])
+        );
+        assert_eq!(
+            scope
+                .gate_boundaries()
+                .iter()
+                .map(|gate| gate.boundary.relay.clone())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([named("events")])
+        );
+        let PlannedTransactionStepKind::Models { plan } = &step.kind else {
+            unreachable!("the relay alteration produces a model step");
+        };
+        assert_eq!(plan.model_gate.affected_entities(), &[relay]);
+    }
+
+    #[test]
+    fn schedule_rebuild_raises_entity_creation_to_a_domain_pause() {
+        let domain = named("default");
+        let cluster_node = ClusterNodeName::parse("node-a")
+            .assured("the scheduler fixture node is an identifier-shaped literal");
+        let statement = Statement::Create(CreateStatement::new(
+            Box::new(relay("events", "event_schema")),
+            false,
+        ));
+        let plan = Registry::plan_transaction(
+            scheduled_snapshot(DomainStatus::Running, [schema("event_schema")]),
+            &[statement],
+            0,
+            false,
+            move |graph, placement, _current, _attribution| TransactionScheduleDecision {
+                schedule: graph.map(|graph| {
+                    graph.schedule_for_domain(
+                        &domain,
+                        std::slice::from_ref(&cluster_node),
+                        0,
+                        placement,
+                    )
+                }),
+                ownership_moves: CanonicalImpactSet::default(),
+            },
+        )
+        .assured("the relay creation has a captured schedule rebuild");
+        let step = plan
+            .first_step()
+            .verified("the relay creation produces one execution step");
+        assert_eq!(
+            step.impact.planned().pause,
+            PauseRequirement::Domain {
+                domain: named("default")
+            }
+        );
+        assert!(
+            step.impact
+                .planned()
+                .effects
+                .rebuilds
+                .as_slice()
+                .iter()
+                .any(|rebuild| rebuild.node.node == node_ref(ModelKind::Relay, "events"))
+        );
+        let PlannedTransactionStepKind::Models { plan } = &step.kind else {
+            unreachable!("the relay creation produces a model step");
+        };
+        assert!(plan.model_gate.affected_entities().is_empty());
+    }
+
+    #[test]
+    fn drop_recreate_retains_both_sides_of_a_rewired_graph() {
+        let domain = named("default");
+        let cluster_node = ClusterNodeName::parse("node-a")
+            .assured("the scheduler fixture node is an identifier-shaped literal");
+        let replacement = unbranched_junction("changed", "input", "new_output");
+        let statements = [
+            Statement::Drop(DropModel {
+                kind: ModelKind::Junction,
+                name: named("changed"),
+            }),
+            Statement::Create(CreateStatement::new(Box::new(replacement), false)),
+        ];
+        let plan = Registry::plan_transaction(
+            scheduled_snapshot(
+                DomainStatus::Running,
+                [
+                    schema("event_schema"),
+                    relay("input", "event_schema"),
+                    relay("old_output", "event_schema"),
+                    relay("new_output", "event_schema"),
+                    unbranched_junction("changed", "input", "old_output"),
+                ],
+            ),
+            &statements,
+            0,
+            false,
+            move |graph, placement, _current, _attribution| TransactionScheduleDecision {
+                schedule: graph.map(|graph| {
+                    graph.schedule_for_domain(
+                        &domain,
+                        std::slice::from_ref(&cluster_node),
+                        0,
+                        placement,
+                    )
+                }),
+                ownership_moves: CanonicalImpactSet::default(),
+            },
+        )
+        .assured("the junction replacement leaves a valid graph");
+        let effects = &plan
+            .first_step()
+            .verified("the replacement produces one execution step")
+            .impact
+            .planned()
+            .effects;
+        let changed = node_ref(ModelKind::Junction, "changed");
+        let old_output = node_ref(ModelKind::Relay, "old_output");
+        let new_output = node_ref(ModelKind::Relay, "new_output");
+        assert!(effects.topology.before.edges.as_slice().iter().any(|edge| {
+            edge.source.node == changed
+                && edge.target.node == old_output
+                && edge.kind == ImpactEdgeKind::Dataflow
+                && edge.attribution.operations()
+                    == [
+                        TransactionOperationNumber::from_index(0)
+                            .assured("the first fixture operation is addressable"),
+                        TransactionOperationNumber::from_index(1)
+                            .assured("the second fixture operation is addressable"),
+                    ]
+        }));
+        assert!(effects.topology.after.edges.as_slice().iter().any(|edge| {
+            edge.source.node == changed
+                && edge.target.node == new_output
+                && edge.kind == ImpactEdgeKind::Dataflow
+        }));
+        assert!(
+            !effects
+                .topology
+                .before
+                .nodes
+                .as_slice()
+                .iter()
+                .any(|node| { node.coverage.node == new_output })
+        );
+        assert!(
+            !effects
+                .topology
+                .after
+                .nodes
+                .as_slice()
+                .iter()
+                .any(|node| { node.coverage.node == old_output })
         );
     }
 

@@ -1805,6 +1805,7 @@ impl SessionServiceImpl {
                     )
                 } else {
                     let mut schedule = plan.schedule;
+                    let ownership_gate = plan.ownership_gate;
                     if let Some(schedule) = schedule.as_mut() {
                         mark_complete_ownership_transitions(
                             plan.expected_schedule.as_ref(),
@@ -1812,10 +1813,11 @@ impl SessionServiceImpl {
                         );
                     }
                     let handoff = if relocations > 0 {
-                        self.begin_planned_ownership_handoff(
+                        self.begin_planned_ownership_handoff_with_exact_gate(
                             domain_id,
                             plan.expected_schedule.as_ref(),
                             schedule.as_ref(),
+                            &ownership_gate,
                         )
                         .await
                     } else {
@@ -2161,8 +2163,8 @@ impl SessionServiceImpl {
 mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{
-        CreateRelay, CreateSchema, DomainName, ExecutionStepOutcome, ImpactReportCompleteness,
-        ModelName, TransactionOperationNumber,
+        CreateRelay, CreateSchema, DomainName, ExecutionStepOutcome, ModelName,
+        TransactionOperationNumber,
     };
     use tokio::sync::mpsc;
 
@@ -2247,10 +2249,7 @@ mod tests {
         };
         assert_eq!(step.operation_range().first().get(), 1);
         assert_eq!(step.operation_range().last().get(), 2);
-        assert!(matches!(
-            step.impact.planned().completeness,
-            ImpactReportCompleteness::Incomplete { .. }
-        ));
+        assert!(step.impact.planned().completeness.is_complete());
         assert!(matches!(
             step.impact.actual().outcome,
             ExecutionStepOutcome::Applied

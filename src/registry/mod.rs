@@ -11,11 +11,13 @@
 //!   no branch-local state belongs here, and a decision must be computable without a cluster.
 //!
 mod domain_state;
+mod entity_gate;
 mod error;
 mod graph;
 mod mutation;
 mod placement;
 mod relocation;
+mod schedule_delta;
 mod scheduler;
 mod storage;
 #[cfg(test)]
@@ -23,6 +25,10 @@ mod test_fixtures;
 mod transaction;
 mod validation;
 
+pub(crate) use entity_gate::{
+    EntityGatePlan, entity_pause_relays_for_schedule, gate_boundary,
+    ownership_handoff_relays_for_schedule, scheduled_impact_coverage,
+};
 /// What the decisions layer exposes. Everything else this module and its submodules declare is
 /// `pub(in crate::registry)` or narrower, so the control plane reaches the registry only through
 /// the names below.
@@ -33,6 +39,7 @@ pub(crate) use placement::{
     PlacementEndpointPairPlan, PlacementPlan, PlacementRequireGroupPlan, PlacementRulePlan,
 };
 pub(crate) use relocation::{RelocationCoverage, RelocationMemberReason, RelocationUnit};
+pub(crate) use schedule_delta::ScheduleDelta;
 #[cfg(feature = "testing")]
 pub use scheduler::SchedulerMode;
 pub(crate) use storage::{Registry, RuntimeChange, RuntimeChanges};
