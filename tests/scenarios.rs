@@ -121,6 +121,7 @@ const DURABLE_CATCH_UP_WRITE_CADENCE: Duration = Duration::from_millis(100);
 const MAX_DURABLE_CATCH_UP_WRITES: usize = 128;
 /// The execution class a follower charges its decoded append batches to.
 const COMMANDS_MEMORY_LABEL: &str = "class=\"commands\"";
+const BULK_MEMORY_LABEL: &str = "class=\"bulk\"";
 const WEB_CONSOLE_FEATURE_NAMES: [&str; 2] =
     ["Web console NSPL REPL", "Web console execution graph"];
 const DEPENDENCY_LIFECYCLE_HELPER_ENV: &str = "NERVIX_DEPENDENCY_LIFECYCLE_HELPER";
@@ -3412,6 +3413,26 @@ async fn then_leader_purged_covered_log_and_reduced_retained_bytes(
         .take()
         .verified("the preceding domain burst recorded its Raft retention peak");
     await_purge_beyond_retention_peak(&observer, &duration, &retention_peak).await;
+}
+
+#[then(expr = "the leader node released its bulk-memory reservation after snapshot compaction")]
+async fn then_leader_released_snapshot_bulk_memory(world: &mut ScenarioWorld) {
+    let leader = running_leader_node(world).await;
+    let reserved = world
+        .cluster()
+        .read_observability_metric(
+            &leader,
+            "nervix_execution_memory_reserved_bytes",
+            &[BULK_MEMORY_LABEL.to_string()],
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to read the leader's bulk-memory reservation: {error}")
+        });
+    assert_eq!(
+        reserved, 0.0,
+        "leader '{leader}' retained {reserved} bytes of bulk memory after snapshot compaction"
+    );
 }
 
 /// Wait until the leader has purged past `peak` and reports fewer retained bytes than it did then.

@@ -210,14 +210,18 @@ impl OperationLimits {
             .checked_add(self.relay_scratch_bytes.as_u64())
     }
 
-    /// Everything one sealed-snapshot section may hold at once: the encoded section and the
-    /// columns it decodes into, which overlap while the conversion runs. The bulk budget backs
-    /// one such section beside the chunk a transfer is submitting at the same time.
-    pub fn snapshot_section_operation_bytes(&self) -> Option<u64> {
+    /// The working set for one sealed-snapshot section: its encoded form and the values it is
+    /// built from or decoded into, plus bounded framing and collection overhead.
+    pub fn snapshot_section_working_bytes(&self) -> Option<u64> {
         self.snapshot_section_bytes
             .as_u64()
             .checked_mul(2)?
-            .checked_add(self.snapshot_header_bytes.as_u64())?
+            .checked_add(self.snapshot_header_bytes.as_u64())
+    }
+
+    /// One section working set beside the chunk a transfer is submitting at the same time.
+    pub fn snapshot_section_operation_bytes(&self) -> Option<u64> {
+        self.snapshot_section_working_bytes()?
             .checked_add(self.bulk_chunk_bytes.as_u64())
     }
 }
