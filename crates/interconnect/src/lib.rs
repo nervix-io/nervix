@@ -33,6 +33,7 @@ use tokio::sync::mpsc;
 mod connection;
 mod identity;
 mod observation;
+mod operation;
 mod pool;
 mod request;
 mod wire;
@@ -46,6 +47,7 @@ pub use observation::{
     ConnectionDirection, ConnectionFailureReason, RelayAdmissionOutcome, RequestOutcome,
     StreamResetReason, TransferDirection, TransportCounters, TransportSnapshot,
 };
+pub use operation::{RemoteOperationFailure, RemoteOperationSubject};
 pub use pool::PoolClass;
 pub use request::{
     ApplicationHealthProbe, ApplicationRevisionRequest, ApplicationRevisionResponse,
@@ -276,7 +278,7 @@ pub struct SubscriptionInterestVisibilityRequest {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubscriptionInterestVisibilityResponse {
-    pub result: Result<(), String>,
+    pub result: Result<(), RemoteOperationFailure>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -301,10 +303,19 @@ macro_rules! declare_runtime_state_kinds {
         /// storage key.
         #[derive(
             Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq, Hash, FromRepr,
+            IntoStaticStr,
         )]
         #[repr(u8)]
+        #[strum(serialize_all = "snake_case")]
         pub enum RuntimeStateKind {
             $($Kind = $tag,)+
+        }
+
+        impl RuntimeStateKind {
+            /// This kind's name, as diagnostics and remote operation subjects spell it.
+            pub fn as_str(self) -> &'static str {
+                self.into()
+            }
         }
 
         impl From<RuntimeStateKind> for u8 {
@@ -353,7 +364,7 @@ pub struct StateSyncRequest {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StateSyncResponse {
-    pub result: Result<Option<StateSnapshotEnvelope>, String>,
+    pub result: Result<Option<StateSnapshotEnvelope>, RemoteOperationFailure>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
@@ -523,7 +534,7 @@ pub struct DataflowNodeStatusRequest {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DataflowNodeStatusResponse {
-    pub result: Result<DataflowNodeStatusEnvelope, String>,
+    pub result: Result<DataflowNodeStatusEnvelope, RemoteOperationFailure>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -565,7 +576,7 @@ pub struct DomainDrainStatusRequest {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DomainDrainStatusResponse {
-    pub result: Result<DomainDrainStatusEnvelope, String>,
+    pub result: Result<DomainDrainStatusEnvelope, RemoteOperationFailure>,
 }
 
 #[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -596,7 +607,7 @@ pub struct EntityGateRequest {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityGateResponse {
-    pub result: Result<(), String>,
+    pub result: Result<(), RemoteOperationFailure>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -618,7 +629,7 @@ pub struct EntityDrainStatusRequest {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityDrainStatusResponse {
-    pub result: Result<EntityDrainStatusEnvelope, String>,
+    pub result: Result<EntityDrainStatusEnvelope, RemoteOperationFailure>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -629,7 +640,7 @@ pub struct EntityGateReleaseRequest {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityGateReleaseResponse {
-    pub result: Result<(), String>,
+    pub result: Result<(), RemoteOperationFailure>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -641,7 +652,7 @@ pub struct DescribeMetricsRequest {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DescribeMetricsResponse {
-    pub result: Result<DescribeMetricsEnvelope, String>,
+    pub result: Result<DescribeMetricsEnvelope, RemoteOperationFailure>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -665,7 +676,7 @@ pub struct DescribeRelayRequest {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DescribeRelayResponse {
-    pub result: Result<bool, String>,
+    pub result: Result<bool, RemoteOperationFailure>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -686,7 +697,7 @@ pub struct DescribeLookupRequest {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DescribeLookupResponse {
-    pub result: Result<LookupDescribeEnvelope, String>,
+    pub result: Result<LookupDescribeEnvelope, RemoteOperationFailure>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -698,7 +709,7 @@ pub struct LookupRequest {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub struct LookupResponse {
-    pub result: Result<Option<Vec<u8>>, String>,
+    pub result: Result<Option<Vec<u8>>, RemoteOperationFailure>,
 }
 
 impl InterconnectRequest for StateSyncRequest {

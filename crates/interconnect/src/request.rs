@@ -40,7 +40,8 @@ use super::{
     ForcedOwnershipRecoveryPreparation, IngestorDescribeEnvelope, MAX_CONCURRENT_HEALTH_PROBES,
     OwnershipHandoffCheckpoint, OwnershipHandoffResponse, PoolClass,
     PrepareForcedOwnershipRecoveryRequest, PrepareOwnershipHandoffStateRequest,
-    ReconcileOwnershipHandoffPreparationsRequest, Transport, TransportError, wire,
+    ReconcileOwnershipHandoffPreparationsRequest, RemoteOperationFailure, Transport,
+    TransportError, wire,
 };
 use crate::{
     connection::{
@@ -1601,7 +1602,7 @@ impl Transport {
 }
 
 impl InterconnectRequest for DescribeIngestorRequest {
-    type Response = Result<IngestorDescribeEnvelope, String>;
+    type Response = Result<IngestorDescribeEnvelope, RemoteOperationFailure>;
 
     const NAME: &'static str = "describe_ingestor";
     const TIMEOUT: Duration = Duration::from_secs(10);

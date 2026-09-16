@@ -23,8 +23,9 @@ use nervix_interconnect::{
     DescribeMetricsEnvelope as RemoteDescribeMetricsEnvelope,
     DescribeMetricsRequest as RemoteDescribeMetricsRequest,
     DescribeRelayRequest as RemoteDescribeRelayRequest,
-    DescribeRelayResponse as RemoteDescribeRelayResponse, LookupDescribeEnvelope,
-    LookupRequest as RemoteLookupRequest, LookupResponse as RemoteLookupResponse,
+    DescribeRelayResponse as RemoteDescribeRelayResponse, IngestorDescribeEnvelope,
+    LookupDescribeEnvelope, LookupRequest as RemoteLookupRequest,
+    LookupResponse as RemoteLookupResponse, RemoteOperationFailure, RemoteOperationSubject,
 };
 use nervix_models::{
     ClusterNodeName, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint,
@@ -55,7 +56,7 @@ use super::{
         ordered_placement_corridor, placement_claim_owner, placement_group_host,
         placement_groups_claimed_by_rule, placement_rule_coverage_status,
         placement_rule_endpoint_nodes, placement_rule_runtime_nodes,
-        runtime_ingestor_describe_from_envelope,
+        runtime_ingestor_describe_from_envelope, runtime_ingestor_describe_to_envelope,
     },
     model_mutation::{command_error, command_ok},
     session_service::SessionServiceImpl,
@@ -283,8 +284,9 @@ impl SessionServiceImpl {
                     result: Ok(remote_exists),
                 }) => exists |= remote_exists,
                 Ok(RemoteDescribeRelayResponse {
-                    result: Err(message),
+                    result: Err(failure),
                 }) => {
+                    let message = failure.to_string();
                     return CommandResult {
                         success: false,
                         diagnostics: vec![Diagnostic {
@@ -344,31 +346,41 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn handle_describe_stream_request(
         &self,
         request: RemoteDescribeRelayRequest,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, RemoteOperationFailure> {
         self.prepare_stream_owner_control_request(&request.domain, &request.relay)
             .await?;
+        let subject = RemoteOperationSubject::Entity {
+            domain: request.domain.clone(),
+            entity: NodeRef::new(ModelKind::Relay, request.relay.clone()),
+        };
+        let target = self
+            .subscription_target_from_schedule(&request.domain, &request.relay)
+            .await
+            .map_err(|reason| RemoteOperationFailure::Failed {
+                subject: subject.clone(),
+                reason,
+            })?;
         let Some(SubscriptionTarget {
             relay: ack_model,
             schema,
             branching,
-        }) = self
-            .subscription_target_from_schedule(&request.domain, &request.relay)
-            .await?
+        }) = target
         else {
-            return Err(format!(
-                "stream '{}' does not exist in domain '{}'",
-                request.relay.as_str(),
-                request.domain.as_str()
-            ));
+            return Err(RemoteOperationFailure::Unavailable { subject });
         };
 
-        let filter = validate_subscription_bindings(
-            &ack_model.name,
-            &branching,
-            &schema,
-            &request.bindings,
-        )?;
-        let key = branch_key_from_filter(&branching, &filter)?;
+        let filter =
+            validate_subscription_bindings(&ack_model.name, &branching, &schema, &request.bindings)
+                .map_err(|reason| RemoteOperationFailure::Failed {
+                    subject: subject.clone(),
+                    reason,
+                })?;
+        let key = branch_key_from_filter(&branching, &filter).map_err(|reason| {
+            RemoteOperationFailure::Failed {
+                subject: subject.clone(),
+                reason,
+            }
+        })?;
         match self
             .inner
             .runtime
@@ -376,7 +388,10 @@ impl SessionServiceImpl {
         {
             Ok(exists) => Ok(exists),
             Err(crate::runtime::RuntimeError::RelayNotInstantiated { .. }) => Ok(false),
-            Err(error) => Err(error.to_string()),
+            Err(error) => Err(RemoteOperationFailure::Failed {
+                subject,
+                reason: error.to_string(),
+            }),
         }
     }
 
@@ -666,7 +681,7 @@ impl SessionServiceImpl {
                 .await
             {
                 Ok(Ok(summary)) => Ok(runtime_ingestor_describe_from_envelope(summary)),
-                Ok(Err(message)) => Err(message),
+                Ok(Err(failure)) => Err(failure.to_string()),
                 Err(error) => Err(error.to_string()),
             }
         } else {
@@ -791,7 +806,7 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn handle_dataflow_node_status_request(
         &self,
         request: RemoteDataflowNodeStatusRequest,
-    ) -> Result<DataflowNodeStatusEnvelope, String> {
+    ) -> Result<DataflowNodeStatusEnvelope, RemoteOperationFailure> {
         self.prepare_owner_control_request(&request.domain, request.kind, &request.name)
             .await?;
         let health = self.inner.runtime.dataflow_node_status(
@@ -861,6 +876,7 @@ impl SessionServiceImpl {
             .await
             .map_err(|error| error.to_string())?
             .result
+            .map_err(|failure| failure.to_string())
     }
 
     fn local_runtime_describe(
@@ -890,11 +906,38 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn handle_describe_metrics_request(
         &self,
         request: RemoteDescribeMetricsRequest,
-    ) -> Result<RemoteDescribeMetricsEnvelope, String> {
+    ) -> Result<RemoteDescribeMetricsEnvelope, RemoteOperationFailure> {
         self.prepare_owner_control_request(&request.domain, request.kind, &request.name)
             .await?;
         let metric_kind = request.kind.as_str().to_ascii_uppercase();
         Ok(self.local_runtime_describe(&request.domain, request.kind, &request.name, &metric_kind))
+    }
+
+    pub(in crate::application) async fn handle_describe_ingestor_request(
+        &self,
+        request: RemoteDescribeIngestorRequest,
+    ) -> Result<IngestorDescribeEnvelope, RemoteOperationFailure> {
+        self.prepare_owner_control_request(&request.domain, ModelKind::Ingestor, &request.name)
+            .await?;
+        let summary = self
+            .inner
+            .runtime
+            .describe_local_ingestor(&request.domain, &request.name)
+            .map_err(|reason| {
+                RemoteOperationFailure::failed(
+                    RemoteOperationSubject::entity(
+                        &request.domain,
+                        ModelKind::Ingestor,
+                        request.name.clone(),
+                    ),
+                    reason,
+                )
+            })?;
+        let metrics =
+            self.inner
+                .runtime
+                .describe_metrics_for(&request.domain, "INGESTOR", &request.name);
+        Ok(runtime_ingestor_describe_to_envelope(summary, metrics))
     }
 
     pub(in crate::application) async fn describe_lookup(
@@ -952,7 +995,7 @@ impl SessionServiceImpl {
                 )
                 .await
             {
-                Ok(response) => response.result,
+                Ok(response) => response.result.map_err(|failure| failure.to_string()),
                 Err(error) => Err(error.to_string()),
             }
         } else {
@@ -989,13 +1032,20 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn handle_describe_lookup_request(
         &self,
         request: RemoteDescribeLookupRequest,
-    ) -> Result<LookupDescribeEnvelope, String> {
+    ) -> Result<LookupDescribeEnvelope, RemoteOperationFailure> {
         self.prepare_owner_control_request(&request.domain, ModelKind::Lookup, &request.name)
             .await?;
         let description = self
             .inner
             .runtime
-            .describe_local_lookup(&request.domain, &request.name)?;
+            .describe_local_lookup(&request.domain, &request.name)
+            .map_err(|reason| RemoteOperationFailure::Failed {
+                subject: RemoteOperationSubject::Entity {
+                    domain: request.domain.clone(),
+                    entity: NodeRef::new(ModelKind::Lookup, request.name.clone()),
+                },
+                reason,
+            })?;
         Ok(LookupDescribeEnvelope {
             resource: description.model.resource,
             resource_version: description.resource_version,
@@ -1484,33 +1534,19 @@ impl SessionServiceImpl {
         domain: &DomainName,
         kind: ModelKind,
         identifier: impl Into<ModelName>,
-    ) -> Result<ScheduledNode, String> {
+    ) -> Result<ScheduledNode, RemoteOperationFailure> {
         let identifier = identifier.into();
         self.prepare_control_request_domain(domain).await?;
-        let node = self
-            .scheduled_model_node(domain, kind, identifier.clone())
-            .await
-            .ok_or_else(|| {
-                format!(
-                    "{} '{}' does not exist in domain '{}'",
-                    kind.as_str().to_ascii_lowercase(),
-                    identifier.as_str(),
-                    domain.as_str()
-                )
-            })?;
+        let subject = RemoteOperationSubject::Entity {
+            domain: domain.clone(),
+            entity: NodeRef::new(kind, identifier.clone()),
+        };
+        let Some(node) = self.scheduled_model_node(domain, kind, identifier).await else {
+            return Err(RemoteOperationFailure::Unavailable { subject });
+        };
         let local_node_id = self.inner.consensus.local_node_id();
         if !node.executes_on(local_node_id) {
-            let owner = match node.execution_node() {
-                Some(owner) => owner.as_str(),
-                None => "-",
-            };
-            return Err(format!(
-                "{} '{}' in domain '{}' is owned by '{owner}' but request reached '{}'",
-                kind.as_str().to_ascii_lowercase(),
-                identifier.as_str(),
-                domain.as_str(),
-                local_node_id
-            ));
+            return Err(RemoteOperationFailure::Rejected { subject });
         }
         Ok(node)
     }
@@ -1520,29 +1556,19 @@ impl SessionServiceImpl {
         domain: &DomainName,
         kind: ModelKind,
         identifier: impl Into<ModelName>,
-    ) -> Result<ScheduledNode, String> {
+    ) -> Result<ScheduledNode, RemoteOperationFailure> {
         let identifier = identifier.into();
         self.prepare_control_request_domain(domain).await?;
-        let node = self
-            .scheduled_model_node(domain, kind, identifier.clone())
-            .await
-            .ok_or_else(|| {
-                format!(
-                    "{} '{}' does not exist in domain '{}'",
-                    kind.as_str().to_ascii_lowercase(),
-                    identifier.as_str(),
-                    domain.as_str()
-                )
-            })?;
+        let subject = RemoteOperationSubject::Entity {
+            domain: domain.clone(),
+            entity: NodeRef::new(kind, identifier.clone()),
+        };
+        let Some(node) = self.scheduled_model_node(domain, kind, identifier).await else {
+            return Err(RemoteOperationFailure::Unavailable { subject });
+        };
         let local_node_id = self.inner.consensus.local_node_id();
         if !node.is_assigned_to(local_node_id) {
-            return Err(format!(
-                "{} '{}' in domain '{}' is not assigned to '{}'",
-                kind.as_str().to_ascii_lowercase(),
-                identifier.as_str(),
-                domain.as_str(),
-                local_node_id
-            ));
+            return Err(RemoteOperationFailure::Rejected { subject });
         }
         Ok(node)
     }
@@ -1551,17 +1577,22 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> Result<(), String> {
+    ) -> Result<(), RemoteOperationFailure> {
         self.prepare_control_request_domain(domain).await?;
-        let owner_nodes = self.scheduled_stream_owner_nodes(domain, relay).await?;
+        let subject = RemoteOperationSubject::Entity {
+            domain: domain.clone(),
+            entity: NodeRef::new(ModelKind::Relay, relay.clone()),
+        };
+        let owner_nodes = self
+            .scheduled_stream_owner_nodes(domain, relay)
+            .await
+            .map_err(|reason| RemoteOperationFailure::Failed {
+                subject: subject.clone(),
+                reason,
+            })?;
         let local_node_id = self.inner.consensus.local_node_id();
         if !owner_nodes.iter().any(|owner| owner == local_node_id) {
-            return Err(format!(
-                "stream '{}' in domain '{}' is not owned by '{}'",
-                relay.as_str(),
-                domain.as_str(),
-                local_node_id
-            ));
+            return Err(RemoteOperationFailure::Rejected { subject });
         }
         Ok(())
     }
@@ -1569,9 +1600,13 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn prepare_control_request_domain(
         &self,
         domain: &DomainName,
-    ) -> Result<(), String> {
+    ) -> Result<(), RemoteOperationFailure> {
         if self.inner.consensus.current_domain(domain).await.is_none() {
-            return Err(format!("domain '{}' does not exist", domain.as_str()));
+            return Err(RemoteOperationFailure::Unavailable {
+                subject: RemoteOperationSubject::Domain {
+                    domain: domain.clone(),
+                },
+            });
         }
         Ok(())
     }
@@ -1697,7 +1732,7 @@ impl SessionServiceImpl {
                 Ok(RemoteLookupResponse { result }) => match result {
                     Ok(None) => return Ok(None),
                     Ok(Some(bytes)) => return self.decode_lookup_record(bytes).await.map(Some),
-                    Err(message) => errors.push(message),
+                    Err(failure) => errors.push(failure.to_string()),
                 },
                 Err(error) => errors.push(error.to_string()),
             }
@@ -1711,12 +1746,19 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn handle_lookup_request(
         &self,
         request: RemoteLookupRequest,
-    ) -> Result<Option<runtime_schema::RuntimeRecordBatch>, String> {
+    ) -> Result<Option<runtime_schema::RuntimeRecordBatch>, RemoteOperationFailure> {
         self.prepare_assigned_control_request(&request.domain, ModelKind::Lookup, &request.name)
             .await?;
         self.inner
             .runtime
             .query_local_lookup(&request.domain, &request.name, &request.key)
+            .map_err(|reason| RemoteOperationFailure::Failed {
+                subject: RemoteOperationSubject::Entity {
+                    domain: request.domain.clone(),
+                    entity: NodeRef::new(ModelKind::Lookup, request.name.clone()),
+                },
+                reason,
+            })
     }
 
     /// Decode one remote lookup answer through the node's admission, so a large answer is charged
