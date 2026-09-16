@@ -7,6 +7,7 @@
 
 use std::{borrow::Cow, num::NonZeroU64};
 
+use error_stack::ResultExt as _;
 use rumqttc::{
     AckMode, AsyncClient, BrokerSessionResumePolicy, Event, Incoming, MqttOptions, Publish, QoS,
     SessionMode, SubscribeReasonCode, TlsConfiguration, Transport as MqttTransport,
@@ -17,6 +18,42 @@ use super::super::*;
 use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct MqttIngestor;
+
+#[derive(Debug, PartialEq, Eq, Error)]
+pub(in crate::runtime) enum MqttIngestorError {
+    #[error("failed to dispatch MQTT ingest group")]
+    Dispatch,
+    #[error("failed to flush MQTT ingest group")]
+    Flush,
+    #[error("invalid MQTT client configuration")]
+    ClientConfig,
+    #[error("MQTT TLS requires client config key 'tls_ca_file'")]
+    MissingTlsCa,
+    #[error("MQTT TLS client authentication requires both 'tls_cert_file' and 'tls_key_file'")]
+    IncompleteTlsIdentity,
+    #[error("failed to build MQTT client")]
+    BuildClient,
+    #[error(
+        "MQTT client_id is required for {instances} instances and must contain '{{{{instance}}}}'"
+    )]
+    MissingClientIdTemplate { instances: NonZeroU64 },
+    #[error(
+        "MQTT client_id '{client_id}' is shared by {instances} instances; use {{{{instance}}}} in \
+         client_id for multi-instance MQTT ingestors"
+    )]
+    InvalidClientIdTemplate {
+        client_id: String,
+        instances: NonZeroU64,
+    },
+    #[error("invalid MQTT service address")]
+    InvalidAddress,
+    #[error("unsupported MQTT service address scheme '{scheme}'")]
+    UnsupportedScheme { scheme: String },
+    #[error("MQTT service address has no host")]
+    MissingHost,
+    #[error("MQTT service address has no port")]
+    MissingPort,
+}
 
 const MQTT_INSTANCE_PLACEHOLDER: &str = "{{instance}}";
 /// Why a caller that keeps running discards what [`MqttIngestor::flush_collector`] returns.
@@ -134,7 +171,7 @@ impl MqttIngestor {
         if let Err(error) =
             Self::client_id_template(&client.config, ingestor.name.as_str(), instances)
         {
-            runtime.record_ingestor_transient_error(domain, &ingestor.name, error);
+            runtime.record_ingestor_transient_error(domain, &ingestor.name, error.to_string());
             let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
             let task_domain = domain.clone();
             let task_ingestor = ingestor.name.clone();
@@ -981,7 +1018,7 @@ impl MqttIngestor {
             }
 
             if let Err(error) = Self::flush_collector(context, &mut collector).await {
-                batch_failure = Some(error);
+                batch_failure = Some(error.to_string());
             }
 
             if batch_failure.is_none() {
@@ -1098,7 +1135,7 @@ impl MqttIngestor {
         context: &MqttTaskContext,
         acks: AckSet,
         collector: &mut IngestRouteCollector,
-    ) -> Result<(), String> {
+    ) -> Result<(), Report<MqttIngestorError>> {
         context
             .runtime
             .dispatch_ingested_records(IngestGroupDispatch {
@@ -1115,6 +1152,7 @@ impl MqttIngestor {
                 acks: vec![acks],
             })
             .await
+            .map_err(|error| Report::new(MqttIngestorError::Dispatch).attach_printable(error))
     }
 
     /// Flushes the collector and reports a failure to the runtime event bus.
@@ -1125,7 +1163,7 @@ impl MqttIngestor {
     async fn flush_collector(
         context: &MqttTaskContext,
         collector: &mut IngestRouteCollector,
-    ) -> Result<(), String> {
+    ) -> Result<(), Report<MqttIngestorError>> {
         let result = context
             .runtime
             .flush_ingest_collector(
@@ -1135,15 +1173,18 @@ impl MqttIngestor {
                 collector,
             )
             .await;
-        if let Err(error) = &result {
-            context.runtime.events().report_error(format!(
-                "failed to flush messages for ingestor '{}' in domain '{}': {}",
-                context.ingestor.as_str(),
-                context.domain.as_str(),
-                error
-            ));
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                context.runtime.events().report_error(format!(
+                    "failed to flush messages for ingestor '{}' in domain '{}': {}",
+                    context.ingestor.as_str(),
+                    context.domain.as_str(),
+                    error
+                ));
+                Err(Report::new(MqttIngestorError::Flush).attach_printable(error))
+            }
         }
-        result
     }
 
     fn qos(qos: MqttQos) -> QoS {
@@ -1161,7 +1202,7 @@ impl MqttIngestor {
     pub(in crate::runtime) fn client_from_config_for_test(
         config: &[ClientConfigEntry],
         default_client_id: &str,
-    ) -> Result<(AsyncClient, rumqttc::EventLoop), String> {
+    ) -> Result<(AsyncClient, rumqttc::EventLoop), Report<MqttIngestorError>> {
         Self::client_from_config(
             config,
             default_client_id,
@@ -1176,10 +1217,9 @@ impl MqttIngestor {
         config: &[nervix_models::ClientConfigEntry],
         default_client_id: &str,
         settings: &MqttClientSettings,
-    ) -> Result<(AsyncClient, rumqttc::EventLoop), String> {
-        let addr = client_config_value(config, "addr", || {
-            "missing MQTT client config key 'addr'".to_string()
-        })?;
+    ) -> Result<(AsyncClient, rumqttc::EventLoop), Report<MqttIngestorError>> {
+        let addr = client_config_value(config, "addr", "MQTT")
+            .change_context(MqttIngestorError::ClientConfig)?;
         let client_id = match optional_client_config_value(config, "client_id") {
             Some(client_id) => client_id.to_owned(),
             None => default_client_id.to_string(),
@@ -1206,23 +1246,23 @@ impl MqttIngestor {
         if mqtt_addr.tls {
             let tls = client_tls_paths(config);
             let ca = if let Some(ca_file) = tls.ca_file.as_ref() {
-                read_tls_file(ca_file, "TLS CA certificate")?
+                read_tls_file(ca_file, "TLS CA certificate")
+                    .change_context(MqttIngestorError::ClientConfig)?
             } else {
-                return Err("MQTT TLS requires client config key 'tls_ca_file'".to_string());
+                return Err(Report::new(MqttIngestorError::MissingTlsCa));
             };
-            let client_auth =
-                match (&tls.cert_file, &tls.key_file) {
-                    (Some(cert_file), Some(key_file)) => Some((
-                        read_tls_file(cert_file, "TLS certificate")?,
-                        read_tls_file(key_file, "TLS private key")?,
-                    )),
-                    (None, None) => None,
-                    _ => {
-                        return Err("MQTT TLS client authentication requires both \
-                                    'tls_cert_file' and 'tls_key_file'"
-                            .to_string());
-                    }
-                };
+            let client_auth = match (&tls.cert_file, &tls.key_file) {
+                (Some(cert_file), Some(key_file)) => Some((
+                    read_tls_file(cert_file, "TLS certificate")
+                        .change_context(MqttIngestorError::ClientConfig)?,
+                    read_tls_file(key_file, "TLS private key")
+                        .change_context(MqttIngestorError::ClientConfig)?,
+                )),
+                (None, None) => None,
+                _ => {
+                    return Err(Report::new(MqttIngestorError::IncompleteTlsIdentity));
+                }
+            };
             options.set_transport(MqttTransport::Tls(TlsConfiguration::Simple {
                 ca,
                 alpn: None,
@@ -1232,14 +1272,16 @@ impl MqttIngestor {
         AsyncClient::builder(options)
             .capacity(1024)
             .try_build()
-            .map_err(|error| format!("invalid MQTT client config: {error}"))
+            .map_err(|error| {
+                Report::new(MqttIngestorError::BuildClient).attach_printable(error.to_string())
+            })
     }
 
     fn client_id_template(
         config: &[nervix_models::ClientConfigEntry],
         default_client_id: &str,
         instances: NonZeroU64,
-    ) -> Result<String, String> {
+    ) -> Result<String, Report<MqttIngestorError>> {
         let configured = optional_client_config_value(config, "client_id");
         if instances == NonZeroU64::MIN {
             return Ok(match configured {
@@ -1248,31 +1290,33 @@ impl MqttIngestor {
             });
         }
         let Some(client_id) = configured else {
-            return Err(format!(
-                "MQTT client_id is required for multi-instance MQTT ingestors; use \
-                 {MQTT_INSTANCE_PLACEHOLDER} in client_id"
-            ));
+            return Err(Report::new(MqttIngestorError::MissingClientIdTemplate {
+                instances,
+            }));
         };
         if !client_id.contains(MQTT_INSTANCE_PLACEHOLDER) {
-            return Err(format!(
-                "MQTT client_id '{client_id}' is shared by {instances} instances; use \
-                 {MQTT_INSTANCE_PLACEHOLDER} in client_id for multi-instance MQTT ingestors"
-            ));
+            return Err(Report::new(MqttIngestorError::InvalidClientIdTemplate {
+                client_id: client_id.to_string(),
+                instances,
+            }));
         }
         Ok(client_id.to_string())
     }
 
-    pub(in crate::runtime) fn parse_addr(addr: &str) -> Result<MqttIngestorAddr, String> {
-        let url = Url::parse(addr).map_err(|_| format!("invalid MQTT addr '{addr}'"))?;
+    pub(in crate::runtime) fn parse_addr(
+        addr: &str,
+    ) -> Result<MqttIngestorAddr, Report<MqttIngestorError>> {
+        let url = Url::parse(addr).map_err(|source| {
+            Report::new(MqttIngestorError::InvalidAddress).attach_printable(source.to_string())
+        })?;
         let tls = if url.scheme() == "mqtt" {
             false
         } else if url.scheme() == "mqtts" {
             true
         } else {
-            return Err(format!(
-                "unsupported MQTT addr scheme '{}', expected mqtt:// or mqtts://",
-                url.scheme()
-            ));
+            return Err(Report::new(MqttIngestorError::UnsupportedScheme {
+                scheme: url.scheme().to_string(),
+            }));
         };
         let host = match url.host() {
             Some(Host::Domain(domain)) => domain.to_string(),
@@ -1281,11 +1325,11 @@ impl MqttIngestor {
             None => String::new(),
         };
         if host.is_empty() {
-            return Err(format!("missing host in MQTT addr '{addr}'"));
+            return Err(Report::new(MqttIngestorError::MissingHost));
         }
         let port = url
             .port()
-            .ok_or_else(|| format!("missing port in MQTT addr '{addr}'"))?;
+            .ok_or_else(|| Report::new(MqttIngestorError::MissingPort))?;
         Ok(MqttIngestorAddr { host, port, tls })
     }
 }
@@ -1298,7 +1342,10 @@ mod tests {
     use nonzero_ext::nonzero;
     use rumqttc::BrokerSessionResumePolicy;
 
-    use super::{MQTT_INSTANCE_PLACEHOLDER, MqttClientSettings, MqttIngestor, MqttIngestorAddr};
+    use super::{
+        MQTT_INSTANCE_PLACEHOLDER, MqttClientSettings, MqttIngestor, MqttIngestorAddr,
+        MqttIngestorError,
+    };
     use crate::runtime::{ParsedRetryPolicy, named, next_retry_delay};
 
     fn config_with_client_id(client_id: &str) -> Vec<ClientConfigEntry> {
@@ -1346,9 +1393,11 @@ mod tests {
         .expect_err("fixed multi-instance client_id must be rejected");
 
         assert_eq!(
-            error,
-            "MQTT client_id 'fixed-client' is shared by 2 instances; use {{instance}} in \
-             client_id for multi-instance MQTT ingestors"
+            error.current_context(),
+            &MqttIngestorError::InvalidClientIdTemplate {
+                client_id: "fixed-client".to_string(),
+                instances: nonzero!(2u64),
+            }
         );
     }
 
@@ -1462,7 +1511,17 @@ mod tests {
         )
         .err()
         .expect("missing mqtt addr");
-        assert!(err.contains("missing MQTT client config key 'addr'"));
+        assert_eq!(err.current_context(), &MqttIngestorError::ClientConfig);
+        assert!(
+            matches!(
+                err.downcast_ref::<crate::runtime::client_config::ClientConfigError>(),
+                Some(crate::runtime::client_config::ClientConfigError::MissingRequired {
+                    connector: "MQTT",
+                    key,
+                }) if key == "addr"
+            ),
+            "missing MQTT address should preserve its typed client-config cause"
+        );
 
         let policy = ParsedRetryPolicy {
             backoff: Duration::from_secs(1),

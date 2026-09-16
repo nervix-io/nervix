@@ -9,7 +9,7 @@ use nervix_models::{DomainName, IngestorName};
 use tokio_tungstenite::{Connector, connect_async, connect_async_tls_with_config};
 
 use super::super::*;
-use crate::runtime::physical_time::actual_utc_now;
+use crate::runtime::{client_config::ClientConfigResult, physical_time::actual_utc_now};
 
 pub(in crate::runtime) struct WebsocketsIngestor;
 
@@ -55,11 +55,11 @@ impl WebsocketsIngestor {
                 ingestor: ingestor.name.as_str().to_string(),
                 reason,
             })?;
-        let endpoint = Self::endpoint_from_config(&resolved_client.entries).map_err(|reason| {
+        let endpoint = Self::endpoint_from_config(&resolved_client.entries).map_err(|error| {
             RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-                reason,
+                reason: error.to_string(),
             }
         })?;
         let signaling_protocol = if let Some(signaling_protocol) = signaling_protocol.as_ref() {
@@ -106,10 +106,10 @@ impl WebsocketsIngestor {
         let task_endpoint_requires_tls =
             match ServiceUrl::new(endpoint.as_str(), "WebSockets endpoint")
                 .scheme()
-                .map_err(|reason| RuntimeError::StartIngestor {
+                .map_err(|error| RuntimeError::StartIngestor {
                     domain: domain.as_str().to_string(),
                     ingestor: ingestor.name.as_str().to_string(),
-                    reason,
+                    reason: error.to_string(),
                 })?
                 .as_str()
             {
@@ -130,10 +130,10 @@ impl WebsocketsIngestor {
             Some(Connector::Rustls(
                 RustlsClientConfigSource::new(&resolved_client.entries)
                     .build_with_default_roots()
-                    .map_err(|reason| RuntimeError::StartIngestor {
+                    .map_err(|error| RuntimeError::StartIngestor {
                         domain: domain.as_str().to_string(),
                         ingestor: ingestor.name.as_str().to_string(),
-                        reason,
+                        reason: error.to_string(),
                     })?,
             ))
         } else {
@@ -426,10 +426,8 @@ impl WebsocketsIngestor {
 
     pub(in crate::runtime) fn endpoint_from_config(
         config: &[nervix_models::ClientConfigEntry],
-    ) -> Result<String, String> {
-        client_config_value(config, "endpoint", || {
-            "missing WebSockets client config key 'endpoint'".to_string()
-        })
+    ) -> ClientConfigResult<String> {
+        client_config_value(config, "endpoint", "WebSockets")
     }
 }
 

@@ -7,6 +7,7 @@
 
 use std::borrow::Cow;
 
+use error_stack::ResultExt as _;
 use lapin::{
     Connection, ConnectionProperties,
     options::{BasicAckOptions, BasicConsumeOptions, BasicQosOptions},
@@ -18,6 +19,18 @@ use super::super::*;
 use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct RabbitMqIngestor;
+
+#[derive(Debug, Error)]
+pub(in crate::runtime) enum RabbitMqIngestorError {
+    #[error("invalid RabbitMQ client configuration")]
+    ClientConfig,
+    #[error("failed to parse RabbitMQ CA certificate")]
+    ParseCaCertificate,
+    #[error("RabbitMQ runtime is unavailable")]
+    RuntimeUnavailable,
+    #[error("failed to connect RabbitMQ client")]
+    Connect,
+}
 
 /// The AMQP headers of one borrowed delivery.
 ///
@@ -455,16 +468,24 @@ impl RabbitMqIngestor {
 
     async fn connection_from_config(
         config: &[nervix_models::ClientConfigEntry],
-    ) -> Result<Connection, String> {
-        let addr = client_config_value(config, "addr", || {
-            "missing RabbitMQ client config key 'addr'".to_string()
-        })?;
-        if ServiceUrl::new(&addr, "RabbitMQ addr").has_scheme("amqps")? {
+    ) -> Result<Connection, Report<RabbitMqIngestorError>> {
+        let addr = client_config_value(config, "addr", "RabbitMQ")
+            .change_context(RabbitMqIngestorError::ClientConfig)?;
+        if ServiceUrl::new(&addr, "RabbitMQ addr")
+            .has_scheme("amqps")
+            .change_context(RabbitMqIngestorError::ClientConfig)?
+        {
             let tls = client_tls_paths(config);
             let cert_chain = if let Some(ca_file) = tls.ca_file.as_ref() {
                 Some(
-                    String::from_utf8(read_tls_file(ca_file, "TLS CA certificate")?)
-                        .map_err(|source| format!("failed to parse RabbitMQ CA PEM: {source}"))?,
+                    String::from_utf8(
+                        read_tls_file(ca_file, "TLS CA certificate")
+                            .change_context(RabbitMqIngestorError::ClientConfig)?,
+                    )
+                    .map_err(|source| {
+                        Report::new(RabbitMqIngestorError::ParseCaCertificate)
+                            .attach_printable(source.to_string())
+                    })?,
                 )
             } else {
                 None
@@ -476,14 +497,21 @@ impl RabbitMqIngestor {
                     identity: None,
                     cert_chain,
                 },
-                lapin::runtime::default_runtime().map_err(|source| source.to_string())?,
+                lapin::runtime::default_runtime().map_err(|source| {
+                    Report::new(RabbitMqIngestorError::RuntimeUnavailable)
+                        .attach_printable(source.to_string())
+                })?,
             )
             .await
-            .map_err(|source| source.to_string())
+            .map_err(|source| {
+                Report::new(RabbitMqIngestorError::Connect).attach_printable(source.to_string())
+            })
         } else {
             Connection::connect(&addr, ConnectionProperties::default())
                 .await
-                .map_err(|source| source.to_string())
+                .map_err(|source| {
+                    Report::new(RabbitMqIngestorError::Connect).attach_printable(source.to_string())
+                })
         }
     }
 

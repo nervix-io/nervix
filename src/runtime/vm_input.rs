@@ -188,7 +188,8 @@ pub(super) fn project_vm_input_column(
                 if let Some(column) = sources
                     .ingest_metadata
                     .map(|metadata| metadata.field_column(field_name))
-                    .transpose()?
+                    .transpose()
+                    .map_err(|error| error.to_string())?
                     .flatten()
                 {
                     if column.data_type() != field.data_type() {

@@ -348,7 +348,8 @@ impl Runtime {
                     &entry.key,
                     &entry.value,
                     &context,
-                )?;
+                )
+                .map_err(|error| error.to_string())?;
             }
             return Ok(ResolvedClientConfig {
                 entries,
@@ -395,12 +396,9 @@ impl Runtime {
             );
         }
         for entry in &mut entries {
-            entry.value = render_client_config_template(
-                &template_engine,
-                &entry.key,
-                &entry.value,
-                &context,
-            )?;
+            entry.value =
+                render_client_config_template(&template_engine, &entry.key, &entry.value, &context)
+                    .map_err(|error| error.to_string())?;
         }
 
         Ok(ResolvedClientConfig {

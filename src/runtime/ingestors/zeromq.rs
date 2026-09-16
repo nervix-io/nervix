@@ -5,12 +5,23 @@
 //! - **Depends on.** Typed ZeroMQ plans, socket clients and ingestor runtime admission.
 //! - **Must not know.** NSPL parsing, registry validation or placement computation.
 
+use error_stack::ResultExt as _;
 use zeromq::{PullSocket, Socket, SocketRecv};
 
 use super::super::*;
 use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct ZeroMqIngestor;
+
+#[derive(Debug, Error)]
+pub(in crate::runtime) enum ZeroMqIngestorError {
+    #[error("invalid ZeroMQ client configuration")]
+    ClientConfig,
+    #[error("failed to bind ZeroMQ client")]
+    Bind,
+    #[error("failed to connect ZeroMQ client")]
+    Connect,
+}
 
 impl ZeroMqIngestor {
     pub(in crate::runtime) async fn start(
@@ -319,23 +330,22 @@ impl ZeroMqIngestor {
         Ok(())
     }
 
-    async fn pull_socket_from_config(config: &[ClientConfigEntry]) -> Result<PullSocket, String> {
-        let addr = client_config_value(config, "addr", || {
-            "missing ZeroMQ client config key 'addr'".to_string()
-        })?;
+    async fn pull_socket_from_config(
+        config: &[ClientConfigEntry],
+    ) -> Result<PullSocket, Report<ZeroMqIngestorError>> {
+        let addr = client_config_value(config, "addr", "ZeroMQ")
+            .change_context(ZeroMqIngestorError::ClientConfig)?;
         let bind = optional_client_config_value(config, "bind")
             .is_some_and(|value| value.eq_ignore_ascii_case("true"));
         let mut socket = PullSocket::new();
         if bind {
-            socket
-                .bind(&addr)
-                .await
-                .map_err(|source| source.to_string())?;
+            socket.bind(&addr).await.map_err(|source| {
+                Report::new(ZeroMqIngestorError::Bind).attach_printable(source.to_string())
+            })?;
         } else {
-            socket
-                .connect(&addr)
-                .await
-                .map_err(|source| source.to_string())?;
+            socket.connect(&addr).await.map_err(|source| {
+                Report::new(ZeroMqIngestorError::Connect).attach_printable(source.to_string())
+            })?;
         }
         Ok(socket)
     }
@@ -343,10 +353,8 @@ impl ZeroMqIngestor {
     #[cfg(test)]
     pub(in crate::runtime) fn addr_from_config(
         config: &[ClientConfigEntry],
-    ) -> Result<String, String> {
-        client_config_value(config, "addr", || {
-            "missing ZeroMQ client config key 'addr'".to_string()
-        })
+    ) -> crate::runtime::client_config::ClientConfigResult<String> {
+        client_config_value(config, "addr", "ZeroMQ")
     }
 
     #[cfg(test)]

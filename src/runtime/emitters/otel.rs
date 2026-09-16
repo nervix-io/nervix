@@ -159,6 +159,45 @@ impl OtelRecordError {
     }
 }
 
+#[derive(Debug, Error)]
+enum OtelValueError {
+    #[error("OTEL {signal} VALUES key '{key}' requires {expected}, found {actual}")]
+    InvalidMappedType {
+        signal: &'static str,
+        key: String,
+        expected: &'static str,
+        actual: DataType,
+    },
+    #[error("OTEL ATTRIBUTE '{key}' has unsupported exact type {actual}")]
+    InvalidAttributeMappingType { key: String, actual: DataType },
+    #[error("OTEL RESOURCE arrays do not support NULL elements")]
+    NullResourceArrayElement,
+    #[error("OTEL RESOURCE values must contain only literal values or literal arrays")]
+    InvalidResourceExpression,
+    #[error("OTEL array value has an invalid Arrow representation")]
+    InvalidArrayRepresentation,
+    #[error("OTEL value requires ARRAY or VEC, found {actual}")]
+    ExpectedList { actual: DataType },
+    #[error("OTEL integer exceeds the OTLP signed 64-bit range")]
+    SignedIntegerRange,
+    #[error("OTEL unsigned value cannot be negative")]
+    NegativeUnsigned,
+    #[error("OTEL value requires an integer-family type, found {actual}")]
+    ExpectedInteger { actual: DataType },
+    #[error("OTEL value requires a numeric type, found {actual}")]
+    ExpectedNumeric { actual: DataType },
+    #[error("OTEL metric value requires a numeric type, found {actual}")]
+    ExpectedMetricNumeric { actual: DataType },
+    #[error("OTEL DATETIME has an invalid Arrow representation")]
+    InvalidDatetimeRepresentation,
+    #[error("OTEL attribute arrays do not support NULL elements")]
+    NullAttributeArrayElement,
+    #[error("OTEL attribute type {actual} is unsupported")]
+    UnsupportedAttributeType { actual: DataType },
+}
+
+type OtelValueResult<T> = Result<T, Report<OtelValueError>>;
+
 impl OtelClientSettings {
     fn parse(config: &[ClientConfigEntry]) -> EmitterRuntimeResult<Self> {
         const ALLOWED_KEYS: &[&str] = &[
@@ -188,9 +227,7 @@ impl OtelClientSettings {
             }
         }
 
-        let endpoint = emitter_config_value(config, "endpoint", || {
-            "missing OTEL client config key 'endpoint'".to_string()
-        })?;
+        let endpoint = emitter_config_value(config, "endpoint", "OTEL")?;
         let endpoint = url::Url::parse(&endpoint)
             .map_err(|error| emitter_config_error(format!("invalid OTEL endpoint: {error}")))?;
         if endpoint.scheme() != "http" && endpoint.scheme() != "https" {
@@ -203,9 +240,7 @@ impl OtelClientSettings {
             return Err(emitter_config_error("OTEL endpoint must include a host"));
         }
 
-        let protocol = emitter_config_value(config, "protocol", || {
-            "missing OTEL client config key 'protocol'".to_string()
-        })?;
+        let protocol = emitter_config_value(config, "protocol", "OTEL")?;
         let protocol = match protocol.as_str() {
             "grpc" => OtelProtocol::Grpc,
             "http/protobuf" => OtelProtocol::HttpProtobuf,
@@ -314,8 +349,8 @@ impl OtelEmitter {
             Ok(program) => match Self::validate_program_types(signal, values, attributes, &program)
             {
                 Ok(()) => Some(program),
-                Err(reason) => {
-                    context.report_init_error("otel", &reason);
+                Err(error) => {
+                    context.report_init_error("otel", &error.to_string());
                     None
                 }
             },
@@ -326,8 +361,8 @@ impl OtelEmitter {
         };
         let resource = match Self::resource_from_mappings(resource) {
             Ok(resource) => Some(resource),
-            Err(reason) => {
-                context.report_init_error("otel", &reason);
+            Err(error) => {
+                context.report_init_error("otel", &error.to_string());
                 None
             }
         };
@@ -451,28 +486,27 @@ impl OtelEmitter {
         values: &[OtelValueMapping],
         attributes: &[OtelValueMapping],
         program: &CompiledSqlValuesProgram,
-    ) -> Result<(), String> {
+    ) -> OtelValueResult<()> {
         for (index, mapping) in values.iter().enumerate() {
             let field = program.program.output_schema.field(index);
             let (valid, expected) =
                 Self::valid_value_type(signal, &mapping.column, field.data_type());
             if !valid {
-                return Err(format!(
-                    "OTEL {} VALUES key '{}' requires {expected}, found {}",
-                    Self::signal_label(signal),
-                    mapping.column,
-                    field.data_type()
-                ));
+                return Err(Report::new(OtelValueError::InvalidMappedType {
+                    signal: Self::signal_label(signal),
+                    key: mapping.column.clone(),
+                    expected,
+                    actual: field.data_type().clone(),
+                }));
             }
         }
         for (offset, mapping) in attributes.iter().enumerate() {
             let field = program.program.output_schema.field(values.len() + offset);
             if !Self::valid_attribute_type(field.data_type()) {
-                return Err(format!(
-                    "OTEL ATTRIBUTE '{}' has unsupported exact type {}",
-                    mapping.column,
-                    field.data_type()
-                ));
+                return Err(Report::new(OtelValueError::InvalidAttributeMappingType {
+                    key: mapping.column.clone(),
+                    actual: field.data_type().clone(),
+                }));
             }
         }
         Ok(())
@@ -568,7 +602,7 @@ impl OtelEmitter {
             || Self::list_element_type(ty).is_some_and(Self::valid_attribute_type)
     }
 
-    fn resource_from_mappings(mappings: &[OtelValueMapping]) -> Result<Resource, String> {
+    fn resource_from_mappings(mappings: &[OtelValueMapping]) -> OtelValueResult<Resource> {
         let mut attributes = Vec::with_capacity(mappings.len());
         for mapping in mappings {
             if let Some(value) = Self::literal_any_value(&mapping.expression)? {
@@ -587,7 +621,7 @@ impl OtelEmitter {
 
     fn literal_any_value(
         expression: &nervix_models::Expression,
-    ) -> Result<Option<AnyValue>, String> {
+    ) -> OtelValueResult<Option<AnyValue>> {
         let value = match expression {
             nervix_models::Expression::Literal(ModelLiteral::I64(value)) => {
                 Some(any_value::Value::IntValue(*value))
@@ -605,18 +639,14 @@ impl OtelEmitter {
             nervix_models::Expression::Array(items) => {
                 let mut values = Vec::with_capacity(items.len());
                 for item in items {
-                    let value = Self::literal_any_value(item)?.ok_or_else(|| {
-                        "OTEL RESOURCE arrays do not support NULL elements".to_string()
-                    })?;
+                    let value = Self::literal_any_value(item)?
+                        .ok_or_else(|| Report::new(OtelValueError::NullResourceArrayElement))?;
                     values.push(value);
                 }
                 Some(any_value::Value::ArrayValue(ArrayValue { values }))
             }
             _ => {
-                return Err(
-                    "OTEL RESOURCE values must contain only literal values or literal arrays"
-                        .to_string(),
-                );
+                return Err(Report::new(OtelValueError::InvalidResourceExpression));
             }
         };
         Ok(Some(AnyValue { value }))
@@ -1246,7 +1276,7 @@ impl<'a> OtelMappedBatch<'a> {
                 )
             })?;
             if let Some(value) = any_value_at(&array.to_array_ref(), row)
-                .map_err(|reason| OtelRecordError::new(mapping.column.clone(), reason))?
+                .map_err(|error| OtelRecordError::new(mapping.column.clone(), error.to_string()))?
             {
                 values.push(KeyValue {
                     key: mapping.column.clone(),
@@ -1465,8 +1495,8 @@ impl<'a> OtelMappedBatch<'a> {
                 "OTEL metric value cannot be NULL",
             ));
         }
-        let value =
-            number_value_at(&array, row).map_err(|reason| OtelRecordError::new("value", reason))?;
+        let value = number_value_at(&array, row)
+            .map_err(|error| OtelRecordError::new("value", error.to_string()))?;
         Ok(NumberDataPoint {
             attributes: self.attributes(row)?,
             start_time_unix_nano: if require_start_time {
@@ -1519,7 +1549,7 @@ impl<'a> OtelMappedBatch<'a> {
                 format!("OTEL VALUES key '{key}' cannot be NULL"),
             ));
         }
-        integer_as_u64(&array, row).map_err(|reason| OtelRecordError::new(key, reason))
+        integer_as_u64(&array, row).map_err(|error| OtelRecordError::new(key, error.to_string()))
     }
 
     fn optional_f64(&self, key: &str, row: usize) -> Result<Option<f64>, OtelRecordError> {
@@ -1531,7 +1561,7 @@ impl<'a> OtelMappedBatch<'a> {
         }
         numeric_as_f64(&array, row)
             .map(Some)
-            .map_err(|reason| OtelRecordError::new(key, reason))
+            .map_err(|error| OtelRecordError::new(key, error.to_string()))
     }
 
     fn required_u64_list(&self, key: &str, row: usize) -> Result<Vec<u64>, OtelRecordError> {
@@ -1539,7 +1569,7 @@ impl<'a> OtelMappedBatch<'a> {
             OtelRecordError::new(key, format!("OTEL VALUES requires key '{key}'"))
         })?;
         let values = list_value(&array, row)
-            .map_err(|reason| OtelRecordError::new(key, reason))?
+            .map_err(|error| OtelRecordError::new(key, error.to_string()))?
             .ok_or_else(|| {
                 OtelRecordError::new(key, format!("OTEL VALUES key '{key}' cannot be NULL"))
             })?;
@@ -1551,7 +1581,8 @@ impl<'a> OtelMappedBatch<'a> {
                         format!("OTEL {key} cannot contain NULL elements"),
                     ));
                 }
-                integer_as_u64(&values, index).map_err(|reason| OtelRecordError::new(key, reason))
+                integer_as_u64(&values, index)
+                    .map_err(|error| OtelRecordError::new(key, error.to_string()))
             })
             .collect()
     }
@@ -1561,7 +1592,7 @@ impl<'a> OtelMappedBatch<'a> {
             OtelRecordError::new(key, format!("OTEL VALUES requires key '{key}'"))
         })?;
         let values = list_value(&array, row)
-            .map_err(|reason| OtelRecordError::new(key, reason))?
+            .map_err(|error| OtelRecordError::new(key, error.to_string()))?
             .ok_or_else(|| {
                 OtelRecordError::new(key, format!("OTEL VALUES key '{key}' cannot be NULL"))
             })?;
@@ -1573,7 +1604,8 @@ impl<'a> OtelMappedBatch<'a> {
                         format!("OTEL {key} cannot contain NULL elements"),
                     ));
                 }
-                numeric_as_f64(&values, index).map_err(|reason| OtelRecordError::new(key, reason))
+                numeric_as_f64(&values, index)
+                    .map_err(|error| OtelRecordError::new(key, error.to_string()))
             })
             .collect()
     }
@@ -1645,26 +1677,28 @@ fn validate_histogram_buckets(
     Ok(())
 }
 
-fn list_value(array: &ArrayRef, row: usize) -> Result<Option<ArrayRef>, String> {
+fn list_value(array: &ArrayRef, row: usize) -> OtelValueResult<Option<ArrayRef>> {
     if array.is_null(row) {
         return Ok(None);
     }
     match array.data_type() {
         DataType::List(_) => match array.as_any().downcast_ref::<ListArray>() {
             Some(array) => Ok(Some(array.value(row))),
-            None => Err("OTEL array value has an invalid Arrow representation".to_string()),
+            None => Err(Report::new(OtelValueError::InvalidArrayRepresentation)),
         },
         DataType::FixedSizeList(_, _) => {
             match array.as_any().downcast_ref::<FixedSizeListArray>() {
                 Some(array) => Ok(Some(array.value(row))),
-                None => Err("OTEL array value has an invalid Arrow representation".to_string()),
+                None => Err(Report::new(OtelValueError::InvalidArrayRepresentation)),
             }
         }
-        ty => Err(format!("OTEL value requires ARRAY or VEC, found {ty}")),
+        ty => Err(Report::new(OtelValueError::ExpectedList {
+            actual: ty.clone(),
+        })),
     }
 }
 
-fn integer_as_i64(array: &ArrayRef, row: usize) -> Result<i64, String> {
+fn integer_as_i64(array: &ArrayRef, row: usize) -> OtelValueResult<i64> {
     match array.data_type() {
         DataType::UInt8 => Ok(array
             .as_any()
@@ -1730,7 +1764,7 @@ fn integer_as_i64(array: &ArrayRef, row: usize) -> Result<i64, String> {
                 )
                 .value(row),
         )
-        .map_err(|_| "OTEL integer exceeds the OTLP signed 64-bit range".to_string()),
+        .map_err(|_| Report::new(OtelValueError::SignedIntegerRange)),
         DataType::Int64 => Ok(array
             .as_any()
             .downcast_ref::<Int64Array>()
@@ -1739,13 +1773,13 @@ fn integer_as_i64(array: &ArrayRef, row: usize) -> Result<i64, String> {
                  Arrow array type",
             )
             .value(row)),
-        ty => Err(format!(
-            "OTEL value requires an integer-family type, found {ty}"
-        )),
+        ty => Err(Report::new(OtelValueError::ExpectedInteger {
+            actual: ty.clone(),
+        })),
     }
 }
 
-fn integer_as_u64(array: &ArrayRef, row: usize) -> Result<u64, String> {
+fn integer_as_u64(array: &ArrayRef, row: usize) -> OtelValueResult<u64> {
     match array.data_type() {
         DataType::UInt8 => Ok(array
             .as_any()
@@ -1792,7 +1826,7 @@ fn integer_as_u64(array: &ArrayRef, row: usize) -> Result<u64, String> {
                 )
                 .value(row),
         )
-        .map_err(|_| "OTEL unsigned value cannot be negative".to_string()),
+        .map_err(|_| Report::new(OtelValueError::NegativeUnsigned)),
         DataType::Int16 => u64::try_from(
             array
                 .as_any()
@@ -1803,7 +1837,7 @@ fn integer_as_u64(array: &ArrayRef, row: usize) -> Result<u64, String> {
                 )
                 .value(row),
         )
-        .map_err(|_| "OTEL unsigned value cannot be negative".to_string()),
+        .map_err(|_| Report::new(OtelValueError::NegativeUnsigned)),
         DataType::Int32 => u64::try_from(
             array
                 .as_any()
@@ -1814,7 +1848,7 @@ fn integer_as_u64(array: &ArrayRef, row: usize) -> Result<u64, String> {
                 )
                 .value(row),
         )
-        .map_err(|_| "OTEL unsigned value cannot be negative".to_string()),
+        .map_err(|_| Report::new(OtelValueError::NegativeUnsigned)),
         DataType::Int64 => u64::try_from(
             array
                 .as_any()
@@ -1825,14 +1859,14 @@ fn integer_as_u64(array: &ArrayRef, row: usize) -> Result<u64, String> {
                 )
                 .value(row),
         )
-        .map_err(|_| "OTEL unsigned value cannot be negative".to_string()),
-        ty => Err(format!(
-            "OTEL value requires an integer-family type, found {ty}"
-        )),
+        .map_err(|_| Report::new(OtelValueError::NegativeUnsigned)),
+        ty => Err(Report::new(OtelValueError::ExpectedInteger {
+            actual: ty.clone(),
+        })),
     }
 }
 
-fn numeric_as_f64(array: &ArrayRef, row: usize) -> Result<f64, String> {
+fn numeric_as_f64(array: &ArrayRef, row: usize) -> OtelValueResult<f64> {
     match array.data_type() {
         DataType::Float32 => Ok(array
             .as_any()
@@ -1929,11 +1963,13 @@ fn numeric_as_f64(array: &ArrayRef, row: usize) -> Result<f64, String> {
             )
             .value(row)
             .approx_into()),
-        ty => Err(format!("OTEL value requires a numeric type, found {ty}")),
+        ty => Err(Report::new(OtelValueError::ExpectedNumeric {
+            actual: ty.clone(),
+        })),
     }
 }
 
-fn number_value_at(array: &ArrayRef, row: usize) -> Result<number_data_point::Value, String> {
+fn number_value_at(array: &ArrayRef, row: usize) -> OtelValueResult<number_data_point::Value> {
     match array.data_type() {
         DataType::Float32 => Ok(number_data_point::Value::AsDouble(
             array
@@ -1959,13 +1995,13 @@ fn number_value_at(array: &ArrayRef, row: usize) -> Result<number_data_point::Va
         ty if OtelEmitter::is_integer_type(ty) => {
             integer_as_i64(array, row).map(number_data_point::Value::AsInt)
         }
-        ty => Err(format!(
-            "OTEL metric value requires a numeric type, found {ty}"
-        )),
+        ty => Err(Report::new(OtelValueError::ExpectedMetricNumeric {
+            actual: ty.clone(),
+        })),
     }
 }
 
-fn any_value_at(array: &ArrayRef, row: usize) -> Result<Option<AnyValue>, String> {
+fn any_value_at(array: &ArrayRef, row: usize) -> OtelValueResult<Option<AnyValue>> {
     if array.is_null(row) {
         return Ok(None);
     }
@@ -2019,7 +2055,7 @@ fn any_value_at(array: &ArrayRef, row: usize) -> Result<Option<AnyValue>, String
             let nanos = array
                 .as_any()
                 .downcast_ref::<TimestampNanosecondArray>()
-                .ok_or_else(|| "OTEL DATETIME has an invalid Arrow representation".to_string())?
+                .ok_or_else(|| Report::new(OtelValueError::InvalidDatetimeRepresentation))?
                 .value(row);
             any_value::Value::StringValue(
                 Timestamp::from_unix_nanos(nanos).as_datetime().to_rfc3339(),
@@ -2031,13 +2067,18 @@ fn any_value_at(array: &ArrayRef, row: usize) -> Result<Option<AnyValue>, String
             );
             let mut converted = Vec::with_capacity(values.len());
             for index in 0..values.len() {
-                converted.push(any_value_at(&values, index)?.ok_or_else(|| {
-                    "OTEL attribute arrays do not support NULL elements".to_string()
-                })?);
+                converted.push(
+                    any_value_at(&values, index)?
+                        .ok_or_else(|| Report::new(OtelValueError::NullAttributeArrayElement))?,
+                );
             }
             any_value::Value::ArrayValue(ArrayValue { values: converted })
         }
-        ty => return Err(format!("OTEL attribute type {ty} is unsupported")),
+        ty => {
+            return Err(Report::new(OtelValueError::UnsupportedAttributeType {
+                actual: ty.clone(),
+            }));
+        }
     };
     Ok(Some(AnyValue { value: Some(value) }))
 }

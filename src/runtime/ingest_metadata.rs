@@ -63,6 +63,39 @@ pub(in crate::runtime) enum IngestMetadataKind {
     Headers,
 }
 
+pub(super) type IngestMetadataResult<T> = Result<T, Report<IngestMetadataError>>;
+
+#[derive(Debug, Error)]
+pub(super) enum IngestMetadataError {
+    #[error("ingest metadata builders for {builders:?} cannot append a {row:?} row")]
+    BuilderKindMismatch {
+        builders: IngestMetadataKind,
+        row: IngestMetadataKind,
+    },
+    #[error("failed to build ingest metadata integration columns")]
+    BuildIntegrationColumns,
+    #[error(
+        "ingest metadata built {integration_rows} integration rows, {header_name_rows} \
+         header-name rows and {header_value_rows} header-value rows"
+    )]
+    HeaderRowCountMismatch {
+        integration_rows: usize,
+        header_name_rows: usize,
+        header_value_rows: usize,
+    },
+    #[error("ingest metadata row {row} is outside column with {column_rows} rows")]
+    RowOutOfBounds { row: usize, column_rows: usize },
+    #[error("failed to select ingest metadata rows")]
+    SelectRows,
+    #[error(
+        "ingest metadata selection has {selection_rows} rows for {metadata_rows} metadata rows"
+    )]
+    SelectionRowCountMismatch {
+        selection_rows: usize,
+        metadata_rows: usize,
+    },
+}
+
 impl IngestMetadataKind {
     #[cfg(test)]
     pub(super) fn for_source(source: &IngestSource) -> Self {
@@ -240,7 +273,7 @@ impl IngestMetadataBuilders {
     // Keep Arrow's builder machinery behind this boundary. Inlining it into the source collector
     // doubles that per-message function's machine code and measurably reduces ingest throughput.
     #[inline(never)]
-    pub(super) fn append(&mut self, row: &IngestMetadataRow<'_>) -> Result<(), String> {
+    pub(super) fn append(&mut self, row: &IngestMetadataRow<'_>) -> IngestMetadataResult<()> {
         let headers = match (&mut self.integration, row) {
             (
                 IngestIntegrationBuilders::Kafka(kafka),
@@ -274,11 +307,10 @@ impl IngestMetadataBuilders {
                 Some(*headers)
             }
             (_, row) => {
-                return Err(format!(
-                    "ingest metadata builders for {:?} cannot append a {:?} row",
-                    self.kind,
-                    row.kind()
-                ));
+                return Err(Report::new(IngestMetadataError::BuilderKindMismatch {
+                    builders: self.kind,
+                    row: row.kind(),
+                }));
             }
         };
         if let Some(headers) = headers {
@@ -295,7 +327,7 @@ impl IngestMetadataBuilders {
     }
 
     #[inline(never)]
-    pub(super) fn finish(mut self) -> Result<IngestFilterMapMetadata, String> {
+    pub(super) fn finish(mut self) -> IngestMetadataResult<IngestFilterMapMetadata> {
         #[cfg(test)]
         INGEST_METADATA_COLUMN_SETS_BUILT.with(|count| count.set(count.get() + 1));
         let rows = self.rows;
@@ -321,16 +353,18 @@ impl IngestMetadataBuilders {
             integration_columns,
             &RecordBatchOptions::new().with_row_count(Some(rows)),
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|source| {
+            Report::new(IngestMetadataError::BuildIntegrationColumns)
+                .attach_printable(source.to_string())
+        })?;
         let header_names: ArrayRef = StdArc::new(self.header_names.finish());
         let header_values: ArrayRef = StdArc::new(self.header_values.finish());
         if header_names.len() != rows || header_values.len() != rows {
-            return Err(format!(
-                "ingest metadata built {rows} integration rows, {} header-name rows and {} \
-                 header-value rows",
-                header_names.len(),
-                header_values.len()
-            ));
+            return Err(Report::new(IngestMetadataError::HeaderRowCountMismatch {
+                integration_rows: rows,
+                header_name_rows: header_names.len(),
+                header_value_rows: header_values.len(),
+            }));
         }
         Ok(IngestFilterMapMetadata {
             columns: Arc::new(IngestFilterMapMetadataColumns {
@@ -344,7 +378,7 @@ impl IngestMetadataBuilders {
 }
 
 impl IngestFilterMapMetadata {
-    pub(super) fn selected_array(&self, array: &ArrayRef) -> Result<ArrayRef, String> {
+    pub(super) fn selected_array(&self, array: &ArrayRef) -> IngestMetadataResult<ArrayRef> {
         if self.rows.iter().copied().eq(0..self.rows.len()) && self.rows.len() == array.len() {
             return Ok(array.clone());
         }
@@ -353,15 +387,17 @@ impl IngestFilterMapMetadata {
             .iter()
             .map(|row| {
                 if *row >= array.len() {
-                    return Err(format!(
-                        "ingest metadata row {row} is outside column with {} rows",
-                        array.len()
-                    ));
+                    return Err(Report::new(IngestMetadataError::RowOutOfBounds {
+                        row: *row,
+                        column_rows: array.len(),
+                    }));
                 }
-                Ok::<u64, String>((*row).arch_into())
+                Ok::<u64, Report<IngestMetadataError>>((*row).arch_into())
             })
             .collect::<Result<UInt64Array, _>>()?;
-        take_arrow_array(array.as_ref(), &indices, None).map_err(|error| error.to_string())
+        take_arrow_array(array.as_ref(), &indices, None).map_err(|source| {
+            Report::new(IngestMetadataError::SelectRows).attach_printable(source.to_string())
+        })
     }
 
     pub(super) fn len(&self) -> usize {
@@ -375,12 +411,13 @@ impl IngestFilterMapMetadata {
         })
     }
 
-    pub(super) fn select(&self, keep: &[bool]) -> Result<Self, String> {
+    pub(super) fn select(&self, keep: &[bool]) -> IngestMetadataResult<Self> {
         if keep.len() != self.len() {
-            return Err(format!(
-                "ingest metadata selection has {} rows for {} metadata rows",
-                keep.len(),
-                self.len()
+            return Err(Report::new(
+                IngestMetadataError::SelectionRowCountMismatch {
+                    selection_rows: keep.len(),
+                    metadata_rows: self.len(),
+                },
             ));
         }
         Ok(Self {
@@ -395,7 +432,7 @@ impl IngestFilterMapMetadata {
         })
     }
 
-    pub(super) fn field_column(&self, name: &str) -> Result<Option<ArrayRef>, String> {
+    pub(super) fn field_column(&self, name: &str) -> IngestMetadataResult<Option<ArrayRef>> {
         let Ok(index) = self.columns.integration_fields.schema().index_of(name) else {
             return Ok(None);
         };

@@ -23,6 +23,36 @@ pub(in crate::runtime) struct SqsEmitter {
     mode: SqsPublishingMode,
 }
 
+#[derive(Debug, PartialEq, Eq, Error)]
+enum SqsRecordError {
+    #[error("SQS message body is not valid UTF-8")]
+    InvalidBodyEncoding,
+    #[error("SQS message body contains a character the service forbids")]
+    ForbiddenBodyCharacter,
+    #[error("SQS message has {count} attributes; the service permits at most {maximum}")]
+    AttributeCount { count: usize, maximum: usize },
+    #[error("SQS message attribute names must contain 1 to 256 bytes")]
+    AttributeNameLength,
+    #[error("SQS message attribute name '{name}' uses a reserved prefix")]
+    ReservedAttributePrefix { name: String },
+    #[error("invalid SQS message attribute name '{name}'")]
+    InvalidAttributeName { name: String },
+    #[error("SQS message attribute '{name}' contains a forbidden character")]
+    ForbiddenAttributeCharacter { name: String },
+    #[error("invalid SQS message attribute '{name}'")]
+    BuildAttribute { name: String },
+    #[error(transparent)]
+    MessageGroup(SqsMessageGroupError),
+    #[error("SQS FIFO message group must contain 1 to 128 characters")]
+    MessageGroupLength,
+    #[error("SQS FIFO message group contains an unsupported character")]
+    MessageGroupCharacter,
+    #[error("SQS record is {bytes} bytes; the protocol limit is 256 KiB")]
+    RequestSize { bytes: usize, maximum: usize },
+}
+
+type SqsRecordResult<T> = Result<T, Report<SqsRecordError>>;
+
 #[derive(Debug)]
 struct PreparedSqsRecord {
     position: BrokerRecordPosition,
@@ -38,22 +68,22 @@ impl PreparedSqsRecord {
         position: BrokerRecordPosition,
         payload: Vec<u8>,
         headers: EmitterHeaders,
-        group_id: Result<Option<String>, String>,
+        group_id: Result<Option<String>, SqsMessageGroupError>,
         acks: AckSet,
-    ) -> Result<Self, String> {
+    ) -> SqsRecordResult<Self> {
         const ENCODED_IN_MEMORY: &str =
             "every term counts bytes of a record this node already holds in memory";
 
         let body = String::from_utf8(payload)
-            .map_err(|_| "SQS message body is not valid UTF-8".to_string())?;
+            .map_err(|_| Report::new(SqsRecordError::InvalidBodyEncoding))?;
         if !SqsEmitter::has_valid_message_characters(&body) {
-            return Err("SQS message body contains a character the service forbids".to_string());
+            return Err(Report::new(SqsRecordError::ForbiddenBodyCharacter));
         }
         if headers.len() > 10 {
-            return Err(format!(
-                "SQS message has {} attributes; the service permits at most 10",
-                headers.len()
-            ));
+            return Err(Report::new(SqsRecordError::AttributeCount {
+                count: headers.len(),
+                maximum: 10,
+            }));
         }
         let mut attributes = HashMap::with_capacity(headers.len());
         for (name, value) in headers {
@@ -62,10 +92,14 @@ impl PreparedSqsRecord {
                 .data_type("String")
                 .string_value(&value)
                 .build()
-                .map_err(|error| format!("invalid SQS message attribute '{name}': {error}"))?;
+                .map_err(|error| {
+                    Report::new(SqsRecordError::BuildAttribute { name: name.clone() })
+                        .attach_printable(error)
+                })?;
             attributes.insert(name, attribute);
         }
-        let group_id = group_id?;
+        let group_id =
+            group_id.map_err(|error| Report::new(SqsRecordError::MessageGroup(error)))?;
         if let Some(group_id) = group_id.as_deref() {
             SqsEmitter::validate_group_id(group_id)?;
         }
@@ -100,9 +134,10 @@ impl PreparedSqsRecord {
             .checked_add(group_bytes)
             .assured(ENCODED_IN_MEMORY);
         if encoded_bytes > SQS_MAX_REQUEST_BYTES {
-            return Err(format!(
-                "SQS record is {encoded_bytes} bytes; the protocol limit is 256 KiB"
-            ));
+            return Err(Report::new(SqsRecordError::RequestSize {
+                bytes: encoded_bytes,
+                maximum: SQS_MAX_REQUEST_BYTES,
+            }));
         }
         Ok(Self {
             position,
@@ -136,9 +171,7 @@ impl SqsEmitter {
     async fn client_from_config(
         config: &[nervix_models::ClientConfigEntry],
     ) -> EmitterRuntimeResult<SqsClient> {
-        let endpoint = emitter_config_value(config, "endpoint", || {
-            "missing SQS client config key 'endpoint'".to_string()
-        })?;
+        let endpoint = emitter_config_value(config, "endpoint", "SQS")?;
         let region = optional_client_config_value(config, "region")
             .unwrap_or("us-east-1")
             .to_string();
@@ -205,12 +238,24 @@ impl SqsEmitter {
             .queue_name(queue)
             .send()
             .await
-            .map_err(emitter_publish_error)?
+            .map_err(|source| {
+                if source
+                    .as_service_error()
+                    .is_some_and(|error| error.is_queue_does_not_exist())
+                {
+                    return Report::new(EmitterRuntimeError::MissingExternalEntity {
+                        kind: "SQS queue",
+                        name: queue.to_string(),
+                    })
+                    .attach_printable(source.to_string());
+                }
+                emitter_init_error(source)
+            })?
             .queue_url()
             .map(ToOwned::to_owned);
         match queue_url {
             Some(queue_url) => Ok(queue_url),
-            None => Err(emitter_publish_error(format!(
+            None => Err(emitter_init_error(format!(
                 "SQS queue '{queue}' has no URL"
             ))),
         }
@@ -233,7 +278,7 @@ impl SqsEmitter {
                 record.acks,
             ) {
                 Ok(record) => prepared.push(record),
-                Err(reason) => outcome.reject(position, reason),
+                Err(error) => outcome.reject(position, error.to_string()),
             }
         }
         match self.mode {
@@ -464,15 +509,15 @@ impl SqsEmitter {
         })
     }
 
-    fn validate_attribute(name: &str, value: &str) -> Result<(), String> {
+    fn validate_attribute(name: &str, value: &str) -> SqsRecordResult<()> {
         let normalized = name.to_ascii_lowercase();
         if name.is_empty() || name.len() > 256 {
-            return Err("SQS message attribute names must contain 1 to 256 bytes".to_string());
+            return Err(Report::new(SqsRecordError::AttributeNameLength));
         }
         if normalized.starts_with("aws.") || normalized.starts_with("amazon.") {
-            return Err(format!(
-                "SQS message attribute name '{name}' uses a reserved prefix"
-            ));
+            return Err(Report::new(SqsRecordError::ReservedAttributePrefix {
+                name: name.to_string(),
+            }));
         }
         if name.starts_with('.')
             || name.ends_with('.')
@@ -481,19 +526,21 @@ impl SqsEmitter {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
         {
-            return Err(format!("invalid SQS message attribute name '{name}'"));
+            return Err(Report::new(SqsRecordError::InvalidAttributeName {
+                name: name.to_string(),
+            }));
         }
         if !Self::has_valid_message_characters(value) {
-            return Err(format!(
-                "SQS message attribute '{name}' contains a forbidden character"
-            ));
+            return Err(Report::new(SqsRecordError::ForbiddenAttributeCharacter {
+                name: name.to_string(),
+            }));
         }
         Ok(())
     }
 
-    fn validate_group_id(group_id: &str) -> Result<(), String> {
+    fn validate_group_id(group_id: &str) -> SqsRecordResult<()> {
         if group_id.is_empty() || group_id.chars().count() > 128 {
-            return Err("SQS FIFO message group must contain 1 to 128 characters".to_string());
+            return Err(Report::new(SqsRecordError::MessageGroupLength));
         }
         if !group_id.chars().all(|character| {
             character.is_ascii_alphanumeric()
@@ -532,7 +579,7 @@ impl SqsEmitter {
                         | '~'
                 )
         }) {
-            return Err("SQS FIFO message group contains an unsupported character".to_string());
+            return Err(Report::new(SqsRecordError::MessageGroupCharacter));
         }
         Ok(())
     }
@@ -602,7 +649,13 @@ mod tests {
         )
         .expect_err("oversized SQS record should be rejected");
 
-        assert!(error.contains("256 KiB"), "unexpected error: {error}");
+        assert_eq!(
+            *error.current_context(),
+            SqsRecordError::RequestSize {
+                bytes: SQS_MAX_REQUEST_BYTES + 1,
+                maximum: SQS_MAX_REQUEST_BYTES,
+            }
+        );
     }
 
     #[test]
@@ -643,9 +696,12 @@ mod tests {
         )
         .expect_err("one byte past the protocol limit should be rejected");
 
-        assert!(
-            error.contains(&format!("{} bytes", SQS_MAX_REQUEST_BYTES + 1)),
-            "unexpected error: {error}"
+        assert_eq!(
+            *error.current_context(),
+            SqsRecordError::RequestSize {
+                bytes: SQS_MAX_REQUEST_BYTES + 1,
+                maximum: SQS_MAX_REQUEST_BYTES,
+            }
         );
     }
 

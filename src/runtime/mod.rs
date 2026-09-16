@@ -306,13 +306,13 @@ use entity_gate::{
     NodeQuiesceCounters, NodeQuiesceWorkGuard, OutputBufferQuiesceGauge,
 };
 pub(in crate::runtime) use events::RuntimeEvents;
-pub(in crate::runtime) use filter_map::evaluate_sqs_fifo_group_program;
 use filter_map::{
     FilterMapBatchInputs, FilterMapOutcomeInputs, InferencerFilterMapTensors, VmUninitializedInput,
     append_filter_map_nested_value, evaluate_filter_map_on_batch, evaluate_output_branch_program,
     execute_filter_map_program_on_batch, expression_reads_sensitive_source,
     plan_emitter_filter_map_batch, plan_filter_map_messages,
 };
+pub(in crate::runtime) use filter_map::{SqsMessageGroupError, evaluate_sqs_fifo_group_program};
 use force_flush::{DomainForceFlush, DomainForceFlushCompletion, DomainForceFlushParticipant};
 use generator::{GeneratorTaskRouteSpec, GeneratorTaskSpec};
 use http_client::HttpClientConfig;

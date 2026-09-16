@@ -1,10 +1,30 @@
 use std::sync::Arc;
 
+use error_stack::{Report, ResultExt as _};
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+use thiserror::Error;
 use tracing::warn;
 
 use super::client_config::{client_identity_pem, client_tls_paths, read_tls_file};
+
+#[derive(Debug, Error)]
+pub(in crate::runtime) enum TlsClientConfigError {
+    #[error("failed to read TLS CA certificate '{path}'")]
+    ReadCaCertificate { path: std::path::PathBuf },
+    #[error("failed to read TLS client identity")]
+    ReadClientIdentity,
+    #[error("failed to parse TLS CA certificate '{path}'")]
+    ParseCaCertificate { path: std::path::PathBuf },
+    #[error("failed to add TLS CA certificate '{path}'")]
+    AddCaCertificate { path: std::path::PathBuf },
+    #[error("failed to parse TLS client certificate chain")]
+    ParseClientCertificate,
+    #[error("failed to parse TLS client private key")]
+    ParseClientKey,
+    #[error("failed to configure TLS client certificate")]
+    ConfigureClientCertificate,
+}
 
 pub(in crate::runtime) struct RustlsClientConfigSource<'a> {
     entries: &'a [nervix_models::ClientConfigEntry],
@@ -15,7 +35,9 @@ impl<'a> RustlsClientConfigSource<'a> {
         Self { entries }
     }
 
-    pub(in crate::runtime) fn build(&self) -> Result<Option<Arc<RustlsClientConfig>>, String> {
+    pub(in crate::runtime) fn build(
+        &self,
+    ) -> Result<Option<Arc<RustlsClientConfig>>, Report<TlsClientConfigError>> {
         let tls = client_tls_paths(self.entries);
         if tls.is_empty() {
             return Ok(None);
@@ -26,47 +48,59 @@ impl<'a> RustlsClientConfigSource<'a> {
 
     pub(in crate::runtime) fn build_with_default_roots(
         &self,
-    ) -> Result<Arc<RustlsClientConfig>, String> {
+    ) -> Result<Arc<RustlsClientConfig>, Report<TlsClientConfigError>> {
         self.build_config(client_tls_paths(self.entries))
     }
 
     fn build_config(
         &self,
         tls: super::client_config::ClientTlsPaths,
-    ) -> Result<Arc<RustlsClientConfig>, String> {
+    ) -> Result<Arc<RustlsClientConfig>, Report<TlsClientConfigError>> {
         nervix_interconnect::install_rustls_crypto_provider();
 
         let mut roots = Self::root_store_with_default_roots();
         if let Some(ca_file) = tls.ca_file.as_ref() {
-            let ca_pem = read_tls_file(ca_file, "TLS CA certificate")?;
+            let ca_pem = read_tls_file(ca_file, "TLS CA certificate").change_context(
+                TlsClientConfigError::ReadCaCertificate {
+                    path: ca_file.clone(),
+                },
+            )?;
             for cert in CertificateDer::pem_slice_iter(&ca_pem) {
                 let cert = cert.map_err(|source| {
-                    format!(
-                        "failed to parse TLS CA certificate '{}': {source}",
-                        ca_file.display()
-                    )
+                    Report::new(TlsClientConfigError::ParseCaCertificate {
+                        path: ca_file.clone(),
+                    })
+                    .attach_printable(source.to_string())
                 })?;
                 roots.add(cert).map_err(|source| {
-                    format!(
-                        "failed to add TLS CA certificate '{}': {source}",
-                        ca_file.display()
-                    )
+                    Report::new(TlsClientConfigError::AddCaCertificate {
+                        path: ca_file.clone(),
+                    })
+                    .attach_printable(source.to_string())
                 })?;
             }
         }
 
         let builder = RustlsClientConfig::builder().with_root_certificates(roots);
-        let client_config = if let Some(identity_pem) = client_identity_pem(&tls)? {
+        let client_config = if let Some(identity_pem) =
+            client_identity_pem(&tls).change_context(TlsClientConfigError::ReadClientIdentity)?
+        {
             let certs = CertificateDer::pem_slice_iter(&identity_pem)
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|source| {
-                    format!("failed to parse TLS client certificate chain: {source}")
+                    Report::new(TlsClientConfigError::ParseClientCertificate)
+                        .attach_printable(source.to_string())
                 })?;
-            let key = PrivateKeyDer::from_pem_slice(&identity_pem)
-                .map_err(|source| format!("failed to parse TLS client private key: {source}"))?;
+            let key = PrivateKeyDer::from_pem_slice(&identity_pem).map_err(|source| {
+                Report::new(TlsClientConfigError::ParseClientKey)
+                    .attach_printable(source.to_string())
+            })?;
             builder
                 .with_client_auth_cert(certs, key)
-                .map_err(|source| format!("failed to configure TLS client certificate: {source}"))?
+                .map_err(|source| {
+                    Report::new(TlsClientConfigError::ConfigureClientCertificate)
+                        .attach_printable(source.to_string())
+                })?
         } else {
             builder.with_no_client_auth()
         };

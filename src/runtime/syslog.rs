@@ -285,7 +285,9 @@ impl SyslogClientConfig {
     ) -> Result<StdArc<rustls::ClientConfig>, SyslogConfigError> {
         RustlsClientConfigSource::new(&self.entries)
             .build_with_default_roots()
-            .map_err(|reason| SyslogConfigError::TlsMaterial { reason })
+            .map_err(|error| SyslogConfigError::TlsMaterial {
+                reason: error.to_string(),
+            })
     }
 
     pub(super) fn tls_server_config(&self) -> Result<StdArc<ServerConfig>, SyslogConfigError> {
@@ -305,10 +307,18 @@ impl SyslogClientConfig {
                 direction: "ingestor",
                 key: "tls_key_file",
             })?;
-        let cert_pem = read_tls_file(cert_file, "Syslog TLS server certificate")
-            .map_err(|reason| SyslogConfigError::TlsMaterial { reason })?;
-        let key_pem = read_tls_file(key_file, "Syslog TLS server private key")
-            .map_err(|reason| SyslogConfigError::TlsMaterial { reason })?;
+        let cert_pem =
+            read_tls_file(cert_file, "Syslog TLS server certificate").map_err(|error| {
+                SyslogConfigError::TlsMaterial {
+                    reason: error.to_string(),
+                }
+            })?;
+        let key_pem =
+            read_tls_file(key_file, "Syslog TLS server private key").map_err(|error| {
+                SyslogConfigError::TlsMaterial {
+                    reason: error.to_string(),
+                }
+            })?;
         let certs = CertificateDer::pem_slice_iter(&cert_pem)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| SyslogConfigError::TlsMaterial {
@@ -335,8 +345,12 @@ impl SyslogClientConfig {
         })?;
         let builder = ServerConfig::builder();
         let config = if let Some(ca_file) = tls.ca_file.as_ref() {
-            let ca_pem = read_tls_file(ca_file, "Syslog TLS client CA certificate")
-                .map_err(|reason| SyslogConfigError::TlsMaterial { reason })?;
+            let ca_pem =
+                read_tls_file(ca_file, "Syslog TLS client CA certificate").map_err(|error| {
+                    SyslogConfigError::TlsMaterial {
+                        reason: error.to_string(),
+                    }
+                })?;
             let mut roots = RootCertStore::empty();
             for cert in CertificateDer::pem_slice_iter(&ca_pem) {
                 let cert = cert.map_err(|error| SyslogConfigError::TlsMaterial {

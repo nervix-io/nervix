@@ -1,11 +1,27 @@
 use std::time::Duration;
 
+use error_stack::{Report, ResultExt as _};
 use reqwest::{Certificate as HttpCertificate, Client as HttpClient, Identity as HttpIdentity};
+use thiserror::Error;
 
 use super::{
     client_config::{client_identity_pem, client_tls_paths, read_tls_file},
     optional_client_config_value,
 };
+
+#[derive(Debug, Error)]
+pub(in crate::runtime) enum HttpClientConfigError {
+    #[error("invalid {label} timeout_ms")]
+    InvalidTimeout { label: &'static str },
+    #[error("failed to read {label} TLS configuration")]
+    ReadTls { label: &'static str },
+    #[error("failed to parse {label} TLS CA certificate")]
+    ParseCaCertificate { label: &'static str },
+    #[error("failed to parse {label} TLS client identity")]
+    ParseClientIdentity { label: &'static str },
+    #[error("failed to build {label} HTTP client")]
+    Build { label: &'static str },
+}
 
 pub(in crate::runtime) struct HttpClientConfig<'a> {
     entries: &'a [nervix_models::ClientConfigEntry],
@@ -20,32 +36,42 @@ impl<'a> HttpClientConfig<'a> {
         Self { entries, label }
     }
 
-    pub(in crate::runtime) fn build(&self) -> Result<HttpClient, String> {
-        self.builder()?.build().map_err(|source| source.to_string())
+    pub(in crate::runtime) fn build(&self) -> Result<HttpClient, Report<HttpClientConfigError>> {
+        self.builder()?.build().map_err(|source| {
+            Report::new(HttpClientConfigError::Build { label: self.label })
+                .attach_printable(source.to_string())
+        })
     }
 
-    fn builder(&self) -> Result<reqwest::ClientBuilder, String> {
+    fn builder(&self) -> Result<reqwest::ClientBuilder, Report<HttpClientConfigError>> {
         let mut builder = HttpClient::builder();
         if let Some(timeout_ms) = optional_client_config_value(self.entries, "timeout_ms") {
-            let timeout_ms = timeout_ms
-                .parse::<u64>()
-                .map_err(|_| format!("invalid {} timeout_ms '{timeout_ms}'", self.label))?;
+            let timeout_ms = timeout_ms.parse::<u64>().map_err(|source| {
+                Report::new(HttpClientConfigError::InvalidTimeout { label: self.label })
+                    .attach_printable(source.to_string())
+            })?;
             builder = builder.timeout(Duration::from_millis(timeout_ms));
         }
 
         let tls = client_tls_paths(self.entries);
         if let Some(ca_file) = tls.ca_file.as_ref() {
-            let ca_pem = read_tls_file(ca_file, "TLS CA certificate")?;
-            builder = builder.add_root_certificate(
-                HttpCertificate::from_pem(&ca_pem)
-                    .map_err(|source| format!("failed to parse TLS CA certificate: {source}"))?,
-            );
+            let ca_pem = read_tls_file(ca_file, "TLS CA certificate")
+                .change_context(HttpClientConfigError::ReadTls { label: self.label })?;
+            builder = builder.add_root_certificate(HttpCertificate::from_pem(&ca_pem).map_err(
+                |source| {
+                    Report::new(HttpClientConfigError::ParseCaCertificate { label: self.label })
+                        .attach_printable(source.to_string())
+                },
+            )?);
         }
-        if let Some(identity_pem) = client_identity_pem(&tls)? {
-            builder = builder.identity(
-                HttpIdentity::from_pem(&identity_pem)
-                    .map_err(|source| format!("failed to parse TLS client identity: {source}"))?,
-            );
+        if let Some(identity_pem) = client_identity_pem(&tls)
+            .change_context(HttpClientConfigError::ReadTls { label: self.label })?
+        {
+            builder =
+                builder.identity(HttpIdentity::from_pem(&identity_pem).map_err(|source| {
+                    Report::new(HttpClientConfigError::ParseClientIdentity { label: self.label })
+                        .attach_printable(source.to_string())
+                })?);
         }
         Ok(builder)
     }
@@ -79,7 +105,7 @@ mod tests {
         )
         .build()
         .expect_err("invalid timeout");
-        assert!(err.contains("invalid HTTP timeout_ms 'oops'"));
+        assert!(err.to_string().contains("invalid HTTP timeout_ms"));
 
         let err = ingestors::prometheus::PrometheusIngestor::client_from_config_for_test(
             &CreateClientPrometheus {
@@ -93,6 +119,6 @@ mod tests {
             .config,
         )
         .expect_err("invalid prometheus timeout");
-        assert!(err.contains("Prometheus timeout_ms"));
+        assert!(err.to_string().contains("Prometheus timeout_ms"));
     }
 }

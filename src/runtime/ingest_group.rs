@@ -238,7 +238,7 @@ impl PendingIngestGroup {
                 .pop_front()
                 .verified("the check above admits at most one metadata row per decoded payload");
             for _ in 0..messages {
-                builders.append(row)?;
+                builders.append(row).map_err(|error| error.to_string())?;
             }
             payload_acks.split_into(messages, &mut self.acks);
             self.ingested_at
@@ -266,7 +266,8 @@ impl PendingIngestGroup {
         let ingest_metadata = self
             .metadata
             .ok_or_else(|| "ingest group closed without opening its metadata builders".to_string())?
-            .finish()?;
+            .finish()
+            .map_err(|error| error.to_string())?;
         if ingest_metadata.len() != row_count {
             return Err(format!(
                 "ingest group has {row_count} records and {} ingest metadata rows",
@@ -343,7 +344,10 @@ impl IngestGroupRows {
                 .enumerate()
                 .filter_map(|(row, metadata)| selected(row).then_some(metadata))
                 .collect(),
-            ingest_metadata: self.ingest_metadata.select(keep)?,
+            ingest_metadata: self
+                .ingest_metadata
+                .select(keep)
+                .map_err(|error| error.to_string())?,
             acks: self
                 .acks
                 .into_iter()
@@ -1514,7 +1518,8 @@ impl Runtime {
                 topic,
                 state.read(),
                 missing_partition_timestamp,
-            )?
+            )
+            .map_err(|error| error.to_string())?
         } else {
             let timestamp = match &last_start {
                 nervix_models::DomainStartPoint::Now { .. } => {
@@ -1526,7 +1531,8 @@ impl Runtime {
                 nervix_models::DomainStartPoint::At { timestamp, .. } => *timestamp,
                 nervix_models::DomainStartPoint::Resume => unreachable!("handled above"),
             };
-            KafkaIngestor::offsets_by_timestamp(consumer, topic, timestamp)?
+            KafkaIngestor::offsets_by_timestamp(consumer, topic, timestamp)
+                .map_err(|error| error.to_string())?
         };
         let has_assignment = KafkaIngestor::assign_offsets_for_instance(
             consumer,
@@ -1534,14 +1540,16 @@ impl Runtime {
             &offsets,
             scheduled_partition_schedule.as_ref(),
             instance_idx,
-        )?;
+        )
+        .map_err(|error| error.to_string())?;
 
         if let nervix_models::DomainStartPoint::Resume = &last_start {
             return Ok((start_version, has_assignment));
         }
 
         let concrete_offsets =
-            KafkaIngestor::concrete_next_offsets_from_assignment(consumer, topic, &offsets)?;
+            KafkaIngestor::concrete_next_offsets_from_assignment(consumer, topic, &offsets)
+                .map_err(|error| error.to_string())?;
         self.reset_domain_kafka_offsets(state, concrete_offsets)
             .await
             .map_err(|error| error.to_string())?;

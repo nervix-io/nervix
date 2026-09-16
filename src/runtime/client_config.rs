@@ -4,6 +4,27 @@ use upon::Engine as TemplateEngine;
 
 use super::*;
 
+pub(super) type ClientConfigResult<T> = Result<T, Report<ClientConfigError>>;
+
+#[derive(Debug, Error)]
+pub(super) enum ClientConfigError {
+    #[error("failed to compile client config template for key '{key}'")]
+    CompileTemplate { key: String },
+    #[error("failed to render client config template for key '{key}'")]
+    RenderTemplate { key: String },
+    #[error("TLS client authentication requires both 'tls_cert_file' and 'tls_key_file'")]
+    IncompleteTlsIdentity,
+    #[error("failed to read {label} '{path}'")]
+    ReadTlsFile { label: String, path: PathBuf },
+    #[error("missing {connector} client config key '{key}'")]
+    MissingRequired {
+        connector: &'static str,
+        key: String,
+    },
+    #[error("invalid boolean client config key '{key}' value '{value}'")]
+    InvalidBoolean { key: String, value: String },
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct ClientTlsPaths {
     pub(super) ca_file: Option<PathBuf>,
@@ -22,21 +43,21 @@ pub(super) fn render_client_config_template<T: serde::Serialize>(
     key: &str,
     value: &str,
     context: &T,
-) -> Result<String, String> {
+) -> ClientConfigResult<String> {
     let template = template_engine.compile(value).map_err(|source| {
-        format!(
-            "failed to compile client config template for '{}={value}': {source:#}",
-            key
-        )
+        Report::new(ClientConfigError::CompileTemplate {
+            key: key.to_string(),
+        })
+        .attach_printable(source.to_string())
     })?;
     template
         .render(template_engine, context)
         .to_string()
         .map_err(|source| {
-            format!(
-                "failed to render client config template for '{}={value}': {source:#}",
-                key
-            )
+            Report::new(ClientConfigError::RenderTemplate {
+                key: key.to_string(),
+            })
+            .attach_printable(source.to_string())
         })
 }
 
@@ -48,7 +69,7 @@ pub(super) fn client_tls_paths(config: &[nervix_models::ClientConfigEntry]) -> C
     }
 }
 
-pub(super) fn client_identity_pem(tls: &ClientTlsPaths) -> Result<Option<Vec<u8>>, String> {
+pub(super) fn client_identity_pem(tls: &ClientTlsPaths) -> ClientConfigResult<Option<Vec<u8>>> {
     match (&tls.cert_file, &tls.key_file) {
         (Some(cert_file), Some(key_file)) => {
             let mut pem = read_tls_file(cert_file, "TLS certificate")?;
@@ -56,16 +77,18 @@ pub(super) fn client_identity_pem(tls: &ClientTlsPaths) -> Result<Option<Vec<u8>
             Ok(Some(pem))
         }
         (None, None) => Ok(None),
-        _ => Err(
-            "TLS client authentication requires both 'tls_cert_file' and 'tls_key_file'"
-                .to_string(),
-        ),
+        _ => Err(Report::new(ClientConfigError::IncompleteTlsIdentity)),
     }
 }
 
-pub(super) fn read_tls_file(path: &PathBuf, label: &str) -> Result<Vec<u8>, String> {
-    fs::read(path)
-        .map_err(|source| format!("failed to read {label} '{}': {source}", path.display()))
+pub(super) fn read_tls_file(path: &PathBuf, label: &str) -> ClientConfigResult<Vec<u8>> {
+    fs::read(path).map_err(|source| {
+        Report::new(ClientConfigError::ReadTlsFile {
+            label: label.to_string(),
+            path: path.clone(),
+        })
+        .attach_printable(source.to_string())
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -101,14 +124,17 @@ pub(super) fn client_config_entries<'a>(
 pub(super) fn client_config_value(
     config: &[nervix_models::ClientConfigEntry],
     key: &str,
-    missing_message: impl FnOnce() -> String,
-) -> Result<String, String> {
+    connector: &'static str,
+) -> ClientConfigResult<String> {
     let entry = config
         .iter()
         .find(|entry| entry.key.eq_ignore_ascii_case(key));
     match entry {
         Some(entry) => Ok(entry.value.clone()),
-        None => Err(missing_message()),
+        None => Err(Report::new(ClientConfigError::MissingRequired {
+            connector,
+            key: key.to_string(),
+        })),
     }
 }
 
@@ -125,7 +151,7 @@ pub(super) fn optional_client_config_value<'a>(
 pub(super) fn optional_bool_client_config_value(
     config: &[nervix_models::ClientConfigEntry],
     key: &str,
-) -> Result<Option<bool>, String> {
+) -> ClientConfigResult<Option<bool>> {
     let Some(value) = optional_client_config_value(config, key) else {
         return Ok(None);
     };
@@ -135,9 +161,10 @@ pub(super) fn optional_bool_client_config_value(
     } else if value.eq_ignore_ascii_case("false") {
         Ok(Some(false))
     } else {
-        Err(format!(
-            "invalid boolean client config key '{key}' value '{value}'"
-        ))
+        Err(Report::new(ClientConfigError::InvalidBoolean {
+            key: key.to_string(),
+            value: value.to_string(),
+        }))
     }
 }
 
@@ -302,6 +329,7 @@ mod tests {
                 .config
             )
             .expect_err("missing zeromq addr")
+            .to_string()
             .contains("missing ZeroMQ client config key 'addr'")
         );
         assert!(
@@ -314,6 +342,7 @@ mod tests {
                 .config
             )
             .expect_err("missing http endpoint")
+            .to_string()
             .contains("missing HTTP client config key 'endpoint'")
         );
         assert!(
@@ -327,6 +356,7 @@ mod tests {
                 .config,
             )
             .expect_err("missing websocket endpoint")
+            .to_string()
             .contains("missing WebSockets client config key 'endpoint'")
         );
         assert!(
@@ -339,6 +369,7 @@ mod tests {
                 .config
             )
             .expect_err("missing prometheus addr")
+            .to_string()
             .contains("missing Prometheus client config key 'addr'")
         );
     }

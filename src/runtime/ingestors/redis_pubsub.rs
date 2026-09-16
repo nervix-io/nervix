@@ -5,12 +5,23 @@
 //! - **Depends on.** Typed Redis plans, connector clients and ingestor runtime admission.
 //! - **Must not know.** NSPL parsing, registry validation or placement computation.
 
+use error_stack::ResultExt as _;
 use redis::{Client as RedisClient, ClientTlsConfig, TlsCertificates as RedisTlsCertificates};
 
 use super::super::*;
 use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct RedisPubSubIngestor;
+
+#[derive(Debug, Error)]
+pub(in crate::runtime) enum RedisPubSubIngestorError {
+    #[error("invalid Redis client configuration")]
+    ClientConfig,
+    #[error("Redis TLS client authentication requires both 'tls_cert_file' and 'tls_key_file'")]
+    IncompleteTlsIdentity,
+    #[error("failed to build Redis client")]
+    BuildClient,
+}
 
 impl RedisPubSubIngestor {
     pub(in crate::runtime) async fn start(
@@ -40,14 +51,14 @@ impl RedisPubSubIngestor {
                 ingestor: ingestor.name.as_str().to_string(),
                 reason,
             })?;
-        let addr = client_config_value(&resolved_client.entries, "addr", || {
-            "missing Redis client config key 'addr'".to_string()
-        })
-        .map_err(|reason| RuntimeError::StartIngestor {
-            domain: domain.as_str().to_string(),
-            ingestor: ingestor.name.as_str().to_string(),
-            reason,
-        })?;
+        let addr =
+            client_config_value(&resolved_client.entries, "addr", "Redis").map_err(|error| {
+                RuntimeError::StartIngestor {
+                    domain: domain.as_str().to_string(),
+                    ingestor: ingestor.name.as_str().to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
         let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
         let branched_runtime = runtime.start_branched_ingestor_runtime(
             domain,
@@ -384,9 +395,11 @@ impl RedisPubSubIngestor {
     fn client_from_config(
         addr: &str,
         config: &[nervix_models::ClientConfigEntry],
-    ) -> Result<RedisClient, String> {
+    ) -> Result<RedisClient, Report<RedisPubSubIngestorError>> {
         let tls = client_tls_paths(config);
-        if ServiceUrl::new(addr, "Redis addr").has_scheme("rediss")?
+        if ServiceUrl::new(addr, "Redis addr")
+            .has_scheme("rediss")
+            .change_context(RedisPubSubIngestorError::ClientConfig)?
             && (tls.ca_file.is_some() || tls.cert_file.is_some() || tls.key_file.is_some())
         {
             RedisClient::build_with_tls(
@@ -394,25 +407,36 @@ impl RedisPubSubIngestor {
                 RedisTlsCertificates {
                     client_tls: match (&tls.cert_file, &tls.key_file) {
                         (Some(cert_file), Some(key_file)) => Some(ClientTlsConfig {
-                            client_cert: read_tls_file(cert_file, "TLS certificate")?,
-                            client_key: read_tls_file(key_file, "TLS private key")?,
+                            client_cert: read_tls_file(cert_file, "TLS certificate")
+                                .change_context(RedisPubSubIngestorError::ClientConfig)?,
+                            client_key: read_tls_file(key_file, "TLS private key")
+                                .change_context(RedisPubSubIngestorError::ClientConfig)?,
                         }),
                         (None, None) => None,
                         _ => {
-                            return Err("Redis TLS client authentication requires both \
-                                        'tls_cert_file' and 'tls_key_file'"
-                                .to_string());
+                            return Err(Report::new(
+                                RedisPubSubIngestorError::IncompleteTlsIdentity,
+                            ));
                         }
                     },
                     root_cert: match tls.ca_file.as_ref() {
-                        Some(ca_file) => Some(read_tls_file(ca_file, "TLS CA certificate")?),
+                        Some(ca_file) => Some(
+                            read_tls_file(ca_file, "TLS CA certificate")
+                                .change_context(RedisPubSubIngestorError::ClientConfig)?,
+                        ),
                         None => None,
                     },
                 },
             )
-            .map_err(|source| source.to_string())
+            .map_err(|source| {
+                Report::new(RedisPubSubIngestorError::BuildClient)
+                    .attach_printable(source.to_string())
+            })
         } else {
-            RedisClient::open(addr).map_err(|source| source.to_string())
+            RedisClient::open(addr).map_err(|source| {
+                Report::new(RedisPubSubIngestorError::BuildClient)
+                    .attach_printable(source.to_string())
+            })
         }
     }
 }

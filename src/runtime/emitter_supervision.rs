@@ -1,5 +1,19 @@
 use super::*;
 
+pub(super) type EmitterReconfigureResult<T> = Result<T, Report<EmitterReconfigureError>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub(super) enum EmitterReconfigureError {
+    #[error("scheduled emitter task timed out accepting reconfiguration")]
+    AcceptTimeout,
+    #[error("scheduled emitter task is unavailable for reconfiguration")]
+    Unavailable,
+    #[error("scheduled emitter task timed out reconfiguring")]
+    ResponseTimeout,
+    #[error("scheduled emitter task dropped its reconfiguration response")]
+    ResponseDropped,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum EmitterRetryKind {
     Infrastructure,
@@ -29,7 +43,7 @@ pub(super) enum EmitterTaskCommand {
     },
     Stop {
         deadline: Instant,
-        response: oneshot::Sender<Result<(), String>>,
+        response: oneshot::Sender<emitters::EmitterRuntimeResult<()>>,
     },
 }
 
@@ -91,19 +105,19 @@ impl ScheduledEmitterTask {
     pub(super) async fn reconfigure_via(
         commands: &mpsc::Sender<EmitterTaskCommand>,
         config: Box<CreateEmitter>,
-    ) -> Result<(), String> {
+    ) -> EmitterReconfigureResult<()> {
         let (response, receiver) = oneshot::channel();
         tokio::time::timeout(
             PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE,
             commands.send(EmitterTaskCommand::Reconfigure { config, response }),
         )
         .await
-        .map_err(|_| "scheduled emitter task timed out accepting reconfiguration".to_string())?
-        .map_err(|_| "scheduled emitter task is unavailable for reconfiguration".to_string())?;
+        .map_err(|_| Report::new(EmitterReconfigureError::AcceptTimeout))?
+        .map_err(|_| Report::new(EmitterReconfigureError::Unavailable))?;
         tokio::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, receiver)
             .await
-            .map_err(|_| "scheduled emitter task timed out reconfiguring".to_string())?
-            .map_err(|_| "scheduled emitter task dropped its reconfiguration response".to_string())
+            .map_err(|_| Report::new(EmitterReconfigureError::ResponseTimeout))?
+            .map_err(|_| Report::new(EmitterReconfigureError::ResponseDropped))
     }
 
     pub(super) async fn stop(
@@ -147,9 +161,12 @@ impl ScheduledEmitterTask {
                 ));
             }
         };
-        if let Err(reason) = response {
+        if let Err(error) = response {
             clear_emitter_stop_signal(&self.stop_signal, deadline);
-            return Err(ScheduledEmitterStopError::recoverable(reason, self));
+            return Err(ScheduledEmitterStopError::recoverable(
+                emitters::emitter_error_message(&error),
+                self,
+            ));
         }
         match tokio::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, &mut self.task).await {
             Ok(Ok(())) => Ok(()),
@@ -406,7 +423,8 @@ mod tests {
             let observed = Instant::now();
             assert!(deadline > started);
             assert!(deadline <= observed + grace);
-            let _ = response.send(Err("transport drain failed".to_string()));
+            let _ = response.send(Err(Report::new(emitters::EmitterRuntimeError::FinalFlush)
+                .attach_printable("transport drain failed")));
 
             let Some(EmitterTaskCommand::Stop { response, .. }) = command_rx.recv().await else {
                 panic!("expected the retried emitter stop command");
