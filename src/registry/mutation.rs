@@ -12,9 +12,10 @@ use nervix_models::{
     AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction, AlterPlacement,
     AlterPlacementOperation, AlterReingestor, AlterRelay, AlterReorderer, AlterSchema,
     AlterWireSchema, AvroType, CborType, DomainName, DropModel, JsonType, Model, ModelChangeAspect,
-    ModelIndex, ModelKind, NodeRef, QuiesceLevel,
+    ModelIndex, ModelKind, NodeRef, QuiesceLevel, Statement,
 };
 use nervix_recovery::Discarded;
+use thiserror::Error;
 
 use crate::registry::{
     domain_state::DomainState,
@@ -38,6 +39,36 @@ pub(crate) enum RegistryMutation {
     AlterGenerator(AlterGenerator),
     AlterPlacement(AlterPlacement),
     Drop(DropModel),
+}
+
+#[derive(Debug, Error)]
+#[error("the statement is not a model mutation")]
+pub(crate) struct RegistryMutationConversionError;
+
+impl TryFrom<&Statement> for RegistryMutation {
+    type Error = RegistryMutationConversionError;
+
+    fn try_from(statement: &Statement) -> Result<Self, Self::Error> {
+        let mutation = match statement {
+            Statement::Create(create) => Self::Create(create.body.clone()),
+            Statement::AlterSchema(alter) => Self::AlterSchema(alter.clone()),
+            Statement::AlterWireJsonSchema(alter) => Self::AlterWireJsonSchema(alter.clone()),
+            Statement::AlterWireCborSchema(alter) => Self::AlterWireCborSchema(alter.clone()),
+            Statement::AlterWireAvroSchema(alter) => Self::AlterWireAvroSchema(alter.clone()),
+            Statement::AlterRelay(alter) => Self::AlterRelay(alter.clone()),
+            Statement::AlterJunction(alter) => Self::AlterJunction(alter.clone()),
+            Statement::AlterDeduplicator(alter) => Self::AlterDeduplicator(alter.clone()),
+            Statement::AlterReorderer(alter) => Self::AlterReorderer(alter.clone()),
+            Statement::AlterEmitter(alter) => Self::AlterEmitter(alter.clone()),
+            Statement::AlterIngestor(alter) => Self::AlterIngestor(alter.clone()),
+            Statement::AlterReingestor(alter) => Self::AlterReingestor(alter.clone()),
+            Statement::AlterGenerator(alter) => Self::AlterGenerator(alter.clone()),
+            Statement::AlterPlacement(alter) => Self::AlterPlacement(alter.clone()),
+            Statement::Drop(drop) => Self::Drop(drop.clone()),
+            _ => return Err(RegistryMutationConversionError),
+        };
+        Ok(mutation)
+    }
 }
 
 impl RegistryMutation {
@@ -222,16 +253,17 @@ pub(crate) struct PlannedMutations {
 #[derive(Debug, Clone)]
 pub(crate) struct TransactionMutationPreflight {
     pub(in crate::registry) planned: Option<PlannedMutations>,
-    pub(in crate::registry) mutation_quiesce_levels: Vec<QuiesceLevel>,
+    pub(in crate::registry) candidate_models: ModelIndex,
+    pub(in crate::registry) incomplete_reason: Option<String>,
 }
 
 impl TransactionMutationPreflight {
-    pub(crate) fn planned(&self) -> Option<&PlannedMutations> {
-        self.planned.as_ref()
+    pub(crate) fn candidate_models(&self) -> &ModelIndex {
+        &self.candidate_models
     }
 
-    pub(crate) fn mutation_quiesce_levels(&self) -> &[QuiesceLevel] {
-        &self.mutation_quiesce_levels
+    pub(crate) fn incomplete_reason(&self) -> Option<&str> {
+        self.incomplete_reason.as_deref()
     }
 }
 
@@ -352,17 +384,5 @@ pub(in crate::registry) fn classify_quiesce(
     QuiescePlan {
         level,
         affected_entities,
-    }
-}
-
-pub(in crate::registry) fn classify_quiesce_level(
-    base: Option<&Model>,
-    candidate: Option<&Model>,
-) -> QuiesceLevel {
-    match (base, candidate) {
-        (Some(base), Some(candidate)) => base.change_aspects_against(candidate).quiesce_level(),
-        (None, Some(_)) => ModelChangeAspect::EntityCreated.quiesce_level(),
-        (Some(_), None) => ModelChangeAspect::EntityDropped.quiesce_level(),
-        (None, None) => QuiesceLevel::Dynamic,
     }
 }
