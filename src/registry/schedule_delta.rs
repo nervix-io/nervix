@@ -12,6 +12,8 @@ use nervix_models::{
 };
 use sorted_vec::SortedSet;
 
+use super::graph::is_schedulable_model;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ScheduleDelta {
     Unchanged,
@@ -25,11 +27,22 @@ pub(crate) enum ScheduleDelta {
 }
 
 impl ScheduleDelta {
+    pub(crate) fn between(
+        existing: Option<&DomainSchedule>,
+        desired: Option<&DomainSchedule>,
+    ) -> Self {
+        match (existing, desired) {
+            (Some(existing), Some(desired)) => Self::classify(existing, desired),
+            (None, None) => Self::Unchanged,
+            (Some(_), None) | (None, Some(_)) => Self::Rebuild,
+        }
+    }
+
     pub(crate) fn classify(existing: &DomainSchedule, desired: &DomainSchedule) -> Self {
         if existing == desired {
             return Self::Unchanged;
         }
-        if existing.domain != desired.domain || existing.nodes.len() != desired.nodes.len() {
+        if existing.domain != desired.domain {
             return Self::Rebuild;
         }
 
@@ -38,7 +51,10 @@ impl ScheduleDelta {
         let mut reassignments = Vec::new();
         for (identity, desired_node) in &desired.nodes {
             let Some(existing_node) = existing.nodes.get(identity) else {
-                return Self::Rebuild;
+                if is_schedulable_model(desired_node.config.as_ref()) {
+                    return Self::Rebuild;
+                }
+                continue;
             };
             if !existing_node.has_same_assignment_as(desired_node) {
                 reassignments.push(desired_node.identity());
@@ -82,6 +98,12 @@ impl ScheduleDelta {
                 QuiesceLevel::DomainPause => return Self::Rebuild,
             }
         }
+        if existing.nodes.iter().any(|(identity, existing_node)| {
+            !desired.nodes.contains_key(identity)
+                && is_schedulable_model(existing_node.config.as_ref())
+        }) {
+            return Self::Rebuild;
+        }
 
         if entities.is_empty() && reassignments.is_empty() {
             // The schedules still differ somewhere the runtime does not execute, such as a
@@ -93,6 +115,26 @@ impl ScheduleDelta {
             reassignments: SortedSet::from_unsorted(reassignments).into_vec(),
             dynamic_updates: updates,
         }
+    }
+
+    pub(crate) const fn quiesce_level(&self) -> QuiesceLevel {
+        match self {
+            Self::Unchanged | Self::Dynamic(_) => QuiesceLevel::Dynamic,
+            Self::EntitySwap { .. } => QuiesceLevel::EntityPause,
+            Self::Rebuild => QuiesceLevel::DomainPause,
+        }
+    }
+
+    pub(crate) fn entity_gate_entities(&self) -> Vec<NodeRef> {
+        let Self::EntitySwap {
+            entities,
+            reassignments,
+            ..
+        } = self
+        else {
+            return Vec::new();
+        };
+        SortedSet::from_unsorted(entities.iter().chain(reassignments).cloned().collect()).into_vec()
     }
 
     fn same_schedule_residue(
@@ -192,6 +234,20 @@ mod tests {
             .into_values()
             .next()
             .expect("fixture schedule must contain a node")
+    }
+
+    fn placement_node(policy: PlacementPolicy) -> ScheduledNode {
+        ScheduledNode::new(Model::Placement(
+            CreatePlacement::new(
+                named("keep_local"),
+                vec![named("event_source")],
+                vec![named("events")],
+                policy,
+                Some(nonzero!(1u64)),
+            )
+            .expect("valid placement"),
+        ))
+        .with_schema_fingerprint([1; 32])
     }
 
     fn schedule(capacity: NonZeroUsize) -> DomainSchedule {
@@ -492,20 +548,32 @@ mod tests {
     }
 
     #[test]
+    fn adding_a_placement_only_applies_the_assignments_it_changes() {
+        let existing = ingestor_schedule("ingress_a");
+        let mut desired = ingestor_schedule("ingress_a");
+        desired.nodes[0].primary_node = Some(ClusterNodeName::parse("node-2").expect("valid name"));
+        desired.nodes[0].assigned_nodes =
+            vec![ClusterNodeName::parse("node-2").expect("valid name")];
+        push_scheduled(
+            &mut desired,
+            placement_node(PlacementPolicy::RequireColocation),
+        );
+
+        assert_eq!(
+            ScheduleDelta::classify(&existing, &desired),
+            ScheduleDelta::EntitySwap {
+                entities: Vec::new(),
+                reassignments: vec![NodeRef {
+                    kind: ModelKind::Ingestor,
+                    identifier: named("event_source"),
+                }],
+                dynamic_updates: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
     fn a_placement_policy_change_only_applies_its_reassignments() {
-        let placement_node = |policy: PlacementPolicy| {
-            ScheduledNode::new(Model::Placement(
-                CreatePlacement::new(
-                    named("keep_local"),
-                    vec![named("event_source")],
-                    vec![named("events")],
-                    policy,
-                    Some(nonzero!(1u64)),
-                )
-                .expect("valid placement"),
-            ))
-            .with_schema_fingerprint([1; 32])
-        };
         let mut existing = ingestor_schedule("ingress_a");
         push_scheduled(
             &mut existing,

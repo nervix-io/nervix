@@ -865,7 +865,12 @@ impl Registry {
                 Some(_) => None,
             })
             .collect::<HashMap<_, _>>();
-        let quiesce = classify_quiesce(&current_models, &candidate, &domain_state.graph);
+        let quiesce = classify_quiesce(
+            &current_models,
+            &candidate,
+            &current_state.graph,
+            &domain_state.graph,
+        );
         let is_noop = models_to_persist.is_empty() && drops_in_batch.is_empty();
         let runtime_changes = if is_noop {
             RuntimeChanges {
@@ -889,6 +894,7 @@ impl Registry {
                 batch_size,
                 operation_name: operation_name.to_string(),
                 base_models: current_models,
+                base_graph: current_state.graph.clone(),
                 domain_state,
                 models_to_persist,
                 drops_in_batch,
@@ -1537,7 +1543,7 @@ fn runtime_changes_for_domain(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{collections::BTreeSet, fs};
 
     use nervix_models::{
         AckMode, AlterEmitter, AlterJunction, AlterProcessorOperation, AlterRelay,
@@ -1918,13 +1924,7 @@ mod tests {
             .expect("capacity alter should plan");
         assert!(!capacity.is_noop());
         assert_eq!(capacity.quiesce().level(), QuiesceLevel::Dynamic);
-        assert_eq!(
-            capacity.quiesce().affected_entities(),
-            &[super::NodeRef {
-                kind: ModelKind::Relay,
-                identifier: named("notifications"),
-            }]
-        );
+        assert!(capacity.quiesce().affected_entities().is_empty());
 
         let _ = fs::remove_dir_all(path);
     }
@@ -2126,12 +2126,22 @@ mod tests {
             .expect("referenced codec recreation should plan");
 
         assert_eq!(planned.quiesce().level(), QuiesceLevel::DomainPause);
+        let expected = planned
+            .base_graph()
+            .whole_impact()
+            .nodes
+            .into_iter()
+            .filter(|coverage| coverage.branches.is_some())
+            .map(|coverage| coverage.node)
+            .collect::<BTreeSet<_>>();
         assert_eq!(
-            planned.quiesce().affected_entities(),
-            &[super::NodeRef {
-                kind: ModelKind::Codec,
-                identifier: named("event_codec"),
-            }]
+            planned
+                .quiesce()
+                .affected_entities()
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            expected
         );
 
         let _ = fs::remove_dir_all(path);

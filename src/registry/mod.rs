@@ -26,7 +26,8 @@ mod transaction;
 mod validation;
 
 pub(crate) use entity_gate::{
-    entity_pause_relays_for_schedule, ownership_handoff_relays_for_schedule,
+    EntityGatePlan, entity_pause_relays_for_schedule, gate_boundary,
+    ownership_handoff_relays_for_schedule, scheduled_impact_coverage,
 };
 /// What the decisions layer exposes. Everything else this module and its submodules declare is
 /// `pub(in crate::registry)` or narrower, so the control plane reaches the registry only through
