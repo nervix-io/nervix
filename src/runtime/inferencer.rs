@@ -192,7 +192,8 @@ impl PreparedInvocation {
             .iter()
             .map(|mapping| {
                 let value = batch
-                    .value(message_index, &mapping.tensor)?
+                    .value(message_index, &mapping.tensor)
+                    .map_err(|error| error.to_string())?
                     .ok_or_else(|| {
                         format!(
                             "ONNX input tensor '{}' mapped value is missing",
@@ -223,7 +224,8 @@ impl PreparedInvocation {
                 .iter()
                 .map(|mapping| {
                     let value = batch
-                        .value(message_index, &mapping.tensor)?
+                        .value(message_index, &mapping.tensor)
+                        .map_err(|error| error.to_string())?
                         .ok_or_else(|| {
                             format!(
                                 "ONNX input tensor '{}' mapped value is missing",
@@ -252,15 +254,15 @@ impl PreparedInvocation {
                 let slices = message_indices
                     .iter()
                     .map(|message_index| {
-                        let value =
-                            batch
-                                .value(*message_index, &mapping.tensor)?
-                                .ok_or_else(|| {
-                                    format!(
-                                        "ONNX input tensor '{}' mapped value is missing",
-                                        mapping.tensor
-                                    )
-                                })?;
+                        let value = batch
+                            .value(*message_index, &mapping.tensor)
+                            .map_err(|error| error.to_string())?
+                            .ok_or_else(|| {
+                                format!(
+                                    "ONNX input tensor '{}' mapped value is missing",
+                                    mapping.tensor
+                                )
+                            })?;
                         mapping.schema.tensor_from_runtime_value(&value)
                     })
                     .collect::<Result<Vec<_>, _>>()?;

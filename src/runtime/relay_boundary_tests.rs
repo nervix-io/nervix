@@ -904,6 +904,7 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
     let fault_injection = ConfiguredFaultInjection::default();
     fault_injection.set_branch_instance_expiration_scan_interval(Duration::from_millis(5));
     let runtime = Runtime::with_persistence_and_temp_dir(
+        nervix_execution::Executor::default(),
         None,
         Duration::from_secs(60),
         fault_injection,

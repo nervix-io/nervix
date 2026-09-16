@@ -169,11 +169,14 @@ pub(super) async fn evaluate_filter_map_on_batch(
             &successful_output_rows,
         )?);
         for (output_row, input_row) in successful_input_rows.into_iter().enumerate() {
-            outcomes[input_row] = SingleRecordFilterMapOutcome::Output(RuntimeRow::new(
-                output_batch.clone(),
-                output_row,
-                record_metadata[input_row].clone(),
-            )?);
+            outcomes[input_row] = SingleRecordFilterMapOutcome::Output(
+                RuntimeRow::new(
+                    output_batch.clone(),
+                    output_row,
+                    record_metadata[input_row].clone(),
+                )
+                .map_err(|error| error.to_string())?,
+            );
         }
     }
     Ok(outcomes)
@@ -1069,7 +1072,8 @@ pub(super) async fn evaluate_output_branch_program(
                 false,
                 output_row,
                 field.name(),
-            )?
+            )
+            .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("branch field '{}' is null", field.name()))?;
             let name = FieldName::parse(field.name()).map_err(|error| {
                 format!(

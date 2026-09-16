@@ -1660,7 +1660,7 @@ impl SessionServiceImpl {
         match record {
             Ok(Some(record)) => match record.row_to_json_string(0) {
                 Ok(json) => command_ok(json),
-                Err(message) => command_error(message),
+                Err(message) => command_error(message.to_string()),
             },
             Ok(None) => command_error(format!(
                 "hash map '{}' has no entry for key {}",

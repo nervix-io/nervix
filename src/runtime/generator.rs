@@ -114,7 +114,10 @@ impl GeneratorContextProjection {
         let schema = source.schema();
         let mut snapshot = HashMap::with_capacity(schema.fields().len());
         for field in schema.fields() {
-            if let Some(value) = source.value(0, field.name())? {
+            if let Some(value) = source
+                .value(0, field.name())
+                .map_err(|error| error.to_string())?
+            {
                 snapshot.insert(format!("{}.{}", self.source_namespace, field.name()), value);
             }
         }
@@ -294,6 +297,7 @@ pub(super) async fn execute_generator_program_on_context(
         0,
         RuntimeRecordMetadata::from_ingested_at_watermarks(execution_now, execution_now),
     )
+    .map_err(|error| error.to_string())
     .map(GeneratorProgramOutcome::Output)
 }
 

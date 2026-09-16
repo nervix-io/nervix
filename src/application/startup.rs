@@ -7,13 +7,19 @@
 //! - **Depends on.** The argument definition and the stores it opens.
 //! - **Must not know.** What the configured node goes on to run.
 
-use std::{net::SocketAddr, path::PathBuf, sync::Arc as StdArc};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc as StdArc,
+};
 
 use error_stack::{Report, ResultExt};
 use fjall::Database;
 use nervix_consensus::{Consensus, ConsensusSettings, RaftRetentionPolicy};
+use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_interconnect::{HandlerRegistrationError, Transport};
 use nervix_recovery::Discarded as _;
+use thiserror::Error;
 use triomphe::Arc;
 
 use super::{Application, Args, error, error::AppError, shutdown::ShutdownCoordinator};
@@ -25,8 +31,21 @@ use crate::{
     runtime::Runtime,
 };
 
+const CONSENSUS_DATABASE_DIRECTORY: &str = "consensus";
+const CONSENSUS_KEYSPACE_PREFIX: &str = "raft_";
+const DATABASE_OPEN_RESERVATION_BYTES: u64 = 4096;
+
+#[derive(Debug, Error)]
+enum NodeDatabaseOpenError {
+    #[error("failed to open the node database: {0}")]
+    Open(#[source] fjall::Error),
+    #[error("consensus keyspaces are present in the node database")]
+    ConsensusNotDedicated,
+}
+
 pub(in crate::application) struct ApplicationStartup {
     pub(in crate::application) db: Database,
+    pub(in crate::application) consensus_path: PathBuf,
     /// A `std` reference count because the runtime publishes the same store through `ArcSwap`.
     pub(in crate::application) resource_store: StdArc<ResourceStore>,
     pub(in crate::application) registry: Arc<Registry>,
@@ -36,6 +55,48 @@ pub(in crate::application) struct ApplicationStartup {
 }
 
 impl ApplicationStartup {
+    pub(in crate::application) fn consensus_database_path(db_path: &Path) -> PathBuf {
+        db_path.join(CONSENSUS_DATABASE_DIRECTORY)
+    }
+
+    pub(in crate::application) async fn open_node_database(
+        path: PathBuf,
+        executor: &Executor,
+    ) -> Result<Database, Report<AppError>> {
+        let reservation = executor
+            .reserve(MemoryClass::Management, DATABASE_OPEN_RESERVATION_BYTES)
+            .await
+            .change_context(AppError::OpenRegistry)?;
+        let opened_path = path.clone();
+        let opened = executor
+            .run_storage(StorageClass::Filesystem, reservation, move |_, _| {
+                let db = Database::builder(opened_path)
+                    .open()
+                    .map_err(NodeDatabaseOpenError::Open)?;
+                if db
+                    .list_keyspace_names()
+                    .iter()
+                    .any(|name| name.starts_with(CONSENSUS_KEYSPACE_PREFIX))
+                {
+                    return Err(NodeDatabaseOpenError::ConsensusNotDedicated);
+                }
+                Ok(db)
+            })
+            .await
+            .change_context(AppError::OpenRegistry)?;
+        match opened {
+            Ok(db) => Ok(db),
+            Err(NodeDatabaseOpenError::Open(error)) => {
+                error!(db_path = %path.display(), error = %error, "failed to open node fjall database");
+                Err(Report::new(AppError::OpenRegistry).attach_printable(error))
+            }
+            Err(NodeDatabaseOpenError::ConsensusNotDedicated) => {
+                error!(db_path = %path.display(), "consensus keyspaces found in node fjall database");
+                Err(Report::new(AppError::ConsensusStorageLayout))
+            }
+        }
+    }
+
     pub(in crate::application) async fn open_consensus(
         &self,
         settings: ConsensusSettings,
@@ -44,15 +105,15 @@ impl ApplicationStartup {
         #[cfg(feature = "testing")]
         let node_id = settings.node_id.clone();
         #[cfg(feature = "testing")]
-        let consensus = Consensus::from_database_with_test_probe(
-            self.db.clone(),
+        let consensus = Consensus::open_with_test_probe(
+            &self.consensus_path,
             settings,
             _fault_injection.consensus_test_probe(&node_id),
         )
         .await
         .change_context(AppError::StartConsensus)?;
         #[cfg(not(feature = "testing"))]
-        let consensus = Consensus::from_database(self.db.clone(), settings)
+        let consensus = Consensus::open(&self.consensus_path, settings)
             .await
             .change_context(AppError::StartConsensus)?;
         #[cfg(feature = "testing")]
@@ -259,11 +320,11 @@ mod tests {
     use fjall::Database;
     use nervix_models::ClusterNodeName;
 
-    use super::Application;
+    use super::{Application, ApplicationStartup, CONSENSUS_KEYSPACE_PREFIX};
     use crate::application::test_fixtures::{test_addr, test_tls_files};
 
     #[tokio::test]
-    async fn startup_failure_releases_the_shared_database_before_returning() {
+    async fn startup_failure_releases_the_split_databases_before_returning() {
         let root = tempfile::tempdir().expect("temporary root should be created");
         let db_path = root.path().join("db");
         let listen_addr = test_addr(0);
@@ -302,9 +363,31 @@ mod tests {
             "unexpected startup error: {error:?}"
         );
 
-        tokio::task::spawn_blocking(move || Database::builder(db_path).open())
-            .await
-            .expect("database open task should join")
-            .expect("application startup failure must release the database lock");
+        let (node_keyspaces, consensus_keyspaces) = tokio::task::spawn_blocking(move || {
+            let consensus_path = ApplicationStartup::consensus_database_path(&db_path);
+            let db = Database::builder(db_path).open()?;
+            let consensus_db = Database::builder(consensus_path).open()?;
+            let node_keyspaces = db.list_keyspace_names();
+            let consensus_keyspaces = consensus_db.list_keyspace_names();
+            drop(consensus_db);
+            drop(db);
+            Ok::<_, fjall::Error>((node_keyspaces, consensus_keyspaces))
+        })
+        .await
+        .expect("database open task should join")
+        .expect("application startup failure must release both database locks");
+        assert!(
+            node_keyspaces
+                .iter()
+                .all(|name| !name.starts_with(CONSENSUS_KEYSPACE_PREFIX)),
+            "the node database must not contain consensus keyspaces"
+        );
+        assert_eq!(consensus_keyspaces.len(), 4);
+        assert!(
+            consensus_keyspaces
+                .iter()
+                .all(|name| name.starts_with(CONSENSUS_KEYSPACE_PREFIX)),
+            "the consensus database must contain only consensus keyspaces"
+        );
     }
 }

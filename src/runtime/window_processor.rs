@@ -771,7 +771,11 @@ impl WindowProcessorState {
                         sequence: entry.sequence,
                         timestamp: entry.timestamp,
                         key: BranchKey::to_remote_key(&entry.message.key),
-                        record: entry.message.record.to_remote()?,
+                        record: entry
+                            .message
+                            .record
+                            .to_remote()
+                            .map_err(|error| error.to_string())?,
                         aggregate_inputs: entry
                             .aggregate_inputs
                             .iter()
@@ -813,7 +817,9 @@ impl WindowProcessorState {
                         timestamp: entry.timestamp,
                         message: RelayMessage {
                             key: BranchKey::from_remote_key(entry.key.clone())?,
-                            record: input_schema.runtime_row_from_remote(&entry.record)?,
+                            record: input_schema
+                                .runtime_row_from_remote(&entry.record)
+                                .map_err(|error| error.to_string())?,
                             acks: AckSet::empty(),
                         },
                         aggregate_inputs: entry
@@ -1039,6 +1045,7 @@ pub(super) async fn evaluate_window_aggregate_inputs(
                     };
                     column
                         .nullable_value_at(row)
+                        .map_err(|error| error.to_string())
                         .map(|value| WindowAggregateInput { value })
                 })
                 .collect()
@@ -1254,8 +1261,12 @@ impl VmFunctionInjector for WindowAggregateFunctionInjector {
                 ),
             }
         })?;
-        let array = runtime_value_arrow_array(data_type, Some(&value), row_count)
-            .map_err(|message| nervix_vm::RuntimeError::InvalidBatch { message })?;
+        let array =
+            runtime_value_arrow_array(data_type, Some(&value), row_count).map_err(|message| {
+                nervix_vm::RuntimeError::InvalidBatch {
+                    message: message.to_string(),
+                }
+            })?;
         let output = VmTypedArray::try_from_array_ref(array).map_err(|error| {
             nervix_vm::RuntimeError::InvalidBatch {
                 message: error.to_string(),
@@ -1301,15 +1312,15 @@ pub(super) async fn evaluate_window_aggregate(
                 field.name()
             ));
         };
-        columns.push(runtime_value_arrow_array(
-            field.data_type(),
-            value.as_ref(),
-            1,
-        )?);
+        columns.push(
+            runtime_value_arrow_array(field.data_type(), value.as_ref(), 1)
+                .map_err(|error| error.to_string())?,
+        );
     }
     let batch = RecordBatch::try_new(output_schema.arrow_schema(), columns)
         .map_err(|error| error.to_string())?;
     RuntimeRecordBatch::from_record_batch(output_schema.arrow_schema(), batch)
+        .map_err(|error| error.to_string())
 }
 
 pub(super) fn evaluate_window_aggregate_expr<'a>(
@@ -1354,7 +1365,8 @@ pub(super) fn evaluate_window_aggregate_expr<'a>(
                     false,
                     0,
                     target_field,
-                )?
+                )
+                .map_err(|error| error.to_string())?
                 .ok_or_else(|| format!("window aggregate VM produced null '{target_field}' output"))
             }
             CompiledWindowAggregateExpr::Array { items, fixed_size } => {

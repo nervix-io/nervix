@@ -209,7 +209,12 @@ impl Runtime {
         };
         fields
             .iter()
-            .map(|field| record.row.value_at(field.column_index))
+            .map(|field| {
+                record
+                    .row
+                    .value_at(field.column_index)
+                    .map_err(|error| error.to_string())
+            })
             .collect::<Result<Vec<_>, _>>()
             .map(Some)
     }
@@ -231,7 +236,12 @@ impl Runtime {
         };
         fields
             .iter()
-            .map(|field| record.row.value_at(field.column_index))
+            .map(|field| {
+                record
+                    .row
+                    .value_at(field.column_index)
+                    .map_err(|error| error.to_string())
+            })
             .collect::<Result<Vec<_>, _>>()
             .map(Some)
     }
@@ -731,7 +741,10 @@ fn materialized_record_report(
 ) -> Result<MaterializedRecordReport, String> {
     Ok(MaterializedRecordReport {
         branch: branch_key_display(&record.branch).to_string(),
-        payload: record.row.to_json_string()?,
+        payload: record
+            .row
+            .to_json_string()
+            .map_err(|error| error.to_string())?,
         ingested_at_low_watermark: record.row.metadata().ingested_at_low_watermark(),
         ingested_at_high_watermark: record.row.metadata().ingested_at_high_watermark(),
     })

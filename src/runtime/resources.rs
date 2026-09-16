@@ -147,7 +147,10 @@ impl Runtime {
                 )
                 .await
                 .map_err(build_error)?;
-            Some(pool.message(&config.message).map_err(build_error)?)
+            Some(
+                pool.message(&config.message)
+                    .map_err(|error| build_error(error.to_string()))?,
+            )
         } else {
             None
         };
@@ -180,8 +183,12 @@ impl Runtime {
                 .await
                 .map_err(build_error)?;
             Some(SignalingProtobufDescriptors {
-                send: pool.message(&config.send_message).map_err(build_error)?,
-                wait: pool.message(&config.wait_message).map_err(build_error)?,
+                send: pool
+                    .message(&config.send_message)
+                    .map_err(|error| build_error(error.to_string()))?,
+                wait: pool
+                    .message(&config.wait_message)
+                    .map_err(|error| build_error(error.to_string()))?,
             })
         } else {
             None
@@ -213,6 +220,7 @@ impl Runtime {
                 })??;
 
         ProtobufDescriptorPool::from_file_descriptor_set(file_descriptor_set)
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn attach_resource_store(&self, resource_store: StdArc<ResourceStore>) {

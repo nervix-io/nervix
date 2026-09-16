@@ -11,6 +11,7 @@ impl Runtime {
         state_snapshot_interval: Duration,
     ) -> Result<Self, RuntimePersistenceError> {
         Self::with_persistence_and_temp_dir(
+            Executor::default(),
             db,
             state_snapshot_interval,
             ConfiguredFaultInjection::default(),
@@ -19,13 +20,13 @@ impl Runtime {
     }
 
     pub(crate) fn with_persistence_and_temp_dir(
+        executor: Executor,
         db: Option<Database>,
         state_snapshot_interval: Duration,
         fault_injection: ConfiguredFaultInjection,
         temp_dir: PathBuf,
     ) -> Result<Self, RuntimePersistenceError> {
         let events = RuntimeEvents::new();
-        let executor = Executor::default();
         let (domain_status_changed, _) = watch::channel(0);
         let state_store = db
             .map(RuntimeStateStore::from_database)
