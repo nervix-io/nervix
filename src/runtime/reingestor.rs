@@ -343,15 +343,15 @@ impl Runtime {
                     scope.execution_now,
                 )
                 .await
-                .map_err(|reason| PlannedGeneralError {
+                .map_err(|error| PlannedGeneralError {
                     acks: batch.acks.clone(),
-                    reason,
+                    reason: error.to_string(),
                 })?
                 .into_iter()
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|reason| PlannedGeneralError {
+                .map_err(|error| PlannedGeneralError {
                     acks: batch.acks.clone(),
-                    reason,
+                    reason: error.to_string(),
                 })?
             } else {
                 match output.branch.as_ref() {
@@ -509,15 +509,15 @@ impl Runtime {
                     execution_now,
                 )
                 .await
-                .map_err(|reason| PlannedGeneralError {
+                .map_err(|error| PlannedGeneralError {
                     acks: batch.acks.clone(),
-                    reason,
+                    reason: error.to_string(),
                 })?
                 .into_iter()
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|reason| PlannedGeneralError {
+                .map_err(|error| PlannedGeneralError {
                     acks: batch.acks.clone(),
-                    reason,
+                    reason: error.to_string(),
                 })?
             } else {
                 match output.branch.as_ref() {

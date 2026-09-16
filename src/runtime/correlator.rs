@@ -80,7 +80,8 @@ impl CorrelatorOutputCompileContext<'_> {
         let parsed = lower_route_construction(
             self.construction,
             SemanticNamespaces::new("__invalid_correlator_bare_read", "output"),
-        )?;
+        )
+        .map_err(|error| format!("{error:#}"))?;
         if !parsed.inner.invoke.is_empty() || parsed.inner.set.is_empty() {
             return Err(format!(
                 "correlator '{}' TO output '{}' must contain SET assignments and may contain WHERE",
@@ -92,7 +93,8 @@ impl CorrelatorOutputCompileContext<'_> {
             &parsed,
             &vec![MessageErrorOperation::Set; parsed.inner.set.len()],
             Some(MessageErrorOperation::RouteWhere),
-        )?;
+        )
+        .map_err(|error| format!("{error:#}"))?;
         let original_parsed = parsed.clone();
         let mut bindings = vec![
             VmCompileBinding::readonly("left", self.left_schema.clone())
@@ -117,7 +119,8 @@ impl CorrelatorOutputCompileContext<'_> {
                 &local_namespaces,
                 self.runtime.available_materialized_streams,
                 self.runtime.current_branching,
-            )?;
+            )
+            .map_err(|error| format!("{error:#}"))?;
         bindings.extend(materialized_bindings);
         let (parsed, pending_lookup_calls) =
             rewrite_lookup_hash_map_program(&parsed, self.runtime.available_lookups)
@@ -596,7 +599,8 @@ pub(super) fn correlator_input_batch(
                 .map(|state| state.value(field.name())),
             row_count,
             field,
-        )?;
+        )
+        .map_err(|error| error.to_string())?;
         fields.push(field.clone());
         columns.push(column.to_array_ref());
     }

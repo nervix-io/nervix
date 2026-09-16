@@ -90,6 +90,7 @@ pub(super) fn vm_input_from_test_rows(
         },
         None,
     )
+    .map_err(|error| error.to_string())
 }
 
 /// The headers of one test message, standing in for a connector's borrowed message.
@@ -134,6 +135,7 @@ pub(super) async fn execute_filter_map_for_test(
         now,
     )
     .await
+    .map_err(|error| error.to_string())
 }
 
 pub(super) fn expression(raw: &str) -> nervix_models::Expression {

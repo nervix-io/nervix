@@ -78,7 +78,7 @@ use nervix_models::{
     ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
     MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality, OtelMetric,
     OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch, OwnershipStateComponent,
-    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
     PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
     RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
     RemoteRuntimeField, ResourceId, ResourceName, ResourceVersionStatus, RetryPolicy,
@@ -154,10 +154,12 @@ use crate::{
         AckCompletion, AckOutcome, AckProgress, AckRequiredWaitGuard, AckRootTracker, AckSet,
     },
     runtime_schema::{
-        CodecError, CompiledCodec, CompiledSchema, ProtobufDescriptorPool, RuntimeRecordBatch,
-        RuntimeRecordBatchBuilder, RuntimeRecordMetadata, RuntimeRow, RuntimeValue,
-        RuntimeValueColumn, compile_codec_with_protobuf, compile_schema, decode_with_codec,
-        parse_as_type_from_arrow, runtime_value_arrow_array, runtime_value_from_arrow_array,
+        CodecError, CompiledCodec, CompiledSchema, ProtobufDescriptorPool,
+        RuntimeProjectionComponent, RuntimeRecordBatch, RuntimeRecordBatchBuilder,
+        RuntimeRecordMetadata, RuntimeRow, RuntimeSchemaError, RuntimeSchemaOperation,
+        RuntimeValue, RuntimeValueColumn, RuntimeValueLocation, RuntimeVmOperation,
+        compile_codec_with_protobuf, compile_schema, decode_with_codec, parse_as_type_from_arrow,
+        runtime_value_arrow_array, runtime_value_from_arrow_array,
     },
     task_shutdown::JoinShutdown as _,
 };
@@ -383,8 +385,8 @@ pub(in crate::runtime) use node::{RuntimeInner, SharedActiveGraph};
 use planning::PlannedModel;
 use planning::{
     branched_node_specs_from_active_graph, branched_node_specs_from_scheduled_nodes,
-    format_branched_by, materialize_ingestor_route_template,
-    materialize_processor_instance_template, processor_template_for_graph_node,
+    materialize_ingestor_route_template, materialize_processor_instance_template,
+    processor_template_for_graph_node,
 };
 use processor_branch_task::{
     PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, ProcessorBranchHandoff, ProcessorNodeCommand,
@@ -411,12 +413,13 @@ use processors::{
     CompiledCorrelatorWhereProgram, CompiledInferencerInputProgram, CompiledReordererProgram,
     CompiledWindowAggregateExpr, CompiledWindowAggregateProgram, CorrelatorBranchState,
     CorrelatorPendingMessage, FilterMapPlan, InferencerFlushContext, InferencerOutputBuffer,
-    IngestorRouteTemplate, JunctionFlushContext, PlannedGeneralError, PlannedMessageError,
-    RelayProcessorNode, RelayProcessorOperationNode, RelayProcessorOperationTemplate,
-    RelayProcessorOutputNode, RelayProcessorOutputTemplate, RelayProcessorOutputsNode,
-    RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate, RelayProcessorTemplate,
-    ReorderKeyPart, ReordererOutputBuffer, ReordererRowOrder, WasmAckContext, WasmAckMap,
-    WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds, WindowFlushContext,
+    IngestorRouteTemplate, JunctionFlushContext, PlannedGeneralError, PlannedGeneralResult,
+    PlannedMessageError, RelayProcessorNode, RelayProcessorOperationNode,
+    RelayProcessorOperationTemplate, RelayProcessorOutputNode, RelayProcessorOutputTemplate,
+    RelayProcessorOutputsNode, RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate,
+    RelayProcessorTemplate, ReorderKeyPart, ReordererOutputBuffer, ReordererRowOrder,
+    WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds,
+    WindowFlushContext,
 };
 use rdkafka::consumer::StreamConsumer;
 pub(in crate::runtime) use reconnect_backoff::RuntimeReconnectBackoff;
@@ -478,7 +481,7 @@ use test_fixtures::{
 };
 use tls::RustlsClientConfigSource;
 pub(in crate::runtime) use vm_compile::{
-    CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders,
+    CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders, KeyProjectionKind,
     MaterializedFieldInterest, MaterializedLookupKeyMode, compile_emitter_filter_map_program,
     compile_key_projection_program, compile_sqs_fifo_group_program,
 };

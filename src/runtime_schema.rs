@@ -1512,6 +1512,33 @@ pub enum RuntimeSchemaOperation {
     FinishBatch,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeProjectionComponent {
+    Keys,
+    Metadata,
+    Namespace(String),
+}
+
+impl fmt::Display for RuntimeProjectionComponent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Keys => formatter.write_str("key sidecar"),
+            Self::Metadata => formatter.write_str("metadata sidecar"),
+            Self::Namespace(namespace) => write!(formatter, "namespace '{namespace}' batch"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum RuntimeVmOperation {
+    #[strum(serialize = "build a VM input batch")]
+    BuildInputBatch,
+    #[strum(serialize = "project metadata into a VM input")]
+    ProjectMetadata,
+    #[strum(serialize = "execute a VM key projection")]
+    ExecuteKeyProjection,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
 pub enum RuntimeValueKind {
     #[strum(serialize = "U8")]
@@ -1560,6 +1587,10 @@ pub enum RuntimeValueLocation {
     ScalarColumn {
         elements: Vec<usize>,
     },
+    VmInputField {
+        field: String,
+        elements: Vec<usize>,
+    },
     AbandonedBatchRow {
         elements: Vec<usize>,
     },
@@ -1574,6 +1605,7 @@ impl RuntimeValueLocation {
             Self::BatchField { elements, .. }
             | Self::CodecField { elements, .. }
             | Self::ScalarColumn { elements }
+            | Self::VmInputField { elements, .. }
             | Self::AbandonedBatchRow { elements }
             | Self::AbandonedFixedSizeList { elements } => elements,
         }
@@ -1584,6 +1616,7 @@ impl RuntimeValueLocation {
             Self::BatchField { elements, .. }
             | Self::CodecField { elements, .. }
             | Self::ScalarColumn { elements }
+            | Self::VmInputField { elements, .. }
             | Self::AbandonedBatchRow { elements }
             | Self::AbandonedFixedSizeList { elements } => elements,
         }
@@ -1598,6 +1631,7 @@ impl fmt::Display for RuntimeValueLocation {
             }
             Self::CodecField { field, .. } => write!(formatter, "field '{field}'")?,
             Self::ScalarColumn { .. } => formatter.write_str("runtime scalar column")?,
+            Self::VmInputField { field, .. } => write!(formatter, "VM input field '{field}'")?,
             Self::AbandonedBatchRow { .. } => {
                 formatter.write_str("abandoned Arrow batch row")?;
             }
@@ -1814,6 +1848,12 @@ pub enum RuntimeSchemaError {
     },
     #[error("Arrow batch has {found} columns for {expected} schema fields")]
     ColumnCountMismatch { expected: usize, found: usize },
+    #[error("{component} has {found} rows for a projection with {expected} rows")]
+    ProjectionRowCountMismatch {
+        component: RuntimeProjectionComponent,
+        expected: usize,
+        found: usize,
+    },
     #[error("cannot infer the element type of an empty test {kind}")]
     EmptyTestSequence { kind: RuntimeValueKind },
     #[error("test ARRAY length {length} exceeds the Arrow i32 length range")]
@@ -1823,6 +1863,23 @@ pub enum RuntimeSchemaError {
         operation: RuntimeSchemaOperation,
         #[source]
         source: ArrowError,
+    },
+    #[error("failed to {operation}: {source}")]
+    VmOperation {
+        operation: RuntimeVmOperation,
+        #[source]
+        source: nervix_vm::RuntimeError,
+    },
+    #[error("failed to {operation} for field '{field}'")]
+    VmProjection {
+        operation: RuntimeVmOperation,
+        field: String,
+    },
+    #[error("{operation} produced side error {code:?} at {span}")]
+    VmSideError {
+        operation: RuntimeVmOperation,
+        code: nervix_vm::ErrorCode,
+        span: nervix_vm::program::Span,
     },
     #[error("Arrow batch row {row} is outside batch with {rows} rows")]
     RowOutOfBounds { row: usize, rows: usize },
@@ -1835,6 +1892,11 @@ pub enum RuntimeSchemaError {
         location: RuntimeValueLocation,
         expected: ArrowDataType,
         found: ArrowDataType,
+    },
+    #[error("Arrow builder for field '{field}' does not accept {expected:?}")]
+    ArrowBuilderTypeMismatch {
+        field: String,
+        expected: ArrowDataType,
     },
     #[error("required Arrow field '{field}' contains null at row {row}")]
     RequiredFieldNull { field: String, row: usize },
@@ -1962,7 +2024,7 @@ pub enum RuntimeSchemaError {
 }
 
 impl RuntimeSchemaError {
-    fn arrow(operation: RuntimeSchemaOperation, source: ArrowError) -> Report<Self> {
+    pub(crate) fn arrow(operation: RuntimeSchemaOperation, source: ArrowError) -> Report<Self> {
         Report::new(Self::ArrowOperation { operation, source })
     }
 }
@@ -2067,7 +2129,7 @@ impl RuntimeRecordMetadata {
 }
 
 impl RuntimeValue {
-    fn kind(&self) -> RuntimeValueKind {
+    pub(crate) fn kind(&self) -> RuntimeValueKind {
         match self {
             Self::U8(_) => RuntimeValueKind::U8,
             Self::I8(_) => RuntimeValueKind::I8,

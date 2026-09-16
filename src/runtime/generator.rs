@@ -103,8 +103,9 @@ impl GeneratorContextProjection {
                 uninitialized: None,
             },
             None,
-        )?;
-        vm_typed_batch_to_runtime_batch(&input)
+        )
+        .map_err(|error| error.to_string())?;
+        vm_typed_batch_to_runtime_batch(&input).map_err(|error| error.to_string())
     }
 
     pub(super) fn materialized_state_snapshot(
@@ -203,6 +204,7 @@ impl GeneratorRouteInputProjection {
             },
             None,
         )
+        .map_err(|error| error.to_string())
     }
 }
 
@@ -291,7 +293,8 @@ pub(super) async fn execute_generator_program_on_context(
             partial_output: captured_partial_output(&result.batch, 0),
         });
     }
-    let batch = vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &[0])?;
+    let batch = vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &[0])
+        .map_err(|error| error.to_string())?;
     RuntimeRow::new(
         Arc::new(batch),
         0,

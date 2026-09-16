@@ -89,8 +89,8 @@ impl SharedVmInputColumns {
     pub(super) fn column(
         &mut self,
         field: &arrow_schema::Field,
-        build: impl FnOnce() -> Result<VmTypedArray, String>,
-    ) -> Result<VmTypedArray, String> {
+        build: impl FnOnce() -> error_stack::Result<VmTypedArray, RuntimeSchemaError>,
+    ) -> error_stack::Result<VmTypedArray, RuntimeSchemaError> {
         let key = SharedVmInputColumnKey {
             name: field.name().clone(),
             data_type: field.data_type().clone(),
@@ -109,28 +109,36 @@ pub(super) fn project_vm_input_batch(
     schema: &StdArc<arrow_schema::Schema>,
     sources: &VmInputProjectionSources<'_>,
     mut shared: Option<&mut SharedVmInputColumns>,
-) -> Result<VmTypedBatch, String> {
+) -> error_stack::Result<VmTypedBatch, RuntimeSchemaError> {
     let row_count = sources.carrier.batch().num_rows();
     if sources.keys.len() != row_count {
-        return Err(format!(
-            "branch key count {} does not match batch row count {row_count}",
-            sources.keys.len()
+        return Err(Report::new(
+            RuntimeSchemaError::ProjectionRowCountMismatch {
+                component: RuntimeProjectionComponent::Keys,
+                expected: row_count,
+                found: sources.keys.len(),
+            },
         ));
     }
     if let Some(metadata) = sources.ingest_metadata
         && metadata.len() != row_count
     {
-        return Err(format!(
-            "ingest metadata count {} does not match batch row count {row_count}",
-            metadata.len()
+        return Err(Report::new(
+            RuntimeSchemaError::ProjectionRowCountMismatch {
+                component: RuntimeProjectionComponent::Metadata,
+                expected: row_count,
+                found: metadata.len(),
+            },
         ));
     }
     for (namespace, batch) in sources.namespace_batches {
         if batch.batch().num_rows() != row_count {
-            return Err(format!(
-                "namespace '{namespace}' batch row count {} does not match carrier row count \
-                 {row_count}",
-                batch.batch().num_rows()
+            return Err(Report::new(
+                RuntimeSchemaError::ProjectionRowCountMismatch {
+                    component: RuntimeProjectionComponent::Namespace((*namespace).to_string()),
+                    expected: row_count,
+                    found: batch.batch().num_rows(),
+                },
             ));
         }
     }
@@ -145,7 +153,12 @@ pub(super) fn project_vm_input_batch(
             shared.as_deref_mut(),
         )?);
     }
-    VmTypedBatch::try_new(schema.clone(), columns).map_err(|error| error.to_string())
+    VmTypedBatch::try_new(schema.clone(), columns).map_err(|source| {
+        Report::new(RuntimeSchemaError::VmOperation {
+            operation: RuntimeVmOperation::BuildInputBatch,
+            source,
+        })
+    })
 }
 
 pub(super) fn project_vm_input_column(
@@ -154,7 +167,7 @@ pub(super) fn project_vm_input_column(
     carrier_schema: &StdArc<arrow_schema::Schema>,
     row_count: usize,
     shared: Option<&mut SharedVmInputColumns>,
-) -> Result<VmTypedArray, String> {
+) -> error_stack::Result<VmTypedArray, RuntimeSchemaError> {
     if let Some(uninitialized) = sources.uninitialized
         && uninitialized.contains(field)
     {
@@ -189,19 +202,29 @@ pub(super) fn project_vm_input_column(
                     .ingest_metadata
                     .map(|metadata| metadata.field_column(field_name))
                     .transpose()
-                    .map_err(|error| error.to_string())?
+                    .map_err(|_| {
+                        Report::new(RuntimeSchemaError::VmProjection {
+                            operation: RuntimeVmOperation::ProjectMetadata,
+                            field: field.name().clone(),
+                        })
+                    })?
                     .flatten()
                 {
                     if column.data_type() != field.data_type() {
-                        return Err(format!(
-                            "ingest metadata field '{}' expected {:?}, found {:?}",
-                            field.name(),
-                            field.data_type(),
-                            column.data_type()
-                        ));
+                        return Err(Report::new(RuntimeSchemaError::ExactTypeMismatch {
+                            location: RuntimeValueLocation::VmInputField {
+                                field: field.name().clone(),
+                                elements: Vec::new(),
+                            },
+                            expected: field.data_type().clone(),
+                            found: column.data_type().clone(),
+                        }));
                     }
-                    return VmTypedArray::try_from_array_ref(column)
-                        .map_err(|error| error.to_string());
+                    return VmTypedArray::try_from_array_ref(column).map_err(|_| {
+                        Report::new(RuntimeSchemaError::UnsupportedArrowType {
+                            data_type: field.data_type().clone(),
+                        })
+                    });
                 }
                 runtime_values_input_column(std::iter::repeat_n(None, row_count), row_count, field)
             };
@@ -230,10 +253,9 @@ pub(super) fn project_vm_input_column(
                     field,
                 );
             }
-            return Err(format!(
-                "FILTER-MAP input record is missing field '{}'",
-                field.name()
-            ));
+            return Err(Report::new(RuntimeSchemaError::MissingField {
+                field: field.name().clone(),
+            }));
         }
         if namespace != INGEST_METADATA_NAMESPACE
             && let Ok(index) = carrier_schema.index_of(field_name)
@@ -244,34 +266,39 @@ pub(super) fn project_vm_input_column(
     if field.is_nullable() {
         return runtime_values_input_column(std::iter::repeat_n(None, row_count), row_count, field);
     }
-    Err(format!(
-        "FILTER-MAP input record is missing field '{}'",
-        field.name()
-    ))
+    Err(Report::new(RuntimeSchemaError::MissingField {
+        field: field.name().clone(),
+    }))
 }
 
 pub(super) fn carrier_input_column(
     carrier: &RuntimeRecordBatch,
     index: usize,
     field: &arrow_schema::Field,
-) -> Result<VmTypedArray, String> {
+) -> error_stack::Result<VmTypedArray, RuntimeSchemaError> {
     let column = carrier.batch().column(index);
     if column.data_type() != field.data_type() {
-        return Err(format!(
-            "input field '{}' expected {:?}, found carrier column type {:?}",
-            field.name(),
-            field.data_type(),
-            column.data_type()
-        ));
+        return Err(Report::new(RuntimeSchemaError::ExactTypeMismatch {
+            location: RuntimeValueLocation::VmInputField {
+                field: field.name().clone(),
+                elements: Vec::new(),
+            },
+            expected: field.data_type().clone(),
+            found: column.data_type().clone(),
+        }));
     }
-    VmTypedArray::try_from_array_ref(column.clone()).map_err(|error| error.to_string())
+    VmTypedArray::try_from_array_ref(column.clone()).map_err(|_| {
+        Report::new(RuntimeSchemaError::UnsupportedArrowType {
+            data_type: column.data_type().clone(),
+        })
+    })
 }
 
 pub(super) fn branch_key_input_column(
     keys: &[Option<BranchKey>],
     field_name: &str,
     field: &arrow_schema::Field,
-) -> Result<VmTypedArray, String> {
+) -> error_stack::Result<VmTypedArray, RuntimeSchemaError> {
     runtime_values_input_column(
         keys.iter()
             .map(|key| key.as_ref().and_then(|key| key.field_value(field_name))),
@@ -284,7 +311,7 @@ pub(super) fn runtime_values_input_column<'a>(
     values: impl Iterator<Item = Option<&'a RuntimeValue>>,
     len: usize,
     field: &arrow_schema::Field,
-) -> Result<VmTypedArray, String> {
+) -> error_stack::Result<VmTypedArray, RuntimeSchemaError> {
     if let ArrowDataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some(tz)) =
         field.data_type()
         && (tz.as_ref() == "+00:00" || tz.as_ref() == "UTC")
@@ -293,20 +320,25 @@ pub(super) fn runtime_values_input_column<'a>(
             .map(|value| match value {
                 Some(RuntimeValue::Datetime(value)) => match value.timestamp_nanos_opt() {
                     Some(nanos) => Ok(Some(nanos)),
-                    None => Err(format!(
-                        "FILTER-MAP input field '{}' datetime is out of nanosecond range",
-                        field.name()
-                    )),
+                    None => Err(Report::new(RuntimeSchemaError::RuntimeValueOutOfRange {
+                        location: RuntimeValueLocation::VmInputField {
+                            field: field.name().clone(),
+                            elements: Vec::new(),
+                        },
+                        expected: ParseAsType::Datetime,
+                    })),
                 },
-                Some(value) => Err(format!(
-                    "FILTER-MAP input field '{}' expected {:?}, got {}",
-                    field.name(),
-                    field.data_type(),
-                    runtime_value_type_name(value)
-                )),
+                Some(value) => Err(Report::new(RuntimeSchemaError::RuntimeValueTypeMismatch {
+                    location: RuntimeValueLocation::VmInputField {
+                        field: field.name().clone(),
+                        elements: Vec::new(),
+                    },
+                    expected: ParseAsType::Datetime,
+                    found: value.kind(),
+                })),
                 None => Ok(None),
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<error_stack::Result<Vec<_>, RuntimeSchemaError>>()?;
         return Ok(VmTypedArray::Datetime(
             nanos
                 .into_iter()
@@ -318,7 +350,12 @@ pub(super) fn runtime_values_input_column<'a>(
     for value in values {
         append_filter_map_nested_value(builder.as_mut(), field.data_type(), value, field)?;
     }
-    VmTypedArray::try_from_array_ref(builder.finish()).map_err(|error| error.to_string())
+    let array = builder.finish();
+    VmTypedArray::try_from_array_ref(array.clone()).map_err(|_| {
+        Report::new(RuntimeSchemaError::UnsupportedArrowType {
+            data_type: array.data_type().clone(),
+        })
+    })
 }
 
 pub(super) fn relay_state_snapshot_from_side_inputs(
@@ -355,7 +392,7 @@ pub(super) async fn compute_lookup_hash_map_columns(
     inputs: &FilterMapBatchInputs<'_>,
     execution_now: Timestamp,
     mut shared_calls: Option<&mut BTreeMap<LookupHashMapCallKey, VmTypedArray>>,
-) -> Result<HashMap<String, VmTypedArray>, String> {
+) -> error_stack::Result<HashMap<String, VmTypedArray>, RuntimeSchemaError> {
     let mut lookup_columns = HashMap::new();
     if program.lookup_hash_maps.is_empty() {
         return Ok(lookup_columns);
@@ -416,13 +453,11 @@ pub(super) async fn compute_lookup_hash_map_columns(
             },
         )
         .await
-        .map_err(|error| {
-            format!(
-                "LOOKUP_HASH_MAP key execution failed for hash map '{}' field '{}': {}",
-                call.lookup.as_str(),
-                call.lookup_field,
-                error
-            )
+        .map_err(|source| {
+            Report::new(RuntimeSchemaError::VmOperation {
+                operation: RuntimeVmOperation::ExecuteKeyProjection,
+                source,
+            })
         })?;
         let key_column = result
             .batch
@@ -434,26 +469,21 @@ pub(super) async fn compute_lookup_hash_map_columns(
                     call.generated_field.as_str(),
                     result.batch.column(index).to_array_ref(),
                 )
-                .map_err(|error| error.to_string())
             })
             .transpose()?;
         let mut row_keys: Vec<Option<String>> = vec![None; row_count];
         for (output_row, input_row) in result.selected_rows.iter().enumerate() {
             if let Some(side_error) = result.batch.errors().row(output_row).first() {
-                return Err(format!(
-                    "LOOKUP_HASH_MAP key side error {}: {} at {}",
-                    side_error.code.as_str(),
-                    side_error.message,
-                    side_error.span
-                ));
+                return Err(Report::new(RuntimeSchemaError::VmSideError {
+                    operation: RuntimeVmOperation::ExecuteKeyProjection,
+                    code: side_error.code,
+                    span: side_error.span,
+                }));
             }
             let Some(key_column) = key_column.as_ref() else {
                 continue;
             };
-            if let Some(value) = key_column
-                .nullable_value_at(output_row)
-                .map_err(|error| error.to_string())?
-            {
+            if let Some(value) = key_column.nullable_value_at(output_row)? {
                 row_keys[input_row] = Some(value.to_key_fragment());
             }
         }
@@ -467,12 +497,9 @@ pub(super) async fn compute_lookup_hash_map_columns(
                 else {
                     return Ok(None);
                 };
-                call.lookup_runtime
-                    .batch
-                    .value(row, &call.lookup_field)
-                    .map_err(|error| error.to_string())
+                call.lookup_runtime.batch.value(row, &call.lookup_field)
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<error_stack::Result<Vec<_>, RuntimeSchemaError>>()?;
         let column = runtime_values_input_column(
             lookup_values.iter().map(Option::as_ref),
             row_count,
@@ -490,7 +517,7 @@ pub(super) fn vm_output_value(
     batch: &VmTypedBatch,
     row: usize,
     field_name: &str,
-) -> Result<Option<RuntimeValue>, String> {
+) -> error_stack::Result<Option<RuntimeValue>, RuntimeSchemaError> {
     // `index_of` reports a missing field as an error, and a missing field is exactly what an
     // absent value means here: the batch carries no column of that name to read.
     let column_index = match batch.schema().index_of(field_name) {
@@ -501,26 +528,29 @@ pub(super) fn vm_output_value(
     let array = batch.column(column_index).to_array_ref();
     runtime_value_from_arrow_array(
         array.as_ref(),
-        &parse_as_type_from_arrow(field.data_type()).map_err(|error| error.to_string())?,
+        &parse_as_type_from_arrow(field.data_type())?,
         field.is_nullable(),
         row,
         field_name,
     )
-    .map_err(|error| error.to_string())
 }
 
 pub(super) fn vm_typed_batch_to_runtime_batch(
     batch: &VmTypedBatch,
-) -> Result<RuntimeRecordBatch, String> {
-    let record_batch = batch.to_record_batch().map_err(|error| error.to_string())?;
+) -> error_stack::Result<RuntimeRecordBatch, RuntimeSchemaError> {
+    let record_batch = batch.to_record_batch().map_err(|source| {
+        Report::new(RuntimeSchemaError::VmOperation {
+            operation: RuntimeVmOperation::BuildInputBatch,
+            source,
+        })
+    })?;
     RuntimeRecordBatch::from_record_batch(batch.schema().clone(), record_batch)
-        .map_err(|error| error.to_string())
 }
 
 pub(super) fn vm_typed_batch_selected_rows_to_runtime_batch(
     batch: &VmTypedBatch,
     selected_rows: &[usize],
-) -> Result<RuntimeRecordBatch, String> {
+) -> error_stack::Result<RuntimeRecordBatch, RuntimeSchemaError> {
     if selected_rows.len() == batch.row_count() {
         return vm_typed_batch_to_runtime_batch(batch);
     }
@@ -532,17 +562,20 @@ pub(super) fn vm_typed_batch_selected_rows_to_runtime_batch(
         .iter()
         .zip(batch.schema().fields())
         .map(|(column, field)| {
-            let column = filter_arrow_array(column.to_array_ref().as_ref(), &predicate)
-                .map_err(|error| error.to_string())?;
+            let column = filter_arrow_array(column.to_array_ref().as_ref(), &predicate).map_err(
+                |source| RuntimeSchemaError::arrow(RuntimeSchemaOperation::FilterRows, source),
+            )?;
             if !field.is_nullable() && column.null_count() > 0 {
-                return Err(format!(
-                    "required output column '{}' contains null values",
-                    field.name()
+                return Err(Report::new(
+                    RuntimeSchemaError::RequiredFieldContainsNulls {
+                        field: field.name().clone(),
+                        nulls: column.null_count(),
+                    },
                 ));
             }
             Ok(column)
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<error_stack::Result<Vec<_>, RuntimeSchemaError>>()?;
     let record_batch = if columns.is_empty() {
         RecordBatch::try_new_with_options(
             batch.schema().clone(),
@@ -552,9 +585,10 @@ pub(super) fn vm_typed_batch_selected_rows_to_runtime_batch(
     } else {
         RecordBatch::try_new(batch.schema().clone(), columns)
     }
-    .map_err(|error| error.to_string())?;
+    .map_err(|source| {
+        RuntimeSchemaError::arrow(RuntimeSchemaOperation::BuildSelectedBatch, source)
+    })?;
     RuntimeRecordBatch::from_record_batch(batch.schema().clone(), record_batch)
-        .map_err(|error| error.to_string())
 }
 
 pub(super) fn runtime_value_type_name(value: &RuntimeValue) -> &'static str {
@@ -574,5 +608,169 @@ pub(super) fn runtime_value_type_name(value: &RuntimeValue) -> &'static str {
         RuntimeValue::F64(_) => "F64",
         RuntimeValue::Array(_) => "ARRAY",
         RuntimeValue::Vec(_) => "VEC",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn project(
+        schema: StdArc<arrow_schema::Schema>,
+        carrier: &RuntimeRecordBatch,
+        keys: &[Option<BranchKey>],
+    ) -> error_stack::Result<VmTypedBatch, RuntimeSchemaError> {
+        let side_inputs = HashMap::default();
+        let lookup_columns = HashMap::default();
+        project_vm_input_batch(
+            &schema,
+            &VmInputProjectionSources {
+                carrier,
+                namespace_batches: &[],
+                strict_namespaces: &[],
+                keys,
+                side_inputs: &side_inputs,
+                ingest_metadata: None,
+                lookup_columns: &lookup_columns,
+                uninitialized: None,
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn projection_failures_reuse_typed_record_contracts() {
+        let row = test_runtime_row([("value".to_string(), RuntimeValue::I64(7))]);
+        let carrier = row.one_row_batch();
+        let empty_schema = StdArc::new(arrow_schema::Schema::empty());
+        let error = project(empty_schema, &carrier, &[])
+            .expect_err("the key sidecar must have one entry per carrier row");
+        let RuntimeSchemaError::ProjectionRowCountMismatch {
+            component,
+            expected,
+            found,
+        } = error.current_context()
+        else {
+            panic!("unexpected projection error: {error:#}");
+        };
+        assert_eq!(component, &RuntimeProjectionComponent::Keys);
+        assert_eq!((*expected, *found), (1, 0));
+
+        let requested_schema =
+            StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+                "value",
+                ArrowDataType::Utf8,
+                false,
+            )]));
+        let error = project(requested_schema, &carrier, &[None])
+            .expect_err("carrier projection must require an exact Arrow type");
+        let RuntimeSchemaError::ExactTypeMismatch {
+            location,
+            expected,
+            found,
+        } = error.current_context()
+        else {
+            panic!("unexpected projection error: {error:#}");
+        };
+        assert_eq!(
+            location,
+            &RuntimeValueLocation::VmInputField {
+                field: "value".to_string(),
+                elements: Vec::new(),
+            }
+        );
+        assert_eq!(expected, &ArrowDataType::Utf8);
+        assert_eq!(found, &ArrowDataType::Int64);
+
+        let required_schema =
+            StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+                "missing",
+                ArrowDataType::Int64,
+                false,
+            )]));
+        let error = project(required_schema, &carrier, &[None])
+            .expect_err("a missing required VM input must be rejected");
+        let RuntimeSchemaError::MissingField { field } = error.current_context() else {
+            panic!("unexpected projection error: {error:#}");
+        };
+        assert_eq!(field, "missing");
+    }
+
+    #[test]
+    fn scalar_projection_failures_keep_value_type_and_range() {
+        let field = arrow_schema::Field::new(
+            "occurred_at",
+            ArrowDataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some("+00:00".into())),
+            false,
+        );
+        let wrong_type = RuntimeValue::I64(7);
+        let error = runtime_values_input_column(std::iter::once(Some(&wrong_type)), 1, &field)
+            .expect_err("datetime projection must reject an integer");
+        let RuntimeSchemaError::RuntimeValueTypeMismatch {
+            location,
+            expected,
+            found,
+        } = error.current_context()
+        else {
+            panic!("unexpected scalar projection error: {error:#}");
+        };
+        assert_eq!(
+            location,
+            &RuntimeValueLocation::VmInputField {
+                field: "occurred_at".to_string(),
+                elements: Vec::new(),
+            }
+        );
+        assert_eq!(expected, &ParseAsType::Datetime);
+        assert_eq!(found, &crate::runtime_schema::RuntimeValueKind::I64);
+
+        let utc = chrono::FixedOffset::east_opt(0).assured("zero is a valid UTC offset");
+        let outside_nanos = utc
+            .with_ymd_and_hms(3000, 1, 1, 0, 0, 0)
+            .single()
+            .assured("the test date is valid in the proleptic Gregorian calendar");
+        let outside_nanos = RuntimeValue::Datetime(outside_nanos);
+        let error = runtime_values_input_column(std::iter::once(Some(&outside_nanos)), 1, &field)
+            .expect_err("year 3000 is outside the signed nanosecond timestamp range");
+        let RuntimeSchemaError::RuntimeValueOutOfRange { location, expected } =
+            error.current_context()
+        else {
+            panic!("unexpected scalar projection error: {error:#}");
+        };
+        assert_eq!(
+            location,
+            &RuntimeValueLocation::VmInputField {
+                field: "occurred_at".to_string(),
+                elements: Vec::new(),
+            }
+        );
+        assert_eq!(expected, &ParseAsType::Datetime);
+    }
+
+    #[test]
+    fn selected_required_nulls_report_the_field_and_count() {
+        let schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "value",
+            ArrowDataType::Int64,
+            false,
+        )]));
+        let batch = VmTypedBatch::try_new(
+            schema,
+            vec![VmTypedArray::Int64(arrow_array::Int64Array::from(vec![
+                Some(1),
+                None,
+            ]))],
+        )
+        .assured("the test schema and typed column have the same shape");
+
+        let error = vm_typed_batch_selected_rows_to_runtime_batch(&batch, &[1])
+            .expect_err("a selected required null must not cross the runtime boundary");
+        let RuntimeSchemaError::RequiredFieldContainsNulls { field, nulls } =
+            error.current_context()
+        else {
+            panic!("unexpected selected-row error: {error:#}");
+        };
+        assert_eq!(field, "value");
+        assert_eq!(*nulls, 1);
     }
 }

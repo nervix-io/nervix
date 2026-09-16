@@ -6,6 +6,7 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_approx_into::ApproxInto as _;
 use nervix_models::Timestamp;
@@ -15,11 +16,22 @@ use nervix_vm::{
     execute_program_in_context, lower_route_construction,
     program::{Program, SpannedNode},
 };
+use thiserror::Error;
 use triomphe::Arc;
 
 /// Row counts spanning `SPAWN_BLOCKING_ROW_THRESHOLD` so the sweep shows both the
 /// amortization curve below it and the cost of the blocking hop above it.
 const SWEEP_ROW_COUNTS: [usize; 6] = [64, 256, 1_024, 4_096, 16_384, 65_536];
+
+#[derive(Debug, Error)]
+enum BenchmarkProgramError {
+    #[error("benchmark route construction could not be parsed")]
+    ParseRouteConstruction,
+    #[error("benchmark route construction could not be lowered")]
+    LowerRouteConstruction,
+}
+
+type BenchmarkProgramResult<T> = error_stack::Result<T, BenchmarkProgramError>;
 
 async fn execute_benchmark_program(
     program: &Arc<CompiledProgram>,
@@ -31,17 +43,19 @@ async fn execute_benchmark_program(
         .map(|result| result.batch)
 }
 
-fn parse_program(source: &str) -> Result<SpannedNode<Program>, String> {
+fn parse_program(source: &str) -> BenchmarkProgramResult<SpannedNode<Program>> {
     parse_program_with_namespaces(source, SemanticNamespaces::new("input", "input"))
 }
 
 fn parse_program_with_namespaces(
     source: &str,
     namespaces: SemanticNamespaces<'_>,
-) -> Result<SpannedNode<Program>, String> {
-    let construction =
-        nervix_nspl::parse_route_construction(source).map_err(|error| error.to_string())?;
+) -> BenchmarkProgramResult<SpannedNode<Program>> {
+    let construction = nervix_nspl::parse_route_construction(source).map_err(|error| {
+        Report::new(BenchmarkProgramError::ParseRouteConstruction).attach_printable(error)
+    })?;
     lower_route_construction(&construction, namespaces)
+        .change_context(BenchmarkProgramError::LowerRouteConstruction)
 }
 
 fn benchmark_row_i64(row: usize) -> i64 {

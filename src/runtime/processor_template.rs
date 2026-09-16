@@ -452,7 +452,8 @@ impl RelayProcessorTemplate {
                             self.processor.as_str()
                         )
                     })?;
-                    let input_schema = relay_schema_for_runtime(runtime, domain, input_relay)?;
+                    let input_schema = relay_schema_for_runtime(runtime, domain, input_relay)
+                        .map_err(|error| format!("{error:#}"))?;
                     let state = replicated_state.restore_state(aggregate, &input_schema)?;
                     RelayProcessorOperationNode::WindowProcessor {
                         output_routes: Self::instantiate_outputs(output_routes),

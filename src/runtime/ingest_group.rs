@@ -1082,7 +1082,8 @@ impl Runtime {
                 },
                 execution_now,
             )
-            .await?;
+            .await
+            .map_err(|error| error.to_string())?;
             let mut keep = vec![false; rows.len()];
             let mut transformed = Vec::new();
             for (row, outcome) in outcomes.into_iter().enumerate() {
@@ -1217,7 +1218,8 @@ impl Runtime {
                     },
                     execution_now,
                 )
-                .await?
+                .await
+                .map_err(|error| error.to_string())?
             } else {
                 (0..rows.len())
                     .map(|row| rows.row(row))
@@ -1272,9 +1274,10 @@ impl Runtime {
                         &side_inputs,
                         execution_now,
                     )
-                    .await?;
+                    .await
+                    .map_err(|error| error.to_string())?;
                     for (row, key) in input_rows.into_iter().zip(evaluated) {
-                        route_keys[row] = Some(key);
+                        route_keys[row] = Some(key.map_err(|error| error.to_string()));
                     }
                 }
             } else {

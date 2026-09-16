@@ -1,13 +1,20 @@
-use super::*;
+use super::{vm_compile::RuntimeVmCompileError, *};
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum MessageErrorRecordConstructionError {
-    #[error("failed to compute message-error lookup columns: {reason}")]
-    LookupColumns { reason: String },
-    #[error("failed to project the message-error VM input: {reason}")]
-    InputProjection { reason: String },
-    #[error("message-error SET execution failed: {reason}")]
-    Execution { reason: String },
+    #[error("failed to compute message-error lookup columns: {error}")]
+    LookupColumns {
+        error: error_stack::Report<crate::runtime_schema::RuntimeSchemaError>,
+    },
+    #[error("failed to project the message-error VM input: {error}")]
+    InputProjection {
+        error: error_stack::Report<crate::runtime_schema::RuntimeSchemaError>,
+    },
+    #[error("message-error SET execution failed: {source}")]
+    Execution {
+        #[source]
+        source: nervix_vm::RuntimeError,
+    },
     #[error("message-error SET produced {rows} rows for one error")]
     RowCount { rows: usize },
     #[error("message-error SET recorded {} at {span}", .code.as_str())]
@@ -15,8 +22,10 @@ pub(super) enum MessageErrorRecordConstructionError {
         code: nervix_vm::ErrorCode,
         span: VmSpan,
     },
-    #[error("failed to project the message-error output: {reason}")]
-    OutputProjection { reason: String },
+    #[error("failed to project the message-error output: {error}")]
+    OutputProjection {
+        error: error_stack::Report<crate::runtime_schema::RuntimeSchemaError>,
+    },
     #[error("failed to materialize the message-error output row: {error}")]
     OutputRow {
         error: error_stack::Report<crate::runtime_schema::RuntimeSchemaError>,
@@ -130,12 +139,18 @@ pub(super) enum MessageErrorHandlingError {
         node: NodeRef,
         input: MessageErrorInput,
     },
-    #[error("{reason}")]
+    #[error(
+        "failed to compile the message-error route for {} '{}' in domain '{}' to relay '{}': {error}",
+        .node.kind.as_str(),
+        .node.identifier.as_str(),
+        .domain.as_str(),
+        .error_relay.as_str()
+    )]
     ProgramCompilation {
         domain: DomainName,
         node: NodeRef,
         error_relay: RelayName,
-        reason: String,
+        error: error_stack::Report<RuntimeVmCompileError>,
     },
     #[error(
         "failed to construct message-error record {reference} for {}: {source}",
@@ -839,12 +854,12 @@ impl Runtime {
                     udfs: Some(&execution.udfs),
                 },
             )
-            .map_err(|reason| {
+            .map_err(|error| {
                 error_stack::Report::new(MessageErrorHandlingError::ProgramCompilation {
                     domain: domain.clone(),
                     node: owner.clone(),
                     error_relay: relay.clone(),
-                    reason,
+                    error,
                 })
             })?;
             MessageErrorRoutePlan {
@@ -1196,10 +1211,12 @@ impl Runtime {
             None,
         )
         .await
-        .map_err(|reason| {
+        .map_err(|lookup_error| {
             MessageErrorHandlingError::record_construction(
                 error,
-                MessageErrorRecordConstructionError::LookupColumns { reason },
+                MessageErrorRecordConstructionError::LookupColumns {
+                    error: lookup_error,
+                },
             )
         })?;
         let uninitialized = VmUninitializedInput {
@@ -1226,10 +1243,12 @@ impl Runtime {
             },
             None,
         )
-        .map_err(|reason| {
+        .map_err(|projection_error| {
             MessageErrorHandlingError::record_construction(
                 error,
-                MessageErrorRecordConstructionError::InputProjection { reason },
+                MessageErrorRecordConstructionError::InputProjection {
+                    error: projection_error,
+                },
             )
         })?;
         let result = execute_program_with_selection_in_context(
@@ -1247,9 +1266,7 @@ impl Runtime {
         .map_err(|source| {
             MessageErrorHandlingError::record_construction(
                 error,
-                MessageErrorRecordConstructionError::Execution {
-                    reason: source.to_string(),
-                },
+                MessageErrorRecordConstructionError::Execution { source },
             )
         })?;
         if result.batch.row_count() != 1 {
@@ -1270,10 +1287,12 @@ impl Runtime {
             ));
         }
         let output = vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &[0]).map_err(
-            |reason| {
+            |projection_error| {
                 MessageErrorHandlingError::record_construction(
                     error,
-                    MessageErrorRecordConstructionError::OutputProjection { reason },
+                    MessageErrorRecordConstructionError::OutputProjection {
+                        error: projection_error,
+                    },
                 )
             },
         )?;

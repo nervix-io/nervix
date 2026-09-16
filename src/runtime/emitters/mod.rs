@@ -4640,7 +4640,8 @@ impl EmitterBatchContext<'_> {
                 match evaluated {
                     Ok(groups) => groups,
                     Err(error) => {
-                        self.report_general_error(error.acks.iter(), error.reason);
+                        let error = error.current_context();
+                        self.report_general_error(error.acks.iter(), error.reason.clone());
                         return None;
                     }
                 }
