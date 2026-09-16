@@ -434,7 +434,7 @@ impl Runtime {
         self.inner
             .expiring_stream_states
             .get(&expiring_placement)
-            .is_none_or(|state| state.contains_key(key))
+            .is_none_or(|state| state.registry.contains_key(key))
     }
 
     /// Every materialized record one relay holds on another node, reported the same way as the
@@ -811,8 +811,7 @@ impl Runtime {
 
     pub(in crate::runtime) async fn resolve_materialized_dependencies_for_batch(
         &self,
-        routing: &mut DomainRoutingCache,
-        domain: &DomainName,
+        handles: MaterializedDomainHandles<'_>,
         input_relay: &RelayName,
         dependencies: &[nervix_models::MaterializedStateDependency],
         batch: RelayRecordBatch,
@@ -821,17 +820,16 @@ impl Runtime {
         Option<(RelayRecordBatch, HashMap<String, RuntimeValue>, Timestamp)>,
         MaterializedReadError,
     > {
+        let MaterializedDomainHandles {
+            routing,
+            domain_clock,
+            domain,
+        } = handles;
         let MaterializedBatchWaitContext {
             shutdown_rx,
             wait_for_required_state,
             mut quiesce_work,
         } = wait;
-        let domain_clock =
-            self.bind_domain_clock(domain)
-                .change_context(MaterializedReadError::DomainClock {
-                    domain: domain.clone(),
-                    branch: batch.key.clone(),
-                })?;
         let mut required_wait = None;
         loop {
             tokio::task::consume_budget().await;
@@ -1014,6 +1012,7 @@ mod tests {
             .domain_routing_cache(&domain)
             .expect("the test domain execution publishes routing");
         let routing_snapshot = routing.load().clone();
+        let domain_clock = test_domain_clock(&domain);
 
         let default = nervix_models::MaterializedStateDependency {
             relay: named("profiles"),
@@ -1172,8 +1171,11 @@ mod tests {
         }];
         {
             let resolution = runtime.resolve_materialized_dependencies_for_batch(
-                &mut routing,
-                &domain,
+                MaterializedDomainHandles {
+                    routing: &mut routing,
+                    domain_clock: &domain_clock,
+                    domain: &domain,
+                },
                 &input_relay,
                 &dependencies,
                 retained,
@@ -1220,8 +1222,11 @@ mod tests {
         assert!(
             runtime
                 .resolve_materialized_dependencies_for_batch(
-                    &mut routing,
-                    &domain,
+                    MaterializedDomainHandles {
+                        routing: &mut routing,
+                        domain_clock: &domain_clock,
+                        domain: &domain,
+                    },
                     &named("input"),
                     &[nervix_models::MaterializedStateDependency {
                         relay: named("profiles"),
