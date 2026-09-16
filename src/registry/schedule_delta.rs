@@ -34,8 +34,28 @@ impl ScheduleDelta {
         match (existing, desired) {
             (Some(existing), Some(desired)) => Self::classify(existing, desired),
             (None, None) => Self::Unchanged,
-            (Some(_), None) | (None, Some(_)) => Self::Rebuild,
+            (Some(existing), None) => {
+                if Self::has_executable_nodes(existing) {
+                    Self::Rebuild
+                } else {
+                    Self::Dynamic(Vec::new())
+                }
+            }
+            (None, Some(desired)) => {
+                if Self::has_executable_nodes(desired) {
+                    Self::Rebuild
+                } else {
+                    Self::Dynamic(Vec::new())
+                }
+            }
         }
+    }
+
+    fn has_executable_nodes(schedule: &DomainSchedule) -> bool {
+        schedule
+            .nodes
+            .values()
+            .any(|node| is_schedulable_model(node.config.as_ref()))
     }
 
     pub(crate) fn classify(existing: &DomainSchedule, desired: &DomainSchedule) -> Self {
@@ -313,6 +333,38 @@ mod tests {
         assert_eq!(
             ScheduleDelta::classify(&existing, &existing),
             ScheduleDelta::Unchanged
+        );
+    }
+
+    #[test]
+    fn control_plane_only_schedule_appearance_and_disappearance_are_dynamic() {
+        let control_plane_only = DomainSchedule::new(
+            DomainName::parse("testing").expect("valid domain"),
+            vec![placement_node(PlacementPolicy::PreferColocation)],
+            Vec::new(),
+        );
+
+        assert_eq!(
+            ScheduleDelta::between(None, Some(&control_plane_only)),
+            ScheduleDelta::Dynamic(Vec::new())
+        );
+        assert_eq!(
+            ScheduleDelta::between(Some(&control_plane_only), None),
+            ScheduleDelta::Dynamic(Vec::new())
+        );
+    }
+
+    #[test]
+    fn executable_schedule_appearance_and_disappearance_rebuild() {
+        let executable = schedule(nonzero!(1usize));
+
+        assert_eq!(
+            ScheduleDelta::between(None, Some(&executable)),
+            ScheduleDelta::Rebuild
+        );
+        assert_eq!(
+            ScheduleDelta::between(Some(&executable), None),
+            ScheduleDelta::Rebuild
         );
     }
 
