@@ -31,7 +31,7 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use strum::IntoStaticStr;
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum JaqProgramError {
     #[error("invalid jaq program: {reason}")]
     Compile { reason: String },
@@ -41,8 +41,81 @@ pub enum JaqProgramError {
     MultipleOutputs,
     #[error("jaq program evaluation failed: {reason}")]
     Eval { reason: String },
-    #[error("jaq value is not valid JSON: {reason}")]
-    NotJson { reason: String },
+    #[error("jaq output contains a binary string, which is not valid JSON")]
+    BinaryStringNotJson,
+    #[error(
+        "jaq output text is not valid UTF-8 at byte {valid_up_to} with error length {error_len:?}"
+    )]
+    InvalidJsonText {
+        valid_up_to: usize,
+        error_len: Option<usize>,
+    },
+    #[error("jaq JSON object key expected {expected}, found {found}")]
+    JsonObjectKeyType {
+        expected: JaqValueKind,
+        found: JaqValueKind,
+    },
+    #[error("jaq number is not valid JSON ({issue} at {line}:{column})")]
+    InvalidJsonNumber {
+        issue: JsonNumberIssue,
+        line: usize,
+        column: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum JaqValueKind {
+    #[strum(serialize = "NULL")]
+    Null,
+    #[strum(serialize = "BOOL")]
+    Bool,
+    #[strum(serialize = "NUMBER")]
+    Number,
+    #[strum(serialize = "BINARY STRING")]
+    BinaryString,
+    #[strum(serialize = "STRING")]
+    TextString,
+    #[strum(serialize = "ARRAY")]
+    Array,
+    #[strum(serialize = "OBJECT")]
+    Object,
+}
+
+impl JaqValueKind {
+    fn of(value: &JaqVal) -> Self {
+        match value {
+            JaqVal::Null => Self::Null,
+            JaqVal::Bool(_) => Self::Bool,
+            JaqVal::Num(_) => Self::Number,
+            JaqVal::BStr(_) => Self::BinaryString,
+            JaqVal::TStr(_) => Self::TextString,
+            JaqVal::Arr(_) => Self::Array,
+            JaqVal::Obj(_) => Self::Object,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum JsonNumberIssue {
+    #[strum(serialize = "I/O failure")]
+    Io,
+    #[strum(serialize = "invalid syntax")]
+    Syntax,
+    #[strum(serialize = "incompatible data")]
+    Data,
+    #[strum(serialize = "unexpected end of input")]
+    Eof,
+}
+
+impl From<serde_json::error::Category> for JsonNumberIssue {
+    fn from(category: serde_json::error::Category) -> Self {
+        match category {
+            serde_json::error::Category::Io => Self::Io,
+            serde_json::error::Category::Syntax => Self::Syntax,
+            serde_json::error::Category::Data => Self::Data,
+            serde_json::error::Category::Eof => Self::Eof,
+        }
+    }
 }
 
 /// One value read from a payload, in the form a program runs on.
@@ -485,37 +558,50 @@ impl Iterator for JaqOutputs<'_> {
 }
 
 fn jaq_value_to_json(value: JaqVal) -> Result<JsonValue, JaqProgramError> {
-    jaq_value_to_json_inner(value).map_err(|reason| JaqProgramError::NotJson { reason })
+    jaq_value_to_json_inner(value).map_err(|error| error.current_context().clone())
 }
 
-fn jaq_value_to_json_inner(value: JaqVal) -> Result<JsonValue, String> {
+fn jaq_value_to_json_inner(value: JaqVal) -> error_stack::Result<JsonValue, JaqProgramError> {
     match value {
         JaqVal::Null => Ok(JsonValue::Null),
         JaqVal::Bool(value) => Ok(JsonValue::Bool(value)),
         JaqVal::Num(value) => jaq_num_to_json(value),
-        JaqVal::BStr(_) => {
-            Err("jaq output contains binary string, which is not valid JSON".to_string())
-        }
+        JaqVal::BStr(_) => Err(error_stack::Report::new(
+            JaqProgramError::BinaryStringNotJson,
+        )),
         JaqVal::TStr(value) => String::from_utf8(value.to_vec())
             .map(JsonValue::String)
-            .map_err(|error| error.to_string()),
+            .map_err(|error| {
+                let error = error.utf8_error();
+                error_stack::Report::new(JaqProgramError::InvalidJsonText {
+                    valid_up_to: error.valid_up_to(),
+                    error_len: error.error_len(),
+                })
+            }),
         JaqVal::Arr(values) => values
             .iter()
             .cloned()
             .map(jaq_value_to_json_inner)
-            .collect::<Result<Vec<_>, _>>()
+            .collect::<error_stack::Result<Vec<_>, JaqProgramError>>()
             .map(JsonValue::Array),
         JaqVal::Obj(values) => {
             let mut object = JsonMap::new();
             for (key, value) in values.iter() {
                 let key = match key {
-                    JaqVal::TStr(key) => {
-                        String::from_utf8(key.to_vec()).map_err(|error| error.to_string())?
-                    }
+                    JaqVal::TStr(key) => String::from_utf8(key.to_vec()).map_err(|error| {
+                        let error = error.utf8_error();
+                        error_stack::Report::new(JaqProgramError::InvalidJsonText {
+                            valid_up_to: error.valid_up_to(),
+                            error_len: error.error_len(),
+                        })
+                    })?,
                     _ => {
-                        return Err("jaq output contains a non-string object key, which is not \
-                                    valid JSON"
-                            .to_string());
+                        return Err(error_stack::Report::new(
+                            JaqProgramError::JsonObjectKeyType {
+                                expected: JaqValueKind::TextString,
+                                found: JaqValueKind::of(key),
+                            },
+                        ));
                     }
                 };
                 object.insert(key, jaq_value_to_json_inner(value.clone())?);
@@ -525,11 +611,17 @@ fn jaq_value_to_json_inner(value: JaqVal) -> Result<JsonValue, String> {
     }
 }
 
-fn jaq_num_to_json(value: JaqNum) -> Result<JsonValue, String> {
+fn jaq_num_to_json(value: JaqNum) -> error_stack::Result<JsonValue, JaqProgramError> {
     let rendered = value.to_string();
     serde_json::Number::from_str(&rendered)
         .map(JsonValue::Number)
-        .map_err(|error| error.to_string())
+        .map_err(|error| {
+            error_stack::Report::new(JaqProgramError::InvalidJsonNumber {
+                issue: error.classify().into(),
+                line: error.line(),
+                column: error.column(),
+            })
+        })
 }
 
 #[cfg(test)]
@@ -537,6 +629,69 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn json_conversion_failures_keep_typed_value_details() {
+        assert_eq!(
+            jaq_value_to_json(JaqVal::byte_str(Bytes::from_static(b"\xff")))
+                .expect_err("binary strings are outside JSON"),
+            JaqProgramError::BinaryStringNotJson
+        );
+        assert_eq!(
+            jaq_value_to_json(JaqVal::utf8_str(Bytes::from_static(b"\xff")))
+                .expect_err("invalid UTF-8 is outside JSON"),
+            JaqProgramError::InvalidJsonText {
+                valid_up_to: 0,
+                error_len: Some(1),
+            }
+        );
+
+        let mut object = jaq_json::Map::default();
+        object.insert(JaqVal::Bool(true), JaqVal::Null);
+        assert_eq!(
+            jaq_value_to_json(JaqVal::obj(object)).expect_err("JSON object keys must be strings"),
+            JaqProgramError::JsonObjectKeyType {
+                expected: JaqValueKind::TextString,
+                found: JaqValueKind::Bool,
+            }
+        );
+
+        let error = jaq_num_to_json(JaqNum::Float(f64::NAN))
+            .expect_err("non-finite numbers are outside JSON");
+        assert!(matches!(
+            error.current_context(),
+            JaqProgramError::InvalidJsonNumber {
+                issue: JsonNumberIssue::Syntax,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn jaq_value_and_json_number_categories_are_typed() {
+        let values = [
+            (JaqVal::Null, JaqValueKind::Null),
+            (JaqVal::Bool(true), JaqValueKind::Bool),
+            (JaqVal::Num(JaqNum::Int(1)), JaqValueKind::Number),
+            (JaqVal::byte_str(Bytes::new()), JaqValueKind::BinaryString),
+            (JaqVal::utf8_str(Bytes::new()), JaqValueKind::TextString),
+            (JaqVal::Arr(Vec::new().into()), JaqValueKind::Array),
+            (JaqVal::obj(jaq_json::Map::default()), JaqValueKind::Object),
+        ];
+        for (value, expected) in values {
+            assert_eq!(JaqValueKind::of(&value), expected);
+        }
+
+        let categories = [
+            (serde_json::error::Category::Io, JsonNumberIssue::Io),
+            (serde_json::error::Category::Syntax, JsonNumberIssue::Syntax),
+            (serde_json::error::Category::Data, JsonNumberIssue::Data),
+            (serde_json::error::Category::Eof, JsonNumberIssue::Eof),
+        ];
+        for (category, expected) in categories {
+            assert_eq!(JsonNumberIssue::from(category), expected);
+        }
+    }
 
     #[test]
     fn runs_a_program_with_a_single_output() {

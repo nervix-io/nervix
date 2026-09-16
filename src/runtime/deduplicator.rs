@@ -9,8 +9,9 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use triomphe::Arc;
 
 use super::{
-    PersistedRuntimeStateEntry, ReorderKeyPart, RuntimePersistenceError, RuntimeStatePlacement,
-    UdfExecutor, checked_add_duration_to_timestamp, compile_key_projection_program,
+    KeyProjectionKind, PersistedRuntimeStateEntry, ReorderKeyPart, RuntimePersistenceError,
+    RuntimeStatePlacement, UdfExecutor, checked_add_duration_to_timestamp,
+    compile_key_projection_program,
     published_generation::{Generation, PublishedGenerations},
 };
 
@@ -140,14 +141,14 @@ pub(super) fn compile_deduplicator_key_program(
         ));
     }
     let compiled = compile_key_projection_program(
-        "deduplicator",
+        KeyProjectionKind::Deduplicator,
         processor,
-        "DEDUPLICATE ON",
         input_relays,
         deduplicate_on,
         input_schema,
         udfs,
-    )?;
+    )
+    .map_err(|error| format!("{error:#}"))?;
     Ok(CompiledDeduplicatorKeyProgram {
         key_column_offset: 0,
         key_count: deduplicate_on.len(),
