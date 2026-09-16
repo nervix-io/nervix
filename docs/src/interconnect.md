@@ -370,6 +370,14 @@ reads its stop request only between rounds, and a round exchanges with each sele
 under a one-second request timeout. Closing the path first makes an exchange still waiting on a
 peer that is itself stopping fail at once, instead of holding teardown for the rest of the round.
 
+Session subscription interest also propagates through gossip. The key encoding is private to the
+cluster layer: whenever the live-node state watcher changes, each node rebuilds an immutable index
+from domain and relay to the interested node incarnations and publishes it through `ArcSwap`. A
+relay owner loads that snapshot and performs borrowed domain and relay lookups, so per-batch remote
+fan-out neither formats a gossip key nor waits on the gossip mutex. Subscription creation waits for
+the exact subscriber incarnation to appear in every live node's published index before it reports
+success. A withdrawal disappears from fan-out when the next gossip state snapshot is published.
+
 Consensus separates traffic according to the progress it protects:
 
 - heartbeats, votes, leadership notifications, linearizable runtime-admission reads, and other

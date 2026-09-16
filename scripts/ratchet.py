@@ -652,6 +652,23 @@ _DATA_PLANE_LOCK_ACQUISITION = re.compile(
     r"\.\s*(?:lock|read|write|entry)\s*\("
 )
 
+_DATA_PLANE_CLUSTER_AWAIT = re.compile(
+    r"\.\s*cluster\s*\.\s*[A-Za-z_][A-Za-z0-9_]*\s*\([^;]*?\)\s*\.\s*await\b",
+    re.DOTALL,
+)
+
+
+def count_data_plane_cluster_awaits(files: Sequence[RustFile]) -> list[Site]:
+    """Count data-plane calls that suspend while reading cluster state."""
+
+    sites: list[Site] = []
+    for file in product_files(files):
+        if not file.path.startswith(DATA_PLANE):
+            continue
+        for match in _DATA_PLANE_CLUSTER_AWAIT.finditer(file.product):
+            sites.append(file.site(match.start(), file.source_line(match.start())))
+    return sites
+
 
 def count_data_plane_lock_acquisitions(files: Sequence[RustFile]) -> list[Site]:
     """Count lock-taking method calls in the files that execute the data plane."""
@@ -830,6 +847,11 @@ COUNTS: tuple[Count, ...] = (
         "model_matches_in_data_plane",
         f"`Model::` references under {DATA_PLANE} outside the planner",
         count_model_matches_in_data_plane,
+    ),
+    Count(
+        "data_plane_cluster_awaits",
+        "data-plane calls that await cluster state",
+        count_data_plane_cluster_awaits,
     ),
     Count(
         "data_plane_lock_acquisitions",

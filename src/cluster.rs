@@ -18,6 +18,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use arc_swap::{ArcSwap, Guard};
 use async_trait::async_trait;
 use chitchat::{
     Chitchat, ChitchatHandle, ChitchatId, ChitchatMessage, Deserializable as _, NodeState,
@@ -66,6 +67,9 @@ const MAX_GOSSIP_MESSAGE_BYTES: usize = 60 * 1024;
 pub struct ClusterHandle {
     local_incarnation: nervix_models::ClusterNodeIncarnation,
     chitchat: Arc<tokio::sync::Mutex<Chitchat>>,
+    /// The membership task owns the other reference and replaces this snapshot whenever the
+    /// Chitchat live-node state watcher changes.
+    subscription_interest: Arc<SubscriptionInterestPublication>,
     /// The transport the gossip server and the membership task also hold, kept here so shutdown
     /// can close it before it asks the gossip server to stop.
     gossip_transport: InterconnectGossipTransport,
@@ -74,6 +78,99 @@ pub struct ClusterHandle {
     peer_health_state: watch::Sender<PeerHealthStateSnapshot>,
     node_unavailability_timeout: Duration,
     membership_task: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// The interested node incarnations for every domain and relay advertised by live gossip state.
+///
+/// Strings are retained only in this cold-path snapshot. A relay owner looks them up through
+/// borrowed `str` keys, then iterates the node map without formatting a gossip key or allocating.
+#[derive(Debug, Default)]
+pub(crate) struct SubscriptionInterestIndex {
+    domains: BTreeMap<String, BTreeMap<String, BTreeMap<ClusterNodeName, ClusterNodeIncarnation>>>,
+}
+
+impl SubscriptionInterestIndex {
+    fn from_live_node_states(nodes: &BTreeMap<ChitchatId, NodeState>) -> Self {
+        let mut index = Self::default();
+        for (chitchat_id, state) in nodes {
+            let Some(identity) = cluster_node_identity(chitchat_id) else {
+                continue;
+            };
+            for (key, _) in state.key_values() {
+                let Some((domain, relay)) = subscription_interest_from_key(key) else {
+                    continue;
+                };
+                let relays = index.domains.entry(domain.to_string()).or_default();
+                let interested_nodes = relays.entry(relay.to_string()).or_default();
+                match interested_nodes.entry(identity.node_id().clone()) {
+                    std::collections::btree_map::Entry::Occupied(mut current) => {
+                        if identity.incarnation() > *current.get() {
+                            current.insert(identity.incarnation());
+                        }
+                    }
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(identity.incarnation());
+                    }
+                }
+            }
+        }
+        index
+    }
+
+    pub(crate) fn nodes(
+        &self,
+        domain: &str,
+        relay: &str,
+    ) -> Option<&BTreeMap<ClusterNodeName, ClusterNodeIncarnation>> {
+        let relays = self.domains.get(domain)?;
+        relays.get(relay)
+    }
+
+    fn contains(&self, subscriber: &ClusterNodeIdentity, domain: &str, relay: &str) -> bool {
+        let Some(nodes) = self.nodes(domain, relay) else {
+            return false;
+        };
+        nodes.get(subscriber.node_id()) == Some(&subscriber.incarnation())
+    }
+}
+
+/// Atomic publication plus a cold-path change notification for creation handshakes.
+struct SubscriptionInterestPublication {
+    index: ArcSwap<SubscriptionInterestIndex>,
+    changed: watch::Sender<()>,
+}
+
+impl SubscriptionInterestPublication {
+    fn new() -> Self {
+        Self {
+            index: ArcSwap::from_pointee(SubscriptionInterestIndex::default()),
+            changed: watch::channel(()).0,
+        }
+    }
+
+    fn publish(&self, nodes: &BTreeMap<ChitchatId, NodeState>) {
+        let index = SubscriptionInterestIndex::from_live_node_states(nodes);
+        self.index.store(Arc::new(index));
+        self.changed.send_replace(());
+    }
+
+    fn load(&self) -> Guard<Arc<SubscriptionInterestIndex>> {
+        self.index.load()
+    }
+
+    async fn wait_for(&self, subscriber: &ClusterNodeIdentity, domain: &str, relay: &str) {
+        let mut changes = self.changed.subscribe();
+        loop {
+            tokio::task::consume_budget().await;
+            if self.load().contains(subscriber, domain, relay) {
+                return;
+            }
+            changes.changed().await.assured(
+                "the subscription-interest publication retains its change sender for the server \
+                 lifetime",
+            );
+        }
+    }
 }
 
 /// The gossip event bus, and the one way a membership or peer-connectivity change reaches a
@@ -1088,11 +1185,14 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
     let events = ClusterEvents::new();
     let chitchat_state = chitchat.chitchat();
     let mut live_nodes = chitchat_state.lock().await.live_nodes_watch_stream();
+    let subscription_interest = Arc::new(SubscriptionInterestPublication::new());
+    let subscription_interest_publisher = subscription_interest.clone();
     let event_tx = events.clone();
     let route_transport = transport.clone();
     let membership_task = tokio::spawn(async move {
         while let Some(nodes) = live_nodes.next().await {
             tokio::task::consume_budget().await;
+            subscription_interest_publisher.publish(&nodes);
             route_transport.refresh_routes(&nodes);
             let report = membership_report(&nodes);
             info!(members = ?report, "cluster membership updated");
@@ -1103,6 +1203,7 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
     Ok(ClusterHandle {
         local_incarnation: nervix_models::ClusterNodeIncarnation::new(generation_id),
         chitchat: chitchat_state,
+        subscription_interest,
         gossip_transport: transport,
         chitchat_server: Mutex::new(Some(chitchat)),
         events,
@@ -1357,35 +1458,8 @@ impl ClusterHandle {
         }
     }
 
-    pub async fn nodes_with_subscription_interest(
-        &self,
-        domain: &str,
-        relay: &str,
-    ) -> BTreeSet<ClusterNodeName> {
-        let key = subscription_interest_key(domain, relay);
-        let chitchat_handle = self.chitchat.clone();
-        let chitchat = chitchat_handle.lock().await;
-        let self_id = chitchat.self_chitchat_id().clone();
-        let mut interested = BTreeSet::new();
-
-        if let Some(state) = chitchat.node_state(&self_id)
-            && state.get(&key).is_some()
-        {
-            interested.extend(ClusterNodeName::parse(&self_id.node_id).ok());
-        }
-
-        for node_id in chitchat.live_nodes() {
-            if *node_id == self_id {
-                continue;
-            }
-            if let Some(state) = chitchat.node_state(node_id)
-                && state.get(&key).is_some()
-            {
-                interested.extend(ClusterNodeName::parse(&node_id.node_id).ok());
-            }
-        }
-
-        interested
+    pub(crate) fn subscription_interest_index(&self) -> Guard<Arc<SubscriptionInterestIndex>> {
+        self.subscription_interest.load()
     }
 
     /// Wait until this node's live Chitchat view contains the interest advertised by the exact
@@ -1396,24 +1470,9 @@ impl ClusterHandle {
         domain: &str,
         relay: &str,
     ) {
-        let key = subscription_interest_key(domain, relay);
-        let mut live_node_states = self.subscribe_live_node_states().await;
-        loop {
-            tokio::task::consume_budget().await;
-            let visible = {
-                let states = live_node_states.borrow_and_update();
-                states.iter().any(|(chitchat_id, state)| {
-                    cluster_node_identity(chitchat_id).as_ref() == Some(subscriber)
-                        && state.get(&key).is_some()
-                })
-            };
-            if visible {
-                return;
-            }
-            live_node_states.changed().await.assured(
-                "the cluster handle retains its Chitchat state sender for the server lifetime",
-            );
-        }
+        self.subscription_interest
+            .wait_for(subscriber, domain, relay)
+            .await;
     }
 
     pub(crate) fn replace_peer_health_endpoints(
@@ -1525,6 +1584,15 @@ impl ClusterHandle {
 
 fn subscription_interest_key(domain: &str, relay: &str) -> String {
     format!("{KEY_SUBSCRIPTION_INTEREST_PREFIX}{domain}:{relay}")
+}
+
+fn subscription_interest_from_key(key: &str) -> Option<(&str, &str)> {
+    let coordinates = key.strip_prefix(KEY_SUBSCRIPTION_INTEREST_PREFIX)?;
+    let (domain, relay) = coordinates.split_once(':')?;
+    if domain.is_empty() || relay.is_empty() {
+        return None;
+    }
+    Some((domain, relay))
 }
 
 fn revision_is_at_least(state: &NodeState, key: &str, revision: u64) -> bool {
@@ -1696,6 +1764,24 @@ mod tests {
         PeerHealthEndpoint::new(health_identity(node, incarnation), address.to_string())
     }
 
+    fn subscription_state(
+        node: &str,
+        incarnation: u64,
+        port: u16,
+        interests: &[(&str, &str)],
+    ) -> (ChitchatId, NodeState) {
+        let id = ChitchatId {
+            node_id: node.to_string(),
+            generation_id: incarnation,
+            gossip_advertise_addr: SocketAddr::from(([127, 0, 0, 1], port)),
+        };
+        let mut state = NodeState::for_test();
+        for (domain, relay) in interests {
+            state.set(subscription_interest_key(domain, relay), "1");
+        }
+        (id, state)
+    }
+
     #[test]
     fn derive_peer_addr_increments_port() {
         let grpc_addr: SocketAddr = "127.0.0.1:47391".parse().expect("valid socket addr");
@@ -1753,6 +1839,82 @@ mod tests {
 
         advance_revision(&mut state, KEY_RUNTIME_REVISION_READY, 8);
         assert!(revision_is_at_least(&state, KEY_RUNTIME_REVISION_READY, 8));
+    }
+
+    #[test]
+    fn subscription_interest_index_tracks_live_advertisements_and_withdrawals() {
+        let (node_one_id, node_one_state) =
+            subscription_state("node-1", 7, 7101, &[("sales", "events")]);
+        let (node_two_id, mut node_two_state) = subscription_state(
+            "node-2",
+            9,
+            7102,
+            &[("sales", "events"), ("sales", "audits")],
+        );
+        node_two_state.set("subscription_interest:incomplete", "1");
+        let mut live_nodes = BTreeMap::from([
+            (node_one_id.clone(), node_one_state),
+            (node_two_id.clone(), node_two_state),
+        ]);
+
+        let index = SubscriptionInterestIndex::from_live_node_states(&live_nodes);
+        let expected = BTreeMap::from([
+            (
+                ClusterNodeName::parse("node-1").assured("the test node name is valid"),
+                ClusterNodeIncarnation::new(7),
+            ),
+            (
+                ClusterNodeName::parse("node-2").assured("the test node name is valid"),
+                ClusterNodeIncarnation::new(9),
+            ),
+        ]);
+        assert_eq!(
+            index
+                .nodes("sales", "events")
+                .assured("both test nodes advertise sales events"),
+            &expected
+        );
+        assert!(index.contains(&health_identity("node-2", 9), "sales", "events"));
+        assert!(index.nodes("incomplete", "").is_none());
+
+        live_nodes
+            .get_mut(&node_two_id)
+            .assured("the second test node is live")
+            .delete(&subscription_interest_key("sales", "events"));
+        let withdrawn = SubscriptionInterestIndex::from_live_node_states(&live_nodes);
+        let remaining = withdrawn
+            .nodes("sales", "events")
+            .assured("the first test node remains interested");
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining.contains_key(
+            &ClusterNodeName::parse("node-1").assured("the test node name is valid")
+        ));
+        assert!(!withdrawn.contains(&health_identity("node-2", 9), "sales", "events"));
+    }
+
+    #[test]
+    fn subscription_interest_snapshot_load_and_lookup_do_not_allocate() {
+        let (node_id, node_state) = subscription_state("node-1", 7, 7101, &[("sales", "events")]);
+        let live_nodes = BTreeMap::from([(node_id, node_state)]);
+        let publication = SubscriptionInterestPublication::new();
+        publication.publish(&live_nodes);
+
+        let (allocations, node_count) = alloc_count::alloc_count!({
+            let index = publication.load();
+            std::hint::black_box(
+                index
+                    .nodes("sales", "events")
+                    .assured("the test node advertises sales events")
+                    .len(),
+            )
+        });
+
+        assert_eq!(node_count, 1);
+        assert_eq!(
+            (allocations.alloc_calls, allocations.realloc_calls),
+            (0, 0),
+            "loading and querying the published subscription-interest index must not allocate"
+        );
     }
 
     #[test]

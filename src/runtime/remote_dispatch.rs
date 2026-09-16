@@ -356,22 +356,22 @@ impl RemoteDispatcher {
         excluded_nodes: &BTreeSet<ClusterNodeName>,
     ) {
         let local_node_id = self.local_node_id();
-        let interested_nodes = self
-            .cluster
-            .nodes_with_subscription_interest(domain.as_str(), relay.as_str())
-            .await;
+        let interest_index = self.cluster.subscription_interest_index();
+        let Some(interested_nodes) = interest_index.nodes(domain.as_str(), relay.as_str()) else {
+            return;
+        };
         // One encode for the whole fanout. Every interested node carries this same allocation,
         // and the first one serializes it inside its own outbound slot: the slot is what orders
         // the batches a node receives, so an encode performed ahead of it lets a later batch
         // overtake an earlier one.
         let mut encoded_body: Option<ChargedBytes> = None;
-        for node_id in interested_nodes {
+        for node_id in interested_nodes.keys() {
             tokio::task::consume_budget().await;
-            if node_id == *local_node_id || excluded_nodes.contains(&node_id) {
+            if node_id == local_node_id || excluded_nodes.contains(node_id) {
                 continue;
             }
             let outbound_slot = services.outbound_slot(
-                &node_id,
+                node_id,
                 relay,
                 RelayPayloadKind::SubscriptionFanout,
                 &batch.key,
@@ -398,7 +398,7 @@ impl RemoteDispatcher {
             let delivery = outbound_slot.next_delivery();
             if let Err(error) = self
                 .dispatch_admitted_relay_payload(
-                    &node_id,
+                    node_id,
                     RelayPayload {
                         delivery,
                         kind: RelayPayloadKind::SubscriptionFanout,
