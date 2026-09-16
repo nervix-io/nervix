@@ -19,6 +19,7 @@ pub(super) struct ReingestorInputSpec {
 
 #[derive(Clone, Copy)]
 pub(super) struct ReingestorDispatchContext<'a> {
+    pub(super) routing: &'a DomainRoutingSnapshot,
     pub(super) domain: &'a DomainName,
     pub(super) reingestor: &'a ReingestorName,
     pub(super) from_relay: &'a RelayName,
@@ -199,75 +200,52 @@ impl Runtime {
         PlannedGeneralError,
     > {
         let ReingestorDispatchContext {
+            routing,
             domain,
             reingestor,
             from_relay,
             ..
         } = context;
         if output.compiled_program.is_none() {
-            let (
-                input_schema,
-                output_schema,
-                materialized_stream_specs,
-                available_lookups,
-                udfs,
-                current_branching,
-                current_branch_schema,
-                target_branch_schema,
-            ) = {
-                let Some(execution) = self.inner.executions.get(domain) else {
-                    return Err(PlannedGeneralError {
-                        acks: batch.acks.clone(),
-                        reason: format!("domain '{}' is not instantiated", domain.as_str()),
-                    });
-                };
-                let input_schema = execution
-                    .relay_schemas
-                    .get(from_relay)
-                    .cloned()
-                    .ok_or_else(|| PlannedGeneralError {
-                        acks: batch.acks.clone(),
-                        reason: format!(
-                            "stream '{}' schema is not instantiated in domain '{}'",
-                            from_relay.as_str(),
-                            domain.as_str()
-                        ),
-                    })?;
-                let output_schema = execution
-                    .relay_schemas
-                    .get(&output.relay)
-                    .cloned()
-                    .ok_or_else(|| PlannedGeneralError {
-                        acks: batch.acks.clone(),
-                        reason: format!(
-                            "stream '{}' schema is not instantiated in domain '{}'",
-                            output.relay.as_str(),
-                            domain.as_str()
-                        ),
-                    })?;
-                (
-                    input_schema,
-                    output_schema,
-                    execution.materialized_stream_specs.clone(),
-                    execution.lookups.clone(),
-                    execution.udfs.clone(),
-                    execution
-                        .relay_branchings
-                        .get(from_relay)
-                        .cloned()
-                        .unwrap_or_default(),
-                    execution
-                        .relay_branching_schemas
-                        .get(from_relay)
-                        .cloned()
-                        .flatten(),
-                    execution
-                        .relay_branching_schemas
-                        .get(&output.relay)
-                        .cloned()
-                        .flatten(),
-                )
-            };
+            let input_schema = routing
+                .relay_schemas
+                .get(from_relay)
+                .cloned()
+                .ok_or_else(|| PlannedGeneralError {
+                    acks: batch.acks.clone(),
+                    reason: format!(
+                        "stream '{}' schema is not instantiated in domain '{}'",
+                        from_relay.as_str(),
+                        domain.as_str()
+                    ),
+                })?;
+            let output_schema = routing
+                .relay_schemas
+                .get(&output.relay)
+                .cloned()
+                .ok_or_else(|| PlannedGeneralError {
+                    acks: batch.acks.clone(),
+                    reason: format!(
+                        "stream '{}' schema is not instantiated in domain '{}'",
+                        output.relay.as_str(),
+                        domain.as_str()
+                    ),
+                })?;
+            let current_branching = routing
+                .relay_branchings
+                .get(from_relay)
+                .cloned()
+                .unwrap_or_default();
+            let current_branch_schema = routing
+                .relay_branching_schemas
+                .get(from_relay)
+                .cloned()
+                .flatten();
+            let target_branch_schema = routing
+                .relay_branching_schemas
+                .get(&output.relay)
+                .cloned()
+                .flatten();
             match compile_processor_output_filter_map_program(
                 RuntimeCompileTarget {
                     domain,
@@ -284,12 +262,12 @@ impl Runtime {
                 },
                 None,
                 RuntimeVmCompileContext {
-                    available_materialized_streams: &materialized_stream_specs,
-                    available_lookups: &available_lookups,
+                    available_materialized_streams: &routing.materialized_stream_specs,
+                    available_lookups: &routing.lookups,
                     current_branching: &current_branching,
                     current_branch_schema: current_branch_schema.as_ref(),
                     current_branch_sensitivity: None,
-                    udfs: Some(&udfs),
+                    udfs: Some(&routing.udfs),
                 },
             ) {
                 Ok(program) => output.compiled_program = program,
@@ -316,12 +294,12 @@ impl Runtime {
                 },
                 target_branch_schema,
                 RuntimeVmCompileContext {
-                    available_materialized_streams: &materialized_stream_specs,
-                    available_lookups: &available_lookups,
+                    available_materialized_streams: &routing.materialized_stream_specs,
+                    available_lookups: &routing.lookups,
                     current_branching: &current_branching,
                     current_branch_schema: current_branch_schema.as_ref(),
                     current_branch_sensitivity: None,
-                    udfs: Some(&udfs),
+                    udfs: Some(&routing.udfs),
                 },
             )
             .map_err(|error| PlannedGeneralError {
@@ -331,18 +309,18 @@ impl Runtime {
         }
 
         let Some(program) = output.compiled_program.as_ref() else {
-            let output_schema = match self.inner.executions.get(domain) {
-                Some(execution) => execution.relay_schemas.get(&output.relay).cloned(),
-                None => None,
-            };
-            let output_schema = output_schema.ok_or_else(|| PlannedGeneralError {
-                acks: batch.acks.clone(),
-                reason: format!(
-                    "reingestor '{}' output relay '{}' is not instantiated",
-                    reingestor.as_str(),
-                    output.relay.as_str()
-                ),
-            })?;
+            let output_schema = routing
+                .relay_schemas
+                .get(&output.relay)
+                .cloned()
+                .ok_or_else(|| PlannedGeneralError {
+                    acks: batch.acks.clone(),
+                    reason: format!(
+                        "reingestor '{}' output relay '{}' is not instantiated",
+                        reingestor.as_str(),
+                        output.relay.as_str()
+                    ),
+                })?;
             let projected = batch
                 .batch
                 .project(output_schema.arrow_schema())
@@ -593,6 +571,7 @@ impl Runtime {
         materialized_values: &HashMap<String, RuntimeValue>,
     ) {
         let ReingestorDispatchContext {
+            routing,
             domain,
             reingestor,
             error_policies,
@@ -621,7 +600,7 @@ impl Runtime {
 
         let mut output_schemas = Vec::with_capacity(output_relays.len());
         for relay in &output_relays {
-            match relay_schema_for_runtime(self, domain, relay) {
+            match relay_schema_for_routing(routing, domain, relay) {
                 Ok(schema) => output_schemas.push(Some(schema)),
                 Err(error) => {
                     self.handle_internal_processor_error_for_acks(
@@ -1027,6 +1006,7 @@ impl Runtime {
         materialized_values: &HashMap<String, RuntimeValue>,
     ) -> Option<RelayRecordBatch> {
         let ReingestorDispatchContext {
+            routing,
             domain,
             reingestor,
             from_relay,
@@ -1040,60 +1020,34 @@ impl Runtime {
         };
 
         if compiled_from_where.is_none() {
-            let (
-                input_schema,
-                materialized_stream_specs,
-                available_lookups,
-                udfs,
-                current_branching,
-                current_branch_schema,
-            ) = {
-                let Some(execution) = self.inner.executions.get(domain) else {
+            let input_schema = match routing.relay_schemas.get(from_relay).cloned() {
+                Some(schema) => schema,
+                None => {
                     self.handle_internal_processor_error_for_acks(
                         domain,
                         ModelKind::Reingestor,
                         reingestor,
                         error_policies,
                         batch.acks.iter(),
-                        format!("domain '{}' is not instantiated", domain.as_str()),
+                        format!(
+                            "stream '{}' schema is not instantiated in domain '{}'",
+                            from_relay.as_str(),
+                            domain.as_str()
+                        ),
                     );
                     return None;
-                };
-                let input_schema = match execution.relay_schemas.get(from_relay).cloned() {
-                    Some(schema) => schema,
-                    None => {
-                        self.handle_internal_processor_error_for_acks(
-                            domain,
-                            ModelKind::Reingestor,
-                            reingestor,
-                            error_policies,
-                            batch.acks.iter(),
-                            format!(
-                                "stream '{}' schema is not instantiated in domain '{}'",
-                                from_relay.as_str(),
-                                domain.as_str()
-                            ),
-                        );
-                        return None;
-                    }
-                };
-                (
-                    input_schema,
-                    execution.materialized_stream_specs.clone(),
-                    execution.lookups.clone(),
-                    execution.udfs.clone(),
-                    execution
-                        .relay_branchings
-                        .get(from_relay)
-                        .cloned()
-                        .unwrap_or_default(),
-                    execution
-                        .relay_branching_schemas
-                        .get(from_relay)
-                        .cloned()
-                        .flatten(),
-                )
+                }
             };
+            let current_branching = routing
+                .relay_branchings
+                .get(from_relay)
+                .cloned()
+                .unwrap_or_default();
+            let current_branch_schema = routing
+                .relay_branching_schemas
+                .get(from_relay)
+                .cloned()
+                .flatten();
             match compile_expression_filter_program(
                 RuntimeCompileTarget {
                     domain,
@@ -1107,12 +1061,12 @@ impl Runtime {
                 false,
                 MessageErrorOperation::SourceWhere,
                 RuntimeVmCompileContext {
-                    available_materialized_streams: &materialized_stream_specs,
-                    available_lookups: &available_lookups,
+                    available_materialized_streams: &routing.materialized_stream_specs,
+                    available_lookups: &routing.lookups,
                     current_branching: &current_branching,
                     current_branch_schema: current_branch_schema.as_ref(),
                     current_branch_sensitivity: None,
-                    udfs: Some(&udfs),
+                    udfs: Some(&routing.udfs),
                 },
             ) {
                 Ok(program) => *compiled_from_where = program,
@@ -1258,6 +1212,22 @@ impl Runtime {
         );
 
         Ok(tokio::spawn(async move {
+            let shared_routing = match runtime
+                .wait_for_domain_routing(&task_domain, &task_from_relay)
+                .await
+            {
+                Ok(routing) => routing,
+                Err(error) => {
+                    runtime.events().report_error(format!(
+                        "reingestor '{}' in domain '{}' could not bind its routing snapshot: \
+                         {error}",
+                        task_reingestor.as_str(),
+                        task_domain.as_str(),
+                    ));
+                    return;
+                }
+            };
+            let mut routing = DomainRoutingCache::new(shared_routing);
             let domain_clock = match runtime.bind_domain_clock(&task_domain) {
                 Ok(clock) => clock,
                 Err(error) => {
@@ -1431,6 +1401,7 @@ impl Runtime {
                         let wait_for_required_state = !interaction.is_terminal_drain();
                         let batch = match runtime
                             .resolve_materialized_dependencies_for_batch(
+                                &mut routing,
                                 &task_domain,
                                 &task_from_relay,
                                 &task_materialized_state,
@@ -1462,9 +1433,11 @@ impl Runtime {
                             }
                         };
                         let (batch, materialized_values, execution_now) = batch;
+                        let routing_snapshot = routing.load();
                         runtime
                             .dispatch_reingestor_outputs(
                                 ReingestorDispatchContext {
+                                    routing: routing_snapshot,
                                     domain: &task_domain,
                                     reingestor: &task_reingestor,
                                     from_relay: &task_from_relay,
@@ -1808,37 +1781,34 @@ mod tests {
         ]);
         let branch_schema = test_schema(&[("tenant", ParseAsType::String)]).arrow_schema();
         let (execution_shutdown, _) = watch::channel(false);
-        runtime.inner.executions.insert(
-            domain.clone(),
+        runtime.install_domain_execution(
+            &domain,
             DomainExecution {
                 schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
-                passive_only: false,
                 start_version: 0,
                 domain_clock: test_domain_clock(&domain),
                 shutdown: execution_shutdown,
                 graph: StdArc::new(ArcSwapOption::empty()),
-                relay_registries: HashMap::default(),
-                relay_schemas: [
-                    (named("orders"), schema.clone()),
-                    (named("tenant_orders"), schema.clone()),
-                ]
-                .into_iter()
-                .collect(),
-                relay_services: HashMap::default(),
-                relay_branchings: [(relay.clone(), vec![named("tenant")])]
-                    .into_iter()
-                    .collect(),
-                relay_branching_schemas: [(relay.clone(), Some(branch_schema))]
-                    .into_iter()
-                    .collect(),
-                materialized_stream_specs: HashMap::default(),
-                materialized_stream_owner_nodes: HashMap::default(),
+                routing: runtime.stage_domain_routing(
+                    &domain,
+                    DomainRoutingSnapshot {
+                        relay_schemas: [
+                            (named("orders"), schema.clone()),
+                            (named("tenant_orders"), schema.clone()),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        relay_branchings: [(relay.clone(), vec![named("tenant")])]
+                            .into_iter()
+                            .collect(),
+                        relay_branching_schemas: [(relay.clone(), Some(branch_schema))]
+                            .into_iter()
+                            .collect(),
+                        ..DomainRoutingSnapshot::default()
+                    },
+                ),
                 branched_ingestors: HashMap::default(),
                 branched_entrypoints: HashMap::default(),
-                codecs: HashMap::default(),
-                signaling_protocols: HashMap::default(),
-                lookups: HashMap::default(),
-                udfs: nervix_roto::UdfExecutor::default(),
                 endpoint_routes: HashMap::default(),
                 node_tasks: HashMap::default(),
                 emitter_tasks: HashMap::default(),
@@ -2048,33 +2018,28 @@ mod tests {
             ("user_id", ParseAsType::U32),
         ]);
         let (execution_shutdown, _) = watch::channel(false);
-        runtime.inner.executions.insert(
-            domain.clone(),
+        runtime.install_domain_execution(
+            &domain,
             DomainExecution {
                 schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
-                passive_only: false,
                 start_version: 0,
                 domain_clock: test_domain_clock(&domain),
                 shutdown: execution_shutdown,
                 graph: StdArc::new(ArcSwapOption::empty()),
-                relay_registries: HashMap::default(),
-                relay_schemas: [
-                    (input_relay.clone(), schema.clone()),
-                    (output_relay.clone(), schema.clone()),
-                ]
-                .into_iter()
-                .collect(),
-                relay_services: HashMap::default(),
-                relay_branchings: HashMap::default(),
-                relay_branching_schemas: HashMap::default(),
-                materialized_stream_specs: HashMap::default(),
-                materialized_stream_owner_nodes: HashMap::default(),
+                routing: runtime.stage_domain_routing(
+                    &domain,
+                    DomainRoutingSnapshot {
+                        relay_schemas: [
+                            (input_relay.clone(), schema.clone()),
+                            (output_relay.clone(), schema.clone()),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        ..DomainRoutingSnapshot::default()
+                    },
+                ),
                 branched_ingestors: HashMap::default(),
                 branched_entrypoints: HashMap::default(),
-                codecs: HashMap::default(),
-                signaling_protocols: HashMap::default(),
-                lookups: HashMap::default(),
-                udfs: nervix_roto::UdfExecutor::default(),
                 endpoint_routes: HashMap::default(),
                 node_tasks: HashMap::default(),
                 emitter_tasks: HashMap::default(),

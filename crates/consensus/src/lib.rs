@@ -99,9 +99,19 @@ pub use transaction::{
     FinishedTransaction, ReplicatedTransaction, TransactionApplyingStep, TransactionCommandResult,
     TransactionCommitAdvance, TransactionCommitProgress, TransactionDiagnostic,
     TransactionMutationError, TransactionMutationResponse, TransactionOutcome,
-    TransactionQueueLimits, TransactionState, TransactionStatement, TransactionStepEffect,
-    TransactionStepResult,
+    TransactionQueueAdmission, TransactionQueueLimits, TransactionState, TransactionStatement,
+    TransactionStatementRequest, TransactionStepEffect, TransactionStepResult,
 };
+
+/// Domain-owned authoritative inputs captured from one state-machine read for transaction
+/// planning. The Raft revision is deliberately absent: unrelated log writes do not change the
+/// semantic planning basis.
+#[derive(Debug, Clone)]
+pub struct TransactionControlSnapshot {
+    pub domain: Option<DomainState>,
+    pub resources: ResourceVersionStatus,
+    pub schedule: Option<DomainSchedule>,
+}
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -1903,6 +1913,18 @@ impl Observer {
 
     pub async fn current_schedule(&self) -> ClusterSchedule {
         (&self.inner.store.inner.state().schedule).into()
+    }
+    pub async fn transaction_control_snapshot(
+        &self,
+        domain: &DomainName,
+    ) -> TransactionControlSnapshot {
+        let state = self.inner.store.inner.state();
+        let schedule: ClusterSchedule = (&state.schedule).into();
+        TransactionControlSnapshot {
+            domain: state.domains.get(domain).cloned(),
+            resources: (&state.resources).into(),
+            schedule: schedule.domain(domain).cloned(),
+        }
     }
     pub async fn current_revision(&self) -> u64 {
         let state = self.inner.store.inner.state();
@@ -4418,9 +4440,10 @@ mod tests {
         GossipNode, GossipState, LeaderTenure, MembershipMutation, MembershipSnapshot,
         ProtocolOriginError, ResourceRecords, StateMachineChanges, StateMachineData,
         TransactionCommandResult, TransactionMutationError, TransactionOutcome,
-        TransactionStatement, TransactionStepEffect, TransactionStepResult, TypeConfig,
-        UserCredentials, apply_consensus_command, apply_consensus_command_at,
-        apply_transaction_step_effect, io_error, storage_decode, validate_protocol_origin,
+        TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
+        TransactionStepResult, TypeConfig, UserCredentials, apply_consensus_command,
+        apply_consensus_command_at, apply_transaction_step_effect, io_error, storage_decode,
+        validate_protocol_origin,
     };
     use crate::{
         ClusterNodeName, ConsensusError, LogIdOf, ReplicatedTransaction, TransactionQueueLimits,
@@ -5393,13 +5416,13 @@ mod tests {
             max_statements: 4,
             max_source_bytes: 1024,
         };
-        let first = TransactionStatement {
+        let first = TransactionStatement::test_admitted(TransactionStatementRequest {
             request_reference: nervix_models::CommandExecutionReference::parse("append-1")
                 .assured("the test append reference contains only admitted characters"),
             expected_position: 0,
             source: "STOP".to_string(),
             statement: Statement::StopDomain(nervix_models::StopDomain),
-        };
+        });
         transaction
             .queue(
                 &owner,
@@ -5419,9 +5442,16 @@ mod tests {
             )
             .assured("an exact duplicate joins the append already admitted above");
         assert_eq!(transaction.statements.len(), 1);
+        assert_eq!(transaction.last_activity_at, Timestamp::from_unix_nanos(2));
+        assert_eq!(
+            transaction
+                .queue_admission(&owner, &domain_id, &first.request, limits)
+                .assured("the exact request returns its retained admission"),
+            crate::TransactionQueueAdmission::Existing(first.admission.clone())
+        );
 
         let mut changed = first;
-        changed.source = "STOP;".to_string();
+        changed.request.source = "STOP;".to_string();
         assert!(matches!(
             transaction.queue(
                 &owner,
@@ -5432,14 +5462,15 @@ mod tests {
             ),
             Err(TransactionMutationError::RequestConflict { .. })
         ));
+        assert_eq!(transaction.last_activity_at, Timestamp::from_unix_nanos(2));
 
-        let mut second = TransactionStatement {
+        let mut second = TransactionStatement::test_admitted(TransactionStatementRequest {
             request_reference: nervix_models::CommandExecutionReference::parse("append-2")
                 .assured("the test append reference contains only admitted characters"),
             expected_position: 0,
             source: "STOP".to_string(),
             statement: Statement::StopDomain(nervix_models::StopDomain),
-        };
+        });
         assert!(matches!(
             transaction.queue(
                 &owner,
@@ -5454,7 +5485,8 @@ mod tests {
                 ..
             })
         ));
-        second.expected_position = 1;
+        assert_eq!(transaction.last_activity_at, Timestamp::from_unix_nanos(2));
+        second.request.expected_position = 1;
         transaction
             .queue(
                 &owner,
@@ -5512,15 +5544,17 @@ mod tests {
                             .checked_add(2)
                             .assured("the test clock counts from zero"),
                     ),
-                    statement: Box::new(TransactionStatement {
-                        request_reference: nervix_models::CommandExecutionReference::parse(
-                            format!("request-{at}"),
-                        )
-                        .assured("the bounded test index produces an admitted reference"),
-                        expected_position: at,
-                        source: "statement".to_string(),
-                        statement,
-                    }),
+                    statement: Box::new(TransactionStatement::test_admitted(
+                        TransactionStatementRequest {
+                            request_reference: nervix_models::CommandExecutionReference::parse(
+                                format!("request-{at}"),
+                            )
+                            .assured("the bounded test index produces an admitted reference"),
+                            expected_position: at,
+                            source: "statement".to_string(),
+                            statement,
+                        },
+                    )),
                     limits: TransactionQueueLimits {
                         max_statements: 4,
                         max_source_bytes: 1024,

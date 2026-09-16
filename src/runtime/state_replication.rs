@@ -2511,13 +2511,12 @@ impl Runtime {
                 response_timeout,
             )
             .await?;
-        response.result.map(|snapshot| {
-            snapshot.map(|snapshot| PersistedRuntimeStateEntry {
-                lsm: snapshot.lsm,
-                schema_fingerprint: snapshot.schema_fingerprint,
-                payload: snapshot.payload,
-            })
-        })
+        let snapshot = response.result.map_err(|failure| failure.to_string())?;
+        Ok(snapshot.map(|snapshot| PersistedRuntimeStateEntry {
+            lsm: snapshot.lsm,
+            schema_fingerprint: snapshot.schema_fingerprint,
+            payload: snapshot.payload,
+        }))
     }
 
     pub(in crate::runtime) async fn wait_for_kafka_offset_replica_quorum(

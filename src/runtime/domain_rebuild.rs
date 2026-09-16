@@ -157,8 +157,16 @@ impl Runtime {
 
     /// Installs a built execution and publishes its endpoint routes in one step, so the routing
     /// index can never drift from the executions it describes.
-    pub(super) fn install_domain_execution(&self, domain: &DomainName, execution: DomainExecution) {
+    pub(super) fn install_domain_execution(
+        &self,
+        domain: &DomainName,
+        mut execution: DomainExecution,
+    ) {
         self.publish_routed_endpoints(domain, &execution);
+        execution.routing.publish();
+        self.inner
+            .domain_routings
+            .insert(domain.clone(), execution.routing.shared());
         self.inner.executions.insert(domain.clone(), execution);
     }
 
@@ -215,7 +223,8 @@ impl Runtime {
             Some(state) => state.start_version,
             None => 0,
         };
-        if let Some((_, existing)) = self.inner.executions.remove(domain) {
+        if let Some((_, mut existing)) = self.inner.executions.remove(domain) {
+            existing.routing.deactivate();
             Box::pin(self.stop_domain_execution(domain, existing)).await;
         }
 
@@ -1054,24 +1063,29 @@ impl Runtime {
             domain,
             DomainExecution {
                 schedule: schedule.clone(),
-                passive_only: false,
                 start_version: desired_start_version,
                 domain_clock,
                 shutdown: shutdown_tx,
                 graph: domain_graph.clone(),
-                relay_registries,
-                relay_schemas,
-                relay_services,
-                lookups: lookup_runtimes,
-                udfs: udf_executor,
-                relay_branchings,
-                relay_branching_schemas,
-                materialized_stream_specs,
-                materialized_stream_owner_nodes,
+                routing: self.stage_domain_routing(
+                    domain,
+                    DomainRoutingSnapshot {
+                        passive_only: false,
+                        relay_registries,
+                        relay_schemas,
+                        relay_services,
+                        lookups: lookup_runtimes,
+                        udfs: udf_executor,
+                        relay_branchings,
+                        relay_branching_schemas,
+                        materialized_stream_specs,
+                        materialized_stream_owner_nodes,
+                        codecs,
+                        signaling_protocols,
+                    },
+                ),
                 branched_ingestors: Self::branched_specs_by_identifier(&branched_specs),
                 branched_entrypoints,
-                codecs,
-                signaling_protocols,
                 endpoint_routes,
                 node_tasks,
                 emitter_tasks,
@@ -1299,24 +1313,29 @@ impl Runtime {
         };
         Ok(DomainExecution {
             schedule: schedule.clone(),
-            passive_only: true,
             start_version,
             domain_clock,
             shutdown,
             graph,
-            relay_registries,
-            relay_schemas,
-            relay_services,
-            lookups,
-            udfs: udf_executor,
-            relay_branchings,
-            relay_branching_schemas,
-            materialized_stream_specs: HashMap::default(),
-            materialized_stream_owner_nodes: HashMap::default(),
+            routing: self.stage_domain_routing(
+                domain,
+                DomainRoutingSnapshot {
+                    passive_only: true,
+                    relay_registries,
+                    relay_schemas,
+                    relay_services,
+                    lookups,
+                    udfs: udf_executor,
+                    relay_branchings,
+                    relay_branching_schemas,
+                    materialized_stream_specs: HashMap::default(),
+                    materialized_stream_owner_nodes: HashMap::default(),
+                    codecs,
+                    signaling_protocols: HashMap::default(),
+                },
+            ),
             branched_ingestors: HashMap::default(),
             branched_entrypoints: HashMap::default(),
-            codecs,
-            signaling_protocols: HashMap::default(),
             endpoint_routes: HashMap::default(),
             node_tasks: HashMap::default(),
             emitter_tasks: HashMap::default(),

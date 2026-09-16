@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::session_service::SessionServiceImpl;
-use crate::runtime::Runtime;
+use crate::runtime::{DomainRoutingCache, Runtime, SharedDomainRouting};
 #[derive(Debug)]
 pub(in crate::application) struct InterconnectRelayPayload {
     peer_node_id: ClusterNodeName,
@@ -59,6 +59,13 @@ impl InterconnectRelayChannel {
 
 pub(in crate::application) struct InterconnectRelayPayloadLane {
     sender: mpsc::UnboundedSender<InterconnectRelayPayload>,
+}
+
+struct InterconnectRelayCompletion {
+    channel: InterconnectRelayChannel,
+    routing: Option<SharedDomainRouting>,
+    cache: Option<DomainRoutingCache>,
+    result: Result<(), Report<crate::runtime::RuntimeError>>,
 }
 
 impl InterconnectRelayPayloadLane {
@@ -102,14 +109,36 @@ impl InterconnectRelayPayloadLane {
         runtime: Runtime,
         channel: InterconnectRelayChannel,
         message: InterconnectRelayPayload,
-    ) -> (
-        InterconnectRelayChannel,
-        Result<(), Report<crate::runtime::RuntimeError>>,
-    ) {
+        routing: Option<SharedDomainRouting>,
+        cache: Option<DomainRoutingCache>,
+    ) -> InterconnectRelayCompletion {
+        let routing = match routing {
+            Some(routing) => routing,
+            None => match runtime
+                .wait_for_domain_routing(&message.payload.domain, &message.payload.relay)
+                .await
+            {
+                Ok(routing) => routing,
+                Err(error) => {
+                    return InterconnectRelayCompletion {
+                        channel,
+                        routing: None,
+                        cache: None,
+                        result: Err(error),
+                    };
+                }
+            },
+        };
+        let mut cache = cache.unwrap_or_else(|| DomainRoutingCache::new(routing.clone()));
         let result = runtime
-            .handle_remote_stream(message.payload, message.admission)
+            .handle_remote_stream(message.payload, message.admission, &mut cache)
             .await;
-        (channel, result)
+        InterconnectRelayCompletion {
+            channel,
+            routing: Some(routing),
+            cache: Some(cache),
+            result,
+        }
     }
 
     pub(in crate::application) async fn run(
@@ -119,6 +148,8 @@ impl InterconnectRelayPayloadLane {
     ) {
         let mut queued =
             HashMap::<InterconnectRelayChannel, VecDeque<InterconnectRelayPayload>>::default();
+        let mut routing_by_domain = HashMap::<DomainName, SharedDomainRouting>::default();
+        let mut routing_cache_pool = HashMap::<DomainName, Vec<DomainRoutingCache>>::default();
         let mut active = FuturesUnordered::new();
         let mut receiving = true;
 
@@ -140,12 +171,22 @@ impl InterconnectRelayPayloadLane {
                         continue;
                     }
                     queued.insert(channel.clone(), VecDeque::new());
-                    active.push(Self::handle(runtime.clone(), channel, message));
+                    let routing = routing_by_domain.get(&channel.domain).cloned();
+                    let cache = routing_cache_pool
+                        .get_mut(&channel.domain)
+                        .and_then(Vec::pop);
+                    active.push(Self::handle(runtime.clone(), channel, message, routing, cache));
                 }
                 completed = active.next(), if !active.is_empty() => {
-                    let Some((channel, result)) = completed else {
+                    let Some(completed) = completed else {
                         continue;
                     };
+                    let InterconnectRelayCompletion {
+                        channel,
+                        routing,
+                        cache,
+                        result,
+                    } = completed;
                     if let Err(error) = result {
                         warn!(error = %error, "failed to process remote relay payload");
                     }
@@ -153,8 +194,23 @@ impl InterconnectRelayPayloadLane {
                         .get_mut(&channel)
                         .and_then(VecDeque::pop_front);
                     if let Some(payload) = next {
-                        active.push(Self::handle(runtime.clone(), channel, payload));
+                        active.push(Self::handle(
+                            runtime.clone(),
+                            channel,
+                            payload,
+                            routing,
+                            cache,
+                        ));
                     } else {
+                        if let Some(routing) = routing {
+                            routing_by_domain.insert(channel.domain.clone(), routing);
+                        }
+                        if let Some(cache) = cache {
+                            routing_cache_pool
+                                .entry(channel.domain.clone())
+                                .or_default()
+                                .push(cache);
+                        }
                         queued.remove(&channel);
                     }
                 }

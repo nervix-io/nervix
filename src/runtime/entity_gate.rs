@@ -72,6 +72,40 @@ pub(crate) enum EntityGateOperationError {
     },
 }
 
+impl EntityGateOperationError {
+    /// How a node that could not serve this gate operation reports it to the node that asked.
+    ///
+    /// A coordination identity this node never held, or holds for another scope or domain, is a
+    /// rejection: the asking node addressed a hold that is not here, and retrying against this
+    /// node cannot help. Everything else ran against a hold this node does own and lost, so the
+    /// caller can only report it.
+    pub(crate) fn as_remote_failure(
+        &self,
+        subject: nervix_interconnect::RemoteOperationSubject,
+    ) -> nervix_interconnect::RemoteOperationFailure {
+        match self {
+            Self::NotHeld { .. }
+            | Self::ScopeConflict { .. }
+            | Self::ScopeMismatch { .. }
+            | Self::DomainMismatch { .. } => {
+                nervix_interconnect::RemoteOperationFailure::Rejected { subject }
+            }
+            Self::EngagementIncomplete { .. } => {
+                nervix_interconnect::RemoteOperationFailure::NotReady { subject }
+            }
+            Self::Released
+            | Self::ReleaseTaskTerminated
+            | Self::RelayFenceDeadline { .. }
+            | Self::EngagementExpired { .. } => {
+                nervix_interconnect::RemoteOperationFailure::Failed {
+                    subject,
+                    reason: self.to_string(),
+                }
+            }
+        }
+    }
+}
+
 pub(super) struct EntityGateOperation {
     scope: EntityGateScope,
     state: Mutex<EntityGateOperationState>,

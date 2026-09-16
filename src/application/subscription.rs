@@ -815,7 +815,7 @@ impl SessionServiceImpl {
             )
             .await
             .map_err(|error| error.to_string())?;
-        response.result
+        response.result.map_err(|failure| failure.to_string())
     }
 
     async fn unregister_subscription_interest(&self, domain: &DomainName, relay: &RelayName) {

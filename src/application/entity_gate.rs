@@ -17,7 +17,7 @@ use nervix_interconnect::{
     EmitterPublishingDrainStateEnvelope, EmitterPublishingDrainStatusEnvelope,
     EntityDrainStatusEnvelope, EntityDrainStatusRequest as RemoteEntityDrainStatusRequest,
     EntityGatePurpose, EntityGateReleaseRequest as RemoteEntityGateReleaseRequest,
-    EntityGateRequest as RemoteEntityGateRequest,
+    EntityGateRequest as RemoteEntityGateRequest, RemoteOperationFailure, RemoteOperationSubject,
 };
 use nervix_models::{ClusterNodeName, CoordinationIdentity, DomainName, NodeRef, RelayName};
 use tokio::time::{Duration, interval, sleep};
@@ -278,6 +278,7 @@ impl SessionServiceImpl {
             .await
             .map_err(|error| error.to_string())?
             .result
+            .map_err(|failure| failure.to_string())
     }
 
     pub(in crate::application) fn local_entity_drain_status(
@@ -287,7 +288,7 @@ impl SessionServiceImpl {
         relays: &[RelayName],
         affected_entities: &[NodeRef],
         purpose: EntityGatePurpose,
-    ) -> Result<EntityDrainStatusEnvelope, String> {
+    ) -> Result<EntityDrainStatusEnvelope, RemoteOperationFailure> {
         let status = self
             .inner
             .runtime
@@ -298,7 +299,13 @@ impl SessionServiceImpl {
                 affected_entities,
                 purpose,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                error
+                    .current_context()
+                    .as_remote_failure(RemoteOperationSubject::Domain {
+                        domain: domain.clone(),
+                    })
+            })?;
         let emitter_publishing = status
             .emitter_publishing
             .into_iter()
@@ -361,6 +368,7 @@ impl SessionServiceImpl {
             .await
             .map_err(|error| error.to_string())?
             .result
+            .map_err(|failure| failure.to_string())
     }
 
     async fn entity_drain_status_on_node(
@@ -377,13 +385,9 @@ impl SessionServiceImpl {
             deadline,
         } = query;
         if node_id == self.inner.consensus.local_node_id() {
-            let status = self.local_entity_drain_status(
-                coordination,
-                domain,
-                relays,
-                affected_entities,
-                purpose,
-            )?;
+            let status = self
+                .local_entity_drain_status(coordination, domain, relays, affected_entities, purpose)
+                .map_err(|failure| failure.to_string())?;
             if status.buffered_relay_batches != 0
                 || status.node_work_items != 0
                 || status.outstanding_acks != 0
@@ -409,6 +413,7 @@ impl SessionServiceImpl {
             .await
             .map_err(|error| error.to_string())?
             .result
+            .map_err(|failure| failure.to_string())
     }
 
     async fn release_entity_gate_on_node(
@@ -437,6 +442,7 @@ impl SessionServiceImpl {
             .await
             .map_err(|error| error.to_string())?
             .result
+            .map_err(|failure| failure.to_string())
     }
 
     fn schedule_cluster_entity_gate_release(&self, release: PendingClusterEntityGateRelease) {

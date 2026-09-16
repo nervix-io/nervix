@@ -82,8 +82,10 @@ adopts that domain, so `recovered_client` follows the transaction's domain witho
 While a transaction is open, `execute` first preflights a queueable statement against the
 replicated prefix. An unsuccessful preflight leaves the transaction `Open` with the same pending
 count, so callers may correct the command and continue using the same handle. A queued model
-mutation's message reports its statement-local quiesce level before execution. Queueable commands
-without useful output have an empty message.
+mutation's message reports the effective quiesce level of its consecutive atomic model run at the
+current prefix. A later mutation in that run may escalate the level or cancel the net change. An
+exact append retry returns the originally admitted result without refreshing preflight or the
+transaction's activity timestamp.
 
 The client automatically attaches its active transaction after a leader redirect or transport
 reconnect before retrying a command. It retains each append's execution reference and expected

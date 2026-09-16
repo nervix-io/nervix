@@ -1067,7 +1067,7 @@ impl SessionServiceImpl {
                     moved.entity.identifier.clone(),
                 )
                 .await
-                .map_err(OwnershipHandoffError::participant)?;
+                .map_err(|failure| OwnershipHandoffError::participant(failure.to_string()))?;
             if !scheduled.is_primary_on(self.inner.consensus.local_node_id()) {
                 return Err(OwnershipHandoffError::participant(format!(
                     "{} '{}' is not owned by source node '{}'",
@@ -1576,7 +1576,9 @@ impl SessionServiceImpl {
                         service
                             .prepare_control_request_domain(&request.domain)
                             .await
-                            .map_err(OwnershipHandoffError::schedule)?;
+                            .map_err(|failure| {
+                                OwnershipHandoffError::schedule(failure.to_string())
+                            })?;
                         let scheduled = service
                             .scheduled_model_node(
                                 &request.domain,

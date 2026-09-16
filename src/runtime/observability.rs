@@ -956,28 +956,17 @@ mod tests {
             "failed to build domain execution for 'default': ingestor start failed".to_string(),
         );
         let (shutdown, _) = watch::channel(false);
-        runtime.inner.executions.insert(
-            domain.clone(),
+        runtime.install_domain_execution(
+            &domain,
             DomainExecution {
                 schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
-                passive_only: false,
                 start_version: 0,
                 domain_clock: test_domain_clock(&domain),
                 shutdown,
                 graph: StdArc::new(ArcSwapOption::empty()),
-                relay_registries: HashMap::default(),
-                relay_schemas: HashMap::default(),
-                relay_services: HashMap::default(),
-                relay_branchings: HashMap::default(),
-                relay_branching_schemas: HashMap::default(),
-                materialized_stream_specs: HashMap::default(),
-                materialized_stream_owner_nodes: HashMap::default(),
+                routing: runtime.stage_domain_routing(&domain, DomainRoutingSnapshot::default()),
                 branched_ingestors: HashMap::default(),
                 branched_entrypoints: HashMap::default(),
-                codecs: HashMap::default(),
-                signaling_protocols: HashMap::default(),
-                lookups: HashMap::default(),
-                udfs: nervix_roto::UdfExecutor::default(),
                 endpoint_routes: HashMap::default(),
                 node_tasks: HashMap::default(),
                 emitter_tasks: HashMap::default(),

@@ -300,23 +300,22 @@ pub(super) fn wasm_guest_call_schemas(
         }
         return None;
     };
-    let input_schema = match relay_schema_for_runtime(&branch.runtime, &branch.domain, input_relay)
-    {
+    let input_schema = match branch.relay_schema(input_relay) {
         Ok(schema) => schema,
         Err(error) => {
             for (_, context) in std::mem::take(ack_map) {
-                context.acks.no_ack(error.clone());
+                context.acks.no_ack(error.to_string());
             }
             return None;
         }
     };
     let mut output_schemas = Vec::with_capacity(output_routes.routes.len());
     for output in &output_routes.routes {
-        match relay_schema_for_runtime(&branch.runtime, &branch.domain, &output.relay) {
+        match branch.relay_schema(&output.relay) {
             Ok(schema) => output_schemas.push((output.relay.clone(), schema)),
             Err(error) => {
                 for (_, context) in std::mem::take(ack_map) {
-                    context.acks.no_ack(error.clone());
+                    context.acks.no_ack(error.to_string());
                 }
                 return None;
             }
@@ -733,6 +732,8 @@ impl BranchInstanceTemplate {
             key,
             runtime: runtime.clone(),
             domain: domain.clone(),
+            routing: runtime.domain_routing_cache(domain),
+            routing_snapshot: None,
             domain_clock,
             source_kind: self.source_kind,
             source: self.source.clone(),

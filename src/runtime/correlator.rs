@@ -998,34 +998,33 @@ pub(super) async fn enqueue_correlator_output(
         return;
     };
     let output_relay = output.relay.clone();
-    let output_schema =
-        match relay_schema_for_runtime(&branch.runtime, &branch.domain, &output_relay) {
-            Ok(schema) => schema,
-            Err(error) => {
-                let policy = output.message_error_policy.clone();
-                for message in messages {
-                    branch
-                        .runtime
-                        .handle_message_error_with_policy(
-                            MessageErrorSourceContext {
-                                domain: &branch.domain,
-                                node_kind,
-                                node: processor,
-                                execution_now,
-                            },
-                            &policy,
-                            message,
-                            MessageErrorFailure::new(
-                                Some(&output_relay),
-                                error.to_string(),
-                                MessageErrorOperation::Finalize,
-                            ),
-                        )
-                        .await;
-                }
-                return;
+    let output_schema = match branch.relay_schema(&output_relay) {
+        Ok(schema) => schema,
+        Err(error) => {
+            let policy = output.message_error_policy.clone();
+            for message in messages {
+                branch
+                    .runtime
+                    .handle_message_error_with_policy(
+                        MessageErrorSourceContext {
+                            domain: &branch.domain,
+                            node_kind,
+                            node: processor,
+                            execution_now,
+                        },
+                        &policy,
+                        message,
+                        MessageErrorFailure::new(
+                            Some(&output_relay),
+                            error.to_string(),
+                            MessageErrorOperation::Finalize,
+                        ),
+                    )
+                    .await;
             }
-        };
+            return;
+        }
+    };
     let batch = match build_stream_record_batch_preserving_acks(output_schema, messages) {
         Ok(batch) => batch,
         Err((error, acks)) => {
@@ -1183,27 +1182,26 @@ pub(super) async fn handle_correlator_timeout_action(
                 compiled_program: None,
                 compiled_branch_program: None,
             };
-            let output_schema =
-                match relay_schema_for_runtime(&branch.runtime, &branch.domain, relay) {
-                    Ok(schema) => schema,
-                    Err(error) => {
-                        branch
-                            .runtime
-                            .handle_message_error(
-                                MessageErrorSourceContext {
-                                    domain: &branch.domain,
-                                    node_kind,
-                                    node: processor,
-                                    execution_now,
-                                },
-                                error_policies,
-                                message,
-                                MessageErrorFailure::publish(None, error.to_string()),
-                            )
-                            .await;
-                        return;
-                    }
-                };
+            let output_schema = match branch.relay_schema(relay) {
+                Ok(schema) => schema,
+                Err(error) => {
+                    branch
+                        .runtime
+                        .handle_message_error(
+                            MessageErrorSourceContext {
+                                domain: &branch.domain,
+                                node_kind,
+                                node: processor,
+                                execution_now,
+                            },
+                            error_policies,
+                            message,
+                            MessageErrorFailure::publish(None, error.to_string()),
+                        )
+                        .await;
+                    return;
+                }
+            };
             let batch = match RelayRecordBatch::from_messages(output_schema, vec![message]) {
                 Ok(batch) => batch,
                 Err(error) => {

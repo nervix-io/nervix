@@ -385,6 +385,10 @@ pub(super) fn install_unpaced_test_domain(runtime: &super::Runtime, domain: &Dom
         domain.clone(),
         unpaced_domain_state(domain.as_str()),
     )]));
+    runtime.inner.domain_routings.insert(
+        domain.clone(),
+        StdArc::new(ArcSwap::from_pointee(DomainRoutingSnapshot::default())),
+    );
 }
 
 pub(super) fn test_domain_clock_authority() -> nervix_models::DomainClockAuthority {

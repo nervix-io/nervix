@@ -484,6 +484,22 @@ impl Runtime {
         let task_events = self.inner.events.clone();
 
         Ok(tokio::spawn(async move {
+            let shared_routing = match runtime
+                .wait_for_domain_routing(&task_domain, &source_relay)
+                .await
+            {
+                Ok(routing) => routing,
+                Err(error) => {
+                    task_events.report_error(format!(
+                        "generator '{}' in domain '{}' could not bind its routing snapshot: \
+                         {error}",
+                        task_generator.as_str(),
+                        task_domain.as_str(),
+                    ));
+                    return;
+                }
+            };
+            let mut routing = DomainRoutingCache::new(shared_routing);
             let mut activity = DomainActivityGuard::new(generator_activity);
             let mut quiesce_activity = Some(NodeQuiesceWorkGuard::begin(quiesce_counters.clone()));
             let mut cadence = cadence;
@@ -588,7 +604,7 @@ impl Runtime {
 
                     let mut state_load_failed = false;
                     let state = match runtime
-                        .materialized_records_from_owner(&task_domain, &source_relay)
+                        .materialized_records_from_owner(&mut routing, &task_domain, &source_relay)
                         .await
                     {
                         Ok(state) => state,
