@@ -1062,7 +1062,8 @@ impl Runtime {
                     &None,
                     &filter_where.materialized_interest,
                 )
-                .await?;
+                .await
+                .map_err(|error| error.to_string())?;
             let keys = vec![None; rows.len()];
             let outcomes = evaluate_filter_map_on_batch(
                 ModelKind::Ingestor.as_str(),
@@ -1196,7 +1197,8 @@ impl Runtime {
                         &None,
                         &filter_map.materialized_interest,
                     )
-                    .await?;
+                    .await
+                    .map_err(|error| error.to_string())?;
                 let keys = vec![None; rows.len()];
                 evaluate_filter_map_on_batch(
                     ModelKind::Ingestor.as_str(),
@@ -1254,7 +1256,8 @@ impl Runtime {
                             &None,
                             &branch_program.program.materialized_interest,
                         )
-                        .await?;
+                        .await
+                        .map_err(|error| error.to_string())?;
                     branch_state_snapshot = relay_state_snapshot_from_side_inputs(&side_inputs);
                     let evaluated = evaluate_output_branch_program(
                         ingestor,
@@ -1540,7 +1543,8 @@ impl Runtime {
         let concrete_offsets =
             KafkaIngestor::concrete_next_offsets_from_assignment(consumer, topic, &offsets)?;
         self.reset_domain_kafka_offsets(state, concrete_offsets)
-            .await?;
+            .await
+            .map_err(|error| error.to_string())?;
         Ok((start_version, has_assignment))
     }
 

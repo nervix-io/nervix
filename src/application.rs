@@ -117,7 +117,7 @@ use crate::{
     resource_interconnect::{
         FetchResourceArchive, PublishResourceReplica, ResourceInterconnectError,
     },
-    runtime::{DescribeStateSnapshot, DescribedStateSnapshot, FetchStateSnapshot},
+    runtime::{DescribeStateSnapshot, FetchStateSnapshot},
 };
 
 mod admitted_connection;
@@ -1778,6 +1778,7 @@ impl Application {
             .register_handler::<DescribeStateSnapshot, _, _>(move |_context, request| {
                 let service = describe_snapshot_service.clone();
                 async move {
+                    let subject = RemoteOperationSubject::state(&request.placement);
                     match crate::runtime::RuntimeStatePlacement::from_remote(request.placement) {
                         Ok(placement) => {
                             service
@@ -1789,7 +1790,9 @@ impl Application {
                                 )
                                 .await
                         }
-                        Err(error) => DescribedStateSnapshot::Unavailable(error),
+                        Err(error) => {
+                            Err(RemoteOperationFailure::failed(subject, error.to_string()))
+                        }
                     }
                 }
             })
@@ -1819,7 +1822,10 @@ impl Application {
                             Ok(placement) => placement,
                             Err(reason) => {
                                 return RemoteStateSyncResponse {
-                                    result: Err(RemoteOperationFailure::failed(subject, reason)),
+                                    result: Err(RemoteOperationFailure::failed(
+                                        subject,
+                                        reason.to_string(),
+                                    )),
                                 };
                             }
                         };
@@ -1837,7 +1843,7 @@ impl Application {
                         .runtime
                         .handle_state_sync_request(&placement, request.after_lsm)
                         .await
-                        .map_err(|reason| RemoteOperationFailure::failed(subject, reason));
+                        .map_err(|error| error.current_context().as_remote_failure(subject));
                     RemoteStateSyncResponse {
                         result: snapshot.map(|snapshot| {
                             snapshot.map(|snapshot| nervix_interconnect::StateSnapshotEnvelope {

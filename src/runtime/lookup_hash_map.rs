@@ -7,6 +7,40 @@
 
 use super::*;
 
+#[derive(Debug, Error)]
+pub(super) enum LookupHashMapError {
+    #[error("LOOKUP_HASH_MAP at {span} expects 3 arguments, found {actual}")]
+    ArgumentCount { actual: usize, span: VmSpan },
+    #[error("LOOKUP_HASH_MAP argument {argument} at {span} must be a string literal")]
+    LiteralArgument { argument: usize, span: VmSpan },
+    #[error("LOOKUP_HASH_MAP hash map name '{name}' at {span} is invalid")]
+    InvalidLookupName { name: String, span: VmSpan },
+    #[error("LOOKUP_HASH_MAP key expression at {span} contains another LOOKUP_HASH_MAP")]
+    NestedKey { span: VmSpan },
+    #[error("LOOKUP_HASH_MAP hash map '{lookup}' at {span} is not instantiated")]
+    LookupUnavailable { lookup: LookupName, span: VmSpan },
+    #[error("LOOKUP_HASH_MAP field '{field}' is missing from hash map '{lookup}' at {span}")]
+    FieldUnavailable {
+        lookup: LookupName,
+        field: String,
+        span: VmSpan,
+    },
+    #[error("failed to infer the LOOKUP_HASH_MAP key for hash map '{lookup}' field '{field}'")]
+    KeyInference {
+        lookup: LookupName,
+        field: String,
+        #[source]
+        source: nervix_vm::CompileError,
+    },
+    #[error("failed to compile the LOOKUP_HASH_MAP key for hash map '{lookup}' field '{field}'")]
+    KeyCompilation {
+        lookup: LookupName,
+        field: String,
+        #[source]
+        source: nervix_vm::CompileError,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct LookupHashMapCall {
     pub(super) lookup: LookupName,
@@ -97,21 +131,19 @@ pub(super) fn lookup_hash_map_literal_arg(
     args: &[SpannedExpr],
     index: usize,
     function_span: nervix_vm::program::Span,
-) -> Result<&str, String> {
+) -> error_stack::Result<&str, LookupHashMapError> {
     let Some(arg) = args.get(index) else {
-        return Err(format!(
-            "LOOKUP_HASH_MAP expects 3 arguments, found {}",
-            args.len()
-        ));
+        return Err(Report::new(LookupHashMapError::ArgumentCount {
+            actual: args.len(),
+            span: function_span,
+        }));
     };
     match &arg.inner {
         Expr::Literal(Literal::String(value)) => Ok(value.as_str()),
-        _ => Err(format!(
-            "LOOKUP_HASH_MAP argument {} must be a string literal at {}..{}",
-            index + 1,
-            function_span.start,
-            function_span.end
-        )),
+        _ => Err(Report::new(LookupHashMapError::LiteralArgument {
+            argument: index + 1,
+            span: function_span,
+        })),
     }
 }
 
@@ -151,7 +183,7 @@ pub(super) fn rewrite_lookup_hash_map_expr(
     expr: &SpannedExpr,
     available_lookups: &HashMap<LookupName, Arc<LookupRuntime>>,
     pending_calls: &mut Vec<PendingLookupHashMapCall>,
-) -> Result<SpannedExpr, String> {
+) -> error_stack::Result<SpannedExpr, LookupHashMapError> {
     let rewritten = match &expr.inner {
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => expr.clone(),
         Expr::Unary { op, expr: inner } => nervix_vm::program::SpannedNode {
@@ -224,7 +256,7 @@ pub(super) fn rewrite_lookup_hash_map_expr(
                             )?,
                         })
                     })
-                    .collect::<Result<Vec<_>, String>>()?,
+                    .collect::<error_stack::Result<Vec<_>, LookupHashMapError>>()?,
                 else_result: else_result
                     .as_ref()
                     .map(|else_result| {
@@ -238,38 +270,43 @@ pub(super) fn rewrite_lookup_hash_map_expr(
         Expr::Call { function, args } => {
             if let FunctionName::LookupHashMap = function {
                 if args.len() != 3 {
-                    return Err(format!(
-                        "LOOKUP_HASH_MAP expects 3 arguments, found {}",
-                        args.len()
-                    ));
+                    return Err(Report::new(LookupHashMapError::ArgumentCount {
+                        actual: args.len(),
+                        span: expr.span,
+                    }));
                 }
                 let lookup_name = lookup_hash_map_literal_arg(args, 0, expr.span)?;
                 let lookup = LookupName::parse(lookup_name).map_err(|error| {
-                    format!("LOOKUP_HASH_MAP hash map name '{lookup_name}' is invalid: {error}")
+                    Report::new(LookupHashMapError::InvalidLookupName {
+                        name: lookup_name.to_string(),
+                        span: expr.span,
+                    })
+                    .attach_printable(error)
                 })?;
                 let lookup_field = lookup_hash_map_literal_arg(args, 2, expr.span)?.to_string();
                 if expr_contains_lookup_hash_map(&args[1]) {
-                    return Err("LOOKUP_HASH_MAP key expression cannot contain another \
-                                LOOKUP_HASH_MAP"
-                        .to_string());
+                    return Err(Report::new(LookupHashMapError::NestedKey {
+                        span: args[1].span,
+                    }));
                 }
                 let Some(lookup_runtime) = available_lookups.get(&lookup).cloned() else {
-                    return Err(format!(
-                        "LOOKUP_HASH_MAP hash map '{}' is not instantiated",
-                        lookup.as_str()
-                    ));
+                    return Err(Report::new(LookupHashMapError::LookupUnavailable {
+                        lookup,
+                        span: expr.span,
+                    }));
                 };
                 let lookup_field_type = lookup_runtime
                     .schema
                     .arrow_schema()
                     .field_with_name(&lookup_field)
                     .map(|field| field.data_type().clone())
-                    .map_err(|_| {
-                        format!(
-                            "LOOKUP_HASH_MAP field '{}' is missing from hash map '{}' schema",
-                            lookup_field,
-                            lookup.as_str()
-                        )
+                    .map_err(|error| {
+                        Report::new(LookupHashMapError::FieldUnavailable {
+                            lookup: lookup.clone(),
+                            field: lookup_field.clone(),
+                            span: expr.span,
+                        })
+                        .attach_printable(error)
                     })?;
                 // Deduplication over the calls lowered so far in this one program. The
                 // comparison includes the key expression, which has no hash or ordering, so the
@@ -322,12 +359,12 @@ pub(super) fn rewrite_lookup_hash_map_expr(
 pub(super) fn rewrite_lookup_hash_map_program(
     parsed: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     available_lookups: &HashMap<LookupName, Arc<LookupRuntime>>,
-) -> Result<
+) -> error_stack::Result<
     (
         nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
         Vec<PendingLookupHashMapCall>,
     ),
-    String,
+    LookupHashMapError,
 > {
     let mut pending_calls = Vec::new();
     let program = nervix_vm::program::Program {
@@ -365,12 +402,12 @@ pub(super) fn rewrite_lookup_hash_map_program(
                                     &mut pending_calls,
                                 )
                             })
-                            .collect::<Result<Vec<_>, String>>()?,
+                            .collect::<error_stack::Result<Vec<_>, LookupHashMapError>>()?,
                     },
                     span: invocation.span,
                 })
             })
-            .collect::<Result<Vec<_>, String>>()?,
+            .collect::<error_stack::Result<Vec<_>, LookupHashMapError>>()?,
     };
     Ok((
         nervix_vm::program::SpannedNode {
@@ -386,7 +423,7 @@ pub(super) fn compile_lookup_hash_map_calls(
     writable_namespace: &str,
     bindings: &[VmCompileBinding],
     udfs: Option<&UdfExecutor>,
-) -> Result<(Vec<LookupHashMapCall>, Option<VmCompileBinding>), String> {
+) -> error_stack::Result<(Vec<LookupHashMapCall>, Option<VmCompileBinding>), LookupHashMapError> {
     if pending_calls.is_empty() {
         return Ok((Vec::new(), None));
     }
@@ -423,13 +460,12 @@ pub(super) fn compile_lookup_hash_map_calls(
             bindings.iter().cloned(),
             signatures,
         )
-        .map_err(|error| {
-            format!(
-                "LOOKUP_HASH_MAP key compile failed for hash map '{}' field '{}': {}",
-                call.lookup.as_str(),
-                call.lookup_field,
-                error.message
-            )
+        .map_err(|source| {
+            Report::new(LookupHashMapError::KeyInference {
+                lookup: call.lookup.clone(),
+                field: call.lookup_field.clone(),
+                source,
+            })
         })?;
         let key_output_schema = StdArc::new(arrow_schema::Schema::new(
             key_types
@@ -452,13 +488,12 @@ pub(super) fn compile_lookup_hash_map_calls(
                 },
             ),
         )
-        .map_err(|error| {
-            format!(
-                "LOOKUP_HASH_MAP key compile failed for hash map '{}' field '{}': {}",
-                call.lookup.as_str(),
-                call.lookup_field,
-                error.message
-            )
+        .map_err(|source| {
+            Report::new(LookupHashMapError::KeyCompilation {
+                lookup: call.lookup.clone(),
+                field: call.lookup_field.clone(),
+                source,
+            })
         })?;
         compiled_calls.push(LookupHashMapCall {
             lookup: call.lookup,

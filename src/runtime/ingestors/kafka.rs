@@ -814,6 +814,7 @@ impl KafkaIngestor {
                                                                         message.offset() + 1,
                                                                     )
                                                                     .await
+                                                                    .map_err(|error| error.to_string())
                                                             } else {
                                                                 Self::commit_offset(
                                                                     &consumer,
@@ -1167,6 +1168,7 @@ impl KafkaIngestor {
                                                                     *next_offset,
                                                                 )
                                                                 .await
+                                                                .map_err(|error| error.to_string())
                                                         } else {
                                                             Self::commit_offset(
                                                                 &consumer,

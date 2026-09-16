@@ -519,13 +519,15 @@ pub(super) fn compile_message_error_set_program(
     )?;
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
-        rewrite_lookup_hash_map_program(&parsed, context.available_lookups)?;
+        rewrite_lookup_hash_map_program(&parsed, context.available_lookups)
+            .map_err(|error| error.to_string())?;
     let (lookup_hash_maps, lookup_binding) = compile_lookup_hash_map_calls(
         pending_lookup_calls,
         "error_output",
         &bindings,
         context.udfs,
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
     }

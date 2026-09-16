@@ -1490,7 +1490,7 @@ async fn persist_wasm_guest_state_with_failure_mode(
     runtime
         .persist_wasm_processor_snapshot(replicated_state, &saved)
         .await
-        .map_err(OwnershipHandoffError::checkpoint)
+        .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))
 }
 
 pub(super) struct WasmOutputAttributionContext<'a> {

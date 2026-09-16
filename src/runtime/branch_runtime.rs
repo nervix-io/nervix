@@ -1664,7 +1664,9 @@ impl BranchExecutionRuntime {
                                     )),
                                 }
                             }
-                            Err(error) => Err(OwnershipHandoffError::checkpoint(error)),
+                            Err(error) => {
+                                Err(OwnershipHandoffError::checkpoint(error.to_string()))
+                            }
                         };
                         checkpoint
                             .send(result)
@@ -1993,7 +1995,9 @@ pub(super) fn restore_branch_instance_lru_snapshot(
     let Some(snapshot) = snapshot else {
         return Ok(0);
     };
-    for (key, last_ingestion) in decode_branch_lru_snapshot(&snapshot.payload)? {
+    for (key, last_ingestion) in
+        decode_branch_lru_snapshot(&snapshot.payload).map_err(|error| error.to_string())?
+    {
         let state = template.instantiate(runtime, domain, key.clone())?;
         runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &key);
         instances.insert_restored(key, last_ingestion, state);
@@ -2014,7 +2018,8 @@ pub(super) fn persist_branch_instance_lru_snapshot<V>(
         return Ok(());
     }
     let placement = branch_lru_placement(runtime, domain, template);
-    let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())?;
+    let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())
+        .map_err(|error| error.to_string())?;
     runtime
         .persist_branch_lru_snapshot(
             placement.clone(),
