@@ -123,6 +123,12 @@ impl RabbitMqIngestor {
                     "started rabbitmq ingestor"
                 );
 
+                // Both ACK root counters belong to this ingestor for as long as it runs, so the
+                // record path holds them instead of resolving them from the shared in-flight maps
+                // per record.
+                let ack_root_trackers =
+                    task_runtime.ingestor_ack_root_trackers(&task_domain, &task_ingestor);
+
                 'outer: loop {
                     tokio::task::consume_budget().await;
                     if task_runtime
@@ -282,11 +288,8 @@ impl RabbitMqIngestor {
                                                         let metadata = [IngestMetadataRow::Headers {
                                                             headers: &headers,
                                                         }];
-                                                        let (acks, completion) = task_runtime
-                                                            .tracked_ingestor_ack_root(
-                                                                &task_domain,
-                                                                &task_ingestor,
-                                                            );
+                                                        let (acks, completion) =
+                                                            ack_root_trackers.tracked_root();
                                                         let dispatch_result = task_runtime
                                                             .dispatch_ingested_records(IngestGroupDispatch {
                                                                 collector: &mut collector,

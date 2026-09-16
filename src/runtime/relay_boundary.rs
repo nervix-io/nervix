@@ -24,7 +24,7 @@ pub(super) fn addressable_count(configured: NonZeroU64) -> NonZeroUsize {
 
 #[derive(Debug)]
 pub(super) struct RelayPresence {
-    pub(super) last_seen_at: parking_lot::Mutex<Timestamp>,
+    pub(super) last_seen_at: AtomicTimestamp,
 }
 
 #[derive(Debug, Clone)]
@@ -41,13 +41,13 @@ impl RelayRegistry {
 
     pub(super) fn touch(&self, key: &Option<BranchKey>, now: Timestamp) {
         if let Some(existing) = self.presences.get(key) {
-            *existing.last_seen_at.lock() = now;
+            existing.last_seen_at.store(now);
             return;
         }
         self.presences.insert(
             key.clone(),
             Arc::new(RelayPresence {
-                last_seen_at: parking_lot::Mutex::new(now),
+                last_seen_at: AtomicTimestamp::new(now),
             }),
         );
     }
@@ -352,6 +352,30 @@ pub(super) struct RelayOwnerBranchState {
     pub(super) global_metrics: RelayMetricsHandle,
     pub(super) physical_node_id: Option<ClusterNodeName>,
     pub(super) capacity: Option<NonZeroUsize>,
+    /// The clock this owner reads its expiration time from, bound on first use and then held.
+    ///
+    /// Binding resolves the domain's execution through a map every other task family reads once,
+    /// and the handle stays valid for as long as the owner runs: rebuilding a domain execution
+    /// stops its relay owners and spawns new ones.
+    domain_clock: Option<DomainClock>,
+}
+
+impl RelayOwnerBranchState {
+    /// The domain time this owner stamps branch presence and expiry with.
+    fn expiration_time(
+        &mut self,
+        runtime: &Runtime,
+        domain: &DomainName,
+    ) -> DomainClockAccessResult<Timestamp> {
+        if self.domain_clock.is_none() {
+            self.domain_clock = Some(runtime.bind_domain_clock(domain)?);
+        }
+        let clock = self
+            .domain_clock
+            .as_ref()
+            .verified("the binding above installed this owner's domain clock");
+        Ok(clock.snapshot()?.now())
+    }
 }
 
 pub(super) struct RelayStateTask {
@@ -911,18 +935,6 @@ impl ExpiringRelayState {
             registry: RelayRegistry::new(),
         }
     }
-
-    pub(super) fn touch(&self, key: &Option<BranchKey>, now: Timestamp) {
-        self.registry.touch(key, now);
-    }
-
-    pub(super) fn contains_key(&self, key: &Option<BranchKey>) -> bool {
-        self.registry.contains_key(key)
-    }
-
-    pub(super) fn remove(&self, key: &Option<BranchKey>) {
-        self.registry.remove(key);
-    }
 }
 
 impl RelayBoundaryServices {
@@ -969,6 +981,13 @@ impl RelayBoundaryServices {
     }
 
     pub(super) fn ingress_slot(&self, branch: &Option<BranchKey>) -> Arc<RelayOutboundSlot> {
+        // A branch's slot is created once and then read on every batch it carries, so the steady
+        // state resolves it with a borrowed key and clones nothing. Creation still goes through
+        // `entry`, because two first batches for one branch must agree on a single slot: the slot
+        // is what orders deliveries, and a racing pair of them would interleave the channel.
+        if let Some(existing) = self.ingress_slots.get(branch) {
+            return existing.clone();
+        }
         self.ingress_slots
             .entry(branch.clone())
             .or_insert_with(|| Arc::new(RelayOutboundSlot::new()))
@@ -1415,43 +1434,6 @@ impl Runtime {
         Ok(self.domain_execution_snapshot(domain)?.now())
     }
 
-    pub(in crate::runtime) fn touch_stream_key(
-        &self,
-        domain: &DomainName,
-        relay: &RelayName,
-        key: &Option<BranchKey>,
-        now: Timestamp,
-    ) {
-        let placement = self.state_placement(
-            domain,
-            RuntimeStateKind::MaterializedRelay,
-            ModelKind::Relay,
-            relay,
-            None,
-        );
-        if let Some(state) = self.inner.expiring_stream_states.get(&placement) {
-            state.touch(key, now);
-        }
-    }
-
-    pub(in crate::runtime) fn remove_stream_key_presence(
-        &self,
-        domain: &DomainName,
-        relay: &RelayName,
-        key: &Option<BranchKey>,
-    ) {
-        let placement = self.state_placement(
-            domain,
-            RuntimeStateKind::MaterializedRelay,
-            ModelKind::Relay,
-            relay,
-            None,
-        );
-        if let Some(state) = self.inner.expiring_stream_states.get(&placement) {
-            state.remove(key);
-        }
-    }
-
     pub(in crate::runtime) fn invalidate_branch_relay_generation(
         &self,
         domain: &DomainName,
@@ -1481,7 +1463,7 @@ impl Runtime {
         branches: &mut RelayOwnerBranchState,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
-        let now = match self.current_stream_expiration_time(domain) {
+        let now = match branches.expiration_time(self, domain) {
             Ok(now) => now,
             Err(error) => {
                 let reason = format!(
@@ -1497,7 +1479,6 @@ impl Runtime {
             }
         };
         branches.registry.touch(&batch.key, now);
-        self.touch_stream_key(domain, relay, &batch.key, now);
         let metrics = match batch.key.as_ref() {
             Some(branch_key) => {
                 let branch_instance = branches
@@ -1521,7 +1502,6 @@ impl Runtime {
         if let Some(capacity) = branches.capacity {
             for (evicted_key, _) in branches.instances.evict_lru_to_capacity(capacity) {
                 branches.registry.remove(&evicted_key);
-                self.remove_stream_key_presence(domain, relay, &evicted_key);
                 self.invalidate_branch_relay_generation(domain, &evicted_key);
             }
         }
@@ -1531,7 +1511,6 @@ impl Runtime {
             batch.domain_timestamp(),
         );
         services.observe_owner_buffer_length(&metrics);
-        self.mark_branch_aggregated_metrics_updated(domain, ModelKind::Relay, relay);
         let result = services.fanout_owner_batch(domain, relay, batch).await;
         batch.ack_success();
         result
@@ -1636,6 +1615,7 @@ impl Runtime {
                 global_metrics,
                 physical_node_id,
                 capacity: branch_capacity,
+                domain_clock: None,
             };
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
             loop {
@@ -1673,7 +1653,7 @@ impl Runtime {
                             std::future::pending::<()>().await;
                         }
                     } => {
-                        let now = match runtime.current_stream_expiration_time(&domain) {
+                        let now = match branches.expiration_time(&runtime, &domain) {
                             Ok(now) => now,
                             Err(error) => {
                                 runtime.events().report_error(format!(
@@ -1689,7 +1669,6 @@ impl Runtime {
                             branch_ttl.verified("this select branch only arms while a branch TTL is configured"),
                         ) {
                             branches.registry.remove(&expired_key);
-                            runtime.remove_stream_key_presence(&domain, &relay, &expired_key);
                             runtime.invalidate_branch_relay_generation(&domain, &expired_key);
                         }
                         next_expiration_scan = Instant::now() + expiration_scan_interval;

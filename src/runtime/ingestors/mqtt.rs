@@ -43,6 +43,9 @@ struct MqttTaskContext {
     metrics: MessageMetricsHandle,
     branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     quiesce: Arc<IngestorQuiesceControl>,
+    /// Both ACK root counters this ingestor updates, resolved once with the context so the record
+    /// path never looks them up in the shared in-flight maps.
+    ack_root_trackers: IngestorAckRootTrackers,
 }
 
 #[derive(Clone)]
@@ -201,6 +204,7 @@ impl MqttIngestor {
                 metrics: metrics.clone(),
                 branched_senders: branched_senders.clone(),
                 quiesce: quiesce.clone(),
+                ack_root_trackers: runtime.ingestor_ack_root_trackers(domain, &ingestor.name),
             };
             let task_topic = topic.clone();
             let task_subscribe_filter = subscribe_filter.clone();
@@ -820,9 +824,7 @@ impl MqttIngestor {
             if !Self::decode_publish(context, &mut collector, &publish).await {
                 return backoff.wait(shutdown_rx).await;
             }
-            let (acks, completion) = context
-                .runtime
-                .tracked_ingestor_ack_root(&context.domain, &context.ingestor);
+            let (acks, completion) = context.ack_root_trackers.tracked_root();
             let dispatch_result = Self::dispatch_entry(
                 context,
                 if !context.branched_senders.is_empty() {
@@ -935,9 +937,7 @@ impl MqttIngestor {
 
             for _ in &publishes {
                 tokio::task::consume_budget().await;
-                let (acks, completion) = context
-                    .runtime
-                    .tracked_ingestor_ack_root(&context.domain, &context.ingestor);
+                let (acks, completion) = context.ack_root_trackers.tracked_root();
                 let dispatch_result = Self::dispatch_entry(
                     context,
                     if !context.branched_senders.is_empty() {
