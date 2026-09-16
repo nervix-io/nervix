@@ -256,6 +256,23 @@ operation's domain semantics.
 5. **Relay delivery.** A management-plane grant reserves receiver capacity before an Arrow body is
    sent, followed by explicit runtime admission and optional downstream record acknowledgements.
 
+A typed request separates the operation's own outcome from the transport's. A handler that cannot
+produce its value answers with one of four classes, and the asking node acts on the class rather
+than on any text. **Rejected** means the answering node does not serve that subject at all, so a
+caller working from a stale schedule resolves the owner again instead of retrying the same node.
+**Unavailable** means the subject does not exist there. **Not ready** means it exists but cannot
+answer yet, so the identical request can succeed later. **Failed** means the operation ran on the
+answering node and lost.
+
+Every class names the subject it refused: a domain, one entity of a domain, one kind of runtime
+state held for an entity, or one subscriber's interest in a relay. The caller therefore reports what
+failed without retaining the request it sent, and it never has to parse a message to decide what to
+do. Only the failed class carries the answering node's own description, because a failure inside
+another node's subsystem is opaque to the caller and that text exists for the operator reading it.
+State snapshot exchange, dataflow node status, domain and entity drain status, entity gating, metric
+description, relay, hash map and ingestor description, hash map queries, and subscription-interest
+visibility all answer in these terms.
+
 Each handler registration publishes a complete replacement dispatch table, so an arriving operation
 finds its handler without taking a lock and registrations that race each other all take effect.
 Discovery likewise publishes the complete live-node set at once, and the live-target check a typed

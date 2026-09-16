@@ -34,7 +34,6 @@ use background_task::{
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use dashmap::DashMap;
-use describe_output::runtime_ingestor_describe_to_envelope;
 use domain_clock::{
     DomainClockRetirements, DomainClockTask, reconcile_domain_clock_tasks,
     run_domain_clock_authority_reconciliation,
@@ -76,8 +75,9 @@ use nervix_interconnect::{
     Envelope, LookupRequest as RemoteLookupRequest, LookupResponse as RemoteLookupResponse,
     MAX_CONCURRENT_HEALTH_PROBES, OwnershipHandoffFailure, PeerTarget,
     PrepareForcedOwnershipRecoveryRequest as RemotePrepareForcedOwnershipRecoveryRequest,
-    RuntimeErrorEvent as RemoteRuntimeErrorEvent, StateSyncRequest as RemoteStateSyncRequest,
-    StateSyncResponse as RemoteStateSyncResponse, StreamHandlerError, StreamingResponse,
+    RemoteOperationFailure, RemoteOperationSubject, RuntimeErrorEvent as RemoteRuntimeErrorEvent,
+    StateSyncRequest as RemoteStateSyncRequest, StateSyncResponse as RemoteStateSyncResponse,
+    StreamHandlerError, StreamingResponse,
     SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest,
     SubscriptionInterestVisibilityResponse as RemoteSubscriptionInterestVisibilityResponse,
     Transport,
@@ -1771,25 +1771,7 @@ impl Application {
         interconnect
             .register_handler::<RemoteDescribeIngestorRequest, _, _>(move |_context, request| {
                 let service = describe_ingestor_service.clone();
-                async move {
-                    service
-                        .prepare_owner_control_request(
-                            &request.domain,
-                            ModelKind::Ingestor,
-                            &request.name,
-                        )
-                        .await?;
-                    let summary = service
-                        .inner
-                        .runtime
-                        .describe_local_ingestor(&request.domain, &request.name)?;
-                    let metrics = service.inner.runtime.describe_metrics_for(
-                        &request.domain,
-                        "INGESTOR",
-                        &request.name,
-                    );
-                    Ok(runtime_ingestor_describe_to_envelope(summary, metrics))
-                }
+                async move { service.handle_describe_ingestor_request(request).await }
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
@@ -1832,35 +1814,34 @@ impl Application {
             .register_handler::<RemoteStateSyncRequest, _, _>(move |_context, request| {
                 let service = state_sync_service.clone();
                 async move {
-                    let result =
+                    let subject = RemoteOperationSubject::state(&request.placement);
+                    let placement =
                         match crate::runtime::RuntimeStatePlacement::from_remote(request.placement)
                         {
-                            Ok(placement) => {
-                                if !service
-                                    .inner
-                                    .runtime
-                                    .runtime_state_placement_is_assigned_locally(&placement)
-                                {
-                                    return RemoteStateSyncResponse {
-                                        result: Err(format!(
-                                            "this node is not currently assigned {:?} state for \
-                                             {} '{}'",
-                                            placement.state,
-                                            placement.kind.as_str(),
-                                            placement.identifier.as_str()
-                                        )),
-                                    };
-                                }
-                                service
-                                    .inner
-                                    .runtime
-                                    .handle_state_sync_request(&placement, request.after_lsm)
-                                    .await
+                            Ok(placement) => placement,
+                            Err(reason) => {
+                                return RemoteStateSyncResponse {
+                                    result: Err(RemoteOperationFailure::failed(subject, reason)),
+                                };
                             }
-                            Err(error) => Err(error),
                         };
+                    if !service
+                        .inner
+                        .runtime
+                        .runtime_state_placement_is_assigned_locally(&placement)
+                    {
+                        return RemoteStateSyncResponse {
+                            result: Err(RemoteOperationFailure::rejected(subject)),
+                        };
+                    }
+                    let snapshot = service
+                        .inner
+                        .runtime
+                        .handle_state_sync_request(&placement, request.after_lsm)
+                        .await
+                        .map_err(|reason| RemoteOperationFailure::failed(subject, reason));
                     RemoteStateSyncResponse {
-                        result: result.map(|snapshot| {
+                        result: snapshot.map(|snapshot| {
                             snapshot.map(|snapshot| nervix_interconnect::StateSnapshotEnvelope {
                                 lsm: snapshot.lsm,
                                 schema_fingerprint: snapshot.schema_fingerprint,
@@ -1901,17 +1882,19 @@ impl Application {
             .register_handler::<RemoteDomainDrainStatusRequest, _, _>(move |_context, request| {
                 let service = domain_drain_service.clone();
                 async move {
-                    let result = service
-                        .apply_current_cluster_state()
-                        .await
-                        .map_err(|error| error.to_string())
-                        .map(|()| {
+                    let result = match service.apply_current_cluster_state().await {
+                        Ok(()) => {
                             service
                                 .inner
                                 .runtime
                                 .force_flush_domain_if_idle(&request.domain);
-                            service.local_domain_drain_status(&request.domain)
-                        });
+                            Ok(service.local_domain_drain_status(&request.domain))
+                        }
+                        Err(error) => Err(RemoteOperationFailure::failed(
+                            RemoteOperationSubject::domain(&request.domain),
+                            error.to_string(),
+                        )),
+                    };
                     RemoteDomainDrainStatusResponse { result }
                 }
             })
@@ -1922,6 +1905,7 @@ impl Application {
             .register_handler::<RemoteEntityGateRequest, _, _>(move |_context, request| {
                 let service = entity_gate_service.clone();
                 async move {
+                    let subject = RemoteOperationSubject::domain(&request.domain);
                     let deadline = tokio::time::Instant::now()
                         .checked_add(Duration::from_millis(request.deadline_millis));
                     let result = match deadline {
@@ -1940,8 +1924,13 @@ impl Application {
                                 },
                             )
                             .await
-                            .map_err(|error| error.to_string()),
-                        None => Err("entity gate deadline exceeds the monotonic clock".to_string()),
+                            .map_err(|error| {
+                                error.current_context().as_remote_failure(subject.clone())
+                            }),
+                        None => Err(RemoteOperationFailure::failed(
+                            subject,
+                            "entity gate deadline exceeds the monotonic clock",
+                        )),
                     };
                     RemoteEntityGateResponse { result }
                 }
@@ -1986,7 +1975,11 @@ impl Application {
                             .runtime
                             .release_entity_gate_operation(&request.coordination, &request.domain)
                             .await
-                            .map_err(|error| error.to_string()),
+                            .map_err(|error| {
+                                error.current_context().as_remote_failure(
+                                    RemoteOperationSubject::domain(&request.domain),
+                                )
+                            }),
                     }
                 }
             })
@@ -2021,14 +2014,21 @@ impl Application {
             .register_handler::<RemoteLookupRequest, _, _>(move |_context, request| {
                 let service = lookup_service.clone();
                 async move {
+                    let subject = RemoteOperationSubject::entity(
+                        &request.domain,
+                        ModelKind::Lookup,
+                        request.name.clone(),
+                    );
                     let result = match service.handle_lookup_request(request).await {
                         Ok(Some(record)) => record
                             .encode_arrow_ipc(service.inner.runtime.executor())
                             .await
                             .map(|body| Some(body.to_vec()))
-                            .map_err(|error| error.to_string()),
+                            .map_err(|error| {
+                                RemoteOperationFailure::failed(subject, error.to_string())
+                            }),
                         Ok(None) => Ok(None),
-                        Err(error) => Err(error),
+                        Err(failure) => Err(failure),
                     };
                     RemoteLookupResponse { result }
                 }
@@ -2042,11 +2042,12 @@ impl Application {
                     let service = subscription_interest_service.clone();
                     async move {
                         let result = if request.subscriber.node_id() != context.peer_node_id() {
-                            Err(format!(
-                                "authenticated node '{}' cannot wait for subscription interest \
-                                 belonging to '{}'",
-                                context.peer_node_id(),
-                                request.subscriber.node_id(),
+                            Err(RemoteOperationFailure::rejected(
+                                RemoteOperationSubject::subscription_interest(
+                                    &request.domain,
+                                    &request.relay,
+                                    &request.subscriber,
+                                ),
                             ))
                         } else {
                             service
@@ -2094,7 +2095,9 @@ impl Application {
                                     request.entity.identifier.clone(),
                                 )
                                 .await
-                                .map_err(OwnershipHandoffError::participant)?;
+                                .map_err(|failure| {
+                                    OwnershipHandoffError::participant(failure.to_string())
+                                })?;
                             if !scheduled.is_primary_on(service.inner.consensus.local_node_id()) {
                                 return Err(OwnershipHandoffError::participant(format!(
                                     "{} '{}' is not owned by this source node",
