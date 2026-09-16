@@ -447,24 +447,20 @@ impl Runtime {
         let Some(resource_store) = self.inner.resource_store.load_full() else {
             return Err("resource store is not attached".to_string());
         };
-        let Some(resource_version) = self
+        let resource_id = self
             .inner
-            .latest_resource_versions
-            .get(&DomainResourceKey {
-                domain: domain.clone(),
-                resource: lookup.resource.clone(),
-            })
-            .map(|value| *value)
-        else {
-            return Err(format!(
-                "resource '{}' has no installed versions for lookup '{}' in domain '{}'",
-                lookup.resource.as_str(),
-                lookup.name.as_str(),
-                domain.as_str()
-            ));
-        };
-        let resource_id =
-            ResourceId::new(domain.clone(), lookup.resource.clone(), resource_version);
+            .resource_versions
+            .load()
+            .resolve_completed_version(domain, &lookup.resource, None)
+            .map_err(|_| {
+                format!(
+                    "resource '{}' has no completed versions for lookup '{}' in domain '{}'",
+                    lookup.resource.as_str(),
+                    lookup.name.as_str(),
+                    domain.as_str()
+                )
+            })?;
+        let resource_version = resource_id.version;
         let path = resource_store
             .resolve_content_path(&resource_id, &lookup.path)
             .map_err(|error| error.to_string())?;

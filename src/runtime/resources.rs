@@ -227,45 +227,24 @@ impl Runtime {
         self.inner.resource_store.store(Some(resource_store));
     }
 
-    pub(crate) fn sync_resource_versions(&self, resources: &nervix_models::ResourceVersionStatus) {
-        self.inner.latest_resource_versions.clear();
-        for resource in &resources.versions {
-            let key = DomainResourceKey {
-                domain: resource.id.domain.clone(),
-                resource: resource.id.identifier.clone(),
-            };
-            if let Some(mut existing) = self.inner.latest_resource_versions.get_mut(&key) {
-                if resource.id.version > *existing {
-                    *existing = resource.id.version;
-                }
-            } else {
-                self.inner
-                    .latest_resource_versions
-                    .insert(key, resource.id.version);
-            }
-        }
-    }
-
     pub(crate) fn attach_resources(
         &self,
         resource_store: StdArc<ResourceStore>,
         resource_versions: ResourceVersionStatus,
     ) {
         self.inner.resource_store.store(Some(resource_store));
-        self.sync_resource_versions(&resource_versions);
         self.inner
             .resource_versions
             .store(StdArc::new(resource_versions));
     }
 
     pub(crate) fn update_resource_versions(&self, resource_versions: ResourceVersionStatus) {
-        self.sync_resource_versions(&resource_versions);
         self.inner
             .resource_versions
             .store(StdArc::new(resource_versions));
     }
 
-    /// Resolves a resource reference to the concrete version installed in `domain`. Resources are
+    /// Resolves a resource reference to the concrete version completed in `domain`. Resources are
     /// domain-owned, so the same name in another domain is a different resource with its own
     /// version sequence. `spec` may pin a version as `<name>@<version>`.
     pub(in crate::runtime) fn resolve_resource_id(
@@ -275,10 +254,9 @@ impl Runtime {
         requested_version: Option<u64>,
         spec: &str,
     ) -> Result<ResourceId, String> {
-        if let Some(version) = requested_version {
-            return Ok(ResourceId::new(domain.clone(), identifier.clone(), version));
-        }
-        if let Some((name, version)) = spec.rsplit_once('@') {
+        let resolved_version = if let Some(version) = requested_version {
+            Some(version)
+        } else if let Some((name, version)) = spec.rsplit_once('@') {
             let parsed = ResourceName::parse(name)
                 .map_err(|_| format!("invalid client resource identifier '{name}'"))?;
             if &parsed != identifier {
@@ -287,21 +265,19 @@ impl Runtime {
                     parsed.as_str()
                 ));
             }
-            let version = version
-                .parse::<u64>()
-                .map_err(|_| format!("invalid client resource version '{version}'"))?;
-            return Ok(ResourceId::new(domain.clone(), identifier.clone(), version));
-        }
-
-        let resources = self.inner.resource_versions.load();
-        let Some(version) = resources.latest_version(domain, identifier) else {
-            return Err(format!(
-                "resource '{}' has no installed versions in domain '{}'",
-                identifier.as_str(),
-                domain.as_str()
-            ));
+            Some(
+                version
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid client resource version '{version}'"))?,
+            )
+        } else {
+            None
         };
-        Ok(ResourceId::new(domain.clone(), identifier.clone(), version))
+        self.inner
+            .resource_versions
+            .load()
+            .resolve_completed_version(domain, identifier, resolved_version)
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn resolve_client_config(
@@ -462,8 +438,9 @@ mod tests {
     use std::path::PathBuf;
 
     use nervix_models::{
-        ClientConfigEntry, ClusterNodeName, DomainName, ResourceId, ResourceVersion,
-        ResourceVersionCounter, ResourceVersionStatus, Timestamp,
+        ClientConfigEntry, ClusterNodeName, DomainName, ResourceId, ResourceUpload,
+        ResourceUploadIdentity, ResourceUploadKey, ResourceUploadState, ResourceUploads,
+        ResourceVersion, ResourceVersionCounter, ResourceVersionStatus, Timestamp, UserName,
     };
     use sorted_vec::SortedVec;
     use tempfile::tempdir;
@@ -497,7 +474,7 @@ mod tests {
                 next_version_by_resource: SortedVec::from_unsorted(vec![ResourceVersionCounter {
                     domain: mount_domain.clone(),
                     identifier: named("dev_tls"),
-                    next_version: 2,
+                    next_version: 4,
                 }]),
                 versions: SortedVec::from_unsorted(vec![ResourceVersion {
                     id: ResourceId::new(mount_domain.clone(), named("dev_tls"), 1),
@@ -510,9 +487,68 @@ mod tests {
                     created_by_node: ClusterNodeName::parse("node-1").expect("valid name"),
                 }]),
                 replicas: SortedVec::new(),
-                uploads: SortedVec::new(),
+                uploads: ResourceUploads::try_from_uploads([
+                    ResourceUpload {
+                        key: ResourceUploadKey::new(
+                            UserName::parse("default")
+                                .assured("the test owner is an identifier-shaped literal"),
+                            mount_domain.clone(),
+                            named("dev_tls"),
+                            ResourceUploadIdentity::parse("mount-upload")
+                                .assured("the test upload identity uses accepted characters"),
+                        ),
+                        version: 1,
+                        state: ResourceUploadState::Completed {
+                            root_checksum: "root".to_string(),
+                            outcome_revision: 1,
+                        },
+                    },
+                    ResourceUpload {
+                        key: ResourceUploadKey::new(
+                            UserName::parse("default")
+                                .assured("the test owner is an identifier-shaped literal"),
+                            mount_domain.clone(),
+                            named("dev_tls"),
+                            ResourceUploadIdentity::parse("applying-upload")
+                                .assured("the test upload identity uses accepted characters"),
+                        ),
+                        version: 2,
+                        state: ResourceUploadState::Applying {
+                            root_checksum: "applying-root".to_string(),
+                        },
+                    },
+                    ResourceUpload {
+                        key: ResourceUploadKey::new(
+                            UserName::parse("default")
+                                .assured("the test owner is an identifier-shaped literal"),
+                            mount_domain.clone(),
+                            named("dev_tls"),
+                            ResourceUploadIdentity::parse("failed-upload")
+                                .assured("the test upload identity uses accepted characters"),
+                        ),
+                        version: 3,
+                        state: ResourceUploadState::Failed {
+                            root_checksum: "failed-root".to_string(),
+                            outcome_revision: 2,
+                            reason: "installation failed".to_string(),
+                        },
+                    },
+                ])
+                .assured("the test uploads have unique identities and versions"),
             },
         );
+
+        for version in [2, 3] {
+            let error = runtime
+                .resolve_resource_id(&mount_domain, &named("dev_tls"), Some(version), "dev_tls")
+                .expect_err("the runtime must reject an incomplete explicit version");
+            assert_eq!(
+                error,
+                format!(
+                    "resource 'dev_tls@{version}' is not a completed version in domain 'tenant'"
+                )
+            );
+        }
 
         let resolved = runtime
             .resolve_client_config(
@@ -546,7 +582,7 @@ mod tests {
             )
             .expect_err("another domain must not see this domain's resource");
         assert!(
-            error.contains("has no installed versions in domain 'other'"),
+            error.contains("has no completed versions in domain 'other'"),
             "unexpected error: {error}"
         );
     }

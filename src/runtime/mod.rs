@@ -287,8 +287,8 @@ use domain_clock::{
 #[cfg(test)]
 use domain_execution::DomainRouting;
 use domain_execution::{
-    DomainExecution, DomainResourceKey, DomainRoutingError, DomainRoutingSnapshot,
-    ObservedDomainTick, RuntimeDomainState,
+    DomainExecution, DomainRoutingError, DomainRoutingSnapshot, ObservedDomainTick,
+    RuntimeDomainState,
 };
 pub(crate) use domain_execution::{DomainRoutingCache, SharedDomainRouting};
 use domain_rebuild::{branch_relays_from_branched_specs, relay_branching_schema_for_runtime};

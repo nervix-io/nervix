@@ -1272,7 +1272,7 @@ impl SessionServiceImpl {
             }
 
             if refresh_http_tls
-                && let Err(error) = Box::pin(self.refresh_http_tls_server_config()).await
+                && let Err(error) = Box::pin(self.refresh_http_tls_server_config(None)).await
             {
                 if transaction_step.is_some() {
                     transaction_application_failure = Some(format!(
