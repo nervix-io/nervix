@@ -11,6 +11,7 @@
 //!   no branch-local state belongs here, and a decision must be computable without a cluster.
 //!
 mod domain_state;
+mod entity_gate;
 mod error;
 mod graph;
 mod mutation;
@@ -24,6 +25,9 @@ mod test_fixtures;
 mod transaction;
 mod validation;
 
+pub(crate) use entity_gate::{
+    entity_pause_relays_for_schedule, ownership_handoff_relays_for_schedule,
+};
 /// What the decisions layer exposes. Everything else this module and its submodules declare is
 /// `pub(in crate::registry)` or narrower, so the control plane reaches the registry only through
 /// the names below.

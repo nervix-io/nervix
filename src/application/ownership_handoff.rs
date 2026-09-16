@@ -36,7 +36,10 @@ use super::{
     entity_gate::{ClusterEntityGate, ENTITY_GATE_RELEASE_RETRY_INTERVAL},
     session_service::SessionServiceImpl,
 };
-use crate::runtime::{OwnershipHandoffError, OwnershipHandoffResult, Runtime};
+use crate::{
+    registry::ownership_handoff_relays_for_schedule,
+    runtime::{OwnershipHandoffError, OwnershipHandoffResult, Runtime},
+};
 
 pub(in crate::application) const FORCED_OWNERSHIP_RECOVERY_BUDGET: Duration =
     Duration::from_secs(5);
@@ -834,7 +837,7 @@ impl SessionServiceImpl {
             .iter()
             .map(|moved| moved.entity.clone())
             .collect::<Vec<_>>();
-        let relays = Runtime::ownership_handoff_relays_for_schedule(current, &affected_entities);
+        let relays = ownership_handoff_relays_for_schedule(current, &affected_entities);
         let former_owners = moves
             .iter()
             .map(|moved| moved.former_owner.clone())
