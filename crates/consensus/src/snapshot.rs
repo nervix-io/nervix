@@ -139,13 +139,7 @@ pub(crate) fn section_generation(key: &[u8]) -> Option<u64> {
     Some(u64::from_be_bytes(generation))
 }
 
-/// Every sealed section of one generation, and what they encode to in total.
-pub(crate) struct SealedSections {
-    pub(crate) sections: Vec<Vec<u8>>,
-    pub(crate) total_bytes: u64,
-}
-
-/// Gathers keyed records into sections no larger than the configured section limit.
+/// Gathers keyed records into one section no larger than the configured section limit.
 ///
 /// A record never spans two sections, so a record larger than the limit forms a section of its own
 /// and the bound is the record limit the state machine already enforces.
@@ -153,8 +147,6 @@ pub(crate) struct SectionWriter {
     limit: u64,
     pending: SnapshotSection,
     pending_bytes: u64,
-    sealed: Vec<Vec<u8>>,
-    total_bytes: u64,
 }
 
 impl SectionWriter {
@@ -163,17 +155,15 @@ impl SectionWriter {
             limit,
             pending: SnapshotSection::default(),
             pending_bytes: 0,
-            sealed: Vec::new(),
-            total_bytes: 0,
         }
     }
 
-    pub(crate) fn push(&mut self, record: StoredRecord) -> io::Result<()> {
+    /// Add one record when it fits. `false` leaves the writer untouched so the caller can start
+    /// the next section at this record without retaining a copy between storage jobs.
+    pub(crate) fn try_push(&mut self, key: &[u8], value: &[u8]) -> io::Result<bool> {
         let record_bytes = u64::try_from(
-            record
-                .key
-                .len()
-                .checked_add(record.value.len())
+            key.len()
+                .checked_add(value.len())
                 .ok_or_else(|| io::Error::other(crate::durable_batch::StorageFailure::Capacity))?,
         )
         .map_err(io::Error::other)?;
@@ -182,38 +172,22 @@ impl SectionWriter {
             .checked_add(record_bytes)
             .ok_or_else(|| io::Error::other(crate::durable_batch::StorageFailure::Capacity))?;
         if !self.pending.records.is_empty() && would_hold > self.limit {
-            self.seal()?;
+            return Ok(false);
         }
-        self.pending_bytes = self
-            .pending_bytes
-            .checked_add(record_bytes)
-            .ok_or_else(|| io::Error::other(crate::durable_batch::StorageFailure::Capacity))?;
-        self.pending.records.push(record);
-        Ok(())
+        self.pending_bytes = would_hold;
+        self.pending.records.push(StoredRecord {
+            key: key.to_vec(),
+            value: value.to_vec(),
+        });
+        Ok(true)
     }
 
-    /// Seal whatever is still pending and hand over every section of this generation.
-    pub(crate) fn finish(mut self) -> io::Result<SealedSections> {
-        if !self.pending.records.is_empty() {
-            self.seal()?;
+    /// Seal the records collected for this section.
+    pub(crate) fn finish(self) -> io::Result<Option<Vec<u8>>> {
+        if self.pending.records.is_empty() {
+            return Ok(None);
         }
-        Ok(SealedSections {
-            sections: self.sealed,
-            total_bytes: self.total_bytes,
-        })
-    }
-
-    fn seal(&mut self) -> io::Result<()> {
-        let section = std::mem::take(&mut self.pending);
-        self.pending_bytes = 0;
-        let encoded = crate::durable_batch::DurableBatch::encode(&section, self.limit)?;
-        let encoded_bytes = u64::try_from(encoded.len()).map_err(io::Error::other)?;
-        self.total_bytes = self
-            .total_bytes
-            .checked_add(encoded_bytes)
-            .ok_or_else(|| io::Error::other(crate::durable_batch::StorageFailure::Capacity))?;
-        self.sealed.push(encoded);
-        Ok(())
+        crate::durable_batch::DurableBatch::encode(&self.pending, self.limit).map(Some)
     }
 }
 

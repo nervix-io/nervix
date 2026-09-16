@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
+use nervix_execution::{ExecutionConfig, MemoryBudgets, OperationLimits};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, DomainConfig, DomainName,
     DomainPace, DomainSchedule, DomainStartPoint, DomainState, DomainStatus, ResourceName,
@@ -12,6 +13,7 @@ use openraft::{
     vote::RaftLeaderId as _,
 };
 use tempfile::TempDir;
+use ubyte::ByteUnit;
 
 use super::*;
 use crate::{
@@ -29,8 +31,10 @@ struct Harness {
 
 impl Harness {
     async fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::with_executor(Executor::default()).await
+    }
+    async fn with_executor(executor: Executor) -> Result<Self, Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
-        let executor = Executor::default();
         let store = FjallStore::from_database(
             Database::builder(directory.path()).open()?,
             executor.clone(),
@@ -1030,6 +1034,133 @@ async fn a_snapshot_is_sealed_as_bounded_sections() -> TestResult {
         records >= 8,
         "every stored record belongs to one section, got {records}"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_generation_larger_than_bulk_memory_seals_one_budgeted_section_at_a_time() -> TestResult {
+    const RECORD_BYTES: usize = 40 * 1024;
+    const RECORDS: u64 = 12;
+
+    let limits = OperationLimits {
+        snapshot_section_bytes: ByteUnit::Kibibyte(64),
+        ..OperationLimits::default()
+    };
+    let executor = Executor::new(ExecutionConfig {
+        budgets: MemoryBudgets {
+            bulk: ByteUnit::Kibibyte(320),
+            ..MemoryBudgets::default()
+        },
+        limits,
+        ..ExecutionConfig::default()
+    })?;
+    let section_working_bytes = limits
+        .snapshot_section_working_bytes()
+        .ok_or("the fixture's snapshot working set must fit in u64")?;
+    let bulk_capacity = executor.snapshot().bulk_memory.capacity_bytes;
+    let mut source = Harness::with_executor(executor.clone()).await?;
+    for index in 1..=RECORDS {
+        source
+            .apply(index, Harness::admission(index, RECORD_BYTES)?)
+            .await?;
+    }
+    source.append(RECORDS).await?;
+    let log_bytes_at_open = source.store.log_bytes_since_snapshot();
+
+    let pause = source
+        .store
+        .inner
+        .faults
+        .pause_next("snapshot_section".to_owned(), StorageBoundary::AfterSync);
+    let mut builder = source.store.clone();
+    let build = tokio::spawn(async move { builder.build_snapshot().await });
+    tokio::time::timeout(Duration::from_secs(10), pause.entered()).await?;
+    assert_eq!(
+        executor.snapshot().bulk_memory.reserved_bytes,
+        section_working_bytes,
+        "one section write must hold exactly its configured working set"
+    );
+
+    let following_index = RECORDS
+        .checked_add(1)
+        .ok_or("the fixture's record count must leave room for one more revision")?;
+    let following = Harness::entry(
+        following_index,
+        Harness::admission(following_index, RECORD_BYTES)?,
+    );
+    let mut log_store = source.store.clone();
+    let append = tokio::spawn(async move {
+        log_store
+            .blocking_append([EntryOf::<TypeConfig>::new_blank(Harness::log_id(
+                following_index,
+            ))])
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while executor.snapshot().consensus_storage.pending < 1 {
+            tokio::task::consume_budget().await;
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    let mut live_store = source.store.clone();
+    let apply = tokio::spawn(async move {
+        live_store
+            .apply(futures_util::stream::iter([Ok((following, None))]))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while executor.snapshot().consensus_storage.pending < 2 {
+            tokio::task::consume_budget().await;
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    let next_pause = source
+        .store
+        .inner
+        .faults
+        .pause_next("snapshot_section".to_owned(), StorageBoundary::AfterSync);
+    pause.release();
+    tokio::time::timeout(Duration::from_secs(10), next_pause.entered()).await?;
+    append.await??;
+    apply.await??;
+    let concurrent_log_bytes = source
+        .store
+        .log_bytes_since_snapshot()
+        .checked_sub(log_bytes_at_open)
+        .ok_or("the appended-byte counter must include its value at snapshot open")?;
+    assert_eq!(
+        source.store.inner.state().last_applied_log_id,
+        Some(Harness::log_id(following_index)),
+        "a state-machine write queued between sections must be allowed to proceed"
+    );
+    assert!(
+        !build.is_finished(),
+        "the generation must still be writing its later bounded sections"
+    );
+    next_pause.release();
+
+    let built = build.await??;
+    assert_eq!(
+        built.meta.last_log_id,
+        Some(Harness::log_id(RECORDS)),
+        "every section must stay pinned to the view opened before the interleaved write"
+    );
+    assert!(
+        built.snapshot.manifest().section_count > 1,
+        "the fixture must span several independently written sections"
+    );
+    assert!(
+        built.snapshot.manifest().total_bytes > bulk_capacity,
+        "the complete generation must exceed the memory available to one node"
+    );
+    assert_eq!(
+        source.store.log_bytes_since_snapshot(),
+        concurrent_log_bytes,
+        "entries appended while the generation seals must count toward the next snapshot"
+    );
+    assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, 0);
     Ok(())
 }
 

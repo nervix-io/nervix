@@ -8,6 +8,99 @@ use nervix_models::{
 
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) enum WindowDurationSetting {
+    Width,
+    Step,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) enum FlushPolicyRequirement {
+    Required,
+    NotUsed,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub(in crate::runtime) enum PlanningError {
+    #[error("window processor '{node}' has an invalid {setting:?} duration")]
+    InvalidWindowDuration {
+        node: ModelName,
+        setting: WindowDurationSetting,
+    },
+    #[error("{kind:?} '{node}' output route '{route}' must declare a flush policy")]
+    MissingFlushPolicy {
+        kind: ModelKind,
+        node: ModelName,
+        route: RelayName,
+    },
+    #[error("{kind:?} '{node}' output route '{route}' has an invalid flush interval")]
+    InvalidFlushInterval {
+        kind: ModelKind,
+        node: ModelName,
+        route: RelayName,
+    },
+    #[error("{kind:?} '{node}' output route '{route}' has an invalid maximum batch size")]
+    InvalidFlushMaxBatchSize {
+        kind: ModelKind,
+        node: ModelName,
+        route: RelayName,
+    },
+    #[error("{kind:?} '{node}' input relay '{relay}' has an invalid collection interval")]
+    InvalidCollectInterval {
+        kind: ModelKind,
+        node: ModelName,
+        relay: RelayName,
+    },
+    #[error("{kind:?} '{node}' input relay '{relay}' has an invalid collection batch size")]
+    InvalidCollectMaxBatchSize {
+        kind: ModelKind,
+        node: ModelName,
+        relay: RelayName,
+    },
+    #[error("{kind:?} '{node}' has an invalid maximum retention time")]
+    InvalidMaxTime { kind: ModelKind, node: ModelName },
+    #[error("window processor '{node}' must declare an output route")]
+    MissingWindowOutput { node: ModelName },
+    #[error("window processor '{node}' output route '{route}' has invalid construction")]
+    InvalidWindowConstruction { node: ModelName, route: RelayName },
+    #[error("window processor '{node}' output route '{route}' could not be compiled")]
+    WindowOutputCompilation { node: ModelName, route: RelayName },
+    #[error("{kind:?} '{node}' must declare an input relay")]
+    MissingInputRelay { kind: ModelKind, node: ModelName },
+    #[error("{kind:?} '{node}' input relay '{relay}' has no runtime schema")]
+    MissingInputSchema {
+        kind: ModelKind,
+        node: ModelName,
+        relay: RelayName,
+    },
+    #[error("inferencer '{node}' input mappings could not be compiled for relay '{relay}'")]
+    InferencerInputCompilation { node: ModelName, relay: RelayName },
+    #[error("{kind:?} '{node}' has no scheduled processor specification")]
+    MissingProcessorSpecification { kind: ModelKind, node: ModelName },
+    #[error("{kind:?} '{node}' did not produce a processor template")]
+    MissingProcessorTemplate { kind: ModelKind, node: ModelName },
+    #[error("{kind:?} '{node}' has an invalid branch TTL")]
+    InvalidBranchTtl { kind: ModelKind, node: ModelName },
+    #[error("{kind:?} '{node}' output route '{route}' has no configured relay")]
+    MissingRelayModel {
+        kind: ModelKind,
+        node: ModelName,
+        route: RelayName,
+    },
+    #[error("{kind:?} '{node}' output route '{route}' has no relay registry")]
+    MissingRelayRegistry {
+        kind: ModelKind,
+        node: ModelName,
+        route: RelayName,
+    },
+    #[error("{kind:?} '{node}' output route '{route}' has no relay services")]
+    MissingRelayServices {
+        kind: ModelKind,
+        node: ModelName,
+        route: RelayName,
+    },
+}
+
 /// Which pooled transport a named client speaks, and the two things opening it needs.
 ///
 /// Reading the Model to decide this is a planning concern: the data plane opens what it is handed
@@ -446,57 +539,71 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
 
 fn parse_optional_window_duration(
     processor: &ModelName,
-    setting: &str,
+    setting: WindowDurationSetting,
     value: Option<&str>,
-) -> Result<Option<Duration>, String> {
-    value
-        .map(|raw| {
-            humantime::parse_duration(raw).map_err(|error| {
-                format!(
-                    "invalid window processor '{}' {} duration '{}': {}",
-                    processor.as_str(),
-                    setting,
-                    raw,
-                    error
-                )
-            })
+) -> error_stack::Result<Option<Duration>, PlanningError> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    let duration = humantime::parse_duration(raw).map_err(|error| {
+        Report::new(PlanningError::InvalidWindowDuration {
+            node: processor.clone(),
+            setting,
         })
-        .transpose()
+        .attach_printable(error)
+    })?;
+    Ok(Some(duration))
 }
 
 pub(in crate::runtime) fn materialize_output(
+    kind: ModelKind,
+    processor: &ModelName,
     output: &BranchedProcessorOutputSpec,
-) -> Result<RelayProcessorOutputTemplate, String> {
+    requirement: FlushPolicyRequirement,
+) -> error_stack::Result<RelayProcessorOutputTemplate, PlanningError> {
+    let flush_policy = match output.flush_policy.as_ref() {
+        Some(policy) => Some(parse_branch_flush_policy(
+            kind,
+            processor,
+            &output.relay,
+            policy,
+        )?),
+        None if requirement == FlushPolicyRequirement::Required => {
+            return Err(Report::new(PlanningError::MissingFlushPolicy {
+                kind,
+                node: processor.clone(),
+                route: output.relay.clone(),
+            }));
+        }
+        None => None,
+    };
     Ok(RelayProcessorOutputTemplate {
         output_relay: output.relay.clone(),
         construction: output.construction.clone(),
-        flush_policy: output
-            .flush_policy
-            .as_ref()
-            .map(|policy| parse_branch_flush_policy("processor output", &output.relay, policy))
-            .transpose()?,
+        flush_policy,
         message_error_policy: output.message_error_policy.clone(),
     })
 }
 
 fn materialize_outputs(
+    kind: ModelKind,
+    processor: &ModelName,
     outputs: &BranchedProcessorOutputsSpec,
-) -> Result<RelayProcessorOutputsTemplate, String> {
-    Ok(RelayProcessorOutputsTemplate {
-        routes: outputs
-            .routes
-            .iter()
-            .map(materialize_output)
-            .collect::<Result<Vec<_>, _>>()?,
-    })
+    requirement: FlushPolicyRequirement,
+) -> error_stack::Result<RelayProcessorOutputsTemplate, PlanningError> {
+    let mut routes = Vec::with_capacity(outputs.routes.len());
+    for output in &outputs.routes {
+        routes.push(materialize_output(kind, processor, output, requirement)?);
+    }
+    Ok(RelayProcessorOutputsTemplate { routes })
 }
 
 fn parse_branch_flush_policy(
-    kind: &str,
-    processor: impl Into<ModelName>,
+    kind: ModelKind,
+    processor: &ModelName,
+    route: &RelayName,
     policy: &FlushPolicy,
-) -> Result<RuntimeFlushPolicy, String> {
-    let processor = processor.into();
+) -> error_stack::Result<RuntimeFlushPolicy, PlanningError> {
     let FlushPolicy::Each {
         interval,
         max_batch_size,
@@ -505,22 +612,20 @@ fn parse_branch_flush_policy(
         return Ok(RuntimeFlushPolicy::Immediate);
     };
     let parsed_interval = humantime::parse_duration(interval).map_err(|error| {
-        format!(
-            "invalid {} '{}' flush_each duration '{}': {}",
+        Report::new(PlanningError::InvalidFlushInterval {
             kind,
-            processor.as_str(),
-            interval,
-            error
-        )
+            node: processor.clone(),
+            route: route.clone(),
+        })
+        .attach_printable(error)
     })?;
     let parsed_max_batch_size = max_batch_size.parse::<ubyte::ByteUnit>().map_err(|error| {
-        format!(
-            "invalid {} '{}' max_batch_size '{}': {}",
+        Report::new(PlanningError::InvalidFlushMaxBatchSize {
             kind,
-            processor.as_str(),
-            max_batch_size,
-            error
-        )
+            node: processor.clone(),
+            route: route.clone(),
+        })
+        .attach_printable(error)
     })?;
     Ok(RuntimeFlushPolicy::Each {
         interval: parsed_interval,
@@ -529,40 +634,49 @@ fn parse_branch_flush_policy(
 }
 
 pub(in crate::runtime) fn parse_input_collect_policy(
-    kind: &str,
+    kind: ModelKind,
     processor: &ModelName,
+    relay: &RelayName,
     policy: &nervix_models::InputCollectPolicy,
-) -> Result<RuntimeInputCollectPolicy, String> {
+) -> error_stack::Result<RuntimeInputCollectPolicy, PlanningError> {
     let interval = humantime::parse_duration(&policy.collect_for).map_err(|error| {
-        format!(
-            "invalid {} '{}' COLLECT FOR duration '{}': {}",
+        Report::new(PlanningError::InvalidCollectInterval {
             kind,
-            processor.as_str(),
-            policy.collect_for,
-            error
-        )
-    })?;
-    let max_batch_size = policy
-        .max_batch_size
-        .as_deref()
-        .map(|max_batch_size| {
-            max_batch_size
-                .parse::<ubyte::ByteUnit>()
-                .map(|size| size.as_u64())
-                .map_err(|error| {
-                    format!(
-                        "invalid {} '{}' COLLECT MAX BATCH SIZE '{}': {}",
-                        kind,
-                        processor.as_str(),
-                        max_batch_size,
-                        error
-                    )
-                })
+            node: processor.clone(),
+            relay: relay.clone(),
         })
-        .transpose()?;
+        .attach_printable(error)
+    })?;
+    let max_batch_size = if let Some(max_batch_size) = policy.max_batch_size.as_deref() {
+        let size = max_batch_size.parse::<ubyte::ByteUnit>().map_err(|error| {
+            Report::new(PlanningError::InvalidCollectMaxBatchSize {
+                kind,
+                node: processor.clone(),
+                relay: relay.clone(),
+            })
+            .attach_printable(error)
+        })?;
+        Some(size.as_u64())
+    } else {
+        None
+    };
     Ok(RuntimeInputCollectPolicy {
         interval,
         max_batch_size,
+    })
+}
+
+fn parse_max_time(
+    kind: ModelKind,
+    processor: &ModelName,
+    value: &str,
+) -> error_stack::Result<Duration, PlanningError> {
+    humantime::parse_duration(value).map_err(|error| {
+        Report::new(PlanningError::InvalidMaxTime {
+            kind,
+            node: processor.clone(),
+        })
+        .attach_printable(error)
     })
 }
 
@@ -570,12 +684,12 @@ fn materialize_nodes(
     nodes: &[BranchedProcessorSpec],
     relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
     udfs: Option<&UdfExecutor>,
-) -> Result<Vec<RelayProcessorTemplate>, String> {
+) -> error_stack::Result<Vec<RelayProcessorTemplate>, PlanningError> {
     let mut out = Vec::new();
     for node in nodes {
         let mut input_collect_policies = HashMap::with_capacity(node.input_collect_policies.len());
         for (relay, policy) in &node.input_collect_policies {
-            let parsed = parse_input_collect_policy(node.kind.as_str(), &node.processor, policy)?;
+            let parsed = parse_input_collect_policy(node.kind, &node.processor, relay, policy)?;
             input_collect_policies.insert(relay.clone(), parsed);
         }
         out.push(RelayProcessorTemplate {
@@ -593,16 +707,14 @@ fn materialize_nodes(
                     deduplicate_on,
                     max_time,
                 } => RelayProcessorOperationTemplate::Deduplicator {
-                    output_routes: materialize_outputs(output_routes)?,
+                    output_routes: materialize_outputs(
+                        node.kind,
+                        &node.processor,
+                        output_routes,
+                        FlushPolicyRequirement::Required,
+                    )?,
                     deduplicate_on: deduplicate_on.clone(),
-                    max_time: humantime::parse_duration(max_time).map_err(|error| {
-                        format!(
-                            "invalid deduplicator '{}' MAX TIME duration '{}': {}",
-                            node.processor.as_str(),
-                            max_time,
-                            error
-                        )
-                    })?,
+                    max_time: parse_max_time(node.kind, &node.processor, max_time)?,
                 },
                 BranchedProcessorOperationSpec::WindowProcessor {
                     output_routes,
@@ -610,10 +722,9 @@ fn materialize_nodes(
                     step,
                 } => {
                     if output_routes.outputs().next().is_none() {
-                        return Err(format!(
-                            "window processor '{}' requires an output relay",
-                            node.processor.as_str()
-                        ));
+                        return Err(Report::new(PlanningError::MissingWindowOutput {
+                            node: node.processor.clone(),
+                        }));
                     }
                     // Lower each written route's construction into its own aggregate program.
                     // Written route order is the order every later step counts in.
@@ -621,12 +732,11 @@ fn materialize_nodes(
                     for output in output_routes.outputs() {
                         let lowered =
                             lower_window_assignments(&output.construction).map_err(|reason| {
-                                format!(
-                                    "window processor '{}' output '{}' construction is invalid: {}",
-                                    node.processor.as_str(),
-                                    output.relay.as_str(),
-                                    reason
-                                )
+                                Report::new(PlanningError::InvalidWindowConstruction {
+                                    node: node.processor.clone(),
+                                    route: output.relay.clone(),
+                                })
+                                .attach_printable(reason)
                             })?;
                         route_aggregates.push(lowered.inner);
                     }
@@ -644,7 +754,14 @@ fn materialize_nodes(
                             &output.relay,
                             relay_schemas,
                             udfs,
-                        )?;
+                        )
+                        .map_err(|reason| {
+                            Report::new(PlanningError::WindowOutputCompilation {
+                                node: node.processor.clone(),
+                                route: output.relay.clone(),
+                            })
+                            .attach_printable(reason)
+                        })?;
                         compiled_aggregates.push(compiled.with_demand_offset(demand_offset));
                         demand_offset += route_aggregate.demands().len();
                     }
@@ -655,7 +772,12 @@ fn materialize_nodes(
 
                     // Compilation is done, so the compiled programs now own the assignments and
                     // the materialized routes keep only their relay, flush, and error contracts.
-                    let mut materialized_outputs = materialize_outputs(output_routes)?;
+                    let mut materialized_outputs = materialize_outputs(
+                        node.kind,
+                        &node.processor,
+                        output_routes,
+                        FlushPolicyRequirement::NotUsed,
+                    )?;
                     for output in &mut materialized_outputs.routes {
                         output.construction.assignments.clear();
                     }
@@ -664,12 +786,12 @@ fn materialize_nodes(
                     let step_messages = step.messages.map(|messages| messages.arch_into());
                     let width_duration = parse_optional_window_duration(
                         &node.processor,
-                        "width",
+                        WindowDurationSetting::Width,
                         width.duration.as_deref(),
                     )?;
                     let step_duration = parse_optional_window_duration(
                         &node.processor,
-                        "step",
+                        WindowDurationSetting::Step,
                         step.duration.as_deref(),
                     )?;
 
@@ -688,16 +810,14 @@ fn materialize_nodes(
                     order_by,
                     max_time,
                 } => RelayProcessorOperationTemplate::Reorderer {
-                    output_routes: materialize_outputs(output_routes)?,
+                    output_routes: materialize_outputs(
+                        node.kind,
+                        &node.processor,
+                        output_routes,
+                        FlushPolicyRequirement::Required,
+                    )?,
                     order_by: order_by.clone(),
-                    max_time: humantime::parse_duration(max_time).map_err(|error| {
-                        format!(
-                            "invalid reorderer '{}' MAX TIME duration '{}': {}",
-                            node.processor.as_str(),
-                            max_time,
-                            error
-                        )
-                    })?,
+                    max_time: parse_max_time(node.kind, &node.processor, max_time)?,
                 },
                 BranchedProcessorOperationSpec::Correlator {
                     output_routes,
@@ -708,24 +828,27 @@ fn materialize_nodes(
                     max_time,
                     timeout_policy,
                 } => RelayProcessorOperationTemplate::Correlator {
-                    output_routes: materialize_outputs(output_routes)?,
+                    output_routes: materialize_outputs(
+                        node.kind,
+                        &node.processor,
+                        output_routes,
+                        FlushPolicyRequirement::Required,
+                    )?,
                     left_relays: left_relays.clone(),
                     right_relays: right_relays.clone(),
                     correlate_where: correlate_where.clone(),
                     match_policy: *match_policy,
-                    max_time: humantime::parse_duration(max_time).map_err(|error| {
-                        format!(
-                            "invalid correlator '{}' MAX TIME duration '{}': {}",
-                            node.processor.as_str(),
-                            max_time,
-                            error
-                        )
-                    })?,
+                    max_time: parse_max_time(node.kind, &node.processor, max_time)?,
                     timeout_policy: timeout_policy.clone(),
                 },
                 BranchedProcessorOperationSpec::Junction { output_routes } => {
                     RelayProcessorOperationTemplate::Junction {
-                        output_routes: materialize_outputs(output_routes)?,
+                        output_routes: materialize_outputs(
+                            node.kind,
+                            &node.processor,
+                            output_routes,
+                            FlushPolicyRequirement::Required,
+                        )?,
                     }
                 }
                 BranchedProcessorOperationSpec::Inferencer {
@@ -736,27 +859,39 @@ fn materialize_nodes(
                     inputs,
                     output_schema,
                 } => {
-                    let input_relay = node.input_relays.first().ok_or_else(|| {
-                        format!(
-                            "inferencer '{}' requires an input relay",
-                            node.processor.as_str()
-                        )
-                    })?;
-                    let input_schema = relay_schemas.get(input_relay).ok_or_else(|| {
-                        format!(
-                            "inferencer '{}' input relay '{}' has no runtime schema",
-                            node.processor.as_str(),
-                            input_relay.as_str()
-                        )
-                    })?;
+                    let Some(input_relay) = node.input_relays.first() else {
+                        return Err(Report::new(PlanningError::MissingInputRelay {
+                            kind: node.kind,
+                            node: node.processor.clone(),
+                        }));
+                    };
+                    let Some(input_schema) = relay_schemas.get(input_relay) else {
+                        return Err(Report::new(PlanningError::MissingInputSchema {
+                            kind: node.kind,
+                            node: node.processor.clone(),
+                            relay: input_relay.clone(),
+                        }));
+                    };
                     let compiled_input_program = CompiledInferencerInputProgram::compile(
                         &node.processor,
                         inputs,
                         input_schema,
                         udfs,
-                    )?;
+                    )
+                    .map_err(|reason| {
+                        Report::new(PlanningError::InferencerInputCompilation {
+                            node: node.processor.clone(),
+                            relay: input_relay.clone(),
+                        })
+                        .attach_printable(reason)
+                    })?;
                     RelayProcessorOperationTemplate::Inferencer {
-                        output_routes: materialize_outputs(output_routes)?,
+                        output_routes: materialize_outputs(
+                            node.kind,
+                            &node.processor,
+                            output_routes,
+                            FlushPolicyRequirement::Required,
+                        )?,
                         resource: resource.clone(),
                         resource_version: *resource_version,
                         file: file.clone(),
@@ -772,7 +907,12 @@ fn materialize_nodes(
                     file,
                     limits,
                 } => RelayProcessorOperationTemplate::WasmProcessor {
-                    output_routes: materialize_outputs(output_routes)?,
+                    output_routes: materialize_outputs(
+                        node.kind,
+                        &node.processor,
+                        output_routes,
+                        FlushPolicyRequirement::NotUsed,
+                    )?,
                     resource: resource.clone(),
                     resource_version: *resource_version,
                     file: file.clone(),
@@ -791,68 +931,75 @@ pub(in crate::runtime) fn processor_template_for_graph_node(
     processor: &ModelName,
     relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
     udfs: Option<&UdfExecutor>,
-) -> Result<RelayProcessorTemplate, String> {
+) -> error_stack::Result<RelayProcessorTemplate, PlanningError> {
     let specs = branched_node_specs_from_active_graph(graph);
-    let node = specs.processor(kind, processor).ok_or_else(|| {
-        format!(
-            "{} '{}' has no scheduled processor specification",
-            kind.as_str(),
-            processor.as_str()
-        )
-    })?;
-    materialize_nodes(std::slice::from_ref(&node.spec), relay_schemas, udfs)?
-        .pop()
-        .ok_or_else(|| {
-            format!(
-                "{} '{}' did not produce a processor template",
-                kind.as_str(),
-                processor.as_str()
-            )
+    let Some(node) = specs.processor(kind, processor) else {
+        return Err(Report::new(PlanningError::MissingProcessorSpecification {
+            kind,
+            node: processor.clone(),
+        }));
+    };
+    let mut templates = materialize_nodes(std::slice::from_ref(&node.spec), relay_schemas, udfs)?;
+    templates.pop().ok_or_else(|| {
+        Report::new(PlanningError::MissingProcessorTemplate {
+            kind,
+            node: processor.clone(),
         })
+    })
 }
 
 fn parse_branch_ttl_setting(
     ttl: Option<&str>,
     kind: ModelKind,
     identifier: &ModelName,
-) -> Result<Option<Duration>, String> {
-    ttl.map(|ttl| {
-        humantime::parse_duration(ttl).map_err(|error| {
-            format!(
-                "invalid branch ttl '{}' for {} '{}': {}",
-                ttl,
-                kind.as_str(),
-                identifier.as_str(),
-                error
-            )
+) -> error_stack::Result<Option<Duration>, PlanningError> {
+    let Some(ttl) = ttl else {
+        return Ok(None);
+    };
+    let duration = humantime::parse_duration(ttl).map_err(|error| {
+        Report::new(PlanningError::InvalidBranchTtl {
+            kind,
+            node: identifier.clone(),
         })
-    })
-    .transpose()
+        .attach_printable(error)
+    })?;
+    Ok(Some(duration))
 }
 
 fn resolve_branch_relay_templates(
+    kind: ModelKind,
+    node: &ModelName,
     branch_relay_ids: HashSet<RelayName>,
     model_index: &ModelIndex,
     relay_registries: &HashMap<RelayName, RelayRegistry>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
-) -> Result<HashMap<RelayName, RelayProcessorRelayTemplate>, String> {
-    branch_relay_ids
-        .into_iter()
-        .map(|relay| {
-            if model_index.configured::<CreateRelay>(&relay).is_none() {
-                return Err(format!("missing branched relay '{}'", relay.as_str()));
-            }
-            let registry = relay_registries
-                .get(&relay)
-                .cloned()
-                .ok_or_else(|| format!("missing branched relay '{}'", relay.as_str()))?;
-            let services = relay_services
-                .get(&relay)
-                .cloned()
-                .ok_or_else(|| format!("missing branched relay services '{}'", relay.as_str()))?;
-            Ok((relay, RelayProcessorRelayTemplate { registry, services }))
-        })
-        .collect::<Result<HashMap<_, _>, String>>()
+) -> error_stack::Result<HashMap<RelayName, RelayProcessorRelayTemplate>, PlanningError> {
+    let mut templates = HashMap::with_capacity(branch_relay_ids.len());
+    for relay in branch_relay_ids {
+        if model_index.configured::<CreateRelay>(&relay).is_none() {
+            return Err(Report::new(PlanningError::MissingRelayModel {
+                kind,
+                node: node.clone(),
+                route: relay,
+            }));
+        }
+        let Some(registry) = relay_registries.get(&relay).cloned() else {
+            return Err(Report::new(PlanningError::MissingRelayRegistry {
+                kind,
+                node: node.clone(),
+                route: relay,
+            }));
+        };
+        let Some(services) = relay_services.get(&relay).cloned() else {
+            return Err(Report::new(PlanningError::MissingRelayServices {
+                kind,
+                node: node.clone(),
+                route: relay,
+            }));
+        };
+        templates.insert(relay, RelayProcessorRelayTemplate { registry, services });
+    }
+    Ok(templates)
 }
 
 pub(in crate::runtime) fn materialize_ingestor_route_template(
@@ -860,10 +1007,12 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
     model_index: &ModelIndex,
     relay_registries: &HashMap<RelayName, RelayRegistry>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
-) -> Result<IngestorRouteTemplate, String> {
+) -> error_stack::Result<IngestorRouteTemplate, PlanningError> {
     let mut branch_relay_ids = HashSet::default();
     branch_relay_ids.insert(spec.root_relay.clone());
     let relays = resolve_branch_relay_templates(
+        spec.kind,
+        &spec.identifier,
         branch_relay_ids,
         model_index,
         relay_registries,
@@ -887,8 +1036,9 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
         },
         ack_boundary: spec.output_ack_boundary,
         flush_policy: parse_branch_flush_policy(
-            spec.kind.as_str(),
+            spec.kind,
             &spec.identifier,
+            &spec.root_relay,
             &spec.output_flush_policy,
         )?,
     })
@@ -901,16 +1051,17 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
     relay_registries: &HashMap<RelayName, RelayRegistry>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
     udfs: Option<&UdfExecutor>,
-) -> Result<BranchInstanceTemplate, String> {
+) -> error_stack::Result<BranchInstanceTemplate, PlanningError> {
     let spec = &node.spec;
-    let root_relay = spec.input_relays.first().cloned().ok_or_else(|| {
-        format!(
-            "{} '{}' requires at least one input relay",
-            spec.kind.as_str(),
-            spec.processor.as_str()
-        )
-    })?;
+    let Some(root_relay) = spec.input_relays.first().cloned() else {
+        return Err(Report::new(PlanningError::MissingInputRelay {
+            kind: spec.kind,
+            node: spec.processor.clone(),
+        }));
+    };
     let relays = resolve_branch_relay_templates(
+        spec.kind,
+        &spec.processor,
         spec.output_relays(),
         model_index,
         relay_registries,
@@ -970,6 +1121,370 @@ mod tests {
         }
     }
 
+    fn inferencer_node(input_relays: Vec<RelayName>) -> BranchedProcessorSpec {
+        BranchedProcessorSpec {
+            kind: ModelKind::Inferencer,
+            processor: named("score_model"),
+            input_relays,
+            input_collect_policies: HashMap::default(),
+            mode: AckMode::Attached,
+            error_policies: ErrorPolicies::handled_by_log(),
+            from_where: HashMap::default(),
+            filter_where: None,
+            materialized_state: Vec::new(),
+            operation: BranchedProcessorOperationSpec::Inferencer {
+                output_routes: BranchedProcessorOutputsSpec {
+                    routes: vec![BranchedProcessorOutputSpec {
+                        relay: named("scores"),
+                        construction: RouteConstruction::default(),
+                        flush_policy: Some(FlushPolicy::Immediate),
+                        message_error_policy: MessageErrorPolicy::Log,
+                    }],
+                },
+                resource: named("fraud_model"),
+                resource_version: Some(1),
+                file: "models/fraud.onnx".to_string(),
+                inputs: Vec::new(),
+                output_schema: Vec::new(),
+            },
+        }
+    }
+
+    fn window_node(output_routes: BranchedProcessorOutputsSpec) -> BranchedProcessorSpec {
+        BranchedProcessorSpec {
+            kind: ModelKind::WindowProcessor,
+            processor: named("metric_window"),
+            input_relays: vec![named("metrics")],
+            input_collect_policies: HashMap::default(),
+            mode: AckMode::Attached,
+            error_policies: ErrorPolicies::handled_by_log(),
+            from_where: HashMap::default(),
+            filter_where: None,
+            materialized_state: Vec::new(),
+            operation: BranchedProcessorOperationSpec::WindowProcessor {
+                output_routes,
+                width: WindowBound::of_messages(10),
+                step: WindowBound::of_messages(5),
+            },
+        }
+    }
+
+    #[test]
+    fn planning_parsers_preserve_typed_contract_failures() {
+        let processor = named::<ModelName>("orders_processor");
+        let relay = named::<RelayName>("orders");
+
+        let window_duration = parse_optional_window_duration(
+            &processor,
+            WindowDurationSetting::Width,
+            Some("not-a-duration"),
+        )
+        .expect_err("an invalid window width must fail");
+        assert!(matches!(
+            window_duration.current_context(),
+            PlanningError::InvalidWindowDuration {
+                node,
+                setting: WindowDurationSetting::Width,
+            } if node == &processor
+        ));
+
+        let output = BranchedProcessorOutputSpec {
+            relay: relay.clone(),
+            construction: RouteConstruction::default(),
+            flush_policy: Some(FlushPolicy::Each {
+                interval: "1s".to_string(),
+                max_batch_size: "not-a-size".to_string(),
+            }),
+            message_error_policy: MessageErrorPolicy::Log,
+        };
+        let flush_size = materialize_output(
+            ModelKind::Deduplicator,
+            &processor,
+            &output,
+            FlushPolicyRequirement::Required,
+        )
+        .expect_err("an invalid flush batch size must fail");
+        assert!(matches!(
+            flush_size.current_context(),
+            PlanningError::InvalidFlushMaxBatchSize {
+                kind: ModelKind::Deduplicator,
+                node,
+                route,
+            } if node == &processor && route == &relay
+        ));
+
+        let collect_interval = parse_input_collect_policy(
+            ModelKind::Junction,
+            &processor,
+            &relay,
+            &nervix_models::InputCollectPolicy {
+                collect_for: "not-a-duration".to_string(),
+                max_batch_size: None,
+            },
+        )
+        .expect_err("an invalid collection interval must fail");
+        assert!(matches!(
+            collect_interval.current_context(),
+            PlanningError::InvalidCollectInterval {
+                kind: ModelKind::Junction,
+                node,
+                relay: error_relay,
+            } if node == &processor && error_relay == &relay
+        ));
+
+        let collect_size = parse_input_collect_policy(
+            ModelKind::Junction,
+            &processor,
+            &relay,
+            &nervix_models::InputCollectPolicy {
+                collect_for: "1s".to_string(),
+                max_batch_size: Some("not-a-size".to_string()),
+            },
+        )
+        .expect_err("an invalid collection batch size must fail");
+        assert!(matches!(
+            collect_size.current_context(),
+            PlanningError::InvalidCollectMaxBatchSize {
+                kind: ModelKind::Junction,
+                node,
+                relay: error_relay,
+            } if node == &processor && error_relay == &relay
+        ));
+
+        let unbounded_collection = parse_input_collect_policy(
+            ModelKind::Junction,
+            &processor,
+            &relay,
+            &nervix_models::InputCollectPolicy {
+                collect_for: "1s".to_string(),
+                max_batch_size: None,
+            },
+        )
+        .expect("a collection policy may omit its byte bound");
+        assert_eq!(unbounded_collection.max_batch_size, None);
+
+        let max_time = parse_max_time(ModelKind::Deduplicator, &processor, "not-a-duration")
+            .expect_err("an invalid maximum retention time must fail");
+        assert!(matches!(
+            max_time.current_context(),
+            PlanningError::InvalidMaxTime {
+                kind: ModelKind::Deduplicator,
+                node,
+            } if node == &processor
+        ));
+
+        let branch_ttl =
+            parse_branch_ttl_setting(Some("not-a-duration"), ModelKind::Deduplicator, &processor)
+                .expect_err("an invalid branch TTL must fail");
+        assert!(matches!(
+            branch_ttl.current_context(),
+            PlanningError::InvalidBranchTtl {
+                kind: ModelKind::Deduplicator,
+                node,
+            } if node == &processor
+        ));
+    }
+
+    #[test]
+    fn window_materialization_classifies_output_contract_failures() {
+        let missing_output = materialize_nodes(
+            &[window_node(BranchedProcessorOutputsSpec {
+                routes: Vec::new(),
+            })],
+            &HashMap::default(),
+            None,
+        )
+        .expect_err("a window processor without an output must fail");
+        assert!(matches!(
+            missing_output.current_context(),
+            PlanningError::MissingWindowOutput { node } if node.as_str() == "metric_window"
+        ));
+
+        let inherited = RouteConstruction {
+            inherit: Some(nervix_models::Inheritance::All),
+            ..RouteConstruction::default()
+        };
+        let invalid_construction = materialize_nodes(
+            &[window_node(BranchedProcessorOutputsSpec {
+                routes: vec![BranchedProcessorOutputSpec {
+                    relay: named("metric_summary"),
+                    construction: inherited,
+                    flush_policy: None,
+                    message_error_policy: MessageErrorPolicy::Log,
+                }],
+            })],
+            &HashMap::default(),
+            None,
+        )
+        .expect_err("window output inheritance must fail lowering");
+        assert!(matches!(
+            invalid_construction.current_context(),
+            PlanningError::InvalidWindowConstruction { node, route }
+                if node.as_str() == "metric_window" && route.as_str() == "metric_summary"
+        ));
+
+        let compilation = materialize_nodes(
+            &[window_node(BranchedProcessorOutputsSpec {
+                routes: vec![BranchedProcessorOutputSpec {
+                    relay: named("metric_summary"),
+                    construction: construction("SET count = COUNT(input.value)"),
+                    flush_policy: None,
+                    message_error_policy: MessageErrorPolicy::Log,
+                }],
+            })],
+            &HashMap::default(),
+            None,
+        )
+        .expect_err("window output without runtime schemas must fail compilation");
+        assert!(matches!(
+            compilation.current_context(),
+            PlanningError::WindowOutputCompilation { node, route }
+                if node.as_str() == "metric_window" && route.as_str() == "metric_summary"
+        ));
+    }
+
+    #[test]
+    fn inferencer_materialization_requires_an_input_and_schema() {
+        let missing_input =
+            materialize_nodes(&[inferencer_node(Vec::new())], &HashMap::default(), None)
+                .expect_err("an inferencer without input must fail");
+        assert!(matches!(
+            missing_input.current_context(),
+            PlanningError::MissingInputRelay {
+                kind: ModelKind::Inferencer,
+                node,
+            } if node.as_str() == "score_model"
+        ));
+
+        let missing_schema = materialize_nodes(
+            &[inferencer_node(vec![named("features")])],
+            &HashMap::default(),
+            None,
+        )
+        .expect_err("an inferencer input without a runtime schema must fail");
+        assert!(matches!(
+            missing_schema.current_context(),
+            PlanningError::MissingInputSchema {
+                kind: ModelKind::Inferencer,
+                node,
+                relay,
+            } if node.as_str() == "score_model" && relay.as_str() == "features"
+        ));
+    }
+
+    #[test]
+    fn relay_template_resolution_classifies_each_missing_owner() {
+        let node = named::<ModelName>("orders_junction");
+        let relay = named::<RelayName>("orders");
+        let relay_ids = || std::iter::once(relay.clone()).collect();
+
+        let missing_model = resolve_branch_relay_templates(
+            ModelKind::Junction,
+            &node,
+            relay_ids(),
+            &ModelIndex::default(),
+            &HashMap::default(),
+            &HashMap::default(),
+        )
+        .expect_err("an unconfigured relay must fail planning");
+        assert!(matches!(
+            missing_model.current_context(),
+            PlanningError::MissingRelayModel {
+                kind: ModelKind::Junction,
+                node: error_node,
+                route,
+            } if error_node == &node && route == &relay
+        ));
+
+        let model_index = [Model::Relay(CreateRelay {
+            name: relay.clone(),
+            schema: named("orders_schema"),
+            buffer: nonzero!(1usize),
+            branching: RelayBranching::unbranched(),
+            materialized_state: None,
+        })]
+        .into_iter()
+        .collect::<ModelIndex>();
+        let missing_registry = resolve_branch_relay_templates(
+            ModelKind::Junction,
+            &node,
+            relay_ids(),
+            &model_index,
+            &HashMap::default(),
+            &HashMap::default(),
+        )
+        .expect_err("a relay without a registry must fail planning");
+        assert!(matches!(
+            missing_registry.current_context(),
+            PlanningError::MissingRelayRegistry {
+                kind: ModelKind::Junction,
+                node: error_node,
+                route,
+            } if error_node == &node && route == &relay
+        ));
+
+        let relay_registries = [(relay.clone(), RelayRegistry::new())]
+            .into_iter()
+            .collect();
+        let missing_services = resolve_branch_relay_templates(
+            ModelKind::Junction,
+            &node,
+            relay_ids(),
+            &model_index,
+            &relay_registries,
+            &HashMap::default(),
+        )
+        .expect_err("a relay without boundary services must fail planning");
+        assert!(matches!(
+            missing_services.current_context(),
+            PlanningError::MissingRelayServices {
+                kind: ModelKind::Junction,
+                node: error_node,
+                route,
+            } if error_node == &node && route == &relay
+        ));
+    }
+
+    #[test]
+    fn processor_instance_materialization_requires_an_input_relay() {
+        let node = BranchedProcessorNodeSpec {
+            spec: BranchedProcessorSpec {
+                kind: ModelKind::Junction,
+                processor: named("orders_junction"),
+                input_relays: Vec::new(),
+                input_collect_policies: HashMap::default(),
+                mode: AckMode::Attached,
+                error_policies: ErrorPolicies::handled_by_log(),
+                from_where: HashMap::default(),
+                filter_where: None,
+                materialized_state: Vec::new(),
+                operation: BranchedProcessorOperationSpec::Junction {
+                    output_routes: BranchedProcessorOutputsSpec { routes: Vec::new() },
+                },
+            },
+            branch: None,
+            branch_ttl: None,
+            branch_max_instances: None,
+        };
+        let error = materialize_processor_instance_template(
+            &node,
+            &ModelIndex::default(),
+            &HashMap::default(),
+            &HashMap::default(),
+            &HashMap::default(),
+            None,
+        )
+        .expect_err("a processor instance without input must fail planning");
+
+        assert!(matches!(
+            error.current_context(),
+            PlanningError::MissingInputRelay {
+                kind: ModelKind::Junction,
+                node,
+            } if node.as_str() == "orders_junction"
+        ));
+    }
+
     #[test]
     fn inferencer_input_mappings_compile_when_template_is_materialized() {
         let input_relay = named::<RelayName>("features");
@@ -1026,10 +1541,76 @@ mod tests {
         let error = materialize_nodes(&[node], &relay_schemas, None)
             .expect_err("invalid INPUTS mapping must fail template materialization");
 
-        assert!(
-            error.contains("inferencer 'score_model' INPUTS compile failed"),
-            "unexpected error: {error}"
-        );
+        assert!(matches!(
+            error.current_context(),
+            PlanningError::InferencerInputCompilation { node, relay }
+                if node == &processor && relay.as_str() == "features"
+        ));
+    }
+
+    #[test]
+    fn missing_flush_policy_identifies_the_node_and_route() {
+        let processor = named::<ModelName>("orders_deduplicator");
+        let route = named::<RelayName>("deduplicated_orders");
+        let output = BranchedProcessorOutputSpec {
+            relay: route.clone(),
+            construction: RouteConstruction::default(),
+            flush_policy: None,
+            message_error_policy: MessageErrorPolicy::Log,
+        };
+
+        let error = materialize_output(
+            ModelKind::Deduplicator,
+            &processor,
+            &output,
+            FlushPolicyRequirement::Required,
+        )
+        .expect_err("a flush-based route must declare its flush policy");
+
+        assert!(matches!(
+            error.current_context(),
+            PlanningError::MissingFlushPolicy {
+                kind,
+                node,
+                route: error_route,
+            } if *kind == ModelKind::Deduplicator
+                && node == &processor
+                && error_route == &route
+        ));
+    }
+
+    #[test]
+    fn invalid_flush_interval_identifies_the_node_and_route() {
+        let processor = named::<ModelName>("orders_reorderer");
+        let route = named::<RelayName>("ordered_orders");
+        let output = BranchedProcessorOutputSpec {
+            relay: route.clone(),
+            construction: RouteConstruction::default(),
+            flush_policy: Some(FlushPolicy::Each {
+                interval: "not-a-duration".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            }),
+            message_error_policy: MessageErrorPolicy::Log,
+        };
+
+        let error = materialize_output(
+            ModelKind::Reorderer,
+            &processor,
+            &output,
+            FlushPolicyRequirement::Required,
+        )
+        .expect_err("an invalid flush interval must fail planning");
+
+        assert!(matches!(
+            error.current_context(),
+            PlanningError::InvalidFlushInterval {
+                kind,
+                node,
+                route: error_route,
+            } if *kind == ModelKind::Reorderer
+                && node == &processor
+                && error_route == &route
+        ));
     }
 
     #[test]
