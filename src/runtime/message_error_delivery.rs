@@ -723,4 +723,59 @@ mod tests {
             .await
             .expect("relay owner should stop");
     }
+
+    #[tokio::test]
+    async fn enqueue_reports_when_the_error_route_has_stopped() {
+        let runtime = Runtime::default();
+        let domain = DomainName::try_from("test").expect("valid domain");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
+        let route = MessageErrorRouteKey {
+            domain,
+            node: NodeRef::new(ModelKind::Junction, named::<ModelName>("route_orders")),
+            source_route: None,
+            error_relay: named("route_errors"),
+        };
+        let target = MessageErrorRouteTarget {
+            registry: RelayRegistry::new(),
+            services: Arc::new(RelayBoundaryServices::new(
+                RelayBoundaryFanout::direct_with_capacity(
+                    NonZeroUsize::new(1).expect("non-zero test capacity"),
+                ),
+                0,
+                0,
+                Vec::new(),
+                None,
+            )),
+        };
+        let route_runtime = MessageErrorRouteRuntime::new(
+            runtime.clone(),
+            route.clone(),
+            target.clone(),
+            RuntimeFlushPolicy::Immediate,
+        );
+        route_runtime.shutdown().await;
+        runtime
+            .inner
+            .message_error_routes
+            .insert(route.clone(), route_runtime);
+        let (delivery, _) = test_delivery();
+
+        let error = runtime
+            .enqueue_message_error_delivery(
+                route.clone(),
+                target,
+                RuntimeFlushPolicy::Immediate,
+                delivery,
+            )
+            .await
+            .expect_err("a stopped error route must reject new delivery");
+
+        assert!(matches!(
+            error.current_context(),
+            MessageErrorHandlingError::DeliveryStopped { route: failed } if failed == &route
+        ));
+    }
 }
