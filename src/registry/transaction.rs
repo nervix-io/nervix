@@ -539,9 +539,7 @@ impl Registry {
                 TransactionOperationNumber::from_index(absolute_index).map_err(|error| {
                     Report::new(TransactionPlanningError::InvalidImpactReport { error })
                 })?;
-            let operation = model_operation(domain, statement).map_err(|_| {
-                Report::new(TransactionPlanningError::InvalidOperation { operation: number })
-            })?;
+            let operation = model_operation(domain, statement, number)?;
             let is_if_not_exists_noop = match statement {
                 Statement::Create(create) if create.if_not_exists => {
                     prefix_models.contains(&create.body.node_ref())
@@ -706,8 +704,10 @@ fn ensure_domain_not_paused(
 fn model_operation(
     domain: &DomainName,
     statement: &Statement,
-) -> Result<TransactionOperation, crate::registry::mutation::RegistryMutationConversionError> {
-    let mutation = RegistryMutation::try_from(statement)?;
+    operation: TransactionOperationNumber,
+) -> Result<TransactionOperation, Report<TransactionPlanningError>> {
+    let mutation = RegistryMutation::try_from(statement)
+        .map_err(|_| Report::new(TransactionPlanningError::InvalidOperation { operation }))?;
     let operation = match statement {
         Statement::Create(_) => TransactionOperation::CreateConfiguration {
             domain: domain.clone(),
