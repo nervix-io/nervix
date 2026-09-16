@@ -1319,10 +1319,14 @@ pub(super) struct PlannedMessageError {
     pub(super) execution_now: Timestamp,
 }
 
+#[derive(thiserror::Error)]
+#[error("{reason}")]
 pub(super) struct PlannedGeneralError {
     pub(super) acks: Vec<AckSet>,
     pub(super) reason: String,
 }
+
+pub(super) type PlannedGeneralResult<T> = error_stack::Result<T, PlannedGeneralError>;
 
 impl std::fmt::Debug for PlannedGeneralError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

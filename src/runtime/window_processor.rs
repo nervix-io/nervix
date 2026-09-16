@@ -987,7 +987,8 @@ pub(super) async fn evaluate_window_aggregate_inputs(
             uninitialized: Some(&uninitialized),
         },
         None,
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
     #[cfg(test)]
     WINDOW_AGGREGATE_INPUT_VM_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
     let result = execute_program_with_selection_in_context(
