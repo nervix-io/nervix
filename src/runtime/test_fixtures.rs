@@ -10,6 +10,7 @@ use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc as StdArc};
 pub(in crate::runtime) const STUPID_CHANNEL_CAPACITY_REMOVE_ME: NonZeroUsize = NonZeroUsize::MIN;
 
 use ahash::HashMap;
+use arc_swap::ArcSwapOption;
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::Schema as ArrowSchema;
@@ -25,7 +26,10 @@ use nervix_vm::window::lower_window_assignments;
 use nervix_wasm::{
     WasmAckSidecar, WasmEnvelope, WasmOutputColumnRef, WasmOutputRow, WasmRoutedOutput,
 };
-use tokio::time::{Duration, sleep, timeout};
+use tokio::{
+    sync::watch,
+    time::{Duration, sleep, timeout},
+};
 use triomphe::Arc;
 
 use super::{
@@ -617,6 +621,38 @@ pub(super) fn scheduled_model(model: nervix_models::Model) -> ScheduledNode {
         Some(ClusterNodeName::parse("node-1").expect("valid name")),
         vec![ClusterNodeName::parse("node-1").expect("valid name")],
     )
+}
+
+pub(super) fn install_test_domain_execution(
+    runtime: &Runtime,
+    domain: &DomainName,
+    nodes: Vec<ScheduledNode>,
+    routing: DomainRoutingSnapshot,
+) {
+    let (shutdown, _) = watch::channel(false);
+    runtime.install_domain_execution(
+        domain,
+        DomainExecution {
+            schedule: DomainSchedule::new(domain.clone(), nodes, Vec::new()),
+            start_version: 0,
+            domain_clock: test_domain_clock(domain),
+            shutdown,
+            graph: StdArc::new(ArcSwapOption::empty()),
+            routing: runtime.stage_domain_routing(domain, routing),
+            branched_ingestors: HashMap::default(),
+            branched_entrypoints: HashMap::default(),
+            endpoint_routes: HashMap::default(),
+            node_tasks: HashMap::default(),
+            emitter_tasks: HashMap::default(),
+            generator_tasks: HashMap::default(),
+            reingestor_tasks: HashMap::default(),
+            placement_tasks: HashMap::default(),
+            relay_state_tasks: HashMap::default(),
+            relay_owner_tasks: HashMap::default(),
+            clients: HashMap::default(),
+            tasks: Vec::new(),
+        },
+    );
 }
 
 pub(super) fn junction_branch_template(
