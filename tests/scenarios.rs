@@ -3415,24 +3415,40 @@ async fn then_leader_purged_covered_log_and_reduced_retained_bytes(
     await_purge_beyond_retention_peak(&observer, &duration, &retention_peak).await;
 }
 
-#[then(expr = "the leader node released its bulk-memory reservation after snapshot compaction")]
-async fn then_leader_released_snapshot_bulk_memory(world: &mut ScenarioWorld) {
+#[then(
+    expr = "within {string} the leader node released its snapshot-section bulk-memory reservation"
+)]
+async fn then_leader_released_snapshot_bulk_memory(world: &mut ScenarioWorld, duration: String) {
     let leader = running_leader_node(world).await;
-    let reserved = world
-        .cluster()
-        .read_observability_metric(
-            &leader,
-            "nervix_execution_memory_reserved_bytes",
-            &[BULK_MEMORY_LABEL.to_string()],
-        )
-        .await
-        .unwrap_or_else(|error| {
-            panic!("failed to read the leader's bulk-memory reservation: {error}")
-        });
-    assert_eq!(
-        reserved, 0.0,
-        "leader '{leader}' retained {reserved} bytes of bulk memory after snapshot compaction"
-    );
+    let deadline = Instant::now()
+        + humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let section_reservation = nervix_execution::OperationLimits::default()
+        .snapshot_section_working_bytes()
+        .verified("the default snapshot-section working set fits in u64");
+    let section_reservation: f64 = section_reservation.approx_into();
+    loop {
+        tokio::task::consume_budget().await;
+        let reserved = world
+            .cluster()
+            .read_observability_metric(
+                &leader,
+                "nervix_execution_memory_reserved_bytes",
+                &[BULK_MEMORY_LABEL.to_string()],
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("failed to read the leader's bulk-memory reservation: {error}")
+            });
+        if reserved < section_reservation {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "within {duration} leader '{leader}' still held {reserved} bytes of bulk memory, at \
+             least the {section_reservation}-byte working set for one snapshot section"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// Wait until the leader has purged past `peak` and reports fewer retained bytes than it did then.
