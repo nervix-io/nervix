@@ -50,6 +50,35 @@ creation is operator-trusted administration. See [User-Defined Functions](udfs.m
 execution contract and [Module Sharing And Branch Memory](wasm-processor-guests.md#module-sharing-and-branch-memory)
 for the WASM isolation and memory boundary.
 
+## Evaluation Model
+
+Builtins are evaluated over Arrow columns: one call computes its result for every message in a
+batch together. A message's result never depends on the other messages in the batch, so batching
+does not change any value. How a function traverses its column, whether through an Arrow compute
+kernel, one pass over the column's value buffer, or a loop over its rows, is internal to the
+function and does not change its results.
+
+The compiler applies two optimizations that preserve results in the same way:
+
+- A deterministic call that cannot fail and whose arguments are all literals may be computed once
+  instead of for every batch. It produces exactly the value that evaluating it for each message
+  would, so `upper('grüßen')` and `upper(input.text)` agree when `input.text` holds `grüßen`.
+- Identical deterministic expressions that cannot fail may be computed once per batch and shared.
+  Calls that return a new value for every message, such as `uuid_v4()`, and calls that can report
+  a per-message error are evaluated at each occurrence, so each occurrence reports its own error.
+
+## Function Properties
+
+Every builtin follows these rules unless its own description says otherwise:
+
+| Property | Contract |
+| --- | --- |
+| Types | Arguments are never converted implicitly. A function that accepts several types, such as `abs` over every numeric type, takes each of them as it is. |
+| Nulls | A null argument produces a null result. `coalesce`, `nullif`, `concat`, and `is_null` define their own null handling. |
+| Sensitivity | A result is sensitive when any argument is sensitive, including results such as `length(...)`, `is_null(...)`, and `count(...)` that do not contain the argument's value. Only `leak_sensitive(...)` removes sensitivity. |
+| Volatility | Every builtin is deterministic except `now()`, which returns one value for an execution, and `uuid_v4()` and `uuid_v7()`, which return a new value for every message. |
+| Errors | A function that can fail reports a per-message error and yields null for that message. The error activates `ON MESSAGE ERROR`. Inside a conditional, only the selected arm can report one. |
+
 ## Conditional Expressions
 
 NSPL provides three self-delimited conditional forms:
@@ -84,6 +113,19 @@ The words `IF`, `CASE`, `WHEN`, `THEN`, `ELSE`, and `END` are reserved in expres
 after a field scope such as `input.<field>`. A schema may declare one of these field names, but an
 NSPL expression cannot reference it.
 
+## Comparison And Equality
+
+`=`, `!=`, `<`, `<=`, `>`, and `>=` require both operands to have the same exact type. The ordering
+comparisons `<`, `<=`, `>`, and `>=` accept numeric, `STRING`, and `DATETIME` operands. A null
+operand makes the comparison null.
+
+- `STRING` values compare by Unicode code point, which is also the order of their UTF-8 bytes.
+  Comparison is case-sensitive and never depends on a locale.
+- Floating-point comparisons follow IEEE 754. NaN is unequal to every value, including another
+  NaN, so `=` is false, `!=` is true, and every ordering comparison with NaN is false. `0.0` and
+  `-0.0` are equal.
+- `nullif(a, b)` and a simple `CASE <operand> WHEN <value>` decide equality exactly as `=` does.
+
 ## Header Functions
 
 | Function | Returns | Notes |
@@ -104,89 +146,139 @@ envelope; if any call fails, no payload or partial header envelope is published.
 | --- | --- | --- |
 | `leak_sensitive(value)` | same type as input | Explicitly removes the sensitivity flag from a value |
 | `now()` | `DATETIME` | Current execution-local domain timestamp |
-| `uuid_v4()` | `STRING` | Random UUID string |
-| `uuid_v7()` | `STRING` | Time-ordered UUID string based on the execution-local domain clock |
+| `uuid_v4()` | `STRING` | Random UUID string, new for every message |
+| `uuid_v7()` | `STRING` | Time-ordered UUID string based on the execution-local domain clock, new for every message |
 
 ## Null Handling
 
 | Function | Returns | Notes |
 | --- | --- | --- |
-| `coalesce(a, b, ...)` | same type as inputs | All arguments must have the same type |
-| `is_null(x)` | `BOOL` | True when the input is null |
-| `nullif(a, b)` | same type as inputs | Returns null when the inputs are equal |
+| `coalesce(a, b, ...)` | same type as inputs | Returns the first non-null argument, or a typed null when every argument is null. All arguments must have the same type |
+| `is_null(x)` | `BOOL` | True when the input is null. Never null |
+| `nullif(a, b)` | same type as inputs | Returns a typed null when `a = b`, and `a` otherwise, including when `b` is null. Both arguments must have the same type |
 
 ## String Functions
 
+String functions count and select characters, meaning Unicode scalar values, rather than bytes.
+Positions count from 1.
+
 | Function | Returns | Notes |
 | --- | --- | --- |
-| `lower(text)` | `STRING` | Lowercases the input |
-| `upper(text)` | `STRING` | Uppercases the input |
-| `trim(text)` | `STRING` | Trims both ends |
-| `btrim(text)` | `STRING` | Trims both ends |
-| `ltrim(text)` | `STRING` | Trims the left side |
-| `rtrim(text)` | `STRING` | Trims the right side |
+| `lower(text)` | `STRING` | Lowercases with Unicode full case mapping |
+| `upper(text)` | `STRING` | Uppercases with Unicode full case mapping |
+| `trim(text)` | `STRING` | Removes leading and trailing Unicode whitespace |
+| `btrim(text)` | `STRING` | Same as `trim` |
+| `ltrim(text)` | `STRING` | Removes leading Unicode whitespace |
+| `rtrim(text)` | `STRING` | Removes trailing Unicode whitespace |
 | `length(text)` | `I64` | Character count |
-| `char_length(text)` | `I64` | Character count |
-| `bit_length(text)` | `I64` | Bit length of the UTF-8 string |
-| `ascii(text)` | `I64` | ASCII code of the first character |
-| `initcap(text)` | `STRING` | Title-cases words |
-| `left(text, count)` | `STRING` | Left substring |
-| `right(text, count)` | `STRING` | Right substring |
-| `substr(text, start)` | `STRING` | 1-based substring |
-| `substr(text, start, length)` | `STRING` | 1-based substring with explicit length |
+| `char_length(text)` | `I64` | Same as `length` |
+| `bit_length(text)` | `I64` | Eight times the UTF-8 byte length |
+| `ascii(text)` | `I64` | Unicode code point of the first character, or `0` for an empty string |
+| `initcap(text)` | `STRING` | Uppercases the first character of each run of letters and digits and lowercases the rest |
+| `left(text, count)` | `STRING` | The first `count` characters. A negative `count` removes that many characters from the end |
+| `right(text, count)` | `STRING` | The last `count` characters. A negative `count` removes that many characters from the start |
+| `substr(text, start)` | `STRING` | Characters from position `start` to the end |
+| `substr(text, start, length)` | `STRING` | At most `length` characters from position `start` |
 | `substring(text, start)` | `STRING` | Alias for `substr` |
 | `substring(text, start, length)` | `STRING` | Alias for `substr` |
-| `concat(a, b, ...)` | `STRING` | All arguments must be `STRING` |
-| `repeat(text, count)` | `STRING` | Repeats the string |
-| `replace(text, from, to)` | `STRING` | Plain string replacement |
-| `reverse(text)` | `STRING` | Reverses characters |
-| `lpad(text, length, fill)` | `STRING` | Left pad with the fill text |
-| `rpad(text, length, fill)` | `STRING` | Right pad with the fill text |
-| `split_part(text, delimiter, index)` | `STRING` | 1-based part index |
-| `strpos(text, needle)` | `I64` | 1-based position |
-| `translate(text, from_chars, to_chars)` | `STRING` | Character-by-character translation |
-| `to_hex(value)` | `STRING` | Integral input only |
-| `md5(text)` | `STRING` | Lowercase hexadecimal digest |
+| `concat(a, b, ...)` | `STRING` | Joins the arguments in order. A null argument contributes nothing, so the result is never null. All arguments must be `STRING` |
+| `repeat(text, count)` | `STRING` | The text repeated `count` times, or an empty string when `count` is at most `0` |
+| `replace(text, from, to)` | `STRING` | Replaces every occurrence of `from`, matched as plain text |
+| `reverse(text)` | `STRING` | Reverses the characters |
+| `lpad(text, length, fill)` | `STRING` | Pads on the left with repetitions of `fill` to `length` characters |
+| `rpad(text, length, fill)` | `STRING` | Pads on the right with repetitions of `fill` to `length` characters |
+| `split_part(text, delimiter, index)` | `STRING` | The part at position `index` |
+| `strpos(text, needle)` | `I64` | Position of the first occurrence of `needle`, or `0` when it does not occur |
+| `translate(text, from_chars, to_chars)` | `STRING` | Replaces each character found in `from_chars` with the character at the same position in `to_chars`, and removes a character that has no counterpart |
+| `to_hex(value)` | `STRING` | Lowercase hexadecimal digits without a prefix. Integral input only; a negative value is written as its two's complement at the input's width |
+| `md5(text)` | `STRING` | Lowercase hexadecimal digest of the UTF-8 bytes |
+
+`lower`, `upper`, and `initcap` use Unicode case mappings, which never depend on the node's locale.
+A mapping can change a value's length: `upper('Grüßen')` is `GRÜSSEN`. A literal, a field, and a
+computed value holding the same text always convert to the same result.
+
+`substr` treats a `start` at or before `1` as the first character and counts `length` from there. A
+`start` past the end, or a negative `length`, returns an empty string.
+
+`lpad` and `rpad` shorten text longer than `length` to its first `length` characters, return an
+empty string when `length` is at most `0`, and return shorter text unchanged when `fill` is empty.
+
+`split_part` returns an empty string when `index` is at most `0` or past the last part. With an
+empty `delimiter`, the whole text is part `1`.
 
 ## String Predicates
 
+Matching is exact and case-sensitive.
+
 | Function | Returns | Notes |
 | --- | --- | --- |
-| `contains(text, needle)` | `BOOL` | Substring test |
-| `starts_with(text, prefix)` | `BOOL` | Prefix test |
-| `ends_with(text, suffix)` | `BOOL` | Suffix test |
+| `contains(text, needle)` | `BOOL` | True when `needle` occurs in `text` |
+| `starts_with(text, prefix)` | `BOOL` | True when `text` begins with `prefix` |
+| `ends_with(text, suffix)` | `BOOL` | True when `text` ends with `suffix` |
 
 ## Regular Expressions
 
-Regular-expression functions take `STRING` arguments and use Rust regex syntax.
+Regular-expression functions take `STRING` arguments and use Rust regex syntax. A pattern that does
+not compile reports a per-message error.
 
 | Function | Returns | Notes |
 | --- | --- | --- |
-| `regexp_like(text, pattern)` | `BOOL` | True when the pattern matches |
-| `regexp_replace(text, pattern, replacement)` | `STRING` | Replaces all matches |
-| `regexp_substr(text, pattern)` | `STRING` | Returns the first matching substring |
+| `regexp_like(text, pattern)` | `BOOL` | True when the pattern matches anywhere in the text |
+| `regexp_replace(text, pattern, replacement)` | `STRING` | Replaces every match. `$1` and `${name}` in `replacement` insert a capture group, and `$$` inserts `$` |
+| `regexp_substr(text, pattern)` | `STRING` | The first match, or null when the pattern does not match |
 
 ## Numeric Functions
 
+Numeric functions accept every integer and floating-point type. A result that is not finite, such
+as `sqrt(-1.0)`, `ln(0.0)`, or `exp(1000.0)`, reports a per-message error instead of producing NaN
+or an infinity.
+
 | Function | Returns | Notes |
 | --- | --- | --- |
-| `abs(x)` | same numeric type as input | Numeric input only |
-| `acos(x)` | `F64` | Numeric input only |
-| `asin(x)` | `F64` | Numeric input only |
-| `atan(x)` | `F64` | Numeric input only |
-| `ceil(x)` | same numeric type as input | Numeric input only |
+| `abs(x)` | same numeric type as input | The absolute value. The minimum value of a signed integer type has none and reports an overflow |
+| `acos(x)` | `F64` | Arc cosine in radians |
+| `asin(x)` | `F64` | Arc sine in radians |
+| `atan(x)` | `F64` | Arc tangent in radians |
+| `ceil(x)` | same numeric type as input | Rounds up. Integer input is returned unchanged |
 | `ceiling(x)` | same numeric type as input | Alias for `ceil` |
-| `cos(x)` | `F64` | Numeric input only |
-| `exp(x)` | `F64` | Numeric input only |
-| `floor(x)` | same numeric type as input | Numeric input only |
-| `ln(x)` | `F64` | Numeric input only |
+| `cos(x)` | `F64` | Cosine of an angle in radians |
+| `exp(x)` | `F64` | `e` raised to `x` |
+| `floor(x)` | same numeric type as input | Rounds down. Integer input is returned unchanged |
+| `ln(x)` | `F64` | Natural logarithm |
 | `log(x)` | `F64` | Base-10 logarithm |
 | `log(base, x)` | `F64` | Logarithm with explicit base |
-| `pow(x, y)` | `F64` | Numeric inputs only |
+| `pow(x, y)` | `F64` | `x` raised to `y` |
 | `power(x, y)` | `F64` | Alias for `pow` |
-| `round(x)` | same numeric type as input | Numeric input only |
-| `sqrt(x)` | `F64` | Numeric input only |
-| `tan(x)` | `F64` | Numeric input only |
+| `round(x)` | same numeric type as input | Rounds to the nearest integer, with halves rounded away from zero. Integer input is returned unchanged |
+| `sqrt(x)` | `F64` | Square root |
+| `tan(x)` | `F64` | Tangent of an angle in radians |
+
+## Array And Vector Functions
+
+These functions take one `ARRAY` or `VEC` value, described in
+[Schemas And Codecs](schemas-and-codecs.md#internal-schemas). The elements of a multidimensional
+`ARRAY` are its outermost items. A null list produces a null result.
+
+| Function | Returns | Notes |
+| --- | --- | --- |
+| `count(list)` | `I64` | Number of elements, counting null elements |
+| `sum(list)` | element type | Sum of the non-null elements. Numeric elements only. An empty list, or one whose elements are all null, returns null |
+| `first(list)` | element type | The first element, or null for an empty list |
+| `last(list)` | element type | The last element, or null for an empty list |
+| `nth(list, index)` | element type | The element at `index`, counting from `0`, or null when `index` is negative or past the end. `index` may be any integer type |
+
+`nth` counts from `0`, unlike string positions: `nth(input.values, 0)` is the same element as
+`first(input.values)`. `first`, `last`, and `nth` require scalar or `DATETIME` elements; a list
+whose elements are themselves `ARRAY` or `VEC` values is rejected when the statement is validated.
+
+`sum` follows the arithmetic operators. An integer sum that overflows its type reports an overflow,
+and a floating-point sum that is not finite reports a per-message error.
+
+In a [window processor](processors.md#window-processor) route, `count`, `sum`, `first`, and `last`
+are always window aggregates, like `min`, `max`, and `percentile_linear_histogram`. They take a
+per-row expression over `input` and aggregate it across the rows the window retained, so
+`COUNT(input.values)` aggregates retained rows rather than counting the elements of one list.
+Everywhere else these names are the list functions above.
 
 ## Example
 
