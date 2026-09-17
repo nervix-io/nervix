@@ -37,7 +37,16 @@ pub(in crate::runtime) struct RelayDispatchGate {
     closed: AtomicBool,
     in_flight_dispatches: AtomicUsize,
     state: Mutex<RelayDispatchGateState>,
+    /// Wakes every waiter when an engagement begins, is released, or expires.
     changed: Notify,
+    /// Wakes fences waiting for quiescence when the in-flight dispatch count reaches zero while the
+    /// gate is closed.
+    ///
+    /// An acquisition the closed gate rejects rolls its count back and can reach zero, so this stays
+    /// apart from `changed`. Otherwise every rollback would wake the other acquisitions waiting for
+    /// the gate to open, each would retry and roll back in turn, and they would keep waking one
+    /// another for as long as the gate stayed closed.
+    drained: Notify,
 }
 
 #[derive(Debug, Default)]
@@ -88,6 +97,7 @@ impl RelayDispatchGate {
             in_flight_dispatches: AtomicUsize::new(0),
             state: Mutex::new(RelayDispatchGateState::default()),
             changed: Notify::new(),
+            drained: Notify::new(),
         }
     }
 
@@ -179,8 +189,11 @@ impl RelayDispatchGate {
             tokio::task::consume_budget().await;
             self.clear_if_expired();
             let changed = self.changed.notified();
+            let drained = self.drained.notified();
             tokio::pin!(changed);
+            tokio::pin!(drained);
             changed.as_mut().enable();
+            drained.as_mut().enable();
             let deadline = {
                 let mut state = self.state.lock();
                 let in_flight_dispatches = self.in_flight_dispatches.load(Ordering::SeqCst);
@@ -203,7 +216,13 @@ impl RelayDispatchGate {
                     }
                 }
             };
-            if timeout_at(deadline, changed.as_mut()).await.is_err() {
+            let woken = async {
+                tokio::select! {
+                    () = changed.as_mut() => {}
+                    () = drained.as_mut() => {}
+                }
+            };
+            if timeout_at(deadline, woken).await.is_err() {
                 self.clear_if_expired();
             }
         }
@@ -273,7 +292,7 @@ impl RelayDispatchGate {
             .map(|engagement| engagement.reason.clone())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(in crate::runtime) fn in_flight_dispatches(&self) -> usize {
         self.in_flight_dispatches.load(Ordering::SeqCst)
     }
@@ -294,7 +313,7 @@ impl RelayDispatchGate {
             })
             .verified("this permit or rolled-back acquisition raised the count");
         if previous == 1 && self.closed.load(Ordering::SeqCst) {
-            self.changed.notify_waiters();
+            self.drained.notify_waiters();
         }
     }
 
@@ -427,95 +446,6 @@ mod gate_tests {
     }
 
     #[tokio::test]
-    async fn gate_engagement_waits_for_pre_engagement_dispatch_to_finish() {
-        let gate = Arc::new(RelayDispatchGate::new());
-        let permit = gate.acquire_dispatch().await;
-        let mut lease = engage(
-            &gate,
-            Instant::now() + Duration::from_secs(1),
-            "graceful entity stop",
-        );
-
-        let quiescent = tokio::spawn(async move { lease.wait_quiescent().await });
-        tokio::task::yield_now().await;
-        assert!(
-            !quiescent.is_finished(),
-            "engagement must fence a dispatch that already acquired its permit"
-        );
-
-        drop(permit);
-        assert!(
-            tokio::time::timeout(Duration::from_secs(1), quiescent)
-                .await
-                .expect("dispatch completion should wake the gate fence")
-                .expect("gate fence task should join")
-        );
-    }
-
-    #[tokio::test]
-    async fn engaged_gate_prevents_new_dispatch_until_release() {
-        let gate = Arc::new(RelayDispatchGate::new());
-        let mut lease = engage(
-            &gate,
-            Instant::now() + Duration::from_secs(1),
-            "graceful entity stop",
-        );
-        assert!(lease.wait_quiescent().await);
-
-        let dispatch = tokio::spawn({
-            let gate = gate.clone();
-            async move {
-                let _permit = gate.acquire_dispatch().await;
-            }
-        });
-        tokio::task::yield_now().await;
-        assert!(
-            !dispatch.is_finished(),
-            "dispatches that arrive after engagement must remain outside the fence"
-        );
-
-        drop(lease);
-        tokio::time::timeout(Duration::from_secs(1), dispatch)
-            .await
-            .expect("gate release should admit the waiting dispatch")
-            .expect("dispatch task should join");
-    }
-
-    #[tokio::test]
-    async fn canceled_dispatch_releases_gate_fence_permit() {
-        let gate = Arc::new(RelayDispatchGate::new());
-        let dispatch = tokio::spawn({
-            let gate = gate.clone();
-            async move {
-                let _permit = gate.acquire_dispatch().await;
-                std::future::pending::<()>().await;
-            }
-        });
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while gate.in_flight_dispatches() == 0 {
-                tokio::task::consume_budget().await;
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("dispatch should acquire its permit");
-
-        let mut lease = engage(
-            &gate,
-            Instant::now() + Duration::from_secs(1),
-            "graceful entity stop",
-        );
-        dispatch.abort();
-        let _ = dispatch.await;
-
-        assert!(
-            tokio::time::timeout(Duration::from_secs(1), lease.wait_quiescent())
-                .await
-                .expect("canceling dispatch should drop its permit")
-        );
-    }
-
-    #[tokio::test]
     async fn expired_engagement_does_not_report_a_completed_fence() {
         let gate = Arc::new(RelayDispatchGate::new());
         let _permit = gate.acquire_dispatch().await;
@@ -556,118 +486,6 @@ mod gate_tests {
             .await
             .expect("dropping the gate lease should admit dispatch")
             .expect("dispatch task should join");
-    }
-
-    #[tokio::test]
-    async fn overlapping_gate_leases_must_all_release_before_dispatch_resumes() {
-        let gate = Arc::new(RelayDispatchGate::new());
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let mut first = engage(&gate, deadline, "first node swap");
-        let mut second = engage(&gate, deadline, "second node swap");
-        assert!(first.wait_quiescent().await);
-        assert!(second.wait_quiescent().await);
-
-        drop(second);
-        assert!(gate.is_closed());
-        drop(first);
-        assert!(!gate.is_closed());
-    }
-}
-
-#[cfg(all(test, feature = "shuttle"))]
-mod shuttle_gate_memory_ordering_tests {
-    use shuttle::{
-        sync::{
-            Arc,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-        },
-        thread,
-    };
-
-    use crate::shuttle_test::check_dfs;
-
-    // These reduced checks make only the memory-ordering claim of the production gate: its
-    // sequentially consistent close flag and in-flight count cannot both miss each other.
-
-    struct ModelDispatchGate {
-        closed: AtomicBool,
-        in_flight_dispatches: AtomicUsize,
-    }
-
-    impl ModelDispatchGate {
-        fn new() -> Self {
-            Self {
-                closed: AtomicBool::new(false),
-                in_flight_dispatches: AtomicUsize::new(0),
-            }
-        }
-
-        fn try_acquire_dispatch(&self) -> bool {
-            let previous = self.in_flight_dispatches.fetch_add(1, Ordering::SeqCst);
-            assert_eq!(previous, 0, "the model has one dispatch contender");
-            if !self.closed.load(Ordering::SeqCst) {
-                return true;
-            }
-            let previous = self.in_flight_dispatches.fetch_sub(1, Ordering::SeqCst);
-            assert_eq!(previous, 1, "the rejected dispatch owns one increment");
-            false
-        }
-
-        fn engage_and_check_quiescent(&self) -> bool {
-            self.closed.store(true, Ordering::SeqCst);
-            self.in_flight_dispatches.load(Ordering::SeqCst) == 0
-        }
-
-        fn finish_dispatch_and_check_notification(&self) -> bool {
-            let previous = self.in_flight_dispatches.fetch_sub(1, Ordering::SeqCst);
-            assert_eq!(previous, 1, "the model begins with one dispatch permit");
-            self.closed.load(Ordering::SeqCst)
-        }
-    }
-
-    #[test]
-    fn concurrent_dispatch_acquire_and_engage_preserve_the_fence() {
-        check_dfs(
-            || {
-                let gate = Arc::new(ModelDispatchGate::new());
-                let dispatch = {
-                    let gate = gate.clone();
-                    thread::spawn(move || gate.try_acquire_dispatch())
-                };
-                let engagement_saw_quiescence = gate.engage_and_check_quiescent();
-
-                let dispatch_acquired = dispatch.join().expect("dispatch thread should join");
-                assert!(
-                    !dispatch_acquired || !engagement_saw_quiescence,
-                    "an acquired dispatch must be visible to a concurrent engagement"
-                );
-            },
-            None,
-        );
-    }
-
-    #[test]
-    fn final_dispatch_drop_cannot_miss_a_concurrent_engagement() {
-        check_dfs(
-            || {
-                let gate = Arc::new(ModelDispatchGate {
-                    closed: AtomicBool::new(false),
-                    in_flight_dispatches: AtomicUsize::new(1),
-                });
-                let dispatch = {
-                    let gate = gate.clone();
-                    thread::spawn(move || gate.finish_dispatch_and_check_notification())
-                };
-                let engagement_saw_quiescence = gate.engage_and_check_quiescent();
-
-                let dispatch_would_notify = dispatch.join().expect("dispatch thread should join");
-                assert!(
-                    dispatch_would_notify || engagement_saw_quiescence,
-                    "the fence must either observe the final drop or receive its notification"
-                );
-            },
-            None,
-        );
     }
 }
 
@@ -1107,9 +925,7 @@ impl<T> fmt::Display for RelayFanoutClosed<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroUsize, time::Duration};
-
-    use triomphe::Arc;
+    use std::num::NonZeroUsize;
 
     use super::{RelayBroadcast, RelayTryRecv};
 
@@ -1185,80 +1001,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publisher_waits_for_the_slowest_consumer() {
-        let channel = Arc::new(RelayBroadcast::with_capacity(capacity(1)));
-        let mut fast = channel.new_receiver();
-        let mut slow = channel.new_receiver();
-        channel
-            .broadcast(1)
-            .await
-            .expect("both consumers have room");
-
-        let pending = tokio::spawn({
-            let channel = channel.clone();
-            async move {
-                channel
-                    .broadcast(2)
-                    .await
-                    .expect("the slow consumer frees room");
-            }
-        });
-        wait_for_waiting_publishers(&channel, 1).await;
-
-        assert_eq!(fast.recv().await, Some(1));
-        tokio::task::yield_now().await;
-        assert!(
-            !pending.is_finished(),
-            "the slow consumer still holds its only admission"
-        );
-
-        assert_eq!(slow.recv().await, Some(1));
-        tokio::time::timeout(Duration::from_secs(5), pending)
-            .await
-            .expect("the slow consumer's take should admit the publisher")
-            .expect("the publisher task should join");
-        assert_eq!(fast.recv().await, Some(2));
-        assert_eq!(slow.recv().await, Some(2));
-    }
-
-    #[tokio::test]
-    async fn losing_a_lagging_consumer_admits_waiting_publishers() {
-        let channel = Arc::new(RelayBroadcast::with_capacity(capacity(1)));
-        let mut active = channel.new_receiver();
-        let lagging = channel.new_receiver();
-        channel
-            .broadcast(1)
-            .await
-            .expect("both consumers have room");
-        assert_eq!(active.recv().await, Some(1));
-
-        let pending = tokio::spawn({
-            let channel = channel.clone();
-            async move {
-                channel
-                    .broadcast(2)
-                    .await
-                    .expect("the active consumer takes the batch");
-            }
-        });
-        wait_for_waiting_publishers(&channel, 1).await;
-        assert_eq!(
-            channel.len(),
-            1,
-            "the lagging consumer still holds the first batch"
-        );
-
-        drop(lagging);
-        tokio::time::timeout(Duration::from_secs(5), pending)
-            .await
-            .expect("losing the lagging consumer should admit the publisher")
-            .expect("the publisher task should join");
-        assert_eq!(channel.receiver_count(), 1);
-        assert_eq!(active.recv().await, Some(2));
-        assert_eq!(channel.len(), 0);
-    }
-
-    #[tokio::test]
     async fn dropping_the_fanout_closes_receivers_after_they_drain() {
         let channel = RelayBroadcast::with_capacity(capacity(2));
         let mut receiver = channel.new_receiver();
@@ -1290,182 +1032,8 @@ mod tests {
         }
         assert_eq!(channel.len(), 0);
     }
-
-    #[tokio::test]
-    async fn shrinking_capacity_holds_publishers_until_the_backlog_drains_below_it() {
-        let channel = Arc::new(RelayBroadcast::with_capacity(capacity(3)));
-        let mut receiver = channel.new_receiver();
-        for value in 1..=3 {
-            channel
-                .broadcast(value)
-                .await
-                .expect("the consumer has room");
-        }
-
-        channel.set_capacity(capacity(1));
-        let pending = tokio::spawn({
-            let channel = channel.clone();
-            async move {
-                channel
-                    .broadcast(4)
-                    .await
-                    .expect("draining the backlog admits the publisher");
-            }
-        });
-        wait_for_waiting_publishers(&channel, 1).await;
-
-        assert_eq!(receiver.recv().await, Some(1));
-        assert!(!pending.is_finished());
-        assert_eq!(receiver.recv().await, Some(2));
-        assert!(!pending.is_finished());
-        assert_eq!(receiver.recv().await, Some(3));
-
-        tokio::time::timeout(Duration::from_secs(5), pending)
-            .await
-            .expect("the drained backlog should admit the publisher")
-            .expect("the publisher task should join");
-        assert_eq!(receiver.recv().await, Some(4));
-    }
-
-    #[tokio::test]
-    async fn growing_capacity_admits_waiting_publishers() {
-        let channel = Arc::new(RelayBroadcast::with_capacity(capacity(1)));
-        let mut receiver = channel.new_receiver();
-        channel.broadcast(1).await.expect("the consumer has room");
-
-        let pending = tokio::spawn({
-            let channel = channel.clone();
-            async move {
-                channel
-                    .broadcast(2)
-                    .await
-                    .expect("the larger capacity admits the publisher");
-            }
-        });
-        wait_for_waiting_publishers(&channel, 1).await;
-
-        channel.set_capacity(capacity(2));
-        tokio::time::timeout(Duration::from_secs(5), pending)
-            .await
-            .expect("growing capacity should admit the publisher without a take")
-            .expect("the publisher task should join");
-        assert_eq!(channel.len(), 2);
-        assert_eq!(receiver.recv().await, Some(1));
-        assert_eq!(receiver.recv().await, Some(2));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_publishers_never_admit_past_capacity() {
-        const CAPACITY: usize = 3;
-        const PUBLISHERS: usize = 16;
-
-        let channel = Arc::new(RelayBroadcast::with_capacity(capacity(CAPACITY)));
-        let mut receiver = channel.new_receiver();
-        let mut publishers = Vec::with_capacity(PUBLISHERS);
-        for value in 0..PUBLISHERS {
-            let channel = channel.clone();
-            publishers.push(tokio::spawn(async move {
-                channel
-                    .broadcast(value)
-                    .await
-                    .expect("the consumer drains every batch");
-            }));
-        }
-        wait_for_waiting_publishers(&channel, PUBLISHERS - CAPACITY).await;
-        assert_eq!(channel.len(), CAPACITY);
-
-        let mut received = Vec::with_capacity(PUBLISHERS);
-        for _ in 0..PUBLISHERS {
-            assert!(
-                channel.len() <= CAPACITY,
-                "admission must never pass the capacity"
-            );
-            let batch = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
-                .await
-                .expect("each take should admit a waiting publisher")
-                .expect("the fan-out stays open while publishers hold it");
-            received.push(batch);
-        }
-        for publisher in publishers {
-            publisher.await.expect("every publisher task should join");
-        }
-        received.sort_unstable();
-        assert_eq!(received, (0..PUBLISHERS).collect::<Vec<_>>());
-    }
-
-    async fn wait_for_waiting_publishers<T>(channel: &RelayBroadcast<T>, expected: usize) {
-        let waited = tokio::time::timeout(Duration::from_secs(5), async {
-            while channel.waiting_publishers() != expected {
-                tokio::task::consume_budget().await;
-                tokio::task::yield_now().await;
-            }
-        })
-        .await;
-        assert!(
-            waited.is_ok(),
-            "timed out waiting for {expected} waiting publisher(s)"
-        );
-    }
 }
 
 #[cfg(all(test, feature = "shuttle"))]
-mod shuttle_fanout_memory_ordering_tests {
-    use shuttle::{
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
-        thread,
-    };
-
-    use crate::shuttle_test::check_dfs;
-
-    // This reduced check makes only the memory-ordering claim of fan-out admission: the
-    // sequentially consistent backlog and waiter counters cannot both miss each other.
-
-    struct ModelFanoutAdmission {
-        admitted: AtomicUsize,
-        waiting_publishers: AtomicUsize,
-    }
-
-    impl ModelFanoutAdmission {
-        fn take_and_check_notification(&self) -> bool {
-            let previous = self.admitted.fetch_sub(1, Ordering::SeqCst);
-            assert_eq!(
-                previous, 1,
-                "the model begins with the consumer at capacity"
-            );
-            self.waiting_publishers.load(Ordering::SeqCst) > 0
-        }
-
-        fn begin_wait_and_check_admission(&self, capacity: usize) -> bool {
-            let previous = self.waiting_publishers.fetch_add(1, Ordering::SeqCst);
-            assert_eq!(previous, 0, "the model has one waiting publisher");
-            self.admitted.load(Ordering::SeqCst) < capacity
-        }
-    }
-
-    #[test]
-    fn consumer_take_cannot_miss_a_waiting_publisher() {
-        check_dfs(
-            || {
-                let admission = Arc::new(ModelFanoutAdmission {
-                    admitted: AtomicUsize::new(1),
-                    waiting_publishers: AtomicUsize::new(0),
-                });
-                let consumer = {
-                    let admission = admission.clone();
-                    thread::spawn(move || admission.take_and_check_notification())
-                };
-                let publisher_admitted = admission.begin_wait_and_check_admission(1);
-
-                let consumer_would_notify = consumer.join().expect("consumer thread should join");
-                assert!(
-                    publisher_admitted || consumer_would_notify,
-                    "a waiting publisher must either observe the take or receive its notification"
-                );
-            },
-            None,
-        );
-    }
-}
+#[path = "relay_channel_shuttle_tests.rs"]
+mod shuttle_tests;

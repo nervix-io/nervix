@@ -108,7 +108,8 @@ pub(super) enum WasmLifecycleStage {
     /// Confirming the saved state with its replicas.
     #[strum(to_string = "state replication")]
     Replication,
-    /// A peer refused to serve the state because it is not the state's authority.
+    /// The state's authority refused the state: a peer that is not the state's authority, or this
+    /// node once the state's lifetime or ownership moved on.
     #[strum(to_string = "state authority check")]
     AuthorityRejection,
 }
@@ -185,6 +186,19 @@ impl WasmBranchModule {
             stage,
             export: None,
             revision: Some(revision),
+        })
+    }
+
+    /// Reports a save of guest state this node no longer holds the lifetime or ownership of.
+    pub(super) fn authority_failure(
+        &self,
+        failure: Report<StateReplicationError>,
+    ) -> Report<WasmInstanceError> {
+        failure.change_context(WasmInstanceError::Lifecycle {
+            module: self.clone(),
+            stage: WasmLifecycleStage::AuthorityRejection,
+            export: None,
+            revision: None,
         })
     }
 
@@ -735,7 +749,7 @@ mod tests {
     use std::sync::Arc as StdArc;
 
     use arrow_array::{Array, Int32Array};
-    use nervix_models::ParseAsType;
+    use nervix_models::{ParseAsType, WasmStateGeneration};
     use nervix_wasm::{WasmAckToken, WasmEnvelope, WasmOutputColumnRef};
     use nonzero_ext::nonzero;
     use ordered_float::OrderedFloat;
@@ -769,7 +783,9 @@ mod tests {
     fn placement() -> RuntimeStatePlacement {
         RuntimeStatePlacement {
             domain: DomainName::parse("events").expect("valid domain"),
-            state: RuntimeStateKind::WasmProcessor,
+            state: RuntimeState::WasmProcessor {
+                generation: WasmStateGeneration::FIRST,
+            },
             kind: ModelKind::WasmProcessor,
             identifier: ModelName::parse("sessionizer").expect("valid identifier"),
             schema_fingerprint: [0; 32],

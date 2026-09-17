@@ -23,9 +23,10 @@ use nervix_execution::sync::DashMap;
 use nervix_interconnect::{TlsConfigBundle, Transport};
 use nervix_models::{
     AckMode, BranchSelection, ClusterNodeName, CreateDeduplicator, CreateEmitter, CreateIngestor,
-    CreateJunction, CreateSchema, DomainConfig, DomainName, DomainPace, DomainStartPoint,
-    DomainState, DomainStatus, EmitSink, IngestSource, KafkaOffsetMode, Model, ModelKind,
-    ModelName, NodeRef, PlacementGroupSchedule, ProcessorInputs, ProcessorOutputs, ScheduledNode,
+    CreateJunction, CreateSchema, CreateWasmProcessor, DomainConfig, DomainName, DomainPace,
+    DomainStartPoint, DomainState, DomainStatus, EmitSink, IngestSource, KafkaOffsetMode, Model,
+    ModelKind, ModelName, NodeRef, PlacementGroupSchedule, ProcessorInputs, ProcessorOutputs,
+    ScheduledNode, WasmProcessorLimits,
 };
 use nonzero_ext::nonzero;
 use parking_lot::RwLock;
@@ -327,6 +328,23 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             deduplicate_on: Vec::new(),
             max_time: "1m".to_string(),
             branched_by: BranchSelection::unbranched(),
+            mode: AckMode::Attached,
+            filter_where: None,
+            materialized_state: Vec::new(),
+        }),
+        ModelKind::WasmProcessor => Model::WasmProcessor(CreateWasmProcessor {
+            name: named(identifier_raw),
+            from: ProcessorInputs::new(Vec::new(), Vec::new()),
+            output_routes: ProcessorOutputs::new(Vec::new()),
+            branched_by: BranchSelection::unbranched(),
+            resource: named("guest_bundle"),
+            resource_version: 1,
+            file: "processors/guest.wasm".to_string(),
+            limits: WasmProcessorLimits {
+                max_fuel: nonzero!(1_000_000u64),
+                max_memory_bytes: nonzero!(67_108_864u64),
+            },
+            global_error_policy: nervix_models::GeneralErrorPolicy::Log,
             mode: AckMode::Attached,
             filter_where: None,
             materialized_state: Vec::new(),
