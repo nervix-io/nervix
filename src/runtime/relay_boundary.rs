@@ -561,7 +561,7 @@ impl RelayConsumerFanout {
                 .broadcast(attached)
                 .await
             {
-                let failed = error.0;
+                let failed = error.batch;
                 for ack in failed.acks.iter() {
                     ack.no_ack("runtime consumer unavailable for attached delivery");
                 }
@@ -789,16 +789,10 @@ impl RelayRuntimeFanIn {
 
     pub(super) async fn recv(&mut self) -> Option<RelayRecordBatch> {
         tokio::task::consume_budget().await;
-        match self.receiver.recv().await {
-            Ok(batch) => Some(batch),
-            Err(async_broadcast::RecvError::Overflowed(_)) => {
-                unreachable!("relay broadcasts are backpressured and must not overflow")
-            }
-            Err(async_broadcast::RecvError::Closed) => None,
-        }
+        self.receiver.recv().await
     }
 
-    pub(super) fn try_recv(&mut self) -> Result<RelayRecordBatch, async_broadcast::TryRecvError> {
+    pub(super) fn try_recv(&mut self) -> RelayTryRecv<RelayRecordBatch> {
         self.receiver.try_recv()
     }
 
@@ -806,16 +800,7 @@ impl RelayRuntimeFanIn {
         &mut self,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<RelayRecordBatch>> {
-        match self.receiver.poll_recv(cx) {
-            std::task::Poll::Ready(Some(Ok(batch))) => std::task::Poll::Ready(Some(batch)),
-            std::task::Poll::Ready(Some(Err(async_broadcast::RecvError::Overflowed(_)))) => {
-                unreachable!("relay broadcasts are backpressured and must not overflow")
-            }
-            std::task::Poll::Ready(Some(Err(async_broadcast::RecvError::Closed)) | None) => {
-                std::task::Poll::Ready(None)
-            }
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
+        self.receiver.poll_recv(cx)
     }
 
     pub(super) fn pending_len(&self) -> usize {
@@ -840,10 +825,13 @@ impl RelayRuntimeFanIn {
     pub(super) fn try_recv_with_quiesce(
         &mut self,
         counters: Option<&Arc<NodeQuiesceCounters>>,
-    ) -> Result<(RelayRecordBatch, Option<NodeQuiesceWorkGuard>), async_broadcast::TryRecvError>
-    {
+    ) -> RelayTryRecv<(RelayRecordBatch, Option<NodeQuiesceWorkGuard>)> {
         let work = counters.map(|counters| NodeQuiesceWorkGuard::begin(counters.clone()));
-        self.try_recv().map(|batch| (batch, work))
+        match self.try_recv() {
+            RelayTryRecv::Batch(batch) => RelayTryRecv::Batch((batch, work)),
+            RelayTryRecv::Empty => RelayTryRecv::Empty,
+            RelayTryRecv::Closed => RelayTryRecv::Closed,
+        }
     }
 }
 
@@ -1040,7 +1028,7 @@ impl RelayBoundaryServices {
         };
         let admission = self.fanout.begin_owner_admission();
         if let Err(error) = buffer.batches.broadcast(batch.attached()).await {
-            for ack in error.0.acks.iter() {
+            for ack in error.batch.acks.iter() {
                 ack.no_ack("relay owner buffer is unavailable");
             }
             return Err(Box::new(batch.clone()));
@@ -1681,15 +1669,9 @@ impl Runtime {
             loop {
                 tokio::task::consume_budget().await;
                 let batch = match receiver.try_recv() {
-                    Ok(batch) => batch,
-                    Err(
-                        async_broadcast::TryRecvError::Empty
-                        | async_broadcast::TryRecvError::Closed,
-                    ) => {
+                    RelayTryRecv::Batch(batch) => batch,
+                    RelayTryRecv::Empty | RelayTryRecv::Closed => {
                         break;
-                    }
-                    Err(async_broadcast::TryRecvError::Overflowed(_)) => {
-                        unreachable!("relay owner buffer is backpressured and must not overflow")
                     }
                 };
                 let _completion = services.begin_owner_batch_completion();
