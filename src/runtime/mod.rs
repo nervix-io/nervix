@@ -532,7 +532,8 @@ mod websocket_signaling;
 mod window_processor;
 mod window_state;
 
-pub(crate) use branch_key::BranchKey;
+#[doc(hidden)]
+pub use branch_key::BranchKey;
 pub(crate) use client_config::{ClientResourceMounts, ResolvedClientConfig};
 pub(crate) use domain_clock::DomainExecutionSnapshot;
 pub(crate) use domain_execution::LookupRuntime;

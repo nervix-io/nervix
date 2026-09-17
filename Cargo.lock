@@ -6901,6 +6901,7 @@ dependencies = [
  "mysql_async",
  "nervix-approx-into",
  "nervix-client-core",
+ "nervix-client-wire",
  "nervix-consensus",
  "nervix-dataflow-graph",
  "nervix-execution",

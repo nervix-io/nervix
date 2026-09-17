@@ -7,7 +7,7 @@ struct BranchKeyInner {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct BranchKey(Arc<BranchKeyInner>);
+pub struct BranchKey(Arc<BranchKeyInner>);
 
 impl std::fmt::Debug for BranchKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -19,8 +19,12 @@ impl std::fmt::Debug for BranchKey {
 }
 
 impl BranchKey {
-    pub(in crate::runtime) fn field_value(&self, name: &str) -> Option<&RuntimeValue> {
+    pub(crate) fn field_value(&self, name: &str) -> Option<&RuntimeValue> {
         self.0.fields.get(name)
+    }
+
+    pub(crate) fn field_count(&self) -> usize {
+        self.0.fields.len()
     }
 
     pub(crate) fn from_fields(
