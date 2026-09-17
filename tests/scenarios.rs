@@ -16425,6 +16425,49 @@ async fn then_within_duration_the_active_session_observes_a_server_error(
     world.last_server_error = Some(event.message);
 }
 
+/// Waits for the server error that carries the docstring, passing over the errors reported before
+/// it. A failing guest may report further errors from later callbacks on the same instance, so the
+/// next error is not necessarily the one the scenario expects.
+#[then(expr = "within {string} the active session observes a server error containing")]
+async fn then_within_duration_the_active_session_observes_a_server_error_containing(
+    world: &mut ScenarioWorld,
+    duration: String,
+    #[step] step: &Step,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let expected = expand_placeholders(world, docstring(step).trim());
+    let session = world
+        .active_session
+        .as_mut()
+        .expect("an active session must exist");
+    let deadline = Instant::now() + duration;
+    let mut passed_over = Vec::new();
+    loop {
+        tokio::task::consume_budget().await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let event = session
+            .try_next_server_error(remaining)
+            .await
+            .expect("failed while waiting for server error");
+        let Some(event) = event else {
+            panic!(
+                "timed out waiting for a server error containing {expected:?} within \
+                 {duration:?}; passed over: {passed_over:?}"
+            );
+        };
+        append_cucumber_log_line(&format!(
+            "observed runtime server error level={} message={}",
+            event.level, event.message
+        ));
+        if event.message.contains(&expected) {
+            world.last_server_error = Some(event.message);
+            return;
+        }
+        passed_over.push(event.message);
+    }
+}
+
 #[then("the last server error contains")]
 async fn then_last_server_error_contains(world: &mut ScenarioWorld, #[step] step: &Step) {
     let expected = expand_placeholders(world, docstring(step).trim());

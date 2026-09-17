@@ -1,23 +1,58 @@
 use std::time::Duration;
 
-use nervix_wasm_protocol::{BranchInit, ProcessorSchema};
+use nervix_wasm_protocol::{BranchInit, GuestSnapshot, ProcessorSchema};
 
-use crate::{abi, envelope::OutputEnvelope, error::GuestError};
+use crate::{
+    abi,
+    envelope::OutputEnvelope,
+    error::{GuestError, RejectedSnapshot},
+    processor::Processor,
+};
 
 /// Branch-instance configuration decoded from the host `BranchInit` payload.
 ///
 /// One guest instance exists per concrete branch, so everything here is
 /// branch-local by construction.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchContext {
     init: BranchInit,
 }
 
+impl From<BranchInit> for BranchContext {
+    fn from(init: BranchInit) -> Self {
+        Self { init }
+    }
+}
+
 impl BranchContext {
-    pub(crate) fn from_init_metadata(metadata: &[u8]) -> Result<Self, GuestError> {
-        Ok(Self {
-            init: BranchInit::decode(metadata)?,
-        })
+    /// Encodes the snapshot of an instance this branch configuration initialized: the
+    /// configuration itself, which a restore checks, and the application state its processor
+    /// saved.
+    pub(crate) fn encode_snapshot(&self, application_state: Vec<u8>) -> Vec<u8> {
+        let snapshot = GuestSnapshot {
+            init_metadata: self.init.encode(),
+            application_state,
+        };
+        snapshot.encode()
+    }
+
+    /// Restores the processor of this branch configuration from a saved snapshot.
+    ///
+    /// The snapshot must decode and must have been taken under this exact branch configuration;
+    /// only then does [`Processor::restore`] receive the application state it carries, including
+    /// empty application state.
+    pub(crate) fn restore_snapshot<P: Processor>(
+        &self,
+        saved: &[u8],
+    ) -> Result<P, RejectedSnapshot> {
+        let snapshot =
+            GuestSnapshot::decode(saved).map_err(RejectedSnapshot::UndecodableEnvelope)?;
+        let saved_init = BranchInit::decode(&snapshot.init_metadata)
+            .map_err(RejectedSnapshot::UndecodableInitMetadata)?;
+        if saved_init != self.init {
+            return Err(RejectedSnapshot::OtherBranchConfiguration);
+        }
+        P::restore(self, &snapshot.application_state).map_err(RejectedSnapshot::ApplicationState)
     }
 
     pub fn domain_name(&self) -> &str {
@@ -62,6 +97,9 @@ impl DomainTime {
 }
 
 /// Handle identifying one guest-requested domain-clock timeout.
+///
+/// The host issues handles per branch instance, so a handle never outlives the instance that
+/// requested it and is never part of saved state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TimeoutHandle(i64);
 
@@ -82,8 +120,6 @@ pub struct GuestContext<'rt> {
     pub(crate) pending_emit: &'rt mut Vec<Vec<u8>>,
     pub(crate) global_error: &'rt mut Vec<u8>,
     pub(crate) error_state: &'rt mut Option<String>,
-    pub(crate) last_domain_time_nanos: &'rt mut i64,
-    pub(crate) last_timeout_handle: &'rt mut i64,
 }
 
 impl GuestContext<'_> {
@@ -92,21 +128,21 @@ impl GuestContext<'_> {
     }
 
     /// Reads the current domain-clock time through the host import.
-    pub fn domain_time(&mut self) -> DomainTime {
-        let now = abi::host_domain_time_nanos();
-        *self.last_domain_time_nanos = now;
-        DomainTime::from_unix_nanos(now)
+    pub fn domain_time(&self) -> DomainTime {
+        DomainTime::from_unix_nanos(abi::host_domain_time_nanos())
     }
 
     /// Requests a domain-clock timeout; the host later invokes the
     /// processor's `on_timeout` with the returned handle.
-    pub fn request_timeout(&mut self, delay: Duration) -> Result<TimeoutHandle, GuestError> {
+    ///
+    /// The timeout belongs to this branch instance. An instance recreated from saved state starts
+    /// without it, so request it again from the next callback when the restored state needs it.
+    pub fn request_timeout(&self, delay: Duration) -> Result<TimeoutHandle, GuestError> {
         let delay_nanos = i64::try_from(delay.as_nanos()).map_err(|_| GuestError::InvalidSize)?;
         let handle = abi::host_timeout_after_nanos(delay_nanos);
         if handle < 0 {
             return Err(GuestError::InvalidSize);
         }
-        *self.last_timeout_handle = handle;
         Ok(TimeoutHandle::new(handle))
     }
 
@@ -120,7 +156,8 @@ impl GuestContext<'_> {
 
     /// Reports a global processor error while letting the current callback
     /// succeed. The host applies `ON GLOBAL ERROR` and the guest latches into
-    /// error state.
+    /// error state. The error state belongs to this instance and is never saved, so an instance
+    /// recreated from saved state starts without it.
     pub fn report_global_error(&mut self, reason: impl Into<String>) {
         let reason = reason.into();
         self.global_error.clear();
@@ -131,16 +168,16 @@ impl GuestContext<'_> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_wasm_protocol::{ProcessorField, ProcessorType};
+    use nervix_wasm_protocol::{ProcessorField, ProcessorType, SavedStateRejection};
 
     use super::*;
+    use crate::envelope::InputBatch;
 
-    #[test]
-    fn branch_context_round_trips_init_metadata() {
-        let init = BranchInit {
+    fn init(branch_key: &[u8]) -> BranchInit {
+        BranchInit {
             domain_name: "events".to_string(),
             domain_type: "PACED".to_string(),
-            branch_key: Some(b"tenant=alpha".to_vec()),
+            branch_key: Some(branch_key.to_vec()),
             input_schema: ProcessorSchema {
                 name: "input_events".to_string(),
                 fields: vec![ProcessorField {
@@ -153,14 +190,197 @@ mod tests {
                 name: "output_events".to_string(),
                 fields: Vec::new(),
             }],
-        };
+        }
+    }
 
-        let branch = BranchContext::from_init_metadata(&init.encode()).expect("must decode");
+    fn branch(branch_key: &[u8]) -> BranchContext {
+        BranchContext::from(init(branch_key))
+    }
+
+    fn saved_state(processor: &impl Processor) -> Vec<u8> {
+        processor
+            .save_state()
+            .expect("the test processor must save its state")
+    }
+
+    /// Counts what it processed and saves the count as eight little-endian bytes.
+    #[derive(Debug, PartialEq)]
+    struct Counter {
+        count: u64,
+    }
+
+    impl Processor for Counter {
+        fn create(_branch: &BranchContext) -> Result<Self, GuestError> {
+            Ok(Self { count: 0 })
+        }
+
+        fn process_batch(
+            &mut self,
+            _ctx: &mut GuestContext<'_>,
+            _input: InputBatch,
+        ) -> Result<(), GuestError> {
+            Ok(())
+        }
+
+        fn save_state(&self) -> Result<Vec<u8>, GuestError> {
+            Ok(self.count.to_le_bytes().to_vec())
+        }
+
+        fn restore(_branch: &BranchContext, state: &[u8]) -> Result<Self, GuestError> {
+            let Ok(count) = <[u8; 8]>::try_from(state) else {
+                return Err(GuestError::failed("saved count must be exactly 8 bytes"));
+            };
+            Ok(Self {
+                count: u64::from_le_bytes(count),
+            })
+        }
+    }
+
+    /// Keeps no state, so it relies on the default `save_state` and `restore`.
+    #[derive(Debug, PartialEq)]
+    struct Stateless;
+
+    impl Processor for Stateless {
+        fn create(_branch: &BranchContext) -> Result<Self, GuestError> {
+            Ok(Self)
+        }
+
+        fn process_batch(
+            &mut self,
+            _ctx: &mut GuestContext<'_>,
+            _input: InputBatch,
+        ) -> Result<(), GuestError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn branch_context_round_trips_init_metadata() {
+        let init = init(b"tenant=alpha");
+
+        let branch = BranchContext::from(BranchInit::decode(&init.encode()).expect("must decode"));
 
         assert_eq!(branch.domain_name(), "events");
         assert_eq!(branch.domain_type(), "PACED");
         assert_eq!(branch.branch_key(), Some(b"tenant=alpha".as_slice()));
         assert_eq!(branch.input_schema(), &init.input_schema);
         assert_eq!(branch.output_schemas(), init.output_schemas.as_slice());
+    }
+
+    #[test]
+    fn a_snapshot_restores_the_application_state_its_processor_saved() {
+        let alpha = branch(b"tenant=alpha");
+
+        let saved = alpha.encode_snapshot(saved_state(&Counter { count: 7 }));
+        let restored = alpha
+            .restore_snapshot::<Counter>(&saved)
+            .expect("the snapshot must restore");
+
+        assert_eq!(restored, Counter { count: 7 });
+        assert_eq!(
+            GuestSnapshot::decode(&saved).expect("the snapshot must decode"),
+            GuestSnapshot {
+                init_metadata: init(b"tenant=alpha").encode(),
+                application_state: 7_u64.to_le_bytes().to_vec(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_stateless_processor_restores_from_the_empty_application_state_it_saved() {
+        let alpha = branch(b"tenant=alpha");
+
+        let saved = alpha.encode_snapshot(saved_state(&Stateless));
+        let snapshot = GuestSnapshot::decode(&saved).expect("the snapshot must decode");
+        let restored = alpha
+            .restore_snapshot::<Stateless>(&saved)
+            .expect("empty application state must restore");
+
+        assert!(snapshot.application_state.is_empty());
+        assert_eq!(restored, Stateless);
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_snapshot_reject_the_snapshot_envelope() {
+        let alpha = branch(b"tenant=alpha");
+
+        let rejected = alpha
+            .restore_snapshot::<Counter>(b"not a guest snapshot")
+            .expect_err("bytes that are not a snapshot must not restore");
+
+        assert!(matches!(rejected, RejectedSnapshot::UndecodableEnvelope(_)));
+        assert_eq!(rejected.verdict(), SavedStateRejection::SnapshotEnvelope);
+    }
+
+    #[test]
+    fn undecodable_init_metadata_rejects_the_snapshot_envelope() {
+        let alpha = branch(b"tenant=alpha");
+        let saved = GuestSnapshot {
+            init_metadata: b"not a branch init".to_vec(),
+            application_state: 7_u64.to_le_bytes().to_vec(),
+        }
+        .encode();
+
+        let rejected = alpha
+            .restore_snapshot::<Counter>(&saved)
+            .expect_err("a snapshot without decodable init metadata must not restore");
+
+        assert!(matches!(
+            rejected,
+            RejectedSnapshot::UndecodableInitMetadata(_)
+        ));
+        assert_eq!(rejected.verdict(), SavedStateRejection::SnapshotEnvelope);
+    }
+
+    #[test]
+    fn a_snapshot_of_another_branch_configuration_rejects_the_snapshot_envelope() {
+        let saved = branch(b"tenant=alpha").encode_snapshot(saved_state(&Counter { count: 7 }));
+
+        let rejected = branch(b"tenant=beta")
+            .restore_snapshot::<Counter>(&saved)
+            .expect_err("a snapshot of another branch must not restore");
+
+        assert!(matches!(
+            rejected,
+            RejectedSnapshot::OtherBranchConfiguration
+        ));
+        assert_eq!(rejected.verdict(), SavedStateRejection::SnapshotEnvelope);
+        assert_eq!(
+            rejected.to_string(),
+            "saved snapshot was taken under a different branch configuration"
+        );
+    }
+
+    #[test]
+    fn application_state_the_processor_refuses_rejects_the_application_state() {
+        let alpha = branch(b"tenant=alpha");
+        let saved = GuestSnapshot {
+            init_metadata: init(b"tenant=alpha").encode(),
+            application_state: vec![1, 2, 3],
+        }
+        .encode();
+
+        let rejected = alpha
+            .restore_snapshot::<Counter>(&saved)
+            .expect_err("a truncated count must not restore");
+
+        assert_eq!(rejected.verdict(), SavedStateRejection::ApplicationState);
+        assert_eq!(rejected.to_string(), "saved count must be exactly 8 bytes");
+    }
+
+    #[test]
+    fn a_stateless_processor_rejects_application_state_it_never_saves() {
+        let alpha = branch(b"tenant=alpha");
+        let saved = GuestSnapshot {
+            init_metadata: init(b"tenant=alpha").encode(),
+            application_state: vec![1, 2, 3],
+        }
+        .encode();
+
+        let rejected = alpha
+            .restore_snapshot::<Stateless>(&saved)
+            .expect_err("a stateless processor must not drop saved state silently");
+
+        assert_eq!(rejected.verdict(), SavedStateRejection::ApplicationState);
     }
 }

@@ -85,7 +85,7 @@ nervix_load_state(ptr: i32, size: i32) -> i32
 nervix_reset_state() -> i32
 ```
 
-Return `0` from fallible functions on success. Return a negative code on guest rejection. Nervix treats negative codes as runtime errors and applies the processor error policy. `nervix_dump_state` returns the size of the snapshot it wrote, or a negative code when it cannot serialize its state.
+Return `0` from fallible functions on success. Return a negative code on guest rejection. Nervix treats negative codes as runtime errors and applies the processor error policy. `nervix_dump_state` returns the size of the snapshot it wrote, or a negative code when it cannot serialize its state; Nervix then keeps the state saved last.
 
 `nervix_load_state` has two reserved codes that classify the saved state itself:
 
@@ -354,9 +354,40 @@ or fallback path. Rebuild every guest for this FlatBuffers contract.
 
 ## State
 
-Use branch-local guest state for data the guest needs across runtime instance recreation.
+Use branch-local guest state for the durable computation state a recreated instance needs to
+continue: counters, aggregates, open windows, or whatever else the guest derives from the input it
+has already accepted.
 
-Nervix saves guest state through `nervix_dump_state`, persists and replicates the returned bytes, and restores them through `nervix_load_state` when the branch instance is recreated.
+Nervix saves guest state through `nervix_dump_state` after it dispatches the output of a successful
+`nervix_process_batch` or `nervix_on_timeout` call, and when it checkpoints a branch for an
+ownership handoff. It persists and replicates the returned bytes and restores them through
+`nervix_load_state`, after `nervix_init`, when the branch instance is recreated.
+
+A save that fails — a negative `nervix_dump_state` code, a trap, or an exhausted limit — is reported
+as a `state snapshot` failure and leaves the state saved last in place. Nervix never replaces saved
+state with the result of a failed save, so a recreated instance restores the last completed save.
+
+Guest state holds computation state only. Everything an instance uses to execute belongs to that
+instance and is never saved:
+
+- input the guest still buffers, together with its ACK tokens, row sidecars, and input-column
+  references;
+- output groups the guest has not emitted yet;
+- timeout handles, which the host issues per instance;
+- error state the guest latched after a failed callback.
+
+A recreated instance therefore starts without buffered input, pending output, error state, or
+pending timeouts. A guest releases buffered input from `nervix_flush` before a handoff, and a guest
+whose restored state needs a timer requests it again from its next input or timeout callback.
+
+Keep `nervix_load_state` strict about what it restores. Save what a restore needs to validate the
+state, such as the branch configuration it was taken under, and reject state that does not match
+the instance it is handed to.
+
+A zero-length `nervix_dump_state` result saves no state at all: the next instance is initialized
+without a `nervix_load_state` call. A guest whose computation state can be empty therefore wraps it
+in an envelope, as both example guests do with `GuestSnapshot`, so that empty computation state is
+still restored as state.
 
 A restore that fails leaves the saved state in place. The next input for that branch instantiates
 the guest again and hands it the same saved state, so a guest that rejects its state keeps being
@@ -365,15 +396,6 @@ state with `-7` or `-8` is the only outcome that classifies the saved bytes as u
 `nervix_load_state` strict and use those codes only for a verdict on the state.
 
 ACK tokens are separate from guest state. They are host-local hot-path runtime capabilities and are not persisted or replicated. If ACK state is lost with a processor owner, the upstream ingestor reacts according to its delivery mode and retry policy.
-
-A guest may include a pending FlatBuffers envelope in its `GuestSnapshot`, but tokens
-and input-column references remain usable only while the originating live host
-ACK map exists. Restored output that refers to lost tokens is rejected. Guest
-state that retains a pending output group must retain the complete generated
-Arrow IPC bytes, every routed output, all column references, and every sidecar.
-Generated indexes are not host capabilities and have no meaning without that
-complete envelope. Guest load code must reject old-format pending envelopes
-rather than silently reset the snapshot.
 
 ## Timeouts
 
@@ -390,6 +412,10 @@ After any successful timeout callback, the host repeatedly calls
 `nervix_read_emit()` and forwards every emitted output group. Shared generated
 columns work identically in timeout output. Input-column references remain
 valid while their source token is live.
+
+Timeout handles belong to the branch instance that requested them. A recreated
+instance starts without pending timeouts and never receives a handle issued to
+an earlier instance.
 
 ## Quiesce Flush
 
@@ -541,6 +567,7 @@ GOTOOLCHAIN="$(sed -n 's/^toolchain //p' go.mod)" tinygo build \
 - Do not ack/nack a token and also carry it into an emitted row.
 - Do not silently accept an init payload whose schema does not match what the guest implements.
 - Do not persist guest state in a custom host-facing format unless `load_state` can reject bad bytes cleanly.
+- Do not save buffered input, ACK tokens, pending output, timeout handles, or latched error state in guest state; save only durable computation state.
 - Do not call host ACK/NACK directly. The guest only reports lineage and decisions in the sidecar.
 
 ## Failure Diagnostics
@@ -572,7 +599,7 @@ another node reaches the session unchanged.
 | `timeout callback` | `nervix_on_timeout` and the emit reads that follow it. |
 | `quiesce flush` | `nervix_flush` and the emit reads that follow it. |
 | `output emission` | An emitted envelope the host cannot decode, or output that fails validation. |
-| `state snapshot` | `nervix_dump_state`. |
+| `state snapshot` | `nervix_dump_state`. Nervix keeps the state saved last. |
 | `local state persistence` | Writing the saved state to the node's state store. |
 | `state replication` | Confirming the saved state with its replicas. |
 | `state authority check` | A replica or peer refused to serve the state because it is not the state's authority. |

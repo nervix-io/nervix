@@ -3,6 +3,8 @@
 package main
 
 import (
+	"encoding/binary"
+	"strconv"
 	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow/nervix-wasm-processor-go-guest/tinyipc"
@@ -19,6 +21,10 @@ const (
 	defaultTimeoutNanos int64  = 1_000_000_000
 	flushEveryBatches   uint64 = 2
 	maxGuestBufferBytes        = 4 * 1024 * 1024
+	// A first value that leaves the guest unable to serialize its state.
+	unserializableStateValue int32 = -400
+	// The processed row count, the only application state, is eight little-endian bytes.
+	processedRowsStateBytes = 8
 )
 
 // nervix_load_state answers with one of these codes when the saved state itself is unusable.
@@ -36,29 +42,26 @@ func hostTimeoutAfterNanos(delayNanos int64) int64
 var fixedBuffer [maxGuestBufferBytes]byte
 var buffer []byte
 var initMetadata []byte
+var outputRelays []string
+var initialized bool
+
+// processedRows counts the rows this branch has accepted. It is the guest's durable computation
+// state and the only state it saves: a recreated instance numbers the rows that follow from it.
+var processedRows uint64
+
+// Everything below is execution state of this instance and is never saved. The pending batch
+// carries ACK tokens that are only valid inside the instance that received them, so a quiesce flush
+// releases it instead of a snapshot carrying it.
+var processedBatches uint64
 var pendingBatch []byte
+var pendingStartRow uint64
 var pendingEmit [][]byte
 var globalError []byte
-var savedState []byte
-var outputRelays []string
-var pendingStartRow uint64
-var initialized bool
-var processedBatches uint64
-var processedRows uint64
-var lastDomainTimeNanos int64
-var lastTimeoutHandle int64
-var errorState string
+var unserializableBy int32
 
 type guestSnapshot struct {
-	ProcessedBatches    uint64
-	ProcessedRows       uint64
-	PendingStartRow     uint64
-	LastDomainTimeNanos int64
-	LastTimeoutHandle   int64
-	PendingBatch        []byte
-	InitMetadata        []byte
-	SavedState          []byte
-	ErrorState          string
+	InitMetadata     []byte
+	ApplicationState []byte
 }
 
 type envelope struct {
@@ -159,202 +162,176 @@ func nervixAlloc(size int32) int32 {
 
 //export nervix_init
 func nervixInit(ptr int32, size int32) int32 {
-	return guardedExport(func() int32 {
-		data, code := readBufferRange(ptr, size)
-		if code != success {
-			return code
-		}
-		relays, code := outputRelaysFromInitMetadata(data)
-		if code != success {
-			return code
-		}
-		initMetadata = append(initMetadata[:0], data...)
-		outputRelays = append(outputRelays[:0], relays...)
-		initialized = true
-		return success
-	})
+	data, code := readBufferRange(ptr, size)
+	if code != success {
+		return code
+	}
+	relays, code := outputRelaysFromInitMetadata(data)
+	if code != success {
+		return code
+	}
+	initMetadata = append(initMetadata[:0], data...)
+	outputRelays = append(outputRelays[:0], relays...)
+	initialized = true
+	return success
 }
 
 //export nervix_current_domain_time_nanos
 func nervixCurrentDomainTimeNanos() int64 {
-	lastDomainTimeNanos = hostDomainTimeNanos()
-	return lastDomainTimeNanos
+	return hostDomainTimeNanos()
 }
 
 //export nervix_process_batch
 func nervixProcessBatch(ptr int32, size int32) int32 {
-	return guardedExport(func() int32 {
-		if !initialized {
-			return errNotInitialized
-		}
-		data, code := readBufferRange(ptr, size)
+	if !initialized {
+		return errNotInitialized
+	}
+	data, code := readBufferRange(ptr, size)
+	if code != success {
+		return code
+	}
+	processedBatches++
+	input, code := decodeEnvelope(data)
+	if code != success {
+		return code
+	}
+	if input.Kind != "input" {
+		return errEnvelope
+	}
+	firstValue, hasFirstValue, code := firstInt32Value(input.ArrowIPCBatch)
+	if code != success {
+		return code
+	}
+	if hasFirstValue && firstValue == -300 {
+		setGlobalError("guest error state for value -300")
+		return errErrorState
+	}
+	if hasFirstValue && firstValue == -200 {
+		setGlobalError("guest global error for value -200")
+		return success
+	}
+	if hasFirstValue && firstValue == -100 {
+		errorOutput, code := messageErrorOutput(input, "guest message error for value -100")
 		if code != success {
 			return code
 		}
-		processedBatches++
-		lastDomainTimeNanos = hostDomainTimeNanos()
-		lastTimeoutHandle = hostTimeoutAfterNanos(defaultTimeoutNanos)
-		input, code := decodeEnvelope(data)
+		if len(outputRelays) > 0 {
+			errorOutput.OutputRelay = outputRelays[0]
+		}
+		encoded, code := encodeEnvelope(envelope{
+			Kind:                   "output",
+			GeneratedArrowIPCBatch: make([]byte, 0),
+			Outputs:                []routedOutput{errorOutput},
+		})
 		if code != success {
 			return code
-		}
-		if input.Kind != "input" {
-			return errEnvelope
-		}
-		firstValue, hasFirstValue, code := firstInt32Value(input.ArrowIPCBatch)
-		if code != success {
-			return code
-		}
-		if hasFirstValue && firstValue == -300 {
-			setGlobalError("guest error state for value -300")
-			return errErrorState
-		}
-		if hasFirstValue && firstValue == -200 {
-			setGlobalError("guest global error for value -200")
-			return success
-		}
-		if hasFirstValue && firstValue == -100 {
-			errorOutput, code := messageErrorOutput(input, "guest message error for value -100")
-			if code != success {
-				return code
-			}
-			if len(outputRelays) > 0 {
-				errorOutput.OutputRelay = outputRelays[0]
-			}
-			encoded, code := encodeEnvelope(envelope{
-				Kind:                   "output",
-				GeneratedArrowIPCBatch: make([]byte, 0),
-				Outputs:                []routedOutput{errorOutput},
-			})
-			if code != success {
-				return code
-			}
-			pendingEmit = pendingEmit[:0]
-			pendingEmit = append(pendingEmit, encoded)
-			return success
 		}
 		pendingEmit = pendingEmit[:0]
-		if len(pendingBatch) > 0 {
-			if code := flushPending(); code != success {
-				return code
-			}
-		}
-		rowCount, code := arrowIPCRowCount(input.ArrowIPCBatch)
-		if code != success {
+		pendingEmit = append(pendingEmit, encoded)
+		return success
+	}
+	if hasFirstValue && firstValue == unserializableStateValue {
+		unserializableBy = unserializableStateValue
+	}
+	pendingEmit = pendingEmit[:0]
+	if len(pendingBatch) > 0 {
+		if code := flushPending(); code != success {
 			return code
 		}
-		pendingStartRow = processedRows
-		processedRows += rowCount
-		pendingBatch = append(pendingBatch[:0], data...)
-		if processedBatches%flushEveryBatches == 0 {
-			return flushPending()
-		}
-		return success
-	})
+	}
+	rowCount, code := arrowIPCRowCount(input.ArrowIPCBatch)
+	if code != success {
+		return code
+	}
+	pendingStartRow = processedRows
+	processedRows += rowCount
+	pendingBatch = append(pendingBatch[:0], data...)
+	if unserializableBy != 0 || processedBatches%flushEveryBatches == 0 {
+		return flushPending()
+	}
+	hostTimeoutAfterNanos(defaultTimeoutNanos)
+	return success
 }
 
 //export nervix_on_timeout
 func nervixOnTimeout(handle int64) int32 {
-	return guardedExport(func() int32 {
-		lastTimeoutHandle = handle
-		if len(pendingBatch) == 0 {
-			return success
-		}
-		pendingEmit = pendingEmit[:0]
-		return flushPending()
-	})
+	if len(pendingBatch) == 0 {
+		return success
+	}
+	pendingEmit = pendingEmit[:0]
+	return flushPending()
 }
 
 // nervix_flush releases everything the guest still buffers because the host is quiescing this
-// branch. Anything not emitted here stays unacknowledged until the branch resumes.
+// branch. Anything not emitted here stays unacknowledged until the branch resumes and is never
+// part of the guest's saved state.
 //
 //export nervix_flush
 func nervixFlush() int32 {
-	return guardedExport(func() int32 {
-		if len(pendingBatch) == 0 {
-			return success
-		}
-		pendingEmit = pendingEmit[:0]
-		return flushPending()
-	})
+	if len(pendingBatch) == 0 {
+		return success
+	}
+	pendingEmit = pendingEmit[:0]
+	return flushPending()
 }
 
 //export nervix_read_emit
 func nervixReadEmit() int32 {
-	return guardedExport(func() int32 {
-		if len(pendingEmit) == 0 {
-			return 0
-		}
-		buffer = append(buffer[:0], pendingEmit[0]...)
-		pendingEmit = pendingEmit[1:]
-		return int32(len(buffer))
-	})
+	if len(pendingEmit) == 0 {
+		return 0
+	}
+	buffer = append(buffer[:0], pendingEmit[0]...)
+	pendingEmit = pendingEmit[1:]
+	return int32(len(buffer))
 }
 
+// nervix_dump_state saves the processed row count together with the branch configuration it
+// belongs to. A guest that cannot serialize its state reports why and returns a negative code, and
+// the host keeps the state it saved last.
+//
 //export nervix_dump_state
 func nervixDumpState() int32 {
-	return guardedStateExport(false, func() int32 {
-		encoded, ok := encodeSnapshot(guestSnapshot{
-			ProcessedBatches:    processedBatches,
-			ProcessedRows:       processedRows,
-			PendingStartRow:     pendingStartRow,
-			LastDomainTimeNanos: lastDomainTimeNanos,
-			LastTimeoutHandle:   lastTimeoutHandle,
-			PendingBatch:        pendingBatch,
-			InitMetadata:        initMetadata,
-			SavedState:          savedState,
-			ErrorState:          errorState,
-		})
-		if !ok {
-			return errInvalidSize
-		}
-
-		buffer = append(buffer[:0], encoded...)
-		return int32(len(buffer))
+	if !initialized {
+		return errNotInitialized
+	}
+	if unserializableBy != 0 {
+		setGlobalError("guest cannot serialize its state for value " + strconv.Itoa(int(unserializableBy)))
+		return errErrorState
+	}
+	applicationState := binary.LittleEndian.AppendUint64(nil, processedRows)
+	encoded := encodeSnapshot(guestSnapshot{
+		InitMetadata:     initMetadata,
+		ApplicationState: applicationState,
 	})
+	buffer = append(buffer[:0], encoded...)
+	return int32(len(buffer))
 }
 
 //export nervix_load_state
 func nervixLoadState(ptr int32, size int32) int32 {
-	return guardedStateExport(false, func() int32 {
-		data, code := readBufferRange(ptr, size)
-		if code != success {
-			return code
-		}
-		return loadStateBytes(data)
-	})
+	data, code := readBufferRange(ptr, size)
+	if code != success {
+		return code
+	}
+	if !initialized {
+		return errNotInitialized
+	}
+	return loadStateBytes(data)
 }
 
 //export nervix_reset_state
 func nervixResetState() int32 {
 	initMetadata = initMetadata[:0]
+	outputRelays = outputRelays[:0]
+	initialized = false
+	processedRows = 0
+	processedBatches = 0
 	pendingBatch = pendingBatch[:0]
+	pendingStartRow = 0
 	pendingEmit = pendingEmit[:0]
 	clearGlobalError()
-	savedState = savedState[:0]
-	outputRelays = outputRelays[:0]
-	pendingStartRow = 0
-	initialized = false
-	processedBatches = 0
-	processedRows = 0
-	lastDomainTimeNanos = 0
-	lastTimeoutHandle = 0
-	errorState = ""
+	unserializableBy = 0
 	return success
-}
-
-func guardedExport(fn func() int32) (result int32) {
-	return guardedStateExport(true, fn)
-}
-
-func guardedStateExport(checkErrorState bool, fn func() int32) (result int32) {
-	if checkErrorState && errorState != "" {
-		if len(globalError) == 0 {
-			setGlobalError(errorState)
-		}
-		return errErrorState
-	}
-	return fn()
 }
 
 func setGlobalError(reason string) {
@@ -401,7 +378,6 @@ func flushPending() int32 {
 	}
 	pendingEmit = append(pendingEmit, encoded)
 	pendingBatch = pendingBatch[:0]
-	pendingStartRow = processedRows
 	return success
 }
 
@@ -471,36 +447,29 @@ func outputRelaysFromInitMetadata(data []byte) ([]string, int32) {
 	return decodeBranchInitOutputRelays(data)
 }
 
+// loadStateBytes restores the processed row count from a snapshot of this instance's branch
+// configuration. The instance keeps the configuration nervix_init gave it; a snapshot taken under
+// another one is rejected rather than restored into it.
 func loadStateBytes(data []byte) int32 {
 	snapshot, ok := decodeSnapshot(data)
 	if !ok {
 		setGlobalError("saved state is not a guest snapshot envelope")
 		return errSnapshotEnvelopeRejected
 	}
-
-	processedBatches = snapshot.ProcessedBatches
-	processedRows = snapshot.ProcessedRows
-	pendingStartRow = snapshot.PendingStartRow
-	lastDomainTimeNanos = snapshot.LastDomainTimeNanos
-	lastTimeoutHandle = snapshot.LastTimeoutHandle
-	pendingBatch = append(pendingBatch[:0], snapshot.PendingBatch...)
-	if len(pendingBatch) > 0 {
-		pending, code := decodeEnvelope(pendingBatch)
-		if code != success || pending.Kind != "input" {
-			setGlobalError("saved pending batch is not an input envelope")
-			return errApplicationStateRejected
-		}
-	}
-	initMetadata = append(initMetadata[:0], snapshot.InitMetadata...)
-	relays, code := outputRelaysFromInitMetadata(initMetadata)
-	if code != success {
-		setGlobalError("saved snapshot carries undecodable branch configuration")
+	sameBranch, ok := sameBranchConfiguration(snapshot.InitMetadata, initMetadata)
+	if !ok {
+		setGlobalError("saved snapshot carries init metadata this guest cannot decode")
 		return errSnapshotEnvelopeRejected
 	}
-	outputRelays = append(outputRelays[:0], relays...)
-	savedState = append(savedState[:0], snapshot.SavedState...)
-	errorState = snapshot.ErrorState
-	initialized = true
+	if !sameBranch {
+		setGlobalError("saved snapshot was taken under a different branch configuration")
+		return errSnapshotEnvelopeRejected
+	}
+	if len(snapshot.ApplicationState) != processedRowsStateBytes {
+		setGlobalError("saved row ordinal must be exactly 8 bytes")
+		return errApplicationStateRejected
+	}
+	processedRows = binary.LittleEndian.Uint64(snapshot.ApplicationState)
 	return success
 }
 

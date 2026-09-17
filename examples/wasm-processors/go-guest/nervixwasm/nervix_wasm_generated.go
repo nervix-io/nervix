@@ -1416,102 +1416,8 @@ func (rcv *GuestSnapshot) Table() flatbuffers.Table {
 	return rcv._tab
 }
 
-func (rcv *GuestSnapshot) ProcessedBatches() uint64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
-	if o != 0 {
-		return rcv._tab.GetUint64(o + rcv._tab.Pos)
-	}
-	return 0
-}
-
-func (rcv *GuestSnapshot) MutateProcessedBatches(n uint64) bool {
-	return rcv._tab.MutateUint64Slot(4, n)
-}
-
-func (rcv *GuestSnapshot) ProcessedRows() uint64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
-	if o != 0 {
-		return rcv._tab.GetUint64(o + rcv._tab.Pos)
-	}
-	return 0
-}
-
-func (rcv *GuestSnapshot) MutateProcessedRows(n uint64) bool {
-	return rcv._tab.MutateUint64Slot(6, n)
-}
-
-func (rcv *GuestSnapshot) PendingStartRow() uint64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
-	if o != 0 {
-		return rcv._tab.GetUint64(o + rcv._tab.Pos)
-	}
-	return 0
-}
-
-func (rcv *GuestSnapshot) MutatePendingStartRow(n uint64) bool {
-	return rcv._tab.MutateUint64Slot(8, n)
-}
-
-func (rcv *GuestSnapshot) LastDomainTimeNanos() int64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
-	if o != 0 {
-		return rcv._tab.GetInt64(o + rcv._tab.Pos)
-	}
-	return 0
-}
-
-func (rcv *GuestSnapshot) MutateLastDomainTimeNanos(n int64) bool {
-	return rcv._tab.MutateInt64Slot(10, n)
-}
-
-func (rcv *GuestSnapshot) LastTimeoutHandle() int64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
-	if o != 0 {
-		return rcv._tab.GetInt64(o + rcv._tab.Pos)
-	}
-	return 0
-}
-
-func (rcv *GuestSnapshot) MutateLastTimeoutHandle(n int64) bool {
-	return rcv._tab.MutateInt64Slot(12, n)
-}
-
-func (rcv *GuestSnapshot) PendingBatch(j int) byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
-	if o != 0 {
-		a := rcv._tab.Vector(o)
-		return rcv._tab.GetByte(a + flatbuffers.UOffsetT(j*1))
-	}
-	return 0
-}
-
-func (rcv *GuestSnapshot) PendingBatchLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
-	if o != 0 {
-		return rcv._tab.VectorLen(o)
-	}
-	return 0
-}
-
-func (rcv *GuestSnapshot) PendingBatchBytes() []byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
-	if o != 0 {
-		return rcv._tab.ByteVector(o + rcv._tab.Pos)
-	}
-	return nil
-}
-
-func (rcv *GuestSnapshot) MutatePendingBatch(j int, n byte) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
-	if o != 0 {
-		a := rcv._tab.Vector(o)
-		return rcv._tab.MutateByte(a+flatbuffers.UOffsetT(j*1), n)
-	}
-	return false
-}
-
 func (rcv *GuestSnapshot) InitMetadata(j int) byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
 	if o != 0 {
 		a := rcv._tab.Vector(o)
 		return rcv._tab.GetByte(a + flatbuffers.UOffsetT(j*1))
@@ -1520,7 +1426,7 @@ func (rcv *GuestSnapshot) InitMetadata(j int) byte {
 }
 
 func (rcv *GuestSnapshot) InitMetadataLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
 	}
@@ -1528,7 +1434,7 @@ func (rcv *GuestSnapshot) InitMetadataLength() int {
 }
 
 func (rcv *GuestSnapshot) InitMetadataBytes() []byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
 	}
@@ -1536,7 +1442,7 @@ func (rcv *GuestSnapshot) InitMetadataBytes() []byte {
 }
 
 func (rcv *GuestSnapshot) MutateInitMetadata(j int, n byte) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
 	if o != 0 {
 		a := rcv._tab.Vector(o)
 		return rcv._tab.MutateByte(a+flatbuffers.UOffsetT(j*1), n)
@@ -1544,8 +1450,8 @@ func (rcv *GuestSnapshot) MutateInitMetadata(j int, n byte) bool {
 	return false
 }
 
-func (rcv *GuestSnapshot) SavedState(j int) byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+func (rcv *GuestSnapshot) ApplicationState(j int) byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
 	if o != 0 {
 		a := rcv._tab.Vector(o)
 		return rcv._tab.GetByte(a + flatbuffers.UOffsetT(j*1))
@@ -1553,24 +1459,24 @@ func (rcv *GuestSnapshot) SavedState(j int) byte {
 	return 0
 }
 
-func (rcv *GuestSnapshot) SavedStateLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+func (rcv *GuestSnapshot) ApplicationStateLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
 	}
 	return 0
 }
 
-func (rcv *GuestSnapshot) SavedStateBytes() []byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+func (rcv *GuestSnapshot) ApplicationStateBytes() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
 	}
 	return nil
 }
 
-func (rcv *GuestSnapshot) MutateSavedState(j int, n byte) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+func (rcv *GuestSnapshot) MutateApplicationState(j int, n byte) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
 	if o != 0 {
 		a := rcv._tab.Vector(o)
 		return rcv._tab.MutateByte(a+flatbuffers.UOffsetT(j*1), n)
@@ -1578,52 +1484,20 @@ func (rcv *GuestSnapshot) MutateSavedState(j int, n byte) bool {
 	return false
 }
 
-func (rcv *GuestSnapshot) ErrorState() []byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
-	if o != 0 {
-		return rcv._tab.ByteVector(o + rcv._tab.Pos)
-	}
-	return nil
-}
-
 func GuestSnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(9)
-}
-func GuestSnapshotAddProcessedBatches(builder *flatbuffers.Builder, processedBatches uint64) {
-	builder.PrependUint64Slot(0, processedBatches, 0)
-}
-func GuestSnapshotAddProcessedRows(builder *flatbuffers.Builder, processedRows uint64) {
-	builder.PrependUint64Slot(1, processedRows, 0)
-}
-func GuestSnapshotAddPendingStartRow(builder *flatbuffers.Builder, pendingStartRow uint64) {
-	builder.PrependUint64Slot(2, pendingStartRow, 0)
-}
-func GuestSnapshotAddLastDomainTimeNanos(builder *flatbuffers.Builder, lastDomainTimeNanos int64) {
-	builder.PrependInt64Slot(3, lastDomainTimeNanos, 0)
-}
-func GuestSnapshotAddLastTimeoutHandle(builder *flatbuffers.Builder, lastTimeoutHandle int64) {
-	builder.PrependInt64Slot(4, lastTimeoutHandle, 0)
-}
-func GuestSnapshotAddPendingBatch(builder *flatbuffers.Builder, pendingBatch flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(pendingBatch), 0)
-}
-func GuestSnapshotStartPendingBatchVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
-	return builder.StartVector(1, numElems, 1)
+	builder.StartObject(2)
 }
 func GuestSnapshotAddInitMetadata(builder *flatbuffers.Builder, initMetadata flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(6, flatbuffers.UOffsetT(initMetadata), 0)
+	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(initMetadata), 0)
 }
 func GuestSnapshotStartInitMetadataVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
 }
-func GuestSnapshotAddSavedState(builder *flatbuffers.Builder, savedState flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(7, flatbuffers.UOffsetT(savedState), 0)
+func GuestSnapshotAddApplicationState(builder *flatbuffers.Builder, applicationState flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(1, flatbuffers.UOffsetT(applicationState), 0)
 }
-func GuestSnapshotStartSavedStateVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+func GuestSnapshotStartApplicationStateVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
-}
-func GuestSnapshotAddErrorState(builder *flatbuffers.Builder, errorState flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(8, flatbuffers.UOffsetT(errorState), 0)
 }
 func GuestSnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
