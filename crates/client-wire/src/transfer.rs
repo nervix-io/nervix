@@ -11,7 +11,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use thiserror::Error;
 
 use crate::{
-    codec::{DecodeError, Decoder, EncodedUnion, Encoder, wire_size},
+    codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, wire_size},
     common::RequestId,
     frame::{EncodedFrame, ServerFrame, VerifiedFrame},
     limits::{MIN_FRAME_BYTES, SessionLimits},
@@ -130,25 +130,25 @@ impl TransferPart {
         decoder: Decoder<'_>,
         request_id: RequestId,
         part: wire::TransferPart<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let total_bytes = decoder.non_zero("TransferPart.total_bytes", part.total_bytes())?;
         let total_bytes = decoder.size("TransferPart.total_bytes", total_bytes.get())?;
         let offset = decoder.size("TransferPart.offset", part.offset())?;
         let chunk = part.chunk();
         if chunk.is_empty() {
-            return Err(Report::new(DecodeError::EmptyCollection {
+            return Err(Report::new(WireDecodeError::EmptyCollection {
                 field: "TransferPart.chunk",
             }));
         }
         let end = offset.checked_add(chunk.len());
         let Some(end) = end else {
-            return Err(Report::new(DecodeError::OutOfRange {
+            return Err(Report::new(WireDecodeError::OutOfRange {
                 field: "TransferPart.offset",
                 value: part.offset(),
             }));
         };
         if end > total_bytes {
-            return Err(Report::new(DecodeError::InvalidValue {
+            return Err(Report::new(WireDecodeError::InvalidValue {
                 field: "TransferPart.chunk",
                 kind: "chunk within the transfer's total bytes",
             }));

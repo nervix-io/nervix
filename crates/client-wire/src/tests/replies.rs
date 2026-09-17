@@ -16,13 +16,12 @@ use super::{
     },
 };
 use crate::{
-    AttachDisposition, AttachOutcome, CancelOutcome, CancelState, CancellationStage, DecodeError,
-    DomainInfo, DomainList, DomainSelection, InspectionOutcome, InspectionRejection,
-    LeaderRedirect, Reply, ReplyBody, RequestCancelled, RequestRejected, RequestRejection,
-    ServerMessage, SourceSpan, SubscribeDisposition, SubscribeOutcome, SubscriptionOpened,
-    SubscriptionType, SuggestOutcome, Suggestion, SuggestionKind, TransactionInspection,
-    TransactionState, TransactionStatus, UnsubscribeDisposition, UnsubscribeOutcome,
-    WireValueError, wire,
+    AttachDisposition, AttachOutcome, CancelOutcome, CancelState, CancellationStage, DomainInfo,
+    DomainList, DomainSelection, InspectionOutcome, InspectionRejection, LeaderRedirect, Reply,
+    ReplyBody, RequestCancelled, RequestRejected, RequestRejection, ServerMessage, SourceSpan,
+    SubscribeDisposition, SubscribeOutcome, SubscriptionOpened, SubscriptionType, SuggestOutcome,
+    Suggestion, SuggestionKind, TransactionInspection, TransactionState, TransactionStatus,
+    UnsubscribeDisposition, UnsubscribeOutcome, WireDecodeError, WireValueError, wire,
 };
 
 fn reply(body: ReplyBody) -> Reply {
@@ -213,7 +212,7 @@ fn inconsistent_transaction_status_is_refused() {
     let frame = raw_server(status_frame(1, 2, None));
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
-        DecodeError::InvalidValue {
+        WireDecodeError::InvalidValue {
             field: "TransactionStatus.applied_operations",
             kind: "operation count",
         }
@@ -221,7 +220,7 @@ fn inconsistent_transaction_status_is_refused() {
     let frame = raw_server(status_frame(1, 0, Some(0)));
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
-        DecodeError::ZeroValue {
+        WireDecodeError::ZeroValue {
             field: "TransactionFailed.failing_operation",
         }
     );
@@ -349,7 +348,7 @@ fn a_paced_domain_needs_a_period() {
     ));
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
-        DecodeError::ZeroValue {
+        WireDecodeError::ZeroValue {
             field: "PacedDomain.period_nanos",
         }
     );
@@ -485,7 +484,7 @@ fn replies_refuse_missing_and_undeclared_enums() {
     ));
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
-        DecodeError::MissingField {
+        WireDecodeError::MissingField {
             field: "CancelOutcome.state",
         }
     );
@@ -513,7 +512,7 @@ fn replies_refuse_missing_and_undeclared_enums() {
     ));
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
-        DecodeError::UnknownEnumValue {
+        WireDecodeError::UnknownEnumValue {
             field: "Suggestion.kind",
             value: 2,
         }
@@ -536,7 +535,7 @@ fn replies_refuse_undeclared_bodies_and_missing_request_identity() {
     ));
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
-        DecodeError::UnknownUnionVariant {
+        WireDecodeError::UnknownUnionVariant {
             field: "Reply.body",
             discriminant: 200,
         }
@@ -568,7 +567,7 @@ fn replies_refuse_undeclared_bodies_and_missing_request_identity() {
     assert_eq!(frame.request_id(), None);
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
-        DecodeError::ZeroValue {
+        WireDecodeError::ZeroValue {
             field: "Reply.request_id",
         }
     );
@@ -632,7 +631,7 @@ fn spans_must_be_ordered_and_endpoints_must_be_uris() {
     ));
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
-        DecodeError::InvalidValue {
+        WireDecodeError::InvalidValue {
             field: "Diagnostic.span",
             kind: "source span",
         }
@@ -646,7 +645,7 @@ fn spans_must_be_ordered_and_endpoints_must_be_uris() {
     let frame = raw_server(diagnostic_reply(None, "not a uri"));
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
-        DecodeError::InvalidValue {
+        WireDecodeError::InvalidValue {
             field: "LeaderEndpoints.grpc_uri",
             kind: "URI",
         }

@@ -18,12 +18,12 @@ use futures_util::StreamExt;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     ClientFrame, ClientMessage, ClientRequest, CommandDisposition, CommandOutcome, CommandRequest,
-    DecodeError, DomainInfo, DomainList, EncodedFrame, InspectTransactionRequest,
-    InspectionOutcome, NoticeLevel, OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, RequestId,
-    RequestRejected, RequestRejection, ServerEvent, ServerFrame, ServerMessage, ServerNotice,
-    SessionLimitSettings, SessionLimits, TransactionInspection, TransactionState,
-    TransactionStatus, TransferAssembly, UploadChunk, UploadDisposition, UploadFrame,
-    UploadMessage, UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame,
+    DomainInfo, DomainList, EncodedFrame, InspectTransactionRequest, InspectionOutcome,
+    NoticeLevel, OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, RequestId, RequestRejected,
+    RequestRejection, ServerEvent, ServerFrame, ServerMessage, ServerNotice, SessionLimitSettings,
+    SessionLimits, TransactionInspection, TransactionState, TransactionStatus, TransferAssembly,
+    UploadChunk, UploadDisposition, UploadFrame, UploadMessage, UploadReply, UploadReplyFrame,
+    UploadStart, VerifiedFrame, WireDecodeError,
     grpc::{
         ClientExchangeCodec, ClientUploadCodec, EXCHANGE_PATH, FrameDecoder, SERVICE_NAME,
         ServerExchangeCodec, ServerUploadCodec, UPLOAD_RESOURCE_PATH,
@@ -206,9 +206,9 @@ fn answer(frame: &VerifiedFrame<ClientFrame>) -> Option<Reply> {
     })
 }
 
-fn rejection(request_id: RequestId, error: &Report<DecodeError>) -> Reply {
+fn rejection(request_id: RequestId, error: &Report<WireDecodeError>) -> Reply {
     let field = match error.current_context() {
-        DecodeError::InvalidValue { field, .. } => Some((*field).to_string()),
+        WireDecodeError::InvalidValue { field, .. } => Some((*field).to_string()),
         _ => None,
     };
     Reply {

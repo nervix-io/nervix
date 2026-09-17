@@ -177,7 +177,7 @@ Feature: Inferencer resources
     When these NSPL commands fail
       """
       CREATE INFERENCER unsupported_schema FROM features
-        USING RESOURCE inference
+        USING RESOURCE inference VERSION 1
         FILE 'model.onnx'
         INPUTS { "features" <unsupported_tensor_type>[2] = input.features }
         OUTPUT SCHEMA { "scores" <supported_tensor_type>[2] }

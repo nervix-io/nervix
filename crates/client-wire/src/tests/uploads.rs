@@ -9,9 +9,9 @@ use super::{
     samples::{diagnostics, leader},
 };
 use crate::{
-    DecodeError, EncodeError, LeaderRedirect, OutcomeOrigin, UploadChunk, UploadDisposition,
-    UploadFailure, UploadFrame, UploadMessage, UploadReply, UploadReplyFrame, UploadStart,
-    VerifiedFrame, wire,
+    LeaderRedirect, OutcomeOrigin, UploadChunk, UploadDisposition, UploadFailure, UploadFrame,
+    UploadMessage, UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame, WireDecodeError,
+    WireEncodeError, wire,
 };
 
 fn identity(raw: &str) -> ResourceUploadIdentity {
@@ -63,7 +63,7 @@ fn a_chunk_is_read_in_place_or_shared_without_copying() {
     let error = UploadChunk::encode(&[], &limits()).expect_err("a chunk holds bytes");
     assert_eq!(
         error.current_context(),
-        &EncodeError::EmptyCollection {
+        &WireEncodeError::EmptyCollection {
             field: "UploadChunk.bytes",
         }
     );
@@ -99,7 +99,7 @@ fn malformed_upload_frames_are_refused() {
     });
     assert_eq!(
         decode_error(UploadMessage::decode(&frame)),
-        DecodeError::EmptyCollection {
+        WireDecodeError::EmptyCollection {
             field: "UploadChunk.bytes",
         }
     );
@@ -125,14 +125,14 @@ fn malformed_upload_frames_are_refused() {
     let frame = upload_frame(start(0, "upload-1"));
     assert_eq!(
         decode_error(UploadMessage::decode(&frame)),
-        DecodeError::ZeroValue {
+        WireDecodeError::ZeroValue {
             field: "UploadStart.total_bytes",
         }
     );
     let frame = upload_frame(start(1, "not valid"));
     assert_eq!(
         decode_error(UploadMessage::decode(&frame)),
-        DecodeError::InvalidValue {
+        WireDecodeError::InvalidValue {
             field: "UploadStart.upload_identity",
             kind: "upload identity",
         }
@@ -145,7 +145,7 @@ fn malformed_upload_frames_are_refused() {
     });
     assert_eq!(
         decode_error(UploadMessage::decode(&frame)),
-        DecodeError::UnknownUnionVariant {
+        WireDecodeError::UnknownUnionVariant {
             field: "UploadMessage.part",
             discriminant: 3,
         }
@@ -248,13 +248,13 @@ fn malformed_upload_replies_are_refused() {
     assert!(UploadReply::decode(&reply_frame(Some(1), 1)).is_ok());
     assert_eq!(
         decode_error(UploadReply::decode(&reply_frame(Some(0), 1))),
-        DecodeError::ZeroValue {
+        WireDecodeError::ZeroValue {
             field: "UploadReply.request_id",
         }
     );
     assert_eq!(
         decode_error(UploadReply::decode(&reply_frame(None, 0))),
-        DecodeError::ZeroValue {
+        WireDecodeError::ZeroValue {
             field: "ResourceInstalled.version",
         }
     );

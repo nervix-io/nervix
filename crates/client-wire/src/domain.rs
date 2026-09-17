@@ -11,7 +11,7 @@ use nervix_models::{
 };
 
 use crate::{
-    codec::{DecodeError, Decoder, EncodeError, EncodedUnion, Encoder, wire_enum},
+    codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
     common::{decode_node_ref, encode_node_ref},
     frame::{EncodedFrame, ServerFrame, VerifiedFrame},
     limits::SessionLimits,
@@ -33,7 +33,7 @@ impl DomainInfo {
     fn encode<'fbb>(
         &self,
         encoder: &mut Encoder<'fbb>,
-    ) -> Result<WIPOffset<wire::DomainInfo<'fbb>>, Report<EncodeError>> {
+    ) -> Result<WIPOffset<wire::DomainInfo<'fbb>>, Report<WireEncodeError>> {
         let domain = encoder.text("DomainInfo.domain", self.domain.as_str())?;
         let pace = match self.pace {
             DomainPace::Unpaced => EncodedUnion::new(
@@ -65,7 +65,7 @@ impl DomainInfo {
     fn decode(
         decoder: Decoder<'_>,
         info: wire::DomainInfo<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let domain = decoder.name("DomainInfo.domain", info.domain())?;
         let status = decoder.required_enumeration("DomainInfo.status", info.status())?;
         let pace = if let Some(paced) = info.pace_as_paced_domain() {
@@ -91,8 +91,10 @@ impl DomainInfo {
         encoder: &mut Encoder<'fbb>,
         field: &'static str,
         domains: &[Self],
-    ) -> Result<WIPOffset<Vector<'fbb, ForwardsUOffset<wire::DomainInfo<'fbb>>>>, Report<EncodeError>>
-    {
+    ) -> Result<
+        WIPOffset<Vector<'fbb, ForwardsUOffset<wire::DomainInfo<'fbb>>>>,
+        Report<WireEncodeError>,
+    > {
         encoder.table_vector(field, domains, Self::encode)
     }
 
@@ -100,7 +102,7 @@ impl DomainInfo {
         decoder: Decoder<'_>,
         field: &'static str,
         domains: Vector<'a, ForwardsUOffset<wire::DomainInfo<'a>>>,
-    ) -> Result<Vec<Self>, Report<DecodeError>> {
+    ) -> Result<Vec<Self>, Report<WireDecodeError>> {
         decoder.table_vector(field, domains, |domain| Self::decode(decoder, domain))
     }
 }
@@ -115,7 +117,7 @@ impl DomainList {
     pub(crate) fn encode_body(
         &self,
         encoder: &mut Encoder<'_>,
-    ) -> Result<EncodedUnion<wire::ReplyBody>, Report<EncodeError>> {
+    ) -> Result<EncodedUnion<wire::ReplyBody>, Report<WireEncodeError>> {
         let domains = DomainInfo::encode_all(encoder, "DomainList.domains", &self.domains)?;
         let list = wire::DomainList::create(
             encoder.fbb(),
@@ -129,7 +131,7 @@ impl DomainList {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         list: wire::DomainList<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let domains = DomainInfo::decode_all(decoder, "DomainList.domains", list.domains())?;
         Ok(Self { domains })
     }
@@ -146,7 +148,7 @@ impl DomainSelection {
     pub(crate) fn encode_body(
         &self,
         encoder: &mut Encoder<'_>,
-    ) -> Result<EncodedUnion<wire::ReplyBody>, Report<EncodeError>> {
+    ) -> Result<EncodedUnion<wire::ReplyBody>, Report<WireEncodeError>> {
         let selection = match self {
             Self::Selected(domain) => {
                 let domain = encoder.text("DomainSelected.domain", domain.as_str())?;
@@ -185,7 +187,7 @@ impl DomainSelection {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         outcome: wire::DomainSelectionOutcome<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         if let Some(selected) = outcome.selection_as_domain_selected() {
             let domain = decoder.name("DomainSelected.domain", selected.domain())?;
             return Ok(Self::Selected(domain));
@@ -211,7 +213,7 @@ impl DomainsObserved {
     pub fn encode(
         &self,
         limits: &SessionLimits,
-    ) -> Result<EncodedFrame<ServerFrame>, Report<EncodeError>> {
+    ) -> Result<EncodedFrame<ServerFrame>, Report<WireEncodeError>> {
         let mut encoder = Encoder::new(limits.frame_bytes(), limits);
         let domains =
             DomainInfo::encode_all(&mut encoder, "DomainsObserved.domains", &self.domains)?;
@@ -230,7 +232,7 @@ impl DomainsObserved {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         observed: wire::DomainsObserved<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let domains =
             DomainInfo::decode_all(decoder, "DomainsObserved.domains", observed.domains())?;
         Ok(Self { domains })
@@ -252,7 +254,7 @@ impl DomainEntity {
     fn encode<'fbb>(
         &self,
         encoder: &mut Encoder<'fbb>,
-    ) -> Result<WIPOffset<wire::DomainEntityEntry<'fbb>>, Report<EncodeError>> {
+    ) -> Result<WIPOffset<wire::DomainEntityEntry<'fbb>>, Report<WireEncodeError>> {
         let entity = match self {
             Self::Model(node) => {
                 let node = encode_node_ref(encoder, node)?;
@@ -290,7 +292,7 @@ impl DomainEntity {
     fn decode(
         decoder: Decoder<'_>,
         entry: wire::DomainEntityEntry<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         if let Some(model) = entry.entity_as_model_entity() {
             return Ok(Self::Model(decode_node_ref(decoder, model.node())?));
         }
@@ -327,7 +329,7 @@ impl DomainSnapshotObserved {
         graph_json: &str,
         entities: &[DomainEntity],
         limits: &SessionLimits,
-    ) -> Result<EncodedFrame<ServerFrame>, Report<EncodeError>> {
+    ) -> Result<EncodedFrame<ServerFrame>, Report<WireEncodeError>> {
         let mut encoder = Encoder::new(limits.frame_bytes(), limits);
         let domain = encoder.text("DomainSnapshotObserved.domain", domain.as_str())?;
         let graph_json = encoder.text("DomainSnapshotObserved.graph_json", graph_json)?;
@@ -354,7 +356,7 @@ impl DomainSnapshotObserved {
         frame: &VerifiedFrame<ServerFrame>,
         decoder: Decoder<'_>,
         snapshot: wire::DomainSnapshotObserved<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let domain = decoder.name("DomainSnapshotObserved.domain", snapshot.domain())?;
         decoder.check_text("DomainSnapshotObserved.graph_json", snapshot.graph_json())?;
         let entities = decoder.table_vector(
@@ -404,7 +406,7 @@ impl ClusterObserved {
     pub fn encode(
         &self,
         limits: &SessionLimits,
-    ) -> Result<EncodedFrame<ServerFrame>, Report<EncodeError>> {
+    ) -> Result<EncodedFrame<ServerFrame>, Report<WireEncodeError>> {
         let mut encoder = Encoder::new(limits.frame_bytes(), limits);
         let observed = wire::ClusterObserved::create(
             encoder.fbb(),

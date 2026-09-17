@@ -529,6 +529,32 @@ table ResourceCatalogImpact {
   operations: [ulong] (required);
 }
 
+/// `VERSION <n>`: exactly this version.
+table ResourceVersionNumber {
+  version: ulong;
+}
+
+/// `VERSION LATEST`: the highest completed version when the statement is applied.
+table LatestResourceVersion {}
+
+/// A resource version as a statement wrote it.
+union RequestedResourceVersion {
+  ResourceVersionNumber,
+  LatestResourceVersion
+}
+
+/// The resource version a created or changed node binds.
+table ResourceBindingImpact {
+  node: NodeRef (required);
+  resource: string (required);
+  /// The version as the statement wrote it.
+  requested: RequestedResourceVersion (required);
+  /// The version the binding resolved to.
+  version: ulong;
+  /// A non-empty set of operation numbers.
+  operations: [ulong] (required);
+}
+
 enum DomainLifecycleAction : ubyte {
   Start,
   Stop
@@ -614,6 +640,7 @@ table ImpactEffects {
   state_resets: [StateResetImpact] (required);
   force_flushes: [ForceFlushImpact] (required);
   resource_catalog: [ResourceCatalogImpact] (required);
+  resource_bindings: [ResourceBindingImpact] (required);
 }
 
 table PlannedStepImpact {

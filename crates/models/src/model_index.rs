@@ -12,32 +12,42 @@ use meticulous::OptionExt as _;
 use crate::{Model, ModelKind, ModelName, NodeRef, UniquelyKindedModel};
 
 /// The models of one domain, keyed by the node each one configures.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ModelIndex {
-    by_node: HashMap<NodeRef, Model>,
+///
+/// `Version` is the type the indexed models bind resource versions with, matching [`Model`]:
+/// stored configuration binds numbers, and configuration a transaction has queued but not planned
+/// keeps the versions its statements wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelIndex<Version = u64> {
+    by_node: HashMap<NodeRef, Model<Version>>,
 }
 
-impl ModelIndex {
-    pub fn new() -> Self {
+impl<Version> Default for ModelIndex<Version> {
+    fn default() -> Self {
         Self {
             by_node: HashMap::new(),
         }
     }
+}
+
+impl<Version> ModelIndex<Version> {
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Stores `model` under the node it configures, replacing the model already there.
-    pub fn insert(&mut self, model: Model) -> Option<Model> {
+    pub fn insert(&mut self, model: Model<Version>) -> Option<Model<Version>> {
         self.by_node.insert(model.node_ref(), model)
     }
 
     /// Removes the model configuring `node`.
-    pub fn remove(&mut self, node: &NodeRef) -> Option<Model> {
+    pub fn remove(&mut self, node: &NodeRef) -> Option<Model<Version>> {
         self.by_node.remove(node)
     }
 
     /// The model configuring `node`, whatever its kind.
     ///
-    /// Readers that already name the kind use [`Self::configured`] and receive its shape.
-    pub fn get(&self, node: &NodeRef) -> Option<&Model> {
+    /// Readers that already name the kind use [`ModelIndex::configured`] and receive its shape.
+    pub fn get(&self, node: &NodeRef) -> Option<&Model<Version>> {
         self.by_node.get(node)
     }
 
@@ -59,15 +69,17 @@ impl ModelIndex {
     }
 
     /// The models this index holds, in no particular order.
-    pub fn models(&self) -> impl Iterator<Item = &Model> {
+    pub fn models(&self) -> impl Iterator<Item = &Model<Version>> {
         self.by_node.values()
     }
 
     /// Each node with the model configuring it, in no particular order.
-    pub fn iter(&self) -> impl Iterator<Item = (&NodeRef, &Model)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&NodeRef, &Model<Version>)> {
         self.by_node.iter()
     }
+}
 
+impl ModelIndex {
     /// The `M` named `identifier`, when the domain configures one.
     pub fn configured<M: UniquelyKindedModel>(
         &self,
@@ -115,8 +127,8 @@ impl ModelIndex {
         "a model index keys every model by the kind the model itself reports";
 }
 
-impl FromIterator<Model> for ModelIndex {
-    fn from_iter<I: IntoIterator<Item = Model>>(models: I) -> Self {
+impl<Version> FromIterator<Model<Version>> for ModelIndex<Version> {
+    fn from_iter<I: IntoIterator<Item = Model<Version>>>(models: I) -> Self {
         let mut index = Self::new();
         for model in models {
             index.insert(model);
@@ -125,18 +137,18 @@ impl FromIterator<Model> for ModelIndex {
     }
 }
 
-impl<'a> IntoIterator for &'a ModelIndex {
-    type Item = (&'a NodeRef, &'a Model);
-    type IntoIter = std::collections::hash_map::Iter<'a, NodeRef, Model>;
+impl<'a, Version> IntoIterator for &'a ModelIndex<Version> {
+    type Item = (&'a NodeRef, &'a Model<Version>);
+    type IntoIter = std::collections::hash_map::Iter<'a, NodeRef, Model<Version>>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.by_node.iter()
     }
 }
 
-impl IntoIterator for ModelIndex {
-    type Item = (NodeRef, Model);
-    type IntoIter = std::collections::hash_map::IntoIter<NodeRef, Model>;
+impl<Version> IntoIterator for ModelIndex<Version> {
+    type Item = (NodeRef, Model<Version>);
+    type IntoIter = std::collections::hash_map::IntoIter<NodeRef, Model<Version>>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.by_node.into_iter()

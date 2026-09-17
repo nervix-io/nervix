@@ -9,7 +9,7 @@ use nervix_models::{
 };
 
 use crate::{
-    codec::{DecodeError, Decoder, EncodeError, EncodedUnion, Encoder, wire_size},
+    codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_size},
     common::{RequestId, WireValueError},
     frame::{ClientFrame, EncodedFrame, VerifiedFrame},
     limits::SessionLimits,
@@ -144,7 +144,7 @@ impl ClientMessage {
     pub fn encode(
         &self,
         limits: &SessionLimits,
-    ) -> Result<EncodedFrame<ClientFrame>, Report<EncodeError>> {
+    ) -> Result<EncodedFrame<ClientFrame>, Report<WireEncodeError>> {
         let mut encoder = Encoder::new(limits.frame_bytes(), limits);
         let request = self.request.encode(&mut encoder)?;
         let message = wire::ClientMessage::create(
@@ -163,7 +163,7 @@ impl ClientMessage {
     /// A failure names the request it concerns whenever the frame carries a valid request
     /// identity, which [`VerifiedFrame::request_id`] reads, so the server can reject that request
     /// and keep the session.
-    pub fn decode(frame: &VerifiedFrame<ClientFrame>) -> Result<Self, Report<DecodeError>> {
+    pub fn decode(frame: &VerifiedFrame<ClientFrame>) -> Result<Self, Report<WireDecodeError>> {
         let decoder = Decoder::new(frame.limits());
         let message = frame.root();
         let request_id =
@@ -189,7 +189,7 @@ impl ClientRequest {
     fn encode(
         &self,
         encoder: &mut Encoder<'_>,
-    ) -> Result<EncodedUnion<wire::ClientRequest>, Report<EncodeError>> {
+    ) -> Result<EncodedUnion<wire::ClientRequest>, Report<WireEncodeError>> {
         let union = match self {
             Self::Command(command) => EncodedUnion::new(
                 wire::ClientRequest::CommandRequest,
@@ -295,7 +295,7 @@ impl ClientRequest {
     fn decode(
         decoder: Decoder<'_>,
         message: wire::ClientMessage<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let request = match message.request_type() {
             wire::ClientRequest::CommandRequest => Self::Command(CommandRequest::decode(
                 decoder,
@@ -309,7 +309,7 @@ impl ClientRequest {
                 match SuggestRequest::new(input, cursor, domain) {
                     Ok(request) => Self::Suggest(request),
                     Err(error) => {
-                        return Err(error.change_context(DecodeError::InvalidValue {
+                        return Err(error.change_context(WireDecodeError::InvalidValue {
                             field: "SuggestRequest.cursor",
                             kind: "character boundary of the input",
                         }));
@@ -392,7 +392,7 @@ impl CommandRequest {
     fn encode<'fbb>(
         &self,
         encoder: &mut Encoder<'fbb>,
-    ) -> Result<WIPOffset<wire::CommandRequest<'fbb>>, Report<EncodeError>> {
+    ) -> Result<WIPOffset<wire::CommandRequest<'fbb>>, Report<WireEncodeError>> {
         let query = encoder.text("CommandRequest.query", &self.query)?;
         let domain = self.domain.as_ref().map(DomainName::as_str);
         let domain = encoder.optional_text("CommandRequest.domain", domain)?;
@@ -422,7 +422,7 @@ impl CommandRequest {
     fn decode(
         decoder: Decoder<'_>,
         command: wire::CommandRequest<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let query = decoder.text("CommandRequest.query", command.query())?;
         let domain = decoder.optional_name("CommandRequest.domain", command.domain())?;
         let execution_reference = decoder.check_text(
@@ -432,7 +432,7 @@ impl CommandRequest {
         let execution_reference = match CommandExecutionReference::parse(execution_reference) {
             Ok(reference) => reference,
             Err(error) => {
-                return Err(error.change_context(DecodeError::InvalidValue {
+                return Err(error.change_context(WireDecodeError::InvalidValue {
                     field: "CommandRequest.execution_reference",
                     kind: "execution reference",
                 }));

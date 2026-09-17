@@ -5,7 +5,7 @@ use bytes::Bytes;
 use flatbuffers::{FlatBufferBuilder, UnionWIPOffset, WIPOffset};
 
 use super::fixtures::{decode_error, finish_raw, raw_server};
-use crate::{DecodeError, ServerMessage, wire};
+use crate::{ServerMessage, WireDecodeError, wire};
 
 type Builder = FlatBufferBuilder<'static>;
 
@@ -25,6 +25,9 @@ struct RawReport {
     /// The discriminant a node's coverage is stored under, when a test overrides the one its
     /// value has.
     coverage_type: Option<wire::NodeBranchCoverage>,
+    /// The discriminant of a resource binding's requested version, when the contribution binds a
+    /// resource.
+    requested_version_type: Option<wire::RequestedResourceVersion>,
     /// The attributions of subgraph pause nodes sharing one coverage, when the step pauses one.
     subgraph_attributions: Option<Vec<Vec<u64>>>,
 }
@@ -42,6 +45,7 @@ impl Default for RawReport {
             configuration_attributions: vec![vec![1]],
             selected_keys: None,
             coverage_type: None,
+            requested_version_type: None,
             subgraph_attributions: None,
         }
     }
@@ -159,6 +163,30 @@ impl RawReport {
         let state_resets = builder.create_vector::<WIPOffset<wire::StateResetImpact>>(&[]);
         let force_flushes = builder.create_vector::<WIPOffset<wire::ForceFlushImpact>>(&[]);
         let resource_catalog = builder.create_vector::<WIPOffset<wire::ResourceCatalogImpact>>(&[]);
+        let mut bindings = Vec::new();
+        if contribution && let Some(requested_type) = self.requested_version_type {
+            let node = self.node(builder);
+            let resource = builder.create_string("guest_bundle");
+            let latest =
+                wire::LatestResourceVersion::create(builder, &wire::LatestResourceVersionArgs {});
+            let operations = builder.create_vector(&[1_u64]);
+            // A NONE discriminant equals the field's default, which the builder writes only when
+            // forced to.
+            builder.force_defaults(true);
+            bindings.push(wire::ResourceBindingImpact::create(
+                builder,
+                &wire::ResourceBindingImpactArgs {
+                    node: Some(node),
+                    resource: Some(resource),
+                    requested_type,
+                    requested: Some(latest.as_union_value()),
+                    version: 1,
+                    operations: Some(operations),
+                },
+            ));
+            builder.force_defaults(false);
+        }
+        let resource_bindings = builder.create_vector(&bindings);
         wire::ImpactEffects::create(
             builder,
             &wire::ImpactEffectsArgs {
@@ -171,6 +199,7 @@ impl RawReport {
                 state_resets: Some(state_resets),
                 force_flushes: Some(force_flushes),
                 resource_catalog: Some(resource_catalog),
+                resource_bindings: Some(resource_bindings),
             },
         )
     }
@@ -387,7 +416,7 @@ impl RawReport {
         finish_raw(builder, root, "NXSM")
     }
 
-    fn decode_error(&self) -> DecodeError {
+    fn decode_error(&self) -> WireDecodeError {
         decode_error(ServerMessage::decode(&raw_server(self.frame())))
     }
 }
@@ -450,7 +479,7 @@ fn attributions_are_non_empty_ascending_sets_of_operation_numbers() {
         };
         assert_eq!(
             report.decode_error(),
-            DecodeError::NonCanonicalSet { field }
+            WireDecodeError::NonCanonicalSet { field }
         );
     }
     let report = RawReport {
@@ -459,13 +488,13 @@ fn attributions_are_non_empty_ascending_sets_of_operation_numbers() {
     };
     assert_eq!(
         report.decode_error(),
-        DecodeError::EmptyCollection { field }
+        WireDecodeError::EmptyCollection { field }
     );
     let report = RawReport {
         configuration_attributions: vec![vec![0]],
         ..RawReport::default()
     };
-    assert_eq!(report.decode_error(), DecodeError::ZeroValue { field });
+    assert_eq!(report.decode_error(), WireDecodeError::ZeroValue { field });
 }
 
 #[test]
@@ -478,7 +507,7 @@ fn effect_sets_are_sent_in_canonical_order() {
         };
         assert_eq!(
             report.decode_error(),
-            DecodeError::NonCanonicalSet { field }
+            WireDecodeError::NonCanonicalSet { field }
         );
     }
 }
@@ -491,7 +520,7 @@ fn subgraph_nodes_never_share_a_coverage() {
     };
     assert_eq!(
         report.decode_error(),
-        DecodeError::NonCanonicalSet {
+        WireDecodeError::NonCanonicalSet {
             field: "QuiesceSubgraph.nodes",
         }
     );
@@ -506,7 +535,7 @@ fn selected_branch_keys_are_a_non_empty_ascending_set() {
     };
     assert_eq!(
         report.decode_error(),
-        DecodeError::EmptyCollection { field }
+        WireDecodeError::EmptyCollection { field }
     );
     for keys in [vec![[2; 32], [1; 32]], vec![[1; 32], [1; 32]]] {
         let report = RawReport {
@@ -515,7 +544,7 @@ fn selected_branch_keys_are_a_non_empty_ascending_set() {
         };
         assert_eq!(
             report.decode_error(),
-            DecodeError::NonCanonicalSet { field }
+            WireDecodeError::NonCanonicalSet { field }
         );
     }
 }
@@ -528,7 +557,7 @@ fn a_report_must_follow_the_vocabulary_rules() {
     };
     assert_eq!(
         report.decode_error(),
-        DecodeError::InvalidValue {
+        WireDecodeError::InvalidValue {
             field: "TransactionImpactReport",
             kind: "transaction impact report",
         }
@@ -539,7 +568,7 @@ fn a_report_must_follow_the_vocabulary_rules() {
     };
     assert!(matches!(
         report.decode_error(),
-        DecodeError::InvalidValue {
+        WireDecodeError::InvalidValue {
             field: "TransactionImpactReport",
             ..
         }
@@ -550,7 +579,7 @@ fn a_report_must_follow_the_vocabulary_rules() {
     };
     assert_eq!(
         report.decode_error(),
-        DecodeError::InvalidValue {
+        WireDecodeError::InvalidValue {
             field: "OperationReport.execution_step",
             kind: "operation range",
         }
@@ -561,7 +590,7 @@ fn a_report_must_follow_the_vocabulary_rules() {
     };
     assert_eq!(
         report.decode_error(),
-        DecodeError::EmptyCollection {
+        WireDecodeError::EmptyCollection {
             field: "ImpactIncomplete.diagnostics",
         }
     );
@@ -575,7 +604,7 @@ fn undeclared_report_members_are_refused() {
     };
     assert_eq!(
         report.decode_error(),
-        DecodeError::UnknownUnionVariant {
+        WireDecodeError::UnknownUnionVariant {
             field: "OperationReport.operation",
             discriminant: 42,
         }
@@ -586,7 +615,7 @@ fn undeclared_report_members_are_refused() {
     };
     assert_eq!(
         report.decode_error(),
-        DecodeError::UnknownEnumValue {
+        WireDecodeError::UnknownEnumValue {
             field: "NodeRef.kind",
             value: 25,
         }
@@ -597,7 +626,7 @@ fn undeclared_report_members_are_refused() {
     };
     assert_eq!(
         report.decode_error(),
-        DecodeError::MissingField {
+        WireDecodeError::MissingField {
             field: "NodeRef.kind",
         }
     );
@@ -607,11 +636,32 @@ fn undeclared_report_members_are_refused() {
     };
     assert_eq!(
         report.decode_error(),
-        DecodeError::UnknownEnumValue {
+        WireDecodeError::UnknownEnumValue {
             field: "ConfigurationReason.aspect",
             value: 73,
         }
     );
+    let report = RawReport {
+        requested_version_type: Some(wire::RequestedResourceVersion::LatestResourceVersion),
+        ..RawReport::default()
+    };
+    assert!(ServerMessage::decode(&raw_server(report.frame())).is_ok());
+    for discriminant in [
+        wire::RequestedResourceVersion::NONE,
+        wire::RequestedResourceVersion(3),
+    ] {
+        let report = RawReport {
+            requested_version_type: Some(discriminant),
+            ..RawReport::default()
+        };
+        assert_eq!(
+            report.decode_error(),
+            WireDecodeError::UnknownUnionVariant {
+                field: "ResourceBindingImpact.requested",
+                discriminant: discriminant.0,
+            }
+        );
+    }
     // NONE is never a valid discriminant, even with a value present, which the verifier leaves
     // unchecked.
     for discriminant in [wire::NodeBranchCoverage::NONE, wire::NodeBranchCoverage(6)] {
@@ -622,7 +672,7 @@ fn undeclared_report_members_are_refused() {
         };
         assert_eq!(
             report.decode_error(),
-            DecodeError::UnknownUnionVariant {
+            WireDecodeError::UnknownUnionVariant {
                 field: "NodeCoverage.branches",
                 discriminant: discriminant.0,
             }

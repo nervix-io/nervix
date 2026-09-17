@@ -10,7 +10,7 @@ use thiserror::Error;
 use url::Url;
 
 use crate::{
-    codec::{DecodeError, Decoder, EncodeError, Encoder, wire_enum},
+    codec::{Decoder, Encoder, WireDecodeError, WireEncodeError, wire_enum},
     wire,
 };
 
@@ -38,7 +38,7 @@ impl RequestId {
         decoder: Decoder<'_>,
         field: &'static str,
         value: u64,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let id = decoder.non_zero(field, value)?;
         Ok(Self(id))
     }
@@ -87,10 +87,10 @@ impl SourceSpan {
         self.end
     }
 
-    fn decode(span: &wire::SourceSpan) -> Result<Self, Report<DecodeError>> {
+    fn decode(span: &wire::SourceSpan) -> Result<Self, Report<WireDecodeError>> {
         match Self::new(span.start(), span.end()) {
             Ok(span) => Ok(span),
-            Err(error) => Err(error.change_context(DecodeError::InvalidValue {
+            Err(error) => Err(error.change_context(WireDecodeError::InvalidValue {
                 field: "Diagnostic.span",
                 kind: "source span",
             })),
@@ -110,7 +110,7 @@ impl Diagnostic {
     pub(crate) fn encode<'fbb>(
         &self,
         encoder: &mut Encoder<'fbb>,
-    ) -> Result<WIPOffset<wire::Diagnostic<'fbb>>, Report<EncodeError>> {
+    ) -> Result<WIPOffset<wire::Diagnostic<'fbb>>, Report<WireEncodeError>> {
         let message = encoder.text("Diagnostic.message", &self.message)?;
         let span = self
             .span
@@ -127,7 +127,7 @@ impl Diagnostic {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         table: wire::Diagnostic<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let message = decoder.text("Diagnostic.message", table.message())?;
         let span = match table.span() {
             Some(span) => Some(SourceSpan::decode(span)?),
@@ -140,8 +140,10 @@ impl Diagnostic {
         encoder: &mut Encoder<'fbb>,
         field: &'static str,
         diagnostics: &[Self],
-    ) -> Result<WIPOffset<Vector<'fbb, ForwardsUOffset<wire::Diagnostic<'fbb>>>>, Report<EncodeError>>
-    {
+    ) -> Result<
+        WIPOffset<Vector<'fbb, ForwardsUOffset<wire::Diagnostic<'fbb>>>>,
+        Report<WireEncodeError>,
+    > {
         encoder.table_vector(field, diagnostics, Self::encode)
     }
 
@@ -149,7 +151,7 @@ impl Diagnostic {
         decoder: Decoder<'_>,
         field: &'static str,
         diagnostics: Vector<'a, ForwardsUOffset<wire::Diagnostic<'a>>>,
-    ) -> Result<Vec<Self>, Report<DecodeError>> {
+    ) -> Result<Vec<Self>, Report<WireDecodeError>> {
         decoder.table_vector(field, diagnostics, |diagnostic| {
             Self::decode(decoder, diagnostic)
         })
@@ -170,7 +172,7 @@ impl LeaderEndpoints {
     pub(crate) fn encode<'fbb>(
         &self,
         encoder: &mut Encoder<'fbb>,
-    ) -> Result<WIPOffset<wire::LeaderEndpoints<'fbb>>, Report<EncodeError>> {
+    ) -> Result<WIPOffset<wire::LeaderEndpoints<'fbb>>, Report<WireEncodeError>> {
         let node = encoder.text("LeaderEndpoints.node", self.node.as_str())?;
         let grpc_uri = match &self.grpc_uri {
             Some(uri) => Some(encoder.text("LeaderEndpoints.grpc_uri", uri.as_str())?),
@@ -193,7 +195,7 @@ impl LeaderEndpoints {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         table: wire::LeaderEndpoints<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let node = decoder.name("LeaderEndpoints.node", table.node())?;
         let grpc_uri = decode_uri(decoder, "LeaderEndpoints.grpc_uri", table.grpc_uri())?;
         let web_console_uri = decode_uri(
@@ -213,7 +215,7 @@ fn decode_uri(
     decoder: Decoder<'_>,
     field: &'static str,
     value: Option<&str>,
-) -> Result<Option<Url>, Report<DecodeError>> {
+) -> Result<Option<Url>, Report<WireDecodeError>> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -221,7 +223,8 @@ fn decode_uri(
     match Url::parse(value) {
         Ok(uri) => Ok(Some(uri)),
         Err(error) => {
-            Err(Report::new(error).change_context(DecodeError::InvalidValue { field, kind: "URI" }))
+            Err(Report::new(error)
+                .change_context(WireDecodeError::InvalidValue { field, kind: "URI" }))
         }
     }
 }
@@ -237,7 +240,7 @@ impl LeaderRedirect {
     pub(crate) fn encode<'fbb>(
         &self,
         encoder: &mut Encoder<'fbb>,
-    ) -> Result<WIPOffset<wire::LeaderRedirect<'fbb>>, Report<EncodeError>> {
+    ) -> Result<WIPOffset<wire::LeaderRedirect<'fbb>>, Report<WireEncodeError>> {
         let leader = match &self.leader {
             Some(leader) => Some(leader.encode(encoder)?),
             None => None,
@@ -251,7 +254,7 @@ impl LeaderRedirect {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         table: wire::LeaderRedirect<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let leader = match table.leader() {
             Some(leader) => Some(LeaderEndpoints::decode(decoder, leader)?),
             None => None,
@@ -302,7 +305,7 @@ wire_enum!(ALL_MODEL_KINDS: ModelKind => wire::ModelKind {
 pub(crate) fn encode_node_ref<'fbb>(
     encoder: &mut Encoder<'fbb>,
     node: &NodeRef,
-) -> Result<WIPOffset<wire::NodeRef<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::NodeRef<'fbb>>, Report<WireEncodeError>> {
     let name = encoder.text("NodeRef.name", node.identifier.as_str())?;
     Ok(wire::NodeRef::create(
         encoder.fbb(),
@@ -317,7 +320,7 @@ pub(crate) fn encode_node_ref<'fbb>(
 pub(crate) fn decode_node_ref(
     decoder: Decoder<'_>,
     table: wire::NodeRef<'_>,
-) -> Result<NodeRef, Report<DecodeError>> {
+) -> Result<NodeRef, Report<WireDecodeError>> {
     let kind: ModelKind = decoder.required_enumeration("NodeRef.kind", table.kind())?;
     let identifier: ModelName = decoder.name("NodeRef.name", table.name())?;
     Ok(NodeRef::new(kind, identifier))

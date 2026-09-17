@@ -93,8 +93,8 @@ original record, while `output.amount` is the finalized route value.
 
 ## ONNX inference
 
-Inferencers keep explicit tensor declarations. Their routes are set-only and do not inherit the
-source row:
+Inferencers keep explicit tensor declarations and name the resource version they load. Their routes
+are set-only and do not inherit the source row:
 
 ```nspl
 CREATE INFERENCER score_message

@@ -15,12 +15,14 @@ use super::{
 };
 use crate::{
     CellView, CellWriter, CellsView, ClientFrame, ClientMessage, ClientRequest, CommandDisposition,
-    CommandRequest, EncodeError, FrameError, FrameViolation, InspectionOutcome, NoticeLevel, Reply,
-    ReplyBody, ReplyDelivery, RowBranch, RowSchema, ServerEvent, ServerFrame, ServerMessage,
-    ServerNotice, SessionLimitSettings, SessionLimits, SubscribeDisposition, SubscribeOutcome,
+    CommandRequest, FrameError, FrameViolation, InspectionOutcome, NoticeLevel, Reply, ReplyBody,
+    ReplyDelivery, RowBranch, RowSchema, ServerEvent, ServerFrame, ServerMessage, ServerNotice,
+    SessionLimitSettings, SessionLimits, SubscribeDisposition, SubscribeOutcome,
     SubscriptionOpened, SubscriptionRowsEncoder, SubscriptionType, TransactionInspection,
     TransactionState, UploadChunk, UploadDisposition, UploadFailure, UploadFrame, UploadMessage,
-    UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame, limits::MAX_NESTING_DEPTH, wire,
+    UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame, WireEncodeError,
+    limits::{MAX_NESTING_DEPTH, MIN_NESTING_DEPTH},
+    wire,
 };
 
 const MARKER: &str = "UTF8MARKER";
@@ -316,7 +318,7 @@ fn the_frame_limit_is_inclusive() {
         .expect_err("an encoder refuses a frame its receiver would refuse");
     assert!(matches!(
         error.current_context(),
-        EncodeError::FrameTooLarge { .. }
+        WireEncodeError::FrameTooLarge { .. }
     ));
 }
 
@@ -420,7 +422,7 @@ fn a_misaligned_root_offset_is_refused() {
     assert_eq!(error, invalid(FrameViolation::Misaligned, "ClientMessage"));
 }
 
-fn nest(cells: &mut CellWriter<'_, 'static>, depth: usize) -> Result<(), Report<EncodeError>> {
+fn nest(cells: &mut CellWriter<'_, 'static>, depth: usize) -> Result<(), Report<WireEncodeError>> {
     if depth == 0 {
         cells.push_u8(1)?;
         return Ok(());
@@ -429,7 +431,7 @@ fn nest(cells: &mut CellWriter<'_, 'static>, depth: usize) -> Result<(), Report<
 }
 
 /// Rows holding one list value nested `levels` deep, encoded under `limits`.
-fn nested_rows(levels: usize, limits: &SessionLimits) -> Result<Bytes, Report<EncodeError>> {
+fn nested_rows(levels: usize, limits: &SessionLimits) -> Result<Bytes, Report<WireEncodeError>> {
     let mut batch = SubscriptionRowsEncoder::unbranched(subscription(), limits)?;
     batch.push_row(|cells| nest(cells, levels))?;
     Ok(batch.finish()?.into_bytes())
@@ -452,7 +454,7 @@ fn nested_schema_reply(
     levels: usize,
     in_branch: bool,
     limits: &SessionLimits,
-) -> Result<Bytes, Report<EncodeError>> {
+) -> Result<Bytes, Report<WireEncodeError>> {
     let field = SchemaField {
         name: name("value"),
         ty: nested_type(levels),
@@ -510,7 +512,7 @@ fn nesting_is_bounded_by_the_limit() {
     let error = nested_rows(30, &limits()).expect_err("66 nested tables exceed the limit of 64");
     assert_eq!(
         error.current_context(),
-        &EncodeError::NestingTooDeep {
+        &WireEncodeError::NestingTooDeep {
             field: "ListCell.elements",
             limit: 64,
         }
@@ -555,7 +557,7 @@ fn schema_nesting_is_bounded_by_the_limit() {
             .expect_err("one more level exceeds the limit of 64");
         assert_eq!(
             error.current_context(),
-            &EncodeError::NestingTooDeep {
+            &WireEncodeError::NestingTooDeep {
                 field: "FieldType.shape",
                 limit: 64,
             }
@@ -735,4 +737,42 @@ fn request_identity_is_read_before_decoding() {
         ServerMessage::decode(&notice),
         Ok(ServerMessage::Event(ServerEvent::Notice(_)))
     ));
+}
+
+#[test]
+fn every_fixed_structure_fits_the_smallest_nesting_limit() {
+    // The inspection reply holds the deepest structure of the schema that does not recurse: 13
+    // tables down to a node coverage in an execution step's affected topology.
+    let shallow = checked(SessionLimitSettings {
+        frame_bytes: size(64 * 1024 * 1024),
+        transfer_bytes: size(64 * 1024 * 1024),
+        nesting_depth: size(MIN_NESTING_DEPTH),
+        ..settings()
+    });
+    let reply = Reply {
+        request_id: request(1),
+        body: ReplyBody::Inspection(InspectionOutcome::Inspected(Box::new(
+            TransactionInspection {
+                transaction: transaction(TransactionState::Open),
+                operation: None,
+                report: impact_report(),
+            },
+        ))),
+    };
+    let ReplyDelivery::Frame(frame) = reply.encode(&shallow).assured("the reply fits the limits")
+    else {
+        panic!("a 64 MiB frame holds the sample inspection");
+    };
+    let frame = frame
+        .verify(&shallow)
+        .assured("the deepest fixed structure verifies under the smallest nesting limit");
+    assert!(ServerMessage::decode(&frame).is_ok());
+    for message in client_messages() {
+        let frame = message
+            .encode(&shallow)
+            .assured("a request fits the limits")
+            .verify(&shallow)
+            .assured("every request verifies under the smallest nesting limit");
+        assert!(ClientMessage::decode(&frame).is_ok());
+    }
 }

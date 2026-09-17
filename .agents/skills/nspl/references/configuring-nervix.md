@@ -250,7 +250,8 @@ Choose checks relevant to the configured graph:
   Observability` for the current histogram buckets. The endpoint also reports
   `nervix_branch_instances` per domain, branch declaration, and physical node, plus
   `nervix_branch_evictions_total` split by `reason="lru"` or `reason="ttl"`.
-- `DESCRIBE RESOURCE` confirms uploads and reports the latest completed version available to bindings.
+- `DESCRIBE RESOURCE` confirms uploads and reports `latest`, the completed version `VERSION LATEST`
+  would bind now; `SHOW CREATE` shows the version each existing binding stores.
 - `SHOW UDFS`, `DESCRIBE UDF <name>`, and `SHOW CREATE UDF <name>` inspect trusted Roto functions.
   Creation itself is the test gate: a rejecting Roto `test` block prevents persistence.
 - `SHOW PLACEMENTS`, `DESCRIBE PLACEMENT <name>`, `SHOW CREATE PLACEMENT <name>`, and

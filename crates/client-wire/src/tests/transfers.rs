@@ -9,10 +9,10 @@ use super::{
     samples::{command_outcome, impact_report, transaction},
 };
 use crate::{
-    CommandDisposition, DecodeError, EncodeError, InspectionOutcome, Reply, ReplyBody,
-    ReplyDelivery, ServerFrame, ServerMessage, SessionLimitSettings, SessionLimits,
-    TransactionInspection, TransactionState, TransferAssembly, TransferError, TransferPart,
-    VerifiedFrame, wire,
+    CommandDisposition, InspectionOutcome, Reply, ReplyBody, ReplyDelivery, ServerFrame,
+    ServerMessage, SessionLimitSettings, SessionLimits, TransactionInspection, TransactionState,
+    TransferAssembly, TransferError, TransferPart, VerifiedFrame, WireDecodeError, WireEncodeError,
+    wire,
 };
 
 fn small_limits(frame_bytes: usize) -> SessionLimits {
@@ -133,7 +133,7 @@ fn a_reply_above_the_transfer_limit_is_refused() {
         .expect_err("the reply exceeds the transfer limit");
     assert!(matches!(
         error.current_context(),
-        EncodeError::FrameTooLarge { limit: 4096, .. }
+        WireEncodeError::FrameTooLarge { limit: 4096, .. }
     ));
 }
 
@@ -286,21 +286,21 @@ fn malformed_parts_are_refused() {
     let frame = raw_server(part_frame(1, 0, 0, b"chunk"));
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
-        DecodeError::ZeroValue {
+        WireDecodeError::ZeroValue {
             field: "TransferPart.total_bytes",
         }
     );
     let frame = raw_server(part_frame(1, 10, 0, b""));
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
-        DecodeError::EmptyCollection {
+        WireDecodeError::EmptyCollection {
             field: "TransferPart.chunk",
         }
     );
     let frame = raw_server(part_frame(1, 10, 6, b"chunk"));
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
-        DecodeError::InvalidValue {
+        WireDecodeError::InvalidValue {
             field: "TransferPart.chunk",
             kind: "chunk within the transfer's total bytes",
         }
@@ -311,7 +311,7 @@ fn malformed_parts_are_refused() {
     assert_eq!(frame.request_id(), None);
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
-        DecodeError::ZeroValue {
+        WireDecodeError::ZeroValue {
             field: "Reply.request_id",
         }
     );

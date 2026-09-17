@@ -241,9 +241,10 @@ impl<R: FrameRoot> VerifiedFrame<R> {
 impl<R: FrameRoot> VerifiedFrame<R> {
     /// The root table.
     pub(crate) fn root(&self) -> R::Table<'_> {
-        // SAFETY: `verify_within` is the only constructor. It ran the FlatBuffers verifier for
-        // exactly this root table over these bytes, and `Bytes` is immutable, so every offset the
-        // generated accessors follow stays in bounds and every required field is present.
+        // SAFETY: `verify_within` is the only constructor that takes new bytes, and it ran the
+        // FlatBuffers verifier for exactly this root table over them; `clone` and `detached` only
+        // share or copy bytes that passed it. `Bytes` is immutable, so every offset the generated
+        // accessors follow stays in bounds and every required field is present.
         unsafe { flatbuffers::root_unchecked::<R::Table<'_>>(&self.bytes) }
     }
 }

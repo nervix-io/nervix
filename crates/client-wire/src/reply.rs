@@ -5,7 +5,7 @@ use flatbuffers::WIPOffset;
 use nervix_models::{DomainName, RelayName, TransactionImpactReport, TransactionOperationNumber};
 
 use crate::{
-    codec::{DecodeError, Decoder, EncodeError, EncodedUnion, Encoder, wire_enum},
+    codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
     common::{Diagnostic, LeaderRedirect, RequestId},
     impact::{decode_report, encode_report},
     row::RowSchema,
@@ -37,7 +37,7 @@ impl Suggestion {
     fn encode<'fbb>(
         &self,
         encoder: &mut Encoder<'fbb>,
-    ) -> Result<WIPOffset<wire::Suggestion<'fbb>>, Report<EncodeError>> {
+    ) -> Result<WIPOffset<wire::Suggestion<'fbb>>, Report<WireEncodeError>> {
         let value = encoder.text("Suggestion.value", &self.value)?;
         Ok(wire::Suggestion::create(
             encoder.fbb(),
@@ -51,7 +51,7 @@ impl Suggestion {
     fn decode(
         decoder: Decoder<'_>,
         suggestion: wire::Suggestion<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let value = decoder.text("Suggestion.value", suggestion.value())?;
         let kind = decoder.required_enumeration("Suggestion.kind", suggestion.kind())?;
         Ok(Self { value, kind })
@@ -68,7 +68,7 @@ impl SuggestOutcome {
     pub(crate) fn encode_body(
         &self,
         encoder: &mut Encoder<'_>,
-    ) -> Result<EncodedUnion<wire::ReplyBody>, Report<EncodeError>> {
+    ) -> Result<EncodedUnion<wire::ReplyBody>, Report<WireEncodeError>> {
         let suggestions = encoder.table_vector(
             "SuggestOutcome.suggestions",
             &self.suggestions,
@@ -86,7 +86,7 @@ impl SuggestOutcome {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         outcome: wire::SuggestOutcome<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let suggestions = decoder.table_vector(
             "SuggestOutcome.suggestions",
             outcome.suggestions(),
@@ -136,7 +136,7 @@ impl InspectionOutcome {
     pub(crate) fn encode_body(
         &self,
         encoder: &mut Encoder<'_>,
-    ) -> Result<EncodedUnion<wire::ReplyBody>, Report<EncodeError>> {
+    ) -> Result<EncodedUnion<wire::ReplyBody>, Report<WireEncodeError>> {
         let disposition = match self {
             Self::Inspected(inspection) => {
                 let transaction = inspection.transaction.encode(encoder)?;
@@ -184,7 +184,7 @@ impl InspectionOutcome {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         outcome: wire::InspectionOutcome<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         if let Some(inspected) = outcome.disposition_as_transaction_inspected() {
             let transaction = TransactionStatus::decode(decoder, inspected.transaction())?;
             let operation = match inspected.operation() {
@@ -252,7 +252,7 @@ impl SubscribeOutcome {
     pub(crate) fn encode_body(
         &self,
         encoder: &mut Encoder<'_>,
-    ) -> Result<EncodedUnion<wire::ReplyBody>, Report<EncodeError>> {
+    ) -> Result<EncodedUnion<wire::ReplyBody>, Report<WireEncodeError>> {
         let disposition = match &self.disposition {
             SubscribeDisposition::Opened(opened) => {
                 let subscription = opened.subscription.encode(encoder)?;
@@ -297,7 +297,7 @@ impl SubscribeOutcome {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         outcome: wire::SubscribeOutcome<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let disposition = if let Some(opened) = outcome.disposition_as_subscription_opened() {
             let subscription = SubscriptionHandle::decode(decoder, opened.subscription())?;
             let domain = decoder.name("SubscriptionOpened.domain", opened.domain())?;
@@ -354,7 +354,7 @@ impl UnsubscribeOutcome {
     pub(crate) fn encode_body(
         &self,
         encoder: &mut Encoder<'_>,
-    ) -> Result<EncodedUnion<wire::ReplyBody>, Report<EncodeError>> {
+    ) -> Result<EncodedUnion<wire::ReplyBody>, Report<WireEncodeError>> {
         let disposition = match &self.disposition {
             UnsubscribeDisposition::Deleted(subscription) => {
                 let subscription = subscription.encode(encoder)?;
@@ -392,7 +392,7 @@ impl UnsubscribeOutcome {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         outcome: wire::UnsubscribeOutcome<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let disposition = if let Some(deleted) = outcome.disposition_as_subscription_deleted() {
             UnsubscribeDisposition::Deleted(SubscriptionHandle::decode(
                 decoder,
@@ -452,7 +452,7 @@ impl CancelOutcome {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         outcome: wire::CancelOutcome<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let target = RequestId::decode(
             decoder,
             "CancelOutcome.target_request_id",
@@ -496,7 +496,7 @@ impl RequestCancelled {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         cancelled: wire::RequestCancelled<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let stage = decoder.required_enumeration("RequestCancelled.stage", cancelled.stage())?;
         Ok(Self { stage })
     }
@@ -537,7 +537,7 @@ impl RequestRejected {
     pub(crate) fn encode_body(
         &self,
         encoder: &mut Encoder<'_>,
-    ) -> Result<EncodedUnion<wire::ReplyBody>, Report<EncodeError>> {
+    ) -> Result<EncodedUnion<wire::ReplyBody>, Report<WireEncodeError>> {
         let field = encoder.optional_text("RequestRejected.field", self.field.as_deref())?;
         let message = encoder.text("RequestRejected.message", &self.message)?;
         let rejected = wire::RequestRejected::create(
@@ -557,7 +557,7 @@ impl RequestRejected {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         rejected: wire::RequestRejected<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let rejection =
             decoder.required_enumeration("RequestRejected.rejection", rejected.rejection())?;
         let field = decoder.optional_text("RequestRejected.field", rejected.field())?;

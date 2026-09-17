@@ -2453,7 +2453,7 @@ mod catch_all_kind_tests {
             output_routes: outputs(),
             branched_by: BranchSelection::unbranched(),
             resource: named("guest_bundle"),
-            resource_version: Some(1),
+            resource_version: 1,
             file: "processors/guest.wasm".to_string(),
             limits: WasmProcessorLimits {
                 max_fuel: nonzero!(1_000_000u64),
@@ -2465,7 +2465,7 @@ mod catch_all_kind_tests {
             materialized_state: Vec::new(),
         };
         let mut rebound = base.clone();
-        rebound.resource_version = Some(2);
+        rebound.resource_version = 2;
         assert_single_aspect(
             Model::WasmProcessor(base),
             Model::WasmProcessor(rebound),
@@ -2482,7 +2482,7 @@ mod catch_all_kind_tests {
             output_routes: outputs(),
             branched_by: BranchSelection::unbranched(),
             resource: named("guest_bundle"),
-            resource_version: Some(1),
+            resource_version: 1,
             file: "processors/guest.wasm".to_string(),
             limits: WasmProcessorLimits {
                 max_fuel: nonzero!(1_000_000u64),
@@ -2512,7 +2512,7 @@ mod catch_all_kind_tests {
             output_routes: outputs(),
             branched_by: BranchSelection::unbranched(),
             resource: named("model_bundle"),
-            resource_version: Some(1),
+            resource_version: 1,
             file: "models/score.onnx".to_string(),
             inputs: Vec::new(),
             output_schema: Vec::new(),
@@ -2559,7 +2559,7 @@ mod catch_all_kind_tests {
         let mut secured = base_vhost.clone();
         secured.tls = Some(VhostTlsResource {
             resource: named("edge_tls"),
-            version: Some(1),
+            version: 1,
         });
         assert_single_aspect(
             Model::Vhost(base_vhost),

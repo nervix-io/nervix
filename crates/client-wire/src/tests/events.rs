@@ -12,11 +12,10 @@ use super::{
     samples::{leader, rows_frame, subscription},
 };
 use crate::{
-    ClusterObserved, DecodeError, DomainEntity, DomainInfo, DomainSnapshotObserved,
-    DomainsObserved, LeaderRedirect, Leadership, LeadershipObserved, NoticeLevel, RowsSkippedCause,
-    ServerEvent, ServerMessage, ServerNotice, SessionEndReason, SessionEnding,
-    SubscriptionDeliveryLost, SubscriptionEndReason, SubscriptionEnded, SubscriptionRowsSkipped,
-    wire,
+    ClusterObserved, DomainEntity, DomainInfo, DomainSnapshotObserved, DomainsObserved,
+    LeaderRedirect, Leadership, LeadershipObserved, NoticeLevel, RowsSkippedCause, ServerEvent,
+    ServerMessage, ServerNotice, SessionEndReason, SessionEnding, SubscriptionDeliveryLost,
+    SubscriptionEndReason, SubscriptionEnded, SubscriptionRowsSkipped, WireDecodeError, wire,
 };
 
 #[test]
@@ -249,7 +248,7 @@ fn malformed_events_are_refused() {
         let frame = raw_server(notice_frame(discriminant, Some(wire::NoticeLevel::Info)));
         assert_eq!(
             decode_error(ServerMessage::decode(&frame)),
-            DecodeError::UnknownUnionVariant {
+            WireDecodeError::UnknownUnionVariant {
                 field: "ServerMessage.body",
                 discriminant: discriminant.0,
             }
@@ -258,7 +257,7 @@ fn malformed_events_are_refused() {
     let frame = raw_server(notice_frame(wire::ServerBody::ServerNotice, None));
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
-        DecodeError::MissingField {
+        WireDecodeError::MissingField {
             field: "ServerNotice.level",
         }
     );
@@ -268,7 +267,7 @@ fn malformed_events_are_refused() {
     ));
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
-        DecodeError::UnknownEnumValue {
+        WireDecodeError::UnknownEnumValue {
             field: "ServerNotice.level",
             value: 3,
         }
@@ -314,7 +313,7 @@ fn a_domain_entity_must_be_declared() {
     let frame = raw_server(finish_raw(builder, root, "NXSM"));
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
-        DecodeError::ZeroValue {
+        WireDecodeError::ZeroValue {
             field: "ResourceEntity.latest_version",
         }
     );

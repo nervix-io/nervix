@@ -9,7 +9,7 @@ use meticulous::OptionExt as _;
 use nervix_models::SubscriptionName;
 
 use crate::{
-    codec::{DecodeError, Decoder, EncodeError, EncodedUnion, Encoder, wire_enum},
+    codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
     frame::{EncodedFrame, ServerFrame, VerifiedFrame},
     limits::{MIN_FRAME_BYTES, SessionLimits},
     row::{CellWriter, RowBatchView},
@@ -38,7 +38,7 @@ impl SubscriptionHandle {
     pub(crate) fn encode<'fbb>(
         &self,
         encoder: &mut Encoder<'fbb>,
-    ) -> Result<WIPOffset<wire::SubscriptionHandle<'fbb>>, Report<EncodeError>> {
+    ) -> Result<WIPOffset<wire::SubscriptionHandle<'fbb>>, Report<WireEncodeError>> {
         let name = encoder.text("SubscriptionHandle.name", self.name.as_str())?;
         Ok(wire::SubscriptionHandle::create(
             encoder.fbb(),
@@ -52,7 +52,7 @@ impl SubscriptionHandle {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         handle: wire::SubscriptionHandle<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let name = decoder.name("SubscriptionHandle.name", handle.name())?;
         let generation = decoder.non_zero("SubscriptionHandle.generation", handle.generation())?;
         Ok(Self { name, generation })
@@ -95,7 +95,7 @@ impl SubscriptionRowsEncoder {
     pub fn unbranched(
         subscription: SubscriptionHandle,
         limits: &SessionLimits,
-    ) -> Result<Self, Report<EncodeError>> {
+    ) -> Result<Self, Report<WireEncodeError>> {
         let mut encoder = Encoder::new(limits.frame_bytes(), limits);
         let handle = subscription.encode(&mut encoder)?;
         Ok(Self {
@@ -111,8 +111,8 @@ impl SubscriptionRowsEncoder {
     pub fn branched(
         subscription: SubscriptionHandle,
         limits: &SessionLimits,
-        write_key: impl FnOnce(&mut CellWriter<'_, 'static>) -> Result<(), Report<EncodeError>>,
-    ) -> Result<Self, Report<EncodeError>> {
+        write_key: impl FnOnce(&mut CellWriter<'_, 'static>) -> Result<(), Report<WireEncodeError>>,
+    ) -> Result<Self, Report<WireEncodeError>> {
         let mut batch = Self::unbranched(subscription, limits)?;
         batch.encoder.keep_free(Self::free_bytes(1));
         let mut key = CellWriter::new(&mut batch.encoder, "BranchKey.cells", ROW_CELL_DEPTH);
@@ -130,8 +130,8 @@ impl SubscriptionRowsEncoder {
     /// Appends a row whose cells `write_cells` writes in field order.
     pub fn push_row(
         &mut self,
-        write_cells: impl FnOnce(&mut CellWriter<'_, 'static>) -> Result<(), Report<EncodeError>>,
-    ) -> Result<(), Report<EncodeError>> {
+        write_cells: impl FnOnce(&mut CellWriter<'_, 'static>) -> Result<(), Report<WireEncodeError>>,
+    ) -> Result<(), Report<WireEncodeError>> {
         let rows = self
             .rows
             .len()
@@ -170,9 +170,9 @@ impl SubscriptionRowsEncoder {
         self.encoder.encoded_bytes()
     }
 
-    pub fn finish(mut self) -> Result<EncodedFrame<ServerFrame>, Report<EncodeError>> {
+    pub fn finish(mut self) -> Result<EncodedFrame<ServerFrame>, Report<WireEncodeError>> {
         if self.rows.is_empty() {
-            return Err(Report::new(EncodeError::EmptyCollection {
+            return Err(Report::new(WireEncodeError::EmptyCollection {
                 field: "RowBatch.rows",
             }));
         }
@@ -226,7 +226,7 @@ impl SubscriptionRows {
         frame: &VerifiedFrame<ServerFrame>,
         decoder: Decoder<'_>,
         rows: wire::SubscriptionRows<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let subscription = SubscriptionHandle::decode(decoder, rows.subscription())?;
         RowBatchView::check(decoder, rows.batch())?;
         Ok(Self {
@@ -265,7 +265,7 @@ impl SubscriptionDeliveryLost {
     pub fn encode(
         &self,
         limits: &SessionLimits,
-    ) -> Result<EncodedFrame<ServerFrame>, Report<EncodeError>> {
+    ) -> Result<EncodedFrame<ServerFrame>, Report<WireEncodeError>> {
         let mut encoder = Encoder::new(limits.frame_bytes(), limits);
         let subscription = self.subscription.encode(&mut encoder)?;
         let lost = wire::SubscriptionDeliveryLost::create(
@@ -284,7 +284,7 @@ impl SubscriptionDeliveryLost {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         lost: wire::SubscriptionDeliveryLost<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let subscription = SubscriptionHandle::decode(decoder, lost.subscription())?;
         let dropped_rows =
             decoder.non_zero("SubscriptionDeliveryLost.dropped_rows", lost.dropped_rows())?;
@@ -325,7 +325,7 @@ impl SubscriptionRowsSkipped {
     pub fn encode(
         &self,
         limits: &SessionLimits,
-    ) -> Result<EncodedFrame<ServerFrame>, Report<EncodeError>> {
+    ) -> Result<EncodedFrame<ServerFrame>, Report<WireEncodeError>> {
         let mut encoder = Encoder::new(limits.frame_bytes(), limits);
         let subscription = self.subscription.encode(&mut encoder)?;
         let message = encoder.text("SubscriptionRowsSkipped.message", &self.message)?;
@@ -347,7 +347,7 @@ impl SubscriptionRowsSkipped {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         skipped: wire::SubscriptionRowsSkipped<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let subscription = SubscriptionHandle::decode(decoder, skipped.subscription())?;
         let cause =
             decoder.required_enumeration("SubscriptionRowsSkipped.cause", skipped.cause())?;
@@ -388,7 +388,7 @@ impl SubscriptionEnded {
     pub fn encode(
         &self,
         limits: &SessionLimits,
-    ) -> Result<EncodedFrame<ServerFrame>, Report<EncodeError>> {
+    ) -> Result<EncodedFrame<ServerFrame>, Report<WireEncodeError>> {
         let mut encoder = Encoder::new(limits.frame_bytes(), limits);
         let subscription = self.subscription.encode(&mut encoder)?;
         let message = encoder.text("SubscriptionEnded.message", &self.message)?;
@@ -409,7 +409,7 @@ impl SubscriptionEnded {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         ended: wire::SubscriptionEnded<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let subscription = SubscriptionHandle::decode(decoder, ended.subscription())?;
         let reason = decoder.required_enumeration("SubscriptionEnded.reason", ended.reason())?;
         let message = decoder.text("SubscriptionEnded.message", ended.message())?;

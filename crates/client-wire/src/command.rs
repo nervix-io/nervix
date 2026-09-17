@@ -5,7 +5,7 @@ use flatbuffers::WIPOffset;
 use nervix_models::{CommandExecutionReference, TransactionPreviewIdentity};
 
 use crate::{
-    codec::{DecodeError, Decoder, EncodeError, EncodedUnion, Encoder, wire_enum},
+    codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
     common::{Diagnostic, LeaderRedirect, OutcomeOrigin},
     transaction::{TransactionStatus, decode_preview_identity, encode_preview_identity},
     wire,
@@ -83,7 +83,7 @@ impl CommandDisposition {
     fn encode(
         &self,
         encoder: &mut Encoder<'_>,
-    ) -> Result<EncodedUnion<wire::CommandDisposition>, Report<EncodeError>> {
+    ) -> Result<EncodedUnion<wire::CommandDisposition>, Report<WireEncodeError>> {
         let union = match self {
             Self::Completed { already_existed } => EncodedUnion::new(
                 wire::CommandDisposition::CommandCompleted,
@@ -166,7 +166,7 @@ impl CommandDisposition {
     fn decode(
         decoder: Decoder<'_>,
         outcome: wire::CommandOutcome<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         if let Some(completed) = outcome.disposition_as_command_completed() {
             return Ok(Self::Completed {
                 already_existed: completed.already_existed(),
@@ -244,7 +244,7 @@ impl StatementOutcome {
     fn encode<'fbb>(
         &self,
         encoder: &mut Encoder<'fbb>,
-    ) -> Result<WIPOffset<wire::StatementOutcome<'fbb>>, Report<EncodeError>> {
+    ) -> Result<WIPOffset<wire::StatementOutcome<'fbb>>, Report<WireEncodeError>> {
         let disposition = match &self.disposition {
             StatementDisposition::Completed { already_existed } => EncodedUnion::new(
                 wire::StatementDisposition::CommandCompleted,
@@ -276,7 +276,7 @@ impl StatementOutcome {
     fn decode(
         decoder: Decoder<'_>,
         outcome: wire::StatementOutcome<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let disposition = if let Some(completed) = outcome.disposition_as_command_completed() {
             StatementDisposition::Completed {
                 already_existed: completed.already_existed(),
@@ -324,7 +324,7 @@ impl CommandOutcome {
     pub(crate) fn encode_body(
         &self,
         encoder: &mut Encoder<'_>,
-    ) -> Result<EncodedUnion<wire::ReplyBody>, Report<EncodeError>> {
+    ) -> Result<EncodedUnion<wire::ReplyBody>, Report<WireEncodeError>> {
         let execution_reference = encoder.text(
             "CommandOutcome.execution_reference",
             self.execution_reference.as_str(),
@@ -361,7 +361,7 @@ impl CommandOutcome {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         outcome: wire::CommandOutcome<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let execution_reference = decoder.check_text(
             "CommandOutcome.execution_reference",
             outcome.execution_reference(),
@@ -369,7 +369,7 @@ impl CommandOutcome {
         let execution_reference = match CommandExecutionReference::parse(execution_reference) {
             Ok(reference) => reference,
             Err(error) => {
-                return Err(error.change_context(DecodeError::InvalidValue {
+                return Err(error.change_context(WireDecodeError::InvalidValue {
                     field: "CommandOutcome.execution_reference",
                     kind: "execution reference",
                 }));
@@ -425,7 +425,7 @@ impl AttachOutcome {
     pub(crate) fn encode_body(
         &self,
         encoder: &mut Encoder<'_>,
-    ) -> Result<EncodedUnion<wire::ReplyBody>, Report<EncodeError>> {
+    ) -> Result<EncodedUnion<wire::ReplyBody>, Report<WireEncodeError>> {
         let disposition = match &self.disposition {
             AttachDisposition::Attached(transaction) => {
                 let transaction = transaction.encode(encoder)?;
@@ -477,7 +477,7 @@ impl AttachOutcome {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         outcome: wire::AttachOutcome<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let disposition = if let Some(attached) = outcome.disposition_as_transaction_attached() {
             AttachDisposition::Attached(TransactionStatus::decode(decoder, attached.transaction())?)
         } else if let Some(finished) = outcome.disposition_as_transaction_already_finished() {

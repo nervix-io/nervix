@@ -28,7 +28,7 @@ const LENGTH_PREFIX_SLACK_BYTES: usize = 16;
 
 /// Why a verified frame does not decode into the value its schema describes.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum DecodeError {
+pub enum WireDecodeError {
     #[error("`{field}` holds union discriminant {discriminant}, which the schema does not declare")]
     UnknownUnionVariant {
         field: &'static str,
@@ -72,7 +72,7 @@ pub enum DecodeError {
 
 /// Why a value could not be encoded as a frame.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum EncodeError {
+pub enum WireEncodeError {
     #[error("`{field}` holds {actual} bytes, above the limit of {limit}")]
     StringTooLong {
         field: &'static str,
@@ -96,7 +96,7 @@ pub enum EncodeError {
 /// An enum value the schema does not declare.
 ///
 /// Nominally public because the schema enum conversions name it, but unreachable outside the
-/// crate: callers see [`DecodeError::UnknownEnumValue`] instead.
+/// crate: callers see [`WireDecodeError::UnknownEnumValue`] instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[error("enum value {value} is not declared by the schema")]
 pub struct UndeclaredEnumValue {
@@ -188,9 +188,9 @@ impl<'fbb> Encoder<'fbb> {
         &mut self,
         field: &'static str,
         value: &str,
-    ) -> Result<WIPOffset<&'fbb str>, Report<EncodeError>> {
+    ) -> Result<WIPOffset<&'fbb str>, Report<WireEncodeError>> {
         if value.len() > self.limits.string_bytes() {
-            return Err(Report::new(EncodeError::StringTooLong {
+            return Err(Report::new(WireEncodeError::StringTooLong {
                 field,
                 actual: value.len(),
                 limit: self.limits.string_bytes(),
@@ -204,7 +204,7 @@ impl<'fbb> Encoder<'fbb> {
         &mut self,
         field: &'static str,
         value: Option<&str>,
-    ) -> Result<Option<WIPOffset<&'fbb str>>, Report<EncodeError>> {
+    ) -> Result<Option<WIPOffset<&'fbb str>>, Report<WireEncodeError>> {
         match value {
             Some(value) => Ok(Some(self.text(field, value)?)),
             None => Ok(None),
@@ -215,7 +215,7 @@ impl<'fbb> Encoder<'fbb> {
         &mut self,
         field: &'static str,
         value: &[u8],
-    ) -> Result<WIPOffset<Vector<'fbb, u8>>, Report<EncodeError>> {
+    ) -> Result<WIPOffset<Vector<'fbb, u8>>, Report<WireEncodeError>> {
         self.reserve(field, value.len())?;
         Ok(self.builder.create_vector(value))
     }
@@ -224,7 +224,7 @@ impl<'fbb> Encoder<'fbb> {
         &mut self,
         field: &'static str,
         values: &[T],
-    ) -> Result<WIPOffset<Vector<'fbb, T::Output>>, Report<EncodeError>>
+    ) -> Result<WIPOffset<Vector<'fbb, T::Output>>, Report<WireEncodeError>>
     where
         T: Push + Copy,
     {
@@ -241,7 +241,7 @@ impl<'fbb> Encoder<'fbb> {
         &mut self,
         field: &'static str,
         offsets: &[WIPOffset<T>],
-    ) -> Result<WIPOffset<Vector<'fbb, ForwardsUOffset<T>>>, Report<EncodeError>> {
+    ) -> Result<WIPOffset<Vector<'fbb, ForwardsUOffset<T>>>, Report<WireEncodeError>> {
         self.entries(field, offsets.len())?;
         let payload = offsets.len().checked_mul(size_of::<u32>()).assured(
             "a slice of 32-bit offsets occupies its length times four bytes in memory, which is \
@@ -259,8 +259,8 @@ impl<'fbb> Encoder<'fbb> {
         &mut self,
         field: &'static str,
         items: &[T],
-        mut encode: impl FnMut(&T, &mut Self) -> Result<WIPOffset<W>, Report<EncodeError>>,
-    ) -> Result<WIPOffset<Vector<'fbb, ForwardsUOffset<W>>>, Report<EncodeError>> {
+        mut encode: impl FnMut(&T, &mut Self) -> Result<WIPOffset<W>, Report<WireEncodeError>>,
+    ) -> Result<WIPOffset<Vector<'fbb, ForwardsUOffset<W>>>, Report<WireEncodeError>> {
         self.entries(field, items.len())?;
         let mut offsets = Vec::with_capacity(items.len());
         for item in items {
@@ -275,9 +275,9 @@ impl<'fbb> Encoder<'fbb> {
         &self,
         field: &'static str,
         len: usize,
-    ) -> Result<(), Report<EncodeError>> {
+    ) -> Result<(), Report<WireEncodeError>> {
         if len > self.limits.collection_entries() {
-            return Err(Report::new(EncodeError::TooManyEntries {
+            return Err(Report::new(WireEncodeError::TooManyEntries {
                 field,
                 actual: len,
                 limit: self.limits.collection_entries(),
@@ -292,9 +292,9 @@ impl<'fbb> Encoder<'fbb> {
         &self,
         field: &'static str,
         depth: usize,
-    ) -> Result<(), Report<EncodeError>> {
+    ) -> Result<(), Report<WireEncodeError>> {
         if depth > self.limits.nesting_depth() {
-            return Err(Report::new(EncodeError::NestingTooDeep {
+            return Err(Report::new(WireEncodeError::NestingTooDeep {
                 field,
                 limit: self.limits.nesting_depth(),
             }));
@@ -309,7 +309,7 @@ impl<'fbb> Encoder<'fbb> {
     }
 
     /// Refuses a frame that has already grown into the bytes kept free or past the byte limit.
-    pub(crate) fn within_limit(&self, field: &'static str) -> Result<(), Report<EncodeError>> {
+    pub(crate) fn within_limit(&self, field: &'static str) -> Result<(), Report<WireEncodeError>> {
         self.check_growth(field, 0)
     }
 
@@ -318,7 +318,7 @@ impl<'fbb> Encoder<'fbb> {
         &self,
         field: &'static str,
         payload: usize,
-    ) -> Result<(), Report<EncodeError>> {
+    ) -> Result<(), Report<WireEncodeError>> {
         let payload = payload.checked_add(LENGTH_PREFIX_SLACK_BYTES).assured(
             "a payload is the length of an in-memory slice or a small table bound, which is at \
              most isize::MAX bytes",
@@ -328,7 +328,11 @@ impl<'fbb> Encoder<'fbb> {
 
     /// Refuses growth by `payload` bytes that would reach into the bytes kept free or pass the
     /// byte limit.
-    fn check_growth(&self, field: &'static str, payload: usize) -> Result<(), Report<EncodeError>> {
+    fn check_growth(
+        &self,
+        field: &'static str,
+        payload: usize,
+    ) -> Result<(), Report<WireEncodeError>> {
         let grown = self.encoded_bytes().checked_add(payload).assured(
             "every check holds the builder to at most one item's tables past a byte limit of at \
              most MAX_FRAME_BYTES, and adding at most isize::MAX bytes to that cannot overflow \
@@ -339,7 +343,7 @@ impl<'fbb> Encoder<'fbb> {
              vector, so the sum stays far below usize::MAX",
         );
         if needed > self.byte_limit {
-            return Err(Report::new(EncodeError::FrameTooLarge {
+            return Err(Report::new(WireEncodeError::FrameTooLarge {
                 field,
                 limit: self.byte_limit,
             }));
@@ -351,12 +355,12 @@ impl<'fbb> Encoder<'fbb> {
     pub(crate) fn finish<R: FrameRoot>(
         mut self,
         root: WIPOffset<R::Table<'fbb>>,
-    ) -> Result<EncodedFrame<R>, Report<EncodeError>> {
+    ) -> Result<EncodedFrame<R>, Report<WireEncodeError>> {
         self.builder.finish(root, Some(R::IDENTIFIER));
         let (buffer, head) = self.builder.collapse();
         let bytes = Bytes::from(buffer).slice(head..);
         if bytes.len() > self.byte_limit {
-            return Err(Report::new(EncodeError::FrameTooLarge {
+            return Err(Report::new(WireEncodeError::FrameTooLarge {
                 field: R::NAME,
                 limit: self.byte_limit,
             }));
@@ -381,9 +385,9 @@ impl<'l> Decoder<'l> {
         &self,
         field: &'static str,
         value: &'a str,
-    ) -> Result<&'a str, Report<DecodeError>> {
+    ) -> Result<&'a str, Report<WireDecodeError>> {
         if value.len() > self.limits.string_bytes() {
-            return Err(Report::new(DecodeError::StringTooLong {
+            return Err(Report::new(WireDecodeError::StringTooLong {
                 field,
                 actual: value.len(),
                 limit: self.limits.string_bytes(),
@@ -396,7 +400,7 @@ impl<'l> Decoder<'l> {
         &self,
         field: &'static str,
         value: &str,
-    ) -> Result<String, Report<DecodeError>> {
+    ) -> Result<String, Report<WireDecodeError>> {
         let value = self.check_text(field, value)?;
         Ok(value.to_owned())
     }
@@ -405,7 +409,7 @@ impl<'l> Decoder<'l> {
         &self,
         field: &'static str,
         value: Option<&str>,
-    ) -> Result<Option<String>, Report<DecodeError>> {
+    ) -> Result<Option<String>, Report<WireDecodeError>> {
         match value {
             Some(value) => Ok(Some(self.text(field, value)?)),
             None => Ok(None),
@@ -417,9 +421,9 @@ impl<'l> Decoder<'l> {
         &self,
         field: &'static str,
         len: usize,
-    ) -> Result<(), Report<DecodeError>> {
+    ) -> Result<(), Report<WireDecodeError>> {
         if len > self.limits.collection_entries() {
-            return Err(Report::new(DecodeError::TooManyEntries {
+            return Err(Report::new(WireDecodeError::TooManyEntries {
                 field,
                 actual: len,
                 limit: self.limits.collection_entries(),
@@ -433,8 +437,8 @@ impl<'l> Decoder<'l> {
         &self,
         field: &'static str,
         tables: Vector<'a, ForwardsUOffset<W>>,
-        mut decode: impl FnMut(W) -> Result<T, Report<DecodeError>>,
-    ) -> Result<Vec<T>, Report<DecodeError>>
+        mut decode: impl FnMut(W) -> Result<T, Report<WireDecodeError>>,
+    ) -> Result<Vec<T>, Report<WireDecodeError>>
     where
         W: Follow<'a, Inner = W> + 'a,
     {
@@ -446,14 +450,18 @@ impl<'l> Decoder<'l> {
         Ok(values)
     }
 
-    pub(crate) fn name<N>(&self, field: &'static str, value: &str) -> Result<N, Report<DecodeError>>
+    pub(crate) fn name<N>(
+        &self,
+        field: &'static str,
+        value: &str,
+    ) -> Result<N, Report<WireDecodeError>>
     where
         N: for<'a> TryFrom<&'a str, Error = NameError>,
     {
         match N::try_from(value) {
             Ok(name) => Ok(name),
             Err(error) => Err(
-                Report::new(error).change_context(DecodeError::InvalidValue {
+                Report::new(error).change_context(WireDecodeError::InvalidValue {
                     field,
                     kind: "name",
                 }),
@@ -465,7 +473,7 @@ impl<'l> Decoder<'l> {
         &self,
         field: &'static str,
         value: Option<&str>,
-    ) -> Result<Option<N>, Report<DecodeError>>
+    ) -> Result<Option<N>, Report<WireDecodeError>>
     where
         N: for<'a> TryFrom<&'a str, Error = NameError>,
     {
@@ -480,10 +488,10 @@ impl<'l> Decoder<'l> {
         &self,
         field: &'static str,
         value: Option<T>,
-    ) -> Result<T, Report<DecodeError>> {
+    ) -> Result<T, Report<WireDecodeError>> {
         match value {
             Some(value) => Ok(value),
-            None => Err(Report::new(DecodeError::MissingField { field })),
+            None => Err(Report::new(WireDecodeError::MissingField { field })),
         }
     }
 
@@ -491,10 +499,10 @@ impl<'l> Decoder<'l> {
         &self,
         field: &'static str,
         value: u64,
-    ) -> Result<NonZeroU64, Report<DecodeError>> {
+    ) -> Result<NonZeroU64, Report<WireDecodeError>> {
         match NonZeroU64::new(value) {
             Some(value) => Ok(value),
-            None => Err(Report::new(DecodeError::ZeroValue { field })),
+            None => Err(Report::new(WireDecodeError::ZeroValue { field })),
         }
     }
 
@@ -503,10 +511,10 @@ impl<'l> Decoder<'l> {
         &self,
         field: &'static str,
         value: u64,
-    ) -> Result<usize, Report<DecodeError>> {
+    ) -> Result<usize, Report<WireDecodeError>> {
         match usize::try_from(value) {
             Ok(size) => Ok(size),
-            Err(_) => Err(Report::new(DecodeError::OutOfRange { field, value })),
+            Err(_) => Err(Report::new(WireDecodeError::OutOfRange { field, value })),
         }
     }
 
@@ -514,7 +522,7 @@ impl<'l> Decoder<'l> {
         &self,
         field: &'static str,
         value: W,
-    ) -> Result<E, Report<DecodeError>>
+    ) -> Result<E, Report<WireDecodeError>>
     where
         E: TryFrom<W, Error = Report<UndeclaredEnumValue>>,
     {
@@ -522,7 +530,7 @@ impl<'l> Decoder<'l> {
             Ok(value) => Ok(value),
             Err(undeclared) => {
                 let value = undeclared.current_context().value;
-                Err(undeclared.change_context(DecodeError::UnknownEnumValue { field, value }))
+                Err(undeclared.change_context(WireDecodeError::UnknownEnumValue { field, value }))
             }
         }
     }
@@ -532,7 +540,7 @@ impl<'l> Decoder<'l> {
         &self,
         field: &'static str,
         value: Option<W>,
-    ) -> Result<E, Report<DecodeError>>
+    ) -> Result<E, Report<WireDecodeError>>
     where
         E: TryFrom<W, Error = Report<UndeclaredEnumValue>>,
     {
@@ -545,8 +553,8 @@ impl<'l> Decoder<'l> {
         &self,
         field: &'static str,
         discriminant: u8,
-    ) -> Report<DecodeError> {
-        Report::new(DecodeError::UnknownUnionVariant {
+    ) -> Report<WireDecodeError> {
+        Report::new(WireDecodeError::UnknownUnionVariant {
             field,
             discriminant,
         })

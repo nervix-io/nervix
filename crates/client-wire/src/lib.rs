@@ -39,7 +39,7 @@ mod transfer;
 mod upload;
 pub mod websocket;
 
-pub use codec::{DecodeError, EncodeError};
+pub use codec::{WireDecodeError, WireEncodeError};
 pub use command::{
     AttachDisposition, AttachOutcome, CommandDisposition, CommandOutcome,
     ExecutionReferenceConflict, StatementDisposition, StatementOutcome, UnknownOutcomeCause,

@@ -51,29 +51,9 @@ pub(super) async fn flush_branch_inferencer_output(
         }
     };
 
-    let version = match branch.runtime.resolve_resource_id(
-        &branch.domain,
-        resource,
-        resource_version,
-        resource.as_str(),
-    ) {
-        Ok(id) => id.version,
-        Err(error) => {
-            branch.runtime.handle_internal_processor_error_for_acks(
-                &branch.domain,
-                node_kind,
-                processor,
-                error_policies,
-                forwarded.acks.iter(),
-                error.to_string(),
-            );
-            return;
-        }
-    };
-    if session
-        .as_ref()
-        .is_none_or(|loaded| loaded.version() != version)
-    {
+    // The session belongs to this branch instance and is loaded once, from the resource version
+    // the inferencer pins.
+    if session.is_none() {
         let Some(resource_store) = branch.runtime.inner.resource_store.load_full() else {
             branch.runtime.handle_internal_processor_error_for_acks(
                 &branch.domain,
@@ -85,7 +65,8 @@ pub(super) async fn flush_branch_inferencer_output(
             );
             return;
         };
-        let resource_id = ResourceId::new(branch.domain.clone(), resource.clone(), version);
+        let resource_id =
+            ResourceId::new(branch.domain.clone(), resource.clone(), resource_version);
         let path = match resource_store.resolve_content_path(&resource_id, file) {
             Ok(path) => path,
             Err(error) => {
@@ -100,7 +81,7 @@ pub(super) async fn flush_branch_inferencer_output(
                 return;
             }
         };
-        match inferencer::OnnxInferencerSession::load(version, &path).await {
+        match inferencer::OnnxInferencerSession::load(&path).await {
             Ok(loaded) => *session = Some(loaded),
             Err(error) => {
                 branch.runtime.handle_internal_processor_error_for_acks(
@@ -110,12 +91,11 @@ pub(super) async fn flush_branch_inferencer_output(
                     error_policies,
                     forwarded.acks.iter(),
                     format!(
-                        "inferencer '{}' failed to load resource '{}@{}' file '{}': {}",
+                        "inferencer '{}' failed to load resource '{}@{}' file '{}': {error:#}",
                         processor.as_str(),
                         resource.as_str(),
-                        version,
+                        resource_version,
                         file,
-                        error
                     ),
                 );
                 return;
@@ -266,12 +246,12 @@ pub(super) async fn flush_branch_inferencer_output(
                 error_policies,
                 messages.iter().map(|message| &message.acks),
                 format!(
-                    "inferencer '{}' failed ONNX execution for resource '{}@{}' file '{}': {}",
+                    "inferencer '{}' failed ONNX execution for resource '{}@{}' file '{}': \
+                     {error:#}",
                     processor.as_str(),
                     resource.as_str(),
-                    version,
+                    resource_version,
                     file,
-                    error
                 ),
             );
             return;

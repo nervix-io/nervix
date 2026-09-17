@@ -8,7 +8,7 @@ use error_stack::Report;
 use meticulous::OptionExt as _;
 
 use crate::{
-    codec::{DecodeError, Decoder, EncodeError, EncodedUnion, Encoder},
+    codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError},
     command::{AttachOutcome, CommandOutcome},
     common::RequestId,
     domain::{
@@ -63,7 +63,7 @@ impl Reply {
     ///
     /// A reply larger than the session transfer limit is refused; the server answers the request
     /// with a rejection instead of truncating it.
-    pub fn encode(&self, limits: &SessionLimits) -> Result<ReplyDelivery, Report<EncodeError>> {
+    pub fn encode(&self, limits: &SessionLimits) -> Result<ReplyDelivery, Report<WireEncodeError>> {
         let mut encoder = Encoder::new(limits.transfer_bytes(), limits);
         let body = match &self.body {
             ReplyBody::Command(outcome) => outcome.encode_body(&mut encoder)?,
@@ -102,7 +102,7 @@ impl Reply {
         decoder: Decoder<'_>,
         request_id: RequestId,
         reply: wire::Reply<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let body = match reply.body_type() {
             wire::ReplyBody::CommandOutcome => ReplyBody::Command(Box::new(
                 CommandOutcome::decode(decoder, reply_member(reply.body_as_command_outcome()))?,
@@ -187,7 +187,7 @@ pub enum ServerMessage {
 }
 
 impl ServerMessage {
-    pub fn decode(frame: &VerifiedFrame<ServerFrame>) -> Result<Self, Report<DecodeError>> {
+    pub fn decode(frame: &VerifiedFrame<ServerFrame>) -> Result<Self, Report<WireDecodeError>> {
         let decoder = Decoder::new(frame.limits());
         let message = frame.root();
         let event = match message.body_type() {
@@ -283,7 +283,7 @@ impl VerifiedFrame<ServerFrame> {
 pub(crate) fn finish_server_message(
     mut encoder: Encoder<'_>,
     body: EncodedUnion<wire::ServerBody>,
-) -> Result<EncodedFrame<ServerFrame>, Report<EncodeError>> {
+) -> Result<EncodedFrame<ServerFrame>, Report<WireEncodeError>> {
     let message = wire::ServerMessage::create(
         encoder.fbb(),
         &wire::ServerMessageArgs {

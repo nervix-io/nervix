@@ -349,6 +349,10 @@ CREATE INFERENCER score_events
 
 Every required route-output field is explicit. The source input is not implicitly inherited.
 
+`USING RESOURCE` requires `VERSION <n>` or `VERSION LATEST`. The inferencer loads the model file
+from the one version it stores, so a later upload of the resource does not change the scoring
+model; see [Versioning](resources.md#versioning).
+
 ## WASM processor
 
 WASM routes are also set-only and execute only when the guest returns actual output data:
@@ -368,6 +372,10 @@ CREATE WASM PROCESSOR normalize_events
     ON MESSAGE ERROR LOG
   ON GLOBAL ERROR LOG;
 ```
+
+`USING RESOURCE` requires `VERSION <n>` or `VERSION LATEST`, and the processor compiles the module
+from the one version it stores. `SHOW CREATE WASM PROCESSOR` renders that version and
+`DESCRIBE WASM PROCESSOR` reports it.
 
 Generated guest state is immutable across routes. WASM processors do not declare `FLUSH`; guest
 output and guest-requested timeouts own emission cadence. `MAX FUEL` and `MAX MEMORY` are both

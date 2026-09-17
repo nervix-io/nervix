@@ -211,6 +211,41 @@ impl ResourceUploadState {
     }
 }
 
+/// The resource version a binding statement names before the statement is applied.
+///
+/// A stored model always holds the resolved number. This is the written form a statement carries
+/// until planning resolves it against the completed versions of its domain.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum RequestedResourceVersion {
+    /// `VERSION <n>`: exactly this version, which has to be completed.
+    Number(u64),
+    /// `VERSION LATEST`: the highest completed version when the statement is applied.
+    Latest,
+}
+
+impl std::fmt::Display for RequestedResourceVersion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Number(version) => write!(formatter, "{version}"),
+            Self::Latest => formatter.write_str("LATEST"),
+        }
+    }
+}
+
 /// The durable assignment and installation outcome of one administrative upload.
 #[derive(
     Debug,
@@ -296,14 +331,87 @@ impl ResourceUploads {
         self.by_key.values()
     }
 
-    fn latest_completed_version(
+    /// The uploads that belong to `domain`, which are the only ones a binding in that domain can
+    /// resolve against.
+    pub fn in_domain(&self, domain: &DomainName) -> Self {
+        let by_key = self
+            .by_key
+            .iter()
+            .filter(|(key, _)| key.domain == *domain)
+            .map(|(key, upload)| (key.clone(), upload.clone()))
+            .collect();
+        let by_version = self
+            .by_version
+            .iter()
+            .filter(|(id, _)| id.domain == *domain)
+            .map(|(id, key)| (id.clone(), key.clone()))
+            .collect();
+        let completed_versions = self
+            .completed_versions
+            .iter()
+            .filter(|id| id.domain == *domain)
+            .cloned()
+            .collect();
+        Self {
+            by_key,
+            by_version,
+            completed_versions,
+        }
+    }
+
+    /// Every completed version, ordered by domain, resource and version.
+    pub fn completed_versions(&self) -> impl Iterator<Item = &ResourceId> {
+        self.completed_versions.iter()
+    }
+
+    /// The completed versions of one resource in `domain`, ascending.
+    pub fn completed_versions_of(
         &self,
         domain: &DomainName,
         identifier: &ResourceName,
-    ) -> Option<&ResourceId> {
+    ) -> impl DoubleEndedIterator<Item = &ResourceId> {
         let first = ResourceId::new(domain.clone(), identifier.clone(), 0);
         let last = ResourceId::new(domain.clone(), identifier.clone(), u64::MAX);
-        self.completed_versions.range(first..=last).next_back()
+        self.completed_versions.range(first..=last)
+    }
+
+    /// Resolves the version a binding requests in `domain`. Upload outcomes are the sole source
+    /// of binding eligibility: an explicit number has to name a completed version, and `LATEST`
+    /// selects the highest completed one.
+    pub fn resolve_completed_version(
+        &self,
+        domain: &DomainName,
+        identifier: &ResourceName,
+        requested: RequestedResourceVersion,
+    ) -> Result<ResourceId, Report<ResourceVersionResolutionError>> {
+        let id = match requested {
+            RequestedResourceVersion::Number(version) => {
+                ResourceId::new(domain.clone(), identifier.clone(), version)
+            }
+            RequestedResourceVersion::Latest => {
+                let Some(latest) = self.completed_versions_of(domain, identifier).next_back()
+                else {
+                    return Err(Report::new(
+                        ResourceVersionResolutionError::NoCompletedVersions {
+                            domain: domain.clone(),
+                            identifier: identifier.clone(),
+                        },
+                    ));
+                };
+                latest.clone()
+            }
+        };
+        let Some(upload) = self.get_version(&id) else {
+            return Err(Report::new(ResourceVersionResolutionError::DoesNotExist(
+                id,
+            )));
+        };
+        if let ResourceUploadState::Completed { .. } = upload.state {
+            return Ok(id);
+        }
+        Err(Report::new(ResourceVersionResolutionError::NotCompleted(
+            id,
+        )))
     }
 }
 
@@ -548,41 +656,182 @@ impl ResourceVersionStatus {
             .map(|counter| counter.next_version)
     }
 
-    /// Resolves an explicit version, or the highest completed version when `requested_version` is
-    /// absent. Upload outcomes are the sole source of binding eligibility and latest selection.
-    pub fn resolve_completed_version(
-        &self,
-        domain: &DomainName,
-        identifier: &ResourceName,
-        requested_version: Option<u64>,
-    ) -> Result<ResourceId, Report<ResourceVersionResolutionError>> {
-        let id = match requested_version {
-            Some(version) => ResourceId::new(domain.clone(), identifier.clone(), version),
-            None => self
-                .uploads
-                .latest_completed_version(domain, identifier)
-                .cloned()
-                .ok_or_else(|| {
-                    Report::new(ResourceVersionResolutionError::NoCompletedVersions {
-                        domain: domain.clone(),
-                        identifier: identifier.clone(),
-                    })
-                })?,
-        };
-        let Some(upload) = self.uploads.get_version(&id) else {
-            return Err(Report::new(ResourceVersionResolutionError::DoesNotExist(
-                id,
-            )));
-        };
-        if matches!(upload.state, ResourceUploadState::Completed { .. }) {
-            return Ok(id);
-        }
-        Err(Report::new(ResourceVersionResolutionError::NotCompleted(
-            id,
-        )))
-    }
-
     pub fn is_declared(&self, domain: &DomainName, identifier: &ResourceName) -> bool {
         self.next_version(domain, identifier).is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use meticulous::{OptionExt as _, ResultExt as _};
+
+    use super::*;
+
+    fn domain(raw: &str) -> DomainName {
+        DomainName::parse(raw).assured("test domains are identifier-shaped literals")
+    }
+
+    fn resource(raw: &str) -> ResourceName {
+        ResourceName::parse(raw).assured("test resources are identifier-shaped literals")
+    }
+
+    fn upload(
+        domain: &DomainName,
+        identity: &str,
+        version: u64,
+        state: ResourceUploadState,
+    ) -> ResourceUpload {
+        ResourceUpload {
+            key: ResourceUploadKey::new(
+                UserName::parse("default")
+                    .assured("the test owner is an identifier-shaped literal"),
+                domain.clone(),
+                resource("model"),
+                ResourceUploadIdentity::parse(identity)
+                    .assured("test upload identities use accepted characters"),
+            ),
+            version,
+            state,
+        }
+    }
+
+    fn completed(root_checksum: &str) -> ResourceUploadState {
+        ResourceUploadState::Completed {
+            root_checksum: root_checksum.to_string(),
+            outcome_revision: 1,
+        }
+    }
+
+    /// Versions 1 and 3 completed, 2 failed after 3 was assigned, and 4 is still applying, all in
+    /// `tenant`; `other` completed its own version 7 of a resource with the same name.
+    fn uploads() -> ResourceUploads {
+        let tenant = domain("tenant");
+        let other = domain("other");
+        ResourceUploads::try_from_uploads([
+            upload(&tenant, "first", 1, completed("first-root")),
+            upload(
+                &tenant,
+                "failed",
+                2,
+                ResourceUploadState::Failed {
+                    root_checksum: "failed-root".to_string(),
+                    outcome_revision: 3,
+                    reason: "installation failed".to_string(),
+                },
+            ),
+            upload(&tenant, "third", 3, completed("third-root")),
+            upload(
+                &tenant,
+                "applying",
+                4,
+                ResourceUploadState::Applying {
+                    root_checksum: "applying-root".to_string(),
+                },
+            ),
+            upload(&other, "elsewhere", 7, completed("elsewhere-root")),
+        ])
+        .assured("the test uploads have unique identities and versions")
+    }
+
+    #[test]
+    fn latest_resolves_to_the_highest_completed_version() {
+        let resolved = uploads()
+            .resolve_completed_version(
+                &domain("tenant"),
+                &resource("model"),
+                RequestedResourceVersion::Latest,
+            )
+            .assured("the tenant has completed versions");
+        assert_eq!(
+            resolved,
+            ResourceId::new(domain("tenant"), resource("model"), 3)
+        );
+    }
+
+    #[test]
+    fn a_number_resolves_only_to_a_completed_version_of_its_domain() {
+        let uploads = uploads();
+        let tenant = domain("tenant");
+        let model = resource("model");
+
+        let first = uploads
+            .resolve_completed_version(&tenant, &model, RequestedResourceVersion::Number(1))
+            .assured("version 1 completed");
+        assert_eq!(first.version, 1);
+
+        for incomplete in [2, 4] {
+            let error = match uploads.resolve_completed_version(
+                &tenant,
+                &model,
+                RequestedResourceVersion::Number(incomplete),
+            ) {
+                Ok(id) => panic!("version {incomplete} must not resolve, got {id:?}"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.current_context().to_string(),
+                format!(
+                    "resource 'model@{incomplete}' is not a completed version in domain 'tenant'"
+                )
+            );
+        }
+
+        let unknown = match uploads.resolve_completed_version(
+            &tenant,
+            &model,
+            RequestedResourceVersion::Number(7),
+        ) {
+            Ok(id) => panic!("another domain's version must not resolve, got {id:?}"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            unknown.current_context().to_string(),
+            "resource 'model@7' does not exist in domain 'tenant'"
+        );
+    }
+
+    #[test]
+    fn latest_without_a_completed_version_is_rejected() {
+        let error = match uploads().resolve_completed_version(
+            &domain("tenant"),
+            &resource("weights"),
+            RequestedResourceVersion::Latest,
+        ) {
+            Ok(id) => panic!("a resource without uploads must not resolve, got {id:?}"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.current_context().to_string(),
+            "resource 'weights' has no completed versions in domain 'tenant'"
+        );
+    }
+
+    #[test]
+    fn domain_uploads_keep_only_that_domain_and_its_completed_versions() {
+        let tenant = domain("tenant");
+        let scoped = uploads().in_domain(&tenant);
+
+        let completed = scoped
+            .completed_versions()
+            .map(|id| id.version)
+            .collect::<Vec<_>>();
+        assert_eq!(completed, vec![1, 3]);
+        assert!(
+            scoped
+                .resolve_completed_version(
+                    &domain("other"),
+                    &resource("model"),
+                    RequestedResourceVersion::Latest
+                )
+                .is_err(),
+            "uploads scoped to one domain resolve nothing in another"
+        );
+        let applying = scoped
+            .get_version(&ResourceId::new(tenant, resource("model"), 4))
+            .assured("the applying upload stays in its domain");
+        assert!(matches!(
+            applying.state,
+            ResourceUploadState::Applying { .. }
+        ));
     }
 }

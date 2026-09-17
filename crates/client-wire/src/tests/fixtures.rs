@@ -12,9 +12,9 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{CommandExecutionReference, NameError, TransactionOperationNumber};
 
 use crate::{
-    ClientFrame, ClientMessage, DecodeError, EncodedFrame, FrameError, FrameRoot, Reply,
-    ReplyDelivery, RequestId, ServerEvent, ServerFrame, ServerMessage, SessionLimitSettings,
-    SessionLimits, VerifiedFrame,
+    ClientFrame, ClientMessage, EncodedFrame, FrameError, FrameRoot, Reply, ReplyDelivery,
+    RequestId, ServerEvent, ServerFrame, ServerMessage, SessionLimitSettings, SessionLimits,
+    VerifiedFrame, WireDecodeError,
 };
 
 pub(crate) fn limits() -> SessionLimits {
@@ -127,7 +127,9 @@ pub(crate) fn raw_server(bytes: Bytes) -> VerifiedFrame<ServerFrame> {
 }
 
 /// The context of a decoding failure.
-pub(crate) fn decode_error<T: Debug>(result: Result<T, Report<DecodeError>>) -> DecodeError {
+pub(crate) fn decode_error<T: Debug>(
+    result: Result<T, Report<WireDecodeError>>,
+) -> WireDecodeError {
     match result {
         Ok(value) => panic!("decoding succeeded with {value:?}"),
         Err(error) => error.current_context().clone(),

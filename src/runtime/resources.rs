@@ -55,19 +55,6 @@ pub(crate) enum RuntimeResourceError {
         resource: ResourceName,
         version: u64,
     },
-    #[error("resource specification '{spec}' has an invalid identifier")]
-    InvalidResourceIdentifier { spec: String },
-    #[error("resource specification '{spec}' names '{actual}' instead of '{expected}'")]
-    ResourceIdentifierMismatch {
-        spec: String,
-        expected: ResourceName,
-        actual: ResourceName,
-    },
-    #[error("resource '{resource}' in domain '{domain}' has an invalid requested version")]
-    InvalidResourceVersion {
-        domain: DomainName,
-        resource: ResourceName,
-    },
     #[error(transparent)]
     ResourceResolution(ResourceVersionResolutionError),
     #[error("client resource '{resource}' in domain '{domain}' requires a resource store")]
@@ -256,13 +243,13 @@ impl Runtime {
                 domain: domain.as_str().to_string(),
                 reason,
             };
+            let resource = ResourceId::new(
+                domain.clone(),
+                config.resource.clone(),
+                config.resource_version,
+            );
             let pool = self
-                .compile_protobuf_descriptor_pool(
-                    domain,
-                    &config.resource,
-                    config.resource_version,
-                    &config.config,
-                )
+                .compile_protobuf_descriptor_pool(resource, &config.config)
                 .await
                 .map_err(|error| build_error(error.to_string()))?;
             Some(
@@ -291,13 +278,13 @@ impl Runtime {
             reason,
         };
         let descriptors = if let SignalingWireFormat::Protobuf(config) = &protocol.format {
+            let resource = ResourceId::new(
+                domain.clone(),
+                config.resource.clone(),
+                config.resource_version,
+            );
             let pool = self
-                .compile_protobuf_descriptor_pool(
-                    domain,
-                    &config.resource,
-                    config.resource_version,
-                    &config.config,
-                )
+                .compile_protobuf_descriptor_pool(resource, &config.config)
                 .await
                 .map_err(|error| build_error(error.to_string()))?;
             Some(SignalingProtobufDescriptors {
@@ -317,22 +304,20 @@ impl Runtime {
             .map_err(|error| build_error(error.to_string()))
     }
 
+    /// Compiles the descriptors of the one resource version a codec or signaling protocol pins.
     pub(super) async fn compile_protobuf_descriptor_pool(
         &self,
-        domain: &DomainName,
-        resource: &ResourceName,
-        resource_version: Option<u64>,
+        id: ResourceId,
         config: &[ClientConfigEntry],
     ) -> error_stack::Result<ProtobufDescriptorPool, RuntimeResourceError> {
         let Some(store) = self.inner.resource_store.load_full() else {
             return Err(Report::new(
                 RuntimeResourceError::ProtobufStoreUnavailable {
-                    domain: domain.clone(),
-                    resource: resource.clone(),
+                    domain: id.domain,
+                    resource: id.identifier,
                 },
             ));
         };
-        let id = self.resolve_resource_id(domain, resource, resource_version, resource.as_str())?;
         let compile_config = ProtobufDescriptorCompileConfig::from_entries(config)?;
         let task_resource = id.identifier.clone();
         let task_version = id.version;
@@ -377,54 +362,6 @@ impl Runtime {
         self.inner
             .resource_versions
             .store(StdArc::new(resource_versions));
-    }
-
-    /// Resolves a resource reference to the concrete version completed in `domain`. Resources are
-    /// domain-owned, so the same name in another domain is a different resource with its own
-    /// version sequence. `spec` may pin a version as `<name>@<version>`.
-    pub(in crate::runtime) fn resolve_resource_id(
-        &self,
-        domain: &DomainName,
-        identifier: &ResourceName,
-        requested_version: Option<u64>,
-        spec: &str,
-    ) -> error_stack::Result<ResourceId, RuntimeResourceError> {
-        let resolved_version = if let Some(version) = requested_version {
-            Some(version)
-        } else if let Some((name, version)) = spec.rsplit_once('@') {
-            let parsed = ResourceName::parse(name).map_err(|error| {
-                Report::new(RuntimeResourceError::InvalidResourceIdentifier {
-                    spec: spec.to_string(),
-                })
-                .attach_printable(error)
-            })?;
-            if &parsed != identifier {
-                return Err(Report::new(
-                    RuntimeResourceError::ResourceIdentifierMismatch {
-                        spec: spec.to_string(),
-                        expected: identifier.clone(),
-                        actual: parsed,
-                    },
-                ));
-            }
-            Some(version.parse::<u64>().map_err(|error| {
-                Report::new(RuntimeResourceError::InvalidResourceVersion {
-                    domain: domain.clone(),
-                    resource: identifier.clone(),
-                })
-                .attach_printable(error)
-            })?)
-        } else {
-            None
-        };
-        self.inner
-            .resource_versions
-            .load()
-            .resolve_completed_version(domain, identifier, resolved_version)
-            .map_err(|error| {
-                let context = error.current_context().clone();
-                error.change_context(RuntimeResourceError::ResourceResolution(context))
-            })
     }
 
     pub(crate) fn resolve_client_config(
@@ -500,7 +437,21 @@ impl Runtime {
             .attach_printable(source)
         })?;
         let mut aliases = BTreeMap::new();
-        let id = self.resolve_resource_id(domain, mount, None, mount.as_str())?;
+        // A client mount does not name a version, so it mounts the highest version completed when
+        // the client is instantiated.
+        let resolution = self
+            .inner
+            .resource_versions
+            .load()
+            .uploads
+            .resolve_completed_version(domain, mount, RequestedResourceVersion::Latest);
+        let id = match resolution {
+            Ok(id) => id,
+            Err(error) => {
+                let context = error.current_context().clone();
+                return Err(error.change_context(RuntimeResourceError::ResourceResolution(context)));
+            }
+        };
         let source_root = resource_store.content_root(&id);
         if !source_root.exists() {
             return Err(Report::new(
@@ -711,53 +662,16 @@ mod tests {
         let domain = DomainName::parse("tenant").expect("valid domain");
         let resource = named::<ResourceName>("events_proto");
         let error = Runtime::new()
-            .compile_protobuf_descriptor_pool(&domain, &resource, Some(1), &[])
+            .compile_protobuf_descriptor_pool(
+                ResourceId::new(domain.clone(), resource.clone(), 1),
+                &[],
+            )
             .await
             .expect_err("protobuf compilation without a resource store must fail");
 
         assert!(matches!(
             error.current_context(),
             RuntimeResourceError::ProtobufStoreUnavailable {
-                domain: error_domain,
-                resource: error_resource,
-            } if error_domain == &domain && error_resource == &resource
-        ));
-    }
-
-    #[test]
-    fn resource_specification_failures_preserve_typed_identity() {
-        let runtime = Runtime::new();
-        let domain = DomainName::parse("tenant").expect("valid domain");
-        let resource = named::<ResourceName>("dev_tls");
-
-        let invalid_identifier = runtime
-            .resolve_resource_id(&domain, &resource, None, "bad name@1")
-            .expect_err("an invalid resource identifier must fail");
-        assert!(matches!(
-            invalid_identifier.current_context(),
-            RuntimeResourceError::InvalidResourceIdentifier { spec } if spec == "bad name@1"
-        ));
-
-        let mismatch = runtime
-            .resolve_resource_id(&domain, &resource, None, "other_tls@1")
-            .expect_err("a mismatched resource identifier must fail");
-        assert!(matches!(
-            mismatch.current_context(),
-            RuntimeResourceError::ResourceIdentifierMismatch {
-                spec,
-                expected,
-                actual,
-            } if spec == "other_tls@1"
-                && expected == &resource
-                && actual.as_str() == "other_tls"
-        ));
-
-        let invalid_version = runtime
-            .resolve_resource_id(&domain, &resource, None, "dev_tls@latest")
-            .expect_err("a non-numeric resource version must fail");
-        assert!(matches!(
-            invalid_version.current_context(),
-            RuntimeResourceError::InvalidResourceVersion {
                 domain: error_domain,
                 resource: error_resource,
             } if error_domain == &domain && error_resource == &resource
@@ -923,18 +837,6 @@ mod tests {
                 .assured("the test uploads have unique identities and versions"),
             },
         );
-
-        for version in [2, 3] {
-            let error = runtime
-                .resolve_resource_id(&mount_domain, &named("dev_tls"), Some(version), "dev_tls")
-                .expect_err("the runtime must reject an incomplete explicit version");
-            assert_eq!(
-                error.current_context().to_string(),
-                format!(
-                    "resource 'dev_tls@{version}' is not a completed version in domain 'tenant'"
-                )
-            );
-        }
 
         let resolved = runtime
             .resolve_client_config(

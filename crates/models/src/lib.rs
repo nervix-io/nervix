@@ -26,6 +26,7 @@ mod node_ref;
 mod quiesce;
 mod remote;
 mod resource;
+mod resource_binding;
 mod schema;
 mod statement;
 mod timestamp;
@@ -74,20 +75,21 @@ pub use quiesce::{
     ImpactTopologyEdge, ModelChangeAspect, ModelChangeAspects, OperationImpactReason,
     OperationImpactReport, OwnershipMoveImpact, PauseRequirement, PlannedExecutionStepImpact,
     QuiesceLevel, QuiesceSubgraph, QuiescenceOutcome, RebuildImpact, RebuildReason,
-    ResourceCatalogAction, ResourceCatalogImpact, StatePurge, StateResetImpact,
-    TransactionImpactReport, TransactionImpactSummary, TransactionInspectionTarget,
-    TransactionOperation, TransactionOperationNumber, TransactionOperationRange,
-    TransactionPosition, TransactionPreviewIdentity,
+    ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact, StatePurge,
+    StateResetImpact, TransactionImpactReport, TransactionImpactSummary,
+    TransactionInspectionTarget, TransactionOperation, TransactionOperationNumber,
+    TransactionOperationRange, TransactionPosition, TransactionPreviewIdentity,
 };
 pub use remote::{
     RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeElementValue,
     RemoteRuntimeField, RemoteRuntimeRecord, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
 };
 pub use resource::{
-    ResourceId, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ResourceUpload,
-    ResourceUploadIdentity, ResourceUploadIdentityError, ResourceUploadKey, ResourceUploadState,
-    ResourceUploads, ResourceUploadsError, ResourceVersion, ResourceVersionCounter,
-    ResourceVersionKey, ResourceVersionResolutionError, ResourceVersionStatus,
+    RequestedResourceVersion, ResourceId, ResourceNodeState, ResourceNodeStatus,
+    ResourceReplicaKey, ResourceUpload, ResourceUploadIdentity, ResourceUploadIdentityError,
+    ResourceUploadKey, ResourceUploadState, ResourceUploads, ResourceUploadsError, ResourceVersion,
+    ResourceVersionCounter, ResourceVersionKey, ResourceVersionResolutionError,
+    ResourceVersionStatus,
 };
 pub use schema::{
     AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation,

@@ -14,7 +14,7 @@ use nervix_models::{BranchName, FieldName, ParseAsType, SchemaField, Timestamp};
 use thiserror::Error;
 
 use crate::{
-    codec::{DecodeError, Decoder, EncodeError, EncodedUnion, Encoder, wire_enum},
+    codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
     wire,
 };
 
@@ -66,7 +66,7 @@ impl RowSchema {
         &self,
         encoder: &mut Encoder<'fbb>,
         depth: usize,
-    ) -> Result<WIPOffset<wire::RowSchema<'fbb>>, Report<EncodeError>> {
+    ) -> Result<WIPOffset<wire::RowSchema<'fbb>>, Report<WireEncodeError>> {
         let field_depth = depth
             .checked_add(1)
             .assured("a schema sits at a fixed depth within its frame");
@@ -106,7 +106,7 @@ impl RowSchema {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         schema: wire::RowSchema<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let fields = decoder.table_vector("RowSchema.fields", schema.fields(), |field| {
             decode_field(decoder, field)
         })?;
@@ -120,7 +120,7 @@ impl RowSchema {
                 match RowBranch::new(name, fields) {
                     Ok(branch) => Some(branch),
                     Err(error) => {
-                        return Err(error.change_context(DecodeError::EmptyCollection {
+                        return Err(error.change_context(WireDecodeError::EmptyCollection {
                             field: "RowBranch.fields",
                         }));
                     }
@@ -137,7 +137,7 @@ fn encode_field<'fbb>(
     field: &SchemaField,
     encoder: &mut Encoder<'fbb>,
     depth: usize,
-) -> Result<WIPOffset<wire::RowField<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::RowField<'fbb>>, Report<WireEncodeError>> {
     let name = encoder.text("RowField.name", field.name.as_str())?;
     let type_depth = depth
         .checked_add(1)
@@ -157,7 +157,7 @@ fn encode_field<'fbb>(
 fn decode_field(
     decoder: Decoder<'_>,
     field: wire::RowField<'_>,
-) -> Result<SchemaField, Report<DecodeError>> {
+) -> Result<SchemaField, Report<WireDecodeError>> {
     let name: FieldName = decoder.name("RowField.name", field.name())?;
     let ty = decode_field_type(decoder, field.field_type())?;
     Ok(SchemaField {
@@ -208,7 +208,7 @@ fn encode_field_type<'fbb>(
     encoder: &mut Encoder<'fbb>,
     ty: &ParseAsType,
     depth: usize,
-) -> Result<WIPOffset<wire::FieldType<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::FieldType<'fbb>>, Report<WireEncodeError>> {
     let shape_depth = depth
         .checked_add(1)
         .assured("every enclosing level passed the nesting check, which bounds the depth");
@@ -276,7 +276,7 @@ impl ScalarType {
 fn decode_field_type(
     decoder: Decoder<'_>,
     field_type: wire::FieldType<'_>,
-) -> Result<ParseAsType, Report<DecodeError>> {
+) -> Result<ParseAsType, Report<WireDecodeError>> {
     if let Some(scalar) = field_type.shape_as_scalar_field_type() {
         let scalar = decoder.required_enumeration("ScalarFieldType.scalar", scalar.scalar())?;
         let ty = match scalar {
@@ -299,7 +299,7 @@ fn decode_field_type(
     if let Some(list) = field_type.shape_as_fixed_list_field_type() {
         let element = decode_field_type(decoder, list.element())?;
         let Some(len) = NonZeroU32::new(list.length()) else {
-            return Err(Report::new(DecodeError::ZeroValue {
+            return Err(Report::new(WireDecodeError::ZeroValue {
                 field: "FixedListFieldType.length",
             }));
         };
@@ -347,7 +347,7 @@ impl<'e, 'fbb> CellWriter<'e, 'fbb> {
     }
 
     /// A null value, for a nullable field.
-    pub fn push_null(&mut self) -> Result<(), Report<EncodeError>> {
+    pub fn push_null(&mut self) -> Result<(), Report<WireEncodeError>> {
         self.admit(0)?;
         let cell = wire::NullCell::create(self.encoder.fbb(), &wire::NullCellArgs {});
         self.push_cell(wire::CellValue::NullCell, cell);
@@ -355,63 +355,63 @@ impl<'e, 'fbb> CellWriter<'e, 'fbb> {
     }
 
     /// The withheld value of a sensitive field.
-    pub fn push_redacted(&mut self) -> Result<(), Report<EncodeError>> {
+    pub fn push_redacted(&mut self) -> Result<(), Report<WireEncodeError>> {
         self.admit(0)?;
         let cell = wire::RedactedCell::create(self.encoder.fbb(), &wire::RedactedCellArgs {});
         self.push_cell(wire::CellValue::RedactedCell, cell);
         Ok(())
     }
 
-    pub fn push_u8(&mut self, value: u8) -> Result<(), Report<EncodeError>> {
+    pub fn push_u8(&mut self, value: u8) -> Result<(), Report<WireEncodeError>> {
         self.admit(0)?;
         let cell = wire::U8Cell::create(self.encoder.fbb(), &wire::U8CellArgs { value });
         self.push_cell(wire::CellValue::U8Cell, cell);
         Ok(())
     }
 
-    pub fn push_i8(&mut self, value: i8) -> Result<(), Report<EncodeError>> {
+    pub fn push_i8(&mut self, value: i8) -> Result<(), Report<WireEncodeError>> {
         self.admit(0)?;
         let cell = wire::I8Cell::create(self.encoder.fbb(), &wire::I8CellArgs { value });
         self.push_cell(wire::CellValue::I8Cell, cell);
         Ok(())
     }
 
-    pub fn push_u16(&mut self, value: u16) -> Result<(), Report<EncodeError>> {
+    pub fn push_u16(&mut self, value: u16) -> Result<(), Report<WireEncodeError>> {
         self.admit(0)?;
         let cell = wire::U16Cell::create(self.encoder.fbb(), &wire::U16CellArgs { value });
         self.push_cell(wire::CellValue::U16Cell, cell);
         Ok(())
     }
 
-    pub fn push_i16(&mut self, value: i16) -> Result<(), Report<EncodeError>> {
+    pub fn push_i16(&mut self, value: i16) -> Result<(), Report<WireEncodeError>> {
         self.admit(0)?;
         let cell = wire::I16Cell::create(self.encoder.fbb(), &wire::I16CellArgs { value });
         self.push_cell(wire::CellValue::I16Cell, cell);
         Ok(())
     }
 
-    pub fn push_u32(&mut self, value: u32) -> Result<(), Report<EncodeError>> {
+    pub fn push_u32(&mut self, value: u32) -> Result<(), Report<WireEncodeError>> {
         self.admit(0)?;
         let cell = wire::U32Cell::create(self.encoder.fbb(), &wire::U32CellArgs { value });
         self.push_cell(wire::CellValue::U32Cell, cell);
         Ok(())
     }
 
-    pub fn push_i32(&mut self, value: i32) -> Result<(), Report<EncodeError>> {
+    pub fn push_i32(&mut self, value: i32) -> Result<(), Report<WireEncodeError>> {
         self.admit(0)?;
         let cell = wire::I32Cell::create(self.encoder.fbb(), &wire::I32CellArgs { value });
         self.push_cell(wire::CellValue::I32Cell, cell);
         Ok(())
     }
 
-    pub fn push_u64(&mut self, value: u64) -> Result<(), Report<EncodeError>> {
+    pub fn push_u64(&mut self, value: u64) -> Result<(), Report<WireEncodeError>> {
         self.admit(0)?;
         let cell = wire::U64Cell::create(self.encoder.fbb(), &wire::U64CellArgs { value });
         self.push_cell(wire::CellValue::U64Cell, cell);
         Ok(())
     }
 
-    pub fn push_i64(&mut self, value: i64) -> Result<(), Report<EncodeError>> {
+    pub fn push_i64(&mut self, value: i64) -> Result<(), Report<WireEncodeError>> {
         self.admit(0)?;
         let cell = wire::I64Cell::create(self.encoder.fbb(), &wire::I64CellArgs { value });
         self.push_cell(wire::CellValue::I64Cell, cell);
@@ -419,7 +419,7 @@ impl<'e, 'fbb> CellWriter<'e, 'fbb> {
     }
 
     /// A 32-bit float, with its exact bits including the sign of zero and any NaN payload.
-    pub fn push_f32(&mut self, value: f32) -> Result<(), Report<EncodeError>> {
+    pub fn push_f32(&mut self, value: f32) -> Result<(), Report<WireEncodeError>> {
         self.admit(0)?;
         let cell = wire::F32Cell::create(
             self.encoder.fbb(),
@@ -430,7 +430,7 @@ impl<'e, 'fbb> CellWriter<'e, 'fbb> {
     }
 
     /// A 64-bit float, with its exact bits including the sign of zero and any NaN payload.
-    pub fn push_f64(&mut self, value: f64) -> Result<(), Report<EncodeError>> {
+    pub fn push_f64(&mut self, value: f64) -> Result<(), Report<WireEncodeError>> {
         self.admit(0)?;
         let cell = wire::F64Cell::create(
             self.encoder.fbb(),
@@ -440,14 +440,14 @@ impl<'e, 'fbb> CellWriter<'e, 'fbb> {
         Ok(())
     }
 
-    pub fn push_bool(&mut self, value: bool) -> Result<(), Report<EncodeError>> {
+    pub fn push_bool(&mut self, value: bool) -> Result<(), Report<WireEncodeError>> {
         self.admit(0)?;
         let cell = wire::BoolCell::create(self.encoder.fbb(), &wire::BoolCellArgs { value });
         self.push_cell(wire::CellValue::BoolCell, cell);
         Ok(())
     }
 
-    pub fn push_string(&mut self, value: &str) -> Result<(), Report<EncodeError>> {
+    pub fn push_string(&mut self, value: &str) -> Result<(), Report<WireEncodeError>> {
         self.admit(value.len())?;
         let value = self.encoder.text("StringCell.value", value)?;
         let cell = wire::StringCell::create(
@@ -458,7 +458,7 @@ impl<'e, 'fbb> CellWriter<'e, 'fbb> {
         Ok(())
     }
 
-    pub fn push_datetime(&mut self, value: Timestamp) -> Result<(), Report<EncodeError>> {
+    pub fn push_datetime(&mut self, value: Timestamp) -> Result<(), Report<WireEncodeError>> {
         self.admit(0)?;
         let cell = wire::DatetimeCell::create(
             self.encoder.fbb(),
@@ -473,8 +473,8 @@ impl<'e, 'fbb> CellWriter<'e, 'fbb> {
     /// A list value whose elements `write_elements` writes.
     pub fn push_list(
         &mut self,
-        write_elements: impl FnOnce(&mut CellWriter<'_, 'fbb>) -> Result<(), Report<EncodeError>>,
-    ) -> Result<(), Report<EncodeError>> {
+        write_elements: impl FnOnce(&mut CellWriter<'_, 'fbb>) -> Result<(), Report<WireEncodeError>>,
+    ) -> Result<(), Report<WireEncodeError>> {
         self.admit(0)?;
         let element_depth = self
             .depth
@@ -497,7 +497,7 @@ impl<'e, 'fbb> CellWriter<'e, 'fbb> {
     }
 
     /// Checks one more cell, holding `payload` bytes beyond its tables, against the limits.
-    fn admit(&self, payload: usize) -> Result<(), Report<EncodeError>> {
+    fn admit(&self, payload: usize) -> Result<(), Report<WireEncodeError>> {
         let value_depth = self.depth.checked_add(1).assured(
             "a writer is at most one level past a nesting limit of at most MAX_NESTING_DEPTH",
         );
@@ -534,7 +534,7 @@ impl<'e, 'fbb> CellWriter<'e, 'fbb> {
     /// The cells written, as a vector.
     pub(crate) fn finish(
         self,
-    ) -> Result<WIPOffset<Vector<'fbb, ForwardsUOffset<wire::Cell<'fbb>>>>, Report<EncodeError>>
+    ) -> Result<WIPOffset<Vector<'fbb, ForwardsUOffset<wire::Cell<'fbb>>>>, Report<WireEncodeError>>
     {
         self.encoder.tables(self.field, &self.cells)
     }
@@ -552,13 +552,13 @@ impl<'a> RowBatchView<'a> {
     pub(crate) fn check(
         decoder: Decoder<'_>,
         batch: wire::RowBatch<'a>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         if let Some(branch_key) = batch.branch_key() {
             CellsView::check(decoder, "BranchKey.cells", branch_key.cells())?;
         }
         let rows = batch.rows();
         if rows.is_empty() {
-            return Err(Report::new(DecodeError::EmptyCollection {
+            return Err(Report::new(WireDecodeError::EmptyCollection {
                 field: "RowBatch.rows",
             }));
         }
@@ -650,7 +650,7 @@ impl<'a> CellsView<'a> {
         decoder: Decoder<'_>,
         field: &'static str,
         cells: Vector<'_, ForwardsUOffset<wire::Cell<'_>>>,
-    ) -> Result<(), Report<DecodeError>> {
+    ) -> Result<(), Report<WireDecodeError>> {
         decoder.entries(field, cells.len())?;
         for cell in cells.iter() {
             match cell.value_type() {

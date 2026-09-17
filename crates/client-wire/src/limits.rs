@@ -17,9 +17,9 @@ const DEFAULT_FRAME_BYTES: usize = 4 * 1024 * 1024;
 /// The largest reply a transfer reassembles by default.
 const DEFAULT_TRANSFER_BYTES: usize = 64 * 1024 * 1024;
 
-/// The deepest nesting of tables by default. The deepest fixed structure of the schema, an edge
-/// of an impact report's topology inside a transferred inspection reply, nests 14 tables; the
-/// rest of the budget is for nested list values and list field types.
+/// The deepest nesting of tables by default. The deepest structure of the schema that does not
+/// recurse, a node coverage in an execution step's affected topology inside an inspection reply,
+/// nests 13 tables; the rest of the budget is for nested list values and list field types.
 const DEFAULT_NESTING_DEPTH: usize = 64;
 
 /// The most entries a single vector may hold by default.
@@ -37,8 +37,9 @@ pub(crate) const MIN_FRAME_BYTES: usize = 1024;
 /// times [`APPARENT_SIZE_FACTOR`], must stay representable in a 32-bit `usize` for browser builds.
 const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
 
-/// The fewest nesting levels any limit admits: enough for every fixed structure of the schema.
-const MIN_NESTING_DEPTH: usize = 16;
+/// The fewest nesting levels any limit admits: enough for every structure of the schema that does
+/// not recurse, which a test verifies under this limit.
+pub(crate) const MIN_NESTING_DEPTH: usize = 16;
 
 /// The most nesting levels any limit admits.
 ///

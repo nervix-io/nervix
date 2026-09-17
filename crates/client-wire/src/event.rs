@@ -5,7 +5,7 @@ use error_stack::Report;
 use nervix_models::ClusterNodeName;
 
 use crate::{
-    codec::{DecodeError, Decoder, EncodeError, EncodedUnion, Encoder, wire_enum},
+    codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
     common::{LeaderEndpoints, LeaderRedirect},
     frame::{EncodedFrame, ServerFrame},
     limits::SessionLimits,
@@ -33,7 +33,7 @@ impl ServerNotice {
     pub fn encode(
         &self,
         limits: &SessionLimits,
-    ) -> Result<EncodedFrame<ServerFrame>, Report<EncodeError>> {
+    ) -> Result<EncodedFrame<ServerFrame>, Report<WireEncodeError>> {
         let mut encoder = Encoder::new(limits.frame_bytes(), limits);
         let message = encoder.text("ServerNotice.message", &self.message)?;
         let notice = wire::ServerNotice::create(
@@ -52,7 +52,7 @@ impl ServerNotice {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         notice: wire::ServerNotice<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let level = decoder.required_enumeration("ServerNotice.level", notice.level())?;
         let message = decoder.text("ServerNotice.message", notice.message())?;
         Ok(Self { level, message })
@@ -80,7 +80,7 @@ impl LeadershipObserved {
     pub fn encode(
         &self,
         limits: &SessionLimits,
-    ) -> Result<EncodedFrame<ServerFrame>, Report<EncodeError>> {
+    ) -> Result<EncodedFrame<ServerFrame>, Report<WireEncodeError>> {
         let mut encoder = Encoder::new(limits.frame_bytes(), limits);
         let leadership = match &self.leadership {
             Leadership::ServingNode(node) => {
@@ -122,7 +122,7 @@ impl LeadershipObserved {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         observed: wire::LeadershipObserved<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         if let Some(serving) = observed.leadership_as_leader_is_serving_node() {
             let node = decoder.name("LeaderIsServingNode.node", serving.node())?;
             return Ok(Self {
@@ -166,7 +166,7 @@ impl SessionEnding {
     pub fn encode(
         &self,
         limits: &SessionLimits,
-    ) -> Result<EncodedFrame<ServerFrame>, Report<EncodeError>> {
+    ) -> Result<EncodedFrame<ServerFrame>, Report<WireEncodeError>> {
         let mut encoder = Encoder::new(limits.frame_bytes(), limits);
         let reason = match &self.reason {
             SessionEndReason::ServerShuttingDown => EncodedUnion::new(
@@ -204,7 +204,7 @@ impl SessionEnding {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         ending: wire::SessionEnding<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         if let Some(redirect) = ending.reason_as_leader_redirect() {
             let redirect = LeaderRedirect::decode(decoder, redirect)?;
             return Ok(Self {

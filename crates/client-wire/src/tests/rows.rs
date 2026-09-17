@@ -16,9 +16,9 @@ use super::{
     samples::{row_schema, rows_frame, subscription},
 };
 use crate::{
-    CellView, CellWriter, CellsView, DecodeError, EmptyBranchKey, EncodeError, RowBranch,
-    RowConformanceError, RowLocation, RowSchema, ServerEvent, ServerMessage, SessionLimitSettings,
-    SessionLimits, SubscriptionRows, SubscriptionRowsEncoder, row::CELL_TABLES_BYTES, wire,
+    CellView, CellWriter, CellsView, EmptyBranchKey, RowBranch, RowConformanceError, RowLocation,
+    RowSchema, ServerEvent, ServerMessage, SessionLimitSettings, SessionLimits, SubscriptionRows,
+    SubscriptionRowsEncoder, WireDecodeError, WireEncodeError, row::CELL_TABLES_BYTES, wire,
 };
 
 fn decode_rows(bytes: Bytes) -> SubscriptionRows {
@@ -172,7 +172,7 @@ fn field(raw: &str, ty: ParseAsType) -> SchemaField {
     }
 }
 
-type WriteCells = fn(&mut CellWriter<'_, 'static>) -> Result<(), Report<EncodeError>>;
+type WriteCells = fn(&mut CellWriter<'_, 'static>) -> Result<(), Report<WireEncodeError>>;
 
 fn unbranched_rows(rows: &[WriteCells]) -> SubscriptionRows {
     let mut batch = SubscriptionRowsEncoder::unbranched(subscription(), &limits())
@@ -418,7 +418,7 @@ fn an_empty_batch_is_refused() {
     let error = batch.finish().expect_err("a batch needs a row");
     assert_eq!(
         error.current_context(),
-        &EncodeError::EmptyCollection {
+        &WireEncodeError::EmptyCollection {
             field: "RowBatch.rows",
         }
     );
@@ -426,7 +426,7 @@ fn an_empty_batch_is_refused() {
     let bytes = raw_rows(|builder| builder.create_vector::<WIPOffset<wire::Row>>(&[]));
     assert_eq!(
         decode_error(ServerMessage::decode(&raw_server(bytes))),
-        DecodeError::EmptyCollection {
+        WireDecodeError::EmptyCollection {
             field: "RowBatch.rows",
         }
     );
@@ -496,7 +496,7 @@ fn malformed_cells_are_refused() {
     });
     assert_eq!(
         decode_error(ServerMessage::decode(&raw_server(bytes))),
-        DecodeError::MissingField {
+        WireDecodeError::MissingField {
             field: "F32Cell.value",
         }
     );
@@ -513,7 +513,7 @@ fn malformed_cells_are_refused() {
     });
     assert_eq!(
         decode_error(ServerMessage::decode(&raw_server(bytes))),
-        DecodeError::MissingField {
+        WireDecodeError::MissingField {
             field: "F64Cell.value",
         }
     );
@@ -530,7 +530,7 @@ fn malformed_cells_are_refused() {
     });
     assert_eq!(
         decode_error(ServerMessage::decode(&raw_server(bytes))),
-        DecodeError::UnknownUnionVariant {
+        WireDecodeError::UnknownUnionVariant {
             field: "Cell.value",
             discriminant: 99,
         }
@@ -562,7 +562,7 @@ fn malformed_cells_are_refused() {
     });
     assert_eq!(
         decode_error(ServerMessage::decode(&raw_server(bytes))),
-        DecodeError::UnknownUnionVariant {
+        WireDecodeError::UnknownUnionVariant {
             field: "Cell.value",
             discriminant: 17,
         }
@@ -593,7 +593,7 @@ fn rows_and_cells_are_held_to_the_collection_limit() {
         .expect_err("a fourth row exceeds a limit of three");
     assert_eq!(
         error.current_context(),
-        &EncodeError::TooManyEntries {
+        &WireEncodeError::TooManyEntries {
             field: "RowBatch.rows",
             actual: 4,
             limit: 3,
@@ -618,7 +618,7 @@ fn rows_and_cells_are_held_to_the_collection_limit() {
         .expect_err("four cells exceed a limit of three");
     assert_eq!(
         error.current_context(),
-        &EncodeError::TooManyEntries {
+        &WireEncodeError::TooManyEntries {
             field: "Row.cells",
             actual: 4,
             limit: 3,
@@ -641,7 +641,7 @@ fn rows_and_cells_are_held_to_the_collection_limit() {
     .assured("collection limits apply when decoding");
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
-        DecodeError::TooManyEntries {
+        WireDecodeError::TooManyEntries {
             field: "RowBatch.rows",
             actual: 4,
             limit: 3,
@@ -661,8 +661,8 @@ fn decode_rows_under(bytes: Bytes, limits: &crate::SessionLimits) -> Subscriptio
 /// Pushes rows until one is refused, then finishes the batch, which must hold every accepted row.
 fn fill_and_finish(
     limits: &SessionLimits,
-    mut write_row: impl FnMut(&mut CellWriter<'_, 'static>) -> Result<(), Report<EncodeError>>,
-) -> Report<EncodeError> {
+    mut write_row: impl FnMut(&mut CellWriter<'_, 'static>) -> Result<(), Report<WireEncodeError>>,
+) -> Report<WireEncodeError> {
     let mut batch = SubscriptionRowsEncoder::unbranched(subscription(), limits)
         .assured("a subscription handle fits the limits");
     let mut pushed = 0;
@@ -698,7 +698,7 @@ fn a_batch_stops_at_the_frame_limit_and_still_finishes() {
     let error = fill_and_finish(&small, |cells| cells.push_string(&text));
     assert!(matches!(
         error.current_context(),
-        EncodeError::FrameTooLarge { limit: 1024, .. }
+        WireEncodeError::FrameTooLarge { limit: 1024, .. }
     ));
 
     // A row refused part way through a cell leaves its accepted cells behind in the frame.
@@ -723,7 +723,7 @@ fn a_batch_stops_at_the_frame_limit_and_still_finishes() {
         });
         assert!(matches!(
             error.current_context(),
-            EncodeError::FrameTooLarge { limit: 1024, .. }
+            WireEncodeError::FrameTooLarge { limit: 1024, .. }
         ));
     }
 }
@@ -891,7 +891,7 @@ fn malformed_schemas_are_refused() {
     );
     assert_eq!(
         decode_error(ServerMessage::decode(&raw_server(bytes))),
-        DecodeError::ZeroValue {
+        WireDecodeError::ZeroValue {
             field: "FixedListFieldType.length",
         }
     );
@@ -899,7 +899,7 @@ fn malformed_schemas_are_refused() {
     let bytes = schema_reply(|builder| scalar_type(builder, None), None);
     assert_eq!(
         decode_error(ServerMessage::decode(&raw_server(bytes))),
-        DecodeError::MissingField {
+        WireDecodeError::MissingField {
             field: "ScalarFieldType.scalar",
         }
     );
@@ -910,7 +910,7 @@ fn malformed_schemas_are_refused() {
     );
     assert_eq!(
         decode_error(ServerMessage::decode(&raw_server(bytes))),
-        DecodeError::UnknownEnumValue {
+        WireDecodeError::UnknownEnumValue {
             field: "ScalarFieldType.scalar",
             value: 13,
         }
@@ -922,7 +922,7 @@ fn malformed_schemas_are_refused() {
     );
     assert_eq!(
         decode_error(ServerMessage::decode(&raw_server(bytes))),
-        DecodeError::EmptyCollection {
+        WireDecodeError::EmptyCollection {
             field: "RowBranch.fields",
         }
     );

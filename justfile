@@ -27,7 +27,12 @@ test: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo test --all-targets --all-features --features testing --workspace
+    # The execution crate's `shuttle` feature replaces Tokio primitives and is valid only inside a
+    # Shuttle runner. Keep it out of the ordinary workspace test process, then test execution with
+    # its default real-Tokio wrapper; `test-shuttle` exercises that feature separately.
+    cargo test --all-targets --all-features --features testing --workspace \
+        --exclude nervix-execution
+    cargo test --all-targets --package nervix-execution
 
 test-scenarios *args: tests-deps
     #!/usr/bin/env bash
@@ -79,10 +84,60 @@ test-lib *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --lib -- {{ args }}
 
+# Type-check one workspace package and all of its targets without building binaries. Extra
+# arguments are forwarded to Cargo, so a server check can add `--features testing`.
+check-package package *args:
+    cargo check --package {{ package }} --all-targets {{ args }}
+
+# Run the unit tests of one workspace package whose tests need no server test dependencies.
+test-package-lib package *args:
+    cargo test --package {{ package }} --lib -- {{ args }}
+
 # Run the bounded-execution unit tests, which live in the nervix-execution crate rather than the
 # server lib.
 test-execution *args:
     cargo test --package nervix-execution --lib -- {{ args }}
+
+# Explore every bounded-execution race invariant under both Shuttle's random and PCT schedulers.
+# Each test gets its own process so a persisted schedule's parent directory identifies the exact
+# invariant that `test-shuttle-replay` must run.
+test-shuttle:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trace_root="{{ cargo_target_dir }}/shuttle-failures"
+    mkdir -p "${trace_root}"
+    shuttle_test_list="$(
+        cargo test --package nervix-execution --features shuttle --lib shuttle_ -- \
+            --list --format terse | sed -n 's/: test$//p'
+    )"
+    if [[ -z "${shuttle_test_list}" ]]; then
+        echo "no shuttle_ tests found in nervix-execution" >&2
+        exit 1
+    fi
+    mapfile -t shuttle_tests <<< "${shuttle_test_list}"
+    for shuttle_test in "${shuttle_tests[@]}"; do
+        trace_directory="${trace_root}/${shuttle_test}"
+        mkdir -p "${trace_directory}"
+        SHUTTLE_TRACE_DIR="${trace_directory}" \
+            cargo test --package nervix-execution --features shuttle --lib \
+                "${shuttle_test}" -- --exact --test-threads=1
+    done
+
+# Replay a schedule emitted under target/shuttle-failures. Its parent directory is the exact test
+# name written by `test-shuttle`, so the schedule cannot accidentally run against another invariant.
+test-shuttle-replay schedule:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    schedule={{ quote(schedule) }}
+    if [[ ! -f "${schedule}" ]]; then
+        echo "Shuttle schedule does not exist: ${schedule}" >&2
+        exit 1
+    fi
+    schedule="$(realpath "${schedule}")"
+    shuttle_test="$(basename "$(dirname "${schedule}")")"
+    SHUTTLE_TRACE_FILE="${schedule}" \
+        cargo test --package nervix-execution --features shuttle --lib \
+            "${shuttle_test}" -- --exact --test-threads=1 --nocapture
 
 # Run the expression VM unit tests, which live in the nervix-vm crate rather than the server lib.
 test-vm *args:
@@ -138,7 +193,13 @@ test-coverage: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo llvm-cov --all-targets --all-features --features testing --workspace --lcov --output-path lcov.info
+    # Merge the default execution tests into the workspace profile without enabling the
+    # Shuttle-only Tokio implementation in ordinary downstream tests.
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov --no-report --all-targets --all-features --features testing --workspace \
+        --exclude nervix-execution
+    cargo llvm-cov --no-report --all-targets --package nervix-execution
+    cargo llvm-cov report --lcov --output-path lcov.info
     cargo crap --lcov lcov.info --min 30 --threshold 30
 
 # Run every Criterion suite. Extra arguments are forwarded to Criterion, so CI can use
@@ -550,8 +611,8 @@ generate-dev-tls:
     set -euo pipefail
     bash scripts/generate_dev_tls.sh
 
-generate-test-onnx output="tests/fixtures/onnx/simple_score.onnx" batch_output="tests/fixtures/onnx/batch_score.onnx" f64_output="tests/fixtures/onnx/f64_score.onnx" matrix_output="tests/fixtures/onnx/matrix_identity.onnx" dynamic_batch_output="tests/fixtures/onnx/dynamic_batch_score.onnx" scalar_output="tests/fixtures/onnx/scalar_identity.onnx":
-    python3 scripts/train_simple_onnx.py --output {{ output }} --batch-output {{ batch_output }} --f64-output {{ f64_output }} --matrix-output {{ matrix_output }} --dynamic-batch-output {{ dynamic_batch_output }} --scalar-output {{ scalar_output }}
+generate-test-onnx output="tests/fixtures/onnx/simple_score.onnx" alternate_output="tests/fixtures/onnx/alternate_score.onnx" batch_output="tests/fixtures/onnx/batch_score.onnx" f64_output="tests/fixtures/onnx/f64_score.onnx" matrix_output="tests/fixtures/onnx/matrix_identity.onnx" dynamic_batch_output="tests/fixtures/onnx/dynamic_batch_score.onnx" scalar_output="tests/fixtures/onnx/scalar_identity.onnx":
+    python3 scripts/train_simple_onnx.py --output {{ output }} --alternate-output {{ alternate_output }} --batch-output {{ batch_output }} --f64-output {{ f64_output }} --matrix-output {{ matrix_output }} --dynamic-batch-output {{ dynamic_batch_output }} --scalar-output {{ scalar_output }}
 
 download-onnxruntime:
     bash scripts/download_onnxruntime.sh

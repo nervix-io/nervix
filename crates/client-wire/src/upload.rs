@@ -8,7 +8,7 @@ use meticulous::OptionExt as _;
 use nervix_models::{DomainName, ResourceName, ResourceUploadIdentity};
 
 use crate::{
-    codec::{DecodeError, Decoder, EncodeError, EncodedUnion, Encoder, wire_enum},
+    codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
     common::{Diagnostic, LeaderRedirect, OutcomeOrigin, RequestId},
     frame::{EncodedFrame, UploadFrame, UploadReplyFrame, VerifiedFrame},
     limits::SessionLimits,
@@ -31,7 +31,7 @@ impl UploadStart {
     pub fn encode(
         &self,
         limits: &SessionLimits,
-    ) -> Result<EncodedFrame<UploadFrame>, Report<EncodeError>> {
+    ) -> Result<EncodedFrame<UploadFrame>, Report<WireEncodeError>> {
         let mut encoder = Encoder::new(limits.frame_bytes(), limits);
         let domain = encoder.text("UploadStart.domain", self.domain.as_str())?;
         let resource = encoder.text("UploadStart.resource", self.resource.as_str())?;
@@ -56,7 +56,7 @@ impl UploadStart {
     fn decode(
         decoder: Decoder<'_>,
         start: wire::UploadStart<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let request_id = RequestId::decode(decoder, "UploadStart.request_id", start.request_id())?;
         let domain = decoder.name("UploadStart.domain", start.domain())?;
         let resource = decoder.name("UploadStart.resource", start.resource())?;
@@ -86,9 +86,9 @@ impl UploadChunk {
     pub fn encode(
         bytes: &[u8],
         limits: &SessionLimits,
-    ) -> Result<EncodedFrame<UploadFrame>, Report<EncodeError>> {
+    ) -> Result<EncodedFrame<UploadFrame>, Report<WireEncodeError>> {
         if bytes.is_empty() {
-            return Err(Report::new(EncodeError::EmptyCollection {
+            return Err(Report::new(WireEncodeError::EmptyCollection {
                 field: "UploadChunk.bytes",
             }));
         }
@@ -105,9 +105,9 @@ impl UploadChunk {
     fn decode(
         frame: &VerifiedFrame<UploadFrame>,
         chunk: wire::UploadChunk<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         if chunk.bytes().is_empty() {
-            return Err(Report::new(DecodeError::EmptyCollection {
+            return Err(Report::new(WireDecodeError::EmptyCollection {
                 field: "UploadChunk.bytes",
             }));
         }
@@ -140,7 +140,7 @@ pub enum UploadMessage {
 }
 
 impl UploadMessage {
-    pub fn decode(frame: &VerifiedFrame<UploadFrame>) -> Result<Self, Report<DecodeError>> {
+    pub fn decode(frame: &VerifiedFrame<UploadFrame>) -> Result<Self, Report<WireDecodeError>> {
         let decoder = Decoder::new(frame.limits());
         let message = frame.root();
         if let Some(start) = message.part_as_upload_start() {
@@ -156,7 +156,7 @@ impl UploadMessage {
 fn finish_upload_message(
     mut encoder: Encoder<'_>,
     part: EncodedUnion<wire::UploadPart>,
-) -> Result<EncodedFrame<UploadFrame>, Report<EncodeError>> {
+) -> Result<EncodedFrame<UploadFrame>, Report<WireEncodeError>> {
     let message = wire::UploadMessage::create(
         encoder.fbb(),
         &wire::UploadMessageArgs {
@@ -219,7 +219,7 @@ impl UploadReply {
     pub fn encode(
         &self,
         limits: &SessionLimits,
-    ) -> Result<EncodedFrame<UploadReplyFrame>, Report<EncodeError>> {
+    ) -> Result<EncodedFrame<UploadReplyFrame>, Report<WireEncodeError>> {
         let mut encoder = Encoder::new(limits.frame_bytes(), limits);
         let disposition = match &self.disposition {
             UploadDisposition::Installed {
@@ -285,7 +285,9 @@ impl UploadReply {
         encoder.finish::<UploadReplyFrame>(reply)
     }
 
-    pub fn decode(frame: &VerifiedFrame<UploadReplyFrame>) -> Result<Self, Report<DecodeError>> {
+    pub fn decode(
+        frame: &VerifiedFrame<UploadReplyFrame>,
+    ) -> Result<Self, Report<WireDecodeError>> {
         let decoder = Decoder::new(frame.limits());
         let reply = frame.root();
         let request_id = match reply.request_id() {
@@ -348,12 +350,12 @@ fn decode_upload_identity(
     decoder: Decoder<'_>,
     field: &'static str,
     value: &str,
-) -> Result<ResourceUploadIdentity, Report<DecodeError>> {
+) -> Result<ResourceUploadIdentity, Report<WireDecodeError>> {
     let value = decoder.check_text(field, value)?;
     match ResourceUploadIdentity::parse(value) {
         Ok(identity) => Ok(identity),
         Err(error) => Err(
-            Report::new(error).change_context(DecodeError::InvalidValue {
+            Report::new(error).change_context(WireDecodeError::InvalidValue {
                 field,
                 kind: "upload identity",
             }),

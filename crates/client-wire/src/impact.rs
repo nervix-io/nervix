@@ -18,14 +18,16 @@ use nervix_models::{
     ImpactNodeCoverage, ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology,
     ImpactTopologyEdge, ModelChangeAspect, OperationImpactReason, OperationImpactReport,
     OwnershipMoveImpact, PauseRequirement, PlannedExecutionStepImpact, QuiesceSubgraph,
-    QuiescenceOutcome, RebuildImpact, RebuildReason, RelayName, ResourceCatalogAction,
-    ResourceCatalogImpact, ResourceName, StatePurge, StateResetImpact, TransactionImpactReport,
-    TransactionOperation, TransactionOperationNumber, TransactionOperationRange,
-    TransactionPosition,
+    QuiescenceOutcome, RebuildImpact, RebuildReason, RelayName, RequestedResourceVersion,
+    ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact, ResourceName, StatePurge,
+    StateResetImpact, TransactionImpactReport, TransactionOperation, TransactionOperationNumber,
+    TransactionOperationRange, TransactionPosition,
 };
 
 use crate::{
-    codec::{DecodeError, Decoder, EncodeError, EncodedUnion, Encoder, wire_enum, wire_size},
+    codec::{
+        Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum, wire_size,
+    },
     common::{decode_node_ref, encode_node_ref},
     transaction::{decode_operation_number, encode_operation_number},
     wire,
@@ -158,7 +160,7 @@ wire_enum!(ALL_MODEL_CHANGE_ASPECTS: ModelChangeAspect => wire::ModelChangeAspec
 pub(crate) fn encode_report<'fbb>(
     encoder: &mut Encoder<'fbb>,
     report: &TransactionImpactReport,
-) -> Result<WIPOffset<wire::TransactionImpactReport<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::TransactionImpactReport<'fbb>>, Report<WireEncodeError>> {
     let domain = encoder.text("TransactionImpactReport.domain", report.domain().as_str())?;
     let planning_basis = wire::Fingerprint::new(report.planning_basis().fingerprint());
     let completeness = encode_completeness(encoder, report.completeness())?;
@@ -190,7 +192,7 @@ pub(crate) fn encode_report<'fbb>(
 pub(crate) fn decode_report(
     decoder: Decoder<'_>,
     report: wire::TransactionImpactReport<'_>,
-) -> Result<TransactionImpactReport, Report<DecodeError>> {
+) -> Result<TransactionImpactReport, Report<WireDecodeError>> {
     let domain: DomainName = decoder.name("TransactionImpactReport.domain", report.domain())?;
     let position = decoder.size("TransactionImpactReport.position", report.position())?;
     let planning_basis = <[u8; 32]>::from(report.planning_basis().bytes());
@@ -219,7 +221,7 @@ pub(crate) fn decode_report(
         execution_steps,
     ) {
         Ok(report) => Ok(report),
-        Err(error) => Err(error.change_context(DecodeError::InvalidValue {
+        Err(error) => Err(error.change_context(WireDecodeError::InvalidValue {
             field: "TransactionImpactReport",
             kind: "transaction impact report",
         })),
@@ -229,7 +231,7 @@ pub(crate) fn decode_report(
 fn encode_operation_report<'fbb>(
     report: &OperationImpactReport,
     encoder: &mut Encoder<'fbb>,
-) -> Result<WIPOffset<wire::OperationReport<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::OperationReport<'fbb>>, Report<WireEncodeError>> {
     let operation = encode_transaction_operation(encoder, &report.operation)?;
     let execution_step = encode_operation_range(report.execution_step);
     let completeness = encode_completeness(encoder, &report.completeness)?;
@@ -254,7 +256,7 @@ fn encode_operation_report<'fbb>(
 fn decode_operation_report(
     decoder: Decoder<'_>,
     report: wire::OperationReport<'_>,
-) -> Result<OperationImpactReport, Report<DecodeError>> {
+) -> Result<OperationImpactReport, Report<WireDecodeError>> {
     let number = decode_operation_number(decoder, "OperationReport.number", report.number())?;
     let operation = decode_transaction_operation(decoder, report)?;
     let execution_step = decode_operation_range(
@@ -285,7 +287,7 @@ fn decode_operation_report(
 fn encode_execution_step<'fbb>(
     step: &ExecutionStepImpactReport,
     encoder: &mut Encoder<'fbb>,
-) -> Result<WIPOffset<wire::ExecutionStepReport<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::ExecutionStepReport<'fbb>>, Report<WireEncodeError>> {
     let operations = encode_operation_range(step.operations());
     let planned = encode_planned_step(encoder, step.planned())?;
     let actual = encode_actual_step(encoder, step.actual())?;
@@ -302,7 +304,7 @@ fn encode_execution_step<'fbb>(
 fn decode_execution_step(
     decoder: Decoder<'_>,
     step: wire::ExecutionStepReport<'_>,
-) -> Result<ExecutionStepImpactReport, Report<DecodeError>> {
+) -> Result<ExecutionStepImpactReport, Report<WireDecodeError>> {
     let operations =
         decode_operation_range(decoder, "ExecutionStepReport.operations", step.operations())?;
     let planned = decode_planned_step(decoder, step.planned())?;
@@ -313,7 +315,7 @@ fn decode_execution_step(
 fn encode_planned_step<'fbb>(
     encoder: &mut Encoder<'fbb>,
     planned: &PlannedExecutionStepImpact,
-) -> Result<WIPOffset<wire::PlannedStepImpact<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::PlannedStepImpact<'fbb>>, Report<WireEncodeError>> {
     let completeness = encode_completeness(encoder, &planned.completeness)?;
     let pause = encode_pause(encoder, &planned.pause)?;
     let effects = encode_effects(encoder, &planned.effects)?;
@@ -332,7 +334,7 @@ fn encode_planned_step<'fbb>(
 fn decode_planned_step(
     decoder: Decoder<'_>,
     planned: wire::PlannedStepImpact<'_>,
-) -> Result<PlannedExecutionStepImpact, Report<DecodeError>> {
+) -> Result<PlannedExecutionStepImpact, Report<WireDecodeError>> {
     let completeness = decode_completeness(
         decoder,
         "PlannedStepImpact.completeness",
@@ -356,7 +358,7 @@ fn decode_planned_step(
 fn encode_actual_step<'fbb>(
     encoder: &mut Encoder<'fbb>,
     actual: &ActualExecutionStepImpact,
-) -> Result<WIPOffset<wire::ActualStepImpact<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::ActualStepImpact<'fbb>>, Report<WireEncodeError>> {
     let outcome = encode_step_outcome(encoder, &actual.outcome)?;
     let quiescence = encoder.table_vector(
         "ActualStepImpact.quiescence",
@@ -378,7 +380,7 @@ fn encode_actual_step<'fbb>(
 fn decode_actual_step(
     decoder: Decoder<'_>,
     actual: wire::ActualStepImpact<'_>,
-) -> Result<ActualExecutionStepImpact, Report<DecodeError>> {
+) -> Result<ActualExecutionStepImpact, Report<WireDecodeError>> {
     let outcome = decode_step_outcome(decoder, actual)?;
     let quiescence = decoder.table_vector(
         "ActualStepImpact.quiescence",
@@ -396,7 +398,7 @@ fn decode_actual_step(
 fn encode_step_outcome(
     encoder: &mut Encoder<'_>,
     outcome: &ExecutionStepOutcome,
-) -> Result<EncodedUnion<wire::ExecutionStepOutcome>, Report<EncodeError>> {
+) -> Result<EncodedUnion<wire::ExecutionStepOutcome>, Report<WireEncodeError>> {
     let union = match outcome {
         ExecutionStepOutcome::Unattempted => EncodedUnion::new(
             wire::ExecutionStepOutcome::StepUnattempted,
@@ -427,7 +429,7 @@ fn encode_step_outcome(
 fn decode_step_outcome(
     decoder: Decoder<'_>,
     actual: wire::ActualStepImpact<'_>,
-) -> Result<ExecutionStepOutcome, Report<DecodeError>> {
+) -> Result<ExecutionStepOutcome, Report<WireDecodeError>> {
     if let Some(failed) = actual.outcome_as_step_failed() {
         let diagnostic = decode_diagnostic(decoder, failed.diagnostic())?;
         return Ok(ExecutionStepOutcome::Failed { diagnostic });
@@ -443,7 +445,7 @@ fn decode_step_outcome(
 fn encode_actual_quiescence<'fbb>(
     quiescence: &ActualQuiescence,
     encoder: &mut Encoder<'fbb>,
-) -> Result<WIPOffset<wire::ActualQuiescence<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::ActualQuiescence<'fbb>>, Report<WireEncodeError>> {
     let requirement = encode_pause(encoder, &quiescence.requirement)?;
     let outcomes = encoder.table_vector(
         "ActualQuiescence.outcomes",
@@ -463,7 +465,7 @@ fn encode_actual_quiescence<'fbb>(
 fn decode_actual_quiescence(
     decoder: Decoder<'_>,
     quiescence: wire::ActualQuiescence<'_>,
-) -> Result<ActualQuiescence, Report<DecodeError>> {
+) -> Result<ActualQuiescence, Report<WireDecodeError>> {
     let requirement = PauseTable {
         discriminant: quiescence.requirement_type(),
         subgraph: quiescence.requirement_as_subgraph_pause(),
@@ -484,7 +486,7 @@ fn decode_actual_quiescence(
 fn encode_quiescence_outcome<'fbb>(
     outcome: &QuiescenceOutcome,
     encoder: &mut Encoder<'fbb>,
-) -> Result<WIPOffset<wire::QuiescenceOutcomeEntry<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::QuiescenceOutcomeEntry<'fbb>>, Report<WireEncodeError>> {
     let union = match outcome {
         QuiescenceOutcome::Requested => EncodedUnion::new(
             wire::QuiescenceOutcome::QuiescenceRequested,
@@ -531,7 +533,7 @@ fn encode_quiescence_outcome<'fbb>(
 fn decode_quiescence_outcome(
     decoder: Decoder<'_>,
     entry: wire::QuiescenceOutcomeEntry<'_>,
-) -> Result<QuiescenceOutcome, Report<DecodeError>> {
+) -> Result<QuiescenceOutcome, Report<WireDecodeError>> {
     if let Some(failed) = entry.outcome_as_quiescence_failed() {
         let diagnostic = decode_diagnostic(decoder, failed.diagnostic())?;
         return Ok(QuiescenceOutcome::Failed { diagnostic });
@@ -551,7 +553,7 @@ fn decode_quiescence_outcome(
 fn encode_effects<'fbb>(
     encoder: &mut Encoder<'fbb>,
     effects: &ImpactEffects,
-) -> Result<WIPOffset<wire::ImpactEffects<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::ImpactEffects<'fbb>>, Report<WireEncodeError>> {
     let changed_configuration = encoder.table_vector(
         "ImpactEffects.changed_configuration",
         effects.changed_configuration.as_slice(),
@@ -593,6 +595,11 @@ fn encode_effects<'fbb>(
         effects.resource_catalog.as_slice(),
         encode_resource_catalog_impact,
     )?;
+    let resource_bindings = encoder.table_vector(
+        "ImpactEffects.resource_bindings",
+        effects.resource_bindings.as_slice(),
+        encode_resource_binding_impact,
+    )?;
     Ok(wire::ImpactEffects::create(
         encoder.fbb(),
         &wire::ImpactEffectsArgs {
@@ -605,6 +612,7 @@ fn encode_effects<'fbb>(
             state_resets: Some(state_resets),
             force_flushes: Some(force_flushes),
             resource_catalog: Some(resource_catalog),
+            resource_bindings: Some(resource_bindings),
         },
     ))
 }
@@ -612,7 +620,7 @@ fn encode_effects<'fbb>(
 fn decode_effects(
     decoder: Decoder<'_>,
     effects: wire::ImpactEffects<'_>,
-) -> Result<ImpactEffects, Report<DecodeError>> {
+) -> Result<ImpactEffects, Report<WireDecodeError>> {
     let changed_configuration = decode_set(
         decoder,
         "ImpactEffects.changed_configuration",
@@ -662,6 +670,12 @@ fn decode_effects(
         effects.resource_catalog(),
         |impact| decode_resource_catalog_impact(decoder, impact),
     )?;
+    let resource_bindings = decode_set(
+        decoder,
+        "ImpactEffects.resource_bindings",
+        effects.resource_bindings(),
+        |impact| decode_resource_binding_impact(decoder, impact),
+    )?;
     Ok(ImpactEffects {
         changed_configuration,
         topology,
@@ -672,13 +686,14 @@ fn decode_effects(
         state_resets,
         force_flushes,
         resource_catalog,
+        resource_bindings,
     })
 }
 
 fn encode_affected_topology<'fbb>(
     encoder: &mut Encoder<'fbb>,
     topology: &AffectedTopology,
-) -> Result<WIPOffset<wire::AffectedTopology<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::AffectedTopology<'fbb>>, Report<WireEncodeError>> {
     let before = encode_topology(encoder, &topology.before)?;
     let after = encode_topology(encoder, &topology.after)?;
     Ok(wire::AffectedTopology::create(
@@ -693,7 +708,7 @@ fn encode_affected_topology<'fbb>(
 fn decode_affected_topology(
     decoder: Decoder<'_>,
     topology: wire::AffectedTopology<'_>,
-) -> Result<AffectedTopology, Report<DecodeError>> {
+) -> Result<AffectedTopology, Report<WireDecodeError>> {
     let before = decode_topology(decoder, topology.before())?;
     let after = decode_topology(decoder, topology.after())?;
     Ok(AffectedTopology { before, after })
@@ -702,7 +717,7 @@ fn decode_affected_topology(
 fn encode_topology<'fbb>(
     encoder: &mut Encoder<'fbb>,
     topology: &ImpactTopology,
-) -> Result<WIPOffset<wire::ImpactTopology<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::ImpactTopology<'fbb>>, Report<WireEncodeError>> {
     let nodes = encoder.table_vector(
         "ImpactTopology.nodes",
         topology.nodes.as_slice(),
@@ -725,7 +740,7 @@ fn encode_topology<'fbb>(
 fn decode_topology(
     decoder: Decoder<'_>,
     topology: wire::ImpactTopology<'_>,
-) -> Result<ImpactTopology, Report<DecodeError>> {
+) -> Result<ImpactTopology, Report<WireDecodeError>> {
     let nodes = decode_set(decoder, "ImpactTopology.nodes", topology.nodes(), |node| {
         decode_attributed_node(decoder, node)
     })?;
@@ -738,7 +753,7 @@ fn decode_topology(
 fn encode_edge<'fbb>(
     edge: &ImpactTopologyEdge,
     encoder: &mut Encoder<'fbb>,
-) -> Result<WIPOffset<wire::TopologyEdge<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::TopologyEdge<'fbb>>, Report<WireEncodeError>> {
     let source = encode_node_coverage(encoder, &edge.source)?;
     let target = encode_node_coverage(encoder, &edge.target)?;
     let operations = encode_attribution(encoder, "TopologyEdge.operations", &edge.attribution)?;
@@ -756,7 +771,7 @@ fn encode_edge<'fbb>(
 fn decode_edge(
     decoder: Decoder<'_>,
     edge: wire::TopologyEdge<'_>,
-) -> Result<ImpactTopologyEdge, Report<DecodeError>> {
+) -> Result<ImpactTopologyEdge, Report<WireDecodeError>> {
     let source = decode_node_coverage(decoder, edge.source())?;
     let target = decode_node_coverage(decoder, edge.target())?;
     let kind = decoder.required_enumeration("TopologyEdge.kind", edge.kind())?;
@@ -772,7 +787,7 @@ fn decode_edge(
 fn encode_configuration_impact<'fbb>(
     impact: &ConfigurationImpact,
     encoder: &mut Encoder<'fbb>,
-) -> Result<WIPOffset<wire::ConfigurationImpact<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::ConfigurationImpact<'fbb>>, Report<WireEncodeError>> {
     let transition = match &impact.transition {
         ConfigurationTransition::Created { node } => {
             let node = encode_node_ref(encoder, node)?;
@@ -817,7 +832,7 @@ fn encode_configuration_impact<'fbb>(
 fn decode_configuration_impact(
     decoder: Decoder<'_>,
     impact: wire::ConfigurationImpact<'_>,
-) -> Result<ConfigurationImpact, Report<DecodeError>> {
+) -> Result<ConfigurationImpact, Report<WireDecodeError>> {
     let transition = if let Some(created) = impact.transition_as_configuration_created() {
         ConfigurationTransition::Created {
             node: decode_node_ref(decoder, created.node())?,
@@ -849,7 +864,7 @@ fn decode_configuration_impact(
 fn encode_ownership_move<'fbb>(
     impact: &OwnershipMoveImpact,
     encoder: &mut Encoder<'fbb>,
-) -> Result<WIPOffset<wire::OwnershipMoveImpact<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::OwnershipMoveImpact<'fbb>>, Report<WireEncodeError>> {
     let node = encode_node_coverage(encoder, &impact.node)?;
     let source = encoder.text("OwnershipMoveImpact.source", impact.source.as_str())?;
     let destination = encoder.text(
@@ -875,7 +890,7 @@ fn encode_ownership_move<'fbb>(
 fn decode_ownership_move(
     decoder: Decoder<'_>,
     impact: wire::OwnershipMoveImpact<'_>,
-) -> Result<OwnershipMoveImpact, Report<DecodeError>> {
+) -> Result<OwnershipMoveImpact, Report<WireDecodeError>> {
     let node = decode_node_coverage(decoder, impact.node())?;
     let source: ClusterNodeName = decoder.name("OwnershipMoveImpact.source", impact.source())?;
     let destination: ClusterNodeName =
@@ -896,7 +911,7 @@ fn decode_ownership_move(
 fn encode_lifecycle_impact<'fbb>(
     impact: &DomainLifecycleImpact,
     encoder: &mut Encoder<'fbb>,
-) -> Result<WIPOffset<wire::DomainLifecycleImpact<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::DomainLifecycleImpact<'fbb>>, Report<WireEncodeError>> {
     let domain = encoder.text("DomainLifecycleImpact.domain", impact.domain.as_str())?;
     let operations = encode_attribution(
         encoder,
@@ -916,7 +931,7 @@ fn encode_lifecycle_impact<'fbb>(
 fn decode_lifecycle_impact(
     decoder: Decoder<'_>,
     impact: wire::DomainLifecycleImpact<'_>,
-) -> Result<DomainLifecycleImpact, Report<DecodeError>> {
+) -> Result<DomainLifecycleImpact, Report<WireDecodeError>> {
     let domain = decoder.name("DomainLifecycleImpact.domain", impact.domain())?;
     let action = decoder.required_enumeration("DomainLifecycleImpact.action", impact.action())?;
     let attribution = decode_attribution(
@@ -934,7 +949,7 @@ fn decode_lifecycle_impact(
 fn encode_activation<'fbb>(
     impact: &ActivationImpact,
     encoder: &mut Encoder<'fbb>,
-) -> Result<WIPOffset<wire::ActivationImpact<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::ActivationImpact<'fbb>>, Report<WireEncodeError>> {
     let node = encode_node_coverage(encoder, &impact.node)?;
     let operations =
         encode_attribution(encoder, "ActivationImpact.operations", &impact.attribution)?;
@@ -951,7 +966,7 @@ fn encode_activation<'fbb>(
 fn decode_activation(
     decoder: Decoder<'_>,
     impact: wire::ActivationImpact<'_>,
-) -> Result<ActivationImpact, Report<DecodeError>> {
+) -> Result<ActivationImpact, Report<WireDecodeError>> {
     let node = decode_node_coverage(decoder, impact.node())?;
     let action = decoder.required_enumeration("ActivationImpact.action", impact.action())?;
     let attribution =
@@ -966,7 +981,7 @@ fn decode_activation(
 fn encode_rebuild<'fbb>(
     impact: &RebuildImpact,
     encoder: &mut Encoder<'fbb>,
-) -> Result<WIPOffset<wire::RebuildImpact<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::RebuildImpact<'fbb>>, Report<WireEncodeError>> {
     let node = encode_node_coverage(encoder, &impact.node)?;
     let operations = encode_attribution(encoder, "RebuildImpact.operations", &impact.attribution)?;
     Ok(wire::RebuildImpact::create(
@@ -982,7 +997,7 @@ fn encode_rebuild<'fbb>(
 fn decode_rebuild(
     decoder: Decoder<'_>,
     impact: wire::RebuildImpact<'_>,
-) -> Result<RebuildImpact, Report<DecodeError>> {
+) -> Result<RebuildImpact, Report<WireDecodeError>> {
     let node = decode_node_coverage(decoder, impact.node())?;
     let reason = decoder.required_enumeration("RebuildImpact.reason", impact.reason())?;
     let attribution = decode_attribution(decoder, "RebuildImpact.operations", impact.operations())?;
@@ -996,7 +1011,7 @@ fn decode_rebuild(
 fn encode_state_reset<'fbb>(
     impact: &StateResetImpact,
     encoder: &mut Encoder<'fbb>,
-) -> Result<WIPOffset<wire::StateResetImpact<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::StateResetImpact<'fbb>>, Report<WireEncodeError>> {
     let node = encode_node_coverage(encoder, &impact.node)?;
     let operations =
         encode_attribution(encoder, "StateResetImpact.operations", &impact.attribution)?;
@@ -1013,7 +1028,7 @@ fn encode_state_reset<'fbb>(
 fn decode_state_reset(
     decoder: Decoder<'_>,
     impact: wire::StateResetImpact<'_>,
-) -> Result<StateResetImpact, Report<DecodeError>> {
+) -> Result<StateResetImpact, Report<WireDecodeError>> {
     let node = decode_node_coverage(decoder, impact.node())?;
     let state = decoder.required_enumeration("StateResetImpact.state", impact.state())?;
     let attribution =
@@ -1028,7 +1043,7 @@ fn decode_state_reset(
 fn encode_force_flush<'fbb>(
     impact: &ForceFlushImpact,
     encoder: &mut Encoder<'fbb>,
-) -> Result<WIPOffset<wire::ForceFlushImpact<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::ForceFlushImpact<'fbb>>, Report<WireEncodeError>> {
     let node = encode_node_coverage(encoder, &impact.node)?;
     let operations =
         encode_attribution(encoder, "ForceFlushImpact.operations", &impact.attribution)?;
@@ -1044,7 +1059,7 @@ fn encode_force_flush<'fbb>(
 fn decode_force_flush(
     decoder: Decoder<'_>,
     impact: wire::ForceFlushImpact<'_>,
-) -> Result<ForceFlushImpact, Report<DecodeError>> {
+) -> Result<ForceFlushImpact, Report<WireDecodeError>> {
     let node = decode_node_coverage(decoder, impact.node())?;
     let attribution =
         decode_attribution(decoder, "ForceFlushImpact.operations", impact.operations())?;
@@ -1054,7 +1069,7 @@ fn decode_force_flush(
 fn encode_resource_catalog_impact<'fbb>(
     impact: &ResourceCatalogImpact,
     encoder: &mut Encoder<'fbb>,
-) -> Result<WIPOffset<wire::ResourceCatalogImpact<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::ResourceCatalogImpact<'fbb>>, Report<WireEncodeError>> {
     let resource = encoder.text("ResourceCatalogImpact.resource", impact.resource.as_str())?;
     let operations = encode_attribution(
         encoder,
@@ -1074,7 +1089,7 @@ fn encode_resource_catalog_impact<'fbb>(
 fn decode_resource_catalog_impact(
     decoder: Decoder<'_>,
     impact: wire::ResourceCatalogImpact<'_>,
-) -> Result<ResourceCatalogImpact, Report<DecodeError>> {
+) -> Result<ResourceCatalogImpact, Report<WireDecodeError>> {
     let resource: ResourceName =
         decoder.name("ResourceCatalogImpact.resource", impact.resource())?;
     let action = decoder.required_enumeration("ResourceCatalogImpact.action", impact.action())?;
@@ -1090,10 +1105,78 @@ fn decode_resource_catalog_impact(
     })
 }
 
+fn encode_resource_binding_impact<'fbb>(
+    impact: &ResourceBindingImpact,
+    encoder: &mut Encoder<'fbb>,
+) -> Result<WIPOffset<wire::ResourceBindingImpact<'fbb>>, Report<WireEncodeError>> {
+    let node = encode_node_ref(encoder, &impact.node)?;
+    let resource = encoder.text("ResourceBindingImpact.resource", impact.resource.as_str())?;
+    let requested = match impact.requested {
+        RequestedResourceVersion::Number(version) => EncodedUnion::new(
+            wire::RequestedResourceVersion::ResourceVersionNumber,
+            wire::ResourceVersionNumber::create(
+                encoder.fbb(),
+                &wire::ResourceVersionNumberArgs { version },
+            ),
+        ),
+        RequestedResourceVersion::Latest => EncodedUnion::new(
+            wire::RequestedResourceVersion::LatestResourceVersion,
+            wire::LatestResourceVersion::create(encoder.fbb(), &wire::LatestResourceVersionArgs {}),
+        ),
+    };
+    let operations = encode_attribution(
+        encoder,
+        "ResourceBindingImpact.operations",
+        &impact.attribution,
+    )?;
+    Ok(wire::ResourceBindingImpact::create(
+        encoder.fbb(),
+        &wire::ResourceBindingImpactArgs {
+            node: Some(node),
+            resource: Some(resource),
+            requested_type: requested.discriminant,
+            requested: Some(requested.value),
+            version: impact.version,
+            operations: Some(operations),
+        },
+    ))
+}
+
+fn decode_resource_binding_impact(
+    decoder: Decoder<'_>,
+    impact: wire::ResourceBindingImpact<'_>,
+) -> Result<ResourceBindingImpact, Report<WireDecodeError>> {
+    let node = decode_node_ref(decoder, impact.node())?;
+    let resource: ResourceName =
+        decoder.name("ResourceBindingImpact.resource", impact.resource())?;
+    let requested = match impact.requested_type() {
+        wire::RequestedResourceVersion::ResourceVersionNumber => {
+            let number = union_member(impact.requested_as_resource_version_number());
+            RequestedResourceVersion::Number(number.version())
+        }
+        wire::RequestedResourceVersion::LatestResourceVersion => RequestedResourceVersion::Latest,
+        undeclared => {
+            return Err(decoder.unknown_union("ResourceBindingImpact.requested", undeclared.0));
+        }
+    };
+    let attribution = decode_attribution(
+        decoder,
+        "ResourceBindingImpact.operations",
+        impact.operations(),
+    )?;
+    Ok(ResourceBindingImpact {
+        node,
+        resource,
+        requested,
+        version: impact.version(),
+        attribution,
+    })
+}
+
 fn encode_transaction_operation(
     encoder: &mut Encoder<'_>,
     operation: &TransactionOperation,
-) -> Result<EncodedUnion<wire::TransactionOperation>, Report<EncodeError>> {
+) -> Result<EncodedUnion<wire::TransactionOperation>, Report<WireEncodeError>> {
     let union = match operation {
         TransactionOperation::CreateConfiguration { domain, node } => {
             let domain = encoder.text("CreateConfigurationOperation.domain", domain.as_str())?;
@@ -1192,7 +1275,7 @@ fn encode_transaction_operation(
 fn decode_transaction_operation(
     decoder: Decoder<'_>,
     report: wire::OperationReport<'_>,
-) -> Result<TransactionOperation, Report<DecodeError>> {
+) -> Result<TransactionOperation, Report<WireDecodeError>> {
     if let Some(operation) = report.operation_as_create_configuration_operation() {
         return Ok(TransactionOperation::CreateConfiguration {
             domain: decoder.name("CreateConfigurationOperation.domain", operation.domain())?,
@@ -1238,7 +1321,7 @@ fn decode_transaction_operation(
 fn encode_reason<'fbb>(
     reason: &OperationImpactReason,
     encoder: &mut Encoder<'fbb>,
-) -> Result<WIPOffset<wire::OperationReason<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::OperationReason<'fbb>>, Report<WireEncodeError>> {
     let union = match reason {
         OperationImpactReason::Configuration { node, aspect } => {
             let node = encode_node_ref(encoder, node)?;
@@ -1289,7 +1372,7 @@ fn encode_reason<'fbb>(
 fn decode_reason(
     decoder: Decoder<'_>,
     reason: wire::OperationReason<'_>,
-) -> Result<OperationImpactReason, Report<DecodeError>> {
+) -> Result<OperationImpactReason, Report<WireDecodeError>> {
     if let Some(configuration) = reason.reason_as_configuration_reason() {
         return Ok(OperationImpactReason::Configuration {
             node: decode_node_ref(decoder, configuration.node())?,
@@ -1323,7 +1406,7 @@ struct PauseTable<'a> {
 fn encode_pause(
     encoder: &mut Encoder<'_>,
     pause: &PauseRequirement,
-) -> Result<EncodedUnion<wire::PauseRequirement>, Report<EncodeError>> {
+) -> Result<EncodedUnion<wire::PauseRequirement>, Report<WireEncodeError>> {
     let union = match pause {
         PauseRequirement::NoPause => EncodedUnion::new(
             wire::PauseRequirement::NoPause,
@@ -1356,7 +1439,7 @@ impl PauseTable<'_> {
         self,
         decoder: Decoder<'_>,
         field: &'static str,
-    ) -> Result<PauseRequirement, Report<DecodeError>> {
+    ) -> Result<PauseRequirement, Report<WireDecodeError>> {
         if let Some(subgraph) = self.subgraph {
             let scope = decode_subgraph(decoder, subgraph.scope())?;
             return Ok(PauseRequirement::Subgraph { scope });
@@ -1375,7 +1458,7 @@ impl PauseTable<'_> {
 fn encode_subgraph<'fbb>(
     encoder: &mut Encoder<'fbb>,
     subgraph: &QuiesceSubgraph,
-) -> Result<WIPOffset<wire::QuiesceSubgraph<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::QuiesceSubgraph<'fbb>>, Report<WireEncodeError>> {
     let domain = encoder.text("QuiesceSubgraph.domain", subgraph.domain().as_str())?;
     let nodes = encoder.table_vector(
         "QuiesceSubgraph.nodes",
@@ -1400,7 +1483,7 @@ fn encode_subgraph<'fbb>(
 fn decode_subgraph(
     decoder: Decoder<'_>,
     subgraph: wire::QuiesceSubgraph<'_>,
-) -> Result<QuiesceSubgraph, Report<DecodeError>> {
+) -> Result<QuiesceSubgraph, Report<WireDecodeError>> {
     let domain = decoder.name("QuiesceSubgraph.domain", subgraph.domain())?;
     let nodes = decoder.table_vector("QuiesceSubgraph.nodes", subgraph.nodes(), |node| {
         decode_attributed_node(decoder, node)
@@ -1424,7 +1507,7 @@ fn decode_subgraph(
 fn encode_attributed_node<'fbb>(
     node: &AttributedImpactNode,
     encoder: &mut Encoder<'fbb>,
-) -> Result<WIPOffset<wire::AttributedNode<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::AttributedNode<'fbb>>, Report<WireEncodeError>> {
     let coverage = encode_node_coverage(encoder, &node.coverage)?;
     let operations = encode_attribution(encoder, "AttributedNode.operations", &node.attribution)?;
     Ok(wire::AttributedNode::create(
@@ -1439,7 +1522,7 @@ fn encode_attributed_node<'fbb>(
 fn decode_attributed_node(
     decoder: Decoder<'_>,
     node: wire::AttributedNode<'_>,
-) -> Result<AttributedImpactNode, Report<DecodeError>> {
+) -> Result<AttributedImpactNode, Report<WireDecodeError>> {
     let coverage = decode_node_coverage(decoder, node.coverage())?;
     let attribution = decode_attribution(decoder, "AttributedNode.operations", node.operations())?;
     Ok(AttributedImpactNode {
@@ -1451,7 +1534,7 @@ fn decode_attributed_node(
 fn encode_attributed_gate<'fbb>(
     gate: &AttributedGateBoundary,
     encoder: &mut Encoder<'fbb>,
-) -> Result<WIPOffset<wire::AttributedGateBoundary<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::AttributedGateBoundary<'fbb>>, Report<WireEncodeError>> {
     let relay = encoder.text("GateBoundary.relay", gate.boundary.relay.as_str())?;
     let branches = encode_branch_coverage(encoder, &gate.boundary.branches)?;
     let boundary = wire::GateBoundary::create(
@@ -1479,7 +1562,7 @@ fn encode_attributed_gate<'fbb>(
 fn decode_attributed_gate(
     decoder: Decoder<'_>,
     gate: wire::AttributedGateBoundary<'_>,
-) -> Result<AttributedGateBoundary, Report<DecodeError>> {
+) -> Result<AttributedGateBoundary, Report<WireDecodeError>> {
     let boundary = gate.boundary();
     let relay: RelayName = decoder.name("GateBoundary.relay", boundary.relay())?;
     let branches = match boundary.branches_type() {
@@ -1510,7 +1593,7 @@ fn decode_attributed_gate(
 fn encode_node_coverage<'fbb>(
     encoder: &mut Encoder<'fbb>,
     coverage: &ImpactNodeCoverage,
-) -> Result<WIPOffset<wire::NodeCoverage<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::NodeCoverage<'fbb>>, Report<WireEncodeError>> {
     let node = encode_node_ref(encoder, &coverage.node)?;
     let branches = match &coverage.branches {
         Some(branches) => encode_branch_coverage(encoder, branches)?,
@@ -1532,7 +1615,7 @@ fn encode_node_coverage<'fbb>(
 fn decode_node_coverage(
     decoder: Decoder<'_>,
     coverage: wire::NodeCoverage<'_>,
-) -> Result<ImpactNodeCoverage, Report<DecodeError>> {
+) -> Result<ImpactNodeCoverage, Report<WireDecodeError>> {
     let node = decode_node_ref(decoder, coverage.node())?;
     let branches = match coverage.branches_type() {
         wire::NodeBranchCoverage::ConfigurationCoverage => {
@@ -1593,7 +1676,7 @@ fn union_member<T>(member: Option<T>) -> T {
 fn encode_branch_coverage<D: BranchCoverageUnion>(
     encoder: &mut Encoder<'_>,
     coverage: &ConcreteBranchCoverage,
-) -> Result<EncodedUnion<D>, Report<EncodeError>> {
+) -> Result<EncodedUnion<D>, Report<WireEncodeError>> {
     let union = match coverage {
         ConcreteBranchCoverage::All => EncodedUnion::new(
             D::ALL,
@@ -1635,7 +1718,10 @@ fn encode_branch_coverage<D: BranchCoverageUnion>(
 }
 
 impl BranchCoverageMember<'_> {
-    fn decode(self, decoder: Decoder<'_>) -> Result<ConcreteBranchCoverage, Report<DecodeError>> {
+    fn decode(
+        self,
+        decoder: Decoder<'_>,
+    ) -> Result<ConcreteBranchCoverage, Report<WireDecodeError>> {
         match self {
             Self::All => Ok(ConcreteBranchCoverage::All),
             Self::Unbranched => Ok(ConcreteBranchCoverage::Unbranched),
@@ -1656,7 +1742,7 @@ impl BranchCoverageMember<'_> {
                 ensure_ascending("SelectedBranchCoverage.keys", fingerprints.iter())?;
                 match ConcreteBranchCoverage::selected(branch, fingerprints) {
                     Ok(coverage) => Ok(coverage),
-                    Err(error) => Err(error.change_context(DecodeError::EmptyCollection {
+                    Err(error) => Err(error.change_context(WireDecodeError::EmptyCollection {
                         field: "SelectedBranchCoverage.keys",
                     })),
                 }
@@ -1668,7 +1754,7 @@ impl BranchCoverageMember<'_> {
 fn encode_completeness(
     encoder: &mut Encoder<'_>,
     completeness: &ImpactReportCompleteness,
-) -> Result<EncodedUnion<wire::ImpactCompleteness>, Report<EncodeError>> {
+) -> Result<EncodedUnion<wire::ImpactCompleteness>, Report<WireEncodeError>> {
     let union = match completeness {
         ImpactReportCompleteness::Complete => EncodedUnion::new(
             wire::ImpactCompleteness::ImpactComplete,
@@ -1697,7 +1783,7 @@ fn decode_completeness(
     field: &'static str,
     incomplete: Option<wire::ImpactIncomplete<'_>>,
     discriminant: wire::ImpactCompleteness,
-) -> Result<ImpactReportCompleteness, Report<DecodeError>> {
+) -> Result<ImpactReportCompleteness, Report<WireDecodeError>> {
     if let Some(incomplete) = incomplete {
         let diagnostics = decoder.table_vector(
             "ImpactIncomplete.diagnostics",
@@ -1706,7 +1792,7 @@ fn decode_completeness(
         )?;
         return match ImpactReportCompleteness::incomplete(diagnostics) {
             Ok(completeness) => Ok(completeness),
-            Err(error) => Err(error.change_context(DecodeError::EmptyCollection {
+            Err(error) => Err(error.change_context(WireDecodeError::EmptyCollection {
                 field: "ImpactIncomplete.diagnostics",
             })),
         };
@@ -1720,7 +1806,7 @@ fn decode_completeness(
 fn encode_diagnostic<'fbb>(
     diagnostic: &ImpactDiagnostic,
     encoder: &mut Encoder<'fbb>,
-) -> Result<WIPOffset<wire::ImpactDiagnostic<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::ImpactDiagnostic<'fbb>>, Report<WireEncodeError>> {
     let message = encoder.text("ImpactDiagnostic.message", &diagnostic.message)?;
     let operation = diagnostic.operation.map(encode_operation_number);
     Ok(wire::ImpactDiagnostic::create(
@@ -1736,7 +1822,7 @@ fn encode_diagnostic<'fbb>(
 fn decode_diagnostic(
     decoder: Decoder<'_>,
     diagnostic: wire::ImpactDiagnostic<'_>,
-) -> Result<ImpactDiagnostic, Report<DecodeError>> {
+) -> Result<ImpactDiagnostic, Report<WireDecodeError>> {
     let kind = decoder.required_enumeration("ImpactDiagnostic.kind", diagnostic.kind())?;
     let operation = match diagnostic.operation() {
         Some(operation) => Some(decode_operation_number(
@@ -1758,7 +1844,7 @@ fn encode_attribution<'fbb>(
     encoder: &mut Encoder<'fbb>,
     field: &'static str,
     attribution: &ImpactAttribution,
-) -> Result<WIPOffset<Vector<'fbb, u64>>, Report<EncodeError>> {
+) -> Result<WIPOffset<Vector<'fbb, u64>>, Report<WireEncodeError>> {
     let operations = attribution
         .operations()
         .iter()
@@ -1771,7 +1857,7 @@ fn decode_attribution(
     decoder: Decoder<'_>,
     field: &'static str,
     operations: Vector<'_, u64>,
-) -> Result<ImpactAttribution, Report<DecodeError>> {
+) -> Result<ImpactAttribution, Report<WireDecodeError>> {
     decoder.entries(field, operations.len())?;
     let mut numbers = Vec::with_capacity(operations.len());
     for operation in operations.iter() {
@@ -1780,7 +1866,7 @@ fn decode_attribution(
     ensure_ascending(field, numbers.iter())?;
     match ImpactAttribution::new(numbers) {
         Ok(attribution) => Ok(attribution),
-        Err(error) => Err(error.change_context(DecodeError::EmptyCollection { field })),
+        Err(error) => Err(error.change_context(WireDecodeError::EmptyCollection { field })),
     }
 }
 
@@ -1795,12 +1881,12 @@ fn decode_operation_range(
     decoder: Decoder<'_>,
     field: &'static str,
     range: &wire::OperationRange,
-) -> Result<TransactionOperationRange, Report<DecodeError>> {
+) -> Result<TransactionOperationRange, Report<WireDecodeError>> {
     let first: TransactionOperationNumber = decode_operation_number(decoder, field, range.first())?;
     let last = decode_operation_number(decoder, field, range.last())?;
     match TransactionOperationRange::new(first, last) {
         Ok(range) => Ok(range),
-        Err(error) => Err(error.change_context(DecodeError::InvalidValue {
+        Err(error) => Err(error.change_context(WireDecodeError::InvalidValue {
             field,
             kind: "operation range",
         })),
@@ -1812,8 +1898,8 @@ fn decode_set<'a, W, T>(
     decoder: Decoder<'_>,
     field: &'static str,
     tables: Vector<'a, ForwardsUOffset<W>>,
-    decode: impl FnMut(W) -> Result<T, Report<DecodeError>>,
-) -> Result<CanonicalImpactSet<T>, Report<DecodeError>>
+    decode: impl FnMut(W) -> Result<T, Report<WireDecodeError>>,
+) -> Result<CanonicalImpactSet<T>, Report<WireDecodeError>>
 where
     W: flatbuffers::Follow<'a, Inner = W> + 'a,
     T: Ord,
@@ -1827,7 +1913,7 @@ where
 fn ensure_ascending<'v, T>(
     field: &'static str,
     keys: impl Iterator<Item = &'v T>,
-) -> Result<(), Report<DecodeError>>
+) -> Result<(), Report<WireDecodeError>>
 where
     T: Ord + 'v,
 {
@@ -1836,7 +1922,7 @@ where
         if let Some(previous) = previous
             && previous >= key
         {
-            return Err(Report::new(DecodeError::NonCanonicalSet { field }));
+            return Err(Report::new(WireDecodeError::NonCanonicalSet { field }));
         }
         previous = Some(key);
     }

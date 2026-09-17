@@ -12,8 +12,8 @@ use super::{
     samples::client_messages,
 };
 use crate::{
-    ClientMessage, ClientRequest, CommandRequest, DecodeError, EncodeError, SessionLimitSettings,
-    SuggestRequest, WireValueError, wire,
+    ClientMessage, ClientRequest, CommandRequest, SessionLimitSettings, SuggestRequest,
+    WireDecodeError, WireEncodeError, WireValueError, wire,
 };
 
 #[test]
@@ -98,7 +98,7 @@ fn a_zero_request_identity_is_refused() {
     assert_eq!(frame.request_id(), None);
     assert_eq!(
         decode_error(ClientMessage::decode(&frame)),
-        DecodeError::ZeroValue {
+        WireDecodeError::ZeroValue {
             field: "ClientMessage.request_id",
         }
     );
@@ -115,7 +115,7 @@ fn an_undeclared_request_variant_is_refused_with_its_request_identity() {
         assert_eq!(frame.request_id(), Some(request(42)));
         assert_eq!(
             decode_error(ClientMessage::decode(&frame)),
-            DecodeError::UnknownUnionVariant {
+            WireDecodeError::UnknownUnionVariant {
                 field: "ClientMessage.request",
                 discriminant: discriminant.0,
             }
@@ -156,7 +156,7 @@ fn invalid_names_and_references_are_refused() {
     ));
     assert_eq!(
         decode_error(ClientMessage::decode(&frame)),
-        DecodeError::InvalidValue {
+        WireDecodeError::InvalidValue {
             field: "CommandRequest.domain",
             kind: "name",
         }
@@ -168,7 +168,7 @@ fn invalid_names_and_references_are_refused() {
     ));
     assert_eq!(
         decode_error(ClientMessage::decode(&frame)),
-        DecodeError::InvalidValue {
+        WireDecodeError::InvalidValue {
             field: "CommandRequest.domain",
             kind: "name",
         }
@@ -177,7 +177,7 @@ fn invalid_names_and_references_are_refused() {
         let frame = raw_client(command_frame("SHOW DOMAINS;", None, invalid));
         assert_eq!(
             decode_error(ClientMessage::decode(&frame)),
-            DecodeError::InvalidValue {
+            WireDecodeError::InvalidValue {
                 field: "CommandRequest.execution_reference",
                 kind: "execution reference",
             }
@@ -257,7 +257,7 @@ fn a_suggestion_cursor_must_fall_on_a_character_boundary() {
         let frame = raw_client(suggest_frame(input, cursor));
         assert_eq!(
             decode_error(ClientMessage::decode(&frame)),
-            DecodeError::InvalidValue {
+            WireDecodeError::InvalidValue {
                 field: "SuggestRequest.cursor",
                 kind: "character boundary of the input",
             }
@@ -294,7 +294,7 @@ fn a_subscription_type_must_be_selected_and_supported() {
     let frame = raw_client(subscribe_frame(None));
     assert_eq!(
         decode_error(ClientMessage::decode(&frame)),
-        DecodeError::MissingField {
+        WireDecodeError::MissingField {
             field: "SubscribeRequest.subscription_type",
         }
     );
@@ -302,7 +302,7 @@ fn a_subscription_type_must_be_selected_and_supported() {
         let frame = raw_client(subscribe_frame(Some(wire::SubscriptionType(unsupported))));
         assert_eq!(
             decode_error(ClientMessage::decode(&frame)),
-            DecodeError::UnknownEnumValue {
+            WireDecodeError::UnknownEnumValue {
                 field: "SubscribeRequest.subscription_type",
                 value: unsupported,
             }
@@ -339,14 +339,14 @@ fn inspection_requests_refuse_operation_zero_and_unknown_targets() {
     ));
     assert_eq!(
         decode_error(ClientMessage::decode(&frame)),
-        DecodeError::ZeroValue {
+        WireDecodeError::ZeroValue {
             field: "InspectTransactionRequest.operation",
         }
     );
     let frame = raw_client(inspect_frame(wire::InspectionTarget(9), None));
     assert_eq!(
         decode_error(ClientMessage::decode(&frame)),
-        DecodeError::UnknownUnionVariant {
+        WireDecodeError::UnknownUnionVariant {
             field: "InspectTransactionRequest.target",
             discriminant: 9,
         }
@@ -375,7 +375,7 @@ fn a_cancel_request_must_name_a_request() {
     let frame = raw_client(cancel_frame(0));
     assert_eq!(
         decode_error(ClientMessage::decode(&frame)),
-        DecodeError::ZeroValue {
+        WireDecodeError::ZeroValue {
             field: "CancelRequest.target_request_id",
         }
     );
@@ -410,7 +410,7 @@ fn string_limits_are_inclusive_on_both_sides() {
         .expect_err("a 33-byte query exceeds a 32-byte string limit");
     assert_eq!(
         error.current_context(),
-        &EncodeError::StringTooLong {
+        &WireEncodeError::StringTooLong {
             field: "CommandRequest.query",
             actual: 33,
             limit: 32,
@@ -425,7 +425,7 @@ fn string_limits_are_inclusive_on_both_sides() {
         .assured("string limits are applied when decoding, not verifying");
     assert_eq!(
         decode_error(ClientMessage::decode(&long)),
-        DecodeError::StringTooLong {
+        WireDecodeError::StringTooLong {
             field: "CommandRequest.query",
             actual: 33,
             limit: 32,

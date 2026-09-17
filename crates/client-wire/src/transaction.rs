@@ -11,7 +11,7 @@ use nervix_models::{
 };
 
 use crate::{
-    codec::{DecodeError, Decoder, EncodeError, EncodedUnion, Encoder, wire_size},
+    codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_size},
     common::WireValueError,
     wire,
 };
@@ -40,7 +40,7 @@ impl TransactionState {
     fn encode(
         &self,
         encoder: &mut Encoder<'_>,
-    ) -> Result<EncodedUnion<wire::TransactionState>, Report<EncodeError>> {
+    ) -> Result<EncodedUnion<wire::TransactionState>, Report<WireEncodeError>> {
         let union = match self {
             Self::Open => EncodedUnion::new(
                 wire::TransactionState::TransactionOpen,
@@ -89,7 +89,7 @@ impl TransactionState {
     fn decode(
         decoder: Decoder<'_>,
         status: wire::TransactionStatus<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let state = status.state_type();
         if let Some(failed) = status.state_as_transaction_failed() {
             let failing_operation = decode_operation_number(
@@ -186,7 +186,7 @@ impl TransactionStatus {
     pub(crate) fn encode<'fbb>(
         &self,
         encoder: &mut Encoder<'fbb>,
-    ) -> Result<WIPOffset<wire::TransactionStatus<'fbb>>, Report<EncodeError>> {
+    ) -> Result<WIPOffset<wire::TransactionStatus<'fbb>>, Report<WireEncodeError>> {
         let transaction_id =
             encoder.text("TransactionStatus.transaction_id", &self.transaction_id)?;
         let domain = encoder.text("TransactionStatus.domain", self.domain.as_str())?;
@@ -207,7 +207,7 @@ impl TransactionStatus {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         status: wire::TransactionStatus<'_>,
-    ) -> Result<Self, Report<DecodeError>> {
+    ) -> Result<Self, Report<WireDecodeError>> {
         let transaction_id =
             decoder.text("TransactionStatus.transaction_id", status.transaction_id())?;
         let domain = decoder.name("TransactionStatus.domain", status.domain())?;
@@ -228,7 +228,7 @@ impl TransactionStatus {
             applied_operations,
         ) {
             Ok(status) => Ok(status),
-            Err(error) => Err(error.change_context(DecodeError::InvalidValue {
+            Err(error) => Err(error.change_context(WireDecodeError::InvalidValue {
                 field: "TransactionStatus.applied_operations",
                 kind: "operation count",
             })),
@@ -241,7 +241,7 @@ pub(crate) fn decode_operation_number(
     decoder: Decoder<'_>,
     field: &'static str,
     value: u64,
-) -> Result<TransactionOperationNumber, Report<DecodeError>> {
+) -> Result<TransactionOperationNumber, Report<WireDecodeError>> {
     let number = decoder.non_zero(field, value)?;
     let number = decoder.size(field, number.get())?;
     let number = NonZeroUsize::new(number).verified("the value was checked to be non-zero above");
@@ -256,7 +256,7 @@ pub(crate) fn encode_operation_number(number: TransactionOperationNumber) -> u64
 pub(crate) fn encode_preview_identity<'fbb>(
     encoder: &mut Encoder<'fbb>,
     preview: &TransactionPreviewIdentity,
-) -> Result<WIPOffset<wire::TransactionPreviewIdentity<'fbb>>, Report<EncodeError>> {
+) -> Result<WIPOffset<wire::TransactionPreviewIdentity<'fbb>>, Report<WireEncodeError>> {
     let transaction_id = encoder.text(
         "TransactionPreviewIdentity.transaction_id",
         &preview.transaction_id,
@@ -275,7 +275,7 @@ pub(crate) fn encode_preview_identity<'fbb>(
 pub(crate) fn decode_preview_identity(
     decoder: Decoder<'_>,
     preview: wire::TransactionPreviewIdentity<'_>,
-) -> Result<TransactionPreviewIdentity, Report<DecodeError>> {
+) -> Result<TransactionPreviewIdentity, Report<WireDecodeError>> {
     let transaction_id = decoder.text(
         "TransactionPreviewIdentity.transaction_id",
         preview.transaction_id(),
@@ -293,7 +293,7 @@ pub(crate) fn decode_preview_identity(
 pub(crate) fn encode_inspection_target(
     encoder: &mut Encoder<'_>,
     target: &TransactionInspectionTarget,
-) -> Result<EncodedUnion<wire::InspectionTarget>, Report<EncodeError>> {
+) -> Result<EncodedUnion<wire::InspectionTarget>, Report<WireEncodeError>> {
     match target {
         TransactionInspectionTarget::Attached => Ok(EncodedUnion::new(
             wire::InspectionTarget::AttachedTransaction,
@@ -318,7 +318,7 @@ pub(crate) fn encode_inspection_target(
 pub(crate) fn decode_inspection_target(
     decoder: Decoder<'_>,
     request: wire::InspectTransactionRequest<'_>,
-) -> Result<TransactionInspectionTarget, Report<DecodeError>> {
+) -> Result<TransactionInspectionTarget, Report<WireDecodeError>> {
     if let Some(by_id) = request.target_as_transaction_by_id() {
         let transaction_id =
             decoder.text("TransactionById.transaction_id", by_id.transaction_id())?;

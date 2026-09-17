@@ -14,21 +14,22 @@ use nervix_models::{
     ImpactReportCompleteness, ImpactTopology, ImpactTopologyEdge, ModelChangeAspect, ModelKind,
     ModelName, NodeRef, OperationImpactReason, OperationImpactReport, OwnershipMoveImpact,
     ParseAsType, PauseRequirement, PlannedExecutionStepImpact, QuiesceSubgraph, QuiescenceOutcome,
-    RebuildImpact, RebuildReason, ResourceCatalogAction, ResourceCatalogImpact, SchemaField,
-    StatePurge, StateResetImpact, Timestamp, TransactionImpactReport, TransactionInspectionTarget,
-    TransactionOperation, TransactionOperationRange, TransactionPosition,
-    TransactionPreviewIdentity,
+    RebuildImpact, RebuildReason, RequestedResourceVersion, ResourceBindingImpact,
+    ResourceCatalogAction, ResourceCatalogImpact, SchemaField, StatePurge, StateResetImpact,
+    Timestamp, TransactionImpactReport, TransactionInspectionTarget, TransactionOperation,
+    TransactionOperationRange, TransactionPosition, TransactionPreviewIdentity,
 };
 use url::Url;
 
 use super::fixtures::{name, non_zero, operation, reference, request};
 use crate::{
     AttachTransactionRequest, CancelRequest, CellWriter, ClientMessage, ClientRequest,
-    CommandDisposition, CommandOutcome, CommandRequest, Diagnostic, EncodeError, EncodedFrame,
+    CommandDisposition, CommandOutcome, CommandRequest, Diagnostic, EncodedFrame,
     InspectTransactionRequest, LeaderEndpoints, LeaderRedirect, OutcomeOrigin, RowBranch,
     RowSchema, SelectDomainRequest, ServerFrame, SessionLimits, SourceSpan, StatementDisposition,
     StatementOutcome, SubscribeRequest, SubscriptionHandle, SubscriptionRowsEncoder,
     SubscriptionType, SuggestRequest, TransactionState, TransactionStatus, UnsubscribeRequest,
+    WireEncodeError,
 };
 
 pub(crate) fn leader() -> LeaderEndpoints {
@@ -430,6 +431,22 @@ fn full_effects() -> ImpactEffects {
             action: ResourceCatalogAction::Create,
             attribution: attribution(1, 1),
         }]),
+        resource_bindings: CanonicalImpactSet::new([
+            ResourceBindingImpact {
+                node: node(ModelKind::WasmProcessor, "guest"),
+                resource: name("guest_bundle"),
+                requested: RequestedResourceVersion::Number(u64::MAX),
+                version: u64::MAX,
+                attribution: attribution(1, 1),
+            },
+            ResourceBindingImpact {
+                node: node(ModelKind::Inferencer, "score"),
+                resource: name("model"),
+                requested: RequestedResourceVersion::Latest,
+                version: 1,
+                attribution: attribution(2, 2),
+            },
+        ]),
     }
 }
 
@@ -744,7 +761,7 @@ pub(crate) fn subscription() -> SubscriptionHandle {
 }
 
 /// The branch key of [`row_schema`]: a value, a null and a redaction.
-fn write_branch_key(key: &mut CellWriter<'_, 'static>) -> Result<(), Report<EncodeError>> {
+fn write_branch_key(key: &mut CellWriter<'_, 'static>) -> Result<(), Report<WireEncodeError>> {
     key.push_string("acme")?;
     key.push_null()?;
     key.push_redacted()?;
@@ -752,7 +769,7 @@ fn write_branch_key(key: &mut CellWriter<'_, 'static>) -> Result<(), Report<Enco
 }
 
 /// A row of [`row_schema`] holding the smallest value of every type.
-fn write_minimum_row(cells: &mut CellWriter<'_, 'static>) -> Result<(), Report<EncodeError>> {
+fn write_minimum_row(cells: &mut CellWriter<'_, 'static>) -> Result<(), Report<WireEncodeError>> {
     cells.push_u8(u8::MIN)?;
     cells.push_i8(i8::MIN)?;
     cells.push_u16(u16::MIN)?;
@@ -780,7 +797,7 @@ fn write_minimum_row(cells: &mut CellWriter<'_, 'static>) -> Result<(), Report<E
 }
 
 /// A row of [`row_schema`] holding the largest and most unusual value of every type.
-fn write_maximum_row(cells: &mut CellWriter<'_, 'static>) -> Result<(), Report<EncodeError>> {
+fn write_maximum_row(cells: &mut CellWriter<'_, 'static>) -> Result<(), Report<WireEncodeError>> {
     cells.push_u8(u8::MAX)?;
     cells.push_i8(i8::MAX)?;
     cells.push_u16(u16::MAX)?;

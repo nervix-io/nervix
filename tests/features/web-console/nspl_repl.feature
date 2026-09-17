@@ -222,6 +222,31 @@ Feature: Web console NSPL REPL
     When selector ".prompt-row input" is filled with "DROP RELAY queued_"
     Then selector ".suggestions" does not contain "queued_orders"
 
+  Scenario: Web console autocompletes LATEST and completed resource versions after VERSION
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And node "node-1" has TLS resource directory "tls_v1" for hosts "complete.example.com"
+    And node "node-1" has TLS resource directory "tls_v2" for hosts "complete.example.com"
+    And node "node-1" has TLS resource directory "tls_v3" for hosts "complete.example.com"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE tls_bundle;
+      UPLOAD RESOURCE tls_bundle VERSION '{{tls_v1}}';
+      UPLOAD RESOURCE tls_bundle VERSION '{{tls_v2}}';
+      """
+    Then the current leader node is saved as placeholder "upload_leader"
+    Given resource installation on node "{{upload_leader}}" fails before promotion
+    And client "uploader" is connected to the leader node
+    When client "uploader" upload of resource "tls_bundle" from "{{tls_v3}}" with identity "failed-version" fails with "for version 3 failed"
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".prompt-row input" is filled with "CREATE VHOST edge complete.example.com WITH TLS tls_bundle VERSION "
+    Then selector ".suggestions" contains "LATEST"
+    And selector ".suggestions" contains "1"
+    And selector ".suggestions" contains "2"
+    And selector ".suggestions" does not contain "3"
+
   Scenario: Web console autocompletes queued entities after leader switchover
     Given a 3 node nervix cluster is started
     Then the current leader node is saved as placeholder "old_leader"
