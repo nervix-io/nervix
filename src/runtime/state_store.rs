@@ -267,7 +267,9 @@ impl StateAdmissions {
     /// Wait until every operation admitted under `generation` has finished.
     ///
     /// Admitted operations are synchronous and never take the barrier, so the wait lasts only as
-    /// long as the operations already running.
+    /// long as the operations already running. The spin yields through the execution crate, whose
+    /// yield a deterministic scheduler sees, so that scheduler runs the operations this waits for
+    /// instead of the spin.
     fn wait_until_finished(&self, generation: u64) {
         let admitted = self.of_generation(generation);
         let mut spins = 0_u32;
@@ -278,8 +280,6 @@ impl StateAdmissions {
                     .verified("the loop only spins while below ADMISSION_SPINS_BEFORE_YIELD");
                 std::hint::spin_loop();
             } else {
-                // The execution crate's yield is visible to a deterministic scheduler, which then
-                // runs the operations this waits for instead of this spin.
                 nervix_execution::sync::yield_now();
             }
         }
