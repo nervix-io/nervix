@@ -54,6 +54,12 @@ pub enum SideErrorReason {
     CastFailed { target: RegisterType },
     #[error("invalid regular expression: {0}")]
     InvalidRegularExpression(regex::Error),
+    /// A datetime builtin whose result lies outside the signed Unix-nanosecond range.
+    #[error("{0} result is outside the DATETIME range")]
+    DatetimeOutOfRange(DatetimeOperation),
+    /// A `date_diff` whose count of units does not fit its `I64` result.
+    #[error("date_diff result does not fit I64")]
+    DateDiffOverflow,
     /// A failure an injected function reported, with the code and text that function chose.
     #[error("{message}")]
     Injected { code: ErrorCode, message: String },
@@ -62,7 +68,9 @@ pub enum SideErrorReason {
 impl SideErrorReason {
     pub fn code(&self) -> ErrorCode {
         match self {
-            Self::IntegerOverflow(_) => ErrorCode::Overflow,
+            Self::IntegerOverflow(_) | Self::DatetimeOutOfRange(_) | Self::DateDiffOverflow => {
+                ErrorCode::Overflow
+            }
             Self::DivisionByZero(_) => ErrorCode::DivisionByZero,
             Self::NonFiniteResult(_) | Self::InvalidRegularExpression(_) => {
                 ErrorCode::InvalidArgument
@@ -99,6 +107,19 @@ pub enum DivisionOperation {
     Division,
     #[strum(to_string = "remainder")]
     Remainder,
+}
+
+/// A datetime builtin whose result is a DATETIME.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum DatetimeOperation {
+    #[strum(to_string = "date_trunc")]
+    DateTrunc,
+    #[strum(to_string = "date_bin")]
+    DateBin,
+    #[strum(to_string = "date_add")]
+    DateAdd,
+    #[strum(to_string = "from_unix")]
+    FromUnix,
 }
 
 /// A floating-point operation whose result has to be finite.
@@ -382,8 +403,8 @@ pub enum RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::{
-        DivisionOperation, ErrorCode, FloatOperation, IntegerOperation, RowErrors, SideError,
-        SideErrorReason,
+        DatetimeOperation, DivisionOperation, ErrorCode, FloatOperation, IntegerOperation,
+        RowErrors, SideError, SideErrorReason,
     };
     use crate::ir::RegisterType;
 
@@ -463,6 +484,38 @@ mod tests {
             assert_eq!(reason.to_string(), message);
             assert_eq!(reason.code(), ErrorCode::InvalidArgument);
         }
+
+        let datetime_ranges = [
+            (
+                DatetimeOperation::DateTrunc,
+                "date_trunc result is outside the DATETIME range",
+            ),
+            (
+                DatetimeOperation::DateBin,
+                "date_bin result is outside the DATETIME range",
+            ),
+            (
+                DatetimeOperation::DateAdd,
+                "date_add result is outside the DATETIME range",
+            ),
+            (
+                DatetimeOperation::FromUnix,
+                "from_unix result is outside the DATETIME range",
+            ),
+        ];
+        for (operation, message) in datetime_ranges {
+            let reason = SideErrorReason::DatetimeOutOfRange(operation);
+            assert_eq!(reason.to_string(), message);
+            assert_eq!(reason.code(), ErrorCode::Overflow);
+        }
+        assert_eq!(
+            SideErrorReason::DateDiffOverflow.to_string(),
+            "date_diff result does not fit I64"
+        );
+        assert_eq!(
+            SideErrorReason::DateDiffOverflow.code(),
+            ErrorCode::Overflow
+        );
 
         let cast = SideErrorReason::CastFailed {
             target: RegisterType::Int64,

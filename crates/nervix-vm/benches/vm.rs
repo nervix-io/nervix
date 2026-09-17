@@ -2,9 +2,10 @@ use std::sync::Arc as StdArc;
 
 use arch_into::ArchInto as _;
 use arrow_array::{
-    BooleanArray, Float64Array, Int32Array, Int64Array, ListArray, StringArray, types::Int64Type,
+    BooleanArray, Float64Array, Int32Array, Int64Array, ListArray, StringArray,
+    TimestampNanosecondArray, types::Int64Type,
 };
-use arrow_schema::{DataType, Field, Schema};
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
@@ -1250,6 +1251,145 @@ fn numeric_kernel_benches(c: &mut Criterion) {
     group.finish();
 }
 
+/// Rows in a datetime kernel batch, which stays at the inline execution threshold like a numeric
+/// kernel batch.
+const DATETIME_KERNEL_ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+
+fn datetime_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new("occurred_at", datetime_type(), true),
+        Field::new("origin", datetime_type(), true),
+        Field::new("amount", DataType::Int64, true),
+        Field::new("epoch_ms", DataType::Int64, true),
+    ]))
+}
+
+fn datetime_type() -> DataType {
+    DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into()))
+}
+
+/// A datetime program measured on its own: its benchmark name, its source, and the type of every
+/// field it sets. Each program holds one builtin family, so a measurement is that family's kernels.
+struct DatetimeProgram {
+    name: &'static str,
+    source: &'static str,
+    outputs: Vec<(&'static str, DataType)>,
+}
+
+fn datetime_programs() -> [DatetimeProgram; 5] {
+    [
+        DatetimeProgram {
+            name: "date_part_time_of_day",
+            source: "SET hour = date_part('hour', input.occurred_at), millisecond = \
+                     date_part('millisecond', input.occurred_at)",
+            outputs: vec![("hour", DataType::Int64), ("millisecond", DataType::Int64)],
+        },
+        DatetimeProgram {
+            name: "date_part_calendar",
+            source: "SET year = date_part('year', input.occurred_at), day_of_year = \
+                     date_part('day_of_year', input.occurred_at), iso_week = \
+                     date_part('iso_week', input.occurred_at)",
+            outputs: vec![
+                ("year", DataType::Int64),
+                ("day_of_year", DataType::Int64),
+                ("iso_week", DataType::Int64),
+            ],
+        },
+        DatetimeProgram {
+            name: "truncate_and_bin",
+            source: "SET minute_start = date_trunc('minute', input.occurred_at), week_start = \
+                     date_trunc('week', input.occurred_at), quarter_hour = date_bin('minute', 15, \
+                     input.occurred_at, input.origin)",
+            outputs: vec![
+                ("minute_start", datetime_type()),
+                ("week_start", datetime_type()),
+                ("quarter_hour", datetime_type()),
+            ],
+        },
+        DatetimeProgram {
+            name: "add_and_diff",
+            source: "SET shifted = date_add('millisecond', input.amount, input.occurred_at), \
+                     elapsed = date_diff('second', input.origin, input.occurred_at)",
+            outputs: vec![("shifted", datetime_type()), ("elapsed", DataType::Int64)],
+        },
+        DatetimeProgram {
+            name: "unix_conversion",
+            source: "SET unix_ms = to_unix('millisecond', input.occurred_at), restored = \
+                     from_unix('millisecond', input.epoch_ms)",
+            outputs: vec![("unix_ms", DataType::Int64), ("restored", datetime_type())],
+        },
+    ]
+}
+
+/// Instants spread from 1938 to 2038, so extraction crosses years and the epoch. A failing row adds
+/// the largest millisecond amount, whose instant lies past the DATETIME range.
+fn datetime_batch(program: &CompiledProgram, failures: FailureDensity) -> TypedBatch {
+    let rows = 0..DATETIME_KERNEL_ROWS;
+    let occurred_at = TimestampNanosecondArray::from_iter_values(
+        rows.clone()
+            .map(|row| benchmark_row_i64(row) * 3_083_000_000_000_017 - 1_000_000_000_000_000_000),
+    )
+    .with_timezone_utc();
+    let origin =
+        TimestampNanosecondArray::from_value(946_685_220_000_000_000, DATETIME_KERNEL_ROWS)
+            .with_timezone_utc();
+    let amount = Int64Array::from_iter_values(rows.clone().map(|row| {
+        if failures.fails(row) {
+            i64::MAX
+        } else {
+            benchmark_row_i64(row % 2_001) - 1_000
+        }
+    }));
+    let epoch_ms = Int64Array::from_iter_values(
+        occurred_at
+            .values()
+            .iter()
+            .map(|nanoseconds| nanoseconds / 1_000_000),
+    );
+    TypedBatch::try_new(
+        program.input_schema.clone(),
+        vec![
+            TypedArray::Datetime(occurred_at),
+            TypedArray::Datetime(origin),
+            TypedArray::Int64(amount),
+            TypedArray::Int64(epoch_ms),
+        ],
+    )
+    .expect("datetime benchmark batch must build")
+}
+
+/// Datetime builtins over one inline batch. Every family runs without failures, and addition also
+/// runs with failing rows, which exercises its range check and error reporting.
+fn datetime_kernel_benches(c: &mut Criterion) {
+    let runtime = benchmark_runtime();
+    let mut group = c.benchmark_group("datetime_kernels");
+    group.throughput(Throughput::Elements(DATETIME_KERNEL_ROWS.arch_into()));
+    for program in datetime_programs() {
+        let compiled = compile_numeric_program(program.source, datetime_schema(), &program.outputs);
+        let densities: &[FailureDensity] = if program.name == "add_and_diff" {
+            &FailureDensity::ALL
+        } else {
+            &[FailureDensity::None]
+        };
+        for failures in densities {
+            let batch = datetime_batch(&compiled, *failures);
+            group.bench_with_input(
+                BenchmarkId::new(program.name, failures.label()),
+                &batch,
+                |b, batch| {
+                    b.iter(|| {
+                        runtime.block_on(execute_benchmark_program(
+                            black_box(&compiled),
+                            black_box(batch),
+                        ))
+                    })
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
 fn benchmark_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .build()
@@ -1463,6 +1603,7 @@ criterion_group!(
     benches,
     execute_benches,
     batch_size_sweep_benches,
-    numeric_kernel_benches
+    numeric_kernel_benches,
+    datetime_kernel_benches
 );
 criterion_main!(benches);

@@ -2464,7 +2464,8 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         | FunctionName::Substr
         | FunctionName::Tan
         | FunctionName::ToHex
-        | FunctionName::Translate => None,
+        | FunctionName::Translate
+        | FunctionName::Datetime(_) => None,
     }
 }
 

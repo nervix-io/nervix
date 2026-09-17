@@ -441,6 +441,7 @@ Supported built-ins include string, null-handling, numeric, regex, and contextua
 - string transforms: `lower`, `upper`, `trim`, `length`, `concat`
 - null handling: `coalesce`, `is_null`, `nullif`
 - numeric and predicates: `abs`, `contains`, `starts_with`, `ends_with`
+- datetime: `date_part`, `date_trunc`, `date_bin`, `date_add`, `date_diff`, `to_unix`, `from_unix`
 - contextual functions: `now`, `uuid_v4`, `uuid_v7`
 
 See [Filter-Map Functions](filter-map-functions.md) for the full current function list, signatures, and aliases.

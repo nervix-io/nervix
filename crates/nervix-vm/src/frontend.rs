@@ -4,6 +4,8 @@
 //! - **Depends on.** The vocabulary, Arrow schemas, and the VM's program types.
 //! - **Must not know.** NSPL tokens or diagnostics, registry state, or runtime tasks.
 
+use std::num::NonZeroU64;
+
 use ahash::{HashSet, HashSetExt};
 use arrow_schema::{DataType, Schema, TimeUnit};
 use error_stack::{Report, ResultExt as _};
@@ -14,11 +16,13 @@ use nervix_models::{
     FieldScope, Inheritance, Literal as ModelLiteral, ParseAsType, RouteConstruction,
     UnaryOperator as ModelUnaryOperator,
 };
+use strum::VariantNames as _;
 use thiserror::Error;
 
 use crate::program::{
-    BinaryOp, CaseArm, Expr, FieldRef, FunctionName, Invocation, Literal, Program, Span,
-    SpannedExpr, SpannedInvocation, SpannedNode, UnaryOp, spanned,
+    BinaryOp, CaseArm, DateBinWidth, DatePart, DatetimeFunction, DatetimeFunctionName, Expr,
+    FieldRef, FixedTimeUnit, FunctionName, Invocation, Literal, Program, Span, SpannedExpr,
+    SpannedInvocation, SpannedNode, UnaryOp, spanned,
 };
 
 /// A compile-time frontend failure together with the semantic operation it belongs to.
@@ -146,6 +150,40 @@ pub enum FrontendErrorKind {
         expected: CastTargetKind,
         found: ParseAsType,
     },
+    #[error("function '{function}' expects {expected} arguments, found {found}")]
+    DatetimeArity {
+        function: DatetimeFunctionName,
+        expected: usize,
+        found: usize,
+    },
+    #[error("function '{function}' requires its {argument}")]
+    NonLiteralDatetimeArgument {
+        function: DatetimeFunctionName,
+        argument: DatetimeLiteral,
+    },
+    #[error(
+        "function '{function}' does not accept time unit '{unit}'; expected one of {expected}",
+        expected = FixedTimeUnit::VARIANTS.join(", ")
+    )]
+    UnknownTimeUnit {
+        function: DatetimeFunctionName,
+        unit: String,
+    },
+    #[error(
+        "function 'date_part' does not accept date part '{part}'; expected one of {expected}",
+        expected = DatePart::VARIANTS.join(", ")
+    )]
+    UnknownDatePart { part: String },
+    #[error("function 'date_bin' requires a positive width, found {width}")]
+    NonPositiveDateBinWidth { width: i64 },
+    #[error(
+        "function 'date_bin' width of {count} {unit}s is longer than {longest} nanoseconds",
+        longest = i64::MAX
+    )]
+    DateBinWidthOutOfRange {
+        count: NonZeroU64,
+        unit: FixedTimeUnit,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
@@ -160,6 +198,17 @@ pub enum AssignmentTargetSet {
 pub enum CastTargetKind {
     #[strum(serialize = "a scalar type")]
     Scalar,
+}
+
+/// A literal argument that selects what a datetime call computes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum DatetimeLiteral {
+    #[strum(serialize = "time unit to be a STRING literal")]
+    TimeUnit,
+    #[strum(serialize = "date part to be a STRING literal")]
+    DatePart,
+    #[strum(serialize = "width to be an integer literal")]
+    Width,
 }
 
 pub type FrontendResult<T> = error_stack::Result<T, FrontendError>;
@@ -1270,13 +1319,19 @@ fn lower_expression_with_span(
         ModelExpression::Call {
             function,
             arguments,
-        } => Expr::Call {
-            function: FunctionName::parse(function.as_str()),
-            args: arguments
+        } => {
+            let args = arguments
                 .iter()
                 .map(|argument| lower_expression_with_span(argument, bare_read_namespace, span))
-                .collect::<FrontendResult<Vec<_>>>()?,
-        },
+                .collect::<FrontendResult<Vec<_>>>()?;
+            match function.as_str().parse::<DatetimeFunctionName>() {
+                Ok(datetime) => datetime.lower_call(args, span)?,
+                Err(_) => Expr::Call {
+                    function: FunctionName::parse(function.as_str()),
+                    args,
+                },
+            }
+        }
         ModelExpression::UdfCall {
             function,
             arguments,
@@ -1342,6 +1397,158 @@ fn lower_expression_with_span(
         },
     };
     Ok(spanned(expression, span))
+}
+
+impl DatetimeFunctionName {
+    /// Lowers a call of this datetime builtin. The literals that select what the call computes are
+    /// read once, here, so the lowered call keeps only the arguments that vary by row.
+    fn lower_call(self, args: Vec<SpannedExpr>, span: Span) -> FrontendResult<Expr> {
+        let (function, operands) = match self {
+            Self::DatePart => {
+                let [part, value] = self.arguments(args, span)?;
+                let part = self.date_part(&part, span)?;
+                (DatetimeFunction::DatePart(part), vec![value])
+            }
+            Self::DateTrunc => {
+                let [unit, value] = self.arguments(args, span)?;
+                let unit = self.time_unit(&unit, span)?;
+                (DatetimeFunction::DateTrunc(unit), vec![value])
+            }
+            Self::DateBin => {
+                let [unit, width, value, origin] = self.arguments(args, span)?;
+                let unit = self.time_unit(&unit, span)?;
+                let width = self.bin_width(&width, unit, span)?;
+                (DatetimeFunction::DateBin(width), vec![value, origin])
+            }
+            Self::DateAdd => {
+                let [unit, amount, value] = self.arguments(args, span)?;
+                let unit = self.time_unit(&unit, span)?;
+                (DatetimeFunction::DateAdd(unit), vec![amount, value])
+            }
+            Self::DateDiff => {
+                let [unit, start, end] = self.arguments(args, span)?;
+                let unit = self.time_unit(&unit, span)?;
+                (DatetimeFunction::DateDiff(unit), vec![start, end])
+            }
+            Self::ToUnix => {
+                let [unit, value] = self.arguments(args, span)?;
+                let unit = self.time_unit(&unit, span)?;
+                (DatetimeFunction::ToUnix(unit), vec![value])
+            }
+            Self::FromUnix => {
+                let [unit, count] = self.arguments(args, span)?;
+                let unit = self.time_unit(&unit, span)?;
+                (DatetimeFunction::FromUnix(unit), vec![count])
+            }
+        };
+        Ok(Expr::Call {
+            function: FunctionName::Datetime(function),
+            args: operands,
+        })
+    }
+
+    /// The written arguments of a call that takes exactly `N` of them.
+    fn arguments<const N: usize>(
+        self,
+        args: Vec<SpannedExpr>,
+        span: Span,
+    ) -> FrontendResult<[SpannedExpr; N]> {
+        let found = args.len();
+        <[SpannedExpr; N]>::try_from(args).map_err(|_| {
+            FrontendError::report(
+                span,
+                FrontendErrorKind::DatetimeArity {
+                    function: self,
+                    expected: N,
+                    found,
+                },
+            )
+        })
+    }
+
+    fn time_unit(self, argument: &SpannedExpr, span: Span) -> FrontendResult<FixedTimeUnit> {
+        let Expr::Literal(Literal::String(unit)) = &argument.inner else {
+            return Err(FrontendError::report(
+                span,
+                FrontendErrorKind::NonLiteralDatetimeArgument {
+                    function: self,
+                    argument: DatetimeLiteral::TimeUnit,
+                },
+            ));
+        };
+        unit.parse().map_err(|_| {
+            FrontendError::report(
+                span,
+                FrontendErrorKind::UnknownTimeUnit {
+                    function: self,
+                    unit: unit.clone(),
+                },
+            )
+        })
+    }
+
+    fn date_part(self, argument: &SpannedExpr, span: Span) -> FrontendResult<DatePart> {
+        let Expr::Literal(Literal::String(part)) = &argument.inner else {
+            return Err(FrontendError::report(
+                span,
+                FrontendErrorKind::NonLiteralDatetimeArgument {
+                    function: self,
+                    argument: DatetimeLiteral::DatePart,
+                },
+            ));
+        };
+        part.parse().map_err(|_| {
+            FrontendError::report(
+                span,
+                FrontendErrorKind::UnknownDatePart { part: part.clone() },
+            )
+        })
+    }
+
+    /// The width of `date_bin`'s bins: a positive integer literal counting `unit`s.
+    fn bin_width(
+        self,
+        argument: &SpannedExpr,
+        unit: FixedTimeUnit,
+        span: Span,
+    ) -> FrontendResult<DateBinWidth> {
+        let width = match &argument.inner {
+            Expr::Literal(Literal::Int64(width)) => *width,
+            // A written `-5` is a negated literal. Reading it as the negative width it names
+            // reports the width itself instead of calling a number that is not a literal.
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                expr,
+            } if let Expr::Literal(Literal::Int64(magnitude)) = &expr.inner => magnitude
+                .checked_neg()
+                .assured("an integer literal is at most i64::MAX, whose negation fits i64"),
+            _ => {
+                return Err(FrontendError::report(
+                    span,
+                    FrontendErrorKind::NonLiteralDatetimeArgument {
+                        function: self,
+                        argument: DatetimeLiteral::Width,
+                    },
+                ));
+            }
+        };
+        let positive = match u64::try_from(width) {
+            Ok(width) => NonZeroU64::new(width),
+            Err(_) => None,
+        };
+        let Some(count) = positive else {
+            return Err(FrontendError::report(
+                span,
+                FrontendErrorKind::NonPositiveDateBinWidth { width },
+            ));
+        };
+        DateBinWidth::new(count, unit).ok_or_else(|| {
+            FrontendError::report(
+                span,
+                FrontendErrorKind::DateBinWidthOutOfRange { count, unit },
+            )
+        })
+    }
 }
 
 fn scalar_data_type(target: &ParseAsType, span: Span) -> FrontendResult<DataType> {
@@ -1908,5 +2115,203 @@ mod tests {
                 found: target,
             },
         );
+    }
+
+    fn lowered_call(source: &str) -> (FunctionName, Vec<SpannedExpr>) {
+        let lowered = lower_expression(&expression(source), "input")
+            .assured("the test call has valid literal arguments");
+        let Expr::Call { function, args } = lowered.inner else {
+            panic!("`{source}` lowers to a call");
+        };
+        (function, args)
+    }
+
+    fn input_field(expr: &SpannedExpr) -> &str {
+        let Expr::FieldRef(FieldRef { relay, field }) = &expr.inner else {
+            panic!("expected an input field reference, found {expr:?}");
+        };
+        assert_eq!(relay, "input");
+        field
+    }
+
+    #[test]
+    fn datetime_calls_keep_only_their_row_valued_arguments() {
+        let (function, args) = lowered_call("DATE_BIN('Minute', 15, input.occurred_at, origin)");
+        let width = DateBinWidth::new(
+            NonZeroU64::new(15).assured("fifteen is positive"),
+            FixedTimeUnit::Minute,
+        )
+        .assured("fifteen minutes is shorter than i64::MAX nanoseconds");
+        assert_eq!(
+            function,
+            FunctionName::Datetime(DatetimeFunction::DateBin(width))
+        );
+        assert_eq!(
+            args.iter().map(input_field).collect::<Vec<_>>(),
+            ["occurred_at", "origin"]
+        );
+
+        let calls = [
+            (
+                "date_part('iso_day_of_week', input.occurred_at)",
+                DatetimeFunction::DatePart(DatePart::IsoDayOfWeek),
+                vec!["occurred_at"],
+            ),
+            (
+                "date_trunc('week', input.occurred_at)",
+                DatetimeFunction::DateTrunc(FixedTimeUnit::Week),
+                vec!["occurred_at"],
+            ),
+            (
+                "date_add('millisecond', input.delay, input.occurred_at)",
+                DatetimeFunction::DateAdd(FixedTimeUnit::Millisecond),
+                vec!["delay", "occurred_at"],
+            ),
+            (
+                "date_diff('second', input.started_at, input.occurred_at)",
+                DatetimeFunction::DateDiff(FixedTimeUnit::Second),
+                vec!["started_at", "occurred_at"],
+            ),
+            (
+                "to_unix('microsecond', input.occurred_at)",
+                DatetimeFunction::ToUnix(FixedTimeUnit::Microsecond),
+                vec!["occurred_at"],
+            ),
+            (
+                "from_unix('nanosecond', input.epoch)",
+                DatetimeFunction::FromUnix(FixedTimeUnit::Nanosecond),
+                vec!["epoch"],
+            ),
+        ];
+        for (source, expected, fields) in calls {
+            let (function, args) = lowered_call(source);
+            assert_eq!(function, FunctionName::Datetime(expected), "{source}");
+            assert_eq!(args.iter().map(input_field).collect::<Vec<_>>(), fields);
+        }
+
+        let (function, args) = lowered_call("date_bin('minute', 15, input.occurred_at, now())");
+        assert!(matches!(function, FunctionName::Datetime(_)));
+        assert!(matches!(
+            args[1].inner,
+            Expr::Call {
+                function: FunctionName::Now,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn datetime_literal_argument_failures_have_semantic_contexts() {
+        let past_widest_weeks = NonZeroU64::new(15_251).assured("15,251 is positive");
+        let failures = [
+            (
+                "date_trunc('month', input.occurred_at)",
+                FrontendErrorKind::UnknownTimeUnit {
+                    function: DatetimeFunctionName::DateTrunc,
+                    unit: "month".to_string(),
+                },
+            ),
+            (
+                "date_part('weekday', input.occurred_at)",
+                FrontendErrorKind::UnknownDatePart {
+                    part: "weekday".to_string(),
+                },
+            ),
+            (
+                "date_add(input.unit, 1, input.occurred_at)",
+                FrontendErrorKind::NonLiteralDatetimeArgument {
+                    function: DatetimeFunctionName::DateAdd,
+                    argument: DatetimeLiteral::TimeUnit,
+                },
+            ),
+            (
+                "date_part(input.part, input.occurred_at)",
+                FrontendErrorKind::NonLiteralDatetimeArgument {
+                    function: DatetimeFunctionName::DatePart,
+                    argument: DatetimeLiteral::DatePart,
+                },
+            ),
+            (
+                "date_bin('minute', input.width, input.occurred_at, input.origin)",
+                FrontendErrorKind::NonLiteralDatetimeArgument {
+                    function: DatetimeFunctionName::DateBin,
+                    argument: DatetimeLiteral::Width,
+                },
+            ),
+            (
+                "date_bin('minute', 0, input.occurred_at, input.origin)",
+                FrontendErrorKind::NonPositiveDateBinWidth { width: 0 },
+            ),
+            (
+                "date_bin('minute', -5, input.occurred_at, input.origin)",
+                FrontendErrorKind::NonPositiveDateBinWidth { width: -5 },
+            ),
+            (
+                "date_bin('week', 15251, input.occurred_at, input.origin)",
+                FrontendErrorKind::DateBinWidthOutOfRange {
+                    count: past_widest_weeks,
+                    unit: FixedTimeUnit::Week,
+                },
+            ),
+            (
+                "from_unix(input.count)",
+                FrontendErrorKind::DatetimeArity {
+                    function: DatetimeFunctionName::FromUnix,
+                    expected: 2,
+                    found: 1,
+                },
+            ),
+            (
+                "date_diff('second', input.started_at)",
+                FrontendErrorKind::DatetimeArity {
+                    function: DatetimeFunctionName::DateDiff,
+                    expected: 3,
+                    found: 2,
+                },
+            ),
+        ];
+        for (source, kind) in failures {
+            assert_frontend_error(lower_expression(&expression(source), "input"), kind);
+        }
+    }
+
+    #[test]
+    fn datetime_literal_argument_failures_name_what_the_call_accepts() {
+        let messages = [
+            (
+                FrontendErrorKind::UnknownTimeUnit {
+                    function: DatetimeFunctionName::DateTrunc,
+                    unit: "month".to_string(),
+                },
+                "function 'date_trunc' does not accept time unit 'month'; expected one of \
+                 nanosecond, microsecond, millisecond, second, minute, hour, day, week",
+            ),
+            (
+                FrontendErrorKind::UnknownDatePart {
+                    part: "weekday".to_string(),
+                },
+                "function 'date_part' does not accept date part 'weekday'; expected one of year, \
+                 quarter, month, day, hour, minute, second, millisecond, microsecond, nanosecond, \
+                 day_of_week, day_of_year, iso_year, iso_week, iso_day_of_week",
+            ),
+            (
+                FrontendErrorKind::NonLiteralDatetimeArgument {
+                    function: DatetimeFunctionName::DateBin,
+                    argument: DatetimeLiteral::Width,
+                },
+                "function 'date_bin' requires its width to be an integer literal",
+            ),
+            (
+                FrontendErrorKind::DateBinWidthOutOfRange {
+                    count: NonZeroU64::new(15_251).assured("15,251 is positive"),
+                    unit: FixedTimeUnit::Week,
+                },
+                "function 'date_bin' width of 15251 weeks is longer than 9223372036854775807 \
+                 nanoseconds",
+            ),
+        ];
+        for (kind, message) in messages {
+            assert_eq!(kind.to_string(), message);
+        }
     }
 }
