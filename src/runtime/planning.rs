@@ -765,7 +765,11 @@ fn materialize_nodes(
                         demand_offset += route_aggregate.demands().len();
                     }
 
-                    // The shared accumulator plan the branch-local window state is built from.
+                    // The shared accumulator plan the branch-local window state is built from,
+                    // whose demands follow the same written route order as the offsets above.
+                    let plan = WindowAccumulatorPlan::new(
+                        compiled_aggregates.iter().map(|compiled| &compiled.route),
+                    );
                     let aggregate =
                         WindowAggregateProgram::combine_route_programs(&route_aggregates);
 
@@ -801,6 +805,7 @@ fn materialize_nodes(
                         width_duration,
                         step_duration,
                         aggregate,
+                        plan,
                         compiled_aggregates,
                     }
                 }
