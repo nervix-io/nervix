@@ -1083,65 +1083,14 @@ async fn start_session(
     let response_task = tokio::spawn(async move {
         while let Ok(Some(session_response)) = response.message().await {
             tokio::task::consume_budget().await;
-            match session_response.event {
-                // A caller that stopped reading its events has left the session, and ending
-                // this loop is what closes it. The send is the only place that fact arrives.
-                Some(proto::session_response::Event::Subscription(event)) => {
-                    match subscription_tx.send(event.into()).await {
-                        Ok(()) => {}
-                        Err(_) => break,
-                    }
-                }
-                Some(proto::session_response::Event::Server(event)) => {
-                    match server_tx.send(event.into()).await {
-                        Ok(()) => {}
-                        Err(_) => break,
-                    }
-                }
-                Some(proto::session_response::Event::Result(result)) => {
-                    let pending = pending.lock().await.pop_front();
-                    if let Some(PendingResponse::Command(tx)) = pending {
-                        tx.send((*result).into())
-                            .means_peer_left("command requester");
-                    }
-                }
-                Some(proto::session_response::Event::Domains(domains)) => {
-                    let response_to_request = domains.response_to_request;
-                    let domains = domains.domains.into_iter().map(Into::into).collect();
-                    if response_to_request {
-                        let pending = pending.lock().await.pop_front();
-                        if let Some(PendingResponse::DomainList(tx)) = pending {
-                            tx.send(domains).means_peer_left("domain list requester");
-                        }
-                    } else if domain_tx.send(domains).await.is_err() {
-                        break;
-                    }
-                }
-                #[cfg(feature = "autocomplete")]
-                Some(proto::session_response::Event::Suggest(suggest)) => {
-                    let pending = pending.lock().await.pop_front();
-                    if let Some(PendingResponse::Suggest(tx)) = pending {
-                        let suggestions = suggest
-                            .suggestions
-                            .into_iter()
-                            .map(|suggestion| AutocompleteSuggestion {
-                                value: suggestion.value,
-                                kind: match proto::SuggestionKind::try_from(suggestion.kind).ok() {
-                                    Some(proto::SuggestionKind::LocalDirectoryLookup) => {
-                                        SuggestionKind::LocalDirectoryLookup
-                                    }
-                                    _ => SuggestionKind::Text,
-                                },
-                            })
-                            .collect();
-                        tx.send(suggestions).means_peer_left("suggestion requester");
-                    }
-                }
-                #[cfg(not(feature = "autocomplete"))]
-                Some(proto::session_response::Event::Suggest(_)) => {}
-                Some(proto::session_response::Event::Snapshot(_))
-                | Some(proto::session_response::Event::Cluster(_)) => {}
-                None => {}
+            let dispatch = SessionResponseDispatch {
+                pending: &pending,
+                subscription_tx: &subscription_tx,
+                server_tx: &server_tx,
+                domain_tx: &domain_tx,
+            };
+            if !dispatch.deliver(session_response).await {
+                break;
             }
         }
         clear_pending_responses(&pending).await;
@@ -1150,6 +1099,77 @@ async fn start_session(
         request_tx,
         response_task,
     })
+}
+
+struct SessionResponseDispatch<'a> {
+    pending: &'a Arc<Mutex<VecDeque<PendingResponse>>>,
+    subscription_tx: &'a mpsc::Sender<SubscriptionEvent>,
+    server_tx: &'a mpsc::Sender<ServerEvent>,
+    domain_tx: &'a mpsc::Sender<Vec<DomainInfo>>,
+}
+
+impl SessionResponseDispatch<'_> {
+    /// Delivers one wire response. `false` means an event consumer left and the session reader
+    /// should close the transport.
+    async fn deliver(&self, response: proto::SessionResponse) -> bool {
+        match response.event {
+            // A caller that stopped reading its events has left the session, and ending the
+            // response loop is what closes it. The send is the only place that fact arrives.
+            Some(proto::session_response::Event::Subscription(event)) => {
+                self.subscription_tx.send(event.into()).await.is_ok()
+            }
+            Some(proto::session_response::Event::Server(event)) => {
+                self.server_tx.send(event.into()).await.is_ok()
+            }
+            Some(proto::session_response::Event::Result(result)) => {
+                let pending = self.pending.lock().await.pop_front();
+                if let Some(PendingResponse::Command(tx)) = pending {
+                    tx.send((*result).into())
+                        .means_peer_left("command requester");
+                }
+                true
+            }
+            Some(proto::session_response::Event::Domains(domains)) => {
+                let response_to_request = domains.response_to_request;
+                let domains = domains.domains.into_iter().map(Into::into).collect();
+                if response_to_request {
+                    let pending = self.pending.lock().await.pop_front();
+                    if let Some(PendingResponse::DomainList(tx)) = pending {
+                        tx.send(domains).means_peer_left("domain list requester");
+                    }
+                    true
+                } else {
+                    self.domain_tx.send(domains).await.is_ok()
+                }
+            }
+            #[cfg(feature = "autocomplete")]
+            Some(proto::session_response::Event::Suggest(suggest)) => {
+                let pending = self.pending.lock().await.pop_front();
+                if let Some(PendingResponse::Suggest(tx)) = pending {
+                    let suggestions = suggest
+                        .suggestions
+                        .into_iter()
+                        .map(|suggestion| AutocompleteSuggestion {
+                            value: suggestion.value,
+                            kind: match proto::SuggestionKind::try_from(suggestion.kind).ok() {
+                                Some(proto::SuggestionKind::LocalDirectoryLookup) => {
+                                    SuggestionKind::LocalDirectoryLookup
+                                }
+                                _ => SuggestionKind::Text,
+                            },
+                        })
+                        .collect();
+                    tx.send(suggestions).means_peer_left("suggestion requester");
+                }
+                true
+            }
+            #[cfg(not(feature = "autocomplete"))]
+            Some(proto::session_response::Event::Suggest(_)) => true,
+            Some(proto::session_response::Event::Snapshot(_))
+            | Some(proto::session_response::Event::Cluster(_))
+            | None => true,
+        }
+    }
 }
 
 /// A live session: the channel commands are written to, and the task draining its responses.
@@ -1553,6 +1573,7 @@ mod tests {
     use std::{
         collections::VecDeque,
         path::{Path, PathBuf},
+        time::Duration,
     };
 
     use meticulous::ResultExt as _;
@@ -1562,9 +1583,10 @@ mod tests {
     use super::{
         Client, ClientError, ClientInner, CommandOutcome, CommandOutcomeKind, ConnectOptions,
         Diagnostic, GrpcConnector, LeaderRouting, PendingResponse, ServerEvent, ServerEventLevel,
-        SubscriptionEvent, SubscriptionRequest, TlsRequirement, TransactionState,
-        TransactionStatus, clear_pending_responses, expand_user_path, proto, reconnect_candidates,
-        recovered_transaction_outcome, split_query_statements, upload_status_is_retryable,
+        SessionResponseDispatch, SubscriptionEvent, SubscriptionRequest, TlsRequirement,
+        TransactionState, TransactionStatus, clear_pending_responses, expand_user_path, proto,
+        reconnect_candidates, recovered_transaction_outcome, split_query_statements,
+        upload_status_is_retryable,
     };
 
     #[test]
@@ -1618,6 +1640,129 @@ mod tests {
         .await
         .expect_err("plain server should be rejected when tls is required");
         assert!(matches!(error, ClientError::TlsRequired));
+    }
+
+    #[tokio::test]
+    #[ignore = "CLIENT-WIRE-11 replaces FIFO response matching with typed request identity"]
+    async fn response_reordering_cannot_take_another_requests_waiter() {
+        let pending = Arc::new(Mutex::new(VecDeque::new()));
+        let (domains_response_tx, domains_response_rx) = oneshot::channel();
+        let (command_response_tx, command_response_rx) = oneshot::channel();
+        {
+            let mut pending_responses = pending.lock().await;
+            pending_responses.push_back(PendingResponse::DomainList(domains_response_tx));
+            pending_responses.push_back(PendingResponse::Command(command_response_tx));
+        }
+        let (subscription_tx, _subscription_rx) = mpsc::channel(1);
+        let (server_tx, _server_rx) = mpsc::channel(1);
+        let (domain_tx, _domain_rx) = mpsc::channel(1);
+        let dispatch = SessionResponseDispatch {
+            pending: &pending,
+            subscription_tx: &subscription_tx,
+            server_tx: &server_tx,
+            domain_tx: &domain_tx,
+        };
+
+        assert!(
+            dispatch
+                .deliver(proto::SessionResponse {
+                    event: Some(proto::session_response::Event::Result(Box::new(
+                        proto::CommandResult {
+                            success: true,
+                            kind: i32::from(proto::CommandResultKind::Ok),
+                            ..Default::default()
+                        },
+                    ))),
+                })
+                .await
+        );
+        assert!(
+            dispatch
+                .deliver(proto::SessionResponse {
+                    event: Some(proto::session_response::Event::Domains(proto::DomainList {
+                        domains: vec![proto::DomainInfo {
+                            id: "orders".to_string(),
+                            pace: "unpaced".to_string(),
+                            status: "running".to_string(),
+                        }],
+                        response_to_request: true,
+                    })),
+                })
+                .await
+        );
+
+        let Ok(command) = command_response_rx.await else {
+            panic!("the command response was discarded by the domain-list waiter");
+        };
+        let Ok(domains) = domains_response_rx.await else {
+            panic!("the domain-list response was discarded by the command waiter");
+        };
+        assert!(command.success);
+        assert_eq!(domains.len(), 1);
+        assert_eq!(domains[0].id, "orders");
+    }
+
+    #[tokio::test]
+    #[ignore = "CLIENT-WIRE-11 separates bounded event delivery from command replies"]
+    async fn saturated_event_consumer_cannot_block_a_command_reply() {
+        let pending = Arc::new(Mutex::new(VecDeque::new()));
+        let (command_response_tx, command_response_rx) = oneshot::channel();
+        pending
+            .lock()
+            .await
+            .push_back(PendingResponse::Command(command_response_tx));
+        let (subscription_tx, _subscription_rx) = mpsc::channel(1);
+        let (server_tx, _server_rx) = mpsc::channel(1);
+        let (domain_tx, _domain_rx) = mpsc::channel(1);
+        server_tx
+            .send(ServerEvent {
+                level: ServerEventLevel::Info,
+                message: "undrained".to_string(),
+            })
+            .await
+            .assured("the receiver remains alive and its one slot starts empty");
+
+        let task_pending = pending.clone();
+        let task_subscription_tx = subscription_tx.clone();
+        let task_server_tx = server_tx.clone();
+        let task_domain_tx = domain_tx.clone();
+        let delivery = tokio::spawn(async move {
+            let dispatch = SessionResponseDispatch {
+                pending: &task_pending,
+                subscription_tx: &task_subscription_tx,
+                server_tx: &task_server_tx,
+                domain_tx: &task_domain_tx,
+            };
+            let event_delivered = dispatch
+                .deliver(proto::SessionResponse {
+                    event: Some(proto::session_response::Event::Server(proto::ServerEvent {
+                        level: i32::from(proto::ServerEventLevel::Info),
+                        message: "also undrained".to_string(),
+                    })),
+                })
+                .await;
+            if !event_delivered {
+                return;
+            }
+            dispatch
+                .deliver(proto::SessionResponse {
+                    event: Some(proto::session_response::Event::Result(Box::new(
+                        proto::CommandResult {
+                            success: true,
+                            kind: i32::from(proto::CommandResultKind::Ok),
+                            ..Default::default()
+                        },
+                    ))),
+                })
+                .await;
+        });
+
+        let received = tokio::time::timeout(Duration::from_millis(50), command_response_rx).await;
+        delivery.abort();
+        let Ok(Ok(command)) = received else {
+            panic!("the command response stalled behind an undrained event consumer");
+        };
+        assert!(command.success);
     }
 
     #[test]

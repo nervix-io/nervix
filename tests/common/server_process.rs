@@ -44,9 +44,9 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use super::cluster::{
-    InterconnectTestCa, TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestCertificateValidity, next_port,
-    publish_http_uri_with_headers, release_test_ports, run_command_via_client,
-    server_accepts_commands, test_basic_authorization,
+    InterconnectTestCa, TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestCertificateValidity,
+    TestSession, next_port, open_raw_session, publish_http_uri_with_headers, release_test_ports,
+    run_command_via_client, server_accepts_commands, test_basic_authorization,
 };
 
 /// The identity the process runs as and its certificate names. Each process forms its own
@@ -73,20 +73,23 @@ const GRPC_MESSAGE_PREFIX_BYTES: usize = 5;
 const UNCOMPRESSED_GRPC_MESSAGE: u8 = 0;
 
 /// How a scenario executes the server binary.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum ServerProcessLaunch {
     /// Execute the binary directly, the way the container image's exec-form command does.
     Direct,
+    /// Execute a separately built server binary, such as the release subject of a benchmark.
+    Executable(PathBuf),
     /// Lower the soft and hard open-file limits before executing the binary. A shell applies the
     /// limit and then replaces itself with the server, so the server keeps the shell's process.
     OpenFileLimit(u32),
 }
 
 impl ServerProcessLaunch {
-    fn command(self) -> Command {
-        let executable = Path::new(env!("CARGO_BIN_EXE_nervix-server"));
+    fn command(&self) -> Command {
+        let default_executable = Path::new(env!("CARGO_BIN_EXE_nervix-server"));
         match self {
-            Self::Direct => Command::new(executable),
+            Self::Direct => Command::new(default_executable),
+            Self::Executable(executable) => Command::new(executable),
             Self::OpenFileLimit(limit) => {
                 let mut command = Command::new("bash");
                 command
@@ -96,7 +99,7 @@ impl ServerProcessLaunch {
                     .arg(r#"ulimit -Sn "$1" && ulimit -Hn "$1" && shift && exec "$@""#)
                     .arg("bash")
                     .arg(limit.to_string())
-                    .arg(executable);
+                    .arg(default_executable);
                 command
             }
         }
@@ -363,6 +366,10 @@ impl ServerProcess {
     /// Runs NSPL through an authenticated session whose active domain is `domain`.
     pub(crate) async fn run_commands(&self, domain: &str, commands: &str) -> io::Result<String> {
         run_command_via_client(&self.grpc_uri(), domain, commands).await
+    }
+
+    pub(crate) async fn open_session(&self, domain: &str) -> io::Result<TestSession> {
+        open_raw_session(&self.grpc_uri(), domain).await
     }
 
     /// Posts `payload` to an HTTP endpoint the process serves for virtual host `host`, returning
@@ -672,8 +679,28 @@ impl ServerProcess {
         }
     }
 
-    fn grpc_uri(&self) -> String {
+    pub(crate) fn grpc_uri(&self) -> String {
         format!("http://{}", loopback(self.configuration.ports.grpc))
+    }
+
+    pub(crate) fn observability_uri(&self, path: &str) -> String {
+        format!(
+            "http://{}{path}",
+            loopback(self.configuration.ports.observability)
+        )
+    }
+
+    pub(crate) fn web_console_websocket_uri(&self) -> String {
+        format!(
+            "ws://{}/console/ws",
+            loopback(self.configuration.ports.web_console)
+        )
+    }
+
+    pub(crate) fn process_id(&self) -> io::Result<u32> {
+        self.child
+            .id()
+            .ok_or_else(|| io::Error::other("nervix-server process has already been reaped"))
     }
 }
 
