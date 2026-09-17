@@ -1991,7 +1991,7 @@ mod shuttle_lifecycle_tests {
     use super::*;
     use crate::{
         runtime::{domain, paced_domain_state, test_domain_clock_authority},
-        shuttle_test::check_random_and_pct,
+        shuttle_test::{check_pct, check_random},
     };
 
     // Shuttle does not model time, so every mapping in these models anchors its physical start at
@@ -2010,12 +2010,22 @@ mod shuttle_lifecycle_tests {
     /// A logical deadline whose physical wait from the origin is beyond Shuttle's sleep horizon.
     const BEYOND_SLEEP_HORIZON: &str = "2040-01-01T00:00:00Z";
 
+    const RANDOM_ITERATIONS: usize = 200;
+    const PCT_ITERATIONS: usize = 200;
+    const PCT_DEPTH: usize = 3;
+
     /// The operations each concurrent reader performs, so that some can finish on either side of a
     /// concurrent publication.
     const READER_OPERATIONS: usize = 3;
 
     /// Why a join never returns a panic: the panic ends the schedule before the join resumes.
     const PANICS_END_THE_SCHEDULE: &str = "Shuttle ends the schedule when a model task panics";
+
+    /// Explores `model` under the random scheduler and then under the PCT scheduler.
+    fn check_random_and_pct(model: fn()) {
+        check_random(model, RANDOM_ITERATIONS);
+        check_pct(model, PCT_ITERATIONS, PCT_DEPTH);
+    }
 
     fn model_time(rfc3339: &str) -> Timestamp {
         rfc3339
