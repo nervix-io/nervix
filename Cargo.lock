@@ -6613,6 +6613,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-client-wire"
+version = "0.1.0-dev"
+dependencies = [
+ "bytes",
+ "error-stack",
+ "flatbuffers",
+ "flatc-rust",
+ "futures-util",
+ "meticulous",
+ "nervix-models",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite 0.24.0",
+ "tonic 0.13.1",
+ "url",
+]
+
+[[package]]
 name = "nervix-connector"
 version = "0.1.0-dev"
 

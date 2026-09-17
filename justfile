@@ -162,6 +162,10 @@ test-interconnect *args:
 test-connectors *args:
     cargo test --package 'nervix-connector*' --lib -- {{ args }}
 
+# Run the session wire codec tests and the gRPC and WebSocket sessions that carry its frames.
+test-client-wire *args:
+    cargo test --package nervix-client-wire --all-features --all-targets -- {{ args }}
+
 test-runtime-state-capabilities: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
@@ -355,8 +359,12 @@ cargo-clippy-nspl-format:
 cargo-clippy-web-console:
     CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-web-console" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-web-console -q
 
+# The browser console decodes session frames, so the wire crate must build for the browser target.
+cargo-clippy-client-wire-wasm:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-client-wire-wasm" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-client-wire --target wasm32-unknown-unknown -q
+
 [parallel]
-cargo-clippy: cargo-clippy-all cargo-clippy-client cargo-clippy-server cargo-clippy-nspl-format cargo-clippy-web-console
+cargo-clippy: cargo-clippy-all cargo-clippy-client cargo-clippy-server cargo-clippy-nspl-format cargo-clippy-web-console cargo-clippy-client-wire-wasm
 
 [parallel]
 lint-inner: cargo-clippy proto-lint

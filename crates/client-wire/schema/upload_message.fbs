@@ -1,0 +1,11 @@
+// An upload stream frame: the upload start or one chunk of archive bytes.
+//
+// This file declares a frame root for code generators; every shape it names lives in session.fbs.
+
+include "session.fbs";
+
+namespace nervix.session;
+
+root_type UploadMessage;
+file_identifier "NXUM";
+file_extension "nxum";
