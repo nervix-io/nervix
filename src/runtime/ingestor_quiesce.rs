@@ -1452,76 +1452,6 @@ mod tests {
     }
 
     #[test]
-    fn an_open_control_answers_intake_without_waiting_on_retained_payloads() {
-        #[derive(Debug, PartialEq, Eq)]
-        struct IntakeAnswers {
-            suspends_intake: bool,
-            skips_poll: bool,
-            endpoint_admission: Result<(), Option<Duration>>,
-            dispatches: bool,
-            replays: bool,
-        }
-
-        let runtime = Runtime::default();
-        let domain = domain("default");
-        let ingestor = named("source");
-        let control = test_ingestor_quiesce_control(
-            &runtime,
-            &domain,
-            &ingestor,
-            IngestQuiesceMode::Buffer {
-                max_size: "1MiB".to_string(),
-                overflow: IngestQuiesceOverflow::DropOldest,
-            },
-        );
-        // Retention and replay own this lock, so holding it shows that an ingestor which is neither
-        // quiesced nor retaining payloads never reaches it from a message, a poll or a loop turn.
-        let retention = control.buffers.lock();
-        let reader_control = control.clone();
-        let reader = std::thread::spawn(move || IntakeAnswers {
-            suspends_intake: reader_control.should_suspend_intake(),
-            skips_poll: reader_control.should_skip_poll(),
-            endpoint_admission: reader_control.endpoint_admission(),
-            dispatches: matches!(
-                reader_control.intake(
-                    0,
-                    BufferedIngestPayload::new(
-                        b"live",
-                        BufferedIngestMetadata::without_headers(),
-                        Timestamp::from_unix_nanos(1),
-                    ),
-                    false,
-                ),
-                IngestorQuiesceIntake::Dispatch(_)
-            ),
-            replays: reader_control.pop_buffered(0).is_some(),
-        });
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while !reader.is_finished() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "an open control waited on its retained payloads while answering intake"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        drop(retention);
-        let answers = reader
-            .join()
-            .assured("an open control answers every intake check without panicking");
-
-        assert_eq!(
-            answers,
-            IntakeAnswers {
-                suspends_intake: false,
-                skips_poll: false,
-                endpoint_admission: Ok(()),
-                dispatches: true,
-                replays: false,
-            }
-        );
-    }
-
-    #[test]
     fn reject_quiesce_hints_its_retry_delay_through_a_pause_and_memory_pressure() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -1687,5 +1617,115 @@ mod tests {
                 .expect("resume should succeed")
         );
         assert!(!runtime.ingestors_paused_for_memory_pressure());
+    }
+
+    #[cfg(feature = "shuttle")]
+    mod shuttle_checks {
+        use shuttle::{sync::mpsc, thread};
+
+        use super::*;
+        use crate::shuttle_test::check_interleavings;
+
+        /// What a control answers to each intake check an ingestor makes.
+        #[derive(Debug, PartialEq, Eq)]
+        struct IntakeAnswers {
+            suspends_intake: bool,
+            skips_poll: bool,
+            endpoint_admission: Result<(), Option<Duration>>,
+            dispatches: bool,
+            replays: bool,
+        }
+
+        impl IntakeAnswers {
+            /// Ask `control` every intake check a message, a poll and a loop turn make.
+            fn of(control: &IngestorQuiesceControl) -> Self {
+                let suspends_intake = control.should_suspend_intake();
+                let skips_poll = control.should_skip_poll();
+                let endpoint_admission = control.endpoint_admission();
+                let intake = control.intake(
+                    0,
+                    BufferedIngestPayload::new(
+                        b"live",
+                        BufferedIngestMetadata::without_headers(),
+                        Timestamp::from_unix_nanos(1),
+                    ),
+                    false,
+                );
+                let replays = control.pop_buffered(0).is_some();
+                Self {
+                    suspends_intake,
+                    skips_poll,
+                    endpoint_admission,
+                    dispatches: matches!(intake, IngestorQuiesceIntake::Dispatch(_)),
+                    replays,
+                }
+            }
+        }
+
+        /// An open buffering control answers every intake check while another thread holds the lock
+        /// that owns retained payloads, which that thread releases only after every check answered.
+        fn open_control_intake_under_held_retention() {
+            // A whole runtime is far heavier than one execution of this model needs, so the control
+            // takes the metrics it records into directly.
+            let metrics = RuntimeMetrics::default();
+            let metric_labels =
+                metrics.register_ingestor_quiesce(&domain("default"), &named("source"), None);
+            let control = Arc::new(IngestorQuiesceControl::new(
+                IngestQuiesceMode::Buffer {
+                    max_size: "1MiB".to_string(),
+                    overflow: IngestQuiesceOverflow::DropOldest,
+                },
+                metrics,
+                metric_labels,
+            ));
+            let (held_tx, held_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            let retention = thread::spawn({
+                let control = control.clone();
+                move || {
+                    let retained = control.buffers.lock();
+                    held_tx
+                        .send(())
+                        .assured("the model keeps the receiver until retention is held");
+                    release_rx.recv().assured(
+                        "the model releases retention once every intake check has answered",
+                    );
+                    drop(retained);
+                }
+            });
+            held_rx
+                .recv()
+                .assured("the retention thread reports once it holds the lock");
+
+            // Retention and replay own this lock, and it stays held until every check has
+            // answered, so a check that reached it from a message, a poll or a loop turn would
+            // leave every thread blocked, which Shuttle reports as a deadlock.
+            let answers = IntakeAnswers::of(&control);
+            release_tx
+                .send(())
+                .assured("the retention thread waits for its release");
+            retention.join().assured(
+                "Shuttle fails the whole execution when a model thread panics, so no join \
+                 observes one",
+            );
+
+            assert_eq!(
+                answers,
+                IntakeAnswers {
+                    suspends_intake: false,
+                    skips_poll: false,
+                    endpoint_admission: Ok(()),
+                    dispatches: true,
+                    replays: false,
+                }
+            );
+        }
+
+        /// An ingestor that is neither quiesced nor retaining payloads answers every message, poll
+        /// and loop turn without the lock that owns retained payloads.
+        #[test]
+        fn shuttle_an_open_control_answers_intake_without_waiting_on_retained_payloads() {
+            check_interleavings(open_control_intake_under_held_retention);
+        }
     }
 }
