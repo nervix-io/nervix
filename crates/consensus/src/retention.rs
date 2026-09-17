@@ -50,14 +50,42 @@ impl Default for RaftRetentionPolicy {
     }
 }
 
+/// Whether a byte-threshold snapshot build has been asked for, and what the node had completed
+/// when it was.
+///
+/// A node has no completed snapshot until its first build finishes, so the completed snapshot it
+/// was asked for is itself optional. Keeping that absence distinct from an index means the request
+/// issued before any snapshot completed never counts as the request for the snapshot at index
+/// zero, which would leave the byte threshold unable to ask again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotTrigger {
+    /// No build has been asked for since the completed snapshot last changed.
+    NotRequested,
+    /// A build was asked for while `completed` was this node's completed snapshot.
+    Requested { completed: Option<u64> },
+}
+
+impl SnapshotTrigger {
+    /// Whether a build has already been asked for while `completed` was the completed snapshot,
+    /// which is what keeps a build in progress from being asked for again on every pass.
+    fn already_requested_for(self, completed: Option<u64>) -> bool {
+        match self {
+            Self::NotRequested => false,
+            Self::Requested {
+                completed: requested,
+            } => requested == completed,
+        }
+    }
+}
+
 /// Keeps one node's snapshot cadence and log retention inside the configured policy.
 pub(crate) struct RetentionTask {
     raft: NervixRaft,
     store: FjallStore,
     policy: RaftRetentionPolicy,
-    /// The snapshot index the last byte-threshold trigger was issued for, so a build in progress
-    /// is not asked for again on every pass.
-    requested_for: Option<u64>,
+    /// The byte-threshold trigger this node has issued, so a build in progress is not asked for
+    /// again on every pass.
+    trigger: SnapshotTrigger,
 }
 
 impl RetentionTask {
@@ -66,7 +94,7 @@ impl RetentionTask {
             raft,
             store,
             policy,
-            requested_for: None,
+            trigger: SnapshotTrigger::NotRequested,
         }
     }
 
@@ -99,8 +127,7 @@ impl RetentionTask {
     /// The entry-count threshold is OpenRaft's own snapshot policy; this only adds the byte bound,
     /// and never asks twice for the same completed snapshot, so at most one build is active.
     async fn request_snapshot_when_bytes_exceed_threshold(&mut self, snapshot_index: Option<u64>) {
-        let completed = snapshot_index.unwrap_or_default();
-        if self.requested_for == Some(completed) {
+        if self.trigger.already_requested_for(snapshot_index) {
             return;
         }
         if self.store.log_bytes_since_snapshot() < self.policy.snapshot_byte_threshold {
@@ -113,7 +140,9 @@ impl RetentionTask {
             bytes = self.store.log_bytes_since_snapshot(),
             "raft snapshot requested by the retained byte threshold"
         );
-        self.requested_for = Some(completed);
+        self.trigger = SnapshotTrigger::Requested {
+            completed: snapshot_index,
+        };
     }
 
     /// Purge the part of the covered log that exceeds the retained byte bound.
@@ -149,5 +178,36 @@ impl RetentionTask {
             purge_upto,
             "raft log purge requested by the retention bound"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SnapshotTrigger;
+
+    #[test]
+    fn a_node_that_has_asked_for_nothing_has_asked_for_no_completed_snapshot() {
+        let trigger = SnapshotTrigger::NotRequested;
+
+        assert!(!trigger.already_requested_for(None));
+        assert!(!trigger.already_requested_for(Some(0)));
+        assert!(!trigger.already_requested_for(Some(7)));
+    }
+
+    #[test]
+    fn the_request_made_before_any_snapshot_completed_is_not_the_request_for_index_zero() {
+        let trigger = SnapshotTrigger::Requested { completed: None };
+
+        assert!(trigger.already_requested_for(None));
+        assert!(!trigger.already_requested_for(Some(0)));
+    }
+
+    #[test]
+    fn a_request_for_the_snapshot_at_index_zero_covers_only_that_snapshot() {
+        let trigger = SnapshotTrigger::Requested { completed: Some(0) };
+
+        assert!(trigger.already_requested_for(Some(0)));
+        assert!(!trigger.already_requested_for(None));
+        assert!(!trigger.already_requested_for(Some(1)));
     }
 }
