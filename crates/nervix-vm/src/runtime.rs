@@ -65,11 +65,12 @@ use crate::{
         RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace, RegisterType, ScalarValue,
     },
     numeric::{
-        self, Arithmetic, BinaryMathFunction, CheckedFloat, CheckedInteger, Comparison, F64Operand,
-        MathFunction, Rounding, SignedInteger,
+        self, Arithmetic, BinaryMathFunction, CheckedFloat, CheckedInteger, Comparison,
+        DecimalRounding, F64Operand, IntegerRounding, MathFunction, Rounding, RoundingDigits,
+        Shift, ShiftCounts, ShiftedInteger, SignedInteger,
     },
     program::{BinaryOp, FunctionName, Span, UnaryOp},
-    semantics::{BuiltinLowering, CaseMapping},
+    semantics::{BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass},
 };
 
 pub const SPAWN_BLOCKING_ROW_THRESHOLD: usize = 1_024;
@@ -1386,7 +1387,11 @@ fn execute_builtin(
             as_utf8(&values[0])?,
             &values[1],
         )?)),
-        BuiltinLowering::Round => execute_rounding(&values[0], Rounding::Round, row_errors, span),
+        BuiltinLowering::Round => match values.as_slice() {
+            [value, digits] => execute_round_to_digits(value, digits, row_errors, span)
+                .ok_or_else(|| unsupported_builtin_inputs(lowering, &values)),
+            _ => execute_rounding(&values[0], Rounding::Round, row_errors, span),
+        },
         BuiltinLowering::Rpad => Ok(TypedArray::Utf8(execute_rpad(
             as_utf8(&values[0])?,
             &values[1],
@@ -1414,6 +1419,63 @@ fn execute_builtin(
             as_utf8(&values[1])?,
             as_utf8(&values[2])?,
         ))),
+        BuiltinLowering::Sin => execute_math(&values[0], MathFunction::Sin, row_errors, span),
+        BuiltinLowering::Atan2 => execute_binary_math(
+            &values[0],
+            &values[1],
+            BinaryMathFunction::Atan2,
+            row_errors,
+            span,
+        ),
+        BuiltinLowering::Log2 => execute_math(&values[0], MathFunction::Log2, row_errors, span),
+        BuiltinLowering::Radians => {
+            execute_math(&values[0], MathFunction::Radians, row_errors, span)
+        }
+        BuiltinLowering::Degrees => {
+            execute_math(&values[0], MathFunction::Degrees, row_errors, span)
+        }
+        BuiltinLowering::Sign => execute_sign(&values[0], row_errors, span)
+            .ok_or_else(|| unsupported_builtin_inputs(lowering, &values)),
+        BuiltinLowering::Trunc => execute_rounding(&values[0], Rounding::Trunc, row_errors, span),
+        BuiltinLowering::IsNan => execute_float_classification(&values[0], FloatClass::Nan)
+            .ok_or_else(|| unsupported_builtin_inputs(lowering, &values)),
+        BuiltinLowering::IsFinite => execute_float_classification(&values[0], FloatClass::Finite)
+            .ok_or_else(|| unsupported_builtin_inputs(lowering, &values)),
+        BuiltinLowering::IsInfinite => {
+            execute_float_classification(&values[0], FloatClass::Infinite)
+                .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
+        }
+        BuiltinLowering::BitwiseAnd => {
+            execute_bitwise(&values[0], &values[1], BitwiseOperation::And)
+                .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
+        }
+        BuiltinLowering::BitwiseOr => execute_bitwise(&values[0], &values[1], BitwiseOperation::Or)
+            .ok_or_else(|| unsupported_builtin_inputs(lowering, &values)),
+        BuiltinLowering::BitwiseXor => {
+            execute_bitwise(&values[0], &values[1], BitwiseOperation::Xor)
+                .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
+        }
+        BuiltinLowering::BitwiseNot => execute_bitwise_not(&values[0])
+            .ok_or_else(|| unsupported_builtin_inputs(lowering, &values)),
+        BuiltinLowering::BitCount => execute_bit_count(&values[0])
+            .ok_or_else(|| unsupported_builtin_inputs(lowering, &values)),
+        BuiltinLowering::ShiftLeft => {
+            execute_shift(&values[0], &values[1], Shift::Left, row_errors, span)
+                .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
+        }
+        BuiltinLowering::ShiftRight => {
+            execute_shift(&values[0], &values[1], Shift::Right, row_errors, span)
+                .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
+        }
+    }
+}
+
+/// The error for a builtin whose input columns have types its signature rejects. Compilation
+/// checks every call against its signature, so this reports a program and a batch that disagree.
+fn unsupported_builtin_inputs(lowering: BuiltinLowering, inputs: &[TypedArray]) -> RuntimeError {
+    let input_types = inputs.iter().map(TypedArray::data_type).collect::<Vec<_>>();
+    RuntimeError::InvalidBatch {
+        message: format!("builtin {lowering:?} does not accept inputs of types {input_types:?}"),
     }
 }
 
@@ -2139,6 +2201,296 @@ where
 {
     let checked = rounding.evaluate_floats(input);
     row_errors.push_failures(checked.failed.lanes(), span, |_| rounding.float_failure());
+    checked.column
+}
+
+/// `round(value, digits)`, or `None` when the value is not numeric or the digits not integral.
+fn execute_round_to_digits(
+    value: &TypedArray,
+    digits: &TypedArray,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> Option<TypedArray> {
+    let digits = RoundingDigits::from_typed(digits)?;
+    let rounded = match value {
+        TypedArray::UInt8(array) => TypedArray::UInt8(execute_integer_round_to_digits(
+            array, &digits, row_errors, span,
+        )),
+        TypedArray::Int8(array) => TypedArray::Int8(execute_integer_round_to_digits(
+            array, &digits, row_errors, span,
+        )),
+        TypedArray::UInt16(array) => TypedArray::UInt16(execute_integer_round_to_digits(
+            array, &digits, row_errors, span,
+        )),
+        TypedArray::Int16(array) => TypedArray::Int16(execute_integer_round_to_digits(
+            array, &digits, row_errors, span,
+        )),
+        TypedArray::UInt32(array) => TypedArray::UInt32(execute_integer_round_to_digits(
+            array, &digits, row_errors, span,
+        )),
+        TypedArray::Int32(array) => TypedArray::Int32(execute_integer_round_to_digits(
+            array, &digits, row_errors, span,
+        )),
+        TypedArray::UInt64(array) => TypedArray::UInt64(execute_integer_round_to_digits(
+            array, &digits, row_errors, span,
+        )),
+        TypedArray::Int64(array) => TypedArray::Int64(execute_integer_round_to_digits(
+            array, &digits, row_errors, span,
+        )),
+        TypedArray::Float32(array) => TypedArray::Float32(execute_float_round_to_digits(
+            array, &digits, row_errors, span,
+        )),
+        TypedArray::Float64(array) => TypedArray::Float64(execute_float_round_to_digits(
+            array, &digits, row_errors, span,
+        )),
+        TypedArray::Boolean(_)
+        | TypedArray::Utf8(_)
+        | TypedArray::Datetime(_)
+        | TypedArray::Generic(_)
+        | TypedArray::Uninitialized { .. } => return None,
+    };
+    Some(rounded)
+}
+
+fn execute_integer_round_to_digits<T>(
+    values: &PrimitiveArray<T>,
+    digits: &RoundingDigits,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> PrimitiveArray<T>
+where
+    T: ArrowPrimitiveType,
+    T::Native: IntegerRounding,
+{
+    let checked = digits.round_integers(values);
+    row_errors.push_failures(checked.failed.lanes(), span, |_| {
+        SideErrorReason::IntegerOverflow(IntegerOperation::Rounding)
+    });
+    checked.column
+}
+
+fn execute_float_round_to_digits<T>(
+    values: &PrimitiveArray<T>,
+    digits: &RoundingDigits,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> PrimitiveArray<T>
+where
+    T: ArrowPrimitiveType,
+    T::Native: DecimalRounding,
+{
+    let checked = digits.round_floats(values);
+    row_errors.push_failures(checked.failed.lanes(), span, |_| {
+        Rounding::Round.float_failure()
+    });
+    checked.column
+}
+
+/// `sign(value)`, or `None` when the value is not numeric.
+fn execute_sign(input: &TypedArray, row_errors: &mut RowErrors, span: Span) -> Option<TypedArray> {
+    let signs = match input {
+        TypedArray::UInt8(array) => TypedArray::UInt8(numeric::integer_sign(array)),
+        TypedArray::Int8(array) => TypedArray::Int8(numeric::integer_sign(array)),
+        TypedArray::UInt16(array) => TypedArray::UInt16(numeric::integer_sign(array)),
+        TypedArray::Int16(array) => TypedArray::Int16(numeric::integer_sign(array)),
+        TypedArray::UInt32(array) => TypedArray::UInt32(numeric::integer_sign(array)),
+        TypedArray::Int32(array) => TypedArray::Int32(numeric::integer_sign(array)),
+        TypedArray::UInt64(array) => TypedArray::UInt64(numeric::integer_sign(array)),
+        TypedArray::Int64(array) => TypedArray::Int64(numeric::integer_sign(array)),
+        TypedArray::Float32(array) => {
+            TypedArray::Float32(execute_float_sign(array, row_errors, span))
+        }
+        TypedArray::Float64(array) => {
+            TypedArray::Float64(execute_float_sign(array, row_errors, span))
+        }
+        TypedArray::Boolean(_)
+        | TypedArray::Utf8(_)
+        | TypedArray::Datetime(_)
+        | TypedArray::Generic(_)
+        | TypedArray::Uninitialized { .. } => return None,
+    };
+    Some(signs)
+}
+
+fn execute_float_sign<T>(
+    input: &PrimitiveArray<T>,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> PrimitiveArray<T>
+where
+    T: ArrowPrimitiveType,
+    T::Native: CheckedFloat,
+{
+    let checked = numeric::float_sign(input);
+    row_errors.push_failures(checked.failed.lanes(), span, |_| {
+        SideErrorReason::NonFiniteResult(FloatOperation::Sign)
+    });
+    checked.column
+}
+
+/// `is_nan`, `is_finite` or `is_infinite`, or `None` when the value is not a float.
+fn execute_float_classification(input: &TypedArray, class: FloatClass) -> Option<TypedArray> {
+    let classified = match input {
+        TypedArray::Float32(array) => class.evaluate(array),
+        TypedArray::Float64(array) => class.evaluate(array),
+        TypedArray::UInt8(_)
+        | TypedArray::Int8(_)
+        | TypedArray::UInt16(_)
+        | TypedArray::Int16(_)
+        | TypedArray::UInt32(_)
+        | TypedArray::Int32(_)
+        | TypedArray::UInt64(_)
+        | TypedArray::Int64(_)
+        | TypedArray::Boolean(_)
+        | TypedArray::Utf8(_)
+        | TypedArray::Datetime(_)
+        | TypedArray::Generic(_)
+        | TypedArray::Uninitialized { .. } => return None,
+    };
+    Some(TypedArray::Boolean(classified))
+}
+
+/// `bitwise_and`, `bitwise_or` or `bitwise_xor`, or `None` unless both operands are integers of
+/// one type.
+fn execute_bitwise(
+    left: &TypedArray,
+    right: &TypedArray,
+    operation: BitwiseOperation,
+) -> Option<TypedArray> {
+    let combined = match (left, right) {
+        (TypedArray::UInt8(left), TypedArray::UInt8(right)) => {
+            TypedArray::UInt8(operation.evaluate(left, right))
+        }
+        (TypedArray::Int8(left), TypedArray::Int8(right)) => {
+            TypedArray::Int8(operation.evaluate(left, right))
+        }
+        (TypedArray::UInt16(left), TypedArray::UInt16(right)) => {
+            TypedArray::UInt16(operation.evaluate(left, right))
+        }
+        (TypedArray::Int16(left), TypedArray::Int16(right)) => {
+            TypedArray::Int16(operation.evaluate(left, right))
+        }
+        (TypedArray::UInt32(left), TypedArray::UInt32(right)) => {
+            TypedArray::UInt32(operation.evaluate(left, right))
+        }
+        (TypedArray::Int32(left), TypedArray::Int32(right)) => {
+            TypedArray::Int32(operation.evaluate(left, right))
+        }
+        (TypedArray::UInt64(left), TypedArray::UInt64(right)) => {
+            TypedArray::UInt64(operation.evaluate(left, right))
+        }
+        (TypedArray::Int64(left), TypedArray::Int64(right)) => {
+            TypedArray::Int64(operation.evaluate(left, right))
+        }
+        _ => return None,
+    };
+    Some(combined)
+}
+
+/// `bitwise_not`, or `None` when the value is not an integer.
+fn execute_bitwise_not(input: &TypedArray) -> Option<TypedArray> {
+    let complement = match input {
+        TypedArray::UInt8(array) => TypedArray::UInt8(numeric::bitwise_complement(array)),
+        TypedArray::Int8(array) => TypedArray::Int8(numeric::bitwise_complement(array)),
+        TypedArray::UInt16(array) => TypedArray::UInt16(numeric::bitwise_complement(array)),
+        TypedArray::Int16(array) => TypedArray::Int16(numeric::bitwise_complement(array)),
+        TypedArray::UInt32(array) => TypedArray::UInt32(numeric::bitwise_complement(array)),
+        TypedArray::Int32(array) => TypedArray::Int32(numeric::bitwise_complement(array)),
+        TypedArray::UInt64(array) => TypedArray::UInt64(numeric::bitwise_complement(array)),
+        TypedArray::Int64(array) => TypedArray::Int64(numeric::bitwise_complement(array)),
+        TypedArray::Float32(_)
+        | TypedArray::Float64(_)
+        | TypedArray::Boolean(_)
+        | TypedArray::Utf8(_)
+        | TypedArray::Datetime(_)
+        | TypedArray::Generic(_)
+        | TypedArray::Uninitialized { .. } => return None,
+    };
+    Some(complement)
+}
+
+/// `bit_count`, or `None` when the value is not an integer.
+fn execute_bit_count(input: &TypedArray) -> Option<TypedArray> {
+    let counts = match input {
+        TypedArray::UInt8(array) => numeric::bit_count(array),
+        TypedArray::Int8(array) => numeric::bit_count(array),
+        TypedArray::UInt16(array) => numeric::bit_count(array),
+        TypedArray::Int16(array) => numeric::bit_count(array),
+        TypedArray::UInt32(array) => numeric::bit_count(array),
+        TypedArray::Int32(array) => numeric::bit_count(array),
+        TypedArray::UInt64(array) => numeric::bit_count(array),
+        TypedArray::Int64(array) => numeric::bit_count(array),
+        TypedArray::Float32(_)
+        | TypedArray::Float64(_)
+        | TypedArray::Boolean(_)
+        | TypedArray::Utf8(_)
+        | TypedArray::Datetime(_)
+        | TypedArray::Generic(_)
+        | TypedArray::Uninitialized { .. } => return None,
+    };
+    Some(TypedArray::Int64(counts))
+}
+
+/// `shift_left` or `shift_right`, or `None` when the value or the count is not an integer.
+fn execute_shift(
+    values: &TypedArray,
+    counts: &TypedArray,
+    shift: Shift,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> Option<TypedArray> {
+    let counts = ShiftCounts::from_typed(counts)?;
+    let shifted = match values {
+        TypedArray::UInt8(array) => TypedArray::UInt8(execute_integer_shift(
+            array, &counts, shift, row_errors, span,
+        )),
+        TypedArray::Int8(array) => TypedArray::Int8(execute_integer_shift(
+            array, &counts, shift, row_errors, span,
+        )),
+        TypedArray::UInt16(array) => TypedArray::UInt16(execute_integer_shift(
+            array, &counts, shift, row_errors, span,
+        )),
+        TypedArray::Int16(array) => TypedArray::Int16(execute_integer_shift(
+            array, &counts, shift, row_errors, span,
+        )),
+        TypedArray::UInt32(array) => TypedArray::UInt32(execute_integer_shift(
+            array, &counts, shift, row_errors, span,
+        )),
+        TypedArray::Int32(array) => TypedArray::Int32(execute_integer_shift(
+            array, &counts, shift, row_errors, span,
+        )),
+        TypedArray::UInt64(array) => TypedArray::UInt64(execute_integer_shift(
+            array, &counts, shift, row_errors, span,
+        )),
+        TypedArray::Int64(array) => TypedArray::Int64(execute_integer_shift(
+            array, &counts, shift, row_errors, span,
+        )),
+        TypedArray::Float32(_)
+        | TypedArray::Float64(_)
+        | TypedArray::Boolean(_)
+        | TypedArray::Utf8(_)
+        | TypedArray::Datetime(_)
+        | TypedArray::Generic(_)
+        | TypedArray::Uninitialized { .. } => return None,
+    };
+    Some(shifted)
+}
+
+fn execute_integer_shift<T>(
+    values: &PrimitiveArray<T>,
+    counts: &ShiftCounts,
+    shift: Shift,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> PrimitiveArray<T>
+where
+    T: ArrowPrimitiveType,
+    T::Native: ShiftedInteger,
+{
+    let checked = shift.evaluate(values, counts);
+    row_errors.push_failures(checked.failed.lanes(), span, |row| {
+        shift.failure(counts, row)
+    });
     checked.column
 }
 
