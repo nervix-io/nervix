@@ -1,3 +1,14 @@
+//! The semantic catalog of every expression operator, cast and builtin.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Each operation's accepted argument types, result type, volatility, dependency scope,
+//!   null propagation and whether it can report a per-row error, and the value contracts, such as
+//!   case mapping, that compile-time folding and columnar execution both apply.
+//! - **Depends on.** The VM program model and Arrow data types.
+//! - **Must not know.** How execution walks Arrow buffers, registers or batches, and anything about
+//!   relays, branches, connectors or the registry.
+
 use arrow_schema::{DataType, TimeUnit};
 
 use crate::{
@@ -124,6 +135,26 @@ impl ExpressionSemantics {
         self.supports_common_subexpression_elimination()
             && self.dependency_scope == DependencyScope::Constant
             && !self.can_error
+    }
+}
+
+/// The case mapping `lower` and `upper` apply: Unicode's full case mapping, which never depends on
+/// a locale. Folding a call over a literal and executing it over a column both apply this one
+/// mapping, so a literal and a column holding the same text always convert to the same value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseMapping {
+    Lower,
+    Upper,
+}
+
+impl CaseMapping {
+    /// Maps one whole value. The mapping has to see the whole value because lowercasing a sigma
+    /// depends on the characters around it, so a character-by-character mapping would differ.
+    pub fn apply(self, text: &str) -> String {
+        match self {
+            Self::Lower => text.to_lowercase(),
+            Self::Upper => text.to_uppercase(),
+        }
     }
 }
 
@@ -471,10 +502,6 @@ pub const fn builtin_semantics_for_lowering(lowering: BuiltinLowering) -> Operat
         | BuiltinLowering::Contains
         | BuiltinLowering::StartsWith
         | BuiltinLowering::EndsWith
-        | BuiltinLowering::Ceil
-        | BuiltinLowering::Cos
-        | BuiltinLowering::Exp
-        | BuiltinLowering::Floor
         | BuiltinLowering::Initcap
         | BuiltinLowering::Left
         | BuiltinLowering::Lpad
@@ -483,14 +510,16 @@ pub const fn builtin_semantics_for_lowering(lowering: BuiltinLowering) -> Operat
         | BuiltinLowering::Replace
         | BuiltinLowering::Reverse
         | BuiltinLowering::Right
-        | BuiltinLowering::Round
         | BuiltinLowering::Rpad
         | BuiltinLowering::SplitPart
         | BuiltinLowering::Strpos
         | BuiltinLowering::Substr
-        | BuiltinLowering::Tan
         | BuiltinLowering::ToHex
-        | BuiltinLowering::Translate => OperationSemantics {
+        | BuiltinLowering::Translate
+        | BuiltinLowering::Count
+        | BuiltinLowering::First
+        | BuiltinLowering::Last
+        | BuiltinLowering::Nth => OperationSemantics {
             volatility: Volatility::Immutable,
             dependency_scope: DependencyScope::Constant,
             has_side_effects: false,
@@ -506,17 +535,6 @@ pub const fn builtin_semantics_for_lowering(lowering: BuiltinLowering) -> Operat
                 null_propagation: NullPropagation::Custom,
             }
         }
-        BuiltinLowering::Sum
-        | BuiltinLowering::Last
-        | BuiltinLowering::First
-        | BuiltinLowering::Count
-        | BuiltinLowering::Nth => OperationSemantics {
-            volatility: Volatility::Immutable,
-            dependency_scope: DependencyScope::Constant,
-            has_side_effects: false,
-            can_error: true,
-            null_propagation: NullPropagation::Strict,
-        },
         BuiltinLowering::IsNull => OperationSemantics {
             volatility: Volatility::Immutable,
             dependency_scope: DependencyScope::Constant,
@@ -528,13 +546,20 @@ pub const fn builtin_semantics_for_lowering(lowering: BuiltinLowering) -> Operat
         | BuiltinLowering::Acos
         | BuiltinLowering::Asin
         | BuiltinLowering::Atan
+        | BuiltinLowering::Ceil
+        | BuiltinLowering::Cos
+        | BuiltinLowering::Exp
+        | BuiltinLowering::Floor
         | BuiltinLowering::Ln
         | BuiltinLowering::Log
         | BuiltinLowering::Pow
         | BuiltinLowering::RegexpLike
         | BuiltinLowering::RegexpReplace
         | BuiltinLowering::RegexpSubstr
-        | BuiltinLowering::Sqrt => OperationSemantics {
+        | BuiltinLowering::Round
+        | BuiltinLowering::Sqrt
+        | BuiltinLowering::Sum
+        | BuiltinLowering::Tan => OperationSemantics {
             volatility: Volatility::Immutable,
             dependency_scope: DependencyScope::Constant,
             has_side_effects: false,
@@ -697,17 +722,18 @@ fn builtin_output_type(
         }
         BuiltinLowering::First | BuiltinLowering::Last => {
             require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
-            list_element_type(function, &arg_types[0], span)
+            list_element_type(function, &arg_types[0], ListElements::Scalar, span)
         }
         BuiltinLowering::Nth => {
             require_builtin_arity_exact(function, arg_types, 2, span.clone())?;
             let index = require_supported_register_type(function, &arg_types[1], span.clone())?;
             require_integral_arg(function, index, span.clone())?;
-            list_element_type(function, &arg_types[0], span)
+            list_element_type(function, &arg_types[0], ListElements::Scalar, span)
         }
         BuiltinLowering::Sum => {
             require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
-            let element = list_element_type(function, &arg_types[0], span.clone())?;
+            let element =
+                list_element_type(function, &arg_types[0], ListElements::Any, span.clone())?;
             let input = require_supported_register_type(function, &element, span.clone())?;
             require_numeric_arg(function, input, span)?;
             Ok(element)
@@ -950,9 +976,21 @@ fn require_supported_register_type(
     })
 }
 
+/// Which elements an `ARRAY` or `VEC` function accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListElements {
+    /// Every supported element, including a nested `ARRAY` or `VEC` value.
+    Any,
+    /// Scalar and datetime elements only. `first`, `last` and `nth` select one element out of the
+    /// list's value column, which execution supports only for these elements, so a nested element
+    /// is rejected when the statement is applied instead of failing every batch it meets.
+    Scalar,
+}
+
 fn list_element_type(
     function: &FunctionName,
     data_type: &DataType,
+    elements: ListElements,
     span: std::ops::Range<usize>,
 ) -> Result<DataType, CompileError> {
     let element = match data_type {
@@ -969,7 +1007,20 @@ fn list_element_type(
             });
         }
     };
-    require_supported_register_type(function, &element, span)?;
+    let element_register = require_supported_register_type(function, &element, span.clone())?;
+    if let ListElements::Scalar = elements
+        && let RegisterType::Generic = element_register
+    {
+        return Err(CompileError {
+            code: "unsupported_function",
+            message: format!(
+                "function '{}' requires ARRAY or VEC elements of a scalar type, found {:?}",
+                function.as_str(),
+                element
+            ),
+            span: span.into(),
+        });
+    }
     Ok(element)
 }
 
@@ -978,7 +1029,7 @@ fn require_list_arg(
     data_type: &DataType,
     span: std::ops::Range<usize>,
 ) -> Result<(), CompileError> {
-    list_element_type(function, data_type, span).map(|_| ())
+    list_element_type(function, data_type, ListElements::Any, span).map(|_| ())
 }
 
 fn require_utf8_arg(
