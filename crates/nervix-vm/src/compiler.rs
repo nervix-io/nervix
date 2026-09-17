@@ -21,9 +21,9 @@ use crate::{
         Literal, Program, Span, SpannedExpr, SpannedNode, UnaryOp, WindowAggregateFunction,
     },
     semantics::{
-        BuiltinLowering, CaseMapping, binary_descriptor, binary_output_type, builtin_descriptor,
-        builtin_semantics_for_lowering, builtin_signature, cast_descriptor, expr_semantics,
-        unary_descriptor,
+        BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass, IntegerBits as _,
+        binary_descriptor, binary_output_type, builtin_descriptor, builtin_semantics_for_lowering,
+        builtin_signature, cast_descriptor, expr_semantics, unary_descriptor,
     },
 };
 
@@ -2377,6 +2377,24 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
             Some(value.clone())
         }
         FunctionName::Abs => None,
+        FunctionName::IsNan => fold_float_classification(FloatClass::Nan, args),
+        FunctionName::IsFinite => fold_float_classification(FloatClass::Finite, args),
+        FunctionName::IsInfinite => fold_float_classification(FloatClass::Infinite, args),
+        FunctionName::BitwiseAnd => fold_bitwise(BitwiseOperation::And, args),
+        FunctionName::BitwiseOr => fold_bitwise(BitwiseOperation::Or, args),
+        FunctionName::BitwiseXor => fold_bitwise(BitwiseOperation::Xor, args),
+        FunctionName::BitwiseNot => {
+            let [FoldedValue::NonNull(ScalarValue::Int64(value))] = args else {
+                return None;
+            };
+            Some(FoldedValue::NonNull(ScalarValue::Int64(value.complement())))
+        }
+        FunctionName::BitCount => {
+            let [FoldedValue::NonNull(ScalarValue::Int64(value))] = args else {
+                return None;
+            };
+            Some(FoldedValue::NonNull(ScalarValue::Int64(value.one_bits())))
+        }
         FunctionName::Contains => {
             let [
                 FoldedValue::NonNull(ScalarValue::Utf8(string)),
@@ -2465,8 +2483,43 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         | FunctionName::Tan
         | FunctionName::ToHex
         | FunctionName::Translate
+        | FunctionName::Sin
+        | FunctionName::Atan2
+        | FunctionName::Log2
+        | FunctionName::Radians
+        | FunctionName::Degrees
+        | FunctionName::Sign
+        | FunctionName::Trunc
+        | FunctionName::ShiftLeft
+        | FunctionName::ShiftRight
         | FunctionName::Datetime(_) => None,
     }
+}
+
+/// Folds `is_nan`, `is_finite` or `is_infinite` over a float literal with the classification
+/// execution applies to a column.
+fn fold_float_classification(class: FloatClass, args: &[FoldedValue]) -> Option<FoldedValue> {
+    let [FoldedValue::NonNull(ScalarValue::Float64(value))] = args else {
+        return None;
+    };
+    Some(FoldedValue::NonNull(ScalarValue::Boolean(
+        class.contains(*value),
+    )))
+}
+
+/// Folds `bitwise_and`, `bitwise_or` or `bitwise_xor` over two integer literals with the operator
+/// execution applies to columns.
+fn fold_bitwise(operation: BitwiseOperation, args: &[FoldedValue]) -> Option<FoldedValue> {
+    let [
+        FoldedValue::NonNull(ScalarValue::Int64(left)),
+        FoldedValue::NonNull(ScalarValue::Int64(right)),
+    ] = args
+    else {
+        return None;
+    };
+    Some(FoldedValue::NonNull(ScalarValue::Int64(
+        operation.apply(*left, *right),
+    )))
 }
 
 pub fn compile_program(
@@ -4677,3 +4730,7 @@ mod tests {
         assert_eq!(numeric_error.code, "unsupported_binary");
     }
 }
+
+#[cfg(test)]
+#[path = "compiler_numeric_function_tests.rs"]
+mod numeric_function_tests;

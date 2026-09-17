@@ -398,6 +398,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reorderer_buffer_returns_batches_that_cannot_be_concatenated() {
+        let sequence_schema = test_schema(&[("sequence", ParseAsType::U32)]);
+        let other_schema = test_schema(&[("other_sequence", ParseAsType::U32)]);
+        let batch = |schema, field: &str| {
+            RelayRecordBatch::from_messages(
+                schema,
+                vec![RelayMessage {
+                    key: None,
+                    record: test_runtime_row([(field.to_string(), RuntimeValue::U32(1))]),
+                    acks: AckSet::empty(),
+                }],
+            )
+            .expect("each fixture row must match its own schema")
+        };
+        let order = || {
+            Arc::new(vec![ReordererRowOrder {
+                key: vec![ReorderKeyPart::UInt64(1)],
+                arrival_sequence: 0,
+            }])
+        };
+        let mut buffer = ReordererOutputBuffer::default();
+        buffer.push(
+            batch(sequence_schema, "sequence"),
+            order(),
+            Timestamp::from_unix_nanos(10),
+        );
+        buffer.push(
+            batch(other_schema, "other_sequence"),
+            order(),
+            Timestamp::from_unix_nanos(20),
+        );
+
+        let failure = *buffer
+            .take_ordered_batch()
+            .expect_err("reorderer batches with different schemas cannot concatenate");
+
+        assert!(matches!(
+            failure.error,
+            ReordererOutputBatchError::Concatenate { .. }
+        ));
+        assert_eq!(failure.batches.len(), 2);
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.estimated_bytes(), 0);
+    }
+
     #[tokio::test]
     async fn reorderer_key_program_evaluates_direct_u32_field() {
         let input_schema = test_schema(&[

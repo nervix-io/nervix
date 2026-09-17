@@ -19,6 +19,78 @@ use crate::runtime::physical_time::actual_utc_now;
 
 pub(crate) struct KafkaIngestor;
 
+#[derive(Debug, Default, PartialEq)]
+pub(in crate::runtime) enum KafkaConsumerAssignment {
+    #[default]
+    Unknown,
+    Cleared,
+    Partitions(TopicPartitionList),
+}
+
+pub(in crate::runtime) struct KafkaOffsetInitialization<'a> {
+    pub(in crate::runtime) topic: &'a str,
+    pub(in crate::runtime) consumer: &'a StreamConsumer,
+    pub(in crate::runtime) consumer_assignment: &'a mut KafkaConsumerAssignment,
+    pub(in crate::runtime) state: &'a KafkaOffsetStateOriginator,
+    pub(in crate::runtime) instance_idx: u64,
+}
+
+impl KafkaConsumerAssignment {
+    fn is_current(&self, assignment: &TopicPartitionList) -> bool {
+        match self {
+            Self::Unknown => false,
+            Self::Cleared => assignment.count() == 0,
+            Self::Partitions(current) => current == assignment,
+        }
+    }
+
+    fn apply(
+        &mut self,
+        consumer: &StreamConsumer,
+        topic: &str,
+        assignment: &TopicPartitionList,
+    ) -> Result<(), Report<KafkaIngestorError>> {
+        // `assign` atomically clears the old assignment before installing this one. Repeating an
+        // identical request while that asynchronous clear is still stopping a partition can
+        // enqueue two stop callbacks for the same fetcher in librdkafka.
+        if self.is_current(assignment) {
+            return Ok(());
+        }
+        if assignment.count() > 0 {
+            consumer.assign(assignment).map_err(|source| {
+                Report::new(KafkaIngestorError::Assign {
+                    topic: topic.to_string(),
+                })
+                .attach_printable(source.to_string())
+            })?;
+            *self = Self::Partitions(assignment.clone());
+        } else {
+            self.clear(consumer, topic)?;
+        }
+        Ok(())
+    }
+
+    fn clear(
+        &mut self,
+        consumer: &StreamConsumer,
+        topic: &str,
+    ) -> Result<(), Report<KafkaIngestorError>> {
+        // librdkafka completes static assignment removal asynchronously. Repeating `unassign`
+        // before its partition-stop reply arrives can enqueue a second stop for that partition.
+        if *self == Self::Cleared {
+            return Ok(());
+        }
+        consumer.unassign().map_err(|source| {
+            Report::new(KafkaIngestorError::Unassign {
+                topic: topic.to_string(),
+            })
+            .attach_printable(source.to_string())
+        })?;
+        *self = Self::Cleared;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum KafkaIngestorError {
     #[error("failed to build Kafka offset commit for topic '{topic}' partition {partition}")]
@@ -287,6 +359,7 @@ impl KafkaIngestor {
                         ingestor: ingestor.name.as_str().to_string(),
                         reason: source.to_string(),
                     })?;
+            let mut consumer_assignment = KafkaConsumerAssignment::default();
             if let KafkaOffsetMode::ConsumerGroup(_) = &offset_mode {
                 consumer.subscribe(&[topic.as_str()]).map_err(|source| {
                     RuntimeError::StartIngestor {
@@ -303,16 +376,19 @@ impl KafkaIngestor {
                         .initialize_domain_kafka_consumer_offsets(
                             domain,
                             &ingestor.name,
-                            topic.as_str(),
-                            &consumer,
-                            state,
-                            instance_idx,
+                            KafkaOffsetInitialization {
+                                topic: topic.as_str(),
+                                consumer: &consumer,
+                                consumer_assignment: &mut consumer_assignment,
+                                state,
+                                instance_idx,
+                            },
                         )
                         .await
                         .map_err(|reason| RuntimeError::StartIngestor {
                             domain: domain.as_str().to_string(),
                             ingestor: ingestor.name.as_str().to_string(),
-                            reason,
+                            reason: reason.to_string(),
                         })?;
                     (Some(start_version), ready)
                 } else {
@@ -411,7 +487,9 @@ impl KafkaIngestor {
                         match &task_offset_mode {
                             KafkaOffsetMode::ConsumerGroup(_) => consumer.unsubscribe(),
                             KafkaOffsetMode::Domain => {
-                                if let Err(error) = consumer.unassign() {
+                                if let Err(error) =
+                                    consumer_assignment.clear(&consumer, task_topic.as_str())
+                                {
                                     task_events.report_error(format!(
                                         "failed to unassign kafka source while quiescing ingestor \
                                          '{}' in domain '{}': {}",
@@ -458,10 +536,13 @@ impl KafkaIngestor {
                                 .initialize_domain_kafka_consumer_offsets(
                                     &task_domain,
                                     &task_ingestor,
-                                    task_topic.as_str(),
-                                    &consumer,
-                                    state,
-                                    instance_idx,
+                                    KafkaOffsetInitialization {
+                                        topic: task_topic.as_str(),
+                                        consumer: &consumer,
+                                        consumer_assignment: &mut consumer_assignment,
+                                        state,
+                                        instance_idx,
+                                    },
                                 )
                                 .await
                             {
@@ -489,10 +570,13 @@ impl KafkaIngestor {
                                 .initialize_domain_kafka_consumer_offsets(
                                     &task_domain,
                                     &task_ingestor,
-                                    task_topic.as_str(),
-                                    &consumer,
-                                    state,
-                                    instance_idx,
+                                    KafkaOffsetInitialization {
+                                        topic: task_topic.as_str(),
+                                        consumer: &consumer,
+                                        consumer_assignment: &mut consumer_assignment,
+                                        state,
+                                        instance_idx,
+                                    },
                                 )
                                 .await
                             {
@@ -1132,7 +1216,7 @@ impl KafkaIngestor {
                                                     )
                                                     .await
                                                 {
-                                                    batch_failure = Some(error);
+                                                    batch_failure = Some(error.to_string());
                                                 }
 
                                                 if batch_failure.is_none() {
@@ -1321,6 +1405,7 @@ impl KafkaIngestor {
         offsets: &HashMap<KafkaTopicPartition, Offset>,
         schedule: Option<&KafkaPartitionSchedule>,
         instance_idx: u64,
+        consumer_assignment: &mut KafkaConsumerAssignment,
     ) -> Result<bool, Report<KafkaIngestorError>> {
         let mut partitions = Vec::new();
         for (key, offset) in offsets {
@@ -1340,7 +1425,6 @@ impl KafkaIngestor {
         };
 
         let mut assignment = TopicPartitionList::new();
-        let mut assigned_any = false;
         for (partition, offset) in partitions {
             if assigned_partitions.contains(&partition) {
                 assignment
@@ -1352,25 +1436,10 @@ impl KafkaIngestor {
                         })
                         .attach_printable(source.to_string())
                     })?;
-                assigned_any = true;
             }
         }
 
-        if assigned_any {
-            consumer.assign(&assignment).map_err(|source| {
-                Report::new(KafkaIngestorError::Assign {
-                    topic: topic.to_string(),
-                })
-                .attach_printable(source.to_string())
-            })?;
-        } else {
-            consumer.unassign().map_err(|source| {
-                Report::new(KafkaIngestorError::Unassign {
-                    topic: topic.to_string(),
-                })
-                .attach_printable(source.to_string())
-            })?;
-        }
+        consumer_assignment.apply(consumer, topic, &assignment)?;
 
         Ok(has_topic_partitions)
     }
@@ -1602,6 +1671,14 @@ impl KafkaIngestor {
 mod tests {
     use super::*;
 
+    fn assignment_at(offset: i64) -> TopicPartitionList {
+        let mut assignment = TopicPartitionList::new();
+        assignment
+            .add_partition_offset("events", 0, Offset::Offset(offset))
+            .assured("the test uses a nonnegative literal Kafka offset");
+        assignment
+    }
+
     fn unavailable_consumer() -> StreamConsumer {
         let consumer: StreamConsumer = ClientConfig::new()
             .set("bootstrap.servers", "127.0.0.1:1")
@@ -1688,5 +1765,19 @@ mod tests {
             seek.current_context(),
             KafkaIngestorError::Seek { .. }
         ));
+    }
+
+    #[test]
+    fn kafka_assignment_state_suppresses_only_identical_requests() {
+        let assignment = assignment_at(10);
+        let changed_offset = assignment_at(11);
+        let empty = TopicPartitionList::new();
+        let current = KafkaConsumerAssignment::Partitions(assignment.clone());
+
+        assert!(current.is_current(&assignment));
+        assert!(!current.is_current(&changed_offset));
+        assert!(!current.is_current(&empty));
+        assert!(KafkaConsumerAssignment::Cleared.is_current(&empty));
+        assert!(!KafkaConsumerAssignment::Unknown.is_current(&assignment));
     }
 }

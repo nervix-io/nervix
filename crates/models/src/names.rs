@@ -190,6 +190,7 @@ macro_rules! declare_names {
                 RkyvSerialize,
                 RkyvDeserialize,
             )]
+            #[rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash))]
             pub struct $Name(NameText);
 
             impl Debug for $Name {

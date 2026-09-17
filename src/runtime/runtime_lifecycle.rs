@@ -116,7 +116,6 @@ impl Runtime {
                 events,
                 fault_injection,
                 resource_store: ArcSwapOption::empty(),
-                resource_versions: ArcSwap::from_pointee(ResourceVersionStatus::default()),
                 remote_dispatcher: ArcSwapOption::empty(),
                 remote_dispatch: Arc::new(RemoteDispatchRegistry {
                     next_ack_id: AtomicU64::new(1),
@@ -340,7 +339,7 @@ impl Runtime {
                 warn!(
                     domain = domain.as_str(),
                     relay = relay.as_str(),
-                    reason,
+                    reason = %reason,
                     "relay owner task did not stop cleanly"
                 );
             }
@@ -351,7 +350,7 @@ impl Runtime {
                 warn!(
                     domain = domain.as_str(),
                     relay = relay.as_str(),
-                    reason,
+                    reason = %reason,
                     "relay state task did not stop cleanly"
                 );
             }

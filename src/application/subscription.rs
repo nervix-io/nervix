@@ -259,7 +259,7 @@ impl SessionSubscriptions {
                                 let messages = match batch.try_into_messages() {
                                     Ok(messages) => messages,
                                     Err(error_and_batch) => {
-                                        let (error, _) = *error_and_batch;
+                                        let error = error_and_batch.error;
                                         let event = SessionResponse {
                                             event: Some(proto::session_response::Event::Server(
                                                 ServerEvent {
@@ -748,11 +748,16 @@ impl SessionServiceImpl {
         relay: &RelayName,
     ) -> Result<(), String> {
         let subscriber = self.inner.cluster.local_node_identity().await;
+        // Subscription delivery may begin as soon as a prepared schedule activates. A member can
+        // be application-unavailable while it finishes that activation, then immediately own this
+        // relay. Include every live membership node in the visibility handshake so that owner
+        // cannot publish before it sees the subscriber's interest.
         let target_nodes = self
             .inner
             .cluster
-            .live_node_ids()
+            .gossip_state()
             .await
+            .live_node_ids()
             .into_iter()
             .filter(|node_id| node_id != subscriber.node_id())
             .collect::<BTreeSet<_>>();

@@ -1152,7 +1152,7 @@ impl MqttIngestor {
                 acks: vec![acks],
             })
             .await
-            .map_err(|error| Report::new(MqttIngestorError::Dispatch).attach_printable(error))
+            .change_context(MqttIngestorError::Dispatch)
     }
 
     /// Flushes the collector and reports a failure to the runtime event bus.
@@ -1182,7 +1182,7 @@ impl MqttIngestor {
                     context.domain.as_str(),
                     error
                 ));
-                Err(Report::new(MqttIngestorError::Flush).attach_printable(error))
+                Err(error.change_context(MqttIngestorError::Flush))
             }
         }
     }
@@ -1467,7 +1467,7 @@ mod tests {
 
     #[test]
     fn mqtt_client_builder_uses_configured_or_default_client_id() {
-        let client = CreateClientMqtt {
+        let client = CreateClientMqtt::<u64> {
             name: named("mqtt_main"),
             mount: None,
             config: vec![nervix_models::ClientConfigEntry {
@@ -1479,7 +1479,7 @@ mod tests {
         MqttIngestor::client_from_config_for_test(&client.config, "default-client")
             .expect("must build client from default id");
 
-        let client_with_id = CreateClientMqtt {
+        let client_with_id = CreateClientMqtt::<u64> {
             name: named("mqtt_main"),
             mount: None,
             config: vec![
@@ -1501,7 +1501,7 @@ mod tests {
     #[test]
     fn mqtt_client_builder_requires_addr_and_retry_delay_handles_overflow() {
         let err = MqttIngestor::client_from_config_for_test(
-            &CreateClientMqtt {
+            &CreateClientMqtt::<u64> {
                 name: named("mqtt_main"),
                 mount: None,
                 config: vec![],

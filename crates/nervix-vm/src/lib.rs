@@ -57,8 +57,8 @@ pub use compiler::{
 };
 pub use error::{
     CompileError, DatetimeOperation, DivisionOperation, ErrorCode, FloatOperation,
-    IntegerOperation, RowErrorLengths, RowErrorMask, RowErrors, RuntimeError, SideError,
-    SideErrorReason,
+    IntegerOperation, RowErrorLengths, RowErrorMask, RowErrors, RuntimeError, ShiftOperation,
+    SideError, SideErrorReason,
 };
 pub use frontend::{
     AssignmentTargetSet, CastTargetKind, DatetimeLiteral, FrontendError, FrontendErrorKind,

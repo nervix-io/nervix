@@ -43,6 +43,8 @@ pub(crate) mod resource_interconnect;
 pub mod runtime;
 pub mod runtime_ack;
 pub mod runtime_schema;
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_test;
 pub(crate) mod task_shutdown;
 
 #[cfg(feature = "testing")]

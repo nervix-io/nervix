@@ -10,10 +10,104 @@
 use std::convert::Infallible;
 
 use crate::{
-    CodecProtobufConfig, CodecWireFormat, CreateCodec, CreateInferencer, CreateSignalingProtocol,
-    CreateVhost, CreateWasmProcessor, Model, RequestedResourceVersion, ResourceName,
-    SignalingProtobufConfig, SignalingWireFormat, VhostTlsResource,
+    ClientResourceMount, CodecProtobufConfig, CodecWireFormat, CreateClientAzureBlob,
+    CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
+    CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
+    CreateClientOtel, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar,
+    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
+    CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateInferencer,
+    CreateLookup, CreateSignalingProtocol, CreateVhost, CreateWasmProcessor, Model,
+    RequestedResourceVersion, ResourceName, SignalingProtobufConfig, SignalingWireFormat,
+    VhostTlsResource,
 };
+
+impl<Version> ClientResourceMount<Version> {
+    fn try_map_version<Next, Error, Map>(
+        self,
+        map: &mut Map,
+    ) -> Result<ClientResourceMount<Next>, Error>
+    where
+        Map: FnMut(&ResourceName, Version) -> Result<Next, Error>,
+    {
+        let version = map(&self.resource, self.version)?;
+        Ok(ClientResourceMount {
+            resource: self.resource,
+            version,
+        })
+    }
+}
+
+macro_rules! impl_client_resource_versions {
+    ($($Client:ident { $($extra:ident),* $(,)? };)+) => {
+        $(
+            impl<Version> $Client<Version> {
+                pub(crate) fn try_map_resource_versions<Next, Error, Map>(
+                    self,
+                    map: &mut Map,
+                ) -> Result<$Client<Next>, Error>
+                where
+                    Map: FnMut(&ResourceName, Version) -> Result<Next, Error>,
+                {
+                    let mount = match self.mount {
+                        Some(mount) => Some(mount.try_map_version(map)?),
+                        None => None,
+                    };
+                    Ok($Client {
+                        name: self.name,
+                        $($extra: self.$extra,)*
+                        mount,
+                        config: self.config,
+                    })
+                }
+            }
+        )+
+    };
+}
+
+impl_client_resource_versions! {
+    CreateClientKafka {};
+    CreateClientPulsar {};
+    CreateClientHttp {};
+    CreateClientSentry {};
+    CreateClientOtel {};
+    CreateClientPrometheus {};
+    CreateClientMqtt {};
+    CreateClientNats {};
+    CreateClientRabbitMq {};
+    CreateClientZeroMq {};
+    CreateClientSqs {};
+    CreateClientSyslog {};
+    CreateClientClickHouse {};
+    CreateClientS3 {};
+    CreateClientGcs {};
+    CreateClientAzureBlob {};
+    CreateClientIcebergRest {};
+    CreateClientRedis { pool };
+    CreateClientPostgres { pool };
+    CreateClientMySql { pool };
+    CreateClientMongoDb { pool };
+    CreateClientWebsockets { signaling_protocol };
+}
+
+impl<Version> CreateLookup<Version> {
+    pub(crate) fn try_map_resource_versions<Next, Error, Map>(
+        self,
+        map: &mut Map,
+    ) -> Result<CreateLookup<Next>, Error>
+    where
+        Map: FnMut(&ResourceName, Version) -> Result<Next, Error>,
+    {
+        let resource_version = map(&self.resource, self.resource_version)?;
+        Ok(CreateLookup {
+            name: self.name,
+            key_field: self.key_field,
+            resource: self.resource,
+            resource_version,
+            path: self.path,
+            decode_using_codec: self.decode_using_codec,
+        })
+    }
+}
 
 impl<Version> VhostTlsResource<Version> {
     fn try_map_version<Next, Error, Map>(

@@ -604,7 +604,7 @@ impl SyslogIngestor {
             debug!(
                 domain = context.domain.as_str(),
                 ingestor = context.ingestor.as_str(),
-                error,
+                error = %error,
                 "skipped syslog frame after decode or route failure"
             );
         }

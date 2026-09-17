@@ -8,6 +8,7 @@
 use std::collections::BTreeSet;
 
 use meticulous::OptionExt as _;
+use nervix_consensus::DomainMutationLease;
 use nervix_models::{
     ClusterNodeName, DomainName, DomainSchedule, DomainStatus, Model, NodeRef, PlacementPolicy,
     QuiesceLevel, RelayName, Relocation, RelocationPreferenceStrategy, ScheduledNode,
@@ -137,6 +138,7 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         relocation: Relocation,
+        mutation: Option<&DomainMutationLease>,
     ) -> CommandResult {
         let Some(_alter_guard) = self.inner.runtime.try_begin_domain_alter(domain) else {
             return command_error(
@@ -202,6 +204,7 @@ impl SessionServiceImpl {
                 domain.clone(),
                 current_domain_schedule,
                 Some(planned_schedule),
+                mutation,
             )
             .await
         {

@@ -7,13 +7,14 @@
 
 use std::{cell::UnsafeCell, ops::Range, panic::AssertUnwindSafe};
 
-use meticulous::OptionExt as _;
-use nervix_wasm_protocol::{GuestSnapshot, SavedStateRejection};
+use nervix_wasm_protocol::BranchInit;
 
 use crate::{
     context::{BranchContext, GuestContext, TimeoutHandle},
     envelope::InputBatch,
-    error::{ERR_ERROR_STATE, ERR_INVALID_SIZE, ERR_OUT_OF_BOUNDS, GuestError, SUCCESS},
+    error::{
+        ERR_ERROR_STATE, ERR_INVALID_SIZE, ERR_OUT_OF_BOUNDS, GuestError, RejectedSnapshot, SUCCESS,
+    },
     processor::Processor,
 };
 
@@ -48,17 +49,16 @@ pub(crate) fn host_timeout_after_nanos(delay_nanos: i64) -> i64 {
 }
 
 /// SDK-owned guest runtime state shared by every export.
+///
+/// All of it is execution state of this instance. A snapshot carries only the branch
+/// configuration and the processor's application state, so an instance restored from one starts
+/// with an empty emit queue and without error state.
 struct RuntimeCore {
     buffer: Vec<u8>,
     pending_emit: Vec<Vec<u8>>,
     global_error: Vec<u8>,
     error_state: Option<String>,
-    init_metadata: Vec<u8>,
     branch: Option<BranchContext>,
-    processed_batches: u64,
-    processed_rows: u64,
-    last_domain_time_nanos: i64,
-    last_timeout_handle: i64,
 }
 
 impl RuntimeCore {
@@ -68,12 +68,7 @@ impl RuntimeCore {
             pending_emit: Vec::new(),
             global_error: Vec::new(),
             error_state: None,
-            init_metadata: Vec::new(),
             branch: None,
-            processed_batches: 0,
-            processed_rows: 0,
-            last_domain_time_nanos: 0,
-            last_timeout_handle: 0,
         }
     }
 
@@ -109,8 +104,6 @@ impl RuntimeCore {
             pending_emit: &mut self.pending_emit,
             global_error: &mut self.global_error,
             error_state: &mut self.error_state,
-            last_domain_time_nanos: &mut self.last_domain_time_nanos,
-            last_timeout_handle: &mut self.last_timeout_handle,
         })
     }
 
@@ -125,11 +118,11 @@ impl RuntimeCore {
     ///
     /// The reason goes on the global-error channel, but nothing is latched: the host discards an
     /// instance whose restore failed, so there is no later callback for a latch to refuse.
-    fn reject_saved_state(&mut self, rejection: SavedStateRejection, reason: &GuestError) -> i32 {
+    fn reject_saved_state(&mut self, rejected: &RejectedSnapshot) -> i32 {
         self.global_error.clear();
         self.global_error
-            .extend_from_slice(reason.to_string().as_bytes());
-        rejection.code()
+            .extend_from_slice(rejected.to_string().as_bytes());
+        rejected.verdict().code()
     }
 
     /// Clears guest-owned state while keeping the reusable buffer allocation.
@@ -137,12 +130,7 @@ impl RuntimeCore {
         self.pending_emit.clear();
         self.global_error.clear();
         self.error_state = None;
-        self.init_metadata.clear();
         self.branch = None;
-        self.processed_batches = 0;
-        self.processed_rows = 0;
-        self.last_domain_time_nanos = 0;
-        self.last_timeout_handle = 0;
     }
 }
 
@@ -288,9 +276,8 @@ pub fn clear_global_error() -> i32 {
 pub fn init<P: Processor>(slot: &InstanceSlot<P>, ptr: i32, size: i32) -> i32 {
     guarded(true, |core| {
         let metadata = core.read_buffer(ptr, size)?;
-        let branch = BranchContext::from_init_metadata(&metadata)?;
+        let branch = BranchContext::from(BranchInit::decode(&metadata)?);
         let instance = P::create(&branch)?;
-        core.init_metadata = metadata;
         core.branch = Some(branch);
         slot.with(|slot| *slot = Some(instance));
         Ok(SUCCESS)
@@ -298,9 +285,7 @@ pub fn init<P: Processor>(slot: &InstanceSlot<P>, ptr: i32, size: i32) -> i32 {
 }
 
 pub fn current_domain_time_nanos() -> i64 {
-    let now = host_domain_time_nanos();
-    CORE.with(|core| core.last_domain_time_nanos = now);
-    now
+    host_domain_time_nanos()
 }
 
 pub fn process_batch<P: Processor>(slot: &InstanceSlot<P>, ptr: i32, size: i32) -> i32 {
@@ -309,14 +294,6 @@ pub fn process_batch<P: Processor>(slot: &InstanceSlot<P>, ptr: i32, size: i32) 
             return Err(GuestError::NotInitialized);
         }
         let input = InputBatch::from_envelope_bytes(core.read_buffer(ptr, size)?)?;
-        core.processed_batches = core
-            .processed_batches
-            .checked_add(1)
-            .assured("a guest cannot process 2^64 batches in the lifetime of an instance");
-        core.processed_rows = core
-            .processed_rows
-            .checked_add(input.row_count())
-            .assured("a guest cannot process 2^64 rows in the lifetime of an instance");
         let mut ctx = core.guest_context()?;
         slot.with(|instance| {
             let Some(instance) = instance.as_mut() else {
@@ -330,7 +307,6 @@ pub fn process_batch<P: Processor>(slot: &InstanceSlot<P>, ptr: i32, size: i32) 
 
 pub fn on_timeout<P: Processor>(slot: &InstanceSlot<P>, handle: i64) -> i32 {
     guarded(true, |core| {
-        core.last_timeout_handle = handle;
         let mut ctx = core.guest_context()?;
         slot.with(|instance| {
             let Some(instance) = instance.as_mut() else {
@@ -370,76 +346,49 @@ pub fn read_emit() -> i32 {
     })
 }
 
+/// Encodes the snapshot of the processor into the reusable buffer and returns its size.
+///
+/// A processor that latched into error state still saves its application state, because error
+/// state belongs to this instance and never enters the snapshot. An error from
+/// [`Processor::save_state`] fails the call like an error from any other callback, and the host
+/// keeps the state saved last.
 pub fn dump_state<P: Processor>(slot: &InstanceSlot<P>) -> i32 {
     guarded(false, |core| {
-        let saved_state = slot.with(|instance| match instance.as_ref() {
-            Some(instance) => P::save_state(instance),
-            None => Vec::new(),
-        });
-        let snapshot = GuestSnapshot {
-            processed_batches: core.processed_batches,
-            processed_rows: core.processed_rows,
-            pending_start_row: 0,
-            last_domain_time_nanos: core.last_domain_time_nanos,
-            last_timeout_handle: core.last_timeout_handle,
-            pending_batch: Vec::new(),
-            init_metadata: core.init_metadata.clone(),
-            saved_state,
-            error_state: core.error_state.clone(),
+        let Some(branch) = &core.branch else {
+            return Err(GuestError::NotInitialized);
         };
-        core.buffer = snapshot.encode();
+        let application_state = slot.with(|instance| {
+            let Some(instance) = instance.as_ref() else {
+                return Err(GuestError::NotInitialized);
+            };
+            instance.save_state()
+        })?;
+        core.buffer = branch.encode_snapshot(application_state);
         i32::try_from(core.buffer.len()).map_err(|_| GuestError::InvalidSize)
     })
 }
 
-/// Restores the processor from the saved state the host hands over.
+/// Restores the processor from the saved state the host hands over, into the branch
+/// configuration `nervix_init` initialized this instance with.
 ///
 /// A range the host did not allocate fails the call with its own code, because it says nothing
-/// about the saved state. Everything after that is a verdict on the state: a snapshot the SDK
-/// cannot decode, including its branch configuration, rejects the snapshot envelope, and an error
-/// from [`Processor::restore`] rejects the application state it carries.
+/// about the saved state, and so does a call before `nervix_init`. Everything after that is a
+/// verdict on the state: a snapshot the SDK cannot decode, including its init metadata, or one
+/// taken under a different branch configuration rejects the snapshot envelope, and an error from
+/// [`Processor::restore`] rejects the application state it carries.
 pub fn load_state<P: Processor>(slot: &InstanceSlot<P>, ptr: i32, size: i32) -> i32 {
     guarded(false, |core| {
-        let bytes = core.read_buffer(ptr, size)?;
-        let snapshot = match GuestSnapshot::decode(&bytes) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                let reason = GuestError::from(error);
-                return Ok(core.reject_saved_state(SavedStateRejection::SnapshotEnvelope, &reason));
-            }
+        let saved = core.read_buffer(ptr, size)?;
+        let Some(branch) = &core.branch else {
+            return Err(GuestError::NotInitialized);
         };
-        if !snapshot.pending_batch.is_empty() {
-            return Ok(core.reject_saved_state(
-                SavedStateRejection::SnapshotEnvelope,
-                &GuestError::UnsupportedSnapshot,
-            ));
-        }
-        let branch = match BranchContext::from_init_metadata(&snapshot.init_metadata) {
-            Ok(branch) => branch,
-            Err(reason) => {
-                return Ok(core.reject_saved_state(SavedStateRejection::SnapshotEnvelope, &reason));
+        match branch.restore_snapshot::<P>(&saved) {
+            Ok(restored) => {
+                slot.with(|slot| *slot = Some(restored));
+                Ok(SUCCESS)
             }
-        };
-        let mut instance = None;
-        if snapshot.error_state.is_none() {
-            match P::restore(&branch, &snapshot.saved_state) {
-                Ok(restored) => instance = Some(restored),
-                Err(reason) => {
-                    return Ok(
-                        core.reject_saved_state(SavedStateRejection::ApplicationState, &reason)
-                    );
-                }
-            }
+            Err(rejected) => Ok(core.reject_saved_state(&rejected)),
         }
-        core.processed_batches = snapshot.processed_batches;
-        core.processed_rows = snapshot.processed_rows;
-        core.last_domain_time_nanos = snapshot.last_domain_time_nanos;
-        core.last_timeout_handle = snapshot.last_timeout_handle;
-        core.init_metadata = snapshot.init_metadata;
-        core.error_state = snapshot.error_state;
-        core.branch = Some(branch);
-        slot.with(|slot| *slot = instance);
-        Ok(SUCCESS)
     })
 }
 

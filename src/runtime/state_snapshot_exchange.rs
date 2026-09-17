@@ -110,6 +110,27 @@ pub(in crate::runtime) enum MaterializedSnapshotExchangeError {
     },
 }
 
+impl MaterializedSnapshotExchangeError {
+    /// Whether the requested state is between assignments rather than having failed to read.
+    ///
+    /// A reader can observe the committed destination just before that destination activates its
+    /// prepared state, or retain the previous destination just after it leaves the assignment.
+    /// Both are ordinary absence for a materialized dependency: its declared policy decides
+    /// whether to wait, skip, or use a default, and a later routing or state notification retries
+    /// the read.
+    pub(in crate::runtime) const fn is_between_assignments(&self) -> bool {
+        matches!(
+            self,
+            Self::RemoteFailure {
+                failure: RemoteOperationFailure::Rejected { .. }
+                    | RemoteOperationFailure::Unavailable { .. }
+                    | RemoteOperationFailure::NotReady { .. },
+                ..
+            }
+        )
+    }
+}
+
 impl Runtime {
     /// Describe what this node would transfer for a placement, sealing a generation if the
     /// requester needs one.

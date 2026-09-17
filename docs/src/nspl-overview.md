@@ -571,7 +571,7 @@ Client definitions are key-value based and may optionally mount a resource for f
 ```nspl,ignore
 CREATE [IF NOT EXISTS] CLIENT <name>
   TYPE <client_type>
-  [MOUNT <resource>]
+  [MOUNT <resource> VERSION <n>|LATEST]
   CONFIG {
     '<key>' = '<value>'
   };

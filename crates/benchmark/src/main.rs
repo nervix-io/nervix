@@ -9,17 +9,22 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_benchmark::{
     AbArm, AbSummary, BenchmarkCatalog, BenchmarkDependency, BenchmarkRunFailure,
     BenchmarkSuiteReport, ContainerImplementation, Implementation, KafkaRenderInputs, LoadShape,
     LoadedBenchmark, NERVIX_METRICS_PROMETHEUS_FILE, NERVIX_METRICS_REPORT_FILE,
-    NervixMetricsReport, RunSettings, provision_topics,
+    NervixImplementation, NervixMetricsReport, RunSettings, provision_topics,
 };
 use nervix_client_core::{Client, ConnectOptions, split_query_statements};
+use nervix_models::ClusterNodeName;
 use nervix_test_environment::{
     ContainerMode, ContainerReadiness, DependencyEnvironment, KAFKA_ADDR, KAFKA_DOCKER_ADDR,
     KAFKA_DOCKER_NETWORK, ManagedContainerInfo, configure_process_lifecycle,
+};
+use rcgen::{
+    BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+    SanType,
 };
 use testcontainers::{
     CopyTargetOptions, GenericImage, ImageExt,
@@ -39,6 +44,11 @@ const NERVIX_INTERCONNECT_PORT: u16 = 47395;
 const NERVIX_HTTP_PORT: u16 = 8080;
 const NERVIX_HTTPS_PORT: u16 = 8443;
 const NERVIX_WEB_CONSOLE_PORT: u16 = 47420;
+const NERVIX_CONTAINER_ROLES: [&str; 3] = [
+    "benchmark-subject-node-1",
+    "benchmark-subject-node-2",
+    "benchmark-subject-node-3",
+];
 
 #[derive(Debug, Parser)]
 #[command(about = "Run declarative end-to-end streaming benchmarks")]
@@ -168,15 +178,16 @@ struct ResolvedRun {
 }
 
 enum SubjectRuntime {
-    Local { child: Child },
-    Container { info: ManagedContainerInfo },
+    Local { children: Vec<Child> },
+    Container { infos: Vec<ManagedContainerInfo> },
 }
 
 struct Subject {
     runtime: SubjectRuntime,
     control_url: Option<String>,
-    metrics_url: Option<reqwest::Url>,
+    metrics_urls: Vec<reqwest::Url>,
     password: Option<String>,
+    node_count: usize,
 }
 
 fn main() -> Result<()> {
@@ -516,18 +527,28 @@ async fn execute_run(
         }
         Implementation::Nervix(_) | Implementation::Container(_) => &docker_bootstrap,
     };
-    let rendered = benchmark.render_implementation_with_parameters(
-        &resolved.implementation,
-        KafkaRenderInputs {
-            kafka_bootstrap_servers: subject_bootstrap,
-            input_topic: &resolved.input_topic,
-            output_topic: &resolved.output_topic,
-            consumer_group: &resolved.consumer_group,
-            lane_count: resolved.partitions,
-            dependency_endpoints: &dependency_endpoints,
-        },
-        &resolved.parameters,
-    )?;
+    let render_inputs = KafkaRenderInputs {
+        kafka_bootstrap_servers: subject_bootstrap,
+        input_topic: &resolved.input_topic,
+        output_topic: &resolved.output_topic,
+        consumer_group: &resolved.consumer_group,
+        lane_count: resolved.partitions,
+        dependency_endpoints: &dependency_endpoints,
+    };
+    let rendered = benchmark
+        .render_implementation_with_parameters(
+            &resolved.implementation,
+            render_inputs,
+            &resolved.parameters,
+        )
+        .map_err(|report| anyhow!("failed to render benchmark implementation: {report:?}"))?;
+    let after_start = benchmark
+        .render_after_start_with_parameters(
+            &resolved.implementation,
+            render_inputs,
+            &resolved.parameters,
+        )
+        .map_err(|report| anyhow!("failed to render post-start statements: {report:?}"))?;
     let rendered_path = match implementation {
         Implementation::Nervix(_) => resolved.run_directory.join("graph.nspl"),
         Implementation::Container(container) => resolved.run_directory.join(
@@ -543,11 +564,21 @@ async fn execute_run(
             rendered_path.display()
         )
     })?;
+    if let Some(after_start) = &after_start {
+        let path = resolved.run_directory.join("after-start.nspl");
+        fs::write(&path, after_start).with_context(|| {
+            format!(
+                "failed to write rendered post-start configuration {}",
+                path.display()
+            )
+        })?;
+    }
 
     let mut subject = match implementation {
-        Implementation::Nervix(_) => {
+        Implementation::Nervix(nervix) => {
             start_nervix(
                 repository_root,
+                nervix,
                 args,
                 resolved,
                 environment,
@@ -564,7 +595,13 @@ async fn execute_run(
     let benchmark_result = async {
         if let Implementation::Nervix(_) = implementation {
             subject
-                .configure_nervix(&resolved.domain, &rendered, resolved.wait_timeout, resolved)
+                .configure_nervix(
+                    &resolved.domain,
+                    &rendered,
+                    after_start.as_deref(),
+                    resolved.wait_timeout,
+                    resolved,
+                )
                 .await?;
         }
         run_load_driver(
@@ -761,13 +798,15 @@ impl ResolvedRun {
 
 async fn start_nervix(
     repository_root: &Path,
+    implementation: &NervixImplementation,
     args: &RunArgs,
     resolved: &ResolvedRun,
     environment: &mut DependencyEnvironment,
     docker_network: &str,
 ) -> Result<Subject> {
     let password = format!("benchmark-{}", resolved.run_token);
-    let interconnect_tls = InterconnectTlsFiles::generate(repository_root).await?;
+    let cluster_id = format!("benchmark-{}", resolved.run_token);
+    let node_count = usize::from(implementation.nodes);
     match args.options.nervix_mode {
         NervixMode::Local => {
             let server_binary = absolute_or_repository_path(
@@ -782,34 +821,78 @@ async fn start_nervix(
                 "Nervix server binary does not exist at {}",
                 server_binary.display()
             );
-            let ports = LocalPorts::reserve()?;
-            let state_directory = resolved.run_directory.join("nervix-state");
-            fs::create_dir_all(&state_directory)?;
-            let log_path = resolved.run_directory.join("subject.log");
-            let log = fs::File::create(&log_path)?;
-            let stderr = log.try_clone()?;
-            let mut command = Command::new(server_binary);
-            command
-                .current_dir(repository_root)
-                .env("NERVIX_INIT_DEFAULT_USER_PASSWORD", &password)
-                .env("NERVIX_DB_PATH", state_directory.join("db"))
-                .env("RUST_LOG", "info")
-                .args(ports.server_arguments(&interconnect_tls))
-                .stdout(Stdio::from(log))
-                .stderr(Stdio::from(stderr))
-                .kill_on_drop(true);
-            let mut child = command
-                .spawn()
-                .context("failed to start local nervix-server")?;
-            wait_for_local_nervix(&mut child, ports.observability, resolved.wait_timeout).await?;
+            let ports = (0..node_count)
+                .map(|_| LocalPorts::reserve())
+                .collect::<io::Result<Vec<_>>>()?;
+            let node_names = benchmark_node_names(node_count);
+            let endpoint_names = node_names
+                .iter()
+                .map(|node| node.as_str().to_string())
+                .collect::<Vec<_>>();
+            let tls = InterconnectTlsFiles::generate(
+                &resolved.run_directory.join("interconnect-tls"),
+                &cluster_id,
+                &node_names,
+                &endpoint_names,
+            )?;
+            let bootstrap_addr = format!("127.0.0.1:{}", ports[0].interconnect);
+            let mut children = Vec::with_capacity(node_count);
+            for index in 0..node_count {
+                tokio::task::consume_budget().await;
+                let node_id = &node_names[index];
+                let state_directory = resolved
+                    .run_directory
+                    .join("nervix-state")
+                    .join(node_id.as_str());
+                fs::create_dir_all(&state_directory)?;
+                let log_name = if node_count == 1 {
+                    "subject.log".to_string()
+                } else {
+                    format!("subject-{}.log", node_id.as_str())
+                };
+                let log = fs::File::create(resolved.run_directory.join(log_name))?;
+                let stderr = log.try_clone()?;
+                let mut command = Command::new(&server_binary);
+                command
+                    .current_dir(repository_root)
+                    .env("NERVIX_INIT_DEFAULT_USER_PASSWORD", &password)
+                    .env("NERVIX_DB_PATH", state_directory.join("db"))
+                    .env("RUST_LOG", "info")
+                    .args(ports[index].server_arguments(
+                        node_id,
+                        &cluster_id,
+                        &tls.ca,
+                        &tls.nodes[index],
+                        (index != 0).then_some(bootstrap_addr.as_str()),
+                    ))
+                    .stdout(Stdio::from(log))
+                    .stderr(Stdio::from(stderr))
+                    .kill_on_drop(true);
+                let mut child = command.spawn().with_context(|| {
+                    format!("failed to start local Nervix {}", node_id.as_str())
+                })?;
+                wait_for_local_nervix(
+                    &mut child,
+                    ports[index].observability,
+                    resolved.wait_timeout,
+                )
+                .await?;
+                children.push(child);
+            }
             Ok(Subject {
-                runtime: SubjectRuntime::Local { child },
-                control_url: Some(format!("http://127.0.0.1:{}", ports.grpc)),
-                metrics_url: Some(reqwest::Url::parse(&format!(
-                    "http://127.0.0.1:{}/metrics",
-                    ports.observability
-                ))?),
+                runtime: SubjectRuntime::Local { children },
+                control_url: Some(format!("http://127.0.0.1:{}", ports[0].grpc)),
+                metrics_urls: ports
+                    .iter()
+                    .map(|ports| {
+                        reqwest::Url::parse(&format!(
+                            "http://127.0.0.1:{}/metrics",
+                            ports.observability
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
                 password: Some(password),
+                node_count,
             })
         }
         NervixMode::Image => {
@@ -818,91 +901,102 @@ async fn start_nervix(
                     anyhow!("--nervix-image is required with --nervix-mode image")
                 })?;
             let (image_name, image_tag) = split_image_reference(image)?;
-            let server_args = vec![
-                "/usr/local/bin/nervix-server".to_string(),
-                "--node-id".to_string(),
-                "node-1".to_string(),
-                "--cluster-id".to_string(),
-                "default".to_string(),
-                "--addr".to_string(),
-                "0.0.0.0:47391".to_string(),
-                "--http-listen-addr".to_string(),
-                format!("0.0.0.0:{NERVIX_HTTP_PORT}"),
-                "--https-listen-addr".to_string(),
-                format!("0.0.0.0:{NERVIX_HTTPS_PORT}"),
-                "--observability-listen-addr".to_string(),
-                "0.0.0.0:9090".to_string(),
-                "--web-console-listen-addr".to_string(),
-                format!("0.0.0.0:{NERVIX_WEB_CONSOLE_PORT}"),
-                "--interconnect-listen-addr".to_string(),
-                format!("0.0.0.0:{NERVIX_INTERCONNECT_PORT}"),
-                "--interconnect-advertise-addr".to_string(),
-                format!("127.0.0.1:{NERVIX_INTERCONNECT_PORT}"),
-                "--interconnect-tls-ca".to_string(),
-                "/tmp/nervix-interconnect-ca.pem".to_string(),
-                "--interconnect-tls-cert".to_string(),
-                "/tmp/nervix-interconnect-node.pem".to_string(),
-                "--interconnect-tls-key".to_string(),
-                "/tmp/nervix-interconnect-node-key.pem".to_string(),
-                "--allow-bootstrap".to_string(),
-            ];
             let timeout = resolved.wait_timeout;
-            let network = docker_network.to_string();
-            let password_for_container = password.clone();
-            let tls_for_container = interconnect_tls.clone();
-            let info = environment
-                .start_generic(
-                    "benchmark-subject",
-                    "Nervix benchmark image",
-                    ContainerReadiness::Running,
-                    &[NERVIX_GRPC_PORT, NERVIX_OBSERVABILITY_PORT],
-                    move || {
-                        GenericImage::new(image_name.clone(), image_tag.clone())
-                            .with_exposed_port(NERVIX_GRPC_PORT)
-                            .with_exposed_port(NERVIX_OBSERVABILITY_PORT)
-                            .with_wait_for(WaitFor::http(
-                                HttpWaitStrategy::new("/readyz")
-                                    .with_port(NERVIX_OBSERVABILITY_PORT)
-                                    .with_expected_status_code(200_u16),
-                            ))
-                            .with_network(network.clone())
-                            .with_copy_to(
-                                "/tmp/nervix-interconnect-ca.pem",
-                                tls_for_container.ca.clone(),
-                            )
-                            .with_copy_to(
-                                "/tmp/nervix-interconnect-node.pem",
-                                tls_for_container.certificate.clone(),
-                            )
-                            .with_copy_to(
-                                "/tmp/nervix-interconnect-node-key.pem",
-                                tls_for_container.private_key.clone(),
-                            )
-                            .with_env_var(
-                                "NERVIX_INIT_DEFAULT_USER_PASSWORD",
-                                password_for_container.clone(),
-                            )
-                            .with_env_var("RUST_LOG", "info")
-                            .with_cmd(server_args.clone())
-                            .with_startup_timeout(timeout)
-                    },
-                )
-                .await
-                .context("failed to start Nervix benchmark image")?;
+            let node_names = benchmark_node_names(node_count);
+            let container_names = node_names
+                .iter()
+                .map(|node| format!("nervix-benchmark-{}-{}", resolved.run_token, node.as_str()))
+                .collect::<Vec<_>>();
+            let tls = InterconnectTlsFiles::generate(
+                &resolved.run_directory.join("interconnect-tls"),
+                &cluster_id,
+                &node_names,
+                &container_names,
+            )?;
+            let bootstrap_addr = format!("{}:{NERVIX_INTERCONNECT_PORT}", container_names[0]);
+            let mut infos = Vec::with_capacity(node_count);
+            for index in 0..node_count {
+                tokio::task::consume_budget().await;
+                let node_id = node_names[index].clone();
+                let container_name = container_names[index].clone();
+                let server_args = container_server_arguments(
+                    &node_id,
+                    &cluster_id,
+                    &container_name,
+                    (index != 0).then_some(bootstrap_addr.as_str()),
+                );
+                let network = docker_network.to_string();
+                let password_for_container = password.clone();
+                let ca = tls.ca.clone();
+                let certificate = tls.nodes[index].certificate.clone();
+                let private_key = tls.nodes[index].private_key.clone();
+                let image_name = image_name.clone();
+                let image_tag = image_tag.clone();
+                let info = environment
+                    .start_generic(
+                        NERVIX_CONTAINER_ROLES[index],
+                        "Nervix benchmark image",
+                        ContainerReadiness::Running,
+                        &[NERVIX_GRPC_PORT, NERVIX_OBSERVABILITY_PORT],
+                        move || {
+                            GenericImage::new(image_name.clone(), image_tag.clone())
+                                .with_exposed_port(NERVIX_GRPC_PORT)
+                                .with_exposed_port(NERVIX_OBSERVABILITY_PORT)
+                                .with_wait_for(WaitFor::http(
+                                    HttpWaitStrategy::new("/readyz")
+                                        .with_port(NERVIX_OBSERVABILITY_PORT)
+                                        .with_expected_status_code(200_u16),
+                                ))
+                                .with_network(network.clone())
+                                .with_container_name(container_name.clone())
+                                .with_copy_to("/tmp/nervix-interconnect-ca.pem", ca.clone())
+                                .with_copy_to(
+                                    "/tmp/nervix-interconnect-node.pem",
+                                    certificate.clone(),
+                                )
+                                .with_copy_to(
+                                    "/tmp/nervix-interconnect-node-key.pem",
+                                    private_key.clone(),
+                                )
+                                .with_env_var(
+                                    "NERVIX_INIT_DEFAULT_USER_PASSWORD",
+                                    password_for_container.clone(),
+                                )
+                                .with_env_var("RUST_LOG", "info")
+                                .with_cmd(server_args.clone())
+                                .with_startup_timeout(timeout)
+                        },
+                    )
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to start Nervix benchmark image {}",
+                            node_id.as_str()
+                        )
+                    })?;
+                infos.push(info);
+            }
             write_image_identity(&resolved.run_directory, image).await?;
-            let grpc_port = info
+            let grpc_port = infos[0]
                 .host_port(NERVIX_GRPC_PORT)
                 .ok_or_else(|| anyhow!("Nervix image did not expose its gRPC port"))?;
-            let observability_port = info
-                .host_port(NERVIX_OBSERVABILITY_PORT)
-                .ok_or_else(|| anyhow!("Nervix image did not expose its observability port"))?;
+            let metrics_urls = infos
+                .iter()
+                .map(|info| {
+                    let observability_port =
+                        info.host_port(NERVIX_OBSERVABILITY_PORT).ok_or_else(|| {
+                            anyhow!("Nervix image did not expose its observability port")
+                        })?;
+                    reqwest::Url::parse(&format!("http://127.0.0.1:{observability_port}/metrics"))
+                        .context("failed to build a Nervix image metrics URL")
+                })
+                .collect::<Result<Vec<_>>>()?;
             Ok(Subject {
-                runtime: SubjectRuntime::Container { info },
+                runtime: SubjectRuntime::Container { infos },
                 control_url: Some(format!("http://127.0.0.1:{grpc_port}")),
-                metrics_url: Some(reqwest::Url::parse(&format!(
-                    "http://127.0.0.1:{observability_port}/metrics"
-                ))?),
+                metrics_urls,
                 password: Some(password),
+                node_count,
             })
         }
     }
@@ -966,10 +1060,11 @@ async fn start_container_subject(
         })?;
     write_image_identity(&resolved.run_directory, &implementation.image).await?;
     Ok(Subject {
-        runtime: SubjectRuntime::Container { info },
+        runtime: SubjectRuntime::Container { infos: vec![info] },
         control_url: None,
-        metrics_url: None,
+        metrics_urls: Vec::new(),
         password: None,
+        node_count: 1,
     })
 }
 
@@ -978,6 +1073,7 @@ impl Subject {
         &mut self,
         domain: &str,
         graph: &str,
+        after_start: Option<&str>,
         timeout: Duration,
         resolved: &ResolvedRun,
     ) -> Result<()> {
@@ -994,7 +1090,10 @@ impl Subject {
             }
             .await;
             match connection {
-                Ok((client, outcome)) if outcome.success => {
+                Ok((client, outcome))
+                    if outcome.success
+                        && cluster_status_is_ready(&outcome.message, self.node_count) =>
+                {
                     fs::write(
                         resolved.run_directory.join("cluster-status.txt"),
                         format!("{outcome:#?}\n"),
@@ -1006,7 +1105,9 @@ impl Subject {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
                 Ok((_, outcome)) => bail!(
-                    "Nervix control plane did not become ready: {}\ndiagnostics: {:?}",
+                    "Nervix control plane did not report all {} benchmark nodes: {}\ndiagnostics: \
+                     {:?}",
+                    self.node_count,
                     outcome.message,
                     outcome.diagnostics
                 ),
@@ -1033,7 +1134,16 @@ impl Subject {
             "START;",
             &resolved.run_directory.join("start-domain.txt"),
         )
-        .await
+        .await?;
+        if let Some(after_start) = after_start {
+            self.execute_graph_statements(
+                &client,
+                after_start,
+                &resolved.run_directory.join("after-start.txt"),
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// Submits the graph one statement at a time.
@@ -1115,10 +1225,15 @@ impl Subject {
     }
 
     fn ensure_running(&mut self) -> Result<()> {
-        if let SubjectRuntime::Local { child } = &mut self.runtime
-            && let Some(status) = child.try_wait()?
-        {
-            bail!("local nervix-server exited unexpectedly with {status}");
+        if let SubjectRuntime::Local { children } = &mut self.runtime {
+            for (index, child) in children.iter_mut().enumerate() {
+                if let Some(status) = child.try_wait()? {
+                    let node_number = index
+                        .checked_add(1)
+                        .assured("a benchmark cluster has at most three nodes");
+                    bail!("local Nervix node-{node_number} exited unexpectedly with {status}");
+                }
+            }
         }
         Ok(())
     }
@@ -1129,57 +1244,84 @@ impl Subject {
         run_directory: &Path,
         timeout: Duration,
     ) -> Result<()> {
-        let Some(metrics_url) = self.metrics_url.clone() else {
+        if self.metrics_urls.is_empty() {
             return Ok(());
-        };
+        }
         let client = reqwest::Client::builder()
             .timeout(timeout.min(Duration::from_secs(30)))
             .build()
             .context("failed to build the benchmark metrics client")?;
-        let response = client
-            .get(metrics_url.clone())
-            .send()
-            .await
-            .with_context(|| format!("failed to scrape Nervix metrics from {metrics_url}"))?
-            .error_for_status()
-            .with_context(|| format!("Nervix metrics scrape at {metrics_url} was unsuccessful"))?;
-        let prometheus = response
-            .text()
-            .await
-            .with_context(|| format!("failed to read Nervix metrics from {metrics_url}"))?;
+        let mut prometheus_scrapes = Vec::with_capacity(self.metrics_urls.len());
+        for metrics_url in &self.metrics_urls {
+            tokio::task::consume_budget().await;
+            let response = client
+                .get(metrics_url.clone())
+                .send()
+                .await
+                .with_context(|| format!("failed to scrape Nervix metrics from {metrics_url}"))?
+                .error_for_status()
+                .with_context(|| {
+                    format!("Nervix metrics scrape at {metrics_url} was unsuccessful")
+                })?;
+            let scrape = response
+                .text()
+                .await
+                .with_context(|| format!("failed to read Nervix metrics from {metrics_url}"))?;
+            prometheus_scrapes.push(scrape);
+        }
+        let prometheus = prometheus_scrapes.join("\n");
         fs::write(
             run_directory.join(NERVIX_METRICS_PROMETHEUS_FILE),
             &prometheus,
         )
         .context("failed to write the raw Nervix metrics scrape")?;
-        let report = NervixMetricsReport::from_prometheus(&prometheus, domain)
-            .context("failed to derive the Nervix benchmark metrics report")?;
+        let report = NervixMetricsReport::from_prometheus_scrapes(
+            prometheus_scrapes.iter().map(String::as_str),
+            domain,
+        )
+        .map_err(|report| {
+            anyhow!("failed to derive the Nervix benchmark metrics report: {report:?}")
+        })?;
         report
             .write(run_directory.join(NERVIX_METRICS_REPORT_FILE))
             .context("failed to write the Nervix benchmark metrics report")
     }
 
     async fn capture_logs(&self, run_directory: &Path) -> Result<()> {
-        let SubjectRuntime::Container { info } = &self.runtime else {
+        let SubjectRuntime::Container { infos } = &self.runtime else {
             return Ok(());
         };
-        let output = Command::new("docker")
-            .args(["logs", info.id()])
-            .output()
-            .await
-            .context("failed to collect benchmark container logs")?;
-        let mut logs = output.stdout;
-        logs.extend_from_slice(&output.stderr);
-        fs::write(run_directory.join("subject.log"), logs)?;
+        for (index, info) in infos.iter().enumerate() {
+            tokio::task::consume_budget().await;
+            let output = Command::new("docker")
+                .args(["logs", info.id()])
+                .output()
+                .await
+                .context("failed to collect benchmark container logs")?;
+            let mut logs = output.stdout;
+            logs.extend_from_slice(&output.stderr);
+            let node_number = index
+                .checked_add(1)
+                .assured("a benchmark cluster has at most three nodes");
+            let name = if infos.len() == 1 {
+                "subject.log".to_string()
+            } else {
+                format!("subject-node-{node_number}.log")
+            };
+            fs::write(run_directory.join(name), logs)?;
+        }
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<()> {
-        if let SubjectRuntime::Local { child } = &mut self.runtime
-            && child.try_wait()?.is_none()
-        {
-            child.start_kill()?;
-            child.wait().await?;
+        if let SubjectRuntime::Local { children } = &mut self.runtime {
+            for child in children.iter_mut().rev() {
+                tokio::task::consume_budget().await;
+                if child.try_wait()?.is_none() {
+                    child.start_kill()?;
+                    child.wait().await?;
+                }
+            }
         }
         Ok(())
     }
@@ -1328,12 +1470,19 @@ impl LocalPorts {
         })
     }
 
-    fn server_arguments(&self, tls: &InterconnectTlsFiles) -> Vec<String> {
-        vec![
+    fn server_arguments(
+        &self,
+        node_id: &ClusterNodeName,
+        cluster_id: &str,
+        ca: &Path,
+        tls: &InterconnectNodeTlsFiles,
+        bootstrap_addr: Option<&str>,
+    ) -> Vec<String> {
+        let mut arguments = vec![
             "--node-id".to_string(),
-            "node-1".to_string(),
+            node_id.as_str().to_string(),
             "--cluster-id".to_string(),
-            "default".to_string(),
+            cluster_id.to_string(),
             "--addr".to_string(),
             format!("127.0.0.1:{}", self.grpc),
             "--http-listen-addr".to_string(),
@@ -1349,42 +1498,184 @@ impl LocalPorts {
             "--interconnect-advertise-addr".to_string(),
             format!("127.0.0.1:{}", self.interconnect),
             "--interconnect-tls-ca".to_string(),
-            tls.ca.display().to_string(),
+            ca.display().to_string(),
             "--interconnect-tls-cert".to_string(),
             tls.certificate.display().to_string(),
             "--interconnect-tls-key".to_string(),
             tls.private_key.display().to_string(),
-            "--allow-bootstrap".to_string(),
-        ]
+        ];
+        match bootstrap_addr {
+            Some(bootstrap_addr) => {
+                arguments.push("--cluster-bootstrap-host".to_string());
+                arguments.push(bootstrap_addr.to_string());
+            }
+            None => arguments.push("--allow-bootstrap".to_string()),
+        }
+        arguments
     }
 }
 
 #[derive(Clone)]
 struct InterconnectTlsFiles {
     ca: PathBuf,
+    nodes: Vec<InterconnectNodeTlsFiles>,
+}
+
+#[derive(Clone)]
+struct InterconnectNodeTlsFiles {
     certificate: PathBuf,
     private_key: PathBuf,
 }
 
 impl InterconnectTlsFiles {
-    async fn generate(repository_root: &Path) -> Result<Self> {
-        let status = Command::new("bash")
-            .arg(repository_root.join("scripts/generate_dev_tls.sh"))
-            .current_dir(repository_root)
-            .status()
-            .await
-            .context("failed to generate development interconnect TLS identity")?;
+    fn generate(
+        directory: &Path,
+        cluster_id: &str,
+        node_ids: &[ClusterNodeName],
+        endpoint_names: &[String],
+    ) -> Result<Self> {
         ensure!(
-            status.success(),
-            "development interconnect TLS generation failed with {status}"
+            node_ids.len() == endpoint_names.len(),
+            "each benchmark node must have one TLS endpoint name"
         );
-        let directory = repository_root.join("tls/dev");
-        Ok(Self {
-            ca: directory.join("ca.pem"),
-            certificate: directory.join("node.pem"),
-            private_key: directory.join("node-key.pem"),
-        })
+        fs::create_dir_all(directory).with_context(|| {
+            format!(
+                "failed to create benchmark interconnect TLS directory {}",
+                directory.display()
+            )
+        })?;
+
+        let mut authority_parameters = CertificateParams::default();
+        authority_parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        authority_parameters.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+        ];
+        let authority_key = KeyPair::generate().context("failed to generate benchmark CA key")?;
+        let authority = authority_parameters
+            .self_signed(&authority_key)
+            .context("failed to generate benchmark CA certificate")?;
+        let ca = directory.join("ca.pem");
+        fs::write(&ca, authority.pem())?;
+
+        let mut nodes = Vec::with_capacity(node_ids.len());
+        for (node_id, endpoint_name) in node_ids.iter().zip(endpoint_names) {
+            let node_directory = directory.join(node_id.as_str());
+            fs::create_dir_all(&node_directory)?;
+            let mut parameters = CertificateParams::new(vec![
+                "localhost".to_string(),
+                "127.0.0.1".to_string(),
+                endpoint_name.clone(),
+            ])
+            .context("failed to prepare benchmark node certificate")?;
+            parameters.subject_alt_names.push(SanType::URI(
+                format!("nervix://cluster/{cluster_id}/node/{}", node_id.as_str())
+                    .try_into()
+                    .context("failed to construct benchmark node identity URI")?,
+            ));
+            parameters.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+            parameters.extended_key_usages = vec![
+                ExtendedKeyUsagePurpose::ServerAuth,
+                ExtendedKeyUsagePurpose::ClientAuth,
+            ];
+            let key = KeyPair::generate().context("failed to generate benchmark node key")?;
+            let certificate = parameters
+                .signed_by(&key, &authority, &authority_key)
+                .context("failed to sign benchmark node certificate")?;
+            let certificate_path = node_directory.join("node.pem");
+            let private_key_path = node_directory.join("node-key.pem");
+            fs::write(&certificate_path, certificate.pem())?;
+            fs::write(&private_key_path, key.serialize_pem())?;
+            nodes.push(InterconnectNodeTlsFiles {
+                certificate: certificate_path,
+                private_key: private_key_path,
+            });
+        }
+        Ok(Self { ca, nodes })
     }
+}
+
+fn benchmark_node_names(node_count: usize) -> Vec<ClusterNodeName> {
+    (1..=node_count)
+        .map(|node_number| {
+            ClusterNodeName::parse(&format!("node-{node_number}"))
+                .assured("numbers from one through three produce valid benchmark node names")
+        })
+        .collect()
+}
+
+fn container_server_arguments(
+    node_id: &ClusterNodeName,
+    cluster_id: &str,
+    container_name: &str,
+    bootstrap_addr: Option<&str>,
+) -> Vec<String> {
+    let mut arguments = vec![
+        "/usr/local/bin/nervix-server".to_string(),
+        "--node-id".to_string(),
+        node_id.as_str().to_string(),
+        "--cluster-id".to_string(),
+        cluster_id.to_string(),
+        "--addr".to_string(),
+        "0.0.0.0:47391".to_string(),
+        "--http-listen-addr".to_string(),
+        format!("0.0.0.0:{NERVIX_HTTP_PORT}"),
+        "--https-listen-addr".to_string(),
+        format!("0.0.0.0:{NERVIX_HTTPS_PORT}"),
+        "--observability-listen-addr".to_string(),
+        "0.0.0.0:9090".to_string(),
+        "--web-console-listen-addr".to_string(),
+        format!("0.0.0.0:{NERVIX_WEB_CONSOLE_PORT}"),
+        "--interconnect-listen-addr".to_string(),
+        format!("0.0.0.0:{NERVIX_INTERCONNECT_PORT}"),
+        "--interconnect-advertise-addr".to_string(),
+        format!("{container_name}:{NERVIX_INTERCONNECT_PORT}"),
+        "--interconnect-tls-ca".to_string(),
+        "/tmp/nervix-interconnect-ca.pem".to_string(),
+        "--interconnect-tls-cert".to_string(),
+        "/tmp/nervix-interconnect-node.pem".to_string(),
+        "--interconnect-tls-key".to_string(),
+        "/tmp/nervix-interconnect-node-key.pem".to_string(),
+    ];
+    match bootstrap_addr {
+        Some(bootstrap_addr) => {
+            arguments.push("--cluster-bootstrap-host".to_string());
+            arguments.push(bootstrap_addr.to_string());
+        }
+        None => arguments.push("--allow-bootstrap".to_string()),
+    }
+    arguments
+}
+
+fn cluster_status_is_ready(status: &str, expected: usize) -> bool {
+    let mut in_membership = false;
+    let mut voters = 0_usize;
+    let mut last_log_index = None;
+    let mut last_applied = None;
+    for line in status.lines() {
+        if let Some(value) = line.strip_prefix("raft.last_log_index: ") {
+            last_log_index = value.parse::<u64>().ok();
+        }
+        if let Some(value) = line.strip_prefix("raft.last_applied: ") {
+            last_applied = value.parse::<u64>().ok();
+        }
+        if line == "raft.membership:" {
+            in_membership = true;
+            continue;
+        }
+        if !in_membership {
+            continue;
+        }
+        if line.starts_with("- ") && line.contains(" [voter] ") {
+            voters = voters
+                .checked_add(1)
+                .assured("a benchmark cluster has at most three members");
+        } else {
+            in_membership = false;
+        }
+    }
+    voters == expected && last_log_index.is_some() && last_log_index == last_applied
 }
 
 async fn wait_for_local_nervix(
@@ -1435,6 +1726,9 @@ fn write_run_manifest(
         Implementation::Container(container) => ("container", Some(container.image.as_str())),
     };
     table.insert("subject".to_string(), subject.into());
+    if let Implementation::Nervix(nervix) = implementation {
+        table.insert("nervix_nodes".to_string(), i64::from(nervix.nodes).into());
+    }
     if let Some(image) = image {
         table.insert("image".to_string(), image.into());
     }
@@ -1560,6 +1854,11 @@ fn absolute_or_repository_path(repository_root: &Path, path: &Path) -> PathBuf {
 fn shape_arguments(shape: &LoadShape) -> Vec<String> {
     match shape {
         LoadShape::UniformPassthrough => vec!["uniform-passthrough".to_string()],
+        LoadShape::UniformFanout { outputs_per_input } => vec![
+            "uniform-fanout".to_string(),
+            "--outputs-per-input".to_string(),
+            outputs_per_input.to_string(),
+        ],
         LoadShape::KeyedWindowed {
             keys_per_cycle,
             retained_keys,

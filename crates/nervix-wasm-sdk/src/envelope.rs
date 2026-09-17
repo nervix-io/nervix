@@ -12,8 +12,9 @@ use crate::error::GuestError;
 
 /// One host input envelope: the Arrow IPC record batches plus the ACK sidecar.
 ///
-/// The raw envelope bytes stay owned so a processor can stash a batch and
-/// carry it inside its own saved state across snapshots.
+/// An input batch is execution state of the instance that received it. Its ACK tokens are only
+/// valid inside that instance, so a processor may buffer a batch between callbacks but never
+/// saves it: see [`crate::Processor::save_state`].
 #[derive(Debug, Clone)]
 pub struct InputBatch {
     bytes: Vec<u8>,
@@ -25,7 +26,7 @@ pub struct InputBatch {
 impl InputBatch {
     /// Decodes one size-prefixed input envelope, verifying the FlatBuffer and
     /// the Arrow IPC stream eagerly.
-    pub fn from_envelope_bytes(bytes: Vec<u8>) -> Result<Self, GuestError> {
+    pub(crate) fn from_envelope_bytes(bytes: Vec<u8>) -> Result<Self, GuestError> {
         let (arrow, acks) = {
             let EnvelopeRef::Input(input) = EnvelopeRef::decode(&bytes)? else {
                 return Err(GuestError::Protocol(ProtocolError::UnexpectedPayload {
@@ -52,16 +53,6 @@ impl InputBatch {
             acks,
             batches,
         })
-    }
-
-    /// Complete size-prefixed envelope bytes, restorable through
-    /// [`InputBatch::from_envelope_bytes`].
-    pub fn envelope_bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    pub fn into_envelope_bytes(self) -> Vec<u8> {
-        self.bytes
     }
 
     pub fn arrow_ipc(&self) -> &[u8] {
@@ -234,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn input_batch_decodes_envelope_and_keeps_restorable_bytes() {
+    fn input_batch_decodes_its_arrow_batches_and_ack_sidecar() {
         let arrow_ipc = sample_arrow_ipc(&[1, 2, 3]);
         let encoded = Envelope::Input {
             arrow_ipc_batch: arrow_ipc.clone(),
@@ -242,16 +233,12 @@ mod tests {
         }
         .encode();
 
-        let input = InputBatch::from_envelope_bytes(encoded.clone()).expect("must decode");
+        let input = InputBatch::from_envelope_bytes(encoded).expect("must decode");
 
         assert_eq!(input.arrow_ipc(), arrow_ipc.as_slice());
         assert_eq!(input.acks(), &sidecar());
         assert_eq!(input.row_count(), 3);
         assert_eq!(input.batches().len(), 1);
-        assert_eq!(input.envelope_bytes(), encoded.as_slice());
-        let restored =
-            InputBatch::from_envelope_bytes(input.into_envelope_bytes()).expect("must restore");
-        assert_eq!(restored.row_count(), 3);
     }
 
     #[test]

@@ -13,11 +13,13 @@ use std::{
 };
 
 use ahash::HashMap;
-use arc_swap::{ArcSwap, ArcSwapOption};
 use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, Reservation};
+use nervix_execution::{
+    BudgetedBuffer, ChargedBytes, Executor, Reservation,
+    sync::{ArcSwap, ArcSwapOption},
+};
 use nervix_models::{ClusterNodeIdentity, ClusterNodeName, CoordinationIdentity};
 use rkyv::{
     Archive, Deserialize, Serialize,

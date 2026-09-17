@@ -280,6 +280,18 @@ struct Histogram {
 }
 
 impl Histogram {
+    fn merge_max(&mut self, other: Self) {
+        for (upper_bound, count) in other.buckets {
+            self.buckets
+                .entry(upper_bound)
+                .and_modify(|current| *current = (*current).max(count))
+                .or_insert(count);
+        }
+        if let Some(count) = other.count {
+            self.count = Some(self.count.unwrap_or_default().max(count));
+        }
+    }
+
     fn insert_bucket(
         &mut self,
         metric: &'static str,
@@ -528,6 +540,13 @@ impl ScrapedMetrics {
         }
     }
 
+    fn merge_max(&mut self, other: Self) {
+        merge_counter_max(&mut self.messages_total, other.messages_total);
+        merge_counter_max(&mut self.batches_total, other.batches_total);
+        merge_histogram_max(&mut self.messages_per_batch, other.messages_per_batch);
+        merge_histogram_max(&mut self.relay_buffer_len, other.relay_buffer_len);
+    }
+
     fn into_report(self) -> Result<NervixMetricsReport, MetricsReportError> {
         for (key, batches) in &self.batches_total {
             if *batches > 0
@@ -638,6 +657,21 @@ impl NervixMetricsReport {
         ScrapedMetrics::parse(input, domain)?.into_report()
     }
 
+    pub fn from_prometheus_scrapes<'a>(
+        inputs: impl IntoIterator<Item = &'a str>,
+        domain: &str,
+    ) -> error_stack::Result<Self, MetricsReportError> {
+        let mut combined = ScrapedMetrics::default();
+        for input in inputs {
+            let scrape = ScrapedMetrics::parse(input, domain)?;
+            // Every node exposes zero-filled series for the complete graph as well as the local
+            // node's live counters. Select the greatest observation for each node-labelled series
+            // so a cluster scrape neither loses the owner nor counts its replicas more than once.
+            combined.merge_max(scrape);
+        }
+        Ok(combined.into_report()?)
+    }
+
     pub fn read(path: impl AsRef<Path>) -> Result<Self, MetricsReportError> {
         let path = path.as_ref();
         let contents = fs::read_to_string(path).map_err(|source| MetricsReportError::Read {
@@ -713,6 +747,24 @@ fn insert_counter(
         return Err(MetricsReportError::DuplicateSeries { metric, target });
     }
     Ok(())
+}
+
+fn merge_counter_max(counters: &mut BTreeMap<SeriesKey, u64>, other: BTreeMap<SeriesKey, u64>) {
+    for (key, value) in other {
+        counters
+            .entry(key)
+            .and_modify(|current| *current = (*current).max(value))
+            .or_insert(value);
+    }
+}
+
+fn merge_histogram_max(
+    histograms: &mut BTreeMap<SeriesKey, Histogram>,
+    other: BTreeMap<SeriesKey, Histogram>,
+) {
+    for (key, histogram) in other {
+        histograms.entry(key).or_default().merge_max(histogram);
+    }
 }
 
 fn metric_name(line: &str) -> &str {

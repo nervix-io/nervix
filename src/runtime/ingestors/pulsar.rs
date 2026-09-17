@@ -764,7 +764,7 @@ impl PulsarIngestor {
                                                     )
                                                     .await
                                                 {
-                                                    batch_failure = Some(error);
+                                                    batch_failure = Some(error.to_string());
                                                 }
 
                                                 if batch_failure.is_none() {
@@ -997,7 +997,7 @@ impl PulsarIngestor {
                     .await
                     .reported("nacking a pulsar message whose flush failed");
             }
-            return Err(Report::new(PulsarIngestorError::Flush).attach_printable(error));
+            return Err(error.change_context(PulsarIngestorError::Flush));
         }
 
         let mut first_error = None;

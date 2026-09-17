@@ -236,6 +236,9 @@ emitter_max_batch_size = "8MiB"
 [implementations.nervix]
 kind = "nervix"
 template = "nervix.nspl.upon"
+# Optional: start up to three Nervix nodes and run placement commands after START.
+nodes = 2
+after_start = "after-start.nspl.upon"
 
 [implementations.competitor]
 kind = "container"
@@ -251,13 +254,23 @@ Templates receive `kafka_bootstrap_servers`, `input_topic`, `output_topic`, `con
 integer `lanes` list resolved from the run's partition count, the manifest's `parameters`, and a
 `dependencies` map containing every started endpoint by its Cucumber key. Container
 implementations join Kafka's run-scoped Docker network; a local Nervix process receives Kafka's
-random host port instead.
+random host port instead. A multi-node Nervix implementation receives one certificate and state
+directory per node, waits for the complete Raft membership, starts the graph, and then submits its
+rendered `after_start` statements. This lets a workload establish remote placement before load
+generation without embedding benchmark-only behavior in the server.
 
 The typed dependency contract is Kafka-to-Kafka. The shared test-environment crate retains the
 other Cucumber dependency starters, but a workload using one of them needs a corresponding typed
 benchmark dependency before it is exposed in a manifest, and a workload whose output cardinality
-neither declared shape describes needs a new `[load.shape]` variant with its own exact parity
-arithmetic.
+none of the declared shapes describes needs a new `[load.shape]` variant with its own exact parity
+arithmetic. `uniform-passthrough` expects one output per input, `uniform-fanout` declares an
+`outputs_per_input` multiplier, and `keyed-windowed` declares its complete cycle and retained
+output count.
+
+The `hot-path-ingest`, `hot-path-relay-fanout`, `hot-path-remote-delivery`, and
+`hot-path-processor` workloads use `--partitions` as the number of concurrent publishers. The
+remote-delivery workload starts two nodes and pins its ingestors and destination relay on opposite
+nodes. Run them with 1, 4, and 16 partitions to reproduce the contentionless data-plane matrix.
 
 ## Results
 
@@ -267,8 +280,9 @@ Every run writes to:
 target/benchmarks/<workload>/<implementation>/<run-id>/
 ```
 
-Artifacts include the resolved parameters, rendered configuration, subject log, image identity for
-container runs, load-driver log, and the count/rate report. `output-diagnostics.json` retains final
+Artifacts include the resolved parameters, rendered configuration, post-start statements when
+declared, one subject log per node, image identity for container runs, load-driver log, and the
+count/rate report. `output-diagnostics.json` retains final
 per-partition counts and, for windowed output, the last 32 summaries with their Kafka partition and
 offset. `container-diagnostics/` retains inspect output, a final resource snapshot, and logs for
 Kafka and container subjects. A Nervix run attempts the end-of-run `/metrics` scrape even after a

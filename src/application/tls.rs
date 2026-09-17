@@ -279,33 +279,10 @@ fn map_pem_error_to_string(error: PemError) -> String {
 }
 
 impl SessionServiceImpl {
-    pub(in crate::application) async fn start_http_tls_resource_observer(
-        &self,
-        shutdown: CancellationToken,
-    ) -> tokio::task::JoinHandle<()> {
-        let mut resources = self.inner.consensus.subscribe_resources();
+    pub(in crate::application) async fn initialize_http_tls_server_config(&self) {
         if let Err(error) = self.refresh_http_tls_server_config().await {
             self.broadcast_error(format!("failed to refresh HTTP TLS config: {error}"));
         }
-        let service = self.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
-                    _ = shutdown.cancelled() => break,
-                    changed = resources.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                        if let Err(error) = service.refresh_http_tls_server_config().await {
-                            service.broadcast_error(format!(
-                                "failed to refresh HTTP TLS config after a resource change: {error}"
-                            ));
-                        }
-                    }
-                }
-            }
-        })
     }
 
     /// Rebuilds the server TLS resolver from the resource version every TLS VHOST pins.

@@ -31,8 +31,8 @@ The guest imports these functions from the `env` module:
 | `nervix_on_timeout` | `(handle: i64) -> i32` | Host callback when a previously requested timeout fires. |
 | `nervix_flush` | `() -> i32` | Host request to release everything the guest still buffers because the branch is being quiesced for a handoff or shutdown. Queue every buffered output envelope for `nervix_read_emit`. Input the guest keeps past this call stays unacknowledged until the branch resumes. |
 | `nervix_read_emit` | `() -> i32` | If the guest has a pending outgoing batch envelope, writes the next envelope into the reusable buffer, removes it from the pending emit queue, and returns the byte size. Returns `0` when nothing is pending. |
-| `nervix_dump_state` | `() -> i32` | Serializes guest state into the reusable buffer and returns the byte size, or a negative code when it cannot serialize the state. |
-| `nervix_load_state` | `(ptr: i32, size: i32) -> i32` | Loads previously dumped guest state bytes. Returns `-7` or `-8` when it rejects the saved state, and another negative code when restoring fails for any other reason. |
+| `nervix_dump_state` | `() -> i32` | Serializes the guest's durable computation state into the reusable buffer and returns the byte size, or a negative code when it cannot serialize the state. The host keeps the state saved last when a save fails. |
+| `nervix_load_state` | `(ptr: i32, size: i32) -> i32` | Loads previously dumped guest state bytes into an instance the host initialized with `nervix_init`. Returns `-7` or `-8` when it rejects the saved state, and another negative code when restoring fails for any other reason. |
 | `nervix_reset_state` | `() -> i32` | Clears guest-owned state while keeping the reusable buffer. |
 
 Return code `0` means success. Negative return codes are guest errors:
@@ -181,8 +181,7 @@ the configured guest-buffer limit.
 
 This FlatBuffers format completely replaces the former CBOR envelope. There is
 no format negotiation or legacy decoder. Guests must be rebuilt with the
-current schema. A snapshot containing a pending old-format envelope is rejected
-during guest-state restoration.
+current schema.
 
 Global errors are not part of the ACK sidecar. They are guest/node state and use
 a separate optional export channel:
@@ -214,15 +213,17 @@ the upstream ingestor reacts according to its delivery mode and retry policy.
 WASM guest state is separate from ACK state. The runtime persists and replicates
 the guest-owned bytes returned from `nervix_dump_state`, then restores them with
 `nervix_load_state` when a branch instance is recreated. A guest that cannot
-decode the snapshot envelope returns `-7`; a guest that decodes it but refuses
-the state it carries returns `-8`. Both example guests put the reason on the
-global-error channel before returning either code.
+decode the snapshot envelope, or that finds it was taken under a different
+branch configuration, returns `-7`; a guest that decodes it but refuses the
+application state it carries returns `-8`. Both example guests put the reason
+on the global-error channel before returning either code.
 
 ## Init Payload
 
-`nervix_init` receives a `BranchInit` FlatBuffer message. Bundled guests retain
-the exact bytes for snapshots and use zero-copy FlatBuffers accessors to read
-the input and output schemas needed to construct column descriptors.
+`nervix_init` receives a `BranchInit` FlatBuffer message. Bundled guests keep
+the branch configuration it describes for their snapshots and use zero-copy
+FlatBuffers accessors to read the input and output schemas needed to construct
+column descriptors.
 
 The shape is:
 
@@ -259,30 +260,40 @@ WasmProcessorSchema {
 The host integration converts Nervix model schemas into this contract before
 encoding the init payload.
 
-## Prototype State
+## Guest State
 
 Both example guests serialize their branch-local state as the `GuestSnapshot`
-variant of the same size-prefixed FlatBuffers `Message` union. The Go guest
-fills the prototype fields directly:
+variant of the same size-prefixed FlatBuffers `Message` union. A snapshot holds
+two byte vectors:
 
-- processed batch count
-- processed row count
-- pending batch start row
-- last observed domain time
-- last timeout handle
-- pending batch envelope
-- opaque init metadata
+- `init_metadata`: a `BranchInit` message of the branch configuration the
+  instance was initialized with. A restore decodes it and rejects the snapshot
+  with `-7` unless it describes the same branch configuration as the instance
+  being restored.
+- `application_state`: the guest's durable computation state.
 
-The Rust guest is built on the `nervix-wasm-sdk` crate. The SDK owns the
-`GuestSnapshot` framework fields (counters, last observed domain time, last
-timeout handle, init metadata, and error state) and persists the processor's
-own counters and pending input envelope opaquely inside `saved_state`. SDK
-snapshots keep `pending_batch` empty and reject snapshots that carry
-prototype pending-batch bytes.
+The durable computation state of both examples is the processed row count,
+encoded as eight little-endian bytes, which a restore requires exactly. The
+batch a guest still buffers, its ACK tokens and input-column references, output
+it has not emitted, and timeout handles belong to the live instance and are
+never saved. A guest releases its buffered batch on `nervix_flush` and requests
+its flush timeout each time it starts buffering a batch, so a restored instance
+holds no timeout until it buffers input again.
 
-Filtering uses `processed row count` as a global row ordinal. Rows with even
+The Rust guest is built on the `nervix-wasm-sdk` crate, which owns the
+`GuestSnapshot` envelope: the processor returns its application state from
+`save_state` and receives it back in `restore`. The Go guest encodes the same
+envelope directly.
+
+Filtering uses the processed row count as a global row ordinal. Rows with even
 global ordinals are preserved and rows with odd global ordinals are dropped, so
 state restoration changes subsequent keep/drop decisions. Preserved rows carry
 their complete input row sidecars, including `source_token`, and unchanged
 fields are emitted as input-column references. Dropped rows are listed in the
 emitted envelope's `acked` sidecar.
+
+Sentinel first values exercise the error paths in both guests: `-100` routes a
+message error, `-200` reports a global error, `-300` fails the batch with a
+guest error, and `-400` is filtered like any other value but leaves the guest
+unable to serialize its state, so every later `nervix_dump_state` fails with the
+reason on the global-error channel.

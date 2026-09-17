@@ -30,6 +30,7 @@
 mod cancellation;
 mod limits;
 mod memory;
+pub mod sync;
 mod workers;
 
 use std::sync::Arc as StdArc;

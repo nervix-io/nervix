@@ -383,37 +383,66 @@ pub(super) struct RelayStateTask {
     pub(super) task: JoinHandle<()>,
 }
 
+#[derive(Debug, Clone, Copy, strum::Display)]
+pub(super) enum RelayTaskKind {
+    #[strum(serialize = "relay state")]
+    State,
+    #[strum(serialize = "relay owner")]
+    Owner,
+}
+
+#[derive(Debug, Error)]
+pub(super) enum RelayTaskStopError {
+    #[error("{task} task failed")]
+    Join { task: RelayTaskKind },
+    #[error("{task} task did not drain within {grace:?}")]
+    DrainTimeout {
+        task: RelayTaskKind,
+        grace: Duration,
+    },
+}
+
 impl RelayStateTask {
-    pub(super) async fn stop(mut self, grace: Duration) -> Result<(), String> {
+    pub(super) async fn stop(
+        mut self,
+        grace: Duration,
+    ) -> error_stack::Result<(), RelayTaskStopError> {
         self.shutdown.send_replace(true);
         match tokio::time::timeout(grace, &mut self.task).await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(format!("relay state task failed: {error}")),
+            Ok(Err(error)) => Err(Report::new(error).change_context(RelayTaskStopError::Join {
+                task: RelayTaskKind::State,
+            })),
             Err(_) => {
                 self.task.abort();
                 self.task.join_after_shutdown("relay state").await;
-                Err(format!(
-                    "relay state task did not drain within {}",
-                    humantime::format_duration(grace)
-                ))
+                Err(Report::new(RelayTaskStopError::DrainTimeout {
+                    task: RelayTaskKind::State,
+                    grace,
+                }))
             }
         }
     }
 }
 
 impl RelayOwnerTask {
-    pub(super) async fn stop(mut self, grace: Duration) -> Result<(), String> {
+    pub(super) async fn stop(
+        mut self,
+        grace: Duration,
+    ) -> error_stack::Result<(), RelayTaskStopError> {
         self.shutdown.send_replace(true);
         match tokio::time::timeout(grace, &mut self.task).await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(format!("relay owner task failed: {error}")),
+            Ok(Err(error)) => Err(Report::new(error).change_context(RelayTaskStopError::Join {
+                task: RelayTaskKind::Owner,
+            })),
             Err(_) => {
                 self.task.abort();
                 self.task.join_after_shutdown("relay owner").await;
-                Err(format!(
-                    "relay owner task did not drain within {}",
-                    humantime::format_duration(grace)
-                ))
+                Err(Report::new(RelayTaskStopError::DrainTimeout {
+                    task: RelayTaskKind::Owner,
+                    grace,
+                }))
             }
         }
     }
@@ -501,6 +530,10 @@ impl RelayConsumerFanout {
 
     pub(super) fn dispatch_gate(&self) -> Arc<RelayDispatchGate> {
         self.dispatch_gate.clone()
+    }
+
+    pub(super) fn dispatch_is_fenced(&self) -> bool {
+        self.dispatch_gate.is_engaged()
     }
 
     pub(super) fn runtime_consumer_buffer_len(&self) -> usize {
@@ -715,6 +748,13 @@ impl RelayBoundaryFanout {
         match self {
             Self::Direct(fanout) => fanout.dispatch_gate(),
             Self::BranchCollapse(branch_collapse) => branch_collapse.fanout.dispatch_gate(),
+        }
+    }
+
+    pub(super) fn dispatch_is_fenced(&self) -> bool {
+        match self {
+            Self::Direct(fanout) => fanout.dispatch_is_fenced(),
+            Self::BranchCollapse(branch_collapse) => branch_collapse.fanout.dispatch_is_fenced(),
         }
     }
 
@@ -953,6 +993,10 @@ impl RelayBoundaryServices {
         self.owner_node.store(owner_node.map(StdArc::new));
     }
 
+    pub(super) fn dispatch_is_fenced(&self) -> bool {
+        self.fanout.dispatch_is_fenced()
+    }
+
     pub(super) fn is_owned_by(&self, node_id: Option<&ClusterNodeName>) -> bool {
         let owner_node = self.owner_node.load();
         owner_node
@@ -989,13 +1033,21 @@ impl RelayBoundaryServices {
         kind: RelayPayloadKind,
         branch: &Option<BranchKey>,
     ) -> Arc<RelayOutboundSlot> {
+        // Remote destinations are stable for the lifetime of a published routing snapshot. Avoid
+        // taking the shard's exclusive `entry` path for every batch after the channel has been
+        // installed. Name and branch clones here only increment their shared allocations; the
+        // miss path owns the one key that enters the map.
+        let channel = RelayOutboundChannel {
+            node_id: node_id.clone(),
+            relay: relay.clone(),
+            kind,
+            branch: branch.clone(),
+        };
+        if let Some(existing) = self.outbound_slots.get(&channel) {
+            return existing.clone();
+        }
         self.outbound_slots
-            .entry(RelayOutboundChannel {
-                node_id: node_id.clone(),
-                relay: relay.clone(),
-                kind,
-                branch: branch.clone(),
-            })
+            .entry(channel)
             .or_insert_with(|| Arc::new(RelayOutboundSlot::new()))
             .clone()
     }
@@ -1878,7 +1930,7 @@ impl Runtime {
                 let messages = match batch.try_into_messages() {
                     Ok(messages) => messages,
                     Err(error_and_batch) => {
-                        let (error, _) = *error_and_batch;
+                        let error = error_and_batch.error;
                         warn!(
                             domain = domain.as_str(),
                             relay = relay.as_str(),

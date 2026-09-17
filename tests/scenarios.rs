@@ -2197,25 +2197,18 @@ impl IngestorLogicTransportFixture {
             }
             Self::Kafka => {
                 let topic = expand_placeholders(world, "logic_notifications_{{test_id}}");
-                let deadline = Instant::now() + Duration::from_secs(5);
-                loop {
-                    tokio::task::consume_budget().await;
-                    world
-                        .cluster()
-                        .publish_kafka_with_headers(&topic, payload, &headers)
-                        .await
-                        .expect("failed to publish ingestor logic kafka payload with headers");
-                    if try_capture_any_subscription_payload(world, Duration::from_millis(500)).await
-                    {
-                        return;
-                    }
-                    assert!(
-                        Instant::now() < deadline,
-                        "timed out waiting for ingestor logic kafka payload with headers to reach \
-                         the relay subscription"
-                    );
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
+                world
+                    .cluster()
+                    .publish_kafka_with_headers(&topic, payload, &headers)
+                    .await
+                    .expect("failed to publish ingestor logic kafka payload with headers");
+                let delivered =
+                    try_capture_any_subscription_payload(world, Duration::from_secs(5)).await;
+                assert!(
+                    delivered,
+                    "timed out waiting for ingestor logic kafka payload with headers to reach the \
+                     relay subscription"
+                );
             }
             Self::Nats => {
                 let subject = expand_placeholders(world, "logic_notifications_{{test_id}}");
@@ -14727,6 +14720,30 @@ async fn when_https_payload_is_posted(
         .expect("failed to post https payload");
 }
 
+#[then(
+    expr = "the leader HTTPS listener for host {string} presents the certificate from resource \
+            directory {string}"
+)]
+async fn then_leader_https_listener_presents_resource_certificate(
+    world: &mut ScenarioWorld,
+    host: String,
+    resource_directory: String,
+) {
+    let host = expand_placeholders(world, &host);
+    let ca_pem = resource_directory_ca_pem(world, &resource_directory);
+    let leader = current_leader_node(world).await;
+    world
+        .cluster()
+        .connect_https(&leader, &host, &ca_pem)
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "leader '{leader}' did not present the certificate trusted by resource directory \
+                 '{resource_directory}' for host '{host}': {error}"
+            )
+        });
+}
+
 #[when(expr = "http payload is posted to node {string} with host {string} path {string}")]
 async fn when_http_payload_is_posted_to_node(
     world: &mut ScenarioWorld,
@@ -16406,6 +16423,49 @@ async fn then_within_duration_the_active_session_observes_a_server_error(
         event.level, event.message
     ));
     world.last_server_error = Some(event.message);
+}
+
+/// Waits for the server error that carries the docstring, passing over the errors reported before
+/// it. A failing guest may report further errors from later callbacks on the same instance, so the
+/// next error is not necessarily the one the scenario expects.
+#[then(expr = "within {string} the active session observes a server error containing")]
+async fn then_within_duration_the_active_session_observes_a_server_error_containing(
+    world: &mut ScenarioWorld,
+    duration: String,
+    #[step] step: &Step,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let expected = expand_placeholders(world, docstring(step).trim());
+    let session = world
+        .active_session
+        .as_mut()
+        .expect("an active session must exist");
+    let deadline = Instant::now() + duration;
+    let mut passed_over = Vec::new();
+    loop {
+        tokio::task::consume_budget().await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let event = session
+            .try_next_server_error(remaining)
+            .await
+            .expect("failed while waiting for server error");
+        let Some(event) = event else {
+            panic!(
+                "timed out waiting for a server error containing {expected:?} within \
+                 {duration:?}; passed over: {passed_over:?}"
+            );
+        };
+        append_cucumber_log_line(&format!(
+            "observed runtime server error level={} message={}",
+            event.level, event.message
+        ));
+        if event.message.contains(&expected) {
+            world.last_server_error = Some(event.message);
+            return;
+        }
+        passed_over.push(event.message);
+    }
 }
 
 #[then("the last server error contains")]

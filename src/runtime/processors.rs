@@ -37,7 +37,7 @@ use super::{
     ReplicatedWasmProcessorState, ReplicatedWindowProcessorState, RuntimeFlushPolicy,
     RuntimeInputCollectPolicy, RuntimeInputCollector, SharedActiveGraph, WasmLiveInstance,
     WindowProcessorState, branch_key_display, inferencer::OnnxInferencerSession,
-    relay_batch::RelayRecordBatchReorderError,
+    relay_batch::RelayRecordBatchError,
 };
 use crate::{
     registry::ActiveGraph,
@@ -1088,10 +1088,14 @@ pub(super) enum ReordererOutputBatchError {
     RowCountOverflow,
     #[error("cannot order an empty reorderer output buffer")]
     Empty,
-    #[error("failed to concatenate buffered reorderer batches: {reason}")]
-    Concatenate { reason: String },
-    #[error(transparent)]
-    Reorder(#[from] RelayRecordBatchReorderError),
+    #[error("failed to concatenate buffered reorderer batches: {report}")]
+    Concatenate {
+        report: Report<RelayRecordBatchError>,
+    },
+    #[error("failed to reorder the buffered relay batch: {report}")]
+    Reorder {
+        report: Report<RelayRecordBatchError>,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1208,10 +1212,12 @@ impl ReordererOutputBuffer {
         let concatenated = match RelayRecordBatch::concat_preserving(batches) {
             Ok(concatenated) => concatenated,
             Err(failure) => {
-                let (reason, batches) = *failure;
+                let failure = *failure;
                 return Err(Box::new(ReordererOutputBatchFailure {
-                    error: ReordererOutputBatchError::Concatenate { reason },
-                    batches,
+                    error: ReordererOutputBatchError::Concatenate {
+                        report: failure.error,
+                    },
+                    batches: failure.preserved,
                 }));
             }
         };
@@ -1223,7 +1229,9 @@ impl ReordererOutputBuffer {
             Err(failure) => {
                 let failure = *failure;
                 Err(Box::new(ReordererOutputBatchFailure {
-                    error: failure.error.into(),
+                    error: ReordererOutputBatchError::Reorder {
+                        report: failure.error,
+                    },
                     batches: vec![failure.batch],
                 }))
             }

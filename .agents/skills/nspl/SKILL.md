@@ -169,6 +169,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   a zero divisor, and a float or math result that is NaN or infinite fail only that message with a
   per-message error. Give a route whose operands can reach those values an `ON MESSAGE ERROR`
   policy, and cast to a wider type before arithmetic that can exceed the narrower one.
+- Expect `round(x, digits)` to round a float's stored binary value exactly, so `round(2.675, 2)` is
+  `2.67`. Test for NaN and infinities with `is_nan`, `is_finite`, and `is_infinite`, which accept
+  only `F32` and `F64`. Give `bitwise_and`, `bitwise_or`, and `bitwise_xor` two arguments of one
+  integer type, and treat shifts as checked: a negative count, or a `shift_left` whose product does
+  not fit the value's type, fails that message.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Declare datetime encoding explicitly when required.
 - For every JAQ-backed codec, use `WITH JAQ TRANSFORMATIONS` and declare `ON INGESTION`,
@@ -240,6 +245,14 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - Require `WITH MAX BATCH <positive_n>` for ClickHouse, Postgres, MySQL, and MongoDB emitters. For
   SQS, use `FIFO GROUP FROM BRANCH|<string_expression>` exactly when the externally provisioned
   queue name ends in `.fifo`; `FROM BRANCH` requires branched input.
+- Give every client resource mount an explicit `MOUNT <resource> VERSION <u64>|LATEST` clause. Put
+  database pool bounds before the mount, and keep a WebSocket client's `WITH SIGNALING PROTOCOL`
+  clause before the mount. `LATEST` is resolved when the statement is applied; the stored client
+  and `SHOW CREATE CLIENT` contain the resulting number, so later uploads and restarts do not move
+  the mount.
+- Give every hash map an explicit `FROM RESOURCE <resource> VERSION <u64>|LATEST` clause. `LATEST`
+  is resolved when the statement is applied, and the stored hash map and `SHOW CREATE HASH MAP`
+  contain the resulting number.
 - Declare connection-pool bounds on every `POSTGRES`, `MYSQL`, `MONGODB`, and `REDIS` client, after
   `TYPE` and before an optional `MOUNT`: `POOL SIZE MIN <u32> MAX <positive_u32>`, in that order,
   with the minimum no greater than the maximum. The clause is required even when only ingestors

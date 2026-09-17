@@ -18,16 +18,15 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use arc_swap::{ArcSwap, Guard};
 use async_trait::async_trait;
 use chitchat::{
     Chitchat, ChitchatHandle, ChitchatId, ChitchatMessage, Deserializable as _, NodeState,
     Serializable as _, spawn_chitchat,
     transport::{Socket as GossipSocket, Transport as GossipTransport},
 };
-use dashmap::DashMap;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{GossipNode, GossipState};
+use nervix_execution::sync::{ArcSwap, DashMap, Guard};
 use nervix_interconnect::{
     ApplicationRevisionResponse, InterconnectRequest, PeerTarget, PoolClass, RequestContext,
     RequestSubquota, Transport as InterconnectTransport,
@@ -36,11 +35,15 @@ use nervix_models::{ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName
 use nervix_recovery::Discarded as _;
 use parking_lot::Mutex;
 use rkyv::{Archive, Deserialize, Serialize};
+#[cfg(not(feature = "shuttle"))]
+use tokio as chitchat_tokio;
 use tokio::{
     net::lookup_host,
     sync::{broadcast, mpsc, watch},
     task::JoinHandle,
 };
+#[cfg(feature = "shuttle")]
+use tokio_real as chitchat_tokio;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -66,7 +69,7 @@ const MAX_GOSSIP_MESSAGE_BYTES: usize = 60 * 1024;
 
 pub struct ClusterHandle {
     local_incarnation: nervix_models::ClusterNodeIncarnation,
-    chitchat: Arc<tokio::sync::Mutex<Chitchat>>,
+    chitchat: Arc<chitchat_tokio::sync::Mutex<Chitchat>>,
     /// The membership task owns the other reference and replaces this snapshot whenever the
     /// Chitchat live-node state watcher changes.
     subscription_interest: Arc<SubscriptionInterestPublication>,
@@ -700,7 +703,7 @@ impl PeerHealthStateWatcher {
 /// retained-input change. The watcher owns that deadline so consumers can re-evaluate cluster state
 /// without sampling it on an interval.
 pub(crate) struct ClusterStateWatcher {
-    live_node_states: watch::Receiver<BTreeMap<ChitchatId, NodeState>>,
+    live_node_states: chitchat_tokio::sync::watch::Receiver<BTreeMap<ChitchatId, NodeState>>,
     peer_health_state: PeerHealthStateWatcher,
 }
 
@@ -1255,7 +1258,7 @@ impl ClusterHandle {
 
     pub(crate) async fn subscribe_live_node_states(
         &self,
-    ) -> watch::Receiver<BTreeMap<ChitchatId, NodeState>> {
+    ) -> chitchat_tokio::sync::watch::Receiver<BTreeMap<ChitchatId, NodeState>> {
         self.chitchat.lock().await.live_nodes_watcher()
     }
 
@@ -2157,7 +2160,8 @@ mod tests {
     #[tokio::test]
     async fn cluster_state_watcher_observes_a_health_target_change_after_wait_preparation() {
         let observation_freshness = Duration::from_secs(10);
-        let (_live_state, live_state_receiver) = watch::channel(BTreeMap::new());
+        let (_live_state, live_state_receiver) =
+            chitchat_tokio::sync::watch::channel(BTreeMap::new());
         let (peer_health_state, peer_health_state_receiver) =
             watch::channel(PeerHealthStateSnapshot::default());
         let mut watcher = ClusterStateWatcher {

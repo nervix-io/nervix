@@ -1,6 +1,6 @@
 use error_stack::ResultExt as _;
 
-use super::*;
+use super::{state_snapshot_exchange::MaterializedSnapshotExchangeError, *};
 
 #[derive(Debug, Error)]
 pub(crate) enum MaterializedReadError {
@@ -65,6 +65,26 @@ pub(crate) enum MaterializedReadError {
     },
     #[error("failed to render a materialized record")]
     RecordReport { branch: Option<BranchKey> },
+}
+
+impl MaterializedReadError {
+    fn from_remote_snapshot_result(
+        result: error_stack::Result<
+            Option<RestoredMaterializedSnapshot>,
+            MaterializedSnapshotExchangeError,
+        >,
+        target_node_id: &ClusterNodeName,
+        placement: RuntimeStatePlacement,
+    ) -> error_stack::Result<Option<RestoredMaterializedSnapshot>, Self> {
+        match result {
+            Ok(restored) => Ok(restored),
+            Err(error) if error.current_context().is_between_assignments() => Ok(None),
+            Err(error) => Err(error.change_context(Self::RemoteSnapshot {
+                target: target_node_id.clone(),
+                placement,
+            })),
+        }
+    }
 }
 
 pub(super) struct MaterializedRelayRead<'a> {
@@ -377,6 +397,17 @@ impl Runtime {
             }
             MaterializedLookupKeyMode::Root => None,
         };
+        // The schedule can publish a materialized relay's destination before that destination
+        // activates its prepared state. The ownership gate already fences records headed to the
+        // relay across that interval; dependency reads observe the same fence so a REQUIRED WAIT
+        // batch remains parked instead of racing a snapshot transfer against activation.
+        if routing
+            .relay_services
+            .get(relay)
+            .is_some_and(|services| services.dispatch_is_fenced())
+        {
+            return Ok(None);
+        }
         let owner = routing
             .materialized_stream_owner_nodes
             .get(relay)
@@ -591,14 +622,13 @@ impl Runtime {
             relay,
             None,
         );
-        let Some(restored) = self
-            .fetch_sealed_materialized_snapshot(target_node_id, &placement, schema, None)
-            .await
-            .change_context(MaterializedReadError::RemoteSnapshot {
-                target: target_node_id.clone(),
-                placement: placement.clone(),
-            })?
-        else {
+        let restored = MaterializedReadError::from_remote_snapshot_result(
+            self.fetch_sealed_materialized_snapshot(target_node_id, &placement, schema, None)
+                .await,
+            target_node_id,
+            placement,
+        )?;
+        let Some(restored) = restored else {
             return Ok(None);
         };
         Ok(restored
@@ -928,7 +958,8 @@ mod tests {
     use std::sync::Arc as StdArc;
 
     use ahash::HashMap;
-    use arc_swap::ArcSwapOption;
+    use nervix_execution::sync::ArcSwapOption;
+    use nervix_interconnect::{RemoteOperationFailure, RemoteOperationSubject};
     use nervix_models::{Assignment, AssignmentTarget, DomainSchedule, Expression, ParseAsType};
     use tokio::{
         sync::watch,
@@ -940,6 +971,71 @@ mod tests {
         runtime_ack::{AckOutcome, AckSet},
         runtime_schema::{RuntimeRecordMetadata, RuntimeValue},
     };
+
+    #[test]
+    fn remote_materialized_read_distinguishes_assignment_gaps_from_failures() {
+        let target = ClusterNodeName::parse("node-1").expect("the test node name is valid");
+        let domain = domain("default");
+        let relay = named::<RelayName>("profiles");
+        let runtime = Runtime::default();
+        let placement = runtime.state_placement(
+            &domain,
+            RuntimeStateKind::MaterializedRelay,
+            ModelKind::Relay,
+            &relay,
+            None,
+        );
+
+        assert!(
+            MaterializedReadError::from_remote_snapshot_result(
+                Ok(None),
+                &target,
+                placement.clone(),
+            )
+            .expect("successful materialized-state absence remains absence")
+            .is_none()
+        );
+
+        let failure = MaterializedReadError::from_remote_snapshot_result(
+            Err(Report::new(
+                MaterializedSnapshotExchangeError::DispatcherUnavailable {
+                    target: target.clone(),
+                    placement: placement.clone(),
+                },
+            )),
+            &target,
+            placement.clone(),
+        )
+        .expect_err("a runtime outside a cluster cannot fetch remote materialized state");
+        assert!(matches!(
+            failure.current_context(),
+            MaterializedReadError::RemoteSnapshot {
+                target: failed_target,
+                placement,
+            } if failed_target == &target
+                && placement.domain == domain
+                && placement.identifier == ModelName::from(&relay)
+        ));
+
+        assert!(
+            MaterializedReadError::from_remote_snapshot_result(
+                Err(Report::new(
+                    MaterializedSnapshotExchangeError::RemoteFailure {
+                        target: target.clone(),
+                        placement: placement.clone(),
+                        failure: RemoteOperationFailure::not_ready(RemoteOperationSubject::state(
+                            &placement.to_remote(),
+                        )),
+                    }
+                )),
+                &target,
+                placement,
+            )
+            .expect("an assignment gap is ordinary materialized-state absence")
+            .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_order() {
         let runtime = Runtime::default();

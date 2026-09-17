@@ -15,9 +15,9 @@ use std::{
     time::Duration,
 };
 
-use arc_swap::ArcSwap;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_execution::sync::ArcSwap;
 #[cfg(test)]
 use nervix_models::DomainTick;
 use nervix_models::{
