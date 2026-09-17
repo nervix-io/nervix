@@ -77,7 +77,7 @@ Feature: Model alteration quiesce classification
       COMMIT;
       """
     Then node "node-1" eventually reports status containing "{{domain}} status=Paused"
-    When these NSPL commands fail with "already has a model alteration in progress"
+    When these NSPL commands fail with "domain '{{domain}}' mutation is owned by transaction"
       """
       ALTER RELAY alter_events SET CAPACITY 4;
       """
