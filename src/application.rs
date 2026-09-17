@@ -1121,7 +1121,10 @@ impl Application {
                             && !orphaned_alter_committing_domains.contains(&domain)
                             && !runtime_for_reconcile.domain_alter_is_active(&domain)
                         {
-                            match consensus_for_reconcile.resume_domain(domain.clone()).await {
+                            match consensus_for_reconcile
+                                .resume_domain(domain.clone(), None)
+                                .await
+                            {
                                 Ok(()) => {
                                     info!(
                                         domain = domain.as_str(),
@@ -1676,7 +1679,6 @@ impl Application {
                 transaction_bindings: DashMap::with_hasher(RandomState::new()),
                 command_executions: DashMap::with_hasher(RandomState::new()),
                 transaction_executions: DashMap::with_hasher(RandomState::new()),
-                transaction_domain_executions: DashMap::with_hasher(RandomState::new()),
                 ownership_handoff_operations: tokio::sync::Mutex::new(()),
                 resource_upload_executions: DashMap::with_hasher(RandomState::new()),
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),

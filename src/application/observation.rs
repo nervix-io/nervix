@@ -2464,17 +2464,20 @@ mod tests {
             .await
             .expect("resource upload should complete");
         proposer
-            .put_domain(DomainState {
-                id: DomainName::parse("default").expect("valid domain"),
-                config: DomainConfig {
-                    pace: DomainPace::Unpaced,
-                    placement: nervix_models::PlacementPolicy::Neutral,
+            .put_domain(
+                DomainState {
+                    id: DomainName::parse("default").expect("valid domain"),
+                    config: DomainConfig {
+                        pace: DomainPace::Unpaced,
+                        placement: nervix_models::PlacementPolicy::Neutral,
+                    },
+                    status: DomainStatus::Stopped,
+                    start_version: 0,
+                    last_start: nervix_models::DomainStartPoint::Resume,
+                    clock: None,
                 },
-                status: DomainStatus::Stopped,
-                start_version: 0,
-                last_start: nervix_models::DomainStartPoint::Resume,
-                clock: None,
-            })
+                None,
+            )
             .await
             .expect("domain should persist");
         let (tx, _rx) = mpsc::channel(16);

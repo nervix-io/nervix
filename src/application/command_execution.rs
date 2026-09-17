@@ -5,6 +5,8 @@
 //! - **Depends on.** Consensus command records and the authoritative visibility barrier.
 //! - **Must not know.** Parser recovery, transport reconnect policy, or runtime implementation.
 
+use std::collections::BTreeSet;
+
 use blake3::Hasher;
 use error_stack::Report;
 use nervix_consensus::{
@@ -104,6 +106,17 @@ impl PersistentCommandRequest {
             source,
             statement,
         }))
+    }
+
+    fn mutation_domains(&self) -> BTreeSet<DomainName> {
+        match &self.statement {
+            Statement::CreateDomain(create) => BTreeSet::from([create.id.clone()]),
+            Statement::DrainNode(_) => BTreeSet::new(),
+            statement if statement.requires_domain_mutation_ownership() => {
+                self.domain.iter().cloned().collect()
+            }
+            _ => BTreeSet::new(),
+        }
     }
 }
 
@@ -281,7 +294,7 @@ impl SessionServiceImpl {
         );
         self.inner
             .consensus
-            .admit_command_execution(execution)
+            .admit_command_execution(execution, request.mutation_domains())
             .await
             .map_err(|error| Box::new(command_error(error.to_string())))
     }
@@ -300,10 +313,17 @@ impl SessionServiceImpl {
                 existed_at_admission,
                 state,
             } => {
+                let Some(mutation) = execution.domain_mutation(&state.id) else {
+                    return command_error(format!(
+                        "durable domain creation lost mutation ownership for '{}'",
+                        state.id.as_str()
+                    ));
+                };
                 Box::pin(self.apply_persistent_domain_creation(
                     if_not_exists,
                     existed_at_admission,
                     *state,
+                    Some(mutation),
                 ))
                 .await
             }
@@ -327,25 +347,42 @@ impl SessionServiceImpl {
                 ))
                 .await
             }
-            CommandExecutionEffect::Statement { source, statement } => {
-                let domain = match &execution.domain {
-                    Some(domain) => domain.to_string(),
-                    None => String::new(),
-                };
-                let command = PendingSessionCommand {
-                    request_reference: execution.reference.clone(),
-                    expected_transaction_position: None,
-                    source,
-                    statement: ClientStatement::Server(*statement),
-                    domain,
-                };
-                Box::pin(self.process_session_command_operations(
-                    vec![SessionCommandOperation::Execute(command)],
-                    tx,
-                    subscriptions,
-                ))
-                .await
-            }
+            CommandExecutionEffect::Statement { source, statement } => match *statement {
+                Statement::Relocate(relocation) => {
+                    let Some(domain) = execution.domain.as_ref() else {
+                        return command_error("durable relocation lost its domain".to_string());
+                    };
+                    let Some(mutation) = execution.domain_mutation(domain) else {
+                        return command_error(format!(
+                            "durable relocation lost mutation ownership for '{}'",
+                            domain.as_str()
+                        ));
+                    };
+                    return Box::pin(self.relocate(domain, relocation, Some(mutation))).await;
+                }
+                Statement::DrainNode(drain) => {
+                    return Box::pin(self.drain_node(drain.node_id, Some(execution))).await;
+                }
+                statement => {
+                    let domain = match &execution.domain {
+                        Some(domain) => domain.to_string(),
+                        None => String::new(),
+                    };
+                    let command = PendingSessionCommand {
+                        request_reference: execution.reference.clone(),
+                        expected_transaction_position: None,
+                        source,
+                        statement: ClientStatement::Server(statement),
+                        domain,
+                    };
+                    return Box::pin(self.process_session_command_operations(
+                        vec![SessionCommandOperation::Execute(command)],
+                        tx,
+                        subscriptions,
+                    ))
+                    .await;
+                }
+            },
             CommandExecutionEffect::CreateUser {
                 if_not_exists,
                 name,
