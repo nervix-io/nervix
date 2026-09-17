@@ -14500,6 +14500,30 @@ async fn when_https_payload_is_posted(
         .expect("failed to post https payload");
 }
 
+#[then(
+    expr = "the leader HTTPS listener for host {string} presents the certificate from resource \
+            directory {string}"
+)]
+async fn then_leader_https_listener_presents_resource_certificate(
+    world: &mut ScenarioWorld,
+    host: String,
+    resource_directory: String,
+) {
+    let host = expand_placeholders(world, &host);
+    let ca_pem = resource_directory_ca_pem(world, &resource_directory);
+    let leader = current_leader_node(world).await;
+    world
+        .cluster()
+        .connect_https(&leader, &host, &ca_pem)
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "leader '{leader}' did not present the certificate trusted by resource directory \
+                 '{resource_directory}' for host '{host}': {error}"
+            )
+        });
+}
+
 #[when(expr = "http payload is posted to node {string} with host {string} path {string}")]
 async fn when_http_payload_is_posted_to_node(
     world: &mut ScenarioWorld,

@@ -171,9 +171,8 @@ readiness, and gate release. A no-op reapplies the current required state before
 
 `START` waits until every listener and assigned source has completed its startup boundary. `STOP`
 waits for remote source and listener teardown, including when it stops the cluster's last running
-domain. Paced-domain clock authority is part of the same revision. TLS-changing model and resource
-effects wait for every affected listener to install the configuration; installation failure fails
-the command.
+domain. Paced-domain clock authority is part of the same revision. TLS-changing model effects wait
+for every affected listener to install the configuration; installation failure fails the command.
 
 An upload is complete after the entire declared body is admitted, its archive and manifest verify,
 and the exact digest is atomically installed on every live node incarnation. A complete admitted

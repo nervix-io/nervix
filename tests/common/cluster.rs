@@ -1893,6 +1893,19 @@ impl Cluster {
         publish_https(&handle.spec, host, path, payload, ca_cert_pem).await
     }
 
+    pub(crate) async fn connect_https(
+        &self,
+        node_id: &str,
+        host: &str,
+        ca_cert_pem: &str,
+    ) -> io::Result<()> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        connect_https(&handle.spec, host, ca_cert_pem).await
+    }
+
     pub(crate) async fn observe_mqtt(&self, topic: &str) -> io::Result<BrokerObserver> {
         observe_mqtt(&self.dependencies, topic).await
     }
@@ -3215,6 +3228,28 @@ async fn publish_https(
         )));
     }
 
+    Ok(())
+}
+
+async fn connect_https(spec: &NodeSpec, host: &str, ca_cert_pem: &str) -> io::Result<()> {
+    let mut roots = RootCertStore::empty();
+    for certificate in CertificateDer::pem_slice_iter(ca_cert_pem.as_bytes()) {
+        roots
+            .add(certificate.map_err(io::Error::other)?)
+            .map_err(io::Error::other)?;
+    }
+    let client_config = RustlsClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = TlsConnector::from(StdArc::new(client_config));
+    let tcp_stream = TcpStream::connect(parse_addr(&spec.https_addr())?)
+        .await
+        .map_err(io::Error::other)?;
+    let server_name = ServerName::try_from(host.to_string()).map_err(io::Error::other)?;
+    connector
+        .connect(server_name, tcp_stream)
+        .await
+        .map_err(io::Error::other)?;
     Ok(())
 }
 
