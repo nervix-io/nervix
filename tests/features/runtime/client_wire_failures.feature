@@ -200,7 +200,7 @@ Feature: Client wire failure regressions
     And physical time passes for "1s"
     Then transaction "{{expiring_transaction}}" eventually has state "EXPIRED"
 
-  @client_wire_expected_failure @client_wire_stale_relocation
+  @client_wire_stale_relocation
   Scenario: A relocation planned before a schedule revision cannot overwrite that revision
     Given Kafka is running
     Given runtime replication is configured with replica count 2 and snapshot interval "10m"

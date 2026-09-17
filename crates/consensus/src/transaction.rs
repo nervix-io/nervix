@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use strum::IntoStaticStr;
 use thiserror::Error;
 
-use crate::{DomainMutationLease, DomainMutationOwner};
+use crate::{DomainMutationLease, DomainMutationOwner, DomainPlanningInputs};
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -747,30 +747,39 @@ impl ReplicatedTransaction {
 )]
 pub enum TransactionStepEffect {
     ReplaceDomainSchedule {
-        domain: DomainName,
-        expected_schedule: Option<Box<DomainSchedule>>,
+        inputs: Box<DomainPlanningInputs>,
         schedule: Option<Box<DomainSchedule>>,
     },
     PutDomainAndSchedule {
-        expected_domain: Box<DomainState>,
-        expected_schedule: Option<Box<DomainSchedule>>,
+        inputs: Box<DomainPlanningInputs>,
         domain: Box<DomainState>,
         schedule: Option<Box<DomainSchedule>>,
     },
     StartDomain {
-        domain_id: DomainName,
-        expected_start_version: u64,
+        inputs: Box<DomainPlanningInputs>,
         start: DomainStartPoint,
         clock: Option<DomainClockState>,
         authority: Option<ClusterNodeIdentity>,
     },
     StopDomain {
-        domain_id: DomainName,
-        expected_start_version: u64,
+        inputs: Box<DomainPlanningInputs>,
     },
     CreateResourceCatalog {
+        inputs: Box<DomainPlanningInputs>,
         identifier: ResourceName,
     },
+}
+
+impl TransactionStepEffect {
+    pub fn inputs(&self) -> &DomainPlanningInputs {
+        match self {
+            Self::ReplaceDomainSchedule { inputs, .. }
+            | Self::PutDomainAndSchedule { inputs, .. }
+            | Self::StartDomain { inputs, .. }
+            | Self::StopDomain { inputs }
+            | Self::CreateResourceCatalog { inputs, .. } => inputs,
+        }
+    }
 }
 
 #[derive(

@@ -460,7 +460,8 @@ impl SessionServiceImpl {
                 );
             }
         };
-        let Some(previous_state) = self.inner.consensus.current_domain(domain).await else {
+        let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
+        let Some(previous_state) = inputs.state().cloned() else {
             return command_error(format!("domain '{}' does not exist", domain.as_str()));
         };
         if let DomainStatus::Paused = previous_state.status {
@@ -486,22 +487,17 @@ impl SessionServiceImpl {
             };
         }
 
-        let current_schedule = self.inner.consensus.current_schedule().await;
-        let previous_schedule = current_schedule.domain(domain).cloned();
-        let availability = self.inner.cluster.availability_state().await;
-        let live_node_ids = availability.live_node_ids();
-        let placement_candidate_node_ids = availability.placement_candidate_node_ids();
-        let live_voters = self.inner.consensus.live_voter_ids(live_node_ids).await;
-        let cluster_nodes = self
-            .inner
-            .consensus
-            .schedulable_live_voter_ids(placement_candidate_node_ids)
+        let previous_schedule = inputs.schedule().cloned();
+        let planning = self
+            .capture_domain_schedule_planning_snapshot(&inputs)
             .await;
+        let live_voters = planning.live_voters();
+        let cluster_nodes = planning.cluster_nodes();
         let mut next_schedule = self.inner.registry.active_graph(domain).map(|graph| {
             #[cfg(feature = "testing")]
             let mut schedule = graph.schedule_for_domain_with_mode(
                 domain,
-                &cluster_nodes,
+                cluster_nodes,
                 self.inner.replica_count,
                 alter.policy,
                 self.inner.runtime.scheduler_mode(),
@@ -509,14 +505,14 @@ impl SessionServiceImpl {
             #[cfg(not(feature = "testing"))]
             let mut schedule = graph.schedule_for_domain(
                 domain,
-                &cluster_nodes,
+                cluster_nodes,
                 self.inner.replica_count,
                 alter.policy,
             );
             Self::merge_existing_schedule_data(
                 &mut schedule,
                 previous_schedule.as_ref(),
-                &live_voters,
+                live_voters,
             );
             schedule
         });
@@ -545,6 +541,12 @@ impl SessionServiceImpl {
                 domain.as_str()
             ));
         }
+        if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {
+            return command_error(error.to_string());
+        }
+        if let Err(error) = planning.validate_eligibility(self).await {
+            return command_error(error.to_string());
+        }
         let handoff = if relocations > 0 {
             self.begin_planned_ownership_handoff(
                 domain,
@@ -562,13 +564,7 @@ impl SessionServiceImpl {
         if let Err(error) = self
             .inner
             .consensus
-            .put_domain_and_schedule(
-                Some(previous_state),
-                previous_schedule,
-                next_state,
-                next_schedule,
-                None,
-            )
+            .put_domain_and_schedule(inputs, next_state, next_schedule, None)
             .await
         {
             if let Some(handoff) = handoff {
