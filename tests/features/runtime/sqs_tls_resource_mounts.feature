@@ -33,7 +33,7 @@ Feature: SQS TLS resource mounts
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_sqs_notifications;
         CREATE CLIENT sqs_tls
         TYPE SQS
-        MOUNT dev_tls
+        MOUNT dev_tls VERSION 1
         CONFIG {
           'endpoint' = '{{sqs_tls_endpoint}}',
           'region' = 'us-east-1',

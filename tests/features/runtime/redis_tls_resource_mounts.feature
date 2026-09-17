@@ -33,7 +33,7 @@ Feature: Redis TLS resource mounts
         CREATE CLIENT redis_tls
         TYPE REDIS
         POOL SIZE MIN 1 MAX 4
-        MOUNT dev_tls
+        MOUNT dev_tls VERSION 1
         CONFIG {
           'addr' = '{{redis_tls_addr}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'

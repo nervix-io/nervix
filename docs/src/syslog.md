@@ -111,7 +111,7 @@ A syslog client describes one direction-dependent socket endpoint:
 
 ```nspl,ignore
 CREATE CLIENT <name>
-  TYPE SYSLOG [MOUNT <resource>]
+  TYPE SYSLOG [MOUNT <resource> VERSION <n>|LATEST]
   CONFIG {
     'protocol' = 'udp'|'tcp'|'tls',
     'addr' = '<host:port>',
@@ -136,7 +136,7 @@ TLS file paths use normal client resource mounts. For example:
 
 ```nspl
 CREATE CLIENT syslog_tls
-  TYPE SYSLOG MOUNT syslog_identity
+  TYPE SYSLOG MOUNT syslog_identity VERSION 1
   CONFIG {
     'protocol' = 'tls',
     'addr' = '0.0.0.0:6514',

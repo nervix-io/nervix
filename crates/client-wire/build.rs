@@ -30,7 +30,7 @@ const GENERATED_MODULE_HEADER: &str = "\
 )]
 #[allow(
     unused_imports,
-    reason = \"some flatc versions emit root imports used only by nested modules\"
+    reason = \"some supported flatc releases emit imports used only by nested modules\"
 )]
 mod generated {
 ";

@@ -18,15 +18,6 @@ pub(in crate::runtime) enum LookupRuntimeError {
     #[error("resource store is not attached")]
     ResourceStoreUnavailable,
     #[error(
-        "resource '{resource}' has no completed versions for lookup '{lookup}' in domain \
-         '{domain}'"
-    )]
-    MissingResourceVersion {
-        domain: DomainName,
-        lookup: LookupName,
-        resource: ResourceName,
-    },
-    #[error(
         "failed to resolve path '{path}' in resource '{resource}' for lookup '{lookup}' in domain \
          '{domain}'"
     )]
@@ -500,18 +491,11 @@ impl Runtime {
         let Some(resource_store) = self.inner.resource_store.load_full() else {
             return Err(Report::new(LookupRuntimeError::ResourceStoreUnavailable));
         };
-        let resource_id = self
-            .inner
-            .resource_versions
-            .load()
-            .uploads
-            .resolve_completed_version(domain, &lookup.resource, RequestedResourceVersion::Latest)
-            .change_context(LookupRuntimeError::MissingResourceVersion {
-                domain: domain.clone(),
-                lookup: lookup.name.clone(),
-                resource: lookup.resource.clone(),
-            })?;
-        let resource_version = resource_id.version;
+        let resource_id = ResourceId::new(
+            domain.clone(),
+            lookup.resource.clone(),
+            lookup.resource_version,
+        );
         let path = resource_store
             .resolve_content_path(&resource_id, &lookup.path)
             .change_context(LookupRuntimeError::ResolveContentPath {
@@ -598,7 +582,6 @@ impl Runtime {
         );
         Ok(LookupRuntime {
             model: lookup,
-            resource_version,
             schema,
             batch: Arc::new(batch),
             entries: Arc::new(entries),

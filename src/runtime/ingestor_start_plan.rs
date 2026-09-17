@@ -100,7 +100,7 @@ pub(super) struct IngestorSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct IngestorClientSpec {
-    pub(super) mount: Option<ResourceName>,
+    pub(super) mount: Option<ClientResourceMount>,
     pub(super) config: Vec<ClientConfigEntry>,
 }
 
@@ -279,7 +279,7 @@ impl IngestorStartPlan {
         };
         let client = |expected: &ClientName,
                       actual: &ClientName,
-                      mount: &Option<ResourceName>,
+                      mount: &Option<ClientResourceMount>,
                       config: &[ClientConfigEntry]| {
             if expected != actual {
                 return Err(Report::new(IngestorStartPlanError::SourceIdentityMismatch));
@@ -656,12 +656,26 @@ mod tests {
         }
     }
 
-    fn client_fields() -> (ClientName, Option<ResourceName>, Vec<ClientConfigEntry>) {
-        (named("upstream"), None, Vec::new())
+    struct ClientFields {
+        name: ClientName,
+        mount: Option<ClientResourceMount>,
+        config: Vec<ClientConfigEntry>,
+    }
+
+    fn client_fields() -> ClientFields {
+        ClientFields {
+            name: named("upstream"),
+            mount: None,
+            config: Vec::new(),
+        }
     }
 
     fn connector_case(kind: IngestorConnectorKind) -> (IngestSource, Model) {
-        let (client, mount, config) = client_fields();
+        let ClientFields {
+            name: client,
+            mount,
+            config,
+        } = client_fields();
         match kind {
             IngestorConnectorKind::Http => (
                 IngestSource::Http {

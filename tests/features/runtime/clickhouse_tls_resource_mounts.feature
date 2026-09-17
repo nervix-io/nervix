@@ -52,7 +52,7 @@ Feature: ClickHouse TLS resource mounts
         ON GENERAL ERROR LOG;
         CREATE CLIENT clickhouse_client
         TYPE CLICKHOUSE
-        MOUNT dev_tls
+        MOUNT dev_tls VERSION 1
         CONFIG {
           'addr' = '{{clickhouse_tls_addr}}',
           'user' = 'default',
