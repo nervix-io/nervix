@@ -133,6 +133,11 @@ reserved raw representation stays inside the encoding's owner. That state record
 still count against ownership handoff; a message parked on materialized `REQUIRED WAIT` does not
 keep a handoff blocked.
 
+A handle owns an active share only when its attachment reserved a pending share. An attachment that
+finds the root complete may observe that root, but cannot park or remove a share owned by another
+handle. Resolution removes the owned pending share before changing active-share tracking, so a
+terminal transition cannot make an unsuccessful attachment look like active work.
+
 Root trackers count attempts rather than individual shares. Their transition ordering may briefly
 overcount but cannot let handoff miss active work. Exactly one terminal transition takes the
 one-shot sender from its slot and releases that guard before notifying the waiter. ACK trees,
