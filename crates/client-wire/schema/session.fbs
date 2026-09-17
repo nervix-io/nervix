@@ -1,0 +1,1548 @@
+// The Nervix client session protocol.
+//
+// Every shape of the public client boundary is declared in this file, once. The root files
+// client_message.fbs, server_message.fbs, upload_message.fbs and upload_reply.fbs name the table a
+// frame is rooted at and the file identifier it carries; they declare no shapes of their own.
+//
+// Framing
+//
+// A frame is one finished FlatBuffer that carries its root's four-byte file identifier and no size
+// prefix. The transport delimits frames:
+//
+// * gRPC. Each gRPC message holds exactly one frame. `/nervix.session.Session/Exchange` is a
+//   bidirectional stream of ClientMessage frames ("NXCM") answered by ServerMessage frames
+//   ("NXSM"). `/nervix.session.Session/UploadResource` is a client stream of UploadMessage frames
+//   ("NXUM") answered by exactly one UploadReply frame ("NXUR").
+// * WebSocket. Each binary message holds exactly one ClientMessage frame from the client or one
+//   ServerMessage frame from the server. A text message is a protocol violation.
+//
+// Verification
+//
+// A receiver verifies a frame once, when it takes ownership of the bytes and before reading any
+// field: the frame must fit the session frame limit, carry the expected identifier, and pass
+// FlatBuffers verification, which bounds every offset, requires `(required)` fields, validates
+// strings as UTF-8, and limits nesting depth, table count and apparent size. Every union field is
+// `(required)`, so NONE is never a valid discriminant. Reading then rejects union discriminants and
+// enum values this schema does not declare, including NONE, an absent `= null` field that a comment
+// requires, zero where a comment requires non-zero, collections and strings longer than the session
+// limits, and values the receiver's platform cannot represent. A receiver never substitutes a
+// default for a rejected value.
+//
+// Scalars declared `= null` are optional: absent means not provided, and a present zero is a
+// value. Other scalars read as their declared default, which is zero or false, when absent.
+//
+// Correlation
+//
+// Every ClientMessage carries a request_id that is non-zero and never reused within one session.
+// Every reply to it is a Reply carrying the same request_id. Unsolicited server messages are the
+// other ServerBody variants; they carry no request_id and never complete a request. The
+// request_id is distinct from a command's execution_reference, which is the durable identity of
+// the command's effects across retries, redirects and reconnects.
+
+namespace nervix.session;
+
+// ---------------------------------------------------------------------------------------------
+// Shared values
+// ---------------------------------------------------------------------------------------------
+
+/// A 32-byte opaque fingerprint.
+struct Fingerprint {
+  bytes: [ubyte:32];
+}
+
+/// A byte range of the NSPL source text a request carried. Offsets are UTF-8 byte offsets on
+/// character boundaries of that text, and `start` is not after `end`.
+struct SourceSpan {
+  start: uint;
+  end: uint;
+}
+
+/// One problem found while serving a request.
+table Diagnostic {
+  message: string (required);
+  /// Absent when the problem has no location in the request's source text.
+  span: SourceSpan;
+}
+
+/// How clients reach the cluster leader.
+table LeaderEndpoints {
+  /// The leader's cluster node name.
+  node: string (required);
+  /// The leader's gRPC session URI. Absent when the leader advertises none.
+  grpc_uri: string;
+  /// The leader's web console URI. Absent when the leader advertises none.
+  web_console_uri: string;
+}
+
+/// The request needs the cluster leader, and the serving node is not the leader.
+table LeaderRedirect {
+  /// Absent while no leader is known, for example during an election.
+  leader: LeaderEndpoints;
+}
+
+/// A request failed definitively. The enclosing outcome's message and diagnostics say why.
+table RequestFailed {}
+
+/// Whether an outcome was produced now or recovered from the durable record of an earlier
+/// attempt with the same identity.
+enum OutcomeOrigin : ubyte {
+  Executed,
+  Recovered
+}
+
+enum ModelKind : ubyte {
+  Schema,
+  WireJsonSchema,
+  WireCborSchema,
+  WireAvroSchema,
+  Codec,
+  Client,
+  Vhost,
+  Branch,
+  Endpoint,
+  SignalingProtocol,
+  Generator,
+  Inferencer,
+  WasmProcessor,
+  Ingestor,
+  Reingestor,
+  Relay,
+  Lookup,
+  Junction,
+  Deduplicator,
+  Correlator,
+  Reorderer,
+  WindowProcessor,
+  Emitter,
+  Placement,
+  Udf
+}
+
+/// One entity of a domain, addressed by its kind and its name.
+table NodeRef {
+  /// Required.
+  kind: ModelKind = null;
+  name: string (required);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Transactions
+// ---------------------------------------------------------------------------------------------
+
+/// The whole-transaction preview a client expects a COMMIT to apply.
+table TransactionPreviewIdentity {
+  transaction_id: string (required);
+  /// The number of accepted operations the preview covered.
+  position: ulong;
+  planning_basis: Fingerprint (required);
+}
+
+table TransactionOpen {}
+
+table TransactionCommitting {}
+
+table TransactionCommitted {}
+
+table TransactionFailed {
+  /// The one-based number of the operation whose execution step failed. Non-zero.
+  failing_operation: ulong;
+  error: string (required);
+}
+
+table TransactionReverted {}
+
+table TransactionExpired {}
+
+union TransactionState {
+  TransactionOpen,
+  TransactionCommitting,
+  TransactionCommitted,
+  TransactionFailed,
+  TransactionReverted,
+  TransactionExpired
+}
+
+/// A replicated transaction as the serving leader records it.
+table TransactionStatus {
+  transaction_id: string (required);
+  domain: string (required);
+  state: TransactionState (required);
+  /// Operations accepted into the transaction. This is also the position the next append
+  /// expects.
+  accepted_operations: ulong;
+  /// Accepted operations whose execution steps have applied. Never exceeds accepted_operations.
+  /// While the transaction is open or committing, the remaining accepted operations are pending.
+  applied_operations: ulong;
+}
+
+/// The inspection targets the transaction bound to this session.
+table AttachedTransaction {}
+
+/// The inspection targets a transaction by identity without attaching it.
+table TransactionById {
+  transaction_id: string (required);
+}
+
+union InspectionTarget {
+  AttachedTransaction,
+  TransactionById
+}
+
+// ---------------------------------------------------------------------------------------------
+// Transaction impact reports
+// ---------------------------------------------------------------------------------------------
+//
+// Sets are sent in canonical order: sorted ascending and without duplicates, using the ordering of
+// the Nervix report vocabulary. Attributions list one-based operation numbers. A report carries no
+// derived summary; its pause summary combines the planned pause of every execution step.
+
+/// An inclusive, consecutive range of one-based operation numbers executed as one atomic step.
+/// `first` is non-zero and not after `last`.
+struct OperationRange {
+  first: ulong;
+  last: ulong;
+}
+
+enum ImpactDiagnosticKind : ubyte {
+  Planning,
+  Topology,
+  Quiescence,
+  Ownership,
+  Activation,
+  Application,
+  Recovery
+}
+
+/// A non-sensitive report diagnostic.
+table ImpactDiagnostic {
+  /// Required.
+  kind: ImpactDiagnosticKind = null;
+  /// The one-based operation the diagnostic concerns. Absent when it concerns no single operation.
+  operation: ulong = null;
+  message: string (required);
+}
+
+table ImpactComplete {}
+
+table ImpactIncomplete {
+  /// Never empty.
+  diagnostics: [ImpactDiagnostic] (required);
+}
+
+union ImpactCompleteness {
+  ImpactComplete,
+  ImpactIncomplete
+}
+
+/// Only the node's configuration participates; no execution of it does.
+table ConfigurationCoverage {}
+
+/// Every concrete execution of the node participates.
+table AllBranchCoverage {}
+
+/// The node's single unbranched execution participates.
+table UnbranchedCoverage {}
+
+/// Every current and later concrete key of the declared branch participates.
+table DeclaredBranchCoverage {
+  branch: string (required);
+}
+
+/// Only the selected concrete keys of the declared branch participate.
+table SelectedBranchCoverage {
+  branch: string (required);
+  /// Branch key fingerprints; a non-empty set.
+  keys: [Fingerprint] (required);
+}
+
+/// The executions of a relay boundary that an impact covers.
+union BranchCoverage {
+  AllBranchCoverage,
+  UnbranchedCoverage,
+  DeclaredBranchCoverage,
+  SelectedBranchCoverage
+}
+
+/// What of a node an impact covers: its configuration only, or some of its executions.
+union NodeBranchCoverage {
+  ConfigurationCoverage,
+  AllBranchCoverage,
+  UnbranchedCoverage,
+  DeclaredBranchCoverage,
+  SelectedBranchCoverage
+}
+
+table NodeCoverage {
+  node: NodeRef (required);
+  branches: NodeBranchCoverage (required);
+}
+
+table AttributedNode {
+  coverage: NodeCoverage (required);
+  /// A non-empty set of operation numbers.
+  operations: [ulong] (required);
+}
+
+table GateBoundary {
+  relay: string (required);
+  branches: BranchCoverage (required);
+}
+
+table AttributedGateBoundary {
+  boundary: GateBoundary (required);
+  /// A non-empty set of operation numbers.
+  operations: [ulong] (required);
+}
+
+table QuiesceSubgraph {
+  domain: string (required);
+  /// A set in which no two entries share a coverage.
+  nodes: [AttributedNode] (required);
+  /// A set in which no two entries share a boundary.
+  gate_boundaries: [AttributedGateBoundary] (required);
+}
+
+table NoPause {}
+
+table SubgraphPause {
+  scope: QuiesceSubgraph (required);
+}
+
+table DomainPause {
+  domain: string (required);
+}
+
+union PauseRequirement {
+  NoPause,
+  SubgraphPause,
+  DomainPause
+}
+
+table CreateConfigurationOperation {
+  domain: string (required);
+  node: NodeRef (required);
+}
+
+table AlterConfigurationOperation {
+  domain: string (required);
+  node: NodeRef (required);
+}
+
+table DropConfigurationOperation {
+  domain: string (required);
+  node: NodeRef (required);
+}
+
+table AlterDomainOperation {
+  domain: string (required);
+}
+
+table StartDomainOperation {
+  domain: string (required);
+}
+
+table StopDomainOperation {
+  domain: string (required);
+}
+
+table CreateResourceOperation {
+  domain: string (required);
+  resource: string (required);
+}
+
+union TransactionOperation {
+  CreateConfigurationOperation,
+  AlterConfigurationOperation,
+  DropConfigurationOperation,
+  AlterDomainOperation,
+  StartDomainOperation,
+  StopDomainOperation,
+  CreateResourceOperation
+}
+
+enum ModelChangeAspect : ubyte {
+  RelayCapacity,
+  RelaySchema,
+  RelayBranching,
+  RelayMaterializedState,
+  ProcessorFilter,
+  ProcessorInputWhere,
+  ProcessorRouteConstruction,
+  ProcessorRouteFlushPolicy,
+  ProcessorCollectPolicy,
+  ProcessorMessageErrorPolicy,
+  ProcessorErrorRouteTargets,
+  ProcessorInputs,
+  ProcessorRoutes,
+  ProcessorMode,
+  ProcessorBranching,
+  ProcessorMaterializedState,
+  DeduplicatorKeyspace,
+  DeduplicatorMaxTime,
+  ReordererOrdering,
+  ReordererMaxTime,
+  EmitterInput,
+  EmitterInputWhere,
+  EmitterSink,
+  EmitterClient,
+  EmitterCodec,
+  EmitterCollectPolicy,
+  EmitterMode,
+  EmitterPublishingMode,
+  EmitterFlushPolicy,
+  EmitterConstruction,
+  EmitterErrorPolicies,
+  EmitterMaterializedState,
+  IngestorSource,
+  IngestorCodec,
+  IngestorTimestamp,
+  IngestorFilter,
+  IngestorRoutes,
+  IngestorGeneralError,
+  ReingestorInputs,
+  ReingestorRoutes,
+  ReingestorMode,
+  ReingestorFilter,
+  ReingestorMaterializedState,
+  GeneratorMaterializedState,
+  GeneratorCadence,
+  GeneratorBranching,
+  GeneratorRoutes,
+  CorrelatorCorrelation,
+  CorrelatorMatchPolicy,
+  CorrelatorMaxTime,
+  CorrelatorTimeoutPolicy,
+  WindowBounds,
+  InferencerBinding,
+  InferencerTensors,
+  WasmBinding,
+  WasmLimits,
+  WasmGlobalError,
+  SchemaDefinition,
+  WireSchemaDefinition,
+  CodecDefinition,
+  ClientConfig,
+  VhostHostnames,
+  VhostTls,
+  EndpointDefinition,
+  SignalingProtocolDefinition,
+  LookupDefinition,
+  BranchSchema,
+  BranchLifecycle,
+  UdfDefinition,
+  PlacementDefinition,
+  EntityReplaced,
+  EntityCreated,
+  EntityDropped
+}
+
+table ConfigurationReason {
+  node: NodeRef (required);
+  /// Required.
+  aspect: ModelChangeAspect = null;
+}
+
+table DomainPlacementReason {}
+
+table DomainStartReason {}
+
+table DomainStopReason {}
+
+table ResourceCatalogReason {
+  resource: string (required);
+}
+
+union OperationImpactReason {
+  ConfigurationReason,
+  DomainPlacementReason,
+  DomainStartReason,
+  DomainStopReason,
+  ResourceCatalogReason
+}
+
+table OperationReason {
+  reason: OperationImpactReason (required);
+}
+
+enum ImpactEdgeKind : ubyte {
+  ConfigurationDependency,
+  Dataflow,
+  MessageError,
+  CorrelationTimeout,
+  MaterializedState
+}
+
+table TopologyEdge {
+  source: NodeCoverage (required);
+  target: NodeCoverage (required);
+  /// Required.
+  kind: ImpactEdgeKind = null;
+  /// A non-empty set of operation numbers.
+  operations: [ulong] (required);
+}
+
+table ImpactTopology {
+  /// A set.
+  nodes: [AttributedNode] (required);
+  /// A set.
+  edges: [TopologyEdge] (required);
+}
+
+table AffectedTopology {
+  before: ImpactTopology (required);
+  after: ImpactTopology (required);
+}
+
+table ConfigurationCreated {
+  node: NodeRef (required);
+}
+
+table ConfigurationChanged {
+  node: NodeRef (required);
+}
+
+table ConfigurationDropped {
+  node: NodeRef (required);
+}
+
+union ConfigurationTransition {
+  ConfigurationCreated,
+  ConfigurationChanged,
+  ConfigurationDropped
+}
+
+table ConfigurationImpact {
+  transition: ConfigurationTransition (required);
+  /// A non-empty set of operation numbers.
+  operations: [ulong] (required);
+}
+
+enum ResourceCatalogAction : ubyte {
+  Create
+}
+
+table ResourceCatalogImpact {
+  resource: string (required);
+  /// Required.
+  action: ResourceCatalogAction = null;
+  /// A non-empty set of operation numbers.
+  operations: [ulong] (required);
+}
+
+enum DomainLifecycleAction : ubyte {
+  Start,
+  Stop
+}
+
+table DomainLifecycleImpact {
+  domain: string (required);
+  /// Required.
+  action: DomainLifecycleAction = null;
+  /// A non-empty set of operation numbers.
+  operations: [ulong] (required);
+}
+
+table OwnershipMoveImpact {
+  node: NodeCoverage (required);
+  /// The cluster node that owned the node before the move.
+  source: string (required);
+  /// The cluster node that owns the node after the move.
+  destination: string (required);
+  /// A non-empty set of operation numbers.
+  operations: [ulong] (required);
+}
+
+enum ActivationAction : ubyte {
+  Activate,
+  Deactivate
+}
+
+table ActivationImpact {
+  node: NodeCoverage (required);
+  /// Required.
+  action: ActivationAction = null;
+  /// A non-empty set of operation numbers.
+  operations: [ulong] (required);
+}
+
+enum RebuildReason : ubyte {
+  Configuration,
+  Ownership,
+  Recovery
+}
+
+table RebuildImpact {
+  node: NodeCoverage (required);
+  /// Required.
+  reason: RebuildReason = null;
+  /// A non-empty set of operation numbers.
+  operations: [ulong] (required);
+}
+
+enum StatePurge : ubyte {
+  DeduplicatorKeyspace,
+  ReordererBuffer,
+  WindowAccumulator,
+  CorrelationBuffer,
+  InferencerWarmState,
+  WasmGuestState
+}
+
+table StateResetImpact {
+  node: NodeCoverage (required);
+  /// Required.
+  state: StatePurge = null;
+  /// A non-empty set of operation numbers.
+  operations: [ulong] (required);
+}
+
+table ForceFlushImpact {
+  node: NodeCoverage (required);
+  /// A non-empty set of operation numbers.
+  operations: [ulong] (required);
+}
+
+/// Every semantic effect of an operation contribution or an execution step. Every vector is a
+/// set.
+table ImpactEffects {
+  changed_configuration: [ConfigurationImpact] (required);
+  topology: AffectedTopology (required);
+  ownership_moves: [OwnershipMoveImpact] (required);
+  lifecycle: [DomainLifecycleImpact] (required);
+  activations: [ActivationImpact] (required);
+  rebuilds: [RebuildImpact] (required);
+  state_resets: [StateResetImpact] (required);
+  force_flushes: [ForceFlushImpact] (required);
+  resource_catalog: [ResourceCatalogImpact] (required);
+}
+
+table PlannedStepImpact {
+  completeness: ImpactCompleteness (required);
+  pause: PauseRequirement (required);
+  effects: ImpactEffects (required);
+}
+
+table QuiescenceRequested {}
+
+table QuiescenceConfirmed {}
+
+table QuiescenceFailed {
+  diagnostic: ImpactDiagnostic (required);
+}
+
+table QuiescenceUncertain {
+  diagnostic: ImpactDiagnostic (required);
+}
+
+table QuiescenceReleased {}
+
+union QuiescenceOutcome {
+  QuiescenceRequested,
+  QuiescenceConfirmed,
+  QuiescenceFailed,
+  QuiescenceUncertain,
+  QuiescenceReleased
+}
+
+table QuiescenceOutcomeEntry {
+  outcome: QuiescenceOutcome (required);
+}
+
+/// The ordered engagement history of one actual pause scope.
+table ActualQuiescence {
+  requirement: PauseRequirement (required);
+  outcomes: [QuiescenceOutcomeEntry] (required);
+}
+
+table StepUnattempted {}
+
+table StepApplying {}
+
+table StepApplied {}
+
+table StepFailed {
+  diagnostic: ImpactDiagnostic (required);
+}
+
+union ExecutionStepOutcome {
+  StepUnattempted,
+  StepApplying,
+  StepApplied,
+  StepFailed
+}
+
+table ActualStepImpact {
+  outcome: ExecutionStepOutcome (required);
+  quiescence: [ActualQuiescence] (required);
+  effects: ImpactEffects (required);
+}
+
+table ExecutionStepReport {
+  operations: OperationRange (required);
+  planned: PlannedStepImpact (required);
+  actual: ActualStepImpact (required);
+}
+
+table OperationReport {
+  /// The one-based operation number. Non-zero.
+  number: ulong;
+  operation: TransactionOperation (required);
+  execution_step: OperationRange (required);
+  completeness: ImpactCompleteness (required);
+  /// Ordered reasons, in the order the operation's clauses were written.
+  reasons: [OperationReason] (required);
+  contribution: ImpactEffects (required);
+}
+
+/// The semantic impact report of one transaction. Operations are numbered consecutively from 1,
+/// and the execution steps partition them in order.
+table TransactionImpactReport {
+  domain: string (required);
+  /// The number of accepted operations the report describes.
+  position: ulong;
+  planning_basis: Fingerprint (required);
+  completeness: ImpactCompleteness (required);
+  operations: [OperationReport] (required);
+  execution_steps: [ExecutionStepReport] (required);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Rows
+// ---------------------------------------------------------------------------------------------
+//
+// A subscription delivers rows of the relay schema it reads. The schema is sent once, in the reply
+// that opens the subscription, and every later batch is positional against it: a row holds one
+// cell per schema field and a branch key holds one cell per branch key field, in declared order.
+
+enum ScalarType : ubyte {
+  U8,
+  I8,
+  U16,
+  I16,
+  U32,
+  I32,
+  U64,
+  I64,
+  F32,
+  F64,
+  Bool,
+  String,
+  Datetime
+}
+
+table ScalarFieldType {
+  /// Required.
+  scalar: ScalarType = null;
+}
+
+/// A fixed-length list whose elements all hold the element type.
+table FixedListFieldType {
+  element: FieldType (required);
+  /// Non-zero.
+  length: uint;
+}
+
+/// A variable-length list whose elements all hold the element type.
+table ListFieldType {
+  element: FieldType (required);
+}
+
+union FieldTypeShape {
+  ScalarFieldType,
+  FixedListFieldType,
+  ListFieldType
+}
+
+table FieldType {
+  shape: FieldTypeShape (required);
+}
+
+table RowField {
+  name: string (required);
+  field_type: FieldType (required);
+  /// Whether a row may hold NullCell for this field.
+  nullable: bool;
+  /// Whether this field is sensitive. Every row then holds RedactedCell for it, whether or not a
+  /// value is present.
+  sensitive: bool;
+}
+
+/// The declared branch of a branched relay and the fields of its key.
+table RowBranch {
+  branch: string (required);
+  /// The branch key fields in key order. Never empty.
+  fields: [RowField] (required);
+}
+
+table RowSchema {
+  fields: [RowField] (required);
+  /// Absent exactly when the relay is unbranched.
+  branch: RowBranch;
+}
+
+/// The field holds no value. Valid only for a nullable field, never as a list element.
+table NullCell {}
+
+/// The field is sensitive and its value is withheld. Valid only for a sensitive field, which then
+/// holds it in every row, never as a list element.
+table RedactedCell {}
+
+table U8Cell {
+  value: ubyte;
+}
+
+table I8Cell {
+  value: byte;
+}
+
+table U16Cell {
+  value: ushort;
+}
+
+table I16Cell {
+  value: short;
+}
+
+table U32Cell {
+  value: uint;
+}
+
+table I32Cell {
+  value: int;
+}
+
+table U64Cell {
+  value: ulong;
+}
+
+table I64Cell {
+  value: long;
+}
+
+/// Required. Optional presence keeps the sign of a negative zero, which a defaulted field loses.
+table F32Cell {
+  value: float = null;
+}
+
+/// Required. Optional presence keeps the sign of a negative zero, which a defaulted field loses.
+table F64Cell {
+  value: double = null;
+}
+
+table BoolCell {
+  value: bool;
+}
+
+table StringCell {
+  value: string (required);
+}
+
+/// A DATETIME value as signed nanoseconds since the Unix epoch in UTC.
+table DatetimeCell {
+  unix_nanos: long;
+}
+
+/// A fixed-length or variable-length list value.
+table ListCell {
+  elements: [Cell] (required);
+}
+
+union CellValue {
+  NullCell,
+  RedactedCell,
+  U8Cell,
+  I8Cell,
+  U16Cell,
+  I16Cell,
+  U32Cell,
+  I32Cell,
+  U64Cell,
+  I64Cell,
+  F32Cell,
+  F64Cell,
+  BoolCell,
+  StringCell,
+  DatetimeCell,
+  ListCell
+}
+
+table Cell {
+  value: CellValue (required);
+}
+
+table Row {
+  /// One cell per schema field, in schema order.
+  cells: [Cell] (required);
+}
+
+table BranchKey {
+  /// One cell per branch key field, in key order.
+  cells: [Cell] (required);
+}
+
+/// Rows of one concrete branch.
+table RowBatch {
+  /// Absent exactly when the relay is unbranched.
+  branch_key: BranchKey;
+  /// Never empty.
+  rows: [Row] (required);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Client requests
+// ---------------------------------------------------------------------------------------------
+
+/// Executes NSPL statements.
+table CommandRequest {
+  query: string (required);
+  /// The selected domain. Absent when none is selected.
+  domain: string;
+  /// The durable identity of this command's effects. A retry after a lost reply, a redirect or a
+  /// reconnect repeats the same reference and recovers the recorded outcome.
+  execution_reference: string (required);
+  /// The accepted-operation position an append to the bound transaction expects.
+  expected_transaction_position: ulong = null;
+  /// The whole-transaction preview a COMMIT expects to apply.
+  expected_preview: TransactionPreviewIdentity;
+}
+
+/// Asks for completions of NSPL source at a cursor.
+table SuggestRequest {
+  input: string (required);
+  /// A UTF-8 byte offset into input, on a character boundary.
+  cursor: uint;
+  /// The selected domain. Absent when none is selected.
+  domain: string;
+}
+
+table ListDomainsRequest {}
+
+/// Selects the domain whose observations the session receives.
+table SelectDomainRequest {
+  domain: string (required);
+}
+
+/// Binds an existing transaction to this session.
+table AttachTransactionRequest {
+  transaction_id: string (required);
+}
+
+/// Reads a transaction's impact report without attaching it or changing it.
+table InspectTransactionRequest {
+  target: InspectionTarget (required);
+  /// The one-based operation to inspect. Absent inspects the whole transaction. Non-zero.
+  operation: ulong = null;
+}
+
+/// How a subscription represents the records it delivers. A subscription's type never changes.
+enum SubscriptionType : ubyte {
+  /// Typed rows against the schema sent when the subscription opens.
+  Row
+}
+
+/// Opens a subscription.
+table SubscribeRequest {
+  domain: string (required);
+  /// Exactly one CREATE SUBSCRIPTION statement.
+  statement: string (required);
+  /// Required. A value the server does not support is rejected rather than replaced.
+  subscription_type: SubscriptionType = null;
+}
+
+/// Closes a subscription of this session.
+table UnsubscribeRequest {
+  subscription: string (required);
+}
+
+/// Stops waiting for an in-flight request. Cancelling a waiter never rolls back admitted work.
+table CancelRequest {
+  /// Non-zero.
+  target_request_id: ulong;
+}
+
+union ClientRequest {
+  CommandRequest,
+  SuggestRequest,
+  ListDomainsRequest,
+  SelectDomainRequest,
+  AttachTransactionRequest,
+  InspectTransactionRequest,
+  SubscribeRequest,
+  UnsubscribeRequest,
+  CancelRequest
+}
+
+// ---------------------------------------------------------------------------------------------
+// Replies
+// ---------------------------------------------------------------------------------------------
+
+table CommandCompleted {
+  /// The statement found the entity it creates already present and changed nothing.
+  already_existed: bool;
+}
+
+/// The session names a transaction the serving leader holds no binding for. Attach it again and
+/// retry.
+table TransactionDetached {
+  transaction_id: string (required);
+}
+
+/// Another session attached the transaction this session was bound to.
+table TransactionTakenOver {
+  transaction_id: string (required);
+}
+
+enum UnknownOutcomeCause : ubyte {
+  /// Leadership moved after the command was durably admitted.
+  LeadershipLost,
+  /// The command is durably admitted and still applying.
+  StillApplying,
+  /// The command finished, but its outcome is not yet authoritative on every live node.
+  NotYetAuthoritative
+}
+
+/// The command was durably admitted and its outcome is not known yet. Retry with the same
+/// execution_reference to recover it.
+table OutcomeUnknown {
+  /// Required.
+  cause: UnknownOutcomeCause = null;
+}
+
+enum ExecutionReferenceConflictKind : ubyte {
+  Content,
+  Domain,
+  Owner,
+  Position
+}
+
+/// The execution_reference already identifies a different command.
+table ExecutionReferenceConflict {
+  /// Required.
+  conflict: ExecutionReferenceConflictKind = null;
+}
+
+/// The execution_reference aged out of execution history; its outcome can no longer be recovered
+/// and the command was not executed again.
+table ExecutionReferenceExpired {}
+
+/// The COMMIT expected a preview that no longer describes the transaction. Nothing was applied
+/// and the transaction stays open.
+table PreviewStale {
+  expected: TransactionPreviewIdentity (required);
+  current: TransactionPreviewIdentity (required);
+}
+
+union CommandDisposition {
+  CommandCompleted,
+  RequestFailed,
+  LeaderRedirect,
+  TransactionDetached,
+  TransactionTakenOver,
+  OutcomeUnknown,
+  ExecutionReferenceConflict,
+  ExecutionReferenceExpired,
+  PreviewStale
+}
+
+union StatementDisposition {
+  CommandCompleted,
+  RequestFailed,
+  LeaderRedirect
+}
+
+table StatementOutcome {
+  disposition: StatementDisposition (required);
+  message: string (required);
+  diagnostics: [Diagnostic] (required);
+}
+
+table CommandOutcome {
+  /// The execution_reference of the request.
+  execution_reference: string (required);
+  /// Required.
+  origin: OutcomeOrigin = null;
+  disposition: CommandDisposition (required);
+  message: string (required);
+  diagnostics: [Diagnostic] (required);
+  /// The outcome of each statement of a multi-statement command in written order. Empty for a
+  /// single statement.
+  statements: [StatementOutcome] (required);
+  /// The transaction this session was bound to while serving the command.
+  transaction: TransactionStatus;
+}
+
+table TransactionAttached {
+  transaction: TransactionStatus (required);
+}
+
+/// The transaction already finished. It stays unattached, and its final status is reported.
+table TransactionAlreadyFinished {
+  transaction: TransactionStatus (required);
+}
+
+union AttachDisposition {
+  TransactionAttached,
+  TransactionAlreadyFinished,
+  RequestFailed,
+  LeaderRedirect
+}
+
+table AttachOutcome {
+  disposition: AttachDisposition (required);
+  message: string (required);
+  diagnostics: [Diagnostic] (required);
+}
+
+enum SuggestionKind : ubyte {
+  Text,
+  LocalDirectoryLookup
+}
+
+table Suggestion {
+  value: string (required);
+  /// Required.
+  kind: SuggestionKind = null;
+}
+
+table SuggestOutcome {
+  suggestions: [Suggestion] (required);
+}
+
+enum DomainStatus : ubyte {
+  Stopped,
+  Running,
+  Paused
+}
+
+table UnpacedDomain {}
+
+table PacedDomain {
+  /// Non-zero.
+  period_nanos: ulong;
+  skew_nanos: ulong;
+}
+
+union DomainPace {
+  UnpacedDomain,
+  PacedDomain
+}
+
+table DomainInfo {
+  domain: string (required);
+  /// Required.
+  status: DomainStatus = null;
+  pace: DomainPace (required);
+}
+
+table DomainList {
+  domains: [DomainInfo] (required);
+}
+
+table DomainSelected {
+  domain: string (required);
+}
+
+table DomainNotFound {
+  domain: string (required);
+}
+
+union DomainSelection {
+  DomainSelected,
+  DomainNotFound
+}
+
+table DomainSelectionOutcome {
+  selection: DomainSelection (required);
+}
+
+table TransactionInspected {
+  transaction: TransactionStatus (required);
+  /// The inspected one-based operation. Absent when the whole transaction was inspected.
+  operation: ulong = null;
+  report: TransactionImpactReport (required);
+}
+
+enum InspectionRejection : ubyte {
+  NoAttachedTransaction,
+  TransactionNotFound,
+  NotOwner,
+  OperationNotFound
+}
+
+table InspectionRejected {
+  /// Required.
+  rejection: InspectionRejection = null;
+  message: string (required);
+}
+
+union InspectionDisposition {
+  TransactionInspected,
+  InspectionRejected,
+  LeaderRedirect
+}
+
+table InspectionOutcome {
+  disposition: InspectionDisposition (required);
+}
+
+/// A subscription within one session. A name reused after deletion gets a new generation.
+table SubscriptionHandle {
+  name: string (required);
+  /// Non-zero.
+  generation: ulong;
+}
+
+table SubscriptionOpened {
+  subscription: SubscriptionHandle (required);
+  domain: string (required);
+  relay: string (required);
+  /// Required. Confirms the type the request selected.
+  subscription_type: SubscriptionType = null;
+  schema: RowSchema (required);
+}
+
+union SubscribeDisposition {
+  SubscriptionOpened,
+  RequestFailed
+}
+
+table SubscribeOutcome {
+  disposition: SubscribeDisposition (required);
+  message: string (required);
+  diagnostics: [Diagnostic] (required);
+}
+
+table SubscriptionDeleted {
+  subscription: SubscriptionHandle (required);
+}
+
+union UnsubscribeDisposition {
+  SubscriptionDeleted,
+  RequestFailed
+}
+
+table UnsubscribeOutcome {
+  disposition: UnsubscribeDisposition (required);
+  message: string (required);
+  diagnostics: [Diagnostic] (required);
+}
+
+enum CancelState : ubyte {
+  /// The target is in flight. Its own terminal reply follows.
+  Requested,
+  /// No request with the target identity is in flight.
+  NotInFlight
+}
+
+table CancelOutcome {
+  /// Non-zero.
+  target_request_id: ulong;
+  /// Required.
+  state: CancelState = null;
+}
+
+enum CancellationStage : ubyte {
+  /// The request was not admitted and has no effects.
+  BeforeAdmission,
+  /// The request was admitted. Its effects may still complete; recover them by identity.
+  AfterAdmission
+}
+
+/// The terminal reply of a cancelled request.
+table RequestCancelled {
+  /// Required.
+  stage: CancellationStage = null;
+}
+
+enum RequestRejection : ubyte {
+  /// A field is missing, malformed or out of range.
+  InvalidRequest,
+  /// The request is not served on this transport.
+  UnsupportedRequest,
+  /// An enum value the server does not support.
+  UnsupportedValue,
+  /// The request_id is already in flight in this session.
+  DuplicateRequestId,
+  /// The complete reply is larger than the session transfer limit.
+  ReplyTooLarge
+}
+
+/// The request was not served.
+table RequestRejected {
+  /// Required.
+  rejection: RequestRejection = null;
+  /// The offending field. Absent when the rejection concerns no single field.
+  field: string;
+  message: string (required);
+}
+
+/// One part of a reply too large for a single frame. The parts of one reply share its request_id
+/// and total_bytes, arrive in order with contiguous offsets starting at zero, and concatenate to a
+/// complete ServerMessage frame holding a Reply with the same request_id and a body that is not a
+/// TransferPart.
+table TransferPart {
+  /// The size of the complete frame. Non-zero.
+  total_bytes: ulong;
+  /// The offset of chunk within the complete frame.
+  offset: ulong;
+  /// Never empty.
+  chunk: [ubyte] (required);
+}
+
+union ReplyBody {
+  CommandOutcome,
+  AttachOutcome,
+  SuggestOutcome,
+  DomainList,
+  DomainSelectionOutcome,
+  InspectionOutcome,
+  SubscribeOutcome,
+  UnsubscribeOutcome,
+  CancelOutcome,
+  RequestCancelled,
+  RequestRejected,
+  TransferPart
+}
+
+table Reply {
+  /// The request_id of the request this reply answers. Non-zero.
+  request_id: ulong;
+  body: ReplyBody (required);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Unsolicited server messages
+// ---------------------------------------------------------------------------------------------
+
+enum NoticeLevel : ubyte {
+  Info,
+  Warning,
+  Error
+}
+
+table ServerNotice {
+  /// Required.
+  level: NoticeLevel = null;
+  message: string (required);
+}
+
+table LeaderIsServingNode {
+  node: string (required);
+}
+
+table LeaderIsRemote {
+  leader: LeaderEndpoints (required);
+}
+
+table LeaderUnknown {}
+
+union Leadership {
+  LeaderIsServingNode,
+  LeaderIsRemote,
+  LeaderUnknown
+}
+
+table LeadershipObserved {
+  leadership: Leadership (required);
+}
+
+table DomainsObserved {
+  domains: [DomainInfo] (required);
+}
+
+table ModelEntity {
+  node: NodeRef (required);
+}
+
+table ResourceEntity {
+  name: string (required);
+  /// The newest completed version. Absent while no version has completed. Non-zero.
+  latest_version: ulong = null;
+}
+
+union DomainEntity {
+  ModelEntity,
+  ResourceEntity
+}
+
+table DomainEntityEntry {
+  entity: DomainEntity (required);
+}
+
+table DomainSnapshotObserved {
+  domain: string (required);
+  /// The live dataflow graph of the domain as a JSON document.
+  graph_json: string (required);
+  entities: [DomainEntityEntry] (required);
+}
+
+table ClusterObserved {
+  running_domains: ulong;
+  graph_nodes: ulong;
+  relays: ulong;
+}
+
+table SubscriptionRows {
+  subscription: SubscriptionHandle (required);
+  batch: RowBatch (required);
+}
+
+/// A dropping subscription discarded rows its session could not take in time.
+table SubscriptionDeliveryLost {
+  subscription: SubscriptionHandle (required);
+  /// Non-zero.
+  dropped_rows: ulong;
+}
+
+enum RowsSkippedCause : ubyte {
+  /// The subscription filter failed to evaluate.
+  FilterFailed,
+  /// The domain's execution time was unavailable to the filter.
+  DomainTimeUnavailable,
+  /// The rows could not be encoded against the subscription schema.
+  EncodingFailed
+}
+
+/// Rows were skipped. The subscription stays open.
+table SubscriptionRowsSkipped {
+  subscription: SubscriptionHandle (required);
+  /// Required.
+  cause: RowsSkippedCause = null;
+  /// Non-zero.
+  skipped_rows: ulong;
+  message: string (required);
+}
+
+enum SubscriptionEndReason : ubyte {
+  /// The relay was rebuilt, stopped or removed. Subscribe again against the current schema.
+  RelayClosed
+}
+
+/// The server closed the subscription. No further rows follow for this generation.
+table SubscriptionEnded {
+  subscription: SubscriptionHandle (required);
+  /// Required.
+  reason: SubscriptionEndReason = null;
+  message: string (required);
+}
+
+table ServerShuttingDown {}
+
+table ProtocolViolated {
+  message: string (required);
+}
+
+union SessionEndReason {
+  ServerShuttingDown,
+  LeaderRedirect,
+  ProtocolViolated
+}
+
+/// The server is ending the session. No reply follows for any request still in flight.
+table SessionEnding {
+  reason: SessionEndReason (required);
+}
+
+union ServerBody {
+  Reply,
+  ServerNotice,
+  LeadershipObserved,
+  DomainsObserved,
+  DomainSnapshotObserved,
+  ClusterObserved,
+  SubscriptionRows,
+  SubscriptionDeliveryLost,
+  SubscriptionRowsSkipped,
+  SubscriptionEnded,
+  SessionEnding
+}
+
+// ---------------------------------------------------------------------------------------------
+// Resource upload
+// ---------------------------------------------------------------------------------------------
+
+/// The first frame of an upload stream.
+table UploadStart {
+  /// Non-zero. The UploadReply carries it back.
+  request_id: ulong;
+  domain: string (required);
+  resource: string (required);
+  /// The stable identity of this upload across retries.
+  upload_identity: string (required);
+  /// The exact archive size the chunks add up to. Non-zero.
+  total_bytes: ulong;
+}
+
+/// Archive bytes following UploadStart, in order.
+table UploadChunk {
+  /// Never empty.
+  bytes: [ubyte] (required);
+}
+
+union UploadPart {
+  UploadStart,
+  UploadChunk
+}
+
+table ResourceInstalled {
+  upload_identity: string (required);
+  /// Non-zero.
+  version: ulong;
+  /// Required.
+  origin: OutcomeOrigin = null;
+}
+
+enum UploadFailure : ubyte {
+  /// The stream did not begin with a valid UploadStart, or a later frame was not a chunk.
+  InvalidStream,
+  ResourceNotDeclared,
+  /// The chunks did not add up to total_bytes.
+  SizeMismatch,
+  QuotaExceeded,
+  InstallationFailed
+}
+
+table UploadFailed {
+  /// Absent when the stream carried no valid upload identity.
+  upload_identity: string;
+  /// Required.
+  failure: UploadFailure = null;
+  /// The version assigned before installation failed. Absent when none was assigned. Non-zero.
+  assigned_version: ulong = null;
+}
+
+union UploadDisposition {
+  ResourceInstalled,
+  UploadFailed,
+  LeaderRedirect
+}
+
+// ---------------------------------------------------------------------------------------------
+// Frame roots
+// ---------------------------------------------------------------------------------------------
+
+/// Root of a client frame ("NXCM").
+table ClientMessage {
+  /// Non-zero, and never reused within one session.
+  request_id: ulong;
+  request: ClientRequest (required);
+}
+
+/// Root of a server frame ("NXSM").
+table ServerMessage {
+  body: ServerBody (required);
+}
+
+/// Root of an upload stream frame ("NXUM").
+table UploadMessage {
+  part: UploadPart (required);
+}
+
+/// Root of the frame that answers an upload stream ("NXUR").
+table UploadReply {
+  /// The request_id of the stream's UploadStart. Absent when the stream carried none.
+  request_id: ulong = null;
+  disposition: UploadDisposition (required);
+  message: string (required);
+  diagnostics: [Diagnostic] (required);
+}

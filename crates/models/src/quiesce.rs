@@ -20,8 +20,10 @@ use crate::{
 };
 
 mod impact;
+mod inspection;
 
 pub use impact::*;
+pub use inspection::*;
 
 #[derive(
     Debug,

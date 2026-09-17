@@ -1,0 +1,11 @@
+// The frame that answers an upload stream.
+//
+// This file declares a frame root for code generators; every shape it names lives in session.fbs.
+
+include "session.fbs";
+
+namespace nervix.session;
+
+root_type UploadReply;
+file_identifier "NXUR";
+file_extension "nxur";
