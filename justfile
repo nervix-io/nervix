@@ -95,6 +95,13 @@ test-lib *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --lib -- {{ args }}
 
+# Run the Arrow-to-Row correctness cases and print its allocation comparison with task 01.
+test-subscription-rows: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --features benchmarks,testing --lib subscription_row:: -- --nocapture
+
 # Type-check one workspace package and all of its targets without building binaries. Extra
 # arguments are forwarded to Cargo, so a server check can add `--features testing`.
 check-package package *args:
@@ -260,7 +267,13 @@ test-coverage: tests-deps
 # `just bench --test` to execute each benchmark body once without recording runner timings.
 bench *args:
     cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
+    cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
     cargo bench --package nervix-vm --bench vm -- {{ args }}
+
+# Compare direct Arrow-to-Row encoding with the protobuf/keyed-JSON wire construction it replaces.
+# The suite reports encoded bytes before Criterion measures CPU; its unit probe measures allocations.
+bench-subscription-rows *args:
+    cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
 
 # Run only the expression VM Criterion suite. Extra arguments are forwarded to Criterion, so a
 # group filter and `--save-baseline` or `--baseline` compare VM kernels without the relay suite.
