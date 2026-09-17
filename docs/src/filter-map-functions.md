@@ -126,6 +126,35 @@ operand makes the comparison null.
   `-0.0` are equal.
 - `nullif(a, b)` and a simple `CASE <operand> WHEN <value>` decide equality exactly as `=` does.
 
+## Arithmetic
+
+`+`, `-`, `*`, `/`, and `%` require both operands to have the same exact numeric type, and the result
+has that type. Unary `-` applies to signed integer and floating-point operands. A null operand makes
+the result null.
+
+Arithmetic is checked. An operation whose result its type cannot hold reports a per-message error
+and yields null for that message, instead of wrapping, saturating, or producing NaN or an infinity.
+Only that message fails: every other message in the batch is computed as usual, and a message's
+result never depends on the other messages in its batch.
+
+- Integer `+`, `-`, and `*` report an `overflow` error when the exact result does not fit the operand
+  type, so `-` over `U8`, `U16`, `U32`, or `U64` operands fails when the right operand is larger.
+- Integer `/` truncates toward zero. A zero divisor reports a `division_by_zero` error, and dividing
+  the minimum value of a signed type by `-1` reports an `overflow` error.
+- Integer `%` returns the remainder with the sign of the dividend. A zero divisor reports a
+  `division_by_zero` error. Every other remainder exists, so the remainder of the minimum value of a
+  signed type by `-1` is `0`.
+- Unary `-` on the minimum value of a signed integer type reports an `overflow` error.
+- `F32` and `F64` arithmetic is IEEE 754 arithmetic at the operand's own width, and `%` returns the
+  remainder with the sign of the dividend. A result that is NaN or an infinity reports an
+  `invalid_argument` error, which includes every division by zero and every operation on NaN. The
+  rule applies to the result, so an infinite operand fails only where the result is not finite:
+  `1.0 / x` is `0.0` for an infinite `x`. Unary `-` on a float never fails: it changes the sign of
+  every value, including zero, NaN, and the infinities.
+
+The error's message names the failure, such as `integer addition overflowed`, `integer remainder by
+zero`, or `floating-point operation produced a non-finite result`.
+
 ## Header Functions
 
 | Function | Returns | Notes |
@@ -229,9 +258,11 @@ not compile reports a per-message error.
 
 ## Numeric Functions
 
-Numeric functions accept every integer and floating-point type. A result that is not finite, such
-as `sqrt(-1.0)`, `ln(0.0)`, or `exp(1000.0)`, reports a per-message error instead of producing NaN
-or an infinity.
+Numeric functions accept every integer and floating-point type. A function that returns `F64` reads
+an integer argument as the nearest `F64`, which is exact for every type up to 32 bits and rounds
+`I64` and `U64` values beyond 2^53. A result that is not finite, such as `sqrt(-1.0)`, `ln(0.0)`, or
+`exp(1000.0)`, reports a per-message `invalid_argument` error and yields null instead of producing
+NaN or an infinity.
 
 | Function | Returns | Notes |
 | --- | --- | --- |
@@ -252,6 +283,27 @@ or an infinity.
 | `round(x)` | same numeric type as input | Rounds to the nearest integer, with halves rounded away from zero. Integer input is returned unchanged |
 | `sqrt(x)` | `F64` | Square root |
 | `tan(x)` | `F64` | Tangent of an angle in radians |
+
+`abs`, `ceil`, `floor`, `round`, and `sqrt` are exact: each returns the correctly rounded result,
+which is the same on every node. `acos`, `asin`, `atan`, `cos`, `exp`, `ln`, `log`, `pow`, and `tan`
+evaluate in IEEE 754 double precision and return a result within two units in the last place of the
+exact value. Nodes on different platforms may differ in that last place.
+
+A function reports an error exactly where its result is not finite. For finite arguments, that is:
+
+| Function | Arguments that report an error |
+| --- | --- |
+| `abs`, `ceil`, `floor`, `round` | None. `abs` over the minimum value of a signed integer type reports an `overflow` error instead |
+| `sqrt(x)` | `x < 0` |
+| `ln(x)`, `log(x)` | `x <= 0` |
+| `log(base, x)` | `x <= 0`, `base < 0`, and `base = 1`; the result is `ln(x) / ln(base)` |
+| `acos(x)`, `asin(x)` | `x < -1` and `x > 1` |
+| `exp(x)` | `x` above about `709.78`, where the result overflows. A result too small to represent is `0.0` |
+| `pow(x, y)` | A result that overflows, `x < 0` with a `y` that is not an integer, and `x = 0` with `y < 0` |
+| `atan(x)`, `cos(x)`, `tan(x)` | None |
+
+A NaN or infinite argument reports an error unless IEEE 754 defines a finite result for it, as it
+does for `atan` of an infinity, `exp` of negative infinity, and `pow(x, 0)`.
 
 ## Array And Vector Functions
 

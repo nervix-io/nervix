@@ -36,6 +36,7 @@ mod compiler;
 mod error;
 mod frontend;
 mod ir;
+mod numeric;
 pub mod program;
 mod runtime;
 mod semantics;
@@ -54,7 +55,8 @@ pub use compiler::{
     infer_set_expr_types_for_bindings, infer_set_expr_types_for_bindings_with_udfs,
 };
 pub use error::{
-    CompileError, ErrorCode, RowErrorLengths, RowErrorMask, RowErrors, RuntimeError, SideError,
+    CompileError, DivisionOperation, ErrorCode, FloatOperation, IntegerOperation, RowErrorLengths,
+    RowErrorMask, RowErrors, RuntimeError, SideError, SideErrorReason,
 };
 pub use frontend::{
     AssignmentTargetSet, CastTargetKind, FrontendError, FrontendErrorKind, FrontendResult,
