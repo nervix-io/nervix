@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use shuttle::{
     Config, FailurePersistence, Runner,
-    scheduler::{DfsScheduler, ReplayScheduler},
+    scheduler::{DfsScheduler, PctScheduler, RandomScheduler, ReplayScheduler, Scheduler},
 };
 
 // Shuttle executes each modeled thread on a coroutine stack. The server test binary's allocator
@@ -20,6 +20,28 @@ const SERVER_MODEL_STACK_SIZE: usize = 1_048_576;
 pub(crate) fn check_dfs<F>(invariant: F, max_iterations: Option<usize>)
 where
     F: Fn() + Send + Sync + 'static,
+{
+    check_with_scheduler(invariant, DfsScheduler::new(max_iterations, false));
+}
+
+pub(crate) fn check_pct<F>(invariant: F, iterations: usize, depth: usize)
+where
+    F: Fn() + Send + Sync + 'static,
+{
+    check_with_scheduler(invariant, PctScheduler::new(depth, iterations));
+}
+
+pub(crate) fn check_random<F>(invariant: F, iterations: usize)
+where
+    F: Fn() + Send + Sync + 'static,
+{
+    check_with_scheduler(invariant, RandomScheduler::new(iterations));
+}
+
+fn check_with_scheduler<F, S>(invariant: F, scheduler: S)
+where
+    F: Fn() + Send + Sync + 'static,
+    S: Scheduler + 'static,
 {
     let mut config = Config::new();
     config.stack_size = SERVER_MODEL_STACK_SIZE;
@@ -47,5 +69,5 @@ where
         config.failure_persistence = FailurePersistence::File(Some(trace_directory));
     }
 
-    Runner::new(DfsScheduler::new(max_iterations, false), config).run(invariant);
+    Runner::new(scheduler, config).run(invariant);
 }
