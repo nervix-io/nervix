@@ -291,6 +291,9 @@ jobs:
       - name: Benchmark smoke tests
         run: just bench --test
 
+      - name: Shuttle concurrency checks
+        run: just test-shuttle
+
       # Runs after the main tests rather than inside them: the walk saturates every core, and its
       # failures are about completion reachability rather than any one test.
       - name: NSPL completion walk
