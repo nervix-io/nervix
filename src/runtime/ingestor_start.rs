@@ -95,7 +95,7 @@ impl Runtime {
     }
 
     pub(crate) async fn start_running_domain_ingestors(&self) -> Result<(), RuntimeError> {
-        let _lock = self.inner.schedule_apply_lock.lock().await;
+        let _application = self.inner.schedule_application.lock().await;
         loop {
             tokio::task::consume_budget().await;
             match self.next_scheduled_ingestor_start_plan(None) {

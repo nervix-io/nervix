@@ -58,8 +58,10 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<MessageErrorRouteKey, Arc<MessageErrorRouteRuntime>, RandomState>,
     pub(in crate::runtime) compiled_domain_udfs:
         DashMap<DomainName, CompiledDomainUdfs, RandomState>,
-    pub(in crate::runtime) schedule_apply_lock: Mutex<()>,
-    pub(in crate::runtime) applied_cluster_revision: AtomicU64,
+    /// Serializes schedule application on this node, and holds what it has applied. Ingestor
+    /// starts and persisted ownership-handoff activation take the same lock so they observe a
+    /// schedule that is not half applied.
+    pub(in crate::runtime) schedule_application: Mutex<ScheduleApplication>,
     pub(in crate::runtime) domain_instantiation_errors: DashMap<DomainName, String, RandomState>,
     pub(in crate::runtime) domains: DashMap<DomainName, RuntimeDomainState, RandomState>,
     pub(in crate::runtime) domain_status_changed: watch::Sender<u64>,
