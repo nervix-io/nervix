@@ -27,7 +27,7 @@ use arrow_array::{
     new_null_array,
     types::{
         ArrowPrimitiveType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type,
-        UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+        TimestampNanosecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
     },
 };
 use arrow_buffer::{NullBuffer, OffsetBuffer};
@@ -56,20 +56,21 @@ use uuid::{NoContext, Timestamp as UuidTimestamp, Uuid};
 
 use crate::{
     batch::{TypedArray, TypedBatch},
+    datetime::{self, UnitCounts},
     error::{
-        FloatOperation, IntegerOperation, RowErrorMask, RowErrors, RuntimeError, SideError,
-        SideErrorReason,
+        DatetimeOperation, FloatOperation, IntegerOperation, RowErrorMask, RowErrors, RuntimeError,
+        SideError, SideErrorReason,
     },
     ir::{
         CompiledPredicate, CompiledProgram, InputBinding, Instruction, InstructionKind,
         RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace, RegisterType, ScalarValue,
     },
     numeric::{
-        self, Arithmetic, BinaryMathFunction, CheckedFloat, CheckedInteger, Comparison,
+        self, Arithmetic, BinaryMathFunction, Checked, CheckedFloat, CheckedInteger, Comparison,
         DecimalRounding, F64Operand, IntegerRounding, MathFunction, Rounding, RoundingDigits,
         Shift, ShiftCounts, ShiftedInteger, SignedInteger,
     },
-    program::{BinaryOp, FunctionName, Span, UnaryOp},
+    program::{BinaryOp, DatetimeFunction, FunctionName, Span, UnaryOp},
     semantics::{BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass},
 };
 
@@ -1467,6 +1468,10 @@ fn execute_builtin(
             execute_shift(&values[0], &values[1], Shift::Right, row_errors, span)
                 .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
         }
+        BuiltinLowering::Datetime(function) => {
+            execute_datetime(function, &values, row_errors, span)
+                .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
+        }
     }
 }
 
@@ -1477,6 +1482,90 @@ fn unsupported_builtin_inputs(lowering: BuiltinLowering, inputs: &[TypedArray]) 
     RuntimeError::InvalidBatch {
         message: format!("builtin {lowering:?} does not accept inputs of types {input_types:?}"),
     }
+}
+
+/// Executes a datetime builtin over its row-valued operands, recording a row error for every lane
+/// whose result its type cannot hold. Answers `None` when an operand does not have a type the
+/// builtin's signature accepts.
+fn execute_datetime(
+    function: DatetimeFunction,
+    operands: &[TypedArray],
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> Option<TypedArray> {
+    match (function, operands) {
+        (DatetimeFunction::DatePart(part), [TypedArray::Datetime(values)]) => {
+            Some(TypedArray::Int64(datetime::date_part(values, part)))
+        }
+        (DatetimeFunction::DateTrunc(unit), [TypedArray::Datetime(values)]) => {
+            let truncated = datetime::truncate(values, unit);
+            Some(record_datetime_failures(
+                truncated,
+                DatetimeOperation::DateTrunc,
+                row_errors,
+                span,
+            ))
+        }
+        (
+            DatetimeFunction::DateBin(width),
+            [TypedArray::Datetime(values), TypedArray::Datetime(origins)],
+        ) => {
+            let binned = datetime::bin(values, origins, width);
+            Some(record_datetime_failures(
+                binned,
+                DatetimeOperation::DateBin,
+                row_errors,
+                span,
+            ))
+        }
+        (DatetimeFunction::DateAdd(unit), [amounts, TypedArray::Datetime(values)]) => {
+            let amounts = UnitCounts::from_typed(amounts)?;
+            let added = datetime::add(&amounts, values, unit);
+            Some(record_datetime_failures(
+                added,
+                DatetimeOperation::DateAdd,
+                row_errors,
+                span,
+            ))
+        }
+        (
+            DatetimeFunction::DateDiff(unit),
+            [TypedArray::Datetime(starts), TypedArray::Datetime(ends)],
+        ) => {
+            let counted = datetime::difference(starts, ends, unit);
+            row_errors.push_failures(counted.failed.lanes(), span, |_| {
+                SideErrorReason::DateDiffOverflow
+            });
+            Some(TypedArray::Int64(counted.column))
+        }
+        (DatetimeFunction::ToUnix(unit), [TypedArray::Datetime(values)]) => {
+            Some(TypedArray::Int64(datetime::to_unix(values, unit)))
+        }
+        (DatetimeFunction::FromUnix(unit), [counts]) => {
+            let counts = UnitCounts::from_typed(counts)?;
+            let converted = datetime::from_unix(&counts, unit);
+            Some(record_datetime_failures(
+                converted,
+                DatetimeOperation::FromUnix,
+                row_errors,
+                span,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Records a row error for every lane of a datetime result that left the DATETIME range.
+fn record_datetime_failures(
+    checked: Checked<TimestampNanosecondType>,
+    operation: DatetimeOperation,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> TypedArray {
+    row_errors.push_failures(checked.failed.lanes(), span, |_| {
+        SideErrorReason::DatetimeOutOfRange(operation)
+    });
+    TypedArray::Datetime(checked.column)
 }
 
 #[derive(Clone, Copy)]
@@ -5880,6 +5969,9 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+#[path = "runtime_datetime_tests.rs"]
+mod datetime_tests;
 #[cfg(test)]
 #[path = "runtime_numeric_tests.rs"]
 mod numeric_tests;
