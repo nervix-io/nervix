@@ -757,8 +757,13 @@ mod tests {
     };
     use triomphe::Arc;
 
-    use super::{RelayMessage, RelayRecordBatch, delivery_observation_from_timestamps};
+    use super::{
+        RelayMessage, RelayRecordBatch, RelayRecordBatchError, RelayRecordBatchOperation,
+        RelayRecordBatchSidecar, build_stream_record_batch_preserving_acks,
+        delivery_observation_from_timestamps,
+    };
     use crate::{
+        runtime::test_fixtures::string_branch_key,
         runtime_ack::AckSet,
         runtime_schema::{
             CompiledSchema, RuntimeRecordMetadata, RuntimeRow, RuntimeValue, compile_schema,
@@ -766,12 +771,14 @@ mod tests {
     };
 
     fn test_schema() -> Arc<CompiledSchema> {
+        schema_with_field("relay_batch_test", "value")
+    }
+
+    fn schema_with_field(schema: &str, field: &str) -> Arc<CompiledSchema> {
         Arc::new(compile_schema(&CreateSchema {
-            name: SchemaName::from(
-                &ModelName::parse("relay_batch_test").expect("valid schema name"),
-            ),
+            name: SchemaName::from(&ModelName::parse(schema).expect("valid schema name")),
             fields: vec![SchemaField {
-                name: FieldName::parse("value").expect("valid field name"),
+                name: FieldName::parse(field).expect("valid field name"),
                 ty: ParseAsType::I64,
                 optional: false,
                 sensitive: false,
@@ -809,6 +816,19 @@ mod tests {
                 .expect("row must exist")
             })
             .collect()
+    }
+
+    fn test_batch(schema: &Arc<CompiledSchema>, values: &[i64]) -> RelayRecordBatch {
+        let messages = test_rows(schema, values)
+            .into_iter()
+            .map(|record| RelayMessage {
+                key: None,
+                record,
+                acks: AckSet::empty(),
+            })
+            .collect();
+        RelayRecordBatch::from_messages(schema.clone(), messages)
+            .expect("relay batch fixture must be valid")
     }
 
     #[test]
@@ -893,6 +913,385 @@ mod tests {
         assert_eq!(
             sparse.batch.value(1, "value").expect("readable value"),
             Some(RuntimeValue::I64(30))
+        );
+    }
+
+    #[test]
+    fn relay_batch_construction_reports_typed_structural_errors() {
+        let schema = test_schema();
+        let empty = RelayRecordBatch::from_messages(schema.clone(), Vec::new())
+            .expect_err("an empty relay batch must be rejected");
+        assert!(matches!(
+            empty.current_context(),
+            RelayRecordBatchError::EmptyMessages
+        ));
+
+        let mut rows = test_rows(&schema, &[10, 20]).into_iter();
+        let mixed = RelayRecordBatch::from_messages(
+            schema.clone(),
+            vec![
+                RelayMessage {
+                    key: None,
+                    record: rows.next().expect("first fixture row"),
+                    acks: AckSet::empty(),
+                },
+                RelayMessage {
+                    key: string_branch_key("tenant", "acme"),
+                    record: rows.next().expect("second fixture row"),
+                    acks: AckSet::empty(),
+                },
+            ],
+        )
+        .expect_err("mixed branch keys must be rejected");
+        assert!(matches!(
+            mixed.current_context(),
+            RelayRecordBatchError::MixedBranchKeys
+        ));
+
+        let valid = test_batch(&schema, &[10]);
+        let missing_acks = RelayRecordBatch::from_runtime_batch(
+            schema.clone(),
+            None,
+            valid.batch.as_ref().clone(),
+            valid.metadata.clone(),
+            Vec::new(),
+        )
+        .expect_err("one Arrow row requires one ACK sidecar");
+        assert!(matches!(
+            missing_acks.current_context(),
+            RelayRecordBatchError::SidecarRowCount {
+                sidecar: RelayRecordBatchSidecar::Ack,
+                expected: 1,
+                found: 0,
+            }
+        ));
+
+        let missing_metadata = RelayRecordBatch::from_runtime_batch(
+            schema.clone(),
+            None,
+            valid.batch.as_ref().clone(),
+            Vec::new(),
+            vec![AckSet::empty()],
+        )
+        .expect_err("one Arrow row requires one metadata sidecar");
+        assert!(matches!(
+            missing_metadata.current_context(),
+            RelayRecordBatchError::SidecarRowCount {
+                sidecar: RelayRecordBatchSidecar::Metadata,
+                expected: 1,
+                found: 0,
+            }
+        ));
+
+        let other_schema = schema_with_field("other_relay_batch", "other_value");
+        let wrong_schema = RelayRecordBatch::from_runtime_batch(
+            other_schema,
+            None,
+            valid.batch.as_ref().clone(),
+            valid.metadata.clone(),
+            valid.acks.clone(),
+        )
+        .expect_err("the runtime batch must match the compiled relay schema");
+        assert!(matches!(
+            wrong_schema.current_context(),
+            RelayRecordBatchError::RuntimeSchema {
+                operation: RelayRecordBatchOperation::ValidateRuntimeBatch,
+            }
+        ));
+        assert!(wrong_schema.contains::<crate::runtime_schema::RuntimeSchemaError>());
+    }
+
+    #[test]
+    fn filtered_relay_batch_requires_row_aligned_sidecars() {
+        let schema = test_schema();
+        let valid = test_batch(&schema, &[10]);
+
+        let missing_metadata = RelayRecordBatch::from_filtered_parts(
+            None,
+            valid.batch.as_ref().clone(),
+            Vec::new(),
+            vec![AckSet::empty()],
+        )
+        .expect_err("filtered metadata must remain row aligned");
+        assert!(matches!(
+            missing_metadata.current_context(),
+            RelayRecordBatchError::SidecarRowCount {
+                sidecar: RelayRecordBatchSidecar::Metadata,
+                expected: 1,
+                found: 0,
+            }
+        ));
+
+        let missing_acks = RelayRecordBatch::from_filtered_parts(
+            None,
+            valid.batch.as_ref().clone(),
+            valid.metadata.clone(),
+            Vec::new(),
+        )
+        .expect_err("filtered ACKs must remain row aligned");
+        assert!(matches!(
+            missing_acks.current_context(),
+            RelayRecordBatchError::SidecarRowCount {
+                sidecar: RelayRecordBatchSidecar::Ack,
+                expected: 1,
+                found: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn relay_batch_take_preserves_acks_for_every_rejected_selection() {
+        let schema = test_schema();
+
+        let mut malformed = test_batch(&schema, &[10, 20]);
+        malformed.keys.pop();
+        let malformed_failure = malformed
+            .take(&[0])
+            .expect_err("misaligned sidecars must be rejected before selection");
+        assert_eq!(malformed_failure.preserved.len(), 2);
+        assert!(matches!(
+            malformed_failure.error.current_context(),
+            RelayRecordBatchError::SidecarCount {
+                arrow_rows: 2,
+                metadata_rows: 2,
+                branch_keys: 1,
+                ack_sets: 2,
+            }
+        ));
+
+        let out_of_bounds = test_batch(&schema, &[10, 20])
+            .take(&[2])
+            .expect_err("selection indices must address an existing row");
+        assert_eq!(out_of_bounds.preserved.len(), 2);
+        assert!(matches!(
+            out_of_bounds.error.current_context(),
+            RelayRecordBatchError::SelectedRowOutOfBounds {
+                row: 2,
+                batch_rows: 2,
+            }
+        ));
+
+        let unordered = test_batch(&schema, &[10, 20])
+            .take(&[1, 0])
+            .expect_err("selected rows must be strictly increasing");
+        assert_eq!(unordered.preserved.len(), 2);
+        assert!(matches!(
+            unordered.error.current_context(),
+            RelayRecordBatchError::SelectedRowsNotIncreasing {
+                previous: 1,
+                next: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn relay_batch_reordering_reports_indices_and_returns_the_batch() {
+        let schema = test_schema();
+
+        let mut malformed = test_batch(&schema, &[10, 20]);
+        malformed.metadata.pop();
+        let malformed_failure = malformed
+            .into_reordered(&[1, 0])
+            .expect_err("reordering requires aligned sidecars");
+        assert_eq!(malformed_failure.batch.message_count(), 2);
+        assert!(matches!(
+            malformed_failure.error.current_context(),
+            RelayRecordBatchError::SidecarCount {
+                arrow_rows: 2,
+                metadata_rows: 1,
+                branch_keys: 2,
+                ack_sets: 2,
+            }
+        ));
+
+        let wrong_length = test_batch(&schema, &[10, 20])
+            .into_reordered(&[0])
+            .expect_err("a reorder must name every row");
+        assert_eq!(wrong_length.batch.message_count(), 2);
+        assert!(matches!(
+            wrong_length.error.current_context(),
+            RelayRecordBatchError::ReorderRowCount {
+                order_rows: 1,
+                batch_rows: 2,
+            }
+        ));
+
+        let out_of_bounds = test_batch(&schema, &[10, 20])
+            .into_reordered(&[0, 2])
+            .expect_err("a reorder index must address an existing row");
+        assert_eq!(out_of_bounds.batch.message_count(), 2);
+        assert!(matches!(
+            out_of_bounds.error.current_context(),
+            RelayRecordBatchError::ReorderRowOutOfBounds {
+                row: 2,
+                batch_rows: 2,
+            }
+        ));
+
+        let duplicate = test_batch(&schema, &[10, 20])
+            .into_reordered(&[0, 0])
+            .expect_err("a reorder must be a permutation");
+        assert_eq!(duplicate.batch.message_count(), 2);
+        assert!(matches!(
+            duplicate.error.current_context(),
+            RelayRecordBatchError::DuplicateReorderRow { row: 0 }
+        ));
+
+        let reordered = test_batch(&schema, &[10, 20])
+            .into_reordered(&[1, 0])
+            .expect("a valid permutation must reorder the batch");
+        assert_eq!(
+            reordered.batch.value(0, "value").expect("readable value"),
+            Some(RuntimeValue::I64(20))
+        );
+        assert_eq!(
+            reordered.batch.value(1, "value").expect("readable value"),
+            Some(RuntimeValue::I64(10))
+        );
+    }
+
+    #[test]
+    fn relay_batch_message_materialization_returns_misaligned_batches() {
+        let schema = test_schema();
+
+        let mut missing_acks = test_batch(&schema, &[10]);
+        missing_acks.acks.clear();
+        let ack_failure = missing_acks
+            .try_into_messages()
+            .expect_err("message materialization requires one ACK set per row");
+        assert_eq!(ack_failure.preserved.message_count(), 1);
+        assert!(matches!(
+            ack_failure.error.current_context(),
+            RelayRecordBatchError::SidecarRowCount {
+                sidecar: RelayRecordBatchSidecar::Ack,
+                expected: 1,
+                found: 0,
+            }
+        ));
+
+        let mut missing_metadata = test_batch(&schema, &[10]);
+        missing_metadata.metadata.clear();
+        let metadata_failure = missing_metadata
+            .try_into_messages()
+            .expect_err("message materialization requires one metadata row per Arrow row");
+        assert_eq!(metadata_failure.preserved.message_count(), 1);
+        assert!(matches!(
+            metadata_failure.error.current_context(),
+            RelayRecordBatchError::SidecarRowCount {
+                sidecar: RelayRecordBatchSidecar::Metadata,
+                expected: 1,
+                found: 0,
+            }
+        ));
+
+        let mut missing_keys = test_batch(&schema, &[10]);
+        missing_keys.keys.clear();
+        let key_failure = missing_keys
+            .try_into_messages()
+            .expect_err("message materialization requires one branch key per row");
+        assert_eq!(key_failure.preserved.message_count(), 1);
+        assert!(matches!(
+            key_failure.error.current_context(),
+            RelayRecordBatchError::SidecarRowCount {
+                sidecar: RelayRecordBatchSidecar::BranchKey,
+                expected: 1,
+                found: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn relay_batch_concatenation_preserves_every_rejected_batch() {
+        let empty = RelayRecordBatch::concat(Vec::new())
+            .expect_err("concatenating no relay batches must fail");
+        assert!(matches!(
+            empty.current_context(),
+            RelayRecordBatchError::RuntimeSchema {
+                operation: RelayRecordBatchOperation::Concatenate,
+            }
+        ));
+        assert!(empty.contains::<crate::runtime_schema::RuntimeSchemaError>());
+
+        let first_schema = test_schema();
+        let second_schema = schema_with_field("other_relay_batch", "other_value");
+        let batches = vec![
+            test_batch(&first_schema, &[10]),
+            test_batch(&second_schema, &[20]),
+        ];
+        let mismatch = RelayRecordBatch::concat_preserving(batches)
+            .expect_err("relay batches with different Arrow schemas cannot concatenate");
+        assert_eq!(mismatch.preserved.len(), 2);
+        assert!(matches!(
+            mismatch.error.current_context(),
+            RelayRecordBatchError::RuntimeSchema {
+                operation: RelayRecordBatchOperation::Concatenate,
+            }
+        ));
+        assert!(
+            mismatch
+                .error
+                .contains::<crate::runtime_schema::RuntimeSchemaError>()
+        );
+    }
+
+    #[test]
+    fn preserving_batch_builder_returns_every_pending_ack_set() {
+        let schema = test_schema();
+        let empty = build_stream_record_batch_preserving_acks(schema.clone(), Vec::new())
+            .expect_err("building from no messages must fail");
+        assert!(empty.preserved.is_empty());
+        assert!(matches!(
+            empty.error.current_context(),
+            RelayRecordBatchError::EmptyMessages
+        ));
+
+        let mut rows = test_rows(&schema, &[10, 20]).into_iter();
+        let mixed = build_stream_record_batch_preserving_acks(
+            schema.clone(),
+            vec![
+                RelayMessage {
+                    key: None,
+                    record: rows.next().expect("first fixture row"),
+                    acks: AckSet::empty(),
+                },
+                RelayMessage {
+                    key: string_branch_key("tenant", "acme"),
+                    record: rows.next().expect("second fixture row"),
+                    acks: AckSet::empty(),
+                },
+            ],
+        )
+        .expect_err("mixed branch keys must return the ACKs collected so far");
+        assert_eq!(mixed.preserved.len(), 2);
+        assert!(matches!(
+            mixed.error.current_context(),
+            RelayRecordBatchError::MixedBranchKeys
+        ));
+
+        let other_schema = schema_with_field("other_relay_batch", "other_value");
+        let wrong_schema = build_stream_record_batch_preserving_acks(
+            other_schema,
+            test_rows(&schema, &[10])
+                .into_iter()
+                .map(|record| RelayMessage {
+                    key: None,
+                    record,
+                    acks: AckSet::empty(),
+                })
+                .collect(),
+        )
+        .expect_err("schema construction failure must preserve the ACK set");
+        assert_eq!(wrong_schema.preserved.len(), 1);
+        assert!(matches!(
+            wrong_schema.error.current_context(),
+            RelayRecordBatchError::RuntimeSchema {
+                operation: RelayRecordBatchOperation::BuildPreservingAcks,
+            }
+        ));
+        assert!(
+            wrong_schema
+                .error
+                .contains::<crate::runtime_schema::RuntimeSchemaError>()
         );
     }
 

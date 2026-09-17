@@ -41,6 +41,81 @@ fn relay_metrics(runtime: &Runtime, domain: &DomainName, relay: &RelayName) -> R
     )
 }
 
+#[tokio::test]
+async fn relay_task_stops_classify_join_failures_by_task_kind() {
+    let (state_shutdown, _state_shutdown_rx) = watch::channel(false);
+    let state = RelayStateTask {
+        shutdown: state_shutdown,
+        task: tokio::spawn(async { panic!("state task fixture failed") }),
+    };
+    let state_error = state
+        .stop(Duration::from_secs(1))
+        .await
+        .expect_err("a panicked state task must fail its stop");
+    assert!(matches!(
+        state_error.current_context(),
+        RelayTaskStopError::Join {
+            task: RelayTaskKind::State,
+        }
+    ));
+    assert!(state_error.contains::<tokio::task::JoinError>());
+
+    let (owner_shutdown, _owner_shutdown_rx) = watch::channel(false);
+    let owner = RelayOwnerTask {
+        shutdown: owner_shutdown,
+        task: tokio::spawn(async { panic!("owner task fixture failed") }),
+    };
+    let owner_error = owner
+        .stop(Duration::from_secs(1))
+        .await
+        .expect_err("a panicked owner task must fail its stop");
+    assert!(matches!(
+        owner_error.current_context(),
+        RelayTaskStopError::Join {
+            task: RelayTaskKind::Owner,
+        }
+    ));
+    assert!(owner_error.contains::<tokio::task::JoinError>());
+}
+
+#[tokio::test]
+async fn relay_task_stops_classify_drain_timeouts_by_task_kind() {
+    let grace = Duration::from_millis(1);
+    let (state_shutdown, _state_shutdown_rx) = watch::channel(false);
+    let state = RelayStateTask {
+        shutdown: state_shutdown,
+        task: tokio::spawn(std::future::pending()),
+    };
+    let state_error = state
+        .stop(grace)
+        .await
+        .expect_err("a state task that ignores shutdown must time out");
+    assert!(matches!(
+        state_error.current_context(),
+        RelayTaskStopError::DrainTimeout {
+            task: RelayTaskKind::State,
+            grace: found,
+        } if *found == grace
+    ));
+
+    let (owner_shutdown, _owner_shutdown_rx) = watch::channel(false);
+    let owner = RelayOwnerTask {
+        shutdown: owner_shutdown,
+        task: tokio::spawn(std::future::pending()),
+    };
+    let owner_error = owner
+        .stop(grace)
+        .await
+        .expect_err("an owner task that ignores shutdown must time out");
+    assert!(matches!(
+        owner_error.current_context(),
+        RelayTaskStopError::DrainTimeout {
+            task: RelayTaskKind::Owner,
+            grace: found,
+        } if *found == grace
+    ));
+}
+
 #[test]
 fn idle_relay_channel_reopens_with_a_fresh_incarnation() {
     let slot = RelayOutboundSlot::new();
