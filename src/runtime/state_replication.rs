@@ -1781,6 +1781,9 @@ impl Runtime {
                 .collect::<OwnershipHandoffResult<Vec<_>>>()?;
             (input_schema, output_schemas)
         };
+        let restore = || OwnershipHandoffError::WasmRestore {
+            processor: processor.name.clone().into(),
+        };
         let compiled = self
             .compile_wasm_processor_module(
                 domain,
@@ -1790,13 +1793,11 @@ impl Runtime {
                 &processor.file,
             )
             .await
-            .map_err(|error| OwnershipHandoffError::wasm_restore(format!("{error:#}")))?;
-        let domain_clock = self.bind_domain_clock(domain).map_err(|error| {
-            OwnershipHandoffError::wasm_restore(format!(
-                "failed to bind WASM processor '{}' to the domain clock: {error}",
-                processor.name.as_str()
-            ))
-        })?;
+            .change_context_lazy(restore)?;
+        let domain_clock = self
+            .bind_domain_clock(domain)
+            .change_context_lazy(restore)?;
+        let pinned = ResourceId::new(domain.clone(), processor.resource.clone(), compiled.version);
         for (placement, snapshot) in checkpoints {
             tokio::task::consume_budget().await;
             if placement.state != RuntimeStateKind::WasmProcessor {
@@ -1815,33 +1816,18 @@ impl Runtime {
                     .map(|(relay, schema)| schema.wasm_processor_schema(relay.as_str().to_string()))
                     .collect(),
             };
-            let execution_now = domain_clock
-                .snapshot()
-                .map_err(|error| {
-                    OwnershipHandoffError::wasm_restore(format!(
-                        "failed to snapshot WASM processor '{}' domain clock: {error}",
-                        processor.name.as_str()
-                    ))
-                })?
-                .now();
-            let restored_state =
-                (!snapshot.payload.is_empty()).then_some(snapshot.payload.as_slice());
+            let execution_now = domain_clock.snapshot().change_context_lazy(restore)?.now();
+            let module = WasmBranchModule {
+                processor: processor.name.clone().into(),
+                branch: placement.branch_key.clone(),
+                resource: pinned.clone(),
+                file: processor.file.clone(),
+            };
+            let saved = RestorableGuestState::of_snapshot(snapshot);
             compiled
-                .compiled
-                .instantiate_branch(
-                    processor.limits,
-                    init,
-                    nervix_wasm::WasmExecutionContext::new(execution_now),
-                    restored_state,
-                )
+                .instantiate_branch(module, processor.limits, init, execution_now, saved)
                 .await
-                .map_err(|error| {
-                    OwnershipHandoffError::wasm_restore(format!(
-                        "wasm processor '{}' rejected transferred branch '{}': {error}",
-                        processor.name.as_str(),
-                        branch_key_display(&placement.branch_key)
-                    ))
-                })?;
+                .change_context_lazy(restore)?;
         }
         Ok(())
     }

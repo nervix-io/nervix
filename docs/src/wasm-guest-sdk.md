@@ -197,6 +197,15 @@ current build cannot interpret instead of silently resetting. The default
 implementations suit stateless processors — they save nothing and reject
 non-empty state.
 
+The SDK reports every restore verdict with the reserved
+[`nervix_load_state` codes](./wasm-processor-guests.md#contract-summary): a
+snapshot it cannot decode, including its branch configuration, is a rejected
+snapshot envelope, and any error `restore` returns is a rejected application
+state with that error as the reason. Nervix keeps the saved state after a
+rejection and reports it under the `snapshot envelope decoding` or
+`application state restoration` [failure stage](./wasm-processor-guests.md#failure-diagnostics),
+so return an error from `restore` only when the saved state itself is unusable.
+
 A processor that buffers input across callbacks can persist the buffered
 batch: `InputBatch::envelope_bytes` returns the complete original envelope and
 `InputBatch::from_envelope_bytes` restores it.

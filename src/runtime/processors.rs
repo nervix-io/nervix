@@ -25,7 +25,7 @@ use nervix_vm::{
     program::{FieldRef, Program as VmProgram, Span, SpannedNode},
     window::{WindowAggregateExpr, WindowAggregateProgram},
 };
-use nervix_wasm::{CompiledWasmProcessor, WasmBranchInstance};
+use nervix_wasm::CompiledWasmProcessor;
 use ordered_float::OrderedFloat;
 use triomphe::Arc;
 
@@ -35,8 +35,8 @@ use super::{
     DeduplicatorKeyspace, DomainClock, DomainExecutionSnapshot, PendingMaterializedBatch,
     RelayBoundaryServices, RelayMessage, RelayRecordBatch, RelayRegistry,
     ReplicatedWasmProcessorState, ReplicatedWindowProcessorState, RuntimeFlushPolicy,
-    RuntimeInputCollectPolicy, RuntimeInputCollector, SharedActiveGraph, WindowProcessorState,
-    branch_key_display, inferencer::OnnxInferencerSession,
+    RuntimeInputCollectPolicy, RuntimeInputCollector, SharedActiveGraph, WasmLiveInstance,
+    WindowProcessorState, branch_key_display, inferencer::OnnxInferencerSession,
     relay_batch::RelayRecordBatchReorderError,
 };
 use crate::{
@@ -400,7 +400,7 @@ pub(super) enum RelayProcessorOperationNode {
         file: String,
         limits: nervix_models::WasmProcessorLimits,
         compiled: Option<WasmCompiledBranchProcessor>,
-        instance: Option<Box<WasmBranchInstance>>,
+        instance: Option<Box<WasmLiveInstance>>,
         replicated_state: Arc<ReplicatedWasmProcessorState>,
         ack_map: WasmAckMap,
         next_ack_token: u64,

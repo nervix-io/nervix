@@ -111,7 +111,11 @@ names the schedule change; it does not authorize coordination traffic.
 
 The coordinator records every destination as an attempted participant before sending its prepare
 request. A timeout, cancellation, or missing response after the destination persisted the request
-therefore remains explicit cleanup work. Discard is exact and idempotent over the coordination
+therefore remains explicit cleanup work. A participant that refuses capture, preparation, forced
+recovery preparation, confirmation, activation, or reconciliation answers with a rejection whose
+text is its complete failure chain rather than only the outermost failure, so the coordinator
+reports, for example, a destination WASM guest's classified restore failure with its stage, branch,
+module, and saved state revision. Discard is exact and idempotent over the coordination
 identity, transition ID, domain, and entity; a delayed discard for one operation cannot remove a
 replacement prepared by another operation.
 
