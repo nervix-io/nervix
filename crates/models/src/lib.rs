@@ -32,6 +32,7 @@ mod schema;
 mod statement;
 mod timestamp;
 mod udf;
+mod wasm_state_generation;
 
 pub use canonical::{
     CanonicalNsplError, alter_avro_wire_schema_to_canonical_nspl,
@@ -158,3 +159,6 @@ pub use statement::{
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};
+pub use wasm_state_generation::{
+    InvalidWasmStateGeneration, WasmStateGeneration, WasmStateGenerations,
+};

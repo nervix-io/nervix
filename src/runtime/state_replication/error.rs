@@ -53,6 +53,8 @@ pub(crate) enum StateReplicationError {
     },
     #[error("failed to replace the offsets in {placement}")]
     ReplaceKafkaOffsets { placement: RuntimeStatePlacement },
+    #[error("this node no longer holds the lifetime or ownership of {placement}")]
+    Superseded { placement: RuntimeStatePlacement },
 }
 
 impl StateReplicationError {
@@ -61,15 +63,15 @@ impl StateReplicationError {
         matches!(self, Self::Persist { .. })
     }
 
-    /// Whether a peer refused to serve the state because it is not the state's authority, rather
-    /// than failing to.
+    /// Whether the state's authority refused the operation, rather than failing it: a peer that is
+    /// not the state's authority, or this node after the state's lifetime or ownership moved on.
     pub(crate) const fn is_authority_rejection(&self) -> bool {
         matches!(
             self,
             Self::RemoteFailure {
                 failure: nervix_interconnect::RemoteOperationFailure::Rejected { .. },
                 ..
-            }
+            } | Self::Superseded { .. }
         )
     }
 

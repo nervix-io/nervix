@@ -59,7 +59,7 @@ impl RemoteOperationSubject {
         Self::State {
             domain: placement.domain.clone(),
             entity: NodeRef::new(placement.kind, placement.identifier.clone()),
-            state: placement.state,
+            state: placement.state.kind(),
         }
     }
 
