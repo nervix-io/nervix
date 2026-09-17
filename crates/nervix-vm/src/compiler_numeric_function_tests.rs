@@ -206,8 +206,8 @@ fn calls_that_cannot_fail_fold_over_literals_and_calls_that_can_fail_do_not() {
     let builtins = compiled
         .instructions
         .iter()
-        .filter_map(|instruction| match instruction.kind {
-            InstructionKind::Builtin { lowering, .. } => Some(lowering),
+        .filter_map(|instruction| match &instruction.kind {
+            InstructionKind::Builtin { lowering, .. } => Some(lowering.clone()),
             _ => None,
         })
         .collect::<Vec<_>>();
