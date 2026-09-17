@@ -502,6 +502,7 @@ impl RelayProcessorTemplate {
                     width_duration,
                     step_duration,
                     aggregate,
+                    plan,
                     compiled_aggregates,
                 } => {
                     let replicated_state = runtime
@@ -527,7 +528,7 @@ impl RelayProcessorTemplate {
                             processor: self.processor.clone(),
                         })?;
                     let state = replicated_state
-                        .restore_state(aggregate, &input_schema)
+                        .restore_state(plan, &input_schema)
                         .change_context_lazy(|| ProcessorTemplateError::WindowRestore {
                             processor: self.processor.clone(),
                             branch: key.clone(),
@@ -539,6 +540,7 @@ impl RelayProcessorTemplate {
                         width_duration: *width_duration,
                         step_duration: *step_duration,
                         aggregate: aggregate.clone(),
+                        plan: plan.clone(),
                         compiled_aggregates: compiled_aggregates.clone(),
                         state,
                         replicated_state,

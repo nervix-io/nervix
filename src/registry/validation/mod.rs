@@ -17,4 +17,5 @@ pub(in crate::registry) mod message_error;
 pub(in crate::registry) mod processor;
 pub(in crate::registry) mod schema;
 pub(in crate::registry) mod vm;
+pub(in crate::registry) mod window_route;
 pub(in crate::registry) mod wire;

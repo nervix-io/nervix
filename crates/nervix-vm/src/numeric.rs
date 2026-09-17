@@ -2,7 +2,8 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The batch kernels behind every numeric operator and numeric builtin: integer and
+//! - **Owns.** The checked lanes a buffer kernel computes with, which the datetime kernels share,
+//!   and the batch kernels behind every numeric operator and numeric builtin: integer and
 //!   floating-point arithmetic, negation, comparison, `abs`, `sign`, rounding and truncation,
 //!   floating-point classification, the math functions, and, in its submodules, integer bit
 //!   operations and rounding to decimal digits. Each kernel is one pass over its operands' value
@@ -54,7 +55,7 @@ const LANES_PER_WORD: usize = 64;
 ///
 /// The value of a failed lane is whatever the operation produced while detecting the failure, such
 /// as a wrapped integer. [`Checked::from_lanes`] replaces it before a column is exposed.
-struct Lanes<N> {
+pub(crate) struct Lanes<N> {
     values: Vec<N>,
     failed: BooleanBuffer,
 }
@@ -62,7 +63,7 @@ struct Lanes<N> {
 impl<N: Copy + Default> Lanes<N> {
     /// Computes `lane` for every operand. Each bitmap word is filled by a loop with a fixed,
     /// branch-free body, which the compiler vectorizes whenever `lane` is vectorizable.
-    fn unary<I: Copy>(operands: &[I], lane: impl Fn(I) -> (N, bool)) -> Self {
+    pub(crate) fn unary<I: Copy>(operands: &[I], lane: impl Fn(I) -> (N, bool)) -> Self {
         let mut values = vec![N::default(); operands.len()];
         let mut words = Vec::with_capacity(operands.len().div_ceil(LANES_PER_WORD));
         let value_words = values.chunks_mut(LANES_PER_WORD);
@@ -81,7 +82,11 @@ impl<N: Copy + Default> Lanes<N> {
 
     /// Computes `lane` for every pair of operands. Both operand slices hold one value per lane of
     /// the same batch, so they have the same length.
-    fn binary<L: Copy, R: Copy>(left: &[L], right: &[R], lane: impl Fn(L, R) -> (N, bool)) -> Self {
+    pub(crate) fn binary<L: Copy, R: Copy>(
+        left: &[L],
+        right: &[R],
+        lane: impl Fn(L, R) -> (N, bool),
+    ) -> Self {
         let mut values = vec![N::default(); left.len()];
         let mut words = Vec::with_capacity(left.len().div_ceil(LANES_PER_WORD));
         let value_words = values.chunks_mut(LANES_PER_WORD);
@@ -160,7 +165,7 @@ pub(crate) struct Checked<T: ArrowPrimitiveType> {
 }
 
 impl<T: ArrowPrimitiveType> Checked<T> {
-    fn from_lanes(lanes: Lanes<T::Native>, operand_nulls: Option<NullBuffer>) -> Self {
+    pub(crate) fn from_lanes(lanes: Lanes<T::Native>, operand_nulls: Option<NullBuffer>) -> Self {
         let Lanes { mut values, failed } = lanes;
         let Some(failed) = FailedLanes::among_valid(failed, operand_nulls.as_ref()) else {
             return Self {

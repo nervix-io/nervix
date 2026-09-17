@@ -438,112 +438,6 @@ mod tests {
     }
 
     #[test]
-    fn every_participant_must_complete() {
-        let coordinator = DomainForceFlush::new();
-        let counters = counters();
-        let mut first = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
-        let mut second = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
-        coordinator.request();
-
-        assert!(
-            first
-                .pending_completion()
-                .expect("participant must remain open")
-                .expect("first completion must be ready")
-                .complete()
-        );
-        assert_eq!(coordinator.pending(), 1);
-        assert_eq!(counters.force_flushes.load(Ordering::Acquire), 1);
-        assert!(
-            second
-                .pending_completion()
-                .expect("participant must remain open")
-                .expect("second completion must be ready")
-                .complete()
-        );
-        assert_eq!(coordinator.pending(), 0);
-        assert_eq!(counters.force_flushes.load(Ordering::Acquire), 0);
-    }
-
-    #[test]
-    fn stale_completion_cannot_clear_a_newer_generation() {
-        let coordinator = DomainForceFlush::new();
-        let counters = counters();
-        let mut participant = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
-        coordinator.request();
-        let stale = participant
-            .pending_completion()
-            .expect("participant must remain open")
-            .expect("first completion must be ready");
-        let newer = coordinator.request();
-
-        assert!(!stale.complete());
-        assert_eq!(coordinator.pending(), 1);
-        assert_eq!(counters.force_flushes.load(Ordering::Acquire), 1);
-        let current = participant
-            .pending_completion()
-            .expect("participant must remain open")
-            .expect("newer completion must be ready");
-        assert_eq!(current.generation(), newer);
-        assert!(current.complete());
-    }
-
-    #[test]
-    fn participant_joining_an_active_generation_is_counted() {
-        let coordinator = DomainForceFlush::new();
-        let counters = counters();
-        let mut first = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
-        coordinator.request();
-        let mut participant = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
-
-        assert_eq!(coordinator.pending(), 2);
-        assert_eq!(counters.force_flushes.load(Ordering::Acquire), 2);
-        assert!(
-            first
-                .pending_completion()
-                .expect("participant must remain open")
-                .expect("first completion must be delivered")
-                .complete()
-        );
-        assert!(
-            participant
-                .pending_completion()
-                .expect("participant must remain open")
-                .expect("active completion must be delivered")
-                .complete()
-        );
-    }
-
-    #[test]
-    fn dropping_completion_does_not_claim_success() {
-        let coordinator = DomainForceFlush::new();
-        let counters = counters();
-        let mut participant = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
-        coordinator.request();
-        drop(
-            participant
-                .pending_completion()
-                .expect("participant must remain open")
-                .expect("completion must be ready"),
-        );
-
-        assert_eq!(coordinator.pending(), 1);
-        assert_eq!(counters.force_flushes.load(Ordering::Acquire), 1);
-        assert!(
-            participant
-                .pending_completion()
-                .expect("participant must remain open")
-                .expect("dropped completion must be delivered again")
-                .complete()
-        );
-        assert_eq!(coordinator.pending(), 0);
-        coordinator.request();
-        drop(participant);
-        assert_eq!(coordinator.pending(), 0);
-        assert_eq!(counters.force_flushes.load(Ordering::Acquire), 0);
-    }
-
-    #[test]
     fn idle_request_does_not_supersede_in_flight_work() {
         let coordinator = DomainForceFlush::new();
         let mut participant = DomainForceFlush::subscribe(&coordinator, None);
@@ -634,27 +528,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changed_waits_for_the_next_generation() {
-        let coordinator = DomainForceFlush::new();
-        let mut participant = DomainForceFlush::subscribe(&coordinator, None);
-        let changed = participant.changed();
-        tokio::pin!(changed);
-        assert!(
-            tokio::time::timeout(tokio::time::Duration::from_millis(10), &mut changed)
-                .await
-                .is_err()
-        );
-
-        let generation = coordinator.request();
-        let completion = tokio::time::timeout(tokio::time::Duration::from_secs(1), changed)
-            .await
-            .expect("force generation must wake the participant")
-            .expect("participant must remain open");
-        assert_eq!(completion.generation(), generation);
-        assert!(completion.complete());
-    }
-
-    #[tokio::test]
     async fn changed_returns_an_already_pending_generation_immediately() {
         let coordinator = DomainForceFlush::new();
         let mut participant = DomainForceFlush::subscribe(&coordinator, None);
@@ -689,5 +562,419 @@ mod tests {
         assert_eq!(coordinator.pending(), 0);
         assert_eq!(counters.force_flushes.load(Ordering::Acquire), 0);
         assert!(participant.changed().await.is_err());
+    }
+}
+
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_tests {
+    use std::{future::Future, task::Poll};
+
+    use super::*;
+    use crate::shuttle_test::{check_dfs, check_pct, check_random};
+
+    const DFS_ITERATIONS: usize = 1_000;
+    const PCT_DEPTH: usize = 3;
+    const PCT_ITERATIONS: usize = 200;
+    const PCT_PARTICIPANTS: usize = 4;
+    const RANDOM_ITERATIONS: usize = 200;
+
+    fn counters() -> Arc<NodeQuiesceCounters> {
+        Arc::new(NodeQuiesceCounters::default())
+    }
+
+    async fn announce_after_first_pending<F>(
+        future: F,
+        pending: tokio::sync::oneshot::Sender<()>,
+    ) -> F::Output
+    where
+        F: Future,
+    {
+        let mut future = std::pin::pin!(future);
+        std::future::poll_fn(|context| match future.as_mut().poll(context) {
+            Poll::Ready(_) => panic!("changed must wait before a generation is published"),
+            Poll::Pending => Poll::Ready(()),
+        })
+        .await;
+        pending
+            .send(())
+            .assured("the publisher waits for changed to become pending");
+        future.await
+    }
+
+    fn every_obligation_resolves_invariant() {
+        shuttle::future::block_on(async {
+            let coordinator = DomainForceFlush::new();
+            let counters = counters();
+            let mut first = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
+            let mut second = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
+            let (second_claimed, second_is_claimed) = tokio::sync::oneshot::channel();
+            let (release_second, second_is_released) = tokio::sync::oneshot::channel();
+
+            let first_task = tokio::spawn(async move {
+                let completion = first
+                    .changed()
+                    .await
+                    .assured("the coordinator remains open until both participants finish");
+                let generation = completion.generation();
+                assert!(completion.complete());
+                generation
+            });
+            let second_task = tokio::spawn(async move {
+                let completion = second
+                    .changed()
+                    .await
+                    .assured("the coordinator remains open until both participants finish");
+                let generation = completion.generation();
+                drop(completion);
+
+                let redelivery = second
+                    .changed()
+                    .await
+                    .assured("dropping the claim leaves its obligation live");
+                assert_eq!(redelivery.generation(), generation);
+                second_claimed
+                    .send(())
+                    .assured("the observer waits for the held second obligation");
+                second_is_released
+                    .await
+                    .assured("the observer releases the second obligation before joining");
+                assert!(redelivery.complete());
+                generation
+            });
+
+            let generation = coordinator.request();
+            let first_generation = first_task
+                .await
+                .assured("the first participant completes without panicking");
+            assert_eq!(first_generation, generation);
+            second_is_claimed
+                .await
+                .assured("the second participant reports its redelivered obligation");
+
+            assert_eq!(coordinator.pending(), 1);
+            assert_eq!(counters.force_flushes.load(Ordering::Acquire), 1);
+            assert_eq!(coordinator.request_if_idle(), generation);
+
+            release_second
+                .send(())
+                .assured("the second participant remains blocked on its release");
+            let second_generation = second_task
+                .await
+                .assured("the second participant completes without panicking");
+            assert_eq!(second_generation, generation);
+            assert_eq!(coordinator.pending(), 0);
+            assert_eq!(counters.force_flushes.load(Ordering::Acquire), 0);
+            assert_ne!(coordinator.request_if_idle(), generation);
+        });
+    }
+
+    #[test]
+    fn shuttle_two_participant_generation_waits_for_every_obligation() {
+        check_dfs(every_obligation_resolves_invariant, Some(DFS_ITERATIONS));
+    }
+
+    fn stale_completions_invariant() {
+        shuttle::future::block_on(async {
+            let coordinator = DomainForceFlush::new();
+            let counters = counters();
+            let mut first = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
+            let mut second = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
+            let (first_claimed, first_is_claimed) = tokio::sync::oneshot::channel();
+            let (second_claimed, second_is_claimed) = tokio::sync::oneshot::channel();
+            let (publish_to_first, first_publication) = tokio::sync::oneshot::channel();
+            let (publish_to_second, second_publication) = tokio::sync::oneshot::channel();
+
+            let first_task = tokio::spawn(async move {
+                let stale = first
+                    .changed()
+                    .await
+                    .assured("the first generation is published before the coordinator closes");
+                let stale_generation = stale.generation();
+                first_claimed
+                    .send(stale_generation)
+                    .assured("the observer waits for the first participant's claim");
+                let current_generation = first_publication
+                    .await
+                    .assured("the observer publishes the newer generation before joining");
+                assert!(!stale.complete());
+
+                let current = first
+                    .changed()
+                    .await
+                    .assured("the newer generation remains available after the stale completion");
+                assert_eq!(current.generation(), current_generation);
+                assert!(current.complete());
+            });
+            let second_task = tokio::spawn(async move {
+                let stale = second
+                    .changed()
+                    .await
+                    .assured("the first generation is published before the coordinator closes");
+                let stale_generation = stale.generation();
+                second_claimed
+                    .send(stale_generation)
+                    .assured("the observer waits for the second participant's claim");
+                let current_generation = second_publication
+                    .await
+                    .assured("the observer publishes the newer generation before joining");
+                assert!(!stale.complete());
+
+                let current = second
+                    .changed()
+                    .await
+                    .assured("the newer generation remains available after the stale completion");
+                assert_eq!(current.generation(), current_generation);
+                assert!(current.complete());
+            });
+
+            let stale_generation = coordinator.request();
+            assert_eq!(
+                first_is_claimed
+                    .await
+                    .assured("the first participant claims the published generation"),
+                stale_generation
+            );
+            assert_eq!(
+                second_is_claimed
+                    .await
+                    .assured("the second participant claims the published generation"),
+                stale_generation
+            );
+
+            let current_generation = coordinator.request();
+            assert_eq!(coordinator.pending(), 2);
+            assert_eq!(counters.force_flushes.load(Ordering::Acquire), 2);
+            publish_to_first
+                .send(current_generation)
+                .assured("the first participant waits for the newer publication");
+            publish_to_second
+                .send(current_generation)
+                .assured("the second participant waits for the newer publication");
+
+            first_task
+                .await
+                .assured("the first participant completes without panicking");
+            second_task
+                .await
+                .assured("the second participant completes without panicking");
+            assert_eq!(coordinator.pending(), 0);
+            assert_eq!(counters.force_flushes.load(Ordering::Acquire), 0);
+        });
+    }
+
+    #[test]
+    fn shuttle_stale_completions_never_clear_a_newer_generation() {
+        check_dfs(stale_completions_invariant, Some(DFS_ITERATIONS));
+    }
+
+    fn waiting_participant_invariant() {
+        shuttle::future::block_on(async {
+            let coordinator = DomainForceFlush::new();
+            let counters = counters();
+            let mut participant = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
+            let (waiting_started, is_waiting) = tokio::sync::oneshot::channel();
+            let waiting = tokio::spawn(async move {
+                let completion =
+                    announce_after_first_pending(participant.changed(), waiting_started)
+                        .await
+                        .assured("the publication wakes the live participant");
+                let generation = completion.generation();
+                assert!(completion.complete());
+                generation
+            });
+            is_waiting
+                .await
+                .assured("changed reports after its first pending poll");
+            let publisher = {
+                let coordinator = coordinator.clone();
+                tokio::spawn(async move { coordinator.request() })
+            };
+
+            let generation = publisher
+                .await
+                .assured("the publication task does not panic");
+            let observed_generation = waiting
+                .await
+                .assured("the waiting participant does not deadlock or panic");
+            assert_eq!(observed_generation, generation);
+            assert_eq!(coordinator.pending(), 0);
+            assert_eq!(counters.force_flushes.load(Ordering::Acquire), 0);
+        });
+    }
+
+    #[test]
+    fn shuttle_published_generation_wakes_a_waiting_participant() {
+        check_random(waiting_participant_invariant, RANDOM_ITERATIONS);
+    }
+
+    fn participant_lifecycle_invariant() {
+        shuttle::future::block_on(async {
+            let coordinator = DomainForceFlush::new();
+            let counters = counters();
+            let mut anchor = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
+            let initial_generation = coordinator.request();
+            let anchor_completion = anchor
+                .pending_completion()
+                .assured("the anchor remains open while participants subscribe")
+                .assured("the active generation gives the anchor an obligation");
+            let (subscribed, mut subscriptions) = tokio::sync::mpsc::channel(PCT_PARTICIPANTS);
+            let mut releases = Vec::with_capacity(PCT_PARTICIPANTS);
+            let mut participants = Vec::with_capacity(PCT_PARTICIPANTS);
+
+            for index in 0..PCT_PARTICIPANTS {
+                tokio::task::consume_budget().await;
+                let coordinator = coordinator.clone();
+                let counters = counters.clone();
+                let subscribed = subscribed.clone();
+                let (release, released) = tokio::sync::oneshot::channel();
+                releases.push(release);
+                participants.push(tokio::spawn(async move {
+                    let mut participant = DomainForceFlush::subscribe(&coordinator, Some(counters));
+                    subscribed
+                        .send(())
+                        .await
+                        .assured("the observer receives every subscription");
+                    released
+                        .await
+                        .assured("the observer releases every subscribed participant");
+
+                    match index {
+                        0 => {
+                            if let Ok(completion) = participant.changed().await {
+                                completion.complete();
+                            }
+                        }
+                        1 => {
+                            let Ok(completion) = participant.changed().await else {
+                                return;
+                            };
+                            drop(completion);
+                            match participant.pending_completion() {
+                                Ok(Some(redelivery)) => {
+                                    redelivery.complete();
+                                }
+                                Ok(None) => {
+                                    panic!("a dropped claim must remain available while open")
+                                }
+                                Err(()) => {}
+                            }
+                        }
+                        2 => drop(participant),
+                        3 => {
+                            if let Ok(completion) = participant.changed().await {
+                                drop(participant);
+                                assert!(!completion.complete());
+                            }
+                        }
+                        _ => panic!("the model creates exactly four participant roles"),
+                    }
+                }));
+            }
+            drop(subscribed);
+
+            for _ in 0..PCT_PARTICIPANTS {
+                tokio::task::consume_budget().await;
+                subscriptions
+                    .recv()
+                    .await
+                    .assured("every participant reports after subscribing");
+            }
+            assert_eq!(coordinator.pending(), PCT_PARTICIPANTS + 1);
+            assert_eq!(
+                counters.force_flushes.load(Ordering::Acquire),
+                PCT_PARTICIPANTS + 1
+            );
+
+            let request = {
+                let coordinator = coordinator.clone();
+                tokio::spawn(async move { coordinator.request() })
+            };
+            let idle_request = {
+                let coordinator = coordinator.clone();
+                tokio::spawn(async move { coordinator.request_if_idle() })
+            };
+            let anchor_task = tokio::spawn(async move {
+                let completed = anchor_completion.complete();
+                drop(anchor);
+                completed
+            });
+
+            for release in releases {
+                tokio::task::consume_budget().await;
+                release
+                    .send(())
+                    .assured("the participant remains blocked until lifecycle operations start");
+            }
+            for participant in participants {
+                tokio::task::consume_budget().await;
+                participant
+                    .await
+                    .assured("the participant lifecycle task does not panic");
+            }
+            request
+                .await
+                .assured("the force-flush request task does not panic");
+            idle_request
+                .await
+                .assured("the idle force-flush request task does not panic");
+            anchor_task
+                .await
+                .assured("the anchor lifecycle task does not panic");
+
+            assert_eq!(coordinator.pending(), 0);
+            assert_eq!(counters.force_flushes.load(Ordering::Acquire), 0);
+
+            let mut first_closing =
+                DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
+            let mut second_closing =
+                DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
+            let first_waiter = tokio::spawn(async move {
+                if let Ok(completion) = first_closing.changed().await {
+                    completion.complete();
+                }
+            });
+            let second_waiter = tokio::spawn(async move {
+                if let Ok(completion) = second_closing.changed().await {
+                    drop(completion);
+                }
+            });
+            let closing_request = {
+                let coordinator = coordinator.clone();
+                tokio::spawn(async move { coordinator.request() })
+            };
+            let closing_idle_request = {
+                let coordinator = coordinator.clone();
+                tokio::spawn(async move { coordinator.request_if_idle() })
+            };
+            let close = {
+                let coordinator = coordinator.clone();
+                tokio::spawn(async move { coordinator.close() })
+            };
+
+            first_waiter
+                .await
+                .assured("the first close waiter does not deadlock or panic");
+            second_waiter
+                .await
+                .assured("the second close waiter does not deadlock or panic");
+            closing_request
+                .await
+                .assured("the request racing with close does not panic");
+            closing_idle_request
+                .await
+                .assured("the idle request racing with close does not panic");
+            close
+                .await
+                .assured("the coordinator close task does not panic");
+
+            assert!(coordinator.request() >= initial_generation);
+            assert_eq!(coordinator.pending(), 0);
+            assert_eq!(counters.force_flushes.load(Ordering::Acquire), 0);
+        });
+    }
+
+    #[test]
+    fn shuttle_participant_lifecycle_balances_obligations_through_close() {
+        check_pct(participant_lifecycle_invariant, PCT_ITERATIONS, PCT_DEPTH);
     }
 }

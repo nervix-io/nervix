@@ -115,8 +115,10 @@ use nervix_vm::{
         Span as VmSpan, SpannedExpr,
     },
     window::{
-        WindowAggregateDemand, WindowAggregateFunction, WindowAggregateProgram,
-        WindowAggregateStorageKind, lower_window_assignments,
+        CompiledWindowDemand, CompiledWindowExpr, CompiledWindowRoute, WINDOW_ARGUMENT_NAMESPACE,
+        WindowAggregateFunction, WindowAggregateInvocation, WindowAggregateProgram,
+        WindowAggregateStorageKind, WindowArgumentColumn, WindowArguments,
+        WindowLinearHistogramConfig, lower_window_assignments,
     },
 };
 use nervix_wasm::{
@@ -159,7 +161,7 @@ use crate::{
         RuntimeRecordMetadata, RuntimeRow, RuntimeSchemaError, RuntimeSchemaOperation,
         RuntimeValue, RuntimeValueColumn, RuntimeValueLocation, RuntimeVmOperation,
         compile_codec_with_protobuf, compile_schema, decode_with_codec, parse_as_type_from_arrow,
-        runtime_value_arrow_array, runtime_value_from_arrow_array,
+        runtime_value_from_arrow_array,
     },
     task_shutdown::JoinShutdown as _,
 };
@@ -410,16 +412,15 @@ use processors::{
     BranchedProcessorNodeSpec, BranchedProcessorOperationSpec, BranchedProcessorOutputSpec,
     BranchedProcessorOutputsSpec, BranchedProcessorSpec, CompiledCorrelatorOutputProgram,
     CompiledCorrelatorWhereProgram, CompiledInferencerInputProgram, CompiledReordererProgram,
-    CompiledWindowAggregateExpr, CompiledWindowAggregateProgram, CorrelatorBranchState,
-    CorrelatorPendingMessage, FilterMapPlan, InferencerFlushContext, InferencerOutputBuffer,
-    IngestorRouteTemplate, JunctionFlushContext, PlannedGeneralError, PlannedGeneralResult,
-    PlannedMessageError, ProcessorCompileError, ProcessorLiveStateError,
-    ProcessorMaterializedError, RelayProcessorNode, RelayProcessorOperationNode,
-    RelayProcessorOperationTemplate, RelayProcessorOutputNode, RelayProcessorOutputTemplate,
-    RelayProcessorOutputsNode, RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate,
-    RelayProcessorTemplate, ReorderKeyPart, ReordererOutputBuffer, ReordererRowOrder,
-    WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds,
-    WindowFlushContext,
+    CompiledWindowAggregateProgram, CorrelatorBranchState, CorrelatorPendingMessage, FilterMapPlan,
+    InferencerFlushContext, InferencerOutputBuffer, IngestorRouteTemplate, JunctionFlushContext,
+    PlannedGeneralError, PlannedGeneralResult, PlannedMessageError, ProcessorCompileError,
+    ProcessorLiveStateError, ProcessorMaterializedError, RelayProcessorNode,
+    RelayProcessorOperationNode, RelayProcessorOperationTemplate, RelayProcessorOutputNode,
+    RelayProcessorOutputTemplate, RelayProcessorOutputsNode, RelayProcessorOutputsTemplate,
+    RelayProcessorRelayTemplate, RelayProcessorTemplate, ReorderKeyPart, ReordererOutputBuffer,
+    ReordererRowOrder, WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext,
+    WindowBounds, WindowFlushContext,
 };
 pub(in crate::runtime) use reconnect_backoff::RuntimeReconnectBackoff;
 use reingestor::ReingestorInputSpec;
@@ -467,8 +468,8 @@ pub(in crate::runtime) use test_fixtures::STUPID_CHANNEL_CAPACITY_REMOVE_ME;
 #[cfg(test)]
 use test_fixtures::{
     OptionalTestField, TWO_ITEM_TEST_CHANNEL_CAPACITY, TestIngestHeaders, attach_loopback_cluster,
-    batch_value, branch_model, branched_by, compile_window_aggregate_for_test, concrete_branch_key,
-    construction, domain, execute_filter_map_for_test, expression, ingest_metadata_for_test,
+    batch_value, branch_model, branched_by, concrete_branch_key, construction, domain,
+    execute_filter_map_for_test, expression, ingest_metadata_for_test,
     install_test_domain_execution, install_unpaced_test_domain, junction_branch_template,
     key_label, named, nonzero_capacity, paced_domain_state, processor_branched_by,
     quiesce_test_batch, row_value, scheduled_model, string_branch_key, test_domain_clock,
@@ -477,7 +478,7 @@ use test_fixtures::{
     validate_wasm_test_output_groups, validate_wasm_test_outputs, vm_input_from_test_rows,
     wait_for_persisted_runtime_state_lsm, wasm_generated_pool, wasm_guest_column,
     wasm_guest_stream, wasm_input_acks, wasm_input_for_records, wasm_input_for_values,
-    wasm_test_generated_output, wasm_test_output, window_aggregate, window_inputs, window_outputs,
+    wasm_test_generated_output, wasm_test_output, window_aggregate, window_outputs, window_plan,
     with_inherit_all,
 };
 use tls::RustlsClientConfigSource;
@@ -513,15 +514,17 @@ use wasm_processor::{
 };
 use wasm_state::{ReplicatedWasmProcessorState, RestorableGuestState, WasmGuestState};
 pub(in crate::runtime) use websocket_signaling::SignalingProtobufDescriptors;
+use window_accumulator::{
+    RetainedWindowRows, WindowAccumulator, WindowAccumulatorPlan, WindowArgumentColumns, WindowRow,
+};
 use window_processor::{
-    WindowAggregateInput, WindowProcessorError, WindowProcessorState, WindowPushFailure,
-    evaluate_window_aggregate_inputs, flush_ready_window_processor, message_timestamp,
-    snapshot_window_processor_live_state, window_next_deadline,
+    WindowAdmission, WindowProcessorError, WindowProcessorState, evaluate_window_arguments,
+    flush_ready_window_processor, message_timestamp, snapshot_window_processor_live_state,
+    window_next_deadline,
 };
 use window_state::{
     LinearHistogramDelayedRemovalSnapshot, ReplicatedWindowProcessorState,
-    WindowAggregateAccumulatorSnapshot, WindowEntrySnapshot, WindowProcessorStateSnapshot,
-    WindowSequenceValueSnapshot, WindowSortedCountSnapshot,
+    WindowAccumulatorSnapshot, WindowEntrySnapshot, WindowProcessorStateSnapshot,
 };
 
 mod tls;
@@ -531,6 +534,7 @@ mod wasm_output;
 mod wasm_processor;
 mod wasm_state;
 mod websocket_signaling;
+mod window_accumulator;
 mod window_processor;
 mod window_state;
 
