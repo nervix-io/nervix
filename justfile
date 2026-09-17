@@ -79,6 +79,11 @@ test-consensus *args:
 test-interconnect *args:
     cargo test --package nervix-interconnect --lib -- {{ args }}
 
+# Run the connector unit tests, which live in the nervix-connector contract crate and in every
+# nervix-connector-* integration crate rather than the server lib.
+test-connectors *args:
+    cargo test --package 'nervix-connector*' --lib -- {{ args }}
+
 test-runtime-state-capabilities: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail

@@ -131,13 +131,15 @@ Nervix is layered. Innermost first, and each layer may name only the layers insi
    dependency only. It is named by the language crate itself, the formatter, the client tools, and
    the session adapter; every other layer consumes Models.
 4. **Engines and infrastructure.** The expression VM and its frontend, the UDF and WASM hosts, wire
-   codecs, consensus, the interconnect, gossip, the state store, and the resource store. An engine
-   is driven by its caller and decides nothing about the graph.
+   codecs, the connector contract and the connector crates, consensus, the interconnect, gossip,
+   the state store, and the resource store. An engine is driven by its caller and decides nothing
+   about the graph.
 5. **Decisions.** Registry validation, placement, scheduling, and planning. A decision is a
    synchronous pure function from typed inputs to a typed outcome, with no Tokio types, locks, or
    shared maps in its signature, and it is unit-tested directly from those inputs.
-6. **Data plane.** Per-node execution: relays, branch-local processor tasks, connectors,
-   materialized state, and acknowledgement tracking. It applies decisions and executes plans.
+6. **Data plane.** Per-node execution: relays, branch-local processor tasks, the host that drives
+   connectors, materialized state, and acknowledgement tracking. It applies decisions and executes
+   plans.
 7. **Control plane.** Transactions, domain lifecycle, applying schedules, observation,
    subscriptions, resources, and cluster coordination.
 8. **Edges.** The session service, HTTP endpoints, the cluster API, metric exposition, the web
@@ -164,6 +166,24 @@ reading those three lines and nothing else.
 The contract states the target, not the present. Where the code contradicts its own contract, the
 header names the contradiction and the layer it violates; it never softens the contract to match
 the code. A contract rewritten to describe today's imports has stopped saying anything.
+
+### Connector crates
+
+Every external integration belongs in its own crate under `crates/connectors/`, and implements the
+source contract, the sink contract, or both, from `nervix-connector` in `crates/connector`.
+
+- A connector crate is an engine driven by the host. The host is the server's data plane, which owns
+  task lifecycle, branch routing, acknowledgement tracking, quiesce, retry and flush cadence,
+  buffering, metrics, and events. A connector owns its driver, its configuration interpretation, its
+  header semantics, and its per-record outcomes, and decides nothing about the graph.
+- The server is the composition root and the only crate that names every connector.
+- No connector crate reads a Model. The decision layer converts Models into a typed plan once, and
+  the connector receives that plan.
+- Capabilities the registry validates live in the vocabulary. The registry names no connector crate,
+  so a capability declared only inside one could never be validated.
+
+`just ratchet` and the clock-boundary check treat the connector crates as data plane, so code that
+moves into them keeps its counts and its clock rules.
 
 ### Migration discipline
 
