@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::{Identity as TonicIdentity, ServerTlsConfig};
 use tracing::{info, warn};
 
-use super::{AppError, resource::resolve_resource_id, session_service::SessionServiceImpl};
+use super::{AppError, session_service::SessionServiceImpl};
 use crate::resource::ResourceStore;
 
 const INTERCONNECT_TLS_RELOAD_INTERVAL: Duration = Duration::from_secs(1);
@@ -284,7 +284,7 @@ impl SessionServiceImpl {
         shutdown: CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         let mut resources = self.inner.consensus.subscribe_resources();
-        if let Err(error) = self.refresh_http_tls_server_config(None).await {
+        if let Err(error) = self.refresh_http_tls_server_config().await {
             self.broadcast_error(format!("failed to refresh HTTP TLS config: {error}"));
         }
         let service = self.clone();
@@ -297,7 +297,7 @@ impl SessionServiceImpl {
                         if changed.is_err() {
                             break;
                         }
-                        if let Err(error) = service.refresh_http_tls_server_config(None).await {
+                        if let Err(error) = service.refresh_http_tls_server_config().await {
                             service.broadcast_error(format!(
                                 "failed to refresh HTTP TLS config after a resource change: {error}"
                             ));
@@ -308,15 +308,11 @@ impl SessionServiceImpl {
         })
     }
 
-    /// Rebuilds the server TLS resolver from completed resource bindings. During an upload, the
-    /// command-owned candidate is supplied so every unpinned binding that selects that resource is
-    /// proven usable before the upload can become completed, without activating the candidate.
+    /// Rebuilds the server TLS resolver from the resource version every TLS VHOST pins.
     pub(in crate::application) async fn refresh_http_tls_server_config(
         &self,
-        candidate: Option<&ResourceId>,
     ) -> Result<(), String> {
         nervix_interconnect::install_rustls_crypto_provider();
-        let resources = self.inner.consensus.current_resources().await;
         let domains = self.inner.consensus.current_domains().await;
         let mut resolver = ResolvesServerCertUsingSni::new();
         let mut configured_tls = false;
@@ -341,29 +337,7 @@ impl SessionServiceImpl {
                     continue;
                 };
 
-                let candidate_id = match candidate {
-                    Some(candidate)
-                        if tls.version.is_none()
-                            && candidate.domain == *domain_id
-                            && candidate.identifier == tls.resource =>
-                    {
-                        Some(candidate.clone())
-                    }
-                    _ => None,
-                };
-                let id = match candidate_id {
-                    Some(candidate) => candidate,
-                    None => resolve_resource_id(&resources, domain_id, &tls.resource, tls.version)
-                        .map_err(|error| {
-                            format!(
-                                "failed to resolve TLS resource for vhost '{}' in domain '{}': \
-                                 {error}",
-                                vhost.name.as_str(),
-                                domain_id.as_str()
-                            )
-                        })?,
-                };
-                let version = id.version;
+                let id = ResourceId::new(domain_id.clone(), tls.resource.clone(), tls.version);
                 let materials = load_vhost_tls_materials(&self.inner.resource_store, &id)
                     .await
                     .map_err(|error| {
@@ -371,7 +345,7 @@ impl SessionServiceImpl {
                             "failed to load TLS resource '{}@{}' for vhost '{}' in domain '{}': \
                              {error}",
                             tls.resource.as_str(),
-                            version,
+                            tls.version,
                             vhost.name.as_str(),
                             domain_id.as_str()
                         )
@@ -392,10 +366,6 @@ impl SessionServiceImpl {
                 }
                 configured_tls = true;
             }
-        }
-
-        if candidate.is_some() {
-            return Ok(());
         }
 
         let mut guard = self.inner.http_tls_server_config.write();

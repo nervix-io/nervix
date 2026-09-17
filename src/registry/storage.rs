@@ -19,7 +19,7 @@ use nervix_models::{
     ClusterSchedule, CreateAvroWireSchema, CreateDeduplicator, CreateEmitter, CreateGenerator,
     CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor, CreateRelay,
     CreateReorderer, CreateSchema, DomainName, IngestSource, IngestorName, Model, ModelIndex,
-    ModelKind, ModelName, NodeRef, PlacementPolicy, UniquelyKindedModel,
+    ModelKind, ModelName, NodeRef, PlacementPolicy, RequestedResourceVersion, UniquelyKindedModel,
 };
 use nervix_recovery::Discarded;
 use parking_lot::{Mutex, RwLock};
@@ -1107,7 +1107,7 @@ impl Registry {
         domain: &DomainName,
         kind: ModelKind,
         prefix: &str,
-        queued: &[RegistryMutation],
+        queued: &[RegistryMutation<RequestedResourceVersion>],
     ) -> Result<Vec<ModelName>, Report<RegistryError>> {
         let committed = self.list_identifiers(domain, kind, prefix)?;
         if queued.is_empty() {
@@ -1133,19 +1133,20 @@ impl Registry {
 
     /// The models of `domain` as `queued` leaves them, applied in written order and without
     /// validating the result. An alteration whose target is gone is skipped, because this describes
-    /// configuration a client is still writing rather than a plan that will be persisted.
+    /// configuration a client is still writing rather than a plan that will be persisted. Queued
+    /// statements keep the resource versions they wrote, so stored models are written the same way.
     pub(crate) fn resulting_models(
         &self,
         domain: &DomainName,
-        queued: &[RegistryMutation],
-    ) -> Result<Vec<Model>, Report<RegistryError>> {
+        queued: &[RegistryMutation<RequestedResourceVersion>],
+    ) -> Result<Vec<Model<RequestedResourceVersion>>, Report<RegistryError>> {
         let mut models = self
             .storage
             .list_models(domain)
             .change_context(RegistryError::LoadStoredModels)?
             .into_iter()
-            .map(|record| record.model)
-            .collect::<ModelIndex>();
+            .map(|record| Model::<RequestedResourceVersion>::from(record.model))
+            .collect::<ModelIndex<RequestedResourceVersion>>();
         for mutation in queued {
             mutation.fold_into_models(&mut models);
         }

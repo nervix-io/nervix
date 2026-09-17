@@ -51,8 +51,8 @@ use super::{
     model_mutation::{RequestDomainError, command_error, parse_request_domain},
     peer_grpc::grpc_uri_from_advertise_addr,
     resource::{
-        ResourceUploadError, requested_resource_versions, resource_ref_suggestions,
-        resource_version_suggestions,
+        ResourceUploadError, completed_resource_version_suggestions, resource_named_before_version,
+        resource_ref_suggestions, resource_version_suggestions,
     },
     runtime_admission::RuntimeAdmission,
     scheduling::RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
@@ -1010,7 +1010,10 @@ impl SessionServiceImpl {
         let mut expects_resource_ref = false;
         let mut expects_session_subscription_ref = false;
         let mut expects_runtime_node_ref = false;
-        let requested_resource_versions = requested_resource_versions(&req.input, cursor);
+        // `DESCRIBE RESOURCE` may name any published version, while a binding may name only a
+        // completed one.
+        let mut expects_resource_version = false;
+        let mut expects_completed_resource_version = false;
         for item in &grammar {
             if let Some(kind) = ModelKind::from_completion_label(item) {
                 semantic_kinds.push(kind);
@@ -1020,14 +1023,22 @@ impl SessionServiceImpl {
                 expects_session_subscription_ref = true;
             } else if item == "ref:runtime_node" {
                 expects_runtime_node_ref = true;
-            } else if prefix.is_empty()
-                || item
-                    .to_ascii_lowercase()
-                    .starts_with(&prefix.to_ascii_lowercase())
-            {
-                suggestions.push(item.clone());
+            } else {
+                if item == "resource_version" {
+                    expects_resource_version = true;
+                } else if item == "completed_resource_version" {
+                    expects_completed_resource_version = true;
+                }
+                if prefix.is_empty()
+                    || item
+                        .to_ascii_lowercase()
+                        .starts_with(&prefix.to_ascii_lowercase())
+                {
+                    suggestions.push(item.clone());
+                }
             }
         }
+        let expects_version = expects_resource_version || expects_completed_resource_version;
 
         for kind in &semantic_kinds {
             if let Some(domain) = &domain
@@ -1060,20 +1071,24 @@ impl SessionServiceImpl {
         }
 
         if let Some(domain) = &domain
-            && (expects_resource_ref || requested_resource_versions.is_some())
+            && (expects_resource_ref || expects_version)
         {
             let resources = self.inner.consensus.current_resources().await;
             if expects_resource_ref {
                 suggestions.extend(resource_ref_suggestions(&resources, domain, &prefix));
                 suggestions.extend(queued.resource_suggestions(&prefix));
             }
-            if let Some(resource_identifier) = requested_resource_versions.as_ref() {
-                suggestions.extend(resource_version_suggestions(
-                    &resources,
-                    domain,
-                    resource_identifier,
-                    &prefix,
-                ));
+            if let Some(resource) = resource_named_before_version(&req.input, cursor) {
+                if expects_resource_version {
+                    suggestions.extend(resource_version_suggestions(
+                        &resources, domain, &resource, &prefix,
+                    ));
+                }
+                if expects_completed_resource_version {
+                    suggestions.extend(completed_resource_version_suggestions(
+                        &resources, domain, &resource, &prefix,
+                    ));
+                }
             }
         }
 
@@ -1081,7 +1096,8 @@ impl SessionServiceImpl {
             || (semantic_kinds.is_empty()
                 && !expects_resource_ref
                 && !expects_session_subscription_ref
-                && !expects_runtime_node_ref)
+                && !expects_runtime_node_ref
+                && !expects_version)
         {
             let domains = self.inner.consensus.current_domains().await;
             for id in domains.into_keys() {

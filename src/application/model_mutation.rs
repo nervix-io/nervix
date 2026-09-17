@@ -14,8 +14,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{ConsensusError, TransactionStepEffect};
 use nervix_interconnect::EntityGatePurpose;
 use nervix_models::{
-    DomainName, DomainSchedule, DomainStatus, ModelKind, ModelName, QuiesceLevel, Statement,
-    TransactionOperationNumber,
+    DomainName, DomainSchedule, DomainStatus, ModelKind, ModelName, QuiesceLevel,
+    RequestedResourceVersion, ResourceBindingImpact, Statement, TransactionOperationNumber,
 };
 use nervix_nspl::client_statement::ClientStatement;
 use tokio::sync::mpsc;
@@ -57,7 +57,9 @@ struct AppliedModelMutation {
 
 struct CollectedModelMutations {
     results: Vec<Option<CommandResult>>,
-    mutations: Vec<RegistryMutation>,
+    /// The mutations as their statements wrote them. A transaction step already carries the plan
+    /// that pinned their resource versions; a direct batch pins them before planning.
+    mutations: Vec<RegistryMutation<RequestedResourceVersion>>,
     applied: Vec<AppliedModelMutation>,
     refresh_http_tls: bool,
 }
@@ -247,12 +249,61 @@ pub(in crate::application) fn quiesce_level_message(level: QuiesceLevel) -> Stri
     format!("quiesce level: {}", level.as_str())
 }
 
+/// When a command reports the number a `VERSION LATEST` resolved to. An explicit version needs no
+/// report, because the statement already names it.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::application) enum LatestResolutionReport {
+    /// A queued statement was admitted. `COMMIT` resolves `LATEST` again against the versions
+    /// completed by then.
+    Provisional,
+    /// The statement was applied and the model stores the reported number.
+    Applied,
+}
+
+impl LatestResolutionReport {
+    /// One message per binding among `bindings` that a statement wrote as `VERSION LATEST`.
+    pub(in crate::application) fn messages<'a>(
+        self,
+        bindings: impl IntoIterator<Item = &'a ResourceBindingImpact>,
+    ) -> Vec<String> {
+        let qualifier = match self {
+            Self::Provisional => "provisionally ",
+            Self::Applied => "",
+        };
+        let mut messages = Vec::new();
+        for binding in bindings {
+            if let RequestedResourceVersion::Latest = binding.requested {
+                messages.push(format!(
+                    "{qualifier}resolved VERSION LATEST of resource '{}' to version {} for {} '{}'",
+                    binding.resource.as_str(),
+                    binding.version,
+                    binding.node.kind.as_str(),
+                    binding.node.identifier.as_str()
+                ));
+            }
+        }
+        messages
+    }
+}
+
+/// What a model mutation batch reports once it applied, beside the per-statement results.
+struct ModelMutationOutcome<'a> {
+    classified_level: QuiesceLevel,
+    planned_relocations: usize,
+    /// The resolved `VERSION LATEST` messages of the applied batch.
+    latest_resolutions: &'a [String],
+}
+
 fn model_mutation_success_result(
     existing_results: &[Option<CommandResult>],
     applied: &[AppliedModelMutation],
-    classified_level: QuiesceLevel,
-    planned_relocations: usize,
+    outcome: ModelMutationOutcome<'_>,
 ) -> CommandResult {
+    let ModelMutationOutcome {
+        classified_level,
+        planned_relocations,
+        latest_resolutions,
+    } = outcome;
     let mut results = existing_results.to_vec();
     let mut first_applied = true;
     for mutation in applied {
@@ -263,6 +314,9 @@ fn model_mutation_success_result(
                 &mut message,
                 &format!("planned relocations: {planned_relocations}"),
             );
+            for resolution in latest_resolutions {
+                append_command_output(&mut message, resolution);
+            }
             first_applied = false;
         }
         results[mutation.index] = Some(CommandResult {
@@ -701,19 +755,57 @@ impl SessionServiceImpl {
                 }
                 None => None,
             };
+            let latest_resolutions = match transaction_step.as_ref() {
+                Some(step) => LatestResolutionReport::Applied.messages(
+                    step.planned_step
+                        .impact
+                        .planned()
+                        .effects
+                        .resource_bindings
+                        .as_slice(),
+                ),
+                None => Vec::new(),
+            };
             let planned = match &transaction_decision {
                 Some(decision) => decision.planned.clone(),
-                None => match self.inner.registry.plan_mutations(&domain, &mutations) {
-                    Ok(planned) => planned,
-                    Err(err) => {
-                        warn!(
-                            domain = domain.as_str(),
-                            error = %err,
-                            "failed to plan model mutation batch"
-                        );
-                        return create_registry_error_response(query, &domain, &error_target, &err);
+                None => {
+                    // A batch outside a transaction resolves the resource versions it wrote
+                    // against the versions completed now, when it is applied.
+                    let resources = Box::pin(self.inner.consensus.current_resources()).await;
+                    let mut pinned_mutations = Vec::with_capacity(mutations.len());
+                    for mutation in mutations.iter().cloned() {
+                        let pinned = mutation.pin_resource_versions(|resource, requested| {
+                            resources
+                                .uploads
+                                .resolve_completed_version(&domain, resource, requested)
+                                .map(|id| id.version)
+                        });
+                        match pinned {
+                            Ok(mutation) => pinned_mutations.push(mutation),
+                            Err(error) => return command_error(error.to_string()),
+                        }
                     }
-                },
+                    match self
+                        .inner
+                        .registry
+                        .plan_mutations(&domain, &pinned_mutations)
+                    {
+                        Ok(planned) => planned,
+                        Err(err) => {
+                            warn!(
+                                domain = domain.as_str(),
+                                error = %err,
+                                "failed to plan model mutation batch"
+                            );
+                            return create_registry_error_response(
+                                query,
+                                &domain,
+                                &error_target,
+                                &err,
+                            );
+                        }
+                    }
+                }
             };
             if let Err(error) = Box::pin(self.validate_changed_model_bindings(
                 &domain,
@@ -1014,8 +1106,11 @@ impl SessionServiceImpl {
                     let step_result = model_mutation_success_result(
                         &results,
                         &applied,
-                        classified_level,
-                        planned_relocations,
+                        ModelMutationOutcome {
+                            classified_level,
+                            planned_relocations,
+                            latest_resolutions: &latest_resolutions,
+                        },
                     );
                     let effect = TransactionStepEffect::ReplaceDomainSchedule {
                         domain: domain.clone(),
@@ -1332,7 +1427,7 @@ impl SessionServiceImpl {
             }
 
             if refresh_http_tls
-                && let Err(error) = Box::pin(self.refresh_http_tls_server_config(None)).await
+                && let Err(error) = Box::pin(self.refresh_http_tls_server_config()).await
             {
                 if transaction_step.is_some() {
                     transaction_application_failure = Some(format!(
@@ -1351,15 +1446,26 @@ impl SessionServiceImpl {
             completed_result = Some(model_mutation_success_result(
                 &results,
                 &applied,
-                classified_level,
-                planned_relocations,
+                ModelMutationOutcome {
+                    classified_level,
+                    planned_relocations,
+                    latest_resolutions: &latest_resolutions,
+                },
             ));
         }
 
         let result = if let Some(result) = completed_result {
             result
         } else {
-            model_mutation_success_result(&results, &applied, QuiesceLevel::Dynamic, 0)
+            model_mutation_success_result(
+                &results,
+                &applied,
+                ModelMutationOutcome {
+                    classified_level: QuiesceLevel::Dynamic,
+                    planned_relocations: 0,
+                    latest_resolutions: &[],
+                },
+            )
         };
         if let Some(transaction_step) = transaction_step.as_ref()
             && recorded_transaction.is_none()

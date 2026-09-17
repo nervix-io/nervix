@@ -451,7 +451,8 @@ impl Runtime {
             .inner
             .resource_versions
             .load()
-            .resolve_completed_version(domain, &lookup.resource, None)
+            .uploads
+            .resolve_completed_version(domain, &lookup.resource, RequestedResourceVersion::Latest)
             .map_err(|_| {
                 format!(
                     "resource '{}' has no completed versions for lookup '{}' in domain '{}'",

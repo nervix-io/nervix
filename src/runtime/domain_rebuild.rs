@@ -348,9 +348,9 @@ impl Runtime {
                         &processor.file,
                     ))
                     .await
-                    .map_err(|reason| RuntimeError::BuildDomainExecution {
+                    .map_err(|error| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
-                        reason,
+                        reason: format!("{error:#}"),
                     })?;
                 }
                 _ => {}

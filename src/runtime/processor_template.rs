@@ -598,17 +598,17 @@ impl BranchInstanceTemplate {
                 ..
             } = &mut processor.operation
             {
-                *compiled = Some(
-                    runtime
-                        .compile_wasm_processor_module(
-                            domain,
-                            &processor.processor,
-                            resource,
-                            *resource_version,
-                            file,
-                        )
-                        .await?,
-                );
+                let prepared = runtime
+                    .compile_wasm_processor_module(
+                        domain,
+                        &processor.processor,
+                        resource,
+                        *resource_version,
+                        file,
+                    )
+                    .await
+                    .map_err(|error| format!("{error:#}"))?;
+                *compiled = Some(prepared);
             }
         }
         Ok(())

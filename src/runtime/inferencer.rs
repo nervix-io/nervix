@@ -19,7 +19,6 @@ use crate::runtime_schema::{RuntimeRecordBatch, RuntimeValue};
 
 #[derive(Clone)]
 pub(super) struct OnnxInferencerSession {
-    version: u64,
     session: Arc<Mutex<Session>>,
 }
 
@@ -27,13 +26,12 @@ impl std::fmt::Debug for OnnxInferencerSession {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("OnnxInferencerSession")
-            .field("version", &self.version)
             .finish_non_exhaustive()
     }
 }
 
 impl OnnxInferencerSession {
-    pub(super) async fn load(version: u64, path: &Path) -> Result<Self, String> {
+    pub(super) async fn load(path: &Path) -> Result<Self, String> {
         let path = path.to_path_buf();
         let session = tokio::task::spawn_blocking(move || {
             let mut builder = Session::builder()
@@ -45,13 +43,8 @@ impl OnnxInferencerSession {
         .await
         .map_err(|error| format!("failed to join ONNX model loading task: {error}"))??;
         Ok(Self {
-            version,
             session: Arc::new(Mutex::new(session)),
         })
-    }
-
-    pub(super) fn version(&self) -> u64 {
-        self.version
     }
 
     pub(super) async fn execute(

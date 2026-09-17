@@ -1790,7 +1790,7 @@ impl Runtime {
                 &processor.file,
             )
             .await
-            .map_err(OwnershipHandoffError::wasm_restore)?;
+            .map_err(|error| OwnershipHandoffError::wasm_restore(format!("{error:#}")))?;
         let domain_clock = self.bind_domain_clock(domain).map_err(|error| {
             OwnershipHandoffError::wasm_restore(format!(
                 "failed to bind WASM processor '{}' to the domain clock: {error}",

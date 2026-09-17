@@ -241,6 +241,16 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) fn take_armed_resource_installation_failure(
+        &self,
+        node_id: &ClusterNodeName,
+    ) -> bool {
+        self.inner
+            .fault_injection
+            .take_armed_resource_installation_failure(node_id)
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_resource_installation_if_armed(&self, node_id: &ClusterNodeName) {
         self.inner
             .fault_injection

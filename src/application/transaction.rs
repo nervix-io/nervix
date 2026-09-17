@@ -22,8 +22,9 @@ use nervix_models::{
     ActualExecutionStepImpact, CanonicalImpactSet, CommandExecutionReference, DomainName,
     DomainSchedule, DomainState, DomainStatus, ExecutionStepImpactReport, ImpactDiagnostic,
     ImpactDiagnosticKind, ImpactNodeCoverage, ImpactPlanningBasis, ImpactReportCompleteness, Model,
-    ModelIndex, OwnershipMoveImpact, PauseRequirement, PlannedExecutionStepImpact, ResourceName,
-    Statement, TransactionOperationNumber, TransactionOperationRange, UserName,
+    ModelIndex, OwnershipMoveImpact, PauseRequirement, PlannedExecutionStepImpact,
+    RequestedResourceVersion, ResourceId, ResourceName, ResourceUploads, Statement,
+    TransactionOperationNumber, TransactionOperationRange, UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
 use parking_lot::Mutex as ParkingMutex;
@@ -40,8 +41,8 @@ use super::{
     domain_clock::{current_timestamp, subtract_timestamp_duration},
     domain_lifecycle::DomainAlterError,
     model_mutation::{
-        RequestDomainError, append_command_output, command_error, command_ok,
-        command_ok_already_existed, parse_request_domain, quiesce_level_message,
+        LatestResolutionReport, RequestDomainError, append_command_output, command_error,
+        command_ok, command_ok_already_existed, parse_request_domain, quiesce_level_message,
     },
     ownership_handoff::{mark_complete_ownership_transitions, planned_ownership_moves},
     schedule_planning::DomainSchedulePlanningSnapshot,
@@ -79,6 +80,7 @@ struct TransactionPlanningBasisInput<'a> {
     domain: &'a DomainState,
     models: Vec<&'a Model>,
     resources: Vec<&'a ResourceName>,
+    completed_resource_versions: Vec<&'a ResourceId>,
     schedule: Option<&'a DomainSchedule>,
     live_voters: &'a [nervix_models::ClusterNodeName],
     cluster_nodes: &'a [nervix_models::ClusterNodeName],
@@ -86,13 +88,27 @@ struct TransactionPlanningBasisInput<'a> {
     scheduler_mode: &'a str,
 }
 
+/// The captured control-plane inputs one planning basis identifies.
+struct TransactionPlanningBasisSource<'a> {
+    domain: &'a DomainState,
+    models: &'a ModelIndex,
+    resources: &'a BTreeSet<ResourceName>,
+    resource_uploads: &'a ResourceUploads,
+    schedule: Option<&'a DomainSchedule>,
+    schedule_inputs: &'a DomainSchedulePlanningSnapshot,
+}
+
 fn transaction_planning_basis(
-    domain: &DomainState,
-    models: &ModelIndex,
-    resources: &BTreeSet<ResourceName>,
-    schedule: Option<&DomainSchedule>,
-    schedule_inputs: &DomainSchedulePlanningSnapshot,
+    source: TransactionPlanningBasisSource<'_>,
 ) -> Result<ImpactPlanningBasis, Report<TransactionPlanningError>> {
+    let TransactionPlanningBasisSource {
+        domain,
+        models,
+        resources,
+        resource_uploads,
+        schedule,
+        schedule_inputs,
+    } = source;
     let mut ordered_models = models.models().collect::<Vec<_>>();
     ordered_models.sort_by_key(|model| model.node_ref());
     let resources = resources.iter().collect();
@@ -100,6 +116,7 @@ fn transaction_planning_basis(
         domain,
         models: ordered_models,
         resources,
+        completed_resource_versions: resource_uploads.completed_versions().collect(),
         schedule,
         live_voters: schedule_inputs.live_voters(),
         cluster_nodes: schedule_inputs.cluster_nodes(),
@@ -194,7 +211,9 @@ impl SessionTransactionBindingError {
 /// seeing the names they drop, before the transaction commits.
 #[derive(Debug, Default)]
 pub(in crate::application) struct QueuedConfiguration {
-    pub(in crate::application) models: Vec<RegistryMutation>,
+    /// Queued model mutations as their statements wrote them. Completion only reads names and
+    /// kinds, so the resource versions stay unresolved until `COMMIT` plans them.
+    pub(in crate::application) models: Vec<RegistryMutation<RequestedResourceVersion>>,
     resources: BTreeSet<ResourceName>,
 }
 
@@ -347,6 +366,15 @@ fn transaction_commit_result(transaction: &ReplicatedTransaction) -> CommandResu
             &mut message,
             &format!("planned relocations: {planned_relocations}"),
         );
+    }
+    for step in transaction.commit_results() {
+        if !step.result.success {
+            continue;
+        }
+        let bindings = step.impact.planned().effects.resource_bindings.as_slice();
+        for resolution in LatestResolutionReport::Applied.messages(bindings) {
+            append_command_output(&mut message, &resolution);
+        }
     }
     let mut reported = transaction
         .commit_results()
@@ -1006,17 +1034,20 @@ impl SessionServiceImpl {
             .filter(|counter| counter.domain == *domain)
             .map(|counter| counter.identifier.clone())
             .collect::<BTreeSet<_>>();
-        let basis = transaction_planning_basis(
-            &domain_state,
-            &models,
-            &resources,
-            control.schedule.as_ref(),
-            &schedule_inputs,
-        )?;
+        let resource_uploads = control.resources.uploads.in_domain(domain);
+        let basis = transaction_planning_basis(TransactionPlanningBasisSource {
+            domain: &domain_state,
+            models: &models,
+            resources: &resources,
+            resource_uploads: &resource_uploads,
+            schedule: control.schedule.as_ref(),
+            schedule_inputs: &schedule_inputs,
+        })?;
         let snapshot = TransactionPlanningSnapshot {
             domain: domain_state.clone(),
             models,
             resources,
+            resource_uploads,
             schedule: control.schedule,
             basis,
         };
@@ -1109,6 +1140,20 @@ impl SessionServiceImpl {
             &mut result.message,
             &quiesce_level_message(step.impact.planned().pause.level()),
         );
+        let mut candidate_bindings = Vec::new();
+        for binding in step.impact.planned().effects.resource_bindings.as_slice() {
+            if binding
+                .attribution
+                .operations()
+                .binary_search(&number)
+                .is_ok()
+            {
+                candidate_bindings.push(binding);
+            }
+        }
+        for message in LatestResolutionReport::Provisional.messages(candidate_bindings) {
+            append_command_output(&mut result.message, &message);
+        }
         result
     }
 
@@ -1141,7 +1186,9 @@ impl SessionServiceImpl {
         ))
     }
 
-    fn transaction_registry_mutation(statement: &Statement) -> RegistryMutation {
+    fn transaction_registry_mutation(
+        statement: &Statement,
+    ) -> RegistryMutation<RequestedResourceVersion> {
         RegistryMutation::try_from(statement)
             .assured("transaction registry mutation requires a model mutation")
     }

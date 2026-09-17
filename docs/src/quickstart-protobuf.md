@@ -42,9 +42,11 @@ The client reports `uploaded resource version 1`. Uploads are immutable and vers
 
 ## The Codec And Its Endpoint
 
-The clause order is rigid: resource, `CONFIG` (mandatory — `file`/`include` select and root the
-`.proto` files inside the resource), the fully-qualified `MESSAGE` name, then the target schema
-and JAQ program. The message's JSON view keeps snake_case proto field names and numeric 64-bit
+The clause order is rigid: resource and its mandatory version, `CONFIG` (mandatory —
+`file`/`include` select and root the `.proto` files inside the resource), the fully-qualified
+`MESSAGE` name, then the target schema and JAQ program. `VERSION 1` names the upload above;
+`VERSION LATEST` would bind the highest completed version when the statement is applied and store
+that number. The message's JSON view keeps snake_case proto field names and numeric 64-bit
 integers, so a field-for-field message needs only the identity program `'.'`:
 
 ```nspl
