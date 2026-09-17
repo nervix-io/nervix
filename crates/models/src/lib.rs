@@ -76,8 +76,9 @@ pub use quiesce::{
     OperationImpactReport, OwnershipMoveImpact, PauseRequirement, PlannedExecutionStepImpact,
     QuiesceLevel, QuiesceSubgraph, QuiescenceOutcome, RebuildImpact, RebuildReason,
     ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact, StatePurge,
-    StateResetImpact, TransactionImpactReport, TransactionImpactSummary, TransactionOperation,
-    TransactionOperationNumber, TransactionOperationRange, TransactionPosition,
+    StateResetImpact, TransactionImpactReport, TransactionImpactSummary,
+    TransactionInspectionTarget, TransactionOperation, TransactionOperationNumber,
+    TransactionOperationRange, TransactionPosition, TransactionPreviewIdentity,
 };
 pub use remote::{
     RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeElementValue,

@@ -1,0 +1,45 @@
+[package]
+build = "build.rs"
+description = "The verified FlatBuffers wire contract of the Nervix client session: schema, frames, limits and transport codecs"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-client-wire"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# The tonic codec for the native gRPC transport. Browser builds leave it off.
+grpc = ["dep:tonic"]
+
+[dependencies]
+bytes = { workspace = true }
+error-stack = { workspace = true }
+flatbuffers = { workspace = true }
+meticulous = { workspace = true }
+nervix-models = { workspace = true }
+thiserror = { workspace = true }
+tonic = { workspace = true, optional = true }
+url = { workspace = true }
+
+[build-dependencies]
+flatc-rust = { workspace = true }
+meticulous = { workspace = true }
+
+[dev-dependencies]
+futures-util = { workspace = true }
+tokio = { workspace = true, features = [
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "sync",
+  "time",
+] }
+tokio-stream = { workspace = true, features = ["net"] }
+tokio-tungstenite = { workspace = true }
+
+[[test]]
+name = "grpc_session"
+required-features = ["grpc"]

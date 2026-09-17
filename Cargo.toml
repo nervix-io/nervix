@@ -227,6 +227,7 @@ members = [
   "crates/approx-into",
   "crates/benchmark",
   "crates/client-core",
+  "crates/client-wire",
   "crates/connector",
   "crates/consensus",
   "crates/dataflow-graph",
@@ -369,6 +370,7 @@ multer = "3"
 mysql_async = "0.36.2"
 nervix-approx-into = { package = "nervix-approx-into", path = "crates/approx-into" }
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
+nervix-client-wire = { package = "nervix-client-wire", path = "crates/client-wire" }
 nervix-connector = { package = "nervix-connector", path = "crates/connector" }
 nervix-consensus = { package = "nervix-consensus", path = "crates/consensus" }
 nervix-dataflow-graph = { package = "nervix-dataflow-graph", path = "crates/dataflow-graph" }

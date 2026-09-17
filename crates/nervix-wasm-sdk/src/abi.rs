@@ -8,7 +8,7 @@
 use std::{cell::UnsafeCell, ops::Range, panic::AssertUnwindSafe};
 
 use meticulous::OptionExt as _;
-use nervix_wasm_protocol::GuestSnapshot;
+use nervix_wasm_protocol::{GuestSnapshot, SavedStateRejection};
 
 use crate::{
     context::{BranchContext, GuestContext, TimeoutHandle},
@@ -118,6 +118,18 @@ impl RuntimeCore {
         self.error_state = Some(reason.to_string());
         self.global_error.clear();
         self.global_error.extend_from_slice(reason.as_bytes());
+    }
+
+    /// Reports why the saved state handed to `nervix_load_state` cannot be restored and returns the
+    /// code that classifies the verdict.
+    ///
+    /// The reason goes on the global-error channel, but nothing is latched: the host discards an
+    /// instance whose restore failed, so there is no later callback for a latch to refuse.
+    fn reject_saved_state(&mut self, rejection: SavedStateRejection, reason: &GuestError) -> i32 {
+        self.global_error.clear();
+        self.global_error
+            .extend_from_slice(reason.to_string().as_bytes());
+        rejection.code()
     }
 
     /// Clears guest-owned state while keeping the reusable buffer allocation.
@@ -380,19 +392,45 @@ pub fn dump_state<P: Processor>(slot: &InstanceSlot<P>) -> i32 {
     })
 }
 
+/// Restores the processor from the saved state the host hands over.
+///
+/// A range the host did not allocate fails the call with its own code, because it says nothing
+/// about the saved state. Everything after that is a verdict on the state: a snapshot the SDK
+/// cannot decode, including its branch configuration, rejects the snapshot envelope, and an error
+/// from [`Processor::restore`] rejects the application state it carries.
 pub fn load_state<P: Processor>(slot: &InstanceSlot<P>, ptr: i32, size: i32) -> i32 {
     guarded(false, |core| {
         let bytes = core.read_buffer(ptr, size)?;
-        let snapshot = GuestSnapshot::decode(&bytes)?;
-        if !snapshot.pending_batch.is_empty() {
-            return Err(GuestError::UnsupportedSnapshot);
-        }
-        let branch = BranchContext::from_init_metadata(&snapshot.init_metadata)?;
-        let instance = if snapshot.error_state.is_none() {
-            Some(P::restore(&branch, &snapshot.saved_state)?)
-        } else {
-            None
+        let snapshot = match GuestSnapshot::decode(&bytes) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let reason = GuestError::from(error);
+                return Ok(core.reject_saved_state(SavedStateRejection::SnapshotEnvelope, &reason));
+            }
         };
+        if !snapshot.pending_batch.is_empty() {
+            return Ok(core.reject_saved_state(
+                SavedStateRejection::SnapshotEnvelope,
+                &GuestError::UnsupportedSnapshot,
+            ));
+        }
+        let branch = match BranchContext::from_init_metadata(&snapshot.init_metadata) {
+            Ok(branch) => branch,
+            Err(reason) => {
+                return Ok(core.reject_saved_state(SavedStateRejection::SnapshotEnvelope, &reason));
+            }
+        };
+        let mut instance = None;
+        if snapshot.error_state.is_none() {
+            match P::restore(&branch, &snapshot.saved_state) {
+                Ok(restored) => instance = Some(restored),
+                Err(reason) => {
+                    return Ok(
+                        core.reject_saved_state(SavedStateRejection::ApplicationState, &reason)
+                    );
+                }
+            }
+        }
         core.processed_batches = snapshot.processed_batches;
         core.processed_rows = snapshot.processed_rows;
         core.last_domain_time_nanos = snapshot.last_domain_time_nanos;

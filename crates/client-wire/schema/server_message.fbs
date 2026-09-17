@@ -1,0 +1,11 @@
+// A server frame: a reply to one request or an unsolicited server message.
+//
+// This file declares a frame root for code generators; every shape it names lives in session.fbs.
+
+include "session.fbs";
+
+namespace nervix.session;
+
+root_type ServerMessage;
+file_identifier "NXSM";
+file_extension "nxsm";
