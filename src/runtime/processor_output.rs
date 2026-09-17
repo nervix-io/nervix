@@ -5,8 +5,8 @@ use super::*;
 /// Every way dispatching a stateful processor's output fails before it reaches its routes.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ProcessorOutputError {
-    #[error("failed to build the processor output relay batch: {reason}")]
-    RelayBatch { reason: String },
+    #[error("failed to build the processor output relay batch")]
+    RelayBatch,
     #[error(
         "pending output has {input_rows} input rows, {keys} keys, {arrow_rows} Arrow rows, and \
          {metadata_rows} metadata rows"
@@ -135,7 +135,7 @@ impl PendingProcessorOutputBatch {
         acks: Vec<AckSet>,
     ) -> error_stack::Result<RelayRecordBatch, ProcessorOutputError> {
         RelayRecordBatch::from_filtered_parts(self.key, self.batch, self.metadata, acks)
-            .map_err(|reason| Report::new(ProcessorOutputError::RelayBatch { reason }))
+            .change_context(ProcessorOutputError::RelayBatch)
     }
 }
 

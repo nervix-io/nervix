@@ -62,8 +62,8 @@ pub(super) enum WasmOutputError {
     RequiredFieldUninitialized { field: String },
     #[error("WASM output Arrow schema does not match its relay schema")]
     OutputSchemaMismatch,
-    #[error("failed to build the WASM output relay batch: {reason}")]
-    OutputRelayBatch { reason: String },
+    #[error("failed to build the WASM output relay batch")]
+    OutputRelayBatch,
     #[error("expected an output envelope at callback index {envelope_index}")]
     UnexpectedEnvelopeKind { envelope_index: usize },
     #[error("WASM output group at callback index {envelope_index} has no routed outputs")]
@@ -1259,7 +1259,7 @@ pub(super) async fn dispatch_wasm_output_route(
                     context.processor,
                     context.error_policies,
                     ack_queues.iter().flatten(),
-                    error,
+                    error.to_string(),
                 );
             return None;
         }
@@ -1564,7 +1564,7 @@ pub(super) fn relay_batch_from_wasm_output(
         return Err(Report::new(WasmOutputError::OutputSchemaMismatch));
     }
     let batch = RelayRecordBatch::from_filtered_parts(key.clone(), batch, metadata, acks)
-        .map_err(|reason| Report::new(WasmOutputError::OutputRelayBatch { reason }))?;
+        .change_context(WasmOutputError::OutputRelayBatch)?;
     Ok(WasmDecodedOutputBatch {
         batch,
         uninitialized_columns,

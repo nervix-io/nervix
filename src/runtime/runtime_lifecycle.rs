@@ -339,7 +339,7 @@ impl Runtime {
                 warn!(
                     domain = domain.as_str(),
                     relay = relay.as_str(),
-                    reason,
+                    reason = %reason,
                     "relay owner task did not stop cleanly"
                 );
             }
@@ -350,7 +350,7 @@ impl Runtime {
                 warn!(
                     domain = domain.as_str(),
                     relay = relay.as_str(),
-                    reason,
+                    reason = %reason,
                     "relay state task did not stop cleanly"
                 );
             }

@@ -383,37 +383,66 @@ pub(super) struct RelayStateTask {
     pub(super) task: JoinHandle<()>,
 }
 
+#[derive(Debug, Clone, Copy, strum::Display)]
+pub(super) enum RelayTaskKind {
+    #[strum(serialize = "relay state")]
+    State,
+    #[strum(serialize = "relay owner")]
+    Owner,
+}
+
+#[derive(Debug, Error)]
+pub(super) enum RelayTaskStopError {
+    #[error("{task} task failed")]
+    Join { task: RelayTaskKind },
+    #[error("{task} task did not drain within {grace:?}")]
+    DrainTimeout {
+        task: RelayTaskKind,
+        grace: Duration,
+    },
+}
+
 impl RelayStateTask {
-    pub(super) async fn stop(mut self, grace: Duration) -> Result<(), String> {
+    pub(super) async fn stop(
+        mut self,
+        grace: Duration,
+    ) -> error_stack::Result<(), RelayTaskStopError> {
         self.shutdown.send_replace(true);
         match tokio::time::timeout(grace, &mut self.task).await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(format!("relay state task failed: {error}")),
+            Ok(Err(error)) => Err(Report::new(error).change_context(RelayTaskStopError::Join {
+                task: RelayTaskKind::State,
+            })),
             Err(_) => {
                 self.task.abort();
                 self.task.join_after_shutdown("relay state").await;
-                Err(format!(
-                    "relay state task did not drain within {}",
-                    humantime::format_duration(grace)
-                ))
+                Err(Report::new(RelayTaskStopError::DrainTimeout {
+                    task: RelayTaskKind::State,
+                    grace,
+                }))
             }
         }
     }
 }
 
 impl RelayOwnerTask {
-    pub(super) async fn stop(mut self, grace: Duration) -> Result<(), String> {
+    pub(super) async fn stop(
+        mut self,
+        grace: Duration,
+    ) -> error_stack::Result<(), RelayTaskStopError> {
         self.shutdown.send_replace(true);
         match tokio::time::timeout(grace, &mut self.task).await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(format!("relay owner task failed: {error}")),
+            Ok(Err(error)) => Err(Report::new(error).change_context(RelayTaskStopError::Join {
+                task: RelayTaskKind::Owner,
+            })),
             Err(_) => {
                 self.task.abort();
                 self.task.join_after_shutdown("relay owner").await;
-                Err(format!(
-                    "relay owner task did not drain within {}",
-                    humantime::format_duration(grace)
-                ))
+                Err(Report::new(RelayTaskStopError::DrainTimeout {
+                    task: RelayTaskKind::Owner,
+                    grace,
+                }))
             }
         }
     }
@@ -1901,7 +1930,7 @@ impl Runtime {
                 let messages = match batch.try_into_messages() {
                     Ok(messages) => messages,
                     Err(error_and_batch) => {
-                        let (error, _) = *error_and_batch;
+                        let error = error_and_batch.error;
                         warn!(
                             domain = domain.as_str(),
                             relay = relay.as_str(),

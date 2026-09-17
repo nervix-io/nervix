@@ -1152,7 +1152,7 @@ impl MqttIngestor {
                 acks: vec![acks],
             })
             .await
-            .map_err(|error| Report::new(MqttIngestorError::Dispatch).attach_printable(error))
+            .change_context(MqttIngestorError::Dispatch)
     }
 
     /// Flushes the collector and reports a failure to the runtime event bus.
@@ -1182,7 +1182,7 @@ impl MqttIngestor {
                     context.domain.as_str(),
                     error
                 ));
-                Err(Report::new(MqttIngestorError::Flush).attach_printable(error))
+                Err(error.change_context(MqttIngestorError::Flush))
             }
         }
     }

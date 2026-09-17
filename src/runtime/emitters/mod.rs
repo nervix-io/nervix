@@ -4466,8 +4466,11 @@ impl EmitterBatchContext<'_> {
         let messages = match batch.batch.try_into_messages() {
             Ok(messages) => messages,
             Err(error) => {
-                let (message, batch) = *error;
-                self.report_general_error(batch.acks.iter(), format!("{reason}; {message}"));
+                let failure = *error;
+                self.report_general_error(
+                    failure.preserved.acks.iter(),
+                    format!("{reason}; {}", failure.error),
+                );
                 return;
             }
         };

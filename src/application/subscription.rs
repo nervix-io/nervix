@@ -259,7 +259,7 @@ impl SessionSubscriptions {
                                 let messages = match batch.try_into_messages() {
                                     Ok(messages) => messages,
                                     Err(error_and_batch) => {
-                                        let (error, _) = *error_and_batch;
+                                        let error = error_and_batch.error;
                                         let event = SessionResponse {
                                             event: Some(proto::session_response::Event::Server(
                                                 ServerEvent {

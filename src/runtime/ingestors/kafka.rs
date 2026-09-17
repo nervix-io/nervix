@@ -19,12 +19,12 @@ use crate::runtime::physical_time::actual_utc_now;
 
 pub(crate) struct KafkaIngestor;
 
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub(in crate::runtime) enum KafkaConsumerAssignment {
     #[default]
     Unknown,
     Cleared,
-    Partitions,
+    Partitions(TopicPartitionList),
 }
 
 pub(in crate::runtime) struct KafkaOffsetInitialization<'a> {
@@ -36,21 +36,34 @@ pub(in crate::runtime) struct KafkaOffsetInitialization<'a> {
 }
 
 impl KafkaConsumerAssignment {
+    fn is_current(&self, assignment: &TopicPartitionList) -> bool {
+        match self {
+            Self::Unknown => false,
+            Self::Cleared => assignment.count() == 0,
+            Self::Partitions(current) => current == assignment,
+        }
+    }
+
     fn apply(
         &mut self,
         consumer: &StreamConsumer,
         topic: &str,
         assignment: &TopicPartitionList,
-        assigned_any: bool,
     ) -> Result<(), Report<KafkaIngestorError>> {
-        if assigned_any {
+        // `assign` atomically clears the old assignment before installing this one. Repeating an
+        // identical request while that asynchronous clear is still stopping a partition can
+        // enqueue two stop callbacks for the same fetcher in librdkafka.
+        if self.is_current(assignment) {
+            return Ok(());
+        }
+        if assignment.count() > 0 {
             consumer.assign(assignment).map_err(|source| {
                 Report::new(KafkaIngestorError::Assign {
                     topic: topic.to_string(),
                 })
                 .attach_printable(source.to_string())
             })?;
-            *self = Self::Partitions;
+            *self = Self::Partitions(assignment.clone());
         } else {
             self.clear(consumer, topic)?;
         }
@@ -375,7 +388,7 @@ impl KafkaIngestor {
                         .map_err(|reason| RuntimeError::StartIngestor {
                             domain: domain.as_str().to_string(),
                             ingestor: ingestor.name.as_str().to_string(),
-                            reason,
+                            reason: reason.to_string(),
                         })?;
                     (Some(start_version), ready)
                 } else {
@@ -1203,7 +1216,7 @@ impl KafkaIngestor {
                                                     )
                                                     .await
                                                 {
-                                                    batch_failure = Some(error);
+                                                    batch_failure = Some(error.to_string());
                                                 }
 
                                                 if batch_failure.is_none() {
@@ -1412,7 +1425,6 @@ impl KafkaIngestor {
         };
 
         let mut assignment = TopicPartitionList::new();
-        let mut assigned_any = false;
         for (partition, offset) in partitions {
             if assigned_partitions.contains(&partition) {
                 assignment
@@ -1424,11 +1436,10 @@ impl KafkaIngestor {
                         })
                         .attach_printable(source.to_string())
                     })?;
-                assigned_any = true;
             }
         }
 
-        consumer_assignment.apply(consumer, topic, &assignment, assigned_any)?;
+        consumer_assignment.apply(consumer, topic, &assignment)?;
 
         Ok(has_topic_partitions)
     }
@@ -1660,6 +1671,14 @@ impl KafkaIngestor {
 mod tests {
     use super::*;
 
+    fn assignment_at(offset: i64) -> TopicPartitionList {
+        let mut assignment = TopicPartitionList::new();
+        assignment
+            .add_partition_offset("events", 0, Offset::Offset(offset))
+            .assured("the test uses a nonnegative literal Kafka offset");
+        assignment
+    }
+
     fn unavailable_consumer() -> StreamConsumer {
         let consumer: StreamConsumer = ClientConfig::new()
             .set("bootstrap.servers", "127.0.0.1:1")
@@ -1746,5 +1765,19 @@ mod tests {
             seek.current_context(),
             KafkaIngestorError::Seek { .. }
         ));
+    }
+
+    #[test]
+    fn kafka_assignment_state_suppresses_only_identical_requests() {
+        let assignment = assignment_at(10);
+        let changed_offset = assignment_at(11);
+        let empty = TopicPartitionList::new();
+        let current = KafkaConsumerAssignment::Partitions(assignment.clone());
+
+        assert!(current.is_current(&assignment));
+        assert!(!current.is_current(&changed_offset));
+        assert!(!current.is_current(&empty));
+        assert!(KafkaConsumerAssignment::Cleared.is_current(&empty));
+        assert!(!KafkaConsumerAssignment::Unknown.is_current(&assignment));
     }
 }
