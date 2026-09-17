@@ -184,9 +184,10 @@ waits only for operations admitted under the generation it superseded. Even and 
 counters let work admitted under the successor proceed without extending that wait.
 
 This fence prevents a former owner from mutating or describing state after reassignment. Snapshot
-capture and whole-state replacement use the assignment barrier because their contents and ownership
-fence must describe the same moment. Ordinary record updates use atomic admission and never take
-that barrier.
+capture holds the assignment barrier so its observed binding stays current for the whole capture.
+Whole-state installation is authorized exclusively under its exact binding: it cannot overlap a
+capture or an admitted origination. Ordinary record updates use atomic admission, continue while a
+capture merely holds the barrier, and never take that barrier.
 
 ## Bounded Synchronization Outside The Open Path
 
