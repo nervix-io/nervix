@@ -48,6 +48,8 @@ pub enum SideErrorReason {
     IntegerOverflow(IntegerOperation),
     #[error("integer {0} by zero")]
     DivisionByZero(DivisionOperation),
+    #[error("integer {0} by a negative count")]
+    NegativeShiftCount(ShiftOperation),
     #[error("{0} produced a non-finite result")]
     NonFiniteResult(FloatOperation),
     #[error("cannot cast value to {target}")]
@@ -64,9 +66,9 @@ impl SideErrorReason {
         match self {
             Self::IntegerOverflow(_) => ErrorCode::Overflow,
             Self::DivisionByZero(_) => ErrorCode::DivisionByZero,
-            Self::NonFiniteResult(_) | Self::InvalidRegularExpression(_) => {
-                ErrorCode::InvalidArgument
-            }
+            Self::NegativeShiftCount(_)
+            | Self::NonFiniteResult(_)
+            | Self::InvalidRegularExpression(_) => ErrorCode::InvalidArgument,
             Self::CastFailed { .. } => ErrorCode::CastFailed,
             Self::Injected { code, .. } => *code,
         }
@@ -90,6 +92,20 @@ pub enum IntegerOperation {
     AbsoluteValue,
     #[strum(to_string = "sum")]
     Sum,
+    #[strum(to_string = "left shift")]
+    LeftShift,
+    /// `round` with a negative number of digits, which rounds to a multiple of a power of ten.
+    #[strum(to_string = "rounding")]
+    Rounding,
+}
+
+/// An integer operation that shifts a value's bits by a count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum ShiftOperation {
+    #[strum(to_string = "left shift")]
+    LeftShift,
+    #[strum(to_string = "right shift")]
+    RightShift,
 }
 
 /// An integer operation that divides.
@@ -117,12 +133,18 @@ pub enum FloatOperation {
     Floor,
     #[strum(to_string = "round")]
     Round,
+    #[strum(to_string = "trunc")]
+    Trunc,
+    #[strum(to_string = "sign")]
+    Sign,
     #[strum(to_string = "acos")]
     Acos,
     #[strum(to_string = "asin")]
     Asin,
     #[strum(to_string = "atan")]
     Atan,
+    #[strum(to_string = "atan2")]
+    Atan2,
     #[strum(to_string = "cos")]
     Cos,
     #[strum(to_string = "exp")]
@@ -132,8 +154,16 @@ pub enum FloatOperation {
     /// `log`, with one argument or two.
     #[strum(to_string = "log")]
     Log,
+    #[strum(to_string = "log2")]
+    Log2,
     #[strum(to_string = "pow")]
     Pow,
+    #[strum(to_string = "radians")]
+    Radians,
+    #[strum(to_string = "degrees")]
+    Degrees,
+    #[strum(to_string = "sin")]
+    Sin,
     #[strum(to_string = "sqrt")]
     Sqrt,
     #[strum(to_string = "tan")]
@@ -382,8 +412,8 @@ pub enum RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::{
-        DivisionOperation, ErrorCode, FloatOperation, IntegerOperation, RowErrors, SideError,
-        SideErrorReason,
+        DivisionOperation, ErrorCode, FloatOperation, IntegerOperation, RowErrors, ShiftOperation,
+        SideError, SideErrorReason,
     };
     use crate::ir::RegisterType;
 
@@ -414,6 +444,8 @@ mod tests {
                 "integer absolute value overflowed",
             ),
             (IntegerOperation::Sum, "integer sum overflowed"),
+            (IntegerOperation::LeftShift, "integer left shift overflowed"),
+            (IntegerOperation::Rounding, "integer rounding overflowed"),
         ];
         for (operation, message) in integer_overflows {
             let reason = SideErrorReason::IntegerOverflow(operation);
@@ -429,6 +461,22 @@ mod tests {
             let reason = SideErrorReason::DivisionByZero(operation);
             assert_eq!(reason.to_string(), message);
             assert_eq!(reason.code(), ErrorCode::DivisionByZero);
+        }
+
+        let negative_shift_counts = [
+            (
+                ShiftOperation::LeftShift,
+                "integer left shift by a negative count",
+            ),
+            (
+                ShiftOperation::RightShift,
+                "integer right shift by a negative count",
+            ),
+        ];
+        for (operation, message) in negative_shift_counts {
+            let reason = SideErrorReason::NegativeShiftCount(operation);
+            assert_eq!(reason.to_string(), message);
+            assert_eq!(reason.code(), ErrorCode::InvalidArgument);
         }
 
         let non_finite = [
@@ -447,14 +495,27 @@ mod tests {
             (FloatOperation::Ceil, "ceil produced a non-finite result"),
             (FloatOperation::Floor, "floor produced a non-finite result"),
             (FloatOperation::Round, "round produced a non-finite result"),
+            (FloatOperation::Trunc, "trunc produced a non-finite result"),
+            (FloatOperation::Sign, "sign produced a non-finite result"),
             (FloatOperation::Acos, "acos produced a non-finite result"),
             (FloatOperation::Asin, "asin produced a non-finite result"),
             (FloatOperation::Atan, "atan produced a non-finite result"),
+            (FloatOperation::Atan2, "atan2 produced a non-finite result"),
             (FloatOperation::Cos, "cos produced a non-finite result"),
             (FloatOperation::Exp, "exp produced a non-finite result"),
             (FloatOperation::Ln, "ln produced a non-finite result"),
             (FloatOperation::Log, "log produced a non-finite result"),
+            (FloatOperation::Log2, "log2 produced a non-finite result"),
             (FloatOperation::Pow, "pow produced a non-finite result"),
+            (
+                FloatOperation::Radians,
+                "radians produced a non-finite result",
+            ),
+            (
+                FloatOperation::Degrees,
+                "degrees produced a non-finite result",
+            ),
+            (FloatOperation::Sin, "sin produced a non-finite result"),
             (FloatOperation::Sqrt, "sqrt produced a non-finite result"),
             (FloatOperation::Tan, "tan produced a non-finite result"),
         ];
