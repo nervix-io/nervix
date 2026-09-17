@@ -6,7 +6,7 @@ use std::{
 };
 
 use ahash::{HashMap, HashSet};
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_models::{
     AckMode, Assignment, AssignmentTarget, BranchName, CorrelationTimeoutAction,
@@ -30,13 +30,13 @@ use ordered_float::OrderedFloat;
 use triomphe::Arc;
 
 use super::{
-    BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingResult, BranchRuntime,
+    BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingResult, BranchKey, BranchRuntime,
     CompiledBranchProgram, CompiledDeduplicatorKeyProgram, CompiledProgramWithMaterializedInterest,
     DeduplicatorKeyspace, DomainClock, DomainExecutionSnapshot, PendingMaterializedBatch,
     RelayBoundaryServices, RelayMessage, RelayRecordBatch, RelayRegistry,
     ReplicatedWasmProcessorState, ReplicatedWindowProcessorState, RuntimeFlushPolicy,
     RuntimeInputCollectPolicy, RuntimeInputCollector, SharedActiveGraph, WindowProcessorState,
-    inferencer::OnnxInferencerSession, relay_batch::RelayRecordBatchError,
+    branch_key_display, inferencer::OnnxInferencerSession, relay_batch::RelayRecordBatchError,
 };
 use crate::{
     registry::ActiveGraph,
@@ -407,6 +407,129 @@ pub(super) enum RelayProcessorOperationNode {
     },
 }
 
+/// Every way compiling the VM programs a stateful processor runs fails. The programs belong to the
+/// processor family rather than to one processor, so every processor's compilation reports here.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ProcessorCompileError {
+    #[error("inferencer '{}' tensor name '{tensor}' is not a valid field", .processor.as_str())]
+    InferencerTensorField {
+        processor: ModelName,
+        tensor: String,
+    },
+    #[error("inferencer '{}' INPUTS mapping is invalid", .processor.as_str())]
+    InferencerInputsMapping { processor: ModelName },
+    #[error("inferencer '{}' INPUTS compile failed", .processor.as_str())]
+    InferencerInputsCompile { processor: ModelName },
+    #[error("window aggregate output relay '{}' has no runtime schema", .relay.as_str())]
+    WindowOutputSchema { relay: RelayName },
+    #[error("window aggregate requires at least one input relay")]
+    WindowWithoutInput,
+    #[error("window aggregate input relay '{}' has no runtime schema", .relay.as_str())]
+    WindowInputSchema { relay: RelayName },
+    #[error("window aggregate output schema is missing field '{field}'")]
+    WindowOutputField { field: String },
+    #[error("window aggregate demand {demand} has no compiled invocation")]
+    WindowDemandUncompiled { demand: usize },
+    #[error("window aggregate input VM type inference failed")]
+    WindowInputInference,
+    #[error("window aggregate input VM compile failed")]
+    WindowInputCompile,
+    #[error("window aggregate VM compile failed")]
+    WindowExprCompile,
+    #[error("window aggregate array cannot be assigned to {data_type:?} field '{field}'")]
+    WindowArrayTarget {
+        data_type: arrow_schema::DataType,
+        field: String,
+    },
+    #[error("compiled window aggregate references unknown demand {demand}")]
+    WindowUnknownDemand { demand: usize },
+    #[error("window aggregate demand {demand} has incompatible output types")]
+    WindowDemandTypes { demand: usize },
+    #[error(
+        "deduplicator '{}' requires at least one DEDUPLICATE ON expression",
+        .processor.as_str()
+    )]
+    DeduplicatorWithoutKeys { processor: ModelName },
+    #[error("deduplicator '{}' DEDUPLICATE ON program is invalid", .processor.as_str())]
+    DeduplicatorKeyProgram { processor: ModelName },
+    #[error("correlator '{}' CORRELATE WHERE is invalid", .processor.as_str())]
+    CorrelateWhereInvalid { processor: ModelName },
+    #[error("correlator '{}' requires both LEFT and RIGHT inputs", .processor.as_str())]
+    CorrelatorSides { processor: ModelName },
+    #[error("correlator '{}' CORRELATE WHERE compile failed", .processor.as_str())]
+    CorrelateWhereCompile { processor: ModelName },
+    #[error(
+        "correlator '{}' TO output '{}' is invalid",
+        .processor.as_str(),
+        .relay.as_str()
+    )]
+    CorrelatorOutputInvalid {
+        processor: ModelName,
+        relay: RelayName,
+    },
+    #[error(
+        "correlator '{}' TO output '{}' must contain SET assignments and may contain WHERE",
+        .processor.as_str(),
+        .relay.as_str()
+    )]
+    CorrelatorOutputShape {
+        processor: ModelName,
+        relay: RelayName,
+    },
+    #[error(
+        "correlator '{}' TO output '{}' compile failed",
+        .processor.as_str(),
+        .relay.as_str()
+    )]
+    CorrelatorOutputCompile {
+        processor: ModelName,
+        relay: RelayName,
+    },
+}
+
+/// Every way resolving a stateful processor's materialized dependencies for one branch fails.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ProcessorMaterializedError {
+    #[error("failed to read the domain routing for branch '{}'", branch_key_display(.branch))]
+    DomainRouting { branch: Option<BranchKey> },
+    #[error(
+        "failed to resolve materialized dependencies in branch '{}'",
+        branch_key_display(.branch)
+    )]
+    Resolve { branch: Option<BranchKey> },
+    #[error(
+        "{} '{}' requires materialized state that was evicted from branch '{}' after the batch was \
+         admitted",
+        .node_kind.as_str(),
+        .processor.as_str(),
+        branch_key_display(.branch)
+    )]
+    EvictedRequiredSkip {
+        node_kind: ModelKind,
+        processor: ModelName,
+        branch: Option<BranchKey>,
+    },
+    #[error(
+        "{} '{}' awaits materialized state that was evicted from branch '{}' after the batch was \
+         admitted",
+        .node_kind.as_str(),
+        .processor.as_str(),
+        branch_key_display(.branch)
+    )]
+    EvictedRequiredWait {
+        node_kind: ModelKind,
+        processor: ModelName,
+        branch: Option<BranchKey>,
+    },
+}
+
+/// A stateful processor failed to publish the live state its branch task owns.
+#[derive(Debug, thiserror::Error)]
+#[error("failed to publish processor live state for branch '{}'", branch_key_display(.branch))]
+pub(super) struct ProcessorLiveStateError {
+    pub(super) branch: Option<BranchKey>,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct CompiledInferencerInputProgram {
     pub(super) program: Arc<VmCompiledProgram>,
@@ -418,23 +541,20 @@ impl CompiledInferencerInputProgram {
         mappings: &[InferencerTensorMapping],
         input_schema: &CompiledSchema,
         udfs: Option<&UdfExecutor>,
-    ) -> Result<Self, String> {
-        let assignments = mappings
-            .iter()
-            .map(|mapping| {
-                Ok(Assignment {
-                    target: AssignmentTarget::bare(FieldName::parse(&mapping.tensor).map_err(
-                        |error| {
-                            format!(
-                                "inferencer '{}' tensor name '{}' is not a valid field: {error}",
-                                processor, mapping.tensor
-                            )
-                        },
-                    )?),
-                    value: mapping.expression.clone(),
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+    ) -> error_stack::Result<Self, ProcessorCompileError> {
+        let mut assignments = Vec::with_capacity(mappings.len());
+        for mapping in mappings {
+            let target = FieldName::parse(&mapping.tensor).change_context_lazy(|| {
+                ProcessorCompileError::InferencerTensorField {
+                    processor: processor.clone(),
+                    tensor: mapping.tensor.clone(),
+                }
+            })?;
+            assignments.push(Assignment {
+                target: AssignmentTarget::bare(target),
+                value: mapping.expression.clone(),
+            });
+        }
         let parsed = lower_route_construction(
             &RouteConstruction {
                 assignments,
@@ -442,11 +562,8 @@ impl CompiledInferencerInputProgram {
             },
             SemanticNamespaces::new("input", "mapped_input"),
         )
-        .map_err(|reason| {
-            format!(
-                "inferencer '{}' INPUTS mapping is invalid: {reason}",
-                processor
-            )
+        .change_context_lazy(|| ProcessorCompileError::InferencerInputsMapping {
+            processor: processor.clone(),
         })?;
         let output_schema = StdArc::new(arrow_schema::Schema::new(
             mappings
@@ -490,11 +607,8 @@ impl CompiledInferencerInputProgram {
                 },
             ),
         )
-        .map_err(|error| {
-            format!(
-                "inferencer '{}' INPUTS compile failed: {}",
-                processor, error.message
-            )
+        .change_context_lazy(|| ProcessorCompileError::InferencerInputsCompile {
+            processor: processor.clone(),
         })?;
         Ok(Self {
             program: Arc::new(program),
@@ -559,21 +673,19 @@ impl CompiledWindowAggregateProgram {
         output_relay: &RelayName,
         relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
         udfs: Option<&UdfExecutor>,
-    ) -> Result<Self, String> {
+    ) -> error_stack::Result<Self, ProcessorCompileError> {
         let output_schema = relay_schemas.get(output_relay).ok_or_else(|| {
-            format!(
-                "window aggregate output relay '{}' has no runtime schema",
-                output_relay.as_str()
-            )
+            Report::new(ProcessorCompileError::WindowOutputSchema {
+                relay: output_relay.clone(),
+            })
         })?;
         let input_relay = input_relays
             .first()
-            .ok_or_else(|| "window aggregate requires at least one input relay".to_string())?;
+            .ok_or_else(|| Report::new(ProcessorCompileError::WindowWithoutInput))?;
         let input_schema = relay_schemas.get(input_relay).ok_or_else(|| {
-            format!(
-                "window aggregate input relay '{}' has no runtime schema",
-                input_relay.as_str()
-            )
+            Report::new(ProcessorCompileError::WindowInputSchema {
+                relay: input_relay.clone(),
+            })
         })?;
         let (input_program, input_fields) =
             Self::compile_inputs(aggregate, input_schema.arrow_schema(), udfs)?;
@@ -581,54 +693,49 @@ impl CompiledWindowAggregateProgram {
             VmCompileBinding::readonly("input", input_schema.arrow_schema())
                 .with_sensitivity(input_schema.vm_sensitivity()),
         ];
-        let assignments = aggregate
-            .assignments
-            .iter()
-            .map(|assignment| {
-                let target_field = output_schema
-                    .arrow_schema()
-                    .field_with_name(&assignment.target.field)
-                    .cloned()
-                    .map_err(|_| {
-                        format!(
-                            "window aggregate output schema is missing field '{}'",
-                            assignment.target.field
-                        )
-                    })?;
-                let target_sensitive = output_schema
-                    .vm_sensitivity()
-                    .is_sensitive(&assignment.target.field);
-                Ok(CompiledWindowAggregateAssignment {
-                    target: assignment.target.clone(),
-                    value: Self::compile_expr(
-                        &assignment.value.inner,
-                        &assignment.target,
-                        target_field.data_type(),
-                        target_sensitive,
-                        &bindings,
-                        udfs,
-                    )?,
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+        let mut assignments = Vec::with_capacity(aggregate.assignments.len());
+        for assignment in &aggregate.assignments {
+            let target_field = output_schema
+                .arrow_schema()
+                .field_with_name(&assignment.target.field)
+                .cloned()
+                .map_err(|_| {
+                    Report::new(ProcessorCompileError::WindowOutputField {
+                        field: assignment.target.field.clone(),
+                    })
+                })?;
+            let target_sensitive = output_schema
+                .vm_sensitivity()
+                .is_sensitive(&assignment.target.field);
+            let value = Self::compile_expr(
+                &assignment.value.inner,
+                &assignment.target,
+                target_field.data_type(),
+                target_sensitive,
+                &bindings,
+                udfs,
+            )?;
+            assignments.push(CompiledWindowAggregateAssignment {
+                target: assignment.target.clone(),
+                value,
+            });
+        }
         let mut demand_types = vec![None; aggregate.demands().len()];
         for assignment in &assignments {
             assignment.value.collect_demand_types(&mut demand_types)?;
         }
-        let demand_types = demand_types
-            .into_iter()
-            .enumerate()
-            .map(|(id, data_type)| {
-                data_type.ok_or_else(|| {
-                    format!("window aggregate demand {id} has no compiled invocation")
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut compiled_demand_types = Vec::with_capacity(demand_types.len());
+        for (demand, data_type) in demand_types.into_iter().enumerate() {
+            let data_type = data_type.ok_or_else(|| {
+                Report::new(ProcessorCompileError::WindowDemandUncompiled { demand })
+            })?;
+            compiled_demand_types.push(data_type);
+        }
         Ok(Self {
             input_program,
             input_fields,
             assignments,
-            demand_types,
+            demand_types: compiled_demand_types,
             demand_offset: 0,
         })
     }
@@ -637,7 +744,8 @@ impl CompiledWindowAggregateProgram {
         aggregate: &WindowAggregateProgram,
         input_schema: StdArc<arrow_schema::Schema>,
         udfs: Option<&UdfExecutor>,
-    ) -> Result<(Arc<VmCompiledProgram>, Vec<Option<String>>), String> {
+    ) -> error_stack::Result<(Arc<VmCompiledProgram>, Vec<Option<String>>), ProcessorCompileError>
+    {
         const OUTPUT_NAMESPACE: &str = "window_input";
         let span: Span = (0..0).into();
         let input_fields = aggregate
@@ -682,12 +790,7 @@ impl CompiledWindowAggregateProgram {
         let signatures = super::runtime_udf_signatures(udfs);
         let inferred =
             infer_vm_set_expr_types_for_bindings_with_udfs(&program, infer_bindings, signatures)
-                .map_err(|error| {
-                    format!(
-                        "window aggregate input VM type inference failed: {}",
-                        error.message
-                    )
-                })?;
+                .change_context(ProcessorCompileError::WindowInputInference)?;
         let output_schema = StdArc::new(arrow_schema::Schema::new(
             inferred
                 .into_iter()
@@ -713,12 +816,7 @@ impl CompiledWindowAggregateProgram {
                 },
             ),
         )
-        .map_err(|error| {
-            format!(
-                "window aggregate input VM compile failed: {}",
-                error.message
-            )
-        })?;
+        .change_context(ProcessorCompileError::WindowInputCompile)?;
         Ok((Arc::new(compiled), input_fields))
     }
 
@@ -734,7 +832,7 @@ impl CompiledWindowAggregateProgram {
         target_sensitive: bool,
         bindings: &[VmCompileBinding],
         udfs: Option<&UdfExecutor>,
-    ) -> Result<CompiledWindowAggregateExpr, String> {
+    ) -> error_stack::Result<CompiledWindowAggregateExpr, ProcessorCompileError> {
         match expr {
             WindowAggregateExpr::Scalar(expr) => {
                 let output_schema =
@@ -775,17 +873,17 @@ impl CompiledWindowAggregateProgram {
                     ),
                 )
                 .map(|program| CompiledWindowAggregateExpr::Scalar(Arc::new(program)))
-                .map_err(|error| format!("window aggregate VM compile failed: {}", error.message))
+                .change_context(ProcessorCompileError::WindowExprCompile)
             }
             WindowAggregateExpr::Array(items) => {
                 let (element_type, fixed_size) = match target_type {
                     arrow_schema::DataType::FixedSizeList(field, _) => (field.data_type(), true),
                     arrow_schema::DataType::List(field) => (field.data_type(), false),
                     other => {
-                        return Err(format!(
-                            "window aggregate array cannot be assigned to {other:?} field '{}'",
-                            target.field
-                        ));
+                        return Err(Report::new(ProcessorCompileError::WindowArrayTarget {
+                            data_type: other.clone(),
+                            field: target.field.clone(),
+                        }));
                     }
                 };
                 Ok(CompiledWindowAggregateExpr::Array {
@@ -813,7 +911,7 @@ impl CompiledWindowAggregateExpr {
     fn collect_demand_types(
         &self,
         demand_types: &mut [Option<arrow_schema::DataType>],
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), ProcessorCompileError> {
         match self {
             Self::Scalar(program) => {
                 for instruction in &program.instructions {
@@ -824,19 +922,17 @@ impl CompiledWindowAggregateExpr {
                     } = &instruction.kind
                     {
                         let Some(existing) = demand_types.get_mut(invocation.demand_id) else {
-                            return Err(format!(
-                                "compiled window aggregate references unknown demand {}",
-                                invocation.demand_id
-                            ));
+                            return Err(Report::new(ProcessorCompileError::WindowUnknownDemand {
+                                demand: invocation.demand_id,
+                            }));
                         };
                         if existing
                             .as_ref()
                             .is_some_and(|existing| existing != output_type)
                         {
-                            return Err(format!(
-                                "window aggregate demand {} has incompatible output types",
-                                invocation.demand_id
-                            ));
+                            return Err(Report::new(ProcessorCompileError::WindowDemandTypes {
+                                demand: invocation.demand_id,
+                            }));
                         }
                         *existing = Some(output_type.clone());
                     }

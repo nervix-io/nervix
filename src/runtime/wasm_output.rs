@@ -1,3 +1,5 @@
+use error_stack::{Report, ResultExt as _};
+
 use super::*;
 
 pub(super) struct WasmOutputContext<'a> {
@@ -21,17 +23,20 @@ pub(super) struct WasmDecodedOutputBatch {
 }
 
 impl WasmDecodedOutputBatch {
-    pub(super) fn materialize_uninitialized_for_relay(&mut self) -> Result<(), String> {
+    pub(super) fn materialize_uninitialized_for_relay(
+        &mut self,
+    ) -> error_stack::Result<(), WasmOutputError> {
         let schema = self.batch.arrow_schema();
         for column_index in &self.uninitialized_columns {
             let field = schema.fields().get(*column_index).ok_or_else(|| {
-                format!("uninitialized output column {column_index} is outside the relay schema")
+                Report::new(WasmOutputError::UninitializedColumnOutOfRange {
+                    column_index: *column_index,
+                })
             })?;
             if !field.is_nullable() {
-                return Err(format!(
-                    "required relay field '{}' remains uninitialized",
-                    field.name()
-                ));
+                return Err(Report::new(WasmOutputError::RequiredFieldUninitialized {
+                    field: field.name().clone(),
+                }));
             }
         }
         self.uninitialized_columns.clear();
@@ -50,6 +55,14 @@ pub(super) struct WasmMaterializedOutput {
 
 #[derive(Debug, Error)]
 pub(super) enum WasmOutputError {
+    #[error("uninitialized output column {column_index} is outside the relay schema")]
+    UninitializedColumnOutOfRange { column_index: usize },
+    #[error("required relay field '{field}' remains uninitialized")]
+    RequiredFieldUninitialized { field: String },
+    #[error("WASM output Arrow schema does not match its relay schema")]
+    OutputSchemaMismatch,
+    #[error("failed to build the WASM output relay batch")]
+    OutputRelayBatch,
     #[error("expected an output envelope at callback index {envelope_index}")]
     UnexpectedEnvelopeKind { envelope_index: usize },
     #[error("WASM output group at callback index {envelope_index} has no routed outputs")]
@@ -643,7 +656,7 @@ pub(super) async fn dispatch_wasm_output_envelopes(
     context: WasmOutputContext<'_>,
     outputs: Vec<WasmEnvelope>,
     ack_map: &mut WasmAckMap,
-) -> Result<(), String> {
+) -> error_stack::Result<(), WasmOutputError> {
     let WasmOutputContext {
         graph,
         branch,
@@ -873,10 +886,10 @@ pub(super) async fn dispatch_wasm_output_route(
                     context.error_policies,
                     decoded.batch.acks.iter(),
                     format!(
-                        "wasm processor '{}' failed to materialize output for relay '{}': {}",
+                        "wasm processor '{}' failed to materialize output for relay '{}': \
+                         {error:#}",
                         context.processor.as_str(),
                         output.relay.as_str(),
-                        error
                     ),
                 );
             return None;
@@ -1411,7 +1424,7 @@ pub(super) async fn persist_wasm_guest_state(
     replicated_state: &ReplicatedWasmProcessorState,
     instance: &mut Option<Box<nervix_wasm::WasmBranchInstance>>,
     execution_now: Timestamp,
-) -> Result<(), String> {
+) -> OwnershipHandoffResult<()> {
     persist_wasm_guest_state_with_failure_mode(
         runtime,
         processor,
@@ -1421,7 +1434,6 @@ pub(super) async fn persist_wasm_guest_state(
         WasmStateSaveFailureMode::InvalidateInstance,
     )
     .await
-    .map_err(|error| error.to_string())
 }
 
 pub(super) async fn checkpoint_wasm_guest_state(
@@ -1506,7 +1518,7 @@ pub(super) fn relay_batch_from_wasm_output(
     rows: Vec<WasmOutputRow>,
     uninitialized_columns: HashSet<usize>,
     context: WasmOutputAttributionContext<'_>,
-) -> Result<WasmDecodedOutputBatch, String> {
+) -> error_stack::Result<WasmDecodedOutputBatch, WasmOutputError> {
     let WasmOutputAttributionContext {
         ack_map,
         token_use_counts,
@@ -1548,14 +1560,14 @@ pub(super) fn relay_batch_from_wasm_output(
         acks.push(AckSet::merged(row_ack_sets));
     }
     if batch.schema().as_ref() != schema.arrow_schema().as_ref() {
-        return Err("WASM output Arrow schema does not match its relay schema".to_string());
+        return Err(Report::new(WasmOutputError::OutputSchemaMismatch));
     }
-    RelayRecordBatch::from_filtered_parts(key.clone(), batch, metadata, acks)
-        .map(|batch| WasmDecodedOutputBatch {
-            batch,
-            uninitialized_columns,
-        })
-        .map_err(|error| error.to_string())
+    let batch = RelayRecordBatch::from_filtered_parts(key.clone(), batch, metadata, acks)
+        .change_context(WasmOutputError::OutputRelayBatch)?;
+    Ok(WasmDecodedOutputBatch {
+        batch,
+        uninitialized_columns,
+    })
 }
 
 #[cfg(test)]

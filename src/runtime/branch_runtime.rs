@@ -402,7 +402,7 @@ impl BranchRuntime {
     pub(super) fn snapshot_processor_live_state(
         &mut self,
         processor_id: &ModelName,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), ProcessorLiveStateError> {
         let Some(mut processor) = self.processors.remove(processor_id) else {
             return Ok(());
         };
@@ -1242,9 +1242,8 @@ impl BranchExecutionRuntime {
                         template,
                         message.acks.iter(),
                         format!(
-                            "failed to instantiate branch '{}': {}",
+                            "failed to instantiate branch '{}': {error:#}",
                             branch_key_display(&key),
-                            error
                         ),
                     );
                     continue;
@@ -2009,7 +2008,9 @@ pub(super) fn restore_branch_instance_lru_snapshot(
     for (key, last_ingestion) in
         decode_branch_lru_snapshot(&snapshot.payload).map_err(|error| error.to_string())?
     {
-        let state = template.instantiate(runtime, domain, key.clone())?;
+        let state = template
+            .instantiate(runtime, domain, key.clone())
+            .map_err(|error| format!("{error:#}"))?;
         runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &key);
         instances.insert_restored(key, last_ingestion, state);
     }

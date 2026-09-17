@@ -404,8 +404,8 @@ use processor_output::{
     flush_due_processor_outputs, pending_output_batches_by_key, processor_output_input_sensitivity,
 };
 use processor_template::{
-    MaterializedDependencyResolution, ProcessorInputFilterKind, wasm_guest_call_schemas,
-    wasm_instance_next_deadline,
+    MaterializedDependencyResolution, ProcessorInputFilterKind, ProcessorTemplateError,
+    wasm_guest_call_schemas, wasm_instance_next_deadline,
 };
 use processors::{
     BranchInstanceAckBoundary, BranchInstanceTemplate, BranchedIngestorSpec, BranchedNodeSpecs,
@@ -415,7 +415,8 @@ use processors::{
     CompiledWindowAggregateExpr, CompiledWindowAggregateProgram, CorrelatorBranchState,
     CorrelatorPendingMessage, FilterMapPlan, InferencerFlushContext, InferencerOutputBuffer,
     IngestorRouteTemplate, JunctionFlushContext, PlannedGeneralError, PlannedGeneralResult,
-    PlannedMessageError, RelayProcessorNode, RelayProcessorOperationNode,
+    PlannedMessageError, ProcessorCompileError, ProcessorLiveStateError,
+    ProcessorMaterializedError, RelayProcessorNode, RelayProcessorOperationNode,
     RelayProcessorOperationTemplate, RelayProcessorOutputNode, RelayProcessorOutputTemplate,
     RelayProcessorOutputsNode, RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate,
     RelayProcessorTemplate, ReorderKeyPart, ReordererOutputBuffer, ReordererRowOrder,
@@ -509,13 +510,13 @@ use wasm_output::{
     WasmOutputContext, checkpoint_wasm_guest_state, dispatch_wasm_output_envelopes,
     persist_wasm_guest_state,
 };
-use wasm_processor::flush_branch_wasm_processor;
+use wasm_processor::{WasmInstanceError, flush_branch_wasm_processor};
 use wasm_state::{ReplicatedWasmProcessorState, WasmGuestState};
 pub(in crate::runtime) use websocket_signaling::SignalingProtobufDescriptors;
 use window_processor::{
-    WindowAggregateInput, WindowProcessorState, evaluate_window_aggregate_inputs,
-    flush_ready_window_processor, message_timestamp, snapshot_window_processor_live_state,
-    window_next_deadline,
+    WindowAggregateInput, WindowProcessorError, WindowProcessorState, WindowPushFailure,
+    evaluate_window_aggregate_inputs, flush_ready_window_processor, message_timestamp,
+    snapshot_window_processor_live_state, window_next_deadline,
 };
 use window_state::{
     LinearHistogramDelayedRemovalSnapshot, ReplicatedWindowProcessorState,

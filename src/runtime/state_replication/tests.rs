@@ -1399,14 +1399,17 @@ async fn window_processor_snapshot_task_persists_published_state_on_interval() {
     let live_state =
         WindowProcessorState::new(&window_aggregate("SET count = COUNT(input.latency)"));
     let snapshot_state = state.clone();
+    let snapshot_branch = placement.branch_key.clone();
     let snapshot_owner = tokio::spawn(async move {
         let response = timeout(Duration::from_secs(1), snapshot_requests.recv())
             .await
             .expect("snapshot task should ask the branch task to publish")
             .expect("snapshot request channel should remain open");
-        let published = snapshot_state
-            .replace_state(&live_state)
-            .map_err(|error| error.to_string());
+        let published = snapshot_state.replace_state(&live_state).map_err(|error| {
+            Report::new(error).change_context(ProcessorLiveStateError {
+                branch: snapshot_branch,
+            })
+        });
         response
             .send(published)
             .expect("the snapshot task waits for the publication it asked for");
