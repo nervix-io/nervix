@@ -83,8 +83,7 @@ On each node, Nervix verifies the archive digest, enforces the staged-archive qu
 extracted-byte and file-count quotas from tar headers before writing each entry. It writes into a
 staging tree, verifies the manifest, and atomically promotes the complete version. Failed installs
 remove their staging trees, and startup removes staging trees abandoned by an interrupted process.
-Before the upload returns success, each node rebuilds its TLS configuration from the versions its
-VHOSTs pin. An upload never changes the version an existing binding uses.
+An upload never changes the version an existing binding uses.
 
 The per-version limits are configured with `NERVIX_RESOURCE_MAX_ARCHIVE_BYTES`, `NERVIX_RESOURCE_MAX_EXTRACTED_BYTES`, and `NERVIX_RESOURCE_MAX_FILE_COUNT`. Their defaults are 4 GiB, 16 GiB, and 1,000,000 files.
 

@@ -583,26 +583,16 @@ impl SessionServiceImpl {
             }
         };
 
-        let node_failure = match self.refresh_http_tls_server_config().await {
-            Ok(()) => None,
-            Err(error) => Some(format!("failed to refresh HTTP TLS config: {error}")),
-        };
         #[cfg(feature = "testing")]
-        let node_failure = if node_failure.is_none()
-            && self
-                .inner
-                .runtime
-                .take_armed_resource_installation_failure(self.inner.consensus.local_node_id())
+        if self
+            .inner
+            .runtime
+            .take_armed_resource_installation_failure(self.inner.consensus.local_node_id())
         {
-            Some(INJECTED_RESOURCE_INSTALLATION_FAILURE.to_string())
-        } else {
-            node_failure
-        };
-        if let Some(reason) = node_failure {
             if let Err(publish_error) = self
                 .publish_resource_replica(failed_replica(
                     Some(manifest.resource.root_checksum),
-                    reason,
+                    INJECTED_RESOURCE_INSTALLATION_FAILURE.to_string(),
                 ))
                 .await
             {
@@ -810,22 +800,13 @@ impl SessionServiceImpl {
             .change_context(ResourceUploadError::Publish {
                 id: manifest.resource.id.clone(),
             })?;
-        let node_failure = match self.refresh_http_tls_server_config().await {
-            Ok(()) => None,
-            Err(error) => Some(format!("failed to refresh HTTP TLS config: {error}")),
-        };
         #[cfg(feature = "testing")]
-        let node_failure = if node_failure.is_none()
-            && self
-                .inner
-                .runtime
-                .take_armed_resource_installation_failure(self.inner.consensus.local_node_id())
+        if self
+            .inner
+            .runtime
+            .take_armed_resource_installation_failure(self.inner.consensus.local_node_id())
         {
-            Some(INJECTED_RESOURCE_INSTALLATION_FAILURE.to_string())
-        } else {
-            node_failure
-        };
-        if let Some(reason) = node_failure {
+            let reason = INJECTED_RESOURCE_INSTALLATION_FAILURE.to_string();
             let failed = ResourceNodeStatus {
                 key: ResourceReplicaKey::new(
                     manifest.resource.id.domain.clone(),
