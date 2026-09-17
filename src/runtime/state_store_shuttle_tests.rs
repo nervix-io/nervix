@@ -125,8 +125,8 @@ impl FenceModel {
                 let returned = self.returned_generation.load(Ordering::SeqCst);
                 assert!(
                     returned <= generation,
-                    "an operation admitted under generation {generation} was still running \
-                     after the rebind publishing generation {returned} returned"
+                    "an operation admitted under generation {generation} was still running after \
+                     the rebind publishing generation {returned} returned"
                 );
                 running_generation.leave();
             })
