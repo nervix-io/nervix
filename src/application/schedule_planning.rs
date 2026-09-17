@@ -309,9 +309,9 @@ mod tests {
             node_id: ClusterNodeName::parse(name).assured("the test node name is valid"),
             incarnation: ClusterNodeIncarnation::new(incarnation),
             terminating,
-            grpc_advertise_addr: String::new(),
-            web_console_advertise_addr: String::new(),
-            interconnect_advertise_addr: String::new(),
+            client_url: None,
+            console_url: None,
+            interconnect_endpoint: None,
         }
     }
 
