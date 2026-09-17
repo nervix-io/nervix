@@ -159,6 +159,12 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   from 0. Outside window processors, `count`, `sum`, `first`, `last`, and `nth` take one `ARRAY` or
   `VEC` value; inside a window processor route, `count`, `sum`, `first`, and `last` are window
   aggregates over retained input rows.
+- Write datetime units, date parts, and `date_bin` widths as literals: units run from `nanosecond`
+  to `week` and have fixed lengths, so a calendar month or year is never a unit. `date_trunc`,
+  `date_bin`, and `to_unix` round toward negative infinity, including before the epoch; `date_diff`
+  rounds toward zero; a week starts on Monday; and `date_bin` always takes an explicit origin. A
+  result outside the `DATETIME` range fails only that message with an `overflow` error. Datetime
+  functions compute only from their arguments; pass `now()` for the execution-local domain time.
 - Treat arithmetic and numeric functions as checked at the operands' exact type: integer overflow,
   a zero divisor, and a float or math result that is NaN or infinite fail only that message with a
   per-message error. Give a route whose operands can reach those values an `ON MESSAGE ERROR`

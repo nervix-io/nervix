@@ -839,6 +839,7 @@ mod tests {
     use nonzero_ext::nonzero;
 
     use super::*;
+    use crate::program::{DatetimeFunction, FixedTimeUnit};
 
     fn lower_aggregate_program(
         assignments: &str,
@@ -1131,6 +1132,46 @@ mod tests {
 
         assert_eq!(parsed.demands().len(), 2);
         assert_eq!(parsed.demand_reference_counts(), vec![1, 1]);
+    }
+
+    #[test]
+    fn datetime_calls_wrap_aggregates_and_feed_their_inputs() {
+        let parsed = lower_aggregate_program(
+            "window_start = date_trunc('minute', MIN(input.occurred_at)), latest_hour = \
+             MAX(date_trunc('hour', input.occurred_at))",
+        )
+        .expect("datetime calls should be valid around and inside aggregate calls");
+
+        let WindowAggregateExpr::Scalar(window_start) = &parsed.assignments[0].value.inner else {
+            panic!("expected a scalar window start");
+        };
+        let Expr::Call { function, args } = &window_start.inner else {
+            panic!("expected the window start to be a datetime call");
+        };
+        assert_eq!(
+            *function,
+            FunctionName::Datetime(DatetimeFunction::DateTrunc(FixedTimeUnit::Minute))
+        );
+        assert!(matches!(
+            args.as_slice(),
+            [SpannedNode {
+                inner: Expr::Call {
+                    function: FunctionName::WindowAggregate(_),
+                    ..
+                },
+                ..
+            }]
+        ));
+
+        let demands = parsed.demands();
+        assert_eq!(demands.len(), 2);
+        assert!(matches!(
+            demands[1].arguments,
+            WindowArguments::Single(Expr::Call {
+                function: FunctionName::Datetime(DatetimeFunction::DateTrunc(FixedTimeUnit::Hour)),
+                ..
+            })
+        ));
     }
 
     #[test]
