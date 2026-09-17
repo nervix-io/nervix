@@ -53,9 +53,8 @@ use crate::{
     },
     runtime::{
         CompiledSubscriptionPredicate, RelayMessage, RelayRecordBatch, RelaySubscriptionReceiver,
-        RelaySubscriptionRecvError, Runtime, SubscriptionPredicateCompileContext,
-        compile_subscription_predicate, execute_subscription_predicate_on_record,
-        scheduled_relay_owner_nodes,
+        Runtime, SubscriptionPredicateCompileContext, compile_subscription_predicate,
+        execute_subscription_predicate_on_record, scheduled_relay_owner_nodes,
     },
     runtime_schema,
     task_shutdown::JoinShutdown,
@@ -256,7 +255,7 @@ impl SessionSubscriptions {
                 tokio::select! {
                     batch = receiver.recv() => {
                         match batch {
-                            Ok(batch) => {
+                            Some(batch) => {
                                 let messages = match batch.try_into_messages() {
                                     Ok(messages) => messages,
                                     Err(error_and_batch) => {
@@ -362,7 +361,7 @@ impl SessionSubscriptions {
                                     }
                                 }
                             }
-                            Err(RelaySubscriptionRecvError::Closed) => {
+                            None => {
                                 let event = SessionResponse {
                                     event: Some(proto::session_response::Event::Server(
                                         ServerEvent {
@@ -384,7 +383,6 @@ impl SessionSubscriptions {
                                     .means_peer_left("session subscription stream");
                                 break 'subscription_loop;
                             }
-                            Err(RelaySubscriptionRecvError::Overflowed(_)) => continue,
                         }
                     }
                     changed = stop_rx.changed() => {

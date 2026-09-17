@@ -1,17 +1,25 @@
-pub(crate) type RelaySubscriptionRecvError = async_broadcast::RecvError;
+//! Relay dispatch fencing and the contentionless relay fan-out.
+//!
+//! Layer: data plane.
+//! - **Owns.** The dispatch gate that fences relay delivery while the runtime mutates a relay, and
+//!   the fan-out that hands every batch published into one relay to each of its live consumers
+//!   under bounded, resizable backpressure.
+//! - **Depends on.** Tokio synchronization, lock-free queues and wakers, `arc-swap`, and panic
+//!   classification.
+//! - **Must not know.** Relays, branches, batches, acknowledgements, placement, or any Model.
 
 use std::{
     collections::BTreeMap,
+    fmt,
+    future::poll_fn,
     num::NonZeroUsize,
-    pin::Pin,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     task::{Context, Poll},
 };
 
-use async_broadcast::{
-    InactiveReceiver, Receiver as AsyncBroadcastReceiver, RecvError, SendError, Sender,
-    TryRecvError,
-};
+use arc_swap::{ArcSwap, Guard};
+use concurrent_queue::{ConcurrentQueue, PopError, PushError};
+use futures_util::task::AtomicWaker;
 use meticulous::{OptionExt as _, ResultExt as _};
 use parking_lot::Mutex;
 use tokio::{
@@ -355,12 +363,6 @@ impl Drop for RelayDispatchPermit<'_> {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct RelayBroadcast<T> {
-    sender: Sender<T>,
-    inner: Arc<RelayBroadcastInner<T>>,
-}
-
 #[cfg(test)]
 mod gate_tests {
     use std::time::Duration;
@@ -678,376 +680,816 @@ mod gate_loom_tests {
     }
 }
 
-#[derive(Debug)]
+/// Hands every batch published into one relay to each of its live consumers.
+///
+/// Each consumer owns a lock-free queue and an admission count, so a publisher delivering a batch
+/// and a consumer taking one meet only on atomics, and publishers into the same relay never
+/// serialize on a shared lock. Capacity bounds each consumer's admitted backlog: a publisher waits
+/// until every consumer has room, which is the backpressure of one shared queue that keeps a batch
+/// until its slowest consumer takes it. A capacity change applies to admission alone, so shrinking
+/// capacity below a consumer's backlog keeps every buffered batch and holds publishers until that
+/// backlog drains below the new bound.
+pub(crate) struct RelayBroadcast<T> {
+    fanout: Arc<RelayFanout<T>>,
+}
+
+struct RelayFanout<T> {
+    /// The live consumers in registration order.
+    ///
+    /// A publisher reserves admission in this order, so it holds a later consumer's reservation
+    /// only while it holds every earlier one. Two publishers into one relay therefore never each
+    /// hold a reservation that the other is waiting for.
+    consumers: ArcSwap<Vec<Arc<RelayConsumerQueue<T>>>>,
+    /// The admitted backlog each consumer may hold. It changes only together with a notification,
+    /// so a publisher that enables its wait before reading it cannot miss a change.
+    capacity: AtomicUsize,
+    receiver_count: AtomicUsize,
+    /// Publishers waiting in [`Self::admit`].
+    ///
+    /// `Notify::notify_waiters` takes the waiter-list lock on every call, so a consumer notifies
+    /// only while this count shows a waiting publisher. A waiting publisher raises the count before
+    /// it reads a consumer's admission count, and a consumer lowers its admission count before it
+    /// reads this one. Both sides use sequentially consistent operations, so one of them observes
+    /// the other: the publisher is admitted, or the consumer wakes it.
+    waiting_publishers: AtomicUsize,
+    /// Wakes waiting publishers when a consumer frees admission, capacity changes, or a consumer
+    /// leaves.
+    admission: Notify,
+}
+
+/// One consumer's share of a relay fan-out.
+struct RelayConsumerQueue<T> {
+    /// Batches delivered to this consumer and not yet taken.
+    batches: ConcurrentQueue<T>,
+    /// Batches admitted to this consumer and not yet taken, including any that a publisher has
+    /// reserved and not yet delivered. Publishers gate on this count instead of the queue length,
+    /// so two publishers cannot both claim one free slot.
+    admitted: AtomicUsize,
+    /// The waker of this consumer's only receiver, since a [`RelayReceiver`] cannot be cloned.
+    delivered: AtomicWaker,
+}
+
+/// Counts one publisher as waiting for admission until its wait returns or is cancelled.
+struct RelayAdmissionWait<'fanout, T> {
+    fanout: &'fanout RelayFanout<T>,
+}
+
+/// One consumer of a relay fan-out.
+///
+/// Dropping it leaves the fan-out, and the batches it has not taken are dropped with its queue.
 pub(crate) struct RelayReceiver<T> {
-    receiver: AsyncBroadcastReceiver<T>,
-    inner: Arc<RelayBroadcastInner<T>>,
+    consumer: Arc<RelayConsumerQueue<T>>,
+    fanout: Arc<RelayFanout<T>>,
 }
 
-#[derive(Debug)]
-struct RelayBroadcastInner<T> {
-    control: Mutex<RelayBroadcastControl<T>>,
-    changed: Notify,
-    dirty: AtomicBool,
+/// What [`RelayReceiver::try_recv`] found without waiting.
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::runtime) enum RelayTryRecv<T> {
+    /// The oldest batch delivered to the receiver and not yet taken.
+    Batch(T),
+    /// Nothing is queued, and the fan-out can still deliver more.
+    Empty,
+    /// The fan-out is gone, and every batch it delivered has been taken.
+    Closed,
 }
 
-#[derive(Debug)]
-struct RelayBroadcastControl<T> {
-    guard: InactiveReceiver<T>,
-    target_capacity: NonZeroUsize,
-    active_publishers: usize,
-    waiting_publishers: usize,
-}
-
-impl<T> RelayBroadcastControl<T> {
-    fn apply_pending_capacity(&mut self) -> bool {
-        let target_capacity = self.target_capacity.get();
-        let current_capacity = self.guard.capacity();
-        if current_capacity < target_capacity
-            || current_capacity > target_capacity && self.guard.len() <= target_capacity
-        {
-            self.guard.set_capacity(target_capacity);
-        }
-        self.is_dirty()
-    }
-
-    fn is_dirty(&self) -> bool {
-        self.guard.capacity() != self.target_capacity.get()
-            || self.active_publishers > 0
-            || self.waiting_publishers > 0
-    }
-}
-
-struct RelayPublishPermit<T> {
-    inner: Arc<RelayBroadcastInner<T>>,
-}
-
-struct RelayPublishWaiter<T> {
-    inner: Arc<RelayBroadcastInner<T>>,
+/// A batch returned to its publisher because no consumer was left to take it.
+pub(in crate::runtime) struct RelayFanoutClosed<T> {
+    pub(in crate::runtime) batch: T,
 }
 
 impl<T> RelayBroadcast<T> {
     pub(crate) fn with_capacity(capacity: NonZeroUsize) -> Self {
-        let (mut sender, receiver) = async_broadcast::broadcast(capacity.get());
-        sender.set_overflow(false);
-        sender.set_await_active(false);
         Self {
-            sender,
-            inner: Arc::new(RelayBroadcastInner {
-                control: Mutex::new(RelayBroadcastControl {
-                    guard: receiver.deactivate(),
-                    target_capacity: capacity,
-                    active_publishers: 0,
-                    waiting_publishers: 0,
-                }),
-                changed: Notify::new(),
-                dirty: AtomicBool::new(false),
+            fanout: Arc::new(RelayFanout {
+                consumers: ArcSwap::from_pointee(Vec::new()),
+                capacity: AtomicUsize::new(capacity.get()),
+                receiver_count: AtomicUsize::new(0),
+                waiting_publishers: AtomicUsize::new(0),
+                admission: Notify::new(),
             }),
         }
     }
 
+    /// Adds a consumer that receives every batch whose publishing begins after this call.
     pub(crate) fn new_receiver(&self) -> RelayReceiver<T> {
-        debug_assert!(self.inner.inactive_receiver_count() > 0);
+        let consumer = Arc::new(RelayConsumerQueue::new());
+        self.fanout.register(&consumer);
         RelayReceiver {
-            receiver: self.sender.new_receiver(),
-            inner: self.inner.clone(),
+            consumer,
+            fanout: self.fanout.clone(),
         }
     }
 
     pub(in crate::runtime) fn receiver_count(&self) -> usize {
-        debug_assert!(self.inner.inactive_receiver_count() > 0);
-        self.sender.receiver_count()
+        self.fanout.receiver_count.load(Ordering::Acquire)
     }
 
+    /// The backlog of the slowest consumer, which is the number of batches the fan-out still holds.
+    ///
+    /// Every consumer receives every batch, so the backlog is a maximum over all of them and this
+    /// visits each consumer once.
     pub(in crate::runtime) fn len(&self) -> usize {
-        self.sender.len()
+        let mut backlog = 0;
+        for consumer in self.fanout.consumers.load().iter() {
+            backlog = backlog.max(consumer.admitted.load(Ordering::SeqCst));
+        }
+        backlog
     }
 
     pub(in crate::runtime) fn capacity(&self) -> usize {
-        self.inner.control.lock().target_capacity.get()
+        self.fanout.capacity.load(Ordering::Acquire)
     }
 
     #[cfg(test)]
     pub(in crate::runtime) fn waiting_publishers(&self) -> usize {
-        self.inner.control.lock().waiting_publishers
+        self.fanout.waiting_publishers.load(Ordering::SeqCst)
     }
 
+    /// Changes the admitted backlog each consumer may hold.
+    ///
+    /// Buffered batches are kept. A smaller capacity holds publishers until every consumer's
+    /// backlog drains below it, and a larger one admits waiting publishers at once.
     pub(in crate::runtime) fn set_capacity(&self, capacity: NonZeroUsize) {
-        let was_dirty = self.inner.dirty.swap(true, Ordering::Relaxed);
-        let is_dirty = {
-            let mut control = self.inner.control.lock();
-            control.target_capacity = capacity;
-            control.apply_pending_capacity()
-        };
-        self.inner.dirty.store(is_dirty, Ordering::Relaxed);
-        if was_dirty || is_dirty {
-            self.inner.changed.notify_waiters();
-        }
+        self.fanout
+            .capacity
+            .store(capacity.get(), Ordering::Release);
+        self.fanout.admission.notify_waiters();
     }
 }
 
 impl<T: Clone> RelayBroadcast<T> {
-    pub(in crate::runtime) async fn broadcast(&self, message: T) -> Result<(), SendError<T>> {
-        if !self.inner.dirty.load(Ordering::Relaxed) {
-            return self.broadcast_message(message).await;
+    /// Delivers `batch` to every consumer registered when publishing begins.
+    ///
+    /// Waits while any of those consumers is at capacity. A consumer that leaves during the wait is
+    /// skipped, and the batch comes back only when no consumer is left to take it.
+    pub(in crate::runtime) async fn broadcast(&self, batch: T) -> Result<(), RelayFanoutClosed<T>> {
+        let consumers = self.fanout.consumers.load();
+        let capacity = self.fanout.capacity.load(Ordering::Acquire);
+        let mut first_full = None;
+        for (index, consumer) in consumers.iter().enumerate() {
+            if !consumer.try_admit(capacity) {
+                first_full = Some(index);
+                break;
+            }
         }
+        let Some(first_full) = first_full else {
+            return RelayConsumerQueue::deliver_each(consumers.iter(), batch)
+                .map_err(|batch| RelayFanoutClosed { batch });
+        };
 
-        let permit = self.publish_permit().await;
-        let result = self.broadcast_message(message).await;
-        drop(permit);
-        self.inner.maintain_dirty_capacity();
-        result
-    }
-
-    async fn broadcast_message(&self, message: T) -> Result<(), SendError<T>> {
-        match self.sender.broadcast(message).await {
-            Ok(None) => Ok(()),
-            Ok(Some(_)) => unreachable!("relay broadcast overflow must be disabled"),
-            Err(error) => Err(error),
+        // A consumer is at capacity and the wait may be long, so the consumer list is held by
+        // reference count rather than through the short-lived load guard. Admissions already
+        // reserved stay held while the remaining consumers are admitted in registration order.
+        let consumers = Guard::into_inner(consumers);
+        let (reserved, remaining) = consumers.split_at(first_full);
+        let mut admitted: Vec<&Arc<RelayConsumerQueue<T>>> = reserved.iter().collect();
+        for consumer in remaining {
+            if self.fanout.admit(consumer).await {
+                admitted.push(consumer);
+            }
         }
+        RelayConsumerQueue::deliver_each(admitted, batch)
+            .map_err(|batch| RelayFanoutClosed { batch })
     }
+}
 
-    async fn publish_permit(&self) -> RelayPublishPermit<T> {
+impl<T> RelayFanout<T> {
+    /// Reserves one admission on `consumer`, waiting while it is at capacity.
+    ///
+    /// Returns `false` once the consumer has left the fan-out. The wait keeps every admission the
+    /// publisher already reserved on earlier consumers.
+    async fn admit(&self, consumer: &RelayConsumerQueue<T>) -> bool {
+        let _wait = RelayAdmissionWait::begin(self);
         loop {
             tokio::task::consume_budget().await;
-            let changed = self.inner.changed.notified();
-            {
-                let mut control = self.inner.control.lock();
-                control.apply_pending_capacity();
-                let queued_or_entering = control.guard.len() + control.active_publishers;
-                if queued_or_entering < control.target_capacity.get() {
-                    control.active_publishers += 1;
-                    self.inner
-                        .dirty
-                        .store(control.is_dirty(), Ordering::Relaxed);
-                    return RelayPublishPermit {
-                        inner: self.inner.clone(),
-                    };
-                }
-                control.waiting_publishers += 1;
-                self.inner
-                    .dirty
-                    .store(control.is_dirty(), Ordering::Relaxed);
+            let admission = self.admission.notified();
+            tokio::pin!(admission);
+            admission.as_mut().enable();
+            if consumer.batches.is_closed() {
+                return false;
             }
-            let waiter = RelayPublishWaiter {
-                inner: self.inner.clone(),
-            };
-            changed.await;
-            drop(waiter);
+            if consumer.try_admit(self.capacity.load(Ordering::Acquire)) {
+                return true;
+            }
+            admission.await;
         }
+    }
+
+    fn register(&self, consumer: &Arc<RelayConsumerQueue<T>>) {
+        self.consumers.rcu(|consumers| {
+            let count = consumers
+                .len()
+                .checked_add(1)
+                .assured("a node cannot hold usize::MAX consumers of one relay");
+            let mut registered = Vec::with_capacity(count);
+            registered.extend(consumers.iter().cloned());
+            registered.push(consumer.clone());
+            registered
+        });
+        self.receiver_count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_add(1)
+            })
+            .assured("a node cannot hold usize::MAX consumers of one relay");
+    }
+
+    fn deregister(&self, consumer: &Arc<RelayConsumerQueue<T>>) {
+        // Copy-on-write rebuilds the whole list on every change, so finding the leaving consumer
+        // is part of that copy rather than a separate lookup.
+        self.consumers.rcu(|consumers| {
+            let mut remaining = Vec::with_capacity(consumers.len());
+            for registered in consumers.iter() {
+                if !Arc::ptr_eq(registered, consumer) {
+                    remaining.push(registered.clone());
+                }
+            }
+            remaining
+        });
+        self.receiver_count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_sub(1)
+            })
+            .verified("the leaving consumer raised the count when it registered");
     }
 }
 
-impl<T> RelayBroadcastInner<T> {
-    fn inactive_receiver_count(&self) -> usize {
-        self.control.lock().guard.inactive_receiver_count()
+impl<T> RelayConsumerQueue<T> {
+    fn new() -> Self {
+        Self {
+            batches: ConcurrentQueue::unbounded(),
+            admitted: AtomicUsize::new(0),
+            delivered: AtomicWaker::new(),
+        }
     }
 
-    fn maintain_dirty_capacity(&self) {
-        if !self.dirty.load(Ordering::Relaxed) {
-            return;
+    /// Reserves one admission, or reports that this consumer already holds `capacity`.
+    fn try_admit(&self, capacity: usize) -> bool {
+        let admission =
+            self.admitted
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |admitted| {
+                    if admitted >= capacity {
+                        return None;
+                    }
+                    Some(
+                        admitted
+                            .checked_add(1)
+                            .verified("the comparison above holds the count below the capacity"),
+                    )
+                });
+        admission.is_ok()
+    }
+
+    /// Hands one admitted batch to this consumer and wakes its receiver.
+    fn deliver(&self, batch: T) {
+        match self.batches.push(batch) {
+            Ok(()) => self.delivered.wake(),
+            // The queue is unbounded, so a push fails only once the receiver has left. The
+            // rejected batch is dropped here, and its admission is returned.
+            Err(PushError::Closed(_) | PushError::Full(_)) => self.release_admission(),
         }
-        let is_dirty = self.control.lock().apply_pending_capacity();
-        self.dirty.store(is_dirty, Ordering::Relaxed);
-        self.changed.notify_waiters();
+    }
+
+    /// Takes the oldest delivered batch and returns its admission.
+    fn take(&self) -> Result<T, PopError> {
+        let batch = self.batches.pop()?;
+        self.release_admission();
+        Ok(batch)
+    }
+
+    fn release_admission(&self) {
+        self.admitted
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |admitted| {
+                admitted.checked_sub(1)
+            })
+            .verified("every release follows the admission that raised the count");
     }
 }
 
-impl<T> Drop for RelayPublishPermit<T> {
-    fn drop(&mut self) {
-        let was_dirty = self.inner.dirty.load(Ordering::Relaxed);
-        let mut control = self.inner.control.lock();
-        control.active_publishers = control
-            .active_publishers
-            .checked_sub(1)
-            .verified("this permit raised the count when the publisher acquired it");
-        let is_dirty = control.apply_pending_capacity();
-        drop(control);
-        self.inner.dirty.store(is_dirty, Ordering::Relaxed);
-        if was_dirty {
-            self.inner.changed.notify_waiters();
+impl<T: Clone> RelayConsumerQueue<T> {
+    /// Delivers `batch` to each admitted consumer, cloning it for every consumer but the last.
+    ///
+    /// Returns the batch when there is no consumer to deliver it to.
+    fn deliver_each<'consumer>(
+        consumers: impl IntoIterator<Item = &'consumer Arc<Self>>,
+        batch: T,
+    ) -> Result<(), T>
+    where
+        T: 'consumer,
+    {
+        let mut consumers = consumers.into_iter();
+        let Some(mut current) = consumers.next() else {
+            return Err(batch);
+        };
+        for next in consumers {
+            current.deliver(batch.clone());
+            current = next;
         }
+        current.deliver(batch);
+        Ok(())
     }
 }
 
-impl<T> Drop for RelayPublishWaiter<T> {
-    fn drop(&mut self) {
-        let was_dirty = self.inner.dirty.load(Ordering::Relaxed);
-        let mut control = self.inner.control.lock();
-        control.waiting_publishers = control
+impl<'fanout, T> RelayAdmissionWait<'fanout, T> {
+    fn begin(fanout: &'fanout RelayFanout<T>) -> Self {
+        fanout
             .waiting_publishers
-            .checked_sub(1)
-            .verified("this waiter raised the count when the publisher started waiting");
-        let is_dirty = control.apply_pending_capacity();
-        drop(control);
-        self.inner.dirty.store(is_dirty, Ordering::Relaxed);
-        if was_dirty {
-            self.inner.changed.notify_waiters();
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |waiting| {
+                waiting.checked_add(1)
+            })
+            .assured("a node cannot hold usize::MAX publishers waiting on one relay");
+        Self { fanout }
+    }
+}
+
+impl<T> Drop for RelayAdmissionWait<'_, T> {
+    fn drop(&mut self) {
+        self.fanout
+            .waiting_publishers
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |waiting| {
+                waiting.checked_sub(1)
+            })
+            .verified("this wait raised the count when it began");
+    }
+}
+
+impl<T> Drop for RelayBroadcast<T> {
+    fn drop(&mut self) {
+        // Publishers borrow this handle, so none outlives it. Closing every queue lets each
+        // receiver take what was already delivered and then observe that nothing more will come.
+        for consumer in self.fanout.consumers.load().iter() {
+            consumer.batches.close();
+            consumer.delivered.wake();
         }
     }
 }
 
-impl<T: Clone> RelayReceiver<T> {
-    pub(crate) async fn recv(&mut self) -> Result<T, RecvError> {
-        let result = self.receiver.recv().await;
-        if result.is_ok() {
-            self.inner.maintain_dirty_capacity();
-        }
-        result
+impl<T> fmt::Debug for RelayBroadcast<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RelayBroadcast")
+            .field("capacity", &self.capacity())
+            .field("receiver_count", &self.receiver_count())
+            .field("len", &self.len())
+            .finish()
+    }
+}
+
+impl<T> RelayReceiver<T> {
+    /// Waits for the next batch, or returns `None` once the fan-out is gone and drained.
+    pub(crate) async fn recv(&mut self) -> Option<T> {
+        poll_fn(|cx| self.poll_recv(cx)).await
     }
 
-    pub(in crate::runtime) fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        let result = self.receiver.try_recv();
-        if result.is_ok() {
-            self.inner.maintain_dirty_capacity();
+    pub(in crate::runtime) fn try_recv(&mut self) -> RelayTryRecv<T> {
+        match self.take() {
+            Ok(batch) => RelayTryRecv::Batch(batch),
+            Err(PopError::Empty) => RelayTryRecv::Empty,
+            Err(PopError::Closed) => RelayTryRecv::Closed,
         }
-        result
     }
 
-    pub(in crate::runtime) fn poll_recv(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<T, RecvError>>> {
-        let result = Pin::new(&mut self.receiver).poll_recv(cx);
-        if let Poll::Ready(Some(Ok(_))) = &result {
-            self.inner.maintain_dirty_capacity();
+    pub(in crate::runtime) fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        match self.take() {
+            Ok(batch) => return Poll::Ready(Some(batch)),
+            Err(PopError::Closed) => return Poll::Ready(None),
+            Err(PopError::Empty) => {}
         }
-        result
+        self.consumer.delivered.register(cx.waker());
+        // A delivery that landed after the attempt above and before the registration woke no
+        // one, so look again now that the waker is registered.
+        match self.take() {
+            Ok(batch) => Poll::Ready(Some(batch)),
+            Err(PopError::Closed) => Poll::Ready(None),
+            Err(PopError::Empty) => Poll::Pending,
+        }
     }
 
+    /// Batches delivered to this receiver and not yet taken.
     pub(in crate::runtime) fn len(&self) -> usize {
-        self.receiver.len()
+        self.consumer.batches.len()
+    }
+
+    fn take(&self) -> Result<T, PopError> {
+        let batch = self.consumer.take()?;
+        // Paired with the sequentially consistent count that `RelayAdmissionWait::begin` raises.
+        if self.fanout.waiting_publishers.load(Ordering::SeqCst) > 0 {
+            self.fanout.admission.notify_waiters();
+        }
+        Ok(batch)
+    }
+}
+
+impl<T> Drop for RelayReceiver<T> {
+    fn drop(&mut self) {
+        // Leave the consumer list before closing the queue, so a publisher that loads the list
+        // afterwards never admits to this receiver. A publisher still holding the earlier list
+        // finds the queue closed, and a waiting one is woken to notice.
+        self.fanout.deregister(&self.consumer);
+        self.consumer.batches.close();
+        self.fanout.admission.notify_waiters();
+    }
+}
+
+impl<T> fmt::Debug for RelayReceiver<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RelayReceiver")
+            .field("len", &self.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> fmt::Debug for RelayFanoutClosed<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RelayFanoutClosed")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> fmt::Display for RelayFanoutClosed<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("no relay consumer is left to take the batch")
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroUsize, sync::atomic::Ordering, time::Duration};
+    use std::{num::NonZeroUsize, time::Duration};
 
     use triomphe::Arc;
 
-    use super::RelayBroadcast;
+    use super::{RelayBroadcast, RelayTryRecv};
+
+    fn capacity(value: usize) -> NonZeroUsize {
+        NonZeroUsize::new(value).expect("test capacities are nonzero")
+    }
 
     #[tokio::test]
-    async fn shrinking_capacity_preserves_buffered_messages() {
-        let channel = RelayBroadcast::with_capacity(NonZeroUsize::new(3).expect("nonzero"));
-        let mut receiver = channel.new_receiver();
+    async fn every_consumer_receives_each_batch_in_publish_order() {
+        let channel = RelayBroadcast::with_capacity(capacity(3));
+        let mut first = channel.new_receiver();
+        let mut second = channel.new_receiver();
+        assert_eq!(channel.receiver_count(), 2);
 
-        channel
-            .broadcast(1)
-            .await
-            .expect("first send should succeed");
-        channel
-            .broadcast(2)
-            .await
-            .expect("second send should succeed");
-        channel
-            .broadcast(3)
-            .await
-            .expect("third send should succeed");
-
-        channel.set_capacity(NonZeroUsize::new(1).expect("nonzero"));
-        assert_eq!(channel.capacity(), 1);
-
-        assert_eq!(
-            receiver.recv().await.expect("first receive should succeed"),
-            1
-        );
-        assert_eq!(
-            receiver
-                .recv()
+        for value in 1..=3 {
+            channel
+                .broadcast(value)
                 .await
-                .expect("second receive should succeed"),
-            2
-        );
+                .expect("both consumers have room");
+        }
+        assert_eq!(channel.len(), 3);
+
+        for expected in 1..=3 {
+            assert_eq!(first.recv().await, Some(expected));
+        }
         assert_eq!(
-            receiver.recv().await.expect("third receive should succeed"),
-            3
+            channel.len(),
+            3,
+            "the fan-out holds every batch the slower consumer has not taken"
         );
-        assert!(!channel.inner.dirty.load(Ordering::Relaxed));
+        for expected in 1..=3 {
+            assert_eq!(second.recv().await, Some(expected));
+        }
+        assert_eq!(channel.len(), 0);
     }
 
     #[tokio::test]
-    async fn steady_capacity_publish_keeps_control_state_clean() {
-        let channel = RelayBroadcast::with_capacity(NonZeroUsize::new(3).expect("nonzero"));
-        let mut receiver = channel.new_receiver();
-
-        assert!(!channel.inner.dirty.load(Ordering::Relaxed));
+    async fn a_receiver_only_receives_batches_published_after_it_joins() {
+        let channel = RelayBroadcast::with_capacity(capacity(2));
+        let mut early = channel.new_receiver();
         channel
             .broadcast(1)
             .await
-            .expect("send should use clean path");
-        assert!(!channel.inner.dirty.load(Ordering::Relaxed));
-        assert_eq!(receiver.recv().await.expect("receive should succeed"), 1);
-        assert!(!channel.inner.dirty.load(Ordering::Relaxed));
-    }
-
-    #[tokio::test]
-    async fn shrinking_capacity_wakes_waiting_publishers_after_drain() {
-        let channel = Arc::new(RelayBroadcast::with_capacity(
-            NonZeroUsize::new(3).expect("nonzero"),
-        ));
-        let mut receiver = channel.new_receiver();
-
-        channel
-            .broadcast(1)
-            .await
-            .expect("first send should succeed");
+            .expect("the early consumer has room");
+        let mut late = channel.new_receiver();
         channel
             .broadcast(2)
             .await
-            .expect("second send should succeed");
-        channel
-            .broadcast(3)
-            .await
-            .expect("third send should succeed");
+            .expect("both consumers have room");
 
-        channel.set_capacity(NonZeroUsize::new(1).expect("nonzero"));
+        assert_eq!(early.recv().await, Some(1));
+        assert_eq!(early.recv().await, Some(2));
+        assert_eq!(late.recv().await, Some(2));
+        assert_eq!(late.try_recv(), RelayTryRecv::Empty);
+    }
+
+    #[tokio::test]
+    async fn publishing_without_consumers_returns_the_batch() {
+        let channel = RelayBroadcast::with_capacity(capacity(1));
+        let returned = channel
+            .broadcast(7)
+            .await
+            .expect_err("no consumer can take the batch");
+        assert_eq!(returned.batch, 7);
+
+        drop(channel.new_receiver());
+        assert_eq!(channel.receiver_count(), 0);
+        let returned = channel
+            .broadcast(8)
+            .await
+            .expect_err("the only consumer has left");
+        assert_eq!(returned.batch, 8);
+    }
+
+    #[tokio::test]
+    async fn publisher_waits_for_the_slowest_consumer() {
+        let channel = Arc::new(RelayBroadcast::with_capacity(capacity(1)));
+        let mut fast = channel.new_receiver();
+        let mut slow = channel.new_receiver();
+        channel
+            .broadcast(1)
+            .await
+            .expect("both consumers have room");
+
         let pending = tokio::spawn({
             let channel = channel.clone();
-            async move { channel.broadcast(4).await.expect("fourth send should wake") }
+            async move {
+                channel
+                    .broadcast(2)
+                    .await
+                    .expect("the slow consumer frees room");
+            }
         });
         wait_for_waiting_publishers(&channel, 1).await;
 
-        assert_eq!(
-            receiver.recv().await.expect("first receive should succeed"),
-            1
-        );
-        assert!(!pending.is_finished());
-        assert_eq!(
-            receiver
-                .recv()
-                .await
-                .expect("second receive should succeed"),
-            2
-        );
-        assert!(!pending.is_finished());
-        assert_eq!(
-            receiver.recv().await.expect("third receive should succeed"),
-            3
+        assert_eq!(fast.recv().await, Some(1));
+        tokio::task::yield_now().await;
+        assert!(
+            !pending.is_finished(),
+            "the slow consumer still holds its only admission"
         );
 
-        tokio::time::timeout(Duration::from_secs(1), pending)
+        assert_eq!(slow.recv().await, Some(1));
+        tokio::time::timeout(Duration::from_secs(5), pending)
             .await
-            .expect("waiting publisher should be notified")
-            .expect("waiting publisher task should join");
-        assert_eq!(
-            receiver
-                .recv()
-                .await
-                .expect("fourth receive should succeed"),
-            4
-        );
+            .expect("the slow consumer's take should admit the publisher")
+            .expect("the publisher task should join");
+        assert_eq!(fast.recv().await, Some(2));
+        assert_eq!(slow.recv().await, Some(2));
     }
 
-    async fn wait_for_waiting_publishers(channel: &RelayBroadcast<i32>, expected: usize) {
-        for _ in 0..100 {
-            tokio::task::consume_budget().await;
-            if channel.inner.control.lock().waiting_publishers == expected {
-                return;
+    #[tokio::test]
+    async fn losing_a_lagging_consumer_admits_waiting_publishers() {
+        let channel = Arc::new(RelayBroadcast::with_capacity(capacity(1)));
+        let mut active = channel.new_receiver();
+        let lagging = channel.new_receiver();
+        channel
+            .broadcast(1)
+            .await
+            .expect("both consumers have room");
+        assert_eq!(active.recv().await, Some(1));
+
+        let pending = tokio::spawn({
+            let channel = channel.clone();
+            async move {
+                channel
+                    .broadcast(2)
+                    .await
+                    .expect("the active consumer takes the batch");
             }
-            tokio::task::yield_now().await;
+        });
+        wait_for_waiting_publishers(&channel, 1).await;
+        assert_eq!(
+            channel.len(),
+            1,
+            "the lagging consumer still holds the first batch"
+        );
+
+        drop(lagging);
+        tokio::time::timeout(Duration::from_secs(5), pending)
+            .await
+            .expect("losing the lagging consumer should admit the publisher")
+            .expect("the publisher task should join");
+        assert_eq!(channel.receiver_count(), 1);
+        assert_eq!(active.recv().await, Some(2));
+        assert_eq!(channel.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn dropping_the_fanout_closes_receivers_after_they_drain() {
+        let channel = RelayBroadcast::with_capacity(capacity(2));
+        let mut receiver = channel.new_receiver();
+        channel.broadcast(1).await.expect("the consumer has room");
+        drop(channel);
+
+        assert_eq!(receiver.recv().await, Some(1));
+        assert_eq!(receiver.recv().await, None);
+        assert_eq!(receiver.try_recv(), RelayTryRecv::Closed);
+    }
+
+    #[tokio::test]
+    async fn shrinking_capacity_preserves_buffered_batches() {
+        let channel = RelayBroadcast::with_capacity(capacity(3));
+        let mut receiver = channel.new_receiver();
+        for value in 1..=3 {
+            channel
+                .broadcast(value)
+                .await
+                .expect("the consumer has room");
         }
-        panic!("timed out waiting for {expected} waiting publisher(s)");
+
+        channel.set_capacity(capacity(1));
+        assert_eq!(channel.capacity(), 1);
+        assert_eq!(channel.len(), 3);
+
+        for expected in 1..=3 {
+            assert_eq!(receiver.recv().await, Some(expected));
+        }
+        assert_eq!(channel.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn shrinking_capacity_holds_publishers_until_the_backlog_drains_below_it() {
+        let channel = Arc::new(RelayBroadcast::with_capacity(capacity(3)));
+        let mut receiver = channel.new_receiver();
+        for value in 1..=3 {
+            channel
+                .broadcast(value)
+                .await
+                .expect("the consumer has room");
+        }
+
+        channel.set_capacity(capacity(1));
+        let pending = tokio::spawn({
+            let channel = channel.clone();
+            async move {
+                channel
+                    .broadcast(4)
+                    .await
+                    .expect("draining the backlog admits the publisher");
+            }
+        });
+        wait_for_waiting_publishers(&channel, 1).await;
+
+        assert_eq!(receiver.recv().await, Some(1));
+        assert!(!pending.is_finished());
+        assert_eq!(receiver.recv().await, Some(2));
+        assert!(!pending.is_finished());
+        assert_eq!(receiver.recv().await, Some(3));
+
+        tokio::time::timeout(Duration::from_secs(5), pending)
+            .await
+            .expect("the drained backlog should admit the publisher")
+            .expect("the publisher task should join");
+        assert_eq!(receiver.recv().await, Some(4));
+    }
+
+    #[tokio::test]
+    async fn growing_capacity_admits_waiting_publishers() {
+        let channel = Arc::new(RelayBroadcast::with_capacity(capacity(1)));
+        let mut receiver = channel.new_receiver();
+        channel.broadcast(1).await.expect("the consumer has room");
+
+        let pending = tokio::spawn({
+            let channel = channel.clone();
+            async move {
+                channel
+                    .broadcast(2)
+                    .await
+                    .expect("the larger capacity admits the publisher");
+            }
+        });
+        wait_for_waiting_publishers(&channel, 1).await;
+
+        channel.set_capacity(capacity(2));
+        tokio::time::timeout(Duration::from_secs(5), pending)
+            .await
+            .expect("growing capacity should admit the publisher without a take")
+            .expect("the publisher task should join");
+        assert_eq!(channel.len(), 2);
+        assert_eq!(receiver.recv().await, Some(1));
+        assert_eq!(receiver.recv().await, Some(2));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_publishers_never_admit_past_capacity() {
+        const CAPACITY: usize = 3;
+        const PUBLISHERS: usize = 16;
+
+        let channel = Arc::new(RelayBroadcast::with_capacity(capacity(CAPACITY)));
+        let mut receiver = channel.new_receiver();
+        let mut publishers = Vec::with_capacity(PUBLISHERS);
+        for value in 0..PUBLISHERS {
+            let channel = channel.clone();
+            publishers.push(tokio::spawn(async move {
+                channel
+                    .broadcast(value)
+                    .await
+                    .expect("the consumer drains every batch");
+            }));
+        }
+        wait_for_waiting_publishers(&channel, PUBLISHERS - CAPACITY).await;
+        assert_eq!(channel.len(), CAPACITY);
+
+        let mut received = Vec::with_capacity(PUBLISHERS);
+        for _ in 0..PUBLISHERS {
+            assert!(
+                channel.len() <= CAPACITY,
+                "admission must never pass the capacity"
+            );
+            let batch = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+                .await
+                .expect("each take should admit a waiting publisher")
+                .expect("the fan-out stays open while publishers hold it");
+            received.push(batch);
+        }
+        for publisher in publishers {
+            publisher.await.expect("every publisher task should join");
+        }
+        received.sort_unstable();
+        assert_eq!(received, (0..PUBLISHERS).collect::<Vec<_>>());
+    }
+
+    async fn wait_for_waiting_publishers<T>(channel: &RelayBroadcast<T>, expected: usize) {
+        let waited = tokio::time::timeout(Duration::from_secs(5), async {
+            while channel.waiting_publishers() != expected {
+                tokio::task::consume_budget().await;
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            waited.is_ok(),
+            "timed out waiting for {expected} waiting publisher(s)"
+        );
+    }
+}
+
+#[cfg(all(test, relay_fanout_loom))]
+mod fanout_loom_tests {
+    use loom::{
+        model,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering, fence},
+        },
+        thread,
+    };
+
+    const MODEL_THREAD_STACK_BYTES: usize = 64 * 1024;
+
+    // As in the dispatch gate model, Loom 0.7 can admit the forbidden store-buffer outcome for a
+    // model expressed only with sequentially consistent atomic operations. These explicit fences
+    // model the total order that the production sequentially consistent operations require.
+
+    struct LoomFanoutAdmission {
+        admitted: AtomicUsize,
+        waiting_publishers: AtomicUsize,
+    }
+
+    impl LoomFanoutAdmission {
+        fn take_and_check_notification(&self) -> bool {
+            let previous = self.admitted.fetch_sub(1, Ordering::SeqCst);
+            assert_eq!(
+                previous, 1,
+                "the model begins with the consumer at capacity"
+            );
+            fence(Ordering::SeqCst);
+            self.waiting_publishers.load(Ordering::SeqCst) > 0
+        }
+
+        fn begin_wait_and_check_admission(&self, capacity: usize) -> bool {
+            let previous = self.waiting_publishers.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(previous, 0, "the model has one waiting publisher");
+            fence(Ordering::SeqCst);
+            self.admitted.load(Ordering::SeqCst) < capacity
+        }
+    }
+
+    fn spawn_model_thread<F, T>(operation: F) -> thread::JoinHandle<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        thread::Builder::new()
+            .stack_size(MODEL_THREAD_STACK_BYTES)
+            .spawn(operation)
+            .expect("loom thread construction should succeed")
+    }
+
+    #[test]
+    fn consumer_take_cannot_miss_a_waiting_publisher() {
+        model(|| {
+            let model = spawn_model_thread(|| {
+                let admission = Arc::new(LoomFanoutAdmission {
+                    admitted: AtomicUsize::new(1),
+                    waiting_publishers: AtomicUsize::new(0),
+                });
+                let consumer = {
+                    let admission = admission.clone();
+                    spawn_model_thread(move || admission.take_and_check_notification())
+                };
+                let publisher_admitted = admission.begin_wait_and_check_admission(1);
+
+                let consumer_would_notify = consumer.join().expect("consumer thread should join");
+                assert!(
+                    publisher_admitted || consumer_would_notify,
+                    "a waiting publisher must either observe the take or receive its notification"
+                );
+            });
+            model.join().expect("model driver should join");
+        });
     }
 }

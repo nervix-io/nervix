@@ -35,7 +35,6 @@ arrow-ipc = { workspace = true }
 arrow-ord = { workspace = true }
 arrow-schema = { workspace = true }
 arrow-select = { workspace = true }
-async-broadcast = { workspace = true }
 async-nats = { workspace = true }
 async-tar = { workspace = true, features = ["runtime-tokio"] }
 async-trait = { workspace = true }
@@ -54,6 +53,7 @@ ciborium = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 clap_complete = { workspace = true }
 clickhouse = { workspace = true, features = ["inserter", "chrono"] }
+concurrent-queue = { workspace = true }
 dashmap = { workspace = true }
 error-stack = { workspace = true }
 fastrand = { workspace = true }
@@ -280,7 +280,6 @@ arrow-schema = "58"
 arrow-select = "58"
 arrow-string = "58"
 ascii-dag = "0.9"
-async-broadcast = "0.7.2"
 # 0.49 uses provider-selectable rustls-webpki 0.103; the previous 0.42 line pulled in Ring.
 async-nats = { version = "0.49.1", default-features = false, features = [
   "aws-lc-rs",
@@ -311,6 +310,7 @@ ciborium = "0.2"
 clap = "4.6.0"
 clap_complete = "4.6.0"
 clickhouse = { version = "0.15.0", default-features = true }
+concurrent-queue = "2.5.0"
 console_error_panic_hook = "0.1"
 criterion = "0.5"
 cucumber = "0.22"

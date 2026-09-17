@@ -139,11 +139,10 @@ The updated capacity is persisted in the relay definition and applied in place t
 buffer. Existing concrete branches, subscriptions, runtime consumers, and dispatch slots remain
 attached.
 
-Increasing capacity is applied in place without reducing buffered data. When
-capacity is shrunk below the current buffered depth, the active fan-out keeps its
-existing physical buffer until receivers drain it far enough to apply the new
-capacity without discarding in-memory batches. Publishers continue to observe relay backpressure
-while the resize is pending. The one-batch producer and consumer dispatch slots never resize.
+A capacity change applies at once to admission and never discards buffered batches. Increasing
+capacity admits waiting publishers immediately. When capacity is shrunk below the current buffered
+depth, every buffered batch is kept and publishers observe relay backpressure until receivers drain
+the buffer below the new capacity. The one-batch producer and consumer dispatch slots never resize.
 
 Small capacities are useful in tests and tiny examples, but high-throughput
 graphs should use capacities large enough to absorb several flush intervals of
