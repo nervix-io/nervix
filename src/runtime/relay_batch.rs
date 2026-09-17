@@ -3,6 +3,7 @@ pub(in crate::runtime) type RelayDispatchResult = Result<(), Box<RelayRecordBatc
 use std::sync::Arc as StdArc;
 
 use arch_into::ArchInto as _;
+use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_models::Timestamp;
 use triomphe::Arc;
@@ -10,7 +11,9 @@ use triomphe::Arc;
 use super::BranchKey;
 use crate::{
     runtime_ack::AckSet,
-    runtime_schema::{CompiledSchema, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow},
+    runtime_schema::{
+        CompiledSchema, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow, RuntimeSchemaError,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -34,8 +37,62 @@ pub(super) struct RelayDeliveryObservation {
     pub(super) latency_seconds: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, strum::Display)]
+pub(crate) enum RelayRecordBatchOperation {
+    #[strum(serialize = "address a relay batch row")]
+    AddressRow,
+    #[strum(serialize = "build a relay batch from messages")]
+    BuildFromMessages,
+    #[strum(serialize = "validate a runtime batch against its relay schema")]
+    ValidateRuntimeBatch,
+    #[strum(serialize = "select relay batch rows")]
+    SelectRows,
+    #[strum(serialize = "reorder relay batch rows")]
+    ReorderRows,
+    #[strum(serialize = "materialize relay messages")]
+    MaterializeMessages,
+    #[strum(serialize = "build a relay batch while preserving acknowledgements")]
+    BuildPreservingAcks,
+    #[strum(serialize = "concatenate relay batches")]
+    Concatenate,
+}
+
+#[derive(Debug, Clone, Copy, strum::Display)]
+pub(crate) enum RelayRecordBatchSidecar {
+    #[strum(serialize = "metadata")]
+    Metadata,
+    #[strum(serialize = "branch key")]
+    BranchKey,
+    #[strum(serialize = "ACK")]
+    Ack,
+}
+
 #[derive(Debug, thiserror::Error)]
-pub(super) enum RelayRecordBatchReorderError {
+pub(crate) enum RelayRecordBatchError {
+    #[error("relay batch row {row} is outside metadata with {metadata_rows} rows")]
+    MetadataRowOutOfBounds { row: usize, metadata_rows: usize },
+    #[error("a relay batch must contain at least one message")]
+    EmptyMessages,
+    #[error("a relay batch cannot mix branch keys")]
+    MixedBranchKeys,
+    #[error(
+        "relay batch {sidecar} sidecar has {found} rows for an Arrow batch with {expected} rows"
+    )]
+    SidecarRowCount {
+        sidecar: RelayRecordBatchSidecar,
+        expected: usize,
+        found: usize,
+    },
+    #[error("failed to {operation}")]
+    RuntimeSchema {
+        operation: RelayRecordBatchOperation,
+    },
+    #[error("relay batch row {row} is outside a batch with {batch_rows} rows")]
+    SelectedRowOutOfBounds { row: usize, batch_rows: usize },
+    #[error(
+        "relay batch selected rows are not strictly increasing at {previous} followed by {next}"
+    )]
+    SelectedRowsNotIncreasing { previous: usize, next: usize },
     #[error(
         "cannot reorder relay batch with {arrow_rows} Arrow rows, {metadata_rows} metadata rows, \
          {branch_keys} branch keys, and {ack_sets} ACK sets"
@@ -47,24 +104,33 @@ pub(super) enum RelayRecordBatchReorderError {
         ack_sets: usize,
     },
     #[error("relay batch reorder has {order_rows} rows for a {batch_rows}-row batch")]
-    RowCount {
+    ReorderRowCount {
         order_rows: usize,
         batch_rows: usize,
     },
     #[error("relay batch reorder row {row} is outside {batch_rows} rows")]
-    RowOutOfBounds { row: usize, batch_rows: usize },
+    ReorderRowOutOfBounds { row: usize, batch_rows: usize },
     #[error("relay batch reorder contains row {row} more than once")]
-    DuplicateRow { row: usize },
-    #[error("Arrow batch reorder failed: {reason}")]
-    Arrow { reason: String },
+    DuplicateReorderRow { row: usize },
 }
 
 #[derive(Debug, thiserror::Error)]
 #[error("{error}")]
 pub(super) struct RelayRecordBatchReorderFailure {
-    #[source]
-    pub(super) error: RelayRecordBatchReorderError,
+    pub(super) error: Report<RelayRecordBatchError>,
     pub(super) batch: RelayRecordBatch,
+}
+
+#[derive(Debug)]
+pub(crate) struct RelayRecordBatchFailure<T> {
+    pub(crate) error: Report<RelayRecordBatchError>,
+    pub(crate) preserved: T,
+}
+
+impl<T> RelayRecordBatchFailure<T> {
+    fn new(error: Report<RelayRecordBatchError>, preserved: T) -> Self {
+        Self { error, preserved }
+    }
 }
 
 /// A relay batch taken apart into the Arrow batch and the per-row sidecars that travel with it.
@@ -78,15 +144,21 @@ pub(super) struct UnkeyedRelayBatchParts {
 }
 
 impl RelayRecordBatch {
-    pub(super) fn runtime_row(&self, row: usize) -> Result<RuntimeRow, String> {
+    pub(super) fn runtime_row(
+        &self,
+        row: usize,
+    ) -> error_stack::Result<RuntimeRow, RelayRecordBatchError> {
         if self.metadata.get(row).is_none() {
-            return Err(format!(
-                "stream batch row {row} is outside metadata with {} rows",
-                self.metadata.len()
-            ));
+            return Err(Report::new(RelayRecordBatchError::MetadataRowOutOfBounds {
+                row,
+                metadata_rows: self.metadata.len(),
+            }));
         }
-        RuntimeRow::new(self.batch.clone(), row, self.metadata[row].clone())
-            .map_err(|error| error.to_string())
+        RuntimeRow::new(self.batch.clone(), row, self.metadata[row].clone()).change_context(
+            RelayRecordBatchError::RuntimeSchema {
+                operation: RelayRecordBatchOperation::AddressRow,
+            },
+        )
     }
 
     pub(super) fn single(
@@ -94,20 +166,20 @@ impl RelayRecordBatch {
         key: Option<BranchKey>,
         record: RuntimeRow,
         acks: AckSet,
-    ) -> Result<Self, String> {
+    ) -> error_stack::Result<Self, RelayRecordBatchError> {
         Self::from_messages(schema, vec![RelayMessage { key, record, acks }])
     }
 
     pub(super) fn from_messages(
         schema: Arc<CompiledSchema>,
         messages: Vec<RelayMessage>,
-    ) -> Result<Self, String> {
+    ) -> error_stack::Result<Self, RelayRecordBatchError> {
         let Some(first) = messages.first() else {
-            return Err("stream batch must contain at least one message".to_string());
+            return Err(Report::new(RelayRecordBatchError::EmptyMessages));
         };
         let key = first.key.clone();
         if messages.iter().any(|message| message.key != key) {
-            return Err("stream batch cannot mix different branch keys".to_string());
+            return Err(Report::new(RelayRecordBatchError::MixedBranchKeys));
         }
         let keys = vec![key.clone(); messages.len()];
         let metadata = messages
@@ -118,14 +190,10 @@ impl RelayRecordBatch {
             .into_iter()
             .map(|message| (message.record, message.acks))
             .unzip();
-        if records
-            .iter()
-            .any(|record| record.batch().schema().as_ref() != schema.arrow_schema().as_ref())
-        {
-            return Err("stream message row schema does not match relay schema".to_string());
-        }
         let batch = RuntimeRecordBatch::shared_from_rows(schema.arrow_schema(), &records)
-            .map_err(|error| error.to_string())?;
+            .change_context(RelayRecordBatchError::RuntimeSchema {
+                operation: RelayRecordBatchOperation::BuildFromMessages,
+            })?;
         Ok(Self {
             key,
             keys,
@@ -141,24 +209,30 @@ impl RelayRecordBatch {
         batch: RuntimeRecordBatch,
         metadata: Vec<RuntimeRecordMetadata>,
         acks: Vec<AckSet>,
-    ) -> Result<Self, String> {
+    ) -> error_stack::Result<Self, RelayRecordBatchError> {
         let row_count = batch.batch().num_rows();
         if row_count != acks.len() {
-            return Err(format!(
-                "stream batch ack count {} does not match row count {}",
-                acks.len(),
-                row_count
-            ));
+            return Err(Report::new(RelayRecordBatchError::SidecarRowCount {
+                sidecar: RelayRecordBatchSidecar::Ack,
+                expected: row_count,
+                found: acks.len(),
+            }));
         }
         if row_count != metadata.len() {
-            return Err(format!(
-                "stream batch metadata count {} does not match row count {}",
-                metadata.len(),
-                row_count
-            ));
+            return Err(Report::new(RelayRecordBatchError::SidecarRowCount {
+                sidecar: RelayRecordBatchSidecar::Metadata,
+                expected: row_count,
+                found: metadata.len(),
+            }));
         }
         if batch.schema().as_ref() != schema.arrow_schema().as_ref() {
-            return Err("stream batch schema does not match compiled schema".to_string());
+            return Err(Report::new(RuntimeSchemaError::SchemaMismatch {
+                expected: schema.arrow_schema(),
+                found: batch.schema(),
+            })
+            .change_context(RelayRecordBatchError::RuntimeSchema {
+                operation: RelayRecordBatchOperation::ValidateRuntimeBatch,
+            }));
         }
         let keys = vec![key.clone(); row_count];
         Ok(Self {
@@ -175,21 +249,21 @@ impl RelayRecordBatch {
         batch: RuntimeRecordBatch,
         metadata: Vec<RuntimeRecordMetadata>,
         acks: Vec<AckSet>,
-    ) -> Result<Self, String> {
+    ) -> error_stack::Result<Self, RelayRecordBatchError> {
         let row_count = batch.batch().num_rows();
         if metadata.len() != row_count {
-            return Err(format!(
-                "filtered metadata count {} does not match row count {}",
-                metadata.len(),
-                row_count
-            ));
+            return Err(Report::new(RelayRecordBatchError::SidecarRowCount {
+                sidecar: RelayRecordBatchSidecar::Metadata,
+                expected: row_count,
+                found: metadata.len(),
+            }));
         }
         if acks.len() != row_count {
-            return Err(format!(
-                "filtered ack count {} does not match row count {}",
-                acks.len(),
-                row_count
-            ));
+            return Err(Report::new(RelayRecordBatchError::SidecarRowCount {
+                sidecar: RelayRecordBatchSidecar::Ack,
+                expected: row_count,
+                found: acks.len(),
+            }));
         }
         let keys = vec![key.clone(); row_count];
         Ok(Self {
@@ -201,19 +275,19 @@ impl RelayRecordBatch {
         })
     }
 
-    pub(super) fn take(self, rows: &[usize]) -> Result<Self, (String, Vec<AckSet>)> {
+    pub(super) fn take(self, rows: &[usize]) -> Result<Self, RelayRecordBatchFailure<Vec<AckSet>>> {
         let row_count = self.batch.batch().num_rows();
         if self.metadata.len() != row_count
             || self.keys.len() != row_count
             || self.acks.len() != row_count
         {
-            return Err((
-                format!(
-                    "stream batch sidecar lengths ({}, {}, {}) do not match row count {row_count}",
-                    self.metadata.len(),
-                    self.keys.len(),
-                    self.acks.len()
-                ),
+            return Err(RelayRecordBatchFailure::new(
+                Report::new(RelayRecordBatchError::SidecarCount {
+                    arrow_rows: row_count,
+                    metadata_rows: self.metadata.len(),
+                    branch_keys: self.keys.len(),
+                    ack_sets: self.acks.len(),
+                }),
                 self.acks,
             ));
         }
@@ -221,14 +295,20 @@ impl RelayRecordBatch {
             return Ok(self);
         }
         if let Some(row) = rows.iter().find(|row| **row >= row_count) {
-            return Err((
-                format!("stream batch row {row} is outside batch with {row_count} rows"),
+            return Err(RelayRecordBatchFailure::new(
+                Report::new(RelayRecordBatchError::SelectedRowOutOfBounds {
+                    row: *row,
+                    batch_rows: row_count,
+                }),
                 self.acks,
             ));
         }
-        if rows.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err((
-                "stream batch selected rows must be strictly increasing".to_string(),
+        if let Some(pair) = rows.windows(2).find(|pair| pair[0] >= pair[1]) {
+            return Err(RelayRecordBatchFailure::new(
+                Report::new(RelayRecordBatchError::SelectedRowsNotIncreasing {
+                    previous: pair[0],
+                    next: pair[1],
+                }),
                 self.acks,
             ));
         }
@@ -241,7 +321,14 @@ impl RelayRecordBatch {
         } = self;
         let batch = match batch.take(rows) {
             Ok(batch) => batch,
-            Err(error) => return Err((error.to_string(), acks)),
+            Err(error) => {
+                return Err(RelayRecordBatchFailure::new(
+                    error.change_context(RelayRecordBatchError::RuntimeSchema {
+                        operation: RelayRecordBatchOperation::SelectRows,
+                    }),
+                    acks,
+                ));
+            }
         };
         fn select<T>(values: Vec<T>, rows: &[usize]) -> Vec<T> {
             let mut selected = Vec::with_capacity(rows.len());
@@ -287,21 +374,21 @@ impl RelayRecordBatch {
             || self.acks.len() != row_count
         {
             return Err(Box::new(RelayRecordBatchReorderFailure {
-                error: RelayRecordBatchReorderError::SidecarCount {
+                error: Report::new(RelayRecordBatchError::SidecarCount {
                     arrow_rows: row_count,
                     metadata_rows: self.metadata.len(),
                     branch_keys: self.keys.len(),
                     ack_sets: self.acks.len(),
-                },
+                }),
                 batch: self,
             }));
         }
         if row_order.len() != row_count {
             return Err(Box::new(RelayRecordBatchReorderFailure {
-                error: RelayRecordBatchReorderError::RowCount {
+                error: Report::new(RelayRecordBatchError::ReorderRowCount {
                     order_rows: row_order.len(),
                     batch_rows: row_count,
-                },
+                }),
                 batch: self,
             }));
         }
@@ -309,16 +396,16 @@ impl RelayRecordBatch {
         for &row in row_order {
             let Some(was_seen) = seen.get_mut(row) else {
                 return Err(Box::new(RelayRecordBatchReorderFailure {
-                    error: RelayRecordBatchReorderError::RowOutOfBounds {
+                    error: Report::new(RelayRecordBatchError::ReorderRowOutOfBounds {
                         row,
                         batch_rows: row_count,
-                    },
+                    }),
                     batch: self,
                 }));
             };
             if *was_seen {
                 return Err(Box::new(RelayRecordBatchReorderFailure {
-                    error: RelayRecordBatchReorderError::DuplicateRow { row },
+                    error: Report::new(RelayRecordBatchError::DuplicateReorderRow { row }),
                     batch: self,
                 }));
             }
@@ -329,11 +416,11 @@ impl RelayRecordBatch {
         }
         let reordered_batch = match self.batch.take(row_order) {
             Ok(batch) => batch,
-            Err(reason) => {
+            Err(error) => {
                 return Err(Box::new(RelayRecordBatchReorderFailure {
-                    error: RelayRecordBatchReorderError::Arrow {
-                        reason: reason.to_string(),
-                    },
+                    error: error.change_context(RelayRecordBatchError::RuntimeSchema {
+                        operation: RelayRecordBatchOperation::ReorderRows,
+                    }),
                     batch: self,
                 }));
             }
@@ -354,35 +441,37 @@ impl RelayRecordBatch {
         })
     }
 
-    pub(crate) fn try_into_messages(self) -> Result<Vec<RelayMessage>, Box<(String, Self)>> {
+    pub(crate) fn try_into_messages(
+        self,
+    ) -> Result<Vec<RelayMessage>, Box<RelayRecordBatchFailure<Self>>> {
         let row_count = self.batch.batch().num_rows();
         if row_count != self.acks.len() {
-            return Err(Box::new((
-                format!(
-                    "stream batch ack count {} does not match row count {}",
-                    self.acks.len(),
-                    row_count
-                ),
+            return Err(Box::new(RelayRecordBatchFailure::new(
+                Report::new(RelayRecordBatchError::SidecarRowCount {
+                    sidecar: RelayRecordBatchSidecar::Ack,
+                    expected: row_count,
+                    found: self.acks.len(),
+                }),
                 self,
             )));
         }
         if row_count != self.metadata.len() {
-            return Err(Box::new((
-                format!(
-                    "stream batch metadata count {} does not match row count {}",
-                    self.metadata.len(),
-                    row_count
-                ),
+            return Err(Box::new(RelayRecordBatchFailure::new(
+                Report::new(RelayRecordBatchError::SidecarRowCount {
+                    sidecar: RelayRecordBatchSidecar::Metadata,
+                    expected: row_count,
+                    found: self.metadata.len(),
+                }),
                 self,
             )));
         }
         if row_count != self.keys.len() {
-            return Err(Box::new((
-                format!(
-                    "stream batch branch key count {} does not match row count {}",
-                    self.keys.len(),
-                    row_count
-                ),
+            return Err(Box::new(RelayRecordBatchFailure::new(
+                Report::new(RelayRecordBatchError::SidecarRowCount {
+                    sidecar: RelayRecordBatchSidecar::BranchKey,
+                    expected: row_count,
+                    found: self.keys.len(),
+                }),
                 self,
             )));
         }
@@ -392,7 +481,14 @@ impl RelayRecordBatch {
             .collect::<Result<Vec<_>, _>>()
         {
             Ok(rows) => rows,
-            Err(error) => return Err(Box::new((error.to_string(), self))),
+            Err(error) => {
+                return Err(Box::new(RelayRecordBatchFailure::new(
+                    error.change_context(RelayRecordBatchError::RuntimeSchema {
+                        operation: RelayRecordBatchOperation::MaterializeMessages,
+                    }),
+                    self,
+                )));
+            }
         };
         let Self { keys, acks, .. } = self;
         let mut messages = Vec::with_capacity(row_count);
@@ -402,19 +498,26 @@ impl RelayRecordBatch {
         Ok(messages)
     }
 
-    pub(super) fn concat(batches: Vec<Self>) -> Result<Self, String> {
-        Self::concat_preserving(batches).map_err(|error| {
-            let (reason, _batches) = *error;
-            reason
-        })
+    pub(super) fn concat(batches: Vec<Self>) -> error_stack::Result<Self, RelayRecordBatchError> {
+        match Self::concat_preserving(batches) {
+            Ok(batch) => Ok(batch),
+            Err(failure) => Err(failure.error),
+        }
     }
 
-    pub(super) fn concat_preserving(batches: Vec<Self>) -> Result<Self, Box<(String, Vec<Self>)>> {
+    pub(super) fn concat_preserving(
+        batches: Vec<Self>,
+    ) -> Result<Self, Box<RelayRecordBatchFailure<Vec<Self>>>> {
         let Some(first) = batches.first() else {
-            return Err(Box::new((
-                "cannot concat zero relay batches".to_string(),
-                batches,
-            )));
+            let error = Report::new(RuntimeSchemaError::EmptyConcatenation).change_context(
+                RelayRecordBatchError::RuntimeSchema {
+                    operation: RelayRecordBatchOperation::Concatenate,
+                },
+            );
+            return Err(Box::new(RelayRecordBatchFailure {
+                error,
+                preserved: batches,
+            }));
         };
 
         let key = first.key.clone();
@@ -432,7 +535,14 @@ impl RelayRecordBatch {
                 .collect::<Vec<_>>();
             match RuntimeRecordBatch::concat(&runtime_batches) {
                 Ok(batch) => batch,
-                Err(error) => return Err(Box::new((error.to_string(), batches))),
+                Err(error) => {
+                    return Err(Box::new(RelayRecordBatchFailure {
+                        error: error.change_context(RelayRecordBatchError::RuntimeSchema {
+                            operation: RelayRecordBatchOperation::Concatenate,
+                        }),
+                        preserved: batches,
+                    }));
+                }
             }
         };
 
@@ -587,10 +697,10 @@ fn delivery_observation_from_timestamps(
 pub(super) fn build_stream_record_batch_preserving_acks(
     schema: Arc<CompiledSchema>,
     messages: Vec<RelayMessage>,
-) -> Result<RelayRecordBatch, (String, Vec<AckSet>)> {
+) -> Result<RelayRecordBatch, RelayRecordBatchFailure<Vec<AckSet>>> {
     let Some(first) = messages.first() else {
-        return Err((
-            "cannot build relay batch from zero messages".to_string(),
+        return Err(RelayRecordBatchFailure::new(
+            Report::new(RelayRecordBatchError::EmptyMessages),
             Vec::new(),
         ));
     };
@@ -607,8 +717,8 @@ pub(super) fn build_stream_record_batch_preserving_acks(
         if message_key != key {
             let mut pending_acks = acks;
             pending_acks.push(message_acks);
-            return Err((
-                "stream batch cannot mix different branch keys".to_string(),
+            return Err(RelayRecordBatchFailure::new(
+                Report::new(RelayRecordBatchError::MixedBranchKeys),
                 pending_acks,
             ));
         }
@@ -616,18 +726,16 @@ pub(super) fn build_stream_record_batch_preserving_acks(
         records.push(record);
         acks.push(message_acks);
     }
-    if records
-        .iter()
-        .any(|record| record.batch().schema().as_ref() != schema.arrow_schema().as_ref())
-    {
-        return Err((
-            "stream message row schema does not match relay schema".to_string(),
-            acks,
-        ));
-    }
     let batch = match RuntimeRecordBatch::shared_from_rows(schema.arrow_schema(), &records) {
         Ok(batch) => batch,
-        Err(error) => return Err((error.to_string(), acks)),
+        Err(error) => {
+            return Err(RelayRecordBatchFailure::new(
+                error.change_context(RelayRecordBatchError::RuntimeSchema {
+                    operation: RelayRecordBatchOperation::BuildPreservingAcks,
+                }),
+                acks,
+            ));
+        }
     };
     let keys = vec![key.clone(); records.len()];
     Ok(RelayRecordBatch {

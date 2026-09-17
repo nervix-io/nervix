@@ -1247,7 +1247,7 @@ pub(super) async fn dispatch_wasm_output_route(
                     context.processor,
                     context.error_policies,
                     ack_queues.iter().flatten(),
-                    error,
+                    error.to_string(),
                 );
             return None;
         }
@@ -1550,12 +1550,12 @@ pub(super) fn relay_batch_from_wasm_output(
     if batch.schema().as_ref() != schema.arrow_schema().as_ref() {
         return Err("WASM output Arrow schema does not match its relay schema".to_string());
     }
-    RelayRecordBatch::from_filtered_parts(key.clone(), batch, metadata, acks).map(|batch| {
-        WasmDecodedOutputBatch {
+    RelayRecordBatch::from_filtered_parts(key.clone(), batch, metadata, acks)
+        .map(|batch| WasmDecodedOutputBatch {
             batch,
             uninitialized_columns,
-        }
-    })
+        })
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

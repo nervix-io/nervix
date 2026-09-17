@@ -1115,6 +1115,7 @@ impl MqttIngestor {
                 acks: vec![acks],
             })
             .await
+            .map_err(|error| error.to_string())
     }
 
     /// Flushes the collector and reports a failure to the runtime event bus.
@@ -1143,7 +1144,7 @@ impl MqttIngestor {
                 error
             ));
         }
-        result
+        result.map_err(|error| error.to_string())
     }
 
     fn qos(qos: MqttQos) -> QoS {

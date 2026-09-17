@@ -1033,17 +1033,17 @@ pub(super) async fn enqueue_correlator_output(
     };
     let batch = match build_stream_record_batch_preserving_acks(output_schema, messages) {
         Ok(batch) => batch,
-        Err((error, acks)) => {
+        Err(failure) => {
             branch.runtime.handle_internal_processor_error_for_acks(
                 &branch.domain,
                 node_kind,
                 processor,
                 error_policies,
-                acks.iter(),
+                failure.preserved.iter(),
                 format!(
                     "correlator '{}' failed to build output batch: {}",
                     processor.as_str(),
-                    error
+                    failure.error
                 ),
             );
             return;

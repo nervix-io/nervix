@@ -366,7 +366,7 @@ impl BranchRuntime {
         let messages = match batch.detached().try_into_messages() {
             Ok(messages) => messages,
             Err(error_and_batch) => {
-                let (error, _) = *error_and_batch;
+                let error = error_and_batch.error;
                 warn!(
                     domain = self.domain.as_str(),
                     relay = relay.as_str(),
@@ -769,14 +769,14 @@ impl IngestorRouteTask {
     ) -> Vec<RelayRecordBatch> {
         let input_batch = match branched_entrypoint_batch_from_inputs_blocking(vec![input]).await {
             Ok(batch) => batch,
-            Err((error, acks)) => {
+            Err(failure) => {
                 self.handle_general_error(
-                    &acks,
+                    &failure.preserved,
                     format!(
                         "{} '{}' failed to build route input batch: {}",
                         self.template.branch.source_kind.as_str(),
                         self.ingestor.as_str(),
-                        error
+                        failure.error
                     ),
                 );
                 return Vec::new();
@@ -811,13 +811,13 @@ impl IngestorRouteTask {
             tokio::task::consume_budget().await;
             match batch_result {
                 Ok((_, batch)) => prepared.push(batch),
-                Err((error, acks)) => self.handle_general_error(
-                    &acks,
+                Err(failure) => self.handle_general_error(
+                    &failure.preserved,
                     format!(
                         "{} '{}' failed to prepare output branch batch: {}",
                         self.template.branch.source_kind.as_str(),
                         self.ingestor.as_str(),
-                        error
+                        failure.error
                     ),
                 ),
             }

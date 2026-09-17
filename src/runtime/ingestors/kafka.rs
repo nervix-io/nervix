@@ -284,7 +284,7 @@ impl KafkaIngestor {
                         .map_err(|reason| RuntimeError::StartIngestor {
                             domain: domain.as_str().to_string(),
                             ingestor: ingestor.name.as_str().to_string(),
-                            reason,
+                            reason: reason.to_string(),
                         })?;
                     (Some(start_version), ready)
                 } else {
@@ -1103,7 +1103,7 @@ impl KafkaIngestor {
                                                     )
                                                     .await
                                                 {
-                                                    batch_failure = Some(error);
+                                                    batch_failure = Some(error.to_string());
                                                 }
 
                                                 if batch_failure.is_none() {

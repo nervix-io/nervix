@@ -9,6 +9,7 @@ use std::borrow::Cow;
 
 use ahash::RandomState;
 use bytes::Bytes;
+use error_stack::ResultExt as _;
 use indexmap::{Equivalent, IndexMap};
 
 use super::*;
@@ -30,6 +31,248 @@ pub(in crate::runtime) const INGEST_GROUP_MAX_ROWS: usize = 1024;
 /// Chosen operational bound for how long a partial source group waits when the source
 /// goes quiet. This is intentionally independent of an NSPL route's flush policy.
 pub(in crate::runtime) const INGEST_GROUP_IDLE_FLUSH: Duration = Duration::from_millis(5);
+
+#[derive(Debug, Clone, Copy, strum::Display)]
+pub(in crate::runtime) enum IngestGroupRecordOperation {
+    #[strum(serialize = "finish the decoded ingest batch")]
+    FinishDecodedBatch,
+    #[strum(serialize = "address an ingest row")]
+    AddressRow,
+    #[strum(serialize = "filter an ingest batch")]
+    FilterBatch,
+    #[strum(serialize = "concatenate transformed ingest rows")]
+    ConcatenateTransformedRows,
+    #[strum(serialize = "concatenate branch output rows")]
+    ConcatenateBranchOutputs,
+    #[strum(serialize = "select branch input rows")]
+    SelectBranchInputs,
+    #[strum(serialize = "concatenate branch input batches")]
+    ConcatenateBranchInputs,
+    #[strum(serialize = "filter a branch input batch")]
+    FilterBranchInput,
+}
+
+#[derive(Debug, Clone, Copy, strum::Display)]
+pub(in crate::runtime) enum IngestMetadataOperation {
+    #[strum(serialize = "append ingest metadata")]
+    Append,
+    #[strum(serialize = "finish ingest metadata")]
+    Finish,
+    #[strum(serialize = "select ingest metadata")]
+    Select,
+}
+
+#[derive(Debug, Clone, Copy, strum::Display)]
+pub(in crate::runtime) enum KafkaOffsetInitializationOperation {
+    #[strum(serialize = "read paced domain time")]
+    ReadDomainTime,
+    #[strum(serialize = "resolve resume offsets")]
+    ResolveResumeOffsets,
+    #[strum(serialize = "resolve timestamp offsets")]
+    ResolveTimestampOffsets,
+    #[strum(serialize = "assign offsets")]
+    AssignOffsets,
+    #[strum(serialize = "resolve concrete offsets")]
+    ResolveConcreteOffsets,
+    #[strum(serialize = "reset replicated offsets")]
+    ResetOffsets,
+}
+
+#[derive(Debug, Clone, Copy, strum::Display)]
+pub(in crate::runtime) enum IngestGroupBlockingOperation {
+    #[strum(serialize = "build a branch input batch")]
+    BuildBranchInput,
+    #[strum(serialize = "filter a branch input batch")]
+    FilterBranchInput,
+}
+
+#[derive(Debug, Error)]
+pub(in crate::runtime) enum IngestGroupError {
+    #[error("received {ack_sets} ACK sets for {metadata_rows} ingest metadata rows")]
+    PayloadSidecarCount {
+        metadata_rows: usize,
+        ack_sets: usize,
+    },
+    #[error(
+        "received {metadata_rows} ingest metadata rows for {decoded_payloads} decoded payloads"
+    )]
+    DecodedPayloadCount {
+        metadata_rows: usize,
+        decoded_payloads: usize,
+    },
+    #[error("failed to {operation}")]
+    Metadata { operation: IngestMetadataOperation },
+    #[error("ingest group has {ack_sets} ACK sets and {ingest_timestamps} ingest timestamps")]
+    TimestampCount {
+        ack_sets: usize,
+        ingest_timestamps: usize,
+    },
+    #[error("ingest group closed without opening its metadata builders")]
+    MissingMetadataBuilders,
+    #[error("ingest group has {records} records and {metadata_rows} ingest metadata rows")]
+    MetadataRowCount {
+        records: usize,
+        metadata_rows: usize,
+    },
+    #[error("ingest group closed without opening its record builder")]
+    MissingRecordBuilder,
+    #[error("ingest group has {records} records and {decoded_rows} decoded rows")]
+    DecodedRowCount { records: usize, decoded_rows: usize },
+    #[error("ingest row {row} is outside record metadata with {record_metadata_rows} rows")]
+    RecordMetadataRowOutOfBounds {
+        row: usize,
+        record_metadata_rows: usize,
+    },
+    #[error(
+        "ingest group has {arrow_rows} Arrow rows, {record_metadata_rows} record metadata rows, \
+         {ingest_metadata_rows} ingest metadata rows, and {ack_sets} ACK sets"
+    )]
+    RowCount {
+        arrow_rows: usize,
+        record_metadata_rows: usize,
+        ingest_metadata_rows: usize,
+        ack_sets: usize,
+    },
+    #[error("ingest selection has {found} rows for a group with {expected} rows")]
+    SelectionLengthMismatch { expected: usize, found: usize },
+    #[error("failed to {operation}")]
+    RuntimeSchema {
+        operation: IngestGroupRecordOperation,
+    },
+    #[error(
+        "ingest group for '{existing_domain}.{existing_ingestor}' cannot collect rows for \
+         '{received_domain}.{received_ingestor}'"
+    )]
+    CollectorIdentity {
+        existing_domain: DomainName,
+        existing_ingestor: IngestorName,
+        received_domain: DomainName,
+        received_ingestor: IngestorName,
+    },
+    #[error("ingest group closed with {payloads} decoded payloads that were never accepted")]
+    UndispatchedPayloads { payloads: usize },
+    #[error(
+        "branch input has {arrow_rows} Arrow rows, {metadata_rows} metadata rows, {branch_keys} \
+         branch keys, and {ack_sets} ACK sets"
+    )]
+    BranchInputRowCount {
+        arrow_rows: usize,
+        metadata_rows: usize,
+        branch_keys: usize,
+        ack_sets: usize,
+    },
+    #[error("a branch input batch must contain at least one input")]
+    EmptyBranchInputs,
+    #[error("branch selection row {row} is outside batch with {batch_rows} rows")]
+    BranchSelectionRowOutOfBounds { row: usize, batch_rows: usize },
+    #[error("failed to construct a filtered relay batch")]
+    FilteredRelayBatch,
+    #[error("failed to {operation} in a blocking task")]
+    BlockingTask {
+        operation: IngestGroupBlockingOperation,
+    },
+    #[error("failed to load routing for domain '{domain}'")]
+    Routing { domain: DomainName },
+    #[error(
+        "ingest group for '{group_domain}.{group_ingestor}' cannot flush as \
+         '{requested_domain}.{requested_ingestor}'"
+    )]
+    FlushIdentity {
+        group_domain: DomainName,
+        group_ingestor: IngestorName,
+        requested_domain: DomainName,
+        requested_ingestor: IngestorName,
+    },
+    #[error("domain '{domain}' is not running")]
+    DomainNotRunning { domain: DomainName },
+    #[error("relay '{relay}' schema is not instantiated in domain '{domain}'")]
+    RelaySchemaMissing {
+        domain: DomainName,
+        relay: RelayName,
+    },
+    #[error("failed to build an ingest batch for relay '{relay}'")]
+    RelayBatch { relay: RelayName },
+    #[error("ingestor '{ingestor}' has no branch entrypoint for relay '{relay}'")]
+    BranchEntrypointMissing {
+        ingestor: IngestorName,
+        relay: RelayName,
+    },
+    #[error("ingestor '{ingestor}' failed to forward a batch to relay '{relay}'")]
+    BranchEntrypointClosed {
+        ingestor: IngestorName,
+        relay: RelayName,
+    },
+    #[error("failed to collect a group for ingestor '{ingestor}'")]
+    Collect { ingestor: IngestorName },
+    #[error("failed to establish ingestion time for '{domain}.{ingestor}'")]
+    IngestionTime {
+        domain: DomainName,
+        ingestor: IngestorName,
+    },
+    #[error("failed to load materialized state for ingestor '{ingestor}'")]
+    MaterializedState { ingestor: IngestorName },
+    #[error("failed to load materialized state for ingestor '{ingestor}' route '{relay}'")]
+    RouteMaterializedState {
+        ingestor: IngestorName,
+        relay: RelayName,
+    },
+    #[error("failed to evaluate the FILTER WHERE program for ingestor '{ingestor}'")]
+    FilterWhere { ingestor: IngestorName },
+    #[error("failed to evaluate route '{relay}' for ingestor '{ingestor}'")]
+    RouteProgram {
+        ingestor: IngestorName,
+        relay: RelayName,
+    },
+    #[error("failed to evaluate branch construction for ingestor '{ingestor}' route '{relay}'")]
+    BranchProgram {
+        ingestor: IngestorName,
+        relay: RelayName,
+    },
+    #[error("ingestor '{ingestor}' route '{relay}' has no compiled branch program")]
+    MissingBranchProgram {
+        ingestor: IngestorName,
+        relay: RelayName,
+    },
+    #[error("ingestor '{ingestor}' route '{relay}' has no branch result for row {row}")]
+    MissingBranchResult {
+        ingestor: IngestorName,
+        relay: RelayName,
+        row: usize,
+    },
+    #[error("ingestor '{ingestor}' route '{relay}' has no branch declaration")]
+    MissingBranchDeclaration {
+        ingestor: IngestorName,
+        relay: RelayName,
+    },
+    #[error("domain '{domain}' is not installed")]
+    DomainNotInstalled { domain: DomainName },
+    #[error("domain '{domain}' has an unresolved START AT NOW")]
+    UnresolvedStartNow { domain: DomainName },
+    #[error(
+        "failed to {operation} for Kafka ingestor '{ingestor}' topic '{topic}' in domain \
+         '{domain}'"
+    )]
+    KafkaOffsets {
+        operation: KafkaOffsetInitializationOperation,
+        domain: DomainName,
+        ingestor: IngestorName,
+        topic: String,
+    },
+    #[error("failed to decode a payload for ingestor '{ingestor}'")]
+    DecodePayload { ingestor: IngestorName },
+}
+
+#[derive(Debug)]
+pub(super) struct IngestGroupFailure<T> {
+    pub(super) error: Report<IngestGroupError>,
+    pub(super) preserved: T,
+}
+
+impl<T> IngestGroupFailure<T> {
+    fn new(error: Report<IngestGroupError>, preserved: T) -> Self {
+        Self { error, preserved }
+    }
+}
 
 pub(super) struct IngestorDependencies {
     pub(super) output_routes: RelayProcessorOutputsNode,
@@ -211,21 +454,21 @@ impl PendingIngestGroup {
         metadata: &[IngestMetadataRow<'_>],
         acks: Vec<AckSet>,
         ingested_at: Timestamp,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), IngestGroupError> {
         let payload_count = metadata.len();
         if acks.len() != payload_count {
-            return Err(format!(
-                "received {} ack sets for {payload_count} ingest metadata rows",
-                acks.len()
-            ));
+            return Err(Report::new(IngestGroupError::PayloadSidecarCount {
+                metadata_rows: payload_count,
+                ack_sets: acks.len(),
+            }));
         }
         // Payloads are accepted in the order they decoded, and a source may accept them one at a
         // time, so a contribution may cover a prefix of what the group has decoded but never more.
         if payload_count > self.undispatched_payloads.len() {
-            return Err(format!(
-                "received {payload_count} ingest metadata rows for {} decoded payloads",
-                self.undispatched_payloads.len()
-            ));
+            return Err(Report::new(IngestGroupError::DecodedPayloadCount {
+                metadata_rows: payload_count,
+                decoded_payloads: self.undispatched_payloads.len(),
+            }));
         }
 
         let (kind, row_bound) = (self.kind, self.row_bound);
@@ -238,7 +481,12 @@ impl PendingIngestGroup {
                 .pop_front()
                 .verified("the check above admits at most one metadata row per decoded payload");
             for _ in 0..messages {
-                builders.append(row)?;
+                builders.append(row).map_err(|error| {
+                    Report::new(IngestGroupError::Metadata {
+                        operation: IngestMetadataOperation::Append,
+                    })
+                    .attach_printable(error)
+                })?;
             }
             payload_acks.split_into(messages, &mut self.acks);
             self.ingested_at
@@ -255,34 +503,42 @@ impl PendingIngestGroup {
         self.acks.len()
     }
 
-    pub(super) fn into_rows(self) -> Result<IngestGroupRows, String> {
+    pub(super) fn into_rows(self) -> error_stack::Result<IngestGroupRows, IngestGroupError> {
         let row_count = self.acks.len();
         if self.ingested_at.len() != row_count {
-            return Err(format!(
-                "ingest group has {row_count} ack sets and {} ingest timestamps",
-                self.ingested_at.len()
-            ));
+            return Err(Report::new(IngestGroupError::TimestampCount {
+                ack_sets: row_count,
+                ingest_timestamps: self.ingested_at.len(),
+            }));
         }
-        let ingest_metadata = self
+        let metadata = self
             .metadata
-            .ok_or_else(|| "ingest group closed without opening its metadata builders".to_string())?
-            .finish()?;
+            .ok_or_else(|| Report::new(IngestGroupError::MissingMetadataBuilders))?;
+        let ingest_metadata = metadata.finish().map_err(|error| {
+            Report::new(IngestGroupError::Metadata {
+                operation: IngestMetadataOperation::Finish,
+            })
+            .attach_printable(error)
+        })?;
         if ingest_metadata.len() != row_count {
-            return Err(format!(
-                "ingest group has {row_count} records and {} ingest metadata rows",
-                ingest_metadata.len()
-            ));
+            return Err(Report::new(IngestGroupError::MetadataRowCount {
+                records: row_count,
+                metadata_rows: ingest_metadata.len(),
+            }));
         }
-        let batch = self
+        let records = self
             .records
-            .ok_or_else(|| "ingest group closed without opening its record builder".to_string())?
+            .ok_or_else(|| Report::new(IngestGroupError::MissingRecordBuilder))?;
+        let batch = records
             .finish()
-            .map_err(|error| error.to_string())?;
+            .change_context(IngestGroupError::RuntimeSchema {
+                operation: IngestGroupRecordOperation::FinishDecodedBatch,
+            })?;
         if batch.batch().num_rows() != row_count {
-            return Err(format!(
-                "ingest group has {row_count} records and {} decoded rows",
-                batch.batch().num_rows()
-            ));
+            return Err(Report::new(IngestGroupError::DecodedRowCount {
+                records: row_count,
+                decoded_rows: batch.batch().num_rows(),
+            }));
         }
         Ok(IngestGroupRows {
             batch: Arc::new(batch),
@@ -316,34 +572,61 @@ impl IngestGroupRows {
         Some(&self.ingest_metadata)
     }
 
-    pub(super) fn row(&self, row: usize) -> Result<RuntimeRow, String> {
+    pub(super) fn row(&self, row: usize) -> error_stack::Result<RuntimeRow, IngestGroupError> {
         let metadata = self.record_metadata.get(row).cloned().ok_or_else(|| {
-            format!(
-                "ingest row {row} is outside metadata with {} rows",
-                self.record_metadata.len()
-            )
+            Report::new(IngestGroupError::RecordMetadataRowOutOfBounds {
+                row,
+                record_metadata_rows: self.record_metadata.len(),
+            })
         })?;
-        RuntimeRow::new(self.batch.clone(), row, metadata).map_err(|error| error.to_string())
+        RuntimeRow::new(self.batch.clone(), row, metadata).change_context(
+            IngestGroupError::RuntimeSchema {
+                operation: IngestGroupRecordOperation::AddressRow,
+            },
+        )
     }
 
     /// Keeps only the rows selected by `keep`, moving records, metadata and acks
     /// together so the three stay row-aligned.
-    pub(super) fn select(self, keep: &[bool]) -> Result<Self, String> {
+    pub(super) fn select(self, keep: &[bool]) -> error_stack::Result<Self, IngestGroupError> {
+        let row_count = self.len();
+        if self.record_metadata.len() != row_count
+            || self.ingest_metadata.len() != row_count
+            || self.acks.len() != row_count
+        {
+            return Err(Report::new(IngestGroupError::RowCount {
+                arrow_rows: row_count,
+                record_metadata_rows: self.record_metadata.len(),
+                ingest_metadata_rows: self.ingest_metadata.len(),
+                ack_sets: self.acks.len(),
+            }));
+        }
+        if keep.len() != row_count {
+            return Err(Report::new(IngestGroupError::SelectionLengthMismatch {
+                expected: row_count,
+                found: keep.len(),
+            }));
+        }
         let selected = |row: usize| keep.get(row).copied().unwrap_or(false);
-        let predicate = BooleanArray::from_iter((0..self.len()).map(|row| Some(selected(row))));
+        let predicate = BooleanArray::from_iter((0..row_count).map(|row| Some(selected(row))));
         Ok(Self {
-            batch: Arc::new(
-                self.batch
-                    .filter(&predicate)
-                    .map_err(|error| error.to_string())?,
-            ),
+            batch: Arc::new(self.batch.filter(&predicate).change_context(
+                IngestGroupError::RuntimeSchema {
+                    operation: IngestGroupRecordOperation::FilterBatch,
+                },
+            )?),
             record_metadata: self
                 .record_metadata
                 .into_iter()
                 .enumerate()
                 .filter_map(|(row, metadata)| selected(row).then_some(metadata))
                 .collect(),
-            ingest_metadata: self.ingest_metadata.select(keep)?,
+            ingest_metadata: self.ingest_metadata.select(keep).map_err(|error| {
+                Report::new(IngestGroupError::Metadata {
+                    operation: IngestMetadataOperation::Select,
+                })
+                .attach_printable(error)
+            })?,
             acks: self
                 .acks
                 .into_iter()
@@ -429,7 +712,7 @@ impl IngestRouteCollector {
     pub(super) fn collect(
         &mut self,
         contribution: IngestGroupContribution<'_>,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), IngestGroupError> {
         let IngestGroupContribution {
             domain,
             ingestor,
@@ -447,13 +730,12 @@ impl IngestRouteCollector {
             && (existing.domain != *domain || existing.ingestor != *ingestor)
         {
             self.pending.discard_undispatched_payloads();
-            return Err(format!(
-                "ingest group for '{}.{}' cannot collect rows for '{}.{}'",
-                existing.domain.as_str(),
-                existing.ingestor.as_str(),
-                domain.as_str(),
-                ingestor.as_str()
-            ));
+            return Err(Report::new(IngestGroupError::CollectorIdentity {
+                existing_domain: existing.domain.clone(),
+                existing_ingestor: existing.ingestor.clone(),
+                received_domain: domain.clone(),
+                received_ingestor: ingestor.clone(),
+            }));
         }
         let accepted_before = self.pending.len();
         if let Err(error) = self.pending.append(metadata, acks, ingested_at) {
@@ -480,15 +762,15 @@ impl IngestRouteCollector {
 
     pub(super) fn take_pending(
         &mut self,
-    ) -> Result<Option<(IngestGroupContext, IngestGroupRows)>, String> {
+    ) -> error_stack::Result<Option<(IngestGroupContext, IngestGroupRows)>, IngestGroupError> {
         // A decoded payload the source never accepted would put the records out of step with the
         // metadata and ACKs, so the group says so rather than closing over the mismatch.
         let undispatched = self.pending.undispatched_payloads();
         if undispatched != 0 {
             self.pending.discard_undispatched_payloads();
-            return Err(format!(
-                "ingest group closed with {undispatched} decoded payloads that were never accepted"
-            ));
+            return Err(Report::new(IngestGroupError::UndispatchedPayloads {
+                payloads: undispatched,
+            }));
         }
         if self.pending.is_empty() {
             return Ok(None);
@@ -621,10 +903,10 @@ pub(super) struct BranchedBranchSelection {
 impl BranchedEntrypointBatch {
     pub(super) fn from_inputs(
         inputs: Vec<BranchedEntrypointInput>,
-    ) -> Result<Self, (String, Vec<AckSet>)> {
+    ) -> Result<Self, IngestGroupFailure<Vec<AckSet>>> {
         if inputs.is_empty() {
-            return Err((
-                "cannot build branch batch from zero inputs".to_string(),
+            return Err(IngestGroupFailure::new(
+                Report::new(IngestGroupError::EmptyBranchInputs),
                 Vec::new(),
             ));
         }
@@ -641,22 +923,26 @@ impl BranchedEntrypointBatch {
             acks.extend(parts.acks);
         }
         let batch_refs = batches.iter().map(Arc::as_ref).collect::<Vec<_>>();
-        let batch = RuntimeRecordBatch::concat(&batch_refs).map_err(|error| {
-            (
-                format!("failed to concatenate branch input batches: {error}"),
-                acks.clone(),
-            )
-        })?;
+        let batch = match RuntimeRecordBatch::concat(&batch_refs) {
+            Ok(batch) => batch,
+            Err(error) => {
+                return Err(IngestGroupFailure::new(
+                    error.change_context(IngestGroupError::RuntimeSchema {
+                        operation: IngestGroupRecordOperation::ConcatenateBranchInputs,
+                    }),
+                    acks,
+                ));
+            }
+        };
         let row_count = batch.batch().num_rows();
         if metadata.len() != row_count || keys.len() != row_count || acks.len() != row_count {
-            return Err((
-                format!(
-                    "branch input batch row count {row_count} does not match metadata {}, branch \
-                     keys {}, acks {}",
-                    metadata.len(),
-                    keys.len(),
-                    acks.len()
-                ),
+            return Err(IngestGroupFailure::new(
+                Report::new(IngestGroupError::BranchInputRowCount {
+                    arrow_rows: row_count,
+                    metadata_rows: metadata.len(),
+                    branch_keys: keys.len(),
+                    ack_sets: acks.len(),
+                }),
                 acks,
             ));
         }
@@ -669,11 +955,25 @@ impl BranchedEntrypointBatch {
         })
     }
 
-    pub(super) fn branch_selections(&self) -> Result<Vec<BranchedBranchSelection>, String> {
+    pub(super) fn branch_selections(
+        &self,
+    ) -> error_stack::Result<Vec<BranchedBranchSelection>, IngestGroupError> {
+        let row_count = self.batch.batch().num_rows();
+        if self.metadata.len() != row_count
+            || self.keys.len() != row_count
+            || self.acks.len() != row_count
+        {
+            return Err(Report::new(IngestGroupError::BranchInputRowCount {
+                arrow_rows: row_count,
+                metadata_rows: self.metadata.len(),
+                branch_keys: self.keys.len(),
+                ack_sets: self.acks.len(),
+            }));
+        }
         let mut selections = Vec::<BranchedBranchSelection>::new();
         let mut positions = HashMap::<Option<BranchKey>, usize>::default();
-        for index in 0..self.metadata.len() {
-            let key = self.keys.get(index).cloned().flatten();
+        for index in 0..row_count {
+            let key = self.keys[index].clone();
             if let Some(position) = positions.get(&key).copied() {
                 selections[position].rows.push(index);
                 continue;
@@ -692,15 +992,25 @@ impl BranchedEntrypointBatch {
         &self,
         selection: BranchedBranchSelection,
         ack_boundary: BranchInstanceAckBoundary,
-    ) -> Result<RelayRecordBatch, (String, Vec<AckSet>)> {
-        let predicate = self
-            .branch_predicate(&selection)
-            .map_err(|error| (error, self.acks.clone()))?;
+    ) -> Result<RelayRecordBatch, IngestGroupFailure<Vec<AckSet>>> {
+        let predicate = match self.branch_predicate(&selection) {
+            Ok(predicate) => predicate,
+            Err(error) => {
+                return Err(IngestGroupFailure::new(error, self.acks.clone()));
+            }
+        };
         let selected_rows = selected_rows(&predicate);
-        let filtered_batch = self
-            .batch
-            .filter(&predicate)
-            .map_err(|error| (error.to_string(), self.acks.clone()))?;
+        let filtered_batch = match self.batch.filter(&predicate) {
+            Ok(batch) => batch,
+            Err(error) => {
+                return Err(IngestGroupFailure::new(
+                    error.change_context(IngestGroupError::RuntimeSchema {
+                        operation: IngestGroupRecordOperation::FilterBranchInput,
+                    }),
+                    self.acks.clone(),
+                ));
+            }
+        };
         let mut metadata = Vec::with_capacity(selected_rows.len());
         let mut acks = Vec::with_capacity(selected_rows.len());
         for row in selected_rows {
@@ -718,20 +1028,28 @@ impl BranchedEntrypointBatch {
                 }
             });
         }
-        RelayRecordBatch::from_filtered_parts(selection.key, filtered_batch, metadata, acks)
-            .map_err(|error| (error, self.acks.clone()))
+        match RelayRecordBatch::from_filtered_parts(selection.key, filtered_batch, metadata, acks) {
+            Ok(batch) => Ok(batch),
+            Err(error) => Err(IngestGroupFailure::new(
+                error.change_context(IngestGroupError::FilteredRelayBatch),
+                self.acks.clone(),
+            )),
+        }
     }
 
     pub(super) fn branch_predicate(
         &self,
         selection: &BranchedBranchSelection,
-    ) -> Result<BooleanArray, String> {
+    ) -> error_stack::Result<BooleanArray, IngestGroupError> {
         let row_count = self.batch.batch().num_rows();
         let mut selected = vec![false; row_count];
         for row in &selection.rows {
             let Some(value) = selected.get_mut(*row) else {
-                return Err(format!(
-                    "branch selection row {row} is outside batch with {row_count} rows"
+                return Err(Report::new(
+                    IngestGroupError::BranchSelectionRowOutOfBounds {
+                        row: *row,
+                        batch_rows: row_count,
+                    },
                 ));
             };
             *value = true;
@@ -755,13 +1073,15 @@ pub(super) fn branched_entrypoint_inputs_acks(inputs: &[BranchedEntrypointInput]
 
 pub(super) async fn branched_entrypoint_batch_from_inputs_blocking(
     inputs: Vec<BranchedEntrypointInput>,
-) -> Result<Arc<BranchedEntrypointBatch>, (String, Vec<AckSet>)> {
+) -> Result<Arc<BranchedEntrypointBatch>, IngestGroupFailure<Vec<AckSet>>> {
     let acks = branched_entrypoint_inputs_acks(&inputs);
     match tokio::task::spawn_blocking(move || BranchedEntrypointBatch::from_inputs(inputs)).await {
         Ok(Ok(batch)) => Ok(Arc::new(batch)),
         Ok(Err(error)) => Err(error),
-        Err(error) => Err((
-            format!("branch input batch build task failed: {error}"),
+        Err(error) => Err(IngestGroupFailure::new(
+            Report::new(error).change_context(IngestGroupError::BlockingTask {
+                operation: IngestGroupBlockingOperation::BuildBranchInput,
+            }),
             acks,
         )),
     }
@@ -769,7 +1089,7 @@ pub(super) async fn branched_entrypoint_batch_from_inputs_blocking(
 
 pub(super) async fn branched_branch_plan_blocking(
     input: Arc<BranchedEntrypointBatch>,
-) -> Result<Vec<BranchedBranchSelection>, String> {
+) -> error_stack::Result<Vec<BranchedBranchSelection>, IngestGroupError> {
     input.branch_selections()
 }
 
@@ -777,7 +1097,7 @@ pub(super) async fn branched_branch_filter_blocking(
     input: Arc<BranchedEntrypointBatch>,
     selection: BranchedBranchSelection,
     ack_boundary: BranchInstanceAckBoundary,
-) -> Result<(Option<BranchKey>, RelayRecordBatch), (String, Vec<AckSet>)> {
+) -> Result<(Option<BranchKey>, RelayRecordBatch), IngestGroupFailure<Vec<AckSet>>> {
     let failure_input = input.clone();
     let key = selection.key.clone();
     match tokio::task::spawn_blocking(move || {
@@ -788,8 +1108,10 @@ pub(super) async fn branched_branch_filter_blocking(
     .await
     {
         Ok(result) => result,
-        Err(error) => Err((
-            format!("branch filter task failed: {error}"),
+        Err(error) => Err(IngestGroupFailure::new(
+            Report::new(error).change_context(IngestGroupError::BlockingTask {
+                operation: IngestGroupBlockingOperation::FilterBranchInput,
+            }),
             failure_input.acks.clone(),
         )),
     }
@@ -859,22 +1181,24 @@ impl Runtime {
         ingestor: &IngestorName,
         branched_senders: &HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
         collector: &mut IngestRouteCollector,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), IngestGroupError> {
         if collector.is_empty() {
             return Ok(());
         }
-        let routing = collector
-            .routing_snapshot(self, domain)
-            .map_err(|error| error.to_string())?;
+        let routing =
+            collector
+                .routing_snapshot(self, domain)
+                .change_context(IngestGroupError::Routing {
+                    domain: domain.clone(),
+                })?;
         if let Some((context, rows)) = collector.take_pending()? {
             if context.domain != *domain || context.ingestor != *ingestor {
-                return Err(format!(
-                    "ingest group for '{}.{}' cannot flush as '{}.{}'",
-                    context.domain.as_str(),
-                    context.ingestor.as_str(),
-                    domain.as_str(),
-                    ingestor.as_str()
-                ));
+                return Err(Report::new(IngestGroupError::FlushIdentity {
+                    group_domain: context.domain,
+                    group_ingestor: context.ingestor,
+                    requested_domain: domain.clone(),
+                    requested_ingestor: ingestor.clone(),
+                }));
             }
             self.execute_ingest_group(&routing, &context, rows, collector)
                 .await?;
@@ -884,7 +1208,10 @@ impl Runtime {
         }
         let groups = collector.drain_groups();
         if routing.passive_only {
-            let error = format!("domain '{}' is not running", domain.as_str());
+            let error = Report::new(IngestGroupError::DomainNotRunning {
+                domain: domain.clone(),
+            });
+            let reason = error.to_string();
             for group in &groups {
                 self.handle_general_error_for_acks(
                     domain,
@@ -892,7 +1219,7 @@ impl Runtime {
                     ingestor,
                     &ErrorPolicies::handled_by_log(),
                     group.messages.iter().map(|message| &message.acks),
-                    error.clone(),
+                    reason.clone(),
                 );
             }
             return Err(error);
@@ -906,18 +1233,18 @@ impl Runtime {
                 .map(|message| message.acks.clone())
                 .collect::<Vec<_>>();
             let Some(schema) = routing.relay_schemas.get(&relay).cloned() else {
-                let error = format!(
-                    "stream '{}' schema is not instantiated in domain '{}'",
-                    relay.as_str(),
-                    domain.as_str()
-                );
+                let error = Report::new(IngestGroupError::RelaySchemaMissing {
+                    domain: domain.clone(),
+                    relay: relay.clone(),
+                });
+                let reason = error.to_string();
                 self.handle_general_error_for_acks(
                     domain,
                     ModelKind::Ingestor,
                     ingestor,
                     &ErrorPolicies::handled_by_log(),
                     acks.iter(),
-                    error.clone(),
+                    reason,
                 );
                 first_error.get_or_insert(error);
                 continue;
@@ -925,55 +1252,59 @@ impl Runtime {
             let batch = match RelayRecordBatch::from_messages(schema, messages) {
                 Ok(batch) => batch,
                 Err(error) => {
+                    let error = error.change_context(IngestGroupError::RelayBatch {
+                        relay: relay.clone(),
+                    });
+                    let reason = error.to_string();
                     self.handle_general_error_for_acks(
                         domain,
                         ModelKind::Ingestor,
                         ingestor,
                         &ErrorPolicies::handled_by_log(),
                         acks.iter(),
-                        error.clone(),
+                        reason,
                     );
                     first_error.get_or_insert(error);
                     continue;
                 }
             };
             let Some(sender) = branched_senders.get(&relay) else {
-                let error = format!(
-                    "ingestor '{}' has no branch entrypoint for relay '{}'",
-                    ingestor.as_str(),
-                    relay.as_str()
-                );
+                let error = Report::new(IngestGroupError::BranchEntrypointMissing {
+                    ingestor: ingestor.clone(),
+                    relay: relay.clone(),
+                });
+                let reason = error.to_string();
                 self.handle_general_error_for_acks(
                     domain,
                     ModelKind::Ingestor,
                     ingestor,
                     &ErrorPolicies::handled_by_log(),
                     batch.acks.iter(),
-                    error.clone(),
+                    reason,
                 );
                 first_error.get_or_insert(error);
                 continue;
             };
             if let Err(error) = sender.send(batch).await {
                 let batch = error.0;
-                let reason = format!(
-                    "ingestor '{}' failed to forward batch to branch entrypoint for relay '{}'",
-                    ingestor.as_str(),
-                    relay.as_str()
-                );
+                let error = Report::new(IngestGroupError::BranchEntrypointClosed {
+                    ingestor: ingestor.clone(),
+                    relay: relay.clone(),
+                });
+                let reason = error.to_string();
                 self.handle_general_error_for_acks(
                     domain,
                     ModelKind::Ingestor,
                     ingestor,
                     &ErrorPolicies::handled_by_log(),
                     batch.acks.iter(),
-                    reason.clone(),
+                    reason,
                 );
-                first_error.get_or_insert(reason);
+                first_error.get_or_insert(error);
             }
         }
         match first_error {
-            Some(reason) => Err(reason),
+            Some(error) => Err(error),
             None => Ok(()),
         }
     }
@@ -986,7 +1317,7 @@ impl Runtime {
     pub(in crate::runtime) async fn dispatch_ingested_records(
         &self,
         dispatch: IngestGroupDispatch<'_>,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), IngestGroupError> {
         let IngestGroupDispatch {
             domain,
             ingestor,
@@ -1009,7 +1340,9 @@ impl Runtime {
                 acks,
                 ingested_at,
             })
-            .map_err(|reason| format!("ingestor '{}' {reason}", ingestor.as_str()))
+            .change_context(IngestGroupError::Collect {
+                ingestor: ingestor.clone(),
+            })
     }
 
     /// Executes one collected ingest group.
@@ -1024,7 +1357,7 @@ impl Runtime {
         context: &IngestGroupContext,
         mut rows: IngestGroupRows,
         collector: &mut IngestRouteCollector,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), IngestGroupError> {
         let domain = &context.domain;
         let ingestor = &context.ingestor;
         let timestamp_source = context.timestamp_source.as_ref();
@@ -1049,9 +1382,12 @@ impl Runtime {
         }
         // One execution clock for the whole group: a batch is evaluated against the
         // state it was admitted with.
-        let ingestion_time = self
-            .ingestion_time(domain, ingestor)
-            .map_err(|error| format!("{error:?}"))?;
+        let ingestion_time = self.ingestion_time(domain, ingestor).change_context(
+            IngestGroupError::IngestionTime {
+                domain: domain.clone(),
+                ingestor: ingestor.clone(),
+            },
+        )?;
         let execution_now = ingestion_time.now();
 
         if let Some(filter_where) = filter_where {
@@ -1063,7 +1399,9 @@ impl Runtime {
                     &filter_where.materialized_interest,
                 )
                 .await
-                .map_err(|error| error.to_string())?;
+                .change_context(IngestGroupError::MaterializedState {
+                    ingestor: ingestor.clone(),
+                })?;
             let keys = vec![None; rows.len()];
             let outcomes = evaluate_filter_map_on_batch(
                 ModelKind::Ingestor.as_str(),
@@ -1079,7 +1417,9 @@ impl Runtime {
                 execution_now,
             )
             .await
-            .map_err(|error| error.to_string())?;
+            .change_context(IngestGroupError::FilterWhere {
+                ingestor: ingestor.clone(),
+            })?;
             let mut keep = vec![false; rows.len()];
             let mut transformed = Vec::new();
             for (row, outcome) in outcomes.into_iter().enumerate() {
@@ -1119,9 +1459,11 @@ impl Runtime {
                     .map(|(_, record)| record.one_row_batch())
                     .collect::<Vec<_>>();
                 let batch_refs = batches.iter().collect::<Vec<_>>();
-                rows.batch = Arc::new(
-                    RuntimeRecordBatch::concat(&batch_refs).map_err(|error| error.to_string())?,
-                );
+                rows.batch = Arc::new(RuntimeRecordBatch::concat(&batch_refs).change_context(
+                    IngestGroupError::RuntimeSchema {
+                        operation: IngestGroupRecordOperation::ConcatenateTransformedRows,
+                    },
+                )?);
             }
         }
         if rows.is_empty() {
@@ -1136,7 +1478,10 @@ impl Runtime {
             let record = rows.row(row)?;
             let event_timestamp = ingestion_time
                 .select(timestamp_source, &record)
-                .map_err(|error| format!("{error:?}"))?;
+                .change_context(IngestGroupError::IngestionTime {
+                    domain: domain.clone(),
+                    ingestor: ingestor.clone(),
+                })?;
             event_timestamps.push(event_timestamp);
         }
         rows.record_metadata = std::mem::take(&mut rows.record_metadata)
@@ -1199,7 +1544,10 @@ impl Runtime {
                         &filter_map.materialized_interest,
                     )
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .change_context(IngestGroupError::RouteMaterializedState {
+                        ingestor: ingestor.clone(),
+                        relay: output.relay.clone(),
+                    })?;
                 let keys = vec![None; rows.len()];
                 evaluate_filter_map_on_batch(
                     ModelKind::Ingestor.as_str(),
@@ -1215,7 +1563,10 @@ impl Runtime {
                     execution_now,
                 )
                 .await
-                .map_err(|error| error.to_string())?
+                .change_context(IngestGroupError::RouteProgram {
+                    ingestor: ingestor.clone(),
+                    relay: output.relay.clone(),
+                })?
             } else {
                 (0..rows.len())
                     .map(|row| rows.row(row))
@@ -1244,12 +1595,16 @@ impl Runtime {
                         .iter()
                         .map(|(_, batch)| batch)
                         .collect::<Vec<_>>();
-                    let output_batch = RuntimeRecordBatch::concat(&output_batches)
-                        .map_err(|error| error.to_string())?;
-                    let input_batch = rows
-                        .batch
-                        .take(&input_rows)
-                        .map_err(|error| error.to_string())?;
+                    let output_batch = RuntimeRecordBatch::concat(&output_batches).change_context(
+                        IngestGroupError::RuntimeSchema {
+                            operation: IngestGroupRecordOperation::ConcatenateBranchOutputs,
+                        },
+                    )?;
+                    let input_batch = rows.batch.take(&input_rows).change_context(
+                        IngestGroupError::RuntimeSchema {
+                            operation: IngestGroupRecordOperation::SelectBranchInputs,
+                        },
+                    )?;
                     let input_keys = vec![None; input_rows.len()];
                     let side_inputs = self
                         .load_materialized_side_inputs(
@@ -1259,7 +1614,10 @@ impl Runtime {
                             &branch_program.program.materialized_interest,
                         )
                         .await
-                        .map_err(|error| error.to_string())?;
+                        .change_context(IngestGroupError::RouteMaterializedState {
+                            ingestor: ingestor.clone(),
+                            relay: output.relay.clone(),
+                        })?;
                     branch_state_snapshot = relay_state_snapshot_from_side_inputs(&side_inputs);
                     let evaluated = evaluate_output_branch_program(
                         ingestor,
@@ -1271,9 +1629,12 @@ impl Runtime {
                         execution_now,
                     )
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .change_context(IngestGroupError::BranchProgram {
+                        ingestor: ingestor.clone(),
+                        relay: output.relay.clone(),
+                    })?;
                     for (row, key) in input_rows.into_iter().zip(evaluated) {
-                        route_keys[row] = Some(key.map_err(|error| error.to_string()));
+                        route_keys[row] = Some(key);
                     }
                 }
             } else {
@@ -1285,11 +1646,10 @@ impl Runtime {
                         None
                     }
                     Some(OutputBranch::BranchedBy { .. }) => {
-                        return Err(format!(
-                            "ingestor '{}' output '{}' has no compiled branch program",
-                            ingestor.as_str(),
-                            output.relay.as_str()
-                        ));
+                        return Err(Report::new(IngestGroupError::MissingBranchProgram {
+                            ingestor: ingestor.clone(),
+                            relay: output.relay.clone(),
+                        }));
                     }
                 };
                 for (row, outcome) in outcomes.iter().enumerate() {
@@ -1304,26 +1664,26 @@ impl Runtime {
                 }
                 match outcome {
                     SingleRecordFilterMapOutcome::Output(record) => {
-                        match route_keys[row].take().ok_or_else(|| {
-                            format!(
-                                "ingestor '{}' output '{}' has no branch result for row {}",
-                                ingestor.as_str(),
-                                output.relay.as_str(),
-                                row
-                            )
-                        })? {
+                        let branch_result = route_keys[row].take().ok_or_else(|| {
+                            Report::new(IngestGroupError::MissingBranchResult {
+                                ingestor: ingestor.clone(),
+                                relay: output.relay.clone(),
+                                row,
+                            })
+                        })?;
+                        match branch_result {
                             Ok(key) => routed[row].push(RoutedOutcome {
                                 output_index,
                                 outcome: SingleRecordFilterMapOutcome::Output(record),
                                 key,
                             }),
-                            Err(reason) => routed[row].push(RoutedOutcome {
+                            Err(error) => routed[row].push(RoutedOutcome {
                                 output_index,
                                 outcome: SingleRecordFilterMapOutcome::MessageError {
                                     error: structured_message_error(
                                         execution_now,
                                         MessageErrorCode::Evaluation,
-                                        reason,
+                                        error.to_string(),
                                         MessageErrorOperation::Set,
                                         None,
                                         std::iter::empty(),
@@ -1411,11 +1771,10 @@ impl Runtime {
                     .verified("the queue above was filled with one ACK entry per route");
                 let output = &output_routes.routes[route_output.output_index];
                 output.branch.as_ref().ok_or_else(|| {
-                    format!(
-                        "ingestor '{}' output '{}' has no branch declaration",
-                        ingestor.as_str(),
-                        output.relay.as_str()
-                    )
+                    Report::new(IngestGroupError::MissingBranchDeclaration {
+                        ingestor: ingestor.clone(),
+                        relay: output.relay.clone(),
+                    })
                 })?;
                 collector.push(
                     &output.relay,
@@ -1490,12 +1849,14 @@ impl Runtime {
         consumer: &StreamConsumer,
         state: &KafkaOffsetStateOriginator,
         instance_idx: u64,
-    ) -> Result<(u64, bool), String> {
+    ) -> error_stack::Result<(u64, bool), IngestGroupError> {
         let (start_version, last_start) = if let Some(domain_state) = self.inner.domains.get(domain)
         {
             (domain_state.start_version, domain_state.last_start.clone())
         } else {
-            return Err(format!("domain '{}' is not installed", domain.as_str()));
+            return Err(Report::new(IngestGroupError::DomainNotInstalled {
+                domain: domain.clone(),
+            }));
         };
         let scheduled_partition_schedule = if let Some(execution) =
             self.inner.executions.get(domain)
@@ -1511,25 +1872,46 @@ impl Runtime {
         let offsets = if let nervix_models::DomainStartPoint::Resume = &last_start {
             let missing_partition_timestamp = self
                 .current_paced_domain_time(domain)
-                .map_err(|error| error.to_string())?;
+                .change_context(IngestGroupError::KafkaOffsets {
+                    operation: KafkaOffsetInitializationOperation::ReadDomainTime,
+                    domain: domain.clone(),
+                    ingestor: ingestor.clone(),
+                    topic: topic.to_string(),
+                })?;
             KafkaIngestor::resume_offsets_from_state(
                 consumer,
                 topic,
                 state.read(),
                 missing_partition_timestamp,
-            )?
+            )
+            .map_err(|error| {
+                Report::new(IngestGroupError::KafkaOffsets {
+                    operation: KafkaOffsetInitializationOperation::ResolveResumeOffsets,
+                    domain: domain.clone(),
+                    ingestor: ingestor.clone(),
+                    topic: topic.to_string(),
+                })
+                .attach_printable(error)
+            })?
         } else {
             let timestamp = match &last_start {
                 nervix_models::DomainStartPoint::Now { .. } => {
-                    return Err(format!(
-                        "domain '{}' has an unresolved START AT NOW",
-                        domain.as_str()
-                    ));
+                    return Err(Report::new(IngestGroupError::UnresolvedStartNow {
+                        domain: domain.clone(),
+                    }));
                 }
                 nervix_models::DomainStartPoint::At { timestamp, .. } => *timestamp,
                 nervix_models::DomainStartPoint::Resume => unreachable!("handled above"),
             };
-            KafkaIngestor::offsets_by_timestamp(consumer, topic, timestamp)?
+            KafkaIngestor::offsets_by_timestamp(consumer, topic, timestamp).map_err(|error| {
+                Report::new(IngestGroupError::KafkaOffsets {
+                    operation: KafkaOffsetInitializationOperation::ResolveTimestampOffsets,
+                    domain: domain.clone(),
+                    ingestor: ingestor.clone(),
+                    topic: topic.to_string(),
+                })
+                .attach_printable(error)
+            })?
         };
         let has_assignment = KafkaIngestor::assign_offsets_for_instance(
             consumer,
@@ -1537,24 +1919,47 @@ impl Runtime {
             &offsets,
             scheduled_partition_schedule.as_ref(),
             instance_idx,
-        )?;
+        )
+        .map_err(|error| {
+            Report::new(IngestGroupError::KafkaOffsets {
+                operation: KafkaOffsetInitializationOperation::AssignOffsets,
+                domain: domain.clone(),
+                ingestor: ingestor.clone(),
+                topic: topic.to_string(),
+            })
+            .attach_printable(error)
+        })?;
 
         if let nervix_models::DomainStartPoint::Resume = &last_start {
             return Ok((start_version, has_assignment));
         }
 
         let concrete_offsets =
-            KafkaIngestor::concrete_next_offsets_from_assignment(consumer, topic, &offsets)?;
+            KafkaIngestor::concrete_next_offsets_from_assignment(consumer, topic, &offsets)
+                .map_err(|error| {
+                    Report::new(IngestGroupError::KafkaOffsets {
+                        operation: KafkaOffsetInitializationOperation::ResolveConcreteOffsets,
+                        domain: domain.clone(),
+                        ingestor: ingestor.clone(),
+                        topic: topic.to_string(),
+                    })
+                    .attach_printable(error)
+                })?;
         self.reset_domain_kafka_offsets(state, concrete_offsets)
             .await
-            .map_err(|error| error.to_string())?;
+            .change_context(IngestGroupError::KafkaOffsets {
+                operation: KafkaOffsetInitializationOperation::ResetOffsets,
+                domain: domain.clone(),
+                ingestor: ingestor.clone(),
+                topic: topic.to_string(),
+            })?;
         Ok((start_version, has_assignment))
     }
 
     pub(in crate::runtime) async fn dispatch_raw_ingest_payload(
         &self,
         dispatch: RawIngestDispatch<'_>,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), IngestGroupError> {
         let RawIngestDispatch {
             domain,
             ingestor,
@@ -1576,7 +1981,11 @@ impl Runtime {
                 .await
             {
                 collector.discard_undispatched_payloads();
-                return Err(error.to_string());
+                return Err(
+                    Report::new(error).change_context(IngestGroupError::DecodePayload {
+                        ingestor: ingestor.clone(),
+                    }),
+                );
             }
         }
         let metadata = payload.metadata_rows();
@@ -1591,12 +2000,10 @@ impl Runtime {
             ingested_at: payload.observed_at(),
             acks: vec![AckSet::empty(); payload.len()],
         })
-        .await
-        .map_err(|error| error.to_string())?;
+        .await?;
         if flush {
             self.flush_ingest_collector(domain, ingestor, branched_senders, collector)
-                .await
-                .map_err(|error| error.to_string())?;
+                .await?;
         }
         Ok(())
     }
@@ -1711,16 +2118,18 @@ mod tests {
         let metadata = (0..acks.len())
             .map(|_| IngestMetadataRow::Headers { headers: &headers })
             .collect::<Vec<_>>();
-        collector.collect(IngestGroupContribution {
-            domain: &domain("default"),
-            ingestor: &named("grouped_event_source"),
-            timestamp_source: None,
-            output_routes: &RelayProcessorOutputsNode { routes: Vec::new() },
-            filter_where: None,
-            metadata: &metadata,
-            acks,
-            ingested_at: Timestamp::from_unix_nanos(1),
-        })
+        collector
+            .collect(IngestGroupContribution {
+                domain: &domain("default"),
+                ingestor: &named("grouped_event_source"),
+                timestamp_source: None,
+                output_routes: &RelayProcessorOutputsNode { routes: Vec::new() },
+                filter_where: None,
+                metadata: &metadata,
+                acks,
+                ingested_at: Timestamp::from_unix_nanos(1),
+            })
+            .map_err(|error| error.to_string())
     }
 
     /// A group of `n` messages must cost one set of Arrow columns, not `n` single-row batches and

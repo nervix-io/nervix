@@ -735,17 +735,17 @@ impl RelayProcessorNode {
 
                     let forwarded = match batch.take(&forwarded_rows) {
                         Ok(batch) => batch,
-                        Err((error, acks)) => {
+                        Err(failure) => {
                             branch.runtime.handle_internal_processor_error_for_acks(
                                 &branch.domain,
                                 self.kind,
                                 &self.processor,
                                 &self.error_policies,
-                                acks.iter(),
+                                failure.preserved.iter(),
                                 format!(
                                     "deduplicator '{}' failed to build output batch: {}",
                                     self.processor.as_str(),
-                                    error
+                                    failure.error
                                 ),
                             );
                             return;
@@ -794,7 +794,8 @@ impl RelayProcessorNode {
                     let messages = match batch.try_into_messages() {
                         Ok(messages) => messages,
                         Err(error_and_batch) => {
-                            let (error, batch) = *error_and_batch;
+                            let failure = *error_and_batch;
+                            let batch = failure.preserved;
                             branch.runtime.handle_internal_processor_error_for_acks(
                                 &branch.domain,
                                 self.kind,
@@ -804,7 +805,7 @@ impl RelayProcessorNode {
                                 format!(
                                     "window processor '{}' failed to decode arrow batch: {}",
                                     self.processor.as_str(),
-                                    error
+                                    failure.error
                                 ),
                             );
                             return;
@@ -1313,7 +1314,8 @@ impl RelayProcessorNode {
                     let messages = match batch.clone().try_into_messages() {
                         Ok(messages) => messages,
                         Err(error_and_batch) => {
-                            let (error, batch) = *error_and_batch;
+                            let failure = *error_and_batch;
+                            let batch = failure.preserved;
                             branch.runtime.handle_internal_processor_error_for_acks(
                                 &branch.domain,
                                 self.kind,
@@ -1323,7 +1325,7 @@ impl RelayProcessorNode {
                                 format!(
                                     "correlator '{}' failed to decode arrow batch: {}",
                                     self.processor.as_str(),
-                                    error
+                                    failure.error
                                 ),
                             );
                             return;

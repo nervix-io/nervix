@@ -108,6 +108,7 @@ pub(super) struct PendingProcessorOutputBatch {
 impl PendingProcessorOutputBatch {
     pub(super) fn into_relay_batch(self, acks: Vec<AckSet>) -> Result<RelayRecordBatch, String> {
         RelayRecordBatch::from_filtered_parts(self.key, self.batch, self.metadata, acks)
+            .map_err(|error| error.to_string())
     }
 }
 

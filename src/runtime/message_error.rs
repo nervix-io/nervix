@@ -887,7 +887,7 @@ impl Runtime {
                     domain: domain.clone(),
                     node: owner.clone(),
                     relay: relay.clone(),
-                    reason,
+                    reason: reason.to_string(),
                 })
             },
         )?;

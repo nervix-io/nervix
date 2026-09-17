@@ -307,9 +307,12 @@ impl RelayInputCollection {
             );
         }
         RelayRecordBatch::concat_preserving(collection.take_pending()).map_err(|error| {
-            let (reason, batches) = *error;
-            let acks = AckSet::merged(batches.iter().map(RelayRecordBatch::merged_acks));
-            RelayInputCollectionError { reason, acks }
+            let error = *error;
+            let acks = AckSet::merged(error.preserved.iter().map(RelayRecordBatch::merged_acks));
+            RelayInputCollectionError {
+                reason: error.error.to_string(),
+                acks,
+            }
         })
     }
 
