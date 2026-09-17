@@ -521,7 +521,7 @@ fn loads_the_keyed_windowed_shape_and_its_output_contract() {
     );
     assert_eq!(shape.messages_per_cycle(), 16);
     assert_eq!(shape.output_records_per_cycle(), 6);
-    assert_eq!(shape.expected_output_records(100), 600);
+    assert_eq!(shape.expected_output_records(100), Some(600));
     assert_eq!(shape.input_messages_for_output_records(600), 1_600);
 }
 

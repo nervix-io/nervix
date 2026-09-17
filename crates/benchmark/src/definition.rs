@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, fmt, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    path::{Path, PathBuf},
+};
 
 use meticulous::OptionExt as _;
 use serde::{Deserialize, Deserializer, de};
@@ -45,6 +49,9 @@ pub enum LoadShape {
     /// Identical payloads, one output message for every accepted input message.
     UniformPassthrough,
 
+    /// Identical payloads, each copied to a fixed number of output consumers.
+    UniformFanout { outputs_per_input: u64 },
+
     /// Cycles of distinct keys, each key produced `copies_per_key` times, with `retained_keys` of
     /// every `keys_per_cycle` keys carrying the retain marker in their padded value. A cycle
     /// therefore survives filtering and deduplication as exactly `retained_keys` records, which a
@@ -72,6 +79,8 @@ pub enum Implementation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NervixImplementation {
     pub template: PathBuf,
+    pub nodes: u8,
+    pub after_start: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +98,10 @@ pub struct ContainerImplementation {
 enum SerializedImplementation {
     Nervix {
         template: PathBuf,
+        #[serde(default = "default_nervix_nodes")]
+        nodes: u8,
+        #[serde(default)]
+        after_start: Option<PathBuf>,
     },
     Container {
         image: String,
@@ -106,9 +119,15 @@ impl<'de> Deserialize<'de> for Implementation {
         D: Deserializer<'de>,
     {
         Ok(match SerializedImplementation::deserialize(deserializer)? {
-            SerializedImplementation::Nervix { template } => {
-                Self::Nervix(NervixImplementation { template })
-            }
+            SerializedImplementation::Nervix {
+                template,
+                nodes,
+                after_start,
+            } => Self::Nervix(NervixImplementation {
+                template,
+                nodes,
+                after_start,
+            }),
             SerializedImplementation::Container {
                 image,
                 template,
@@ -126,6 +145,10 @@ impl<'de> Deserialize<'de> for Implementation {
             }),
         })
     }
+}
+
+const fn default_nervix_nodes() -> u8 {
+    1
 }
 
 impl<'de> Deserialize<'de> for LoadDuration {
@@ -237,52 +260,61 @@ impl BenchmarkDefinition {
                     "implementation name '{name}' must be a lowercase hyphenated slug"
                 ));
             }
-            if let Implementation::Container(container) = implementation {
-                if container.image.trim().is_empty() {
-                    return Err(format!(
-                        "container implementation '{name}' must declare a non-empty image"
-                    ));
+            match implementation {
+                Implementation::Nervix(nervix) => {
+                    if !(1..=3).contains(&nervix.nodes) {
+                        return Err(format!(
+                            "nervix implementation '{name}' nodes must be between one and three"
+                        ));
+                    }
                 }
-                if !container.config_path.is_absolute()
-                    || container.config_path.file_name().is_none()
-                    || container.config_path.components().any(|component| {
-                        matches!(
-                            component,
-                            std::path::Component::CurDir | std::path::Component::ParentDir
-                        )
-                    })
-                {
-                    return Err(format!(
-                        "container implementation '{name}' config_path must be an absolute file \
-                         path"
-                    ));
-                }
-                if container.command.as_ref().is_some_and(|command| {
-                    command.is_empty() || command.iter().any(|argument| argument.is_empty())
-                }) {
-                    return Err(format!(
-                        "container implementation '{name}' command must contain non-empty \
-                         arguments"
-                    ));
-                }
-                if container.readiness_port.is_some() != container.readiness_path.is_some() {
-                    return Err(format!(
-                        "container implementation '{name}' must declare readiness_port and \
-                         readiness_path together"
-                    ));
-                }
-                if container.readiness_port == Some(0) {
-                    return Err(format!(
-                        "container implementation '{name}' readiness_port must be positive"
-                    ));
-                }
-                if let Some(path) = &container.readiness_path
-                    && (!path.starts_with('/') || path.contains(char::is_whitespace))
-                {
-                    return Err(format!(
-                        "container implementation '{name}' readiness_path must be an absolute \
-                         HTTP path without whitespace"
-                    ));
+                Implementation::Container(container) => {
+                    if container.image.trim().is_empty() {
+                        return Err(format!(
+                            "container implementation '{name}' must declare a non-empty image"
+                        ));
+                    }
+                    if !container.config_path.is_absolute()
+                        || container.config_path.file_name().is_none()
+                        || container.config_path.components().any(|component| {
+                            matches!(
+                                component,
+                                std::path::Component::CurDir | std::path::Component::ParentDir
+                            )
+                        })
+                    {
+                        return Err(format!(
+                            "container implementation '{name}' config_path must be an absolute \
+                             file path"
+                        ));
+                    }
+                    if container.command.as_ref().is_some_and(|command| {
+                        command.is_empty() || command.iter().any(|argument| argument.is_empty())
+                    }) {
+                        return Err(format!(
+                            "container implementation '{name}' command must contain non-empty \
+                             arguments"
+                        ));
+                    }
+                    if container.readiness_port.is_some() != container.readiness_path.is_some() {
+                        return Err(format!(
+                            "container implementation '{name}' must declare readiness_port and \
+                             readiness_path together"
+                        ));
+                    }
+                    if container.readiness_port == Some(0) {
+                        return Err(format!(
+                            "container implementation '{name}' readiness_port must be positive"
+                        ));
+                    }
+                    if let Some(path) = &container.readiness_path
+                        && (!path.starts_with('/') || path.contains(char::is_whitespace))
+                    {
+                        return Err(format!(
+                            "container implementation '{name}' readiness_path must be an absolute \
+                             HTTP path without whitespace"
+                        ));
+                    }
                 }
             }
         }
@@ -296,7 +328,7 @@ impl LoadShape {
     #[must_use]
     pub fn messages_per_cycle(&self) -> u64 {
         match self {
-            Self::UniformPassthrough => 1,
+            Self::UniformPassthrough | Self::UniformFanout { .. } => 1,
             Self::KeyedWindowed {
                 keys_per_cycle,
                 copies_per_key,
@@ -312,16 +344,16 @@ impl LoadShape {
     pub fn output_records_per_cycle(&self) -> u64 {
         match self {
             Self::UniformPassthrough => 1,
+            Self::UniformFanout { outputs_per_input } => *outputs_per_input,
             Self::KeyedWindowed { retained_keys, .. } => *retained_keys,
         }
     }
 
-    /// Records the measured path owes for `cycles` complete cycles.
+    /// Records the measured path owes for `cycles` complete cycles, or `None` when the count does
+    /// not fit in the report's `u64` counter.
     #[must_use]
-    pub fn expected_output_records(&self, cycles: u64) -> u64 {
-        cycles
-            .checked_mul(self.output_records_per_cycle())
-            .assured("a run cannot complete more cycles than its message budget allows")
+    pub fn expected_output_records(&self, cycles: u64) -> Option<u64> {
+        cycles.checked_mul(self.output_records_per_cycle())
     }
 
     /// Input messages `records` output records account for, used as the live backlog signal while
@@ -334,6 +366,12 @@ impl LoadShape {
     }
 
     fn validate(&self) -> Result<(), String> {
+        if let Self::UniformFanout { outputs_per_input } = self {
+            if *outputs_per_input == 0 {
+                return Err("load.shape.outputs_per_input must be positive".to_string());
+            }
+            return Ok(());
+        }
         let Self::KeyedWindowed {
             keys_per_cycle,
             retained_keys,
@@ -375,10 +413,17 @@ impl LoadShape {
 }
 
 impl Implementation {
-    pub(crate) fn template(&self) -> &PathBuf {
+    pub(crate) fn template(&self) -> &Path {
         match self {
-            Self::Nervix(implementation) => &implementation.template,
-            Self::Container(implementation) => &implementation.template,
+            Self::Nervix(implementation) => implementation.template.as_path(),
+            Self::Container(implementation) => implementation.template.as_path(),
+        }
+    }
+
+    pub(crate) fn after_start_template(&self) -> Option<&Path> {
+        match self {
+            Self::Nervix(implementation) => implementation.after_start.as_deref(),
+            Self::Container(_) => None,
         }
     }
 }

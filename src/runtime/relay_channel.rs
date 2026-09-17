@@ -162,6 +162,11 @@ impl RelayDispatchGate {
         }
     }
 
+    /// Whether an ownership or lifecycle operation currently fences this relay.
+    pub(in crate::runtime) fn is_engaged(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
     /// Waits for all dispatch permits acquired before `generation` was engaged to be dropped.
     ///
     /// `false` means this engagement was released or reached its deadline before the fence
