@@ -132,7 +132,7 @@ CREATE WINDOW PROCESSOR device_summary
         samples = COUNT(input.value),
         minimum = MIN(input.value),
         maximum = MAX(input.value),
-        average = SUM(input.value) / COUNT(input.value)
+        average = AVG(input.value)
     WHERE output.samples > 0
     ON MESSAGE ERROR LOG;
 ```
