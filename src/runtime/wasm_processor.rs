@@ -1,16 +1,21 @@
 //! Branch-local WASM processor execution.
 //!
 //! Layer: data plane.
-//! - **Owns.** WASM invocation, guest output routing and branch-local timeout handling.
+//! - **Owns.** WASM invocation, guest output routing, branch-local timeout handling, and the
+//!   lifecycle stage and diagnostic identity of every WASM processor failure.
 //! - **Depends on.** Compiled WASM processors, Arrow batches and explicit execution contexts.
 //! - **Must not know.** NSPL parsing, placement policy or external connector clients.
 
 use error_stack::{Report, ResultExt as _};
 
-use super::*;
+use super::{state_replication::StateReplicationError, *};
 
-/// Every way preparing a branch's WASM processor instance, or the input envelope it is handed,
-/// fails.
+/// Every way a WASM processor's module, or one of its branch instances, fails.
+///
+/// A module failure belongs to the processor. Every later failure belongs to one branch instance
+/// and names the lifecycle stage it happened at, because the stage decides what the failure says
+/// about the saved state: only a guest's rejection of the state it was asked to restore classifies
+/// those bytes, and every other failure leaves them as usable as they were.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum WasmInstanceError {
     #[error("resource store is not attached")]
@@ -39,8 +44,9 @@ pub(super) enum WasmInstanceError {
         path: std::path::PathBuf,
     },
     #[error(
-        "failed to compile wasm processor '{}' resource '{}@{version}' file '{file}'",
+        "wasm processor '{}' {} failed (resource '{}' version {version} file '{file}')",
         .processor.as_str(),
+        WasmLifecycleStage::ModuleCompilation,
         .resource.as_str()
     )]
     CompileModule {
@@ -50,13 +56,21 @@ pub(super) enum WasmInstanceError {
         file: String,
     },
     #[error(
-        "failed to instantiate wasm processor '{}' branch '{}'",
-        .processor.as_str(),
-        branch_key_display(.branch)
+        "wasm processor '{}' instance is unavailable while saving guest state",
+        .processor.as_str()
     )]
-    Instantiate {
-        processor: ModelName,
-        branch: Option<BranchKey>,
+    InstanceUnavailable { processor: ModelName },
+    #[error(
+        "wasm processor '{}' {stage} failed ({module}{}{})",
+        .module.processor.as_str(),
+        WasmGuestExportDetail(*.export),
+        WasmSavedStateRevisionDetail(*.revision)
+    )]
+    Lifecycle {
+        module: WasmBranchModule,
+        stage: WasmLifecycleStage,
+        export: Option<&'static str>,
+        revision: Option<u64>,
     },
     #[error("failed to encode the wasm input batch")]
     EncodeInput,
@@ -70,10 +84,209 @@ pub(super) enum WasmInstanceError {
     },
 }
 
+/// The stage of a WASM processor branch instance's lifecycle at which a failure happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub(super) enum WasmLifecycleStage {
+    /// Resolving, reading, or compiling the pinned module file.
+    #[strum(to_string = "module compilation")]
+    ModuleCompilation,
+    /// A guest operation that failed without a verdict on saved state.
+    #[strum(to_string = "{0}")]
+    Guest(nervix_wasm::WasmGuestOperation),
+    /// The guest could not decode the snapshot envelope of the saved state and rejected it.
+    #[strum(to_string = "snapshot envelope decoding")]
+    SnapshotEnvelopeDecoding,
+    /// The guest decoded the saved snapshot and rejected the application state it carries.
+    #[strum(to_string = "application state restoration")]
+    ApplicationStateRestoration,
+    /// The host could not decode or validate what the guest emitted.
+    #[strum(to_string = "output emission")]
+    OutputEmission,
+    /// Writing the saved state to the node's state store.
+    #[strum(to_string = "local state persistence")]
+    LocalPersistence,
+    /// Confirming the saved state with its replicas.
+    #[strum(to_string = "state replication")]
+    Replication,
+    /// A peer refused to serve the state because it is not the state's authority.
+    #[strum(to_string = "state authority check")]
+    AuthorityRejection,
+}
+
+impl WasmLifecycleStage {
+    /// The stage a failed guest operation belongs to. A verdict on saved state and output the host
+    /// cannot decode are stages of their own; every other failure belongs to its operation.
+    pub(super) fn of_guest_failure(failure: &nervix_wasm::WasmGuestError) -> Self {
+        match failure.saved_state_rejection() {
+            Some(nervix_wasm::SavedStateRejection::SnapshotEnvelope) => {
+                return Self::SnapshotEnvelopeDecoding;
+            }
+            Some(nervix_wasm::SavedStateRejection::ApplicationState) => {
+                return Self::ApplicationStateRestoration;
+            }
+            None => {}
+        }
+        if failure.is_invalid_emission() {
+            return Self::OutputEmission;
+        }
+        Self::Guest(failure.operation())
+    }
+
+    /// The stage a failed save of guest state belongs to once the guest produced the state.
+    pub(super) fn of_state_persistence(failure: &StateReplicationError) -> Self {
+        if failure.is_local_persistence() {
+            return Self::LocalPersistence;
+        }
+        if failure.is_authority_rejection() {
+            return Self::AuthorityRejection;
+        }
+        Self::Replication
+    }
+}
+
+/// One WASM processor branch instance and the pinned module file it runs, as a diagnostic names
+/// them. The pinned resource version carries the owning domain, which the node reporting the
+/// failure already renders beside it.
+#[derive(Debug, Clone)]
+pub(super) struct WasmBranchModule {
+    pub(super) processor: ModelName,
+    pub(super) branch: Option<BranchKey>,
+    pub(super) resource: ResourceId,
+    pub(super) file: String,
+}
+
+impl WasmBranchModule {
+    /// Reports a failed guest operation on this instance under the stage it belongs to. `revision`
+    /// is the saved state revision the operation was restoring, when it was restoring one.
+    pub(super) fn guest_failure(
+        &self,
+        failure: Report<nervix_wasm::WasmGuestError>,
+        revision: Option<u64>,
+    ) -> Report<WasmInstanceError> {
+        let stage = WasmLifecycleStage::of_guest_failure(failure.current_context());
+        let export = failure.current_context().export();
+        failure.change_context(WasmInstanceError::Lifecycle {
+            module: self.clone(),
+            stage,
+            export,
+            revision,
+        })
+    }
+
+    /// Reports that the guest state saved at `revision` could not be persisted or replicated.
+    pub(super) fn persistence_failure(
+        &self,
+        failure: Report<StateReplicationError>,
+        revision: u64,
+    ) -> Report<WasmInstanceError> {
+        let stage = WasmLifecycleStage::of_state_persistence(failure.current_context());
+        failure.change_context(WasmInstanceError::Lifecycle {
+            module: self.clone(),
+            stage,
+            export: None,
+            revision: Some(revision),
+        })
+    }
+
+    /// Reports output the guest emitted that failed validation.
+    pub(super) fn emission_failure<C: error_stack::Context>(
+        &self,
+        failure: Report<C>,
+    ) -> Report<WasmInstanceError> {
+        failure.change_context(WasmInstanceError::Lifecycle {
+            module: self.clone(),
+            stage: WasmLifecycleStage::OutputEmission,
+            export: Some("nervix_read_emit"),
+            revision: None,
+        })
+    }
+}
+
+impl std::fmt::Display for WasmBranchModule {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.branch {
+            Some(branch) => write!(formatter, "branch {branch}")?,
+            None => formatter.write_str("unbranched")?,
+        }
+        write!(
+            formatter,
+            ", resource '{}' version {} file '{}'",
+            self.resource.identifier.as_str(),
+            self.resource.version,
+            self.file
+        )
+    }
+}
+
+/// A branch's live guest instance, together with the pinned module it was instantiated from.
+#[derive(Debug)]
+pub(super) struct WasmLiveInstance {
+    pub(super) module: WasmBranchModule,
+    pub(super) guest: nervix_wasm::WasmBranchInstance,
+}
+
+impl WasmCompiledBranchProcessor {
+    /// Instantiates and initializes one branch guest of this module, hands it `saved` when the
+    /// branch has saved state, and reports a failure under the lifecycle stage it happened at.
+    pub(super) async fn instantiate_branch(
+        &self,
+        module: WasmBranchModule,
+        limits: nervix_models::WasmProcessorLimits,
+        init: WasmBranchInit,
+        execution_now: Timestamp,
+        saved: Option<RestorableGuestState<'_>>,
+    ) -> error_stack::Result<WasmLiveInstance, WasmInstanceError> {
+        let mut restored_bytes = None;
+        let mut restored_revision = None;
+        if let Some(saved) = saved {
+            restored_bytes = Some(saved.bytes);
+            restored_revision = Some(saved.revision);
+        }
+        let instantiation = self
+            .compiled
+            .instantiate_branch(
+                limits,
+                init,
+                nervix_wasm::WasmExecutionContext::new(execution_now),
+                restored_bytes,
+            )
+            .await;
+        match instantiation {
+            Ok(guest) => Ok(WasmLiveInstance { module, guest }),
+            Err(error) => Err(module.guest_failure(error, restored_revision)),
+        }
+    }
+}
+
+/// The guest export a lifecycle failure names, rendered as a trailing diagnostic detail.
+struct WasmGuestExportDetail(Option<&'static str>);
+
+impl std::fmt::Display for WasmGuestExportDetail {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(export) => write!(formatter, ", export '{export}'"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The saved state revision a lifecycle failure involves, rendered as a trailing diagnostic
+/// detail.
+struct WasmSavedStateRevisionDetail(Option<u64>);
+
+impl std::fmt::Display for WasmSavedStateRevisionDetail {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(revision) => write!(formatter, ", saved state revision {revision}"),
+            None => Ok(()),
+        }
+    }
+}
+
 pub(super) async fn flush_branch_wasm_processor(
     context: WasmFlushContext<'_>,
     compiled: &mut Option<WasmCompiledBranchProcessor>,
-    instance: &mut Option<Box<nervix_wasm::WasmBranchInstance>>,
+    instance: &mut Option<Box<WasmLiveInstance>>,
     ack_map: &mut WasmAckMap,
     next_ack_token: &mut u64,
     pending: &mut Vec<RelayRecordBatch>,
@@ -178,7 +391,7 @@ pub(super) async fn flush_branch_wasm_processor(
         }
     }
 
-    if let Err(error) = ensure_wasm_processor_instance(
+    let ensured = ensure_wasm_processor_instance(
         WasmInstanceContext {
             branch,
             processor,
@@ -195,8 +408,8 @@ pub(super) async fn flush_branch_wasm_processor(
         compiled,
         instance,
     )
-    .await
-    {
+    .await;
+    if let Err(error) = ensured {
         branch.runtime.handle_general_error_for_acks(
             &branch.domain,
             node_kind,
@@ -207,7 +420,6 @@ pub(super) async fn flush_branch_wasm_processor(
         );
         return;
     }
-
     if instance.is_none() {
         branch.runtime.handle_internal_processor_error_for_acks(
             &branch.domain,
@@ -243,7 +455,8 @@ pub(super) async fn flush_branch_wasm_processor(
     ack_map.extend(input_ack_map);
     let process_result = instance
         .as_mut()
-        .verified("the let-else above returned unless this branch holds an instance")
+        .verified("the is_none check above returned unless this branch holds an instance")
+        .guest
         .process_envelope_in_context(
             &envelope,
             nervix_wasm::WasmExecutionContext::new(execution_now),
@@ -253,17 +466,18 @@ pub(super) async fn flush_branch_wasm_processor(
         Ok(outputs) => outputs,
         Err(error) => {
             let resource_limit_exceeded = error.current_context().is_resource_limit_exceeded();
+            let failure = instance
+                .as_ref()
+                .verified("the is_none check above returned unless this branch holds an instance")
+                .module
+                .guest_failure(error, None);
             branch.runtime.handle_general_error_for_acks(
                 &branch.domain,
                 node_kind,
                 processor,
                 error_policies,
                 ack_map.values().map(|context| &context.acks),
-                format!(
-                    "wasm processor '{}' failed to process batch: {}",
-                    processor.as_str(),
-                    error
-                ),
+                format!("{failure:#}"),
             );
             ack_map.clear();
             if resource_limit_exceeded {
@@ -286,6 +500,10 @@ pub(super) async fn flush_branch_wasm_processor(
             input_schema: &input_schema,
             output_schemas: &output_schemas,
             key: &output_branch_key,
+            module: &instance
+                .as_ref()
+                .verified("the is_none check above returned unless this branch holds an instance")
+                .module,
             dispatch_error: "failed to forward message",
             execution_now,
         },
@@ -393,7 +611,7 @@ impl Runtime {
 pub(super) async fn ensure_wasm_processor_instance(
     context: WasmInstanceContext<'_>,
     compiled: &mut Option<WasmCompiledBranchProcessor>,
-    instance: &mut Option<Box<nervix_wasm::WasmBranchInstance>>,
+    instance: &mut Option<Box<WasmLiveInstance>>,
 ) -> error_stack::Result<(), WasmInstanceError> {
     let WasmInstanceContext {
         branch,
@@ -408,8 +626,8 @@ pub(super) async fn ensure_wasm_processor_instance(
         replicated_state,
         execution_now,
     } = context;
-    let module = match compiled.as_ref() {
-        Some(module) => module.compiled.clone(),
+    let compiled_module = match compiled.as_ref() {
+        Some(compiled_module) => compiled_module.clone(),
         None => {
             let prepared = branch
                 .runtime
@@ -421,10 +639,9 @@ pub(super) async fn ensure_wasm_processor_instance(
                     file,
                 )
                 .await?;
-            let module = prepared.compiled.clone();
-            *compiled = Some(prepared);
+            *compiled = Some(prepared.clone());
             *instance = None;
-            module
+            prepared
         }
     };
 
@@ -443,20 +660,17 @@ pub(super) async fn ensure_wasm_processor_instance(
                 .map(|(relay, schema)| schema.wasm_processor_schema(relay.as_str().to_string()))
                 .collect(),
         };
-        let restored_guest_state = replicated_state.restore_guest_state();
-        let instantiated = module
-            .instantiate_branch(
-                limits,
-                init,
-                nervix_wasm::WasmExecutionContext::new(execution_now),
-                restored_guest_state.restorable(),
-            )
-            .await
-            .change_context_lazy(|| WasmInstanceError::Instantiate {
-                processor: processor.clone(),
-                branch: branch.key.clone(),
-            })?;
-        *instance = Some(Box::new(instantiated));
+        let module = WasmBranchModule {
+            processor: processor.clone(),
+            branch: branch.key.clone(),
+            resource: ResourceId::new(branch.domain.clone(), resource.clone(), resource_version),
+            file: file.to_string(),
+        };
+        let saved = replicated_state.restore_guest_state();
+        let live = compiled_module
+            .instantiate_branch(module, limits, init, execution_now, saved.restorable())
+            .await?;
+        *instance = Some(Box::new(live));
     }
     Ok(())
 }
@@ -529,6 +743,166 @@ mod tests {
 
     use super::*;
     use crate::runtime_schema::{RuntimeValue, test_runtime_row};
+
+    fn tenant_branch(tenant: &str) -> Option<BranchKey> {
+        let key = BranchKey::from_fields([(
+            FieldName::parse("tenant").expect("valid identifier"),
+            RuntimeValue::String(tenant.to_string()),
+        )])
+        .expect("test branch key must be non-empty");
+        Some(key)
+    }
+
+    fn sessionizer_module(branch: Option<BranchKey>) -> WasmBranchModule {
+        WasmBranchModule {
+            processor: ModelName::parse("sessionizer").expect("valid identifier"),
+            branch,
+            resource: ResourceId::new(
+                DomainName::parse("events").expect("valid domain"),
+                ResourceName::parse("sessionizer").expect("valid identifier"),
+                3,
+            ),
+            file: "sessionizer.wasm".to_string(),
+        }
+    }
+
+    fn placement() -> RuntimeStatePlacement {
+        RuntimeStatePlacement {
+            domain: DomainName::parse("events").expect("valid domain"),
+            state: RuntimeStateKind::WasmProcessor,
+            kind: ModelKind::WasmProcessor,
+            identifier: ModelName::parse("sessionizer").expect("valid identifier"),
+            schema_fingerprint: [0; 32],
+            branch_key: tenant_branch("alpha"),
+        }
+    }
+
+    #[test]
+    fn a_rejected_saved_state_is_a_stage_of_its_own() {
+        let envelope = nervix_wasm::WasmGuestError::SnapshotEnvelopeRejected { reason: None };
+        let application = nervix_wasm::WasmGuestError::ApplicationStateRejected { reason: None };
+
+        assert_eq!(
+            WasmLifecycleStage::of_guest_failure(&envelope),
+            WasmLifecycleStage::SnapshotEnvelopeDecoding
+        );
+        assert_eq!(
+            WasmLifecycleStage::of_guest_failure(&application),
+            WasmLifecycleStage::ApplicationStateRestoration
+        );
+    }
+
+    #[test]
+    fn a_failed_restore_without_a_verdict_stays_with_its_operation() {
+        let exhausted = nervix_wasm::WasmGuestError::Failed {
+            operation: nervix_wasm::WasmGuestOperation::StateRestore,
+            cause: nervix_wasm::WasmGuestCallError::FuelExhausted {
+                limit: nonzero!(1_000u64),
+                export: Some("nervix_load_state"),
+            },
+        };
+        let refused_init = nervix_wasm::WasmGuestError::Failed {
+            operation: nervix_wasm::WasmGuestOperation::Initialization,
+            cause: nervix_wasm::WasmGuestCallError::GlobalError {
+                reason: "unsupported schema".to_string(),
+            },
+        };
+
+        assert_eq!(
+            WasmLifecycleStage::of_guest_failure(&exhausted),
+            WasmLifecycleStage::Guest(nervix_wasm::WasmGuestOperation::StateRestore)
+        );
+        assert_eq!(
+            WasmLifecycleStage::of_guest_failure(&refused_init),
+            WasmLifecycleStage::Guest(nervix_wasm::WasmGuestOperation::Initialization)
+        );
+    }
+
+    #[test]
+    fn output_the_host_cannot_decode_is_an_emission_failure() {
+        let decode_failure =
+            WasmEnvelope::decode(&[0xa0]).expect_err("a single byte is not an envelope");
+        let emission = nervix_wasm::WasmGuestError::Failed {
+            operation: nervix_wasm::WasmGuestOperation::BatchProcessing,
+            cause: nervix_wasm::WasmGuestCallError::InvalidEmission(decode_failure),
+        };
+
+        assert_eq!(
+            WasmLifecycleStage::of_guest_failure(&emission),
+            WasmLifecycleStage::OutputEmission
+        );
+        assert_eq!(emission.export(), Some("nervix_read_emit"));
+    }
+
+    #[test]
+    fn a_state_persistence_failure_is_classified_by_what_refused_the_state() {
+        let local = StateReplicationError::Persist {
+            placement: placement(),
+            lsm: 4,
+        };
+        let quorum = StateReplicationError::ReplicaQuorum {
+            placement: placement(),
+            lsm: 4,
+            required_acks: 1,
+        };
+        let refused = StateReplicationError::RemoteFailure {
+            target: ClusterNodeName::parse("node-2").expect("valid name"),
+            placement: placement(),
+            failure: nervix_interconnect::RemoteOperationFailure::rejected(
+                nervix_interconnect::RemoteOperationSubject::domain(&placement().domain),
+            ),
+        };
+
+        assert_eq!(
+            WasmLifecycleStage::of_state_persistence(&local),
+            WasmLifecycleStage::LocalPersistence
+        );
+        assert_eq!(
+            WasmLifecycleStage::of_state_persistence(&quorum),
+            WasmLifecycleStage::Replication
+        );
+        assert_eq!(
+            WasmLifecycleStage::of_state_persistence(&refused),
+            WasmLifecycleStage::AuthorityRejection
+        );
+    }
+
+    #[test]
+    fn a_rejected_saved_state_diagnostic_names_the_branch_module_export_and_revision() {
+        let rejection = Report::new(nervix_wasm::WasmGuestError::ApplicationStateRejected {
+            reason: Some("counters header is truncated".to_string()),
+        });
+
+        let failure = sessionizer_module(tenant_branch("alpha")).guest_failure(rejection, Some(12));
+
+        assert_eq!(
+            format!("{failure:#}"),
+            "wasm processor 'sessionizer' application state restoration failed (branch \
+             {\"tenant\":\"alpha\"}, resource 'sessionizer' version 3 file 'sessionizer.wasm', \
+             export 'nervix_load_state', saved state revision 12): wasm guest rejected the \
+             application state in its saved snapshot: counters header is truncated"
+        );
+    }
+
+    #[test]
+    fn an_unbranched_guest_failure_diagnostic_renders_every_cause_once() {
+        let exhausted = Report::new(nervix_wasm::WasmGuestError::Failed {
+            operation: nervix_wasm::WasmGuestOperation::BatchProcessing,
+            cause: nervix_wasm::WasmGuestCallError::FuelExhausted {
+                limit: nonzero!(1_000u64),
+                export: Some("nervix_process_batch"),
+            },
+        });
+
+        let failure = sessionizer_module(None).guest_failure(exhausted, None);
+
+        assert_eq!(
+            format!("{failure:#}"),
+            "wasm processor 'sessionizer' batch processing failed (unbranched, resource \
+             'sessionizer' version 3 file 'sessionizer.wasm', export 'nervix_process_batch'): \
+             wasm guest batch processing failed: wasm guest exhausted MAX FUEL 1000"
+        );
+    }
 
     #[tokio::test]
     async fn wasm_input_envelope_retains_one_shared_source_batch_and_source_tokens() {

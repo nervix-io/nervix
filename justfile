@@ -143,6 +143,11 @@ test-shuttle-replay schedule:
 test-vm *args:
     cargo test --package nervix-vm --lib -- {{ args }}
 
+# Run the WASM host, guest SDK and ABI protocol unit tests, which live in their own crates rather
+# than the server lib. The host tests drive the bundled Rust and Go reference guests.
+test-wasm *args: wasm-processor-guests
+    cargo test --package nervix-wasm --package nervix-wasm-sdk --package nervix-wasm-protocol --lib -- {{ args }}
+
 # Run the consensus unit tests, which live in the nervix-consensus crate rather than the server lib.
 test-consensus *args:
     cargo test --package nervix-consensus --lib -- {{ args }}
