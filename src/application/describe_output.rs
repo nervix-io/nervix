@@ -19,8 +19,8 @@ use nervix_models::{
     CreateWindowProcessor, DomainName, EmitSink, FieldName, IcebergCatalog, IngestSource,
     IngestTimestampSource, KafkaOffsetMode, Model, ModelName, MongoDbConflictAction,
     MySqlConflictAction, NodeRef, PlacementName, PlacementPolicy, PostgresConflictAction,
-    ProcessorInputs, ProcessorOutputs, RelayName, ScheduledNode, expression_to_nspl,
-    ingest_quiesce_to_nspl,
+    ProcessorInputs, ProcessorOutputs, RelayName, RequestedResourceVersion, ScheduledNode,
+    expression_to_nspl, ingest_quiesce_to_nspl,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram};
 use tokio::time::Duration;
@@ -1003,15 +1003,11 @@ pub(in crate::application) fn format_wasm_processor_describe_output(
         "kind: WASM PROCESSOR".to_string(),
     ];
     lines.extend(format_schedule_placement_lines(scheduled_node));
-    let version = match processor.resource_version {
-        Some(version) => version.to_string(),
-        None => "latest".to_string(),
-    };
     lines.extend([
         format!("from: {}", processor_input_names(&processor.from)),
         format!("mode: {}", processor.mode.as_ref()),
         format!("resource: {}", processor.resource.as_str()),
-        format!("resource version: {version}"),
+        format!("resource version: {}", processor.resource_version),
         format!("file: {}", processor.file),
         format!("max fuel: {}", processor.limits.max_fuel),
         format!("max memory: {} bytes", processor.limits.max_memory_bytes),
@@ -1199,7 +1195,7 @@ pub(in crate::application) fn placement_runtime_node_ref_suggestions(
     registry: &Registry,
     domain: &DomainName,
     prefix: &str,
-    queued: &[RegistryMutation],
+    queued: &[RegistryMutation<RequestedResourceVersion>],
 ) -> Vec<String> {
     let Ok(models) = registry.resulting_models(domain, queued) else {
         return Vec::new();
@@ -1225,7 +1221,7 @@ pub(in crate::application) fn placement_runtime_node_ref_suggestions(
         .collect()
 }
 
-fn placement_member_model_is_eligible(model: &Model) -> bool {
+fn placement_member_model_is_eligible<Version>(model: &Model<Version>) -> bool {
     match model {
         Model::Generator(_)
         | Model::Inferencer(_)

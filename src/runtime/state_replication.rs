@@ -1797,7 +1797,11 @@ impl Runtime {
         let domain_clock = self
             .bind_domain_clock(domain)
             .change_context_lazy(restore)?;
-        let pinned = ResourceId::new(domain.clone(), processor.resource.clone(), compiled.version);
+        let pinned = ResourceId::new(
+            domain.clone(),
+            processor.resource.clone(),
+            processor.resource_version,
+        );
         for (placement, snapshot) in checkpoints {
             tokio::task::consume_budget().await;
             if placement.state != RuntimeStateKind::WasmProcessor {

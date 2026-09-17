@@ -24,10 +24,10 @@ use nervix_models::{
     JunctionName, LookupName, MaterializedStateDependency, MaterializedStatePolicy,
     MessageErrorPolicy, ModelName, NameError, OutputBranch, PlacementName, ProcessorInputWhere,
     ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarSubscriptionName, QueueGroupName,
-    QueueName, ReingestorName, RelayName, ReordererName, ResourceName, RetryPolicy,
-    RouteConstruction, SchemaName, SignalingProtocolName, SubjectName, SubscriptionName, TableName,
-    TopicName, UdfName, UserName, VhostName, WasmProcessorName, WindowProcessorName,
-    WireSchemaName,
+    QueueName, ReingestorName, RelayName, ReordererName, RequestedResourceVersion, ResourceName,
+    RetryPolicy, RouteConstruction, SchemaName, SignalingProtocolName, SubjectName,
+    SubscriptionName, TableName, TopicName, UdfName, UserName, VhostName, WasmProcessorName,
+    WindowProcessorName, WireSchemaName,
 };
 use sorted_vec::SortedSet;
 
@@ -328,6 +328,24 @@ pub fn u64_value<'src>()
             .map_err(|_| Rich::custom(span, format!("invalid integer '{raw}'")))
     })
     .boxed()
+}
+
+/// The version clause every resource binding requires: `VERSION <n>` or `VERSION LATEST`.
+///
+/// Binding kinds share this one clause, so `LATEST` means the same thing wherever a resource is
+/// bound. The number carries its own label, which lets completion offer the resource's completed
+/// versions beside `LATEST`.
+pub fn resource_version_clause<'src>()
+-> impl Parser<'src, &'src [Token], RequestedResourceVersion, extra::Err<ParseError<'src>>> + Clone
+{
+    kw(Identifier::Version)
+        .ignore_then(choice((
+            kw(Identifier::Latest).to(RequestedResourceVersion::Latest),
+            u64_value()
+                .labelled("completed_resource_version")
+                .map(RequestedResourceVersion::Number),
+        )))
+        .boxed()
 }
 
 /// An integer written where zero has no meaning, parsed straight into `NonZeroU64`.

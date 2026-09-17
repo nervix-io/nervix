@@ -1067,7 +1067,7 @@ mod tests {
         validate_signaling_protocol(&signaling_protocol(
             SignalingWireFormat::Protobuf(SignalingProtobufConfig {
                 resource: named("proto_bundle"),
-                resource_version: Some(1),
+                resource_version: 1,
                 config: Vec::new(),
                 send_message: "nervix.test.Subscribe".to_string(),
                 wait_message: "nervix.test.Ack".to_string(),
@@ -1138,7 +1138,7 @@ mod tests {
         let error = validate_signaling_protocol(&signaling_protocol(
             SignalingWireFormat::Protobuf(SignalingProtobufConfig {
                 resource: named("proto_bundle"),
-                resource_version: None,
+                resource_version: 1,
                 config: Vec::new(),
                 send_message: "nervix.test.Subscribe".to_string(),
                 wait_message: "  ".to_string(),

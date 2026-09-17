@@ -504,7 +504,8 @@ impl Runtime {
             .inner
             .resource_versions
             .load()
-            .resolve_completed_version(domain, &lookup.resource, None)
+            .uploads
+            .resolve_completed_version(domain, &lookup.resource, RequestedResourceVersion::Latest)
             .change_context(LookupRuntimeError::MissingResourceVersion {
                 domain: domain.clone(),
                 lookup: lookup.name.clone(),

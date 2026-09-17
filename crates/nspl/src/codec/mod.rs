@@ -2,16 +2,16 @@ use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
     CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
-    CodecWireFormat, CreateCodec, CreateStatement, SchemaName,
+    CodecWireFormat, CreateCodec, CreateStatement, RequestedResourceVersion, SchemaName,
 };
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, codec_name, config_entries_block, field_ref,
-        if_not_exists_clause, into_parse_error, kw, lex_input, resource_ref, schema_ref,
-        string_lit, suggest_from, tok, u64_value, wire_avro_schema_ref, wire_cbor_schema_ref,
-        wire_json_schema_ref,
+        if_not_exists_clause, into_parse_error, kw, lex_input, resource_ref,
+        resource_version_clause, schema_ref, string_lit, suggest_from, tok, wire_avro_schema_ref,
+        wire_cbor_schema_ref, wire_json_schema_ref,
     },
 };
 
@@ -19,14 +19,17 @@ use crate::{
 /// the wire schema that format needs, the Nervix schema it decodes into, and the per-field
 /// encoding rules.
 struct CodecBody {
-    wire_format: CodecWireFormat,
+    wire_format: CodecWireFormat<RequestedResourceVersion>,
     schema: SchemaName,
     encoding_rules: Vec<CodecEncodingRule>,
 }
 
-pub fn create_codec_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateCodec>, extra::Err<ParseError<'src>>> + Clone
-{
+pub fn create_codec_parser<'src>() -> impl Parser<
+    'src,
+    &'src [Token],
+    CreateStatement<CreateCodec<RequestedResourceVersion>>,
+    extra::Err<ParseError<'src>>,
+> + Clone {
     let ingestion_transformations = kw(Identifier::On)
         .ignore_then(kw(Identifier::Ingestion))
         .ignore_then(string_lit())
@@ -127,7 +130,7 @@ pub fn create_codec_parser<'src>()
         .ignore_then(kw(Identifier::Using))
         .ignore_then(kw(Identifier::Resource))
         .ignore_then(resource_ref())
-        .then(kw(Identifier::Version).ignore_then(u64_value()).or_not())
+        .then(resource_version_clause())
         .then(config_entries_block())
         .boxed()
         .then_ignore(kw(Identifier::Message))
@@ -200,7 +203,7 @@ pub fn create_codec_parser<'src>()
 
 pub fn parse_create_codec_tokens(
     tokens: &[Token],
-) -> Result<CreateStatement<CreateCodec>, Vec<ParseError<'_>>> {
+) -> Result<CreateStatement<CreateCodec<RequestedResourceVersion>>, Vec<ParseError<'_>>> {
     let out = create_codec_parser().then_ignore(end()).parse(tokens);
     if out.has_errors() {
         Err(out.into_errors())
@@ -213,7 +216,7 @@ pub fn parse_create_codec_tokens(
 
 pub fn parse_create_codec(
     input: &str,
-) -> Result<CreateStatement<CreateCodec>, ParseFromSourceError> {
+) -> Result<CreateStatement<CreateCodec<RequestedResourceVersion>>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -307,7 +310,7 @@ mod tests {
             CodecWireFormat::Protobuf(CodecProtobufConfig {
                 resource: nervix_models::ResourceName::parse("proto_bundle")
                     .expect("valid identifier"),
-                resource_version: Some(2),
+                resource_version: RequestedResourceVersion::Number(2),
                 config: vec![
                     ClientConfigEntry {
                         key: "file".to_string(),
@@ -326,6 +329,21 @@ mod tests {
             })
         );
         assert_eq!(parsed.schema.as_str(), "notification_schema");
+    }
+
+    #[test]
+    fn parses_create_protobuf_codec_bound_to_the_latest_resource_version() {
+        let parsed = parse_create_codec(
+            "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION \
+             LATEST CONFIG {'file' = 'notification.proto'} MESSAGE 'nervix.test.Notification' TO \
+             SCHEMA notification_schema WITH JAQ TRANSFORMATIONS ON INGESTION '.';",
+        )
+        .expect("parse should succeed");
+
+        let CodecWireFormat::Protobuf(config) = &parsed.wire_format else {
+            panic!("expected a protobuf codec");
+        };
+        assert_eq!(config.resource_version, RequestedResourceVersion::Latest);
     }
 
     fn wire_schema_name(name: &str) -> WireSchemaName {
@@ -362,7 +380,7 @@ mod tests {
     )]
     fn parses_schemaful_codec_formats(
         #[case] input: &str,
-        #[case] wire_format: CodecWireFormat,
+        #[case] wire_format: CodecWireFormat<RequestedResourceVersion>,
         #[case] name: &str,
         #[case] schema: &str,
     ) {
@@ -394,14 +412,24 @@ mod tests {
         "CREATE CODEC notification_codec FROM XML TO SCHEMA notification_schema;"
     )]
     #[case::protobuf_without_jaq_transformation(
-        "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle CONFIG \
-         {\"file\" = \"notification.proto\"} MESSAGE \"nervix.test.Notification\" TO SCHEMA \
-         notification_schema;"
+        "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION 1 \
+         CONFIG {\"file\" = \"notification.proto\"} MESSAGE \"nervix.test.Notification\" TO \
+         SCHEMA notification_schema;"
     )]
     #[case::protobuf_without_config_clause(
-        "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle MESSAGE \
-         \"nervix.test.Notification\" TO SCHEMA notification_schema WITH JAQ TRANSFORMATIONS ON \
-         INGESTION \".\";"
+        "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION 1 \
+         MESSAGE \"nervix.test.Notification\" TO SCHEMA notification_schema WITH JAQ \
+         TRANSFORMATIONS ON INGESTION \".\";"
+    )]
+    #[case::protobuf_without_resource_version(
+        "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle CONFIG \
+         {\"file\" = \"notification.proto\"} MESSAGE \"nervix.test.Notification\" TO SCHEMA \
+         notification_schema WITH JAQ TRANSFORMATIONS ON INGESTION \".\";"
+    )]
+    #[case::protobuf_with_a_named_version(
+        "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION newest \
+         CONFIG {\"file\" = \"notification.proto\"} MESSAGE \"nervix.test.Notification\" TO \
+         SCHEMA notification_schema WITH JAQ TRANSFORMATIONS ON INGESTION \".\";"
     )]
     #[case::without_explicit_wire_format(
         "CREATE CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA \
@@ -466,6 +494,21 @@ mod tests {
         "CREATE CODEC notification_codec FROM PROTOBUF ",
         &["USING"],
         &["WIRE"]
+    )]
+    #[case::only_version_after_protobuf_resource(
+        "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle ",
+        &["VERSION"],
+        &["CONFIG", "MESSAGE"]
+    )]
+    #[case::latest_and_completed_version_after_protobuf_version(
+        "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION ",
+        &["LATEST", "completed_resource_version"],
+        &["CONFIG", "integer_literal"]
+    )]
+    #[case::config_after_protobuf_latest_resource_version(
+        "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION LATEST ",
+        &["CONFIG"],
+        &["MESSAGE", "LATEST"]
     )]
     #[case::config_after_protobuf_resource_version(
         "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION 1 ",

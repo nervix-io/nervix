@@ -4,6 +4,8 @@
 The model is intentionally dependency-free: it trains a two-feature linear
 regressor with plain Python and writes the ONNX protobuf wire format directly.
 The per-message model has `features: FLOAT[2] -> score: FLOAT[1]`.
+The alternate per-message model has the same signature and different parameters, so tests can
+tell which of two resource versions produced a score.
 The batch model has `features, mask: FLOAT[batch, 2] -> scores: FLOAT[batch, 2]`.
 Its outputs include a batch-wide feature mean so tests can distinguish one
 collected-batch invocation from repeated single-message invocations.
@@ -132,11 +134,15 @@ def node(
     return bytes(out)
 
 
-def per_message_graph(weights: list[float], bias: float) -> bytes:
+ALTERNATE_WEIGHTS = [-0.25, 0.5]
+ALTERNATE_BIAS = 0.5
+
+
+def per_message_graph(name: str, weights: list[float], bias: float) -> bytes:
     out = bytearray()
     out += message_field(1, node("MatMul", ["features", "weights"], ["linear"], "linear"))
     out += message_field(1, node("Add", ["linear", "bias"], ["score"], "score"))
-    out += field_string(2, "nervix_per_message_score")
+    out += field_string(2, name)
     out += message_field(5, tensor_initializer("weights", [2, 1], weights))
     out += message_field(5, tensor_initializer("bias", [1], [bias]))
     out += message_field(11, value_info("features", [2]))
@@ -232,6 +238,11 @@ def main() -> None:
         help="path to write the generated ONNX model",
     )
     parser.add_argument(
+        "--alternate-output",
+        default="tests/fixtures/onnx/alternate_score.onnx",
+        help="path to write the generated alternate per-message ONNX model",
+    )
+    parser.add_argument(
         "--batch-output",
         default="tests/fixtures/onnx/batch_score.onnx",
         help="path to write the generated batched ONNX model",
@@ -261,7 +272,18 @@ def main() -> None:
     weights, bias = train_linear_regressor()
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_bytes(model_proto(per_message_graph(weights, bias)))
+    output.write_bytes(
+        model_proto(per_message_graph("nervix_per_message_score", weights, bias))
+    )
+    alternate_output = Path(args.alternate_output)
+    alternate_output.parent.mkdir(parents=True, exist_ok=True)
+    alternate_output.write_bytes(
+        model_proto(
+            per_message_graph(
+                "nervix_alternate_per_message_score", ALTERNATE_WEIGHTS, ALTERNATE_BIAS
+            )
+        )
+    )
     batch_output = Path(args.batch_output)
     batch_output.parent.mkdir(parents=True, exist_ok=True)
     batch_output.write_bytes(model_proto(batch_graph()))
@@ -278,6 +300,9 @@ def main() -> None:
     scalar_output.parent.mkdir(parents=True, exist_ok=True)
     scalar_output.write_bytes(model_proto(scalar_graph()))
     print(f"wrote {output} weights={weights!r} bias={bias!r}")
+    print(
+        f"wrote {alternate_output} weights={ALTERNATE_WEIGHTS!r} bias={ALTERNATE_BIAS!r}"
+    )
     print(f"wrote {batch_output}")
     print(f"wrote {f64_output}")
     print(f"wrote {matrix_output}")

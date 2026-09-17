@@ -8,9 +8,9 @@ use crate::{
         LexedInput, ParseError, ParseFromSourceError, boxed_choice, client_ref, codec_ref,
         correlator_ref, deduplicator_ref, emitter_ref, endpoint_ref, generator_ref, inferencer_ref,
         ingestor_ref, into_parse_error, junction_ref, kw, kw_phrase2, lex_input, lookup_ref,
-        placement_ref, reingestor_ref, relay_ref, reorderer_ref, schema_ref, suggest_from, tok,
-        udf_ref, vhost_ref, window_processor_ref, wire_avro_schema_ref, wire_cbor_schema_ref,
-        wire_json_schema_ref,
+        placement_ref, reingestor_ref, relay_ref, reorderer_ref, schema_ref,
+        signaling_protocol_ref, suggest_from, tok, udf_ref, vhost_ref, wasm_processor_ref,
+        window_processor_ref, wire_avro_schema_ref, wire_cbor_schema_ref, wire_json_schema_ref,
     },
 };
 
@@ -71,6 +71,12 @@ pub fn show_create_parser<'src>()
                 kind: ModelKind::Endpoint,
                 name: name.into(),
             }),
+        kw_phrase2(Identifier::Signaling, Identifier::Protocol)
+            .ignore_then(signaling_protocol_ref())
+            .map(|name| ShowCreate {
+                kind: ModelKind::SignalingProtocol,
+                name: name.into(),
+            }),
         kw(Identifier::Generator)
             .ignore_then(generator_ref())
             .map(|name| ShowCreate {
@@ -99,6 +105,12 @@ pub fn show_create_parser<'src>()
             .ignore_then(inferencer_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Inferencer,
+                name: name.into(),
+            }),
+        kw_phrase2(Identifier::Wasm, Identifier::Processor)
+            .ignore_then(wasm_processor_ref())
+            .map(|name| ShowCreate {
+                kind: ModelKind::WasmProcessor,
                 name: name.into(),
             }),
         kw(Identifier::Relay)
@@ -250,6 +262,39 @@ mod tests {
     }
 
     #[test]
+    fn parses_show_create_signaling_protocol() {
+        let parsed = parse_show_create("SHOW CREATE SIGNALING PROTOCOL protobuf_subscribe;")
+            .expect("parse should succeed");
+        assert_eq!(parsed.kind, ModelKind::SignalingProtocol);
+        assert_eq!(parsed.name.as_str(), "protobuf_subscribe");
+    }
+
+    #[test]
+    fn parses_show_create_wasm_processor() {
+        let parsed = parse_show_create("SHOW CREATE WASM PROCESSOR filter_even_rows;")
+            .expect("parse should succeed");
+        assert_eq!(parsed.kind, ModelKind::WasmProcessor);
+        assert_eq!(parsed.name.as_str(), "filter_even_rows");
+    }
+
+    #[test]
+    fn rejects_show_create_with_a_partial_binding_kind_phrase() {
+        assert!(parse_show_create("SHOW CREATE SIGNALING protobuf_subscribe;").is_err());
+        assert!(parse_show_create("SHOW CREATE WASM filter_even_rows;").is_err());
+    }
+
+    #[test]
+    fn completes_binding_kind_references_without_leaking_other_kinds() {
+        let input = "SHOW CREATE SIGNALING PROTOCOL ";
+        let suggestions = suggest_show_create(input, input.len());
+        assert_eq!(suggestions, vec!["ref:signaling_protocol".to_string()]);
+
+        let input = "SHOW CREATE WASM PROCESSOR ";
+        let suggestions = suggest_show_create(input, input.len());
+        assert_eq!(suggestions, vec!["ref:wasm_processor".to_string()]);
+    }
+
+    #[test]
     fn rejects_show_create_without_entity_kind() {
         let tokens = to_tokens("SHOW CREATE latency;");
         assert!(parse_show_create_tokens(&tokens).is_err());
@@ -328,6 +373,8 @@ mod tests {
         assert!(suggestions.contains(&"JUNCTION".to_string()));
         assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));
         assert!(suggestions.contains(&"WINDOW PROCESSOR".to_string()));
+        assert!(suggestions.contains(&"SIGNALING PROTOCOL".to_string()));
+        assert!(suggestions.contains(&"WASM PROCESSOR".to_string()));
         assert!(suggestions.contains(&"EMITTER".to_string()));
         assert!(suggestions.contains(&"PLACEMENT".to_string()));
         assert!(suggestions.contains(&"UDF".to_string()));

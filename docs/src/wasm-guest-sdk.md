@@ -245,6 +245,10 @@ CREATE WASM PROCESSOR normalize_events
   ON GLOBAL ERROR LOG;
 ```
 
+`VERSION` is mandatory. `VERSION LATEST` binds the highest completed version when the statement is
+applied; either form stores one concrete version, so a later upload does not replace the module a
+processor runs.
+
 See [Resources](./resources.md) for uploads and
 [Runtime Nodes](./processors.md) for the complete `CREATE WASM PROCESSOR`
 grammar.

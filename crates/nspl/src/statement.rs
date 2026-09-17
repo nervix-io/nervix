@@ -237,10 +237,10 @@ mod tests {
         ModelKind, ModelName, MqttIngestMode, MqttQos, MqttSession, NatsIngestMode, OutputBranch,
         ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode,
         RabbitMqIngestMode, RedisPubSubIngestMode, ReingestorName, RelayName, ReordererName,
-        ResourceName, RetryPolicy, SchemaField, SchemaName, SignalingProtobufConfig,
-        SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
-        SqsIngestMode, Statement, SubscriptionBinding, SubscriptionLiteral, UncordonNode,
-        WasmProcessorName, WindowProcessorName, WireSchemaField, ZeroMqIngestMode,
+        RequestedResourceVersion, ResourceName, RetryPolicy, SchemaField, SchemaName,
+        SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
+        SignalingWireFormat, SqsIngestMode, Statement, SubscriptionBinding, SubscriptionLiteral,
+        UncordonNode, WasmProcessorName, WindowProcessorName, WireSchemaField, ZeroMqIngestMode,
     };
     use nonzero_ext::nonzero;
     use rstest::rstest;
@@ -473,7 +473,7 @@ mod tests {
         }
     }
 
-    fn gen_model(bytes: &[u8]) -> Model {
+    fn gen_model(bytes: &[u8]) -> Model<RequestedResourceVersion> {
         let mut g = ByteGen::new(bytes);
         match g.next_u8() % 30 {
             0 => {
@@ -1107,9 +1107,9 @@ mod tests {
                     SignalingWireFormat::Protobuf(SignalingProtobufConfig {
                         resource: g.name(),
                         resource_version: if g.bool() {
-                            Some(g.bounded_u64(1, 8))
+                            RequestedResourceVersion::Number(g.bounded_u64(1, 8))
                         } else {
-                            None
+                            RequestedResourceVersion::Latest
                         },
                         config: vec![ClientConfigEntry {
                             key: "file".to_string(),
@@ -1243,7 +1243,7 @@ mod tests {
             ("DESCRIBE RESOURCE r VERSION ", "resource_version"),
             (
                 "CREATE INFERENCER i FROM r USING RESOURCE res VERSION ",
-                "integer_literal",
+                "completed_resource_version",
             ),
             (
                 "CREATE INGESTOR i FROM KAFKA c TOPIC t OFFSET BY DOMAIN INSTANCES ",
@@ -1267,7 +1267,8 @@ mod tests {
                 "placement_rank",
             ),
             (
-                "CREATE WASM PROCESSOR w FROM r USING RESOURCE res FILE 'g.wasm' MAX FUEL ",
+                "CREATE WASM PROCESSOR w FROM r USING RESOURCE res VERSION 1 FILE 'g.wasm' MAX \
+                 FUEL ",
                 "max_fuel",
             ),
         ] {
@@ -1507,6 +1508,8 @@ mod tests {
         assert!(suggestions.contains(&"JUNCTION".to_string()));
         assert!(suggestions.contains(&"JUNCTION".to_string()));
         assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));
+        assert!(suggestions.contains(&"SIGNALING PROTOCOL".to_string()));
+        assert!(suggestions.contains(&"WASM PROCESSOR".to_string()));
         assert!(suggestions.contains(&"EMITTER".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
         assert!(!suggestions.contains(&"AVRO".to_string()));
@@ -1972,7 +1975,10 @@ mod tests {
         };
         assert_eq!(processor.mode, AckMode::Attached);
         assert_eq!(processor.resource.as_str(), "fraud_model");
-        assert_eq!(processor.resource_version, Some(3));
+        assert_eq!(
+            processor.resource_version,
+            RequestedResourceVersion::Number(3)
+        );
         assert_eq!(processor.inputs.len(), 1);
         assert_eq!(processor.output_schema.len(), 1);
         assert_eq!(

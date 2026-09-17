@@ -650,15 +650,19 @@ TLS is configured on the VHOST itself:
 
 ```nspl
 CREATE IF NOT EXISTS VHOST edge api.example.com, ws.example.com
-  WITH TLS tls_bundle;
+  WITH TLS tls_bundle VERSION 3;
 ```
 
-or with an explicit pinned resource version:
+`WITH TLS` requires a version. `VERSION LATEST` binds the highest completed version of the bundle
+when the statement is applied:
 
 ```nspl
 CREATE IF NOT EXISTS VHOST edge api.example.com, ws.example.com
-  WITH TLS tls_bundle VERSION 3;
+  WITH TLS tls_bundle VERSION LATEST;
 ```
+
+Either way the VHOST stores one concrete version and keeps presenting that certificate after later
+uploads; `SHOW CREATE VHOST` renders the number it bound.
 
 The referenced resource bundle must contain:
 
@@ -795,7 +799,8 @@ CREATE SIGNALING PROTOCOL challenge_response
 The `TIMEOUT` is one budget for the whole handshake, and captured state lives
 only for its duration — it is never logged, and does not reach ingestion.
 
-`PROTOBUF` signaling declares its resource and one message type per direction:
+`PROTOBUF` signaling declares its resource, the version it compiles, and one message type per
+direction:
 
 ```nspl,ignore
 CREATE SIGNALING PROTOCOL protobuf_subscribe
@@ -808,6 +813,9 @@ CREATE SIGNALING PROTOCOL protobuf_subscribe
   WAIT JAQ '.id == 1'
   TIMEOUT 5s;
 ```
+
+`VERSION` is mandatory. `VERSION LATEST` binds the highest completed version when the statement is
+applied, and the protocol stores that number. `SHOW CREATE SIGNALING PROTOCOL` renders it.
 
 Protobuf decoding is permissive: unknown fields are kept and missing fields take
 their proto3 defaults, so nearly any binary frame decodes as the `WAIT MESSAGE`

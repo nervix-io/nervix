@@ -1,18 +1,22 @@
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
-use nervix_models::{CreateStatement, CreateVhost, VhostTlsResource};
+use nervix_models::{CreateStatement, CreateVhost, RequestedResourceVersion, VhostTlsResource};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, hostname_lit, if_not_exists_clause,
-        into_parse_error, kw, lex_input, resource_ref, suggest_from, tok, vhost_name,
+        into_parse_error, kw, lex_input, resource_ref, resource_version_clause, suggest_from, tok,
+        vhost_name,
     },
 };
 
-pub fn create_vhost_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateVhost>, extra::Err<ParseError<'src>>> + Clone
-{
+pub fn create_vhost_parser<'src>() -> impl Parser<
+    'src,
+    &'src [Token],
+    CreateStatement<CreateVhost<RequestedResourceVersion>>,
+    extra::Err<ParseError<'src>>,
+> + Clone {
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
         .then_ignore(kw(Identifier::Vhost))
@@ -27,16 +31,7 @@ pub fn create_vhost_parser<'src>()
             kw(Identifier::With)
                 .ignore_then(kw(Identifier::Tls))
                 .ignore_then(resource_ref())
-                .then(
-                    kw(Identifier::Version)
-                        .ignore_then(select! { Token::NumberLiteral(value) => value })
-                        .try_map(|value, span| {
-                            value
-                                .parse::<u64>()
-                                .map_err(|_| chumsky::error::Rich::custom(span, "resource_version"))
-                        })
-                        .or_not(),
-                )
+                .then(resource_version_clause())
                 .map(|(resource, version)| VhostTlsResource { resource, version })
                 .or_not(),
         )
@@ -55,7 +50,7 @@ pub fn create_vhost_parser<'src>()
 
 pub fn parse_create_vhost_tokens(
     tokens: &[Token],
-) -> Result<CreateStatement<CreateVhost>, Vec<ParseError<'_>>> {
+) -> Result<CreateStatement<CreateVhost<RequestedResourceVersion>>, Vec<ParseError<'_>>> {
     let out = create_vhost_parser().then_ignore(end()).parse(tokens);
     if out.has_errors() {
         Err(out.into_errors())
@@ -68,7 +63,7 @@ pub fn parse_create_vhost_tokens(
 
 pub fn parse_create_vhost(
     input: &str,
-) -> Result<CreateStatement<CreateVhost>, ParseFromSourceError> {
+) -> Result<CreateStatement<CreateVhost<RequestedResourceVersion>>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -112,15 +107,15 @@ mod tests {
     }
 
     #[test]
-    fn parses_create_vhost_with_tls_latest() {
-        let input = "CREATE VHOST my_vhost api.example.com WITH TLS my_cert;";
+    fn parses_create_vhost_with_tls_latest_version() {
+        let input = "CREATE VHOST my_vhost api.example.com WITH TLS my_cert VERSION LATEST;";
         let tokens = to_tokens(input);
         let parsed = parse_create_vhost_tokens(&tokens).expect("parse should succeed");
         assert_eq!(
             parsed.tls,
             Some(VhostTlsResource {
                 resource: nervix_models::ResourceName::parse("my_cert").expect("valid resource"),
-                version: None,
+                version: RequestedResourceVersion::Latest,
             })
         );
     }
@@ -134,9 +129,40 @@ mod tests {
             parsed.tls,
             Some(VhostTlsResource {
                 resource: nervix_models::ResourceName::parse("my_cert").expect("valid resource"),
-                version: Some(7),
+                version: RequestedResourceVersion::Number(7),
             })
         );
+    }
+
+    #[test]
+    fn requires_a_version_for_the_tls_resource() {
+        for input in [
+            "CREATE VHOST my_vhost api.example.com WITH TLS my_cert;",
+            "CREATE VHOST my_vhost api.example.com WITH TLS my_cert VERSION;",
+            "CREATE VHOST my_vhost api.example.com WITH TLS my_cert VERSION newest;",
+        ] {
+            assert!(
+                parse_create_vhost_tokens(&to_tokens(input)).is_err(),
+                "{input:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn suggests_only_version_after_the_tls_resource() {
+        let input = "CREATE VHOST edge api.example.com WITH TLS my_cert ";
+        let suggestions = suggest_create_vhost(input, input.len());
+        assert_eq!(suggestions, vec!["VERSION".to_string()]);
+    }
+
+    #[test]
+    fn suggests_latest_and_a_completed_version_after_version() {
+        let input = "CREATE VHOST edge api.example.com WITH TLS my_cert VERSION ";
+        let suggestions = suggest_create_vhost(input, input.len());
+        assert!(suggestions.contains(&"LATEST".to_string()));
+        assert!(suggestions.contains(&"completed_resource_version".to_string()));
+        assert!(!suggestions.contains(&"integer_literal".to_string()));
+        assert!(!suggestions.contains(&";".to_string()));
     }
 
     #[test]
