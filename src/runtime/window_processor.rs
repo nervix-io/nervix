@@ -78,11 +78,8 @@ pub(super) enum WindowProcessorError {
     AggregateInputFieldMissing { field: String },
     #[error("failed to read the window aggregate input column '{field}'")]
     AggregateInputColumn { field: String },
-    #[error("window aggregate input VM failed with {}: {message}", .code.as_str())]
-    AggregateInputRow {
-        code: nervix_vm::ErrorCode,
-        message: String,
-    },
+    #[error("window aggregate input VM failed with {}: {reason}", .reason.code().as_str())]
+    AggregateInputRow { reason: nervix_vm::SideErrorReason },
     #[error("PERCENTILE_LINEAR_HISTOGRAM requires finite numeric values")]
     HistogramRequiresFinite,
     #[error("PERCENTILE_LINEAR_HISTOGRAM requires at least one bucket")]
@@ -1170,8 +1167,7 @@ pub(super) async fn evaluate_window_aggregate_inputs(
     for row in 0..row_count {
         if let Some(error) = result.batch.errors().row(row).first() {
             rows.push(Err(Report::new(WindowProcessorError::AggregateInputRow {
-                code: error.code,
-                message: error.message.clone(),
+                reason: error.reason.clone(),
             })));
             continue;
         }
@@ -1825,8 +1821,8 @@ mod tests {
         assert!(
             matches!(
                 row_error.current_context(),
-                WindowProcessorError::AggregateInputRow { code, .. }
-                    if code.as_str() == "division_by_zero"
+                WindowProcessorError::AggregateInputRow { reason }
+                    if reason.code().as_str() == "division_by_zero"
             ),
             "the failed row should carry the division_by_zero side error, got {row_error:?}"
         );
