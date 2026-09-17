@@ -204,8 +204,9 @@ Feature: Checked numeric execution
         FROM operands
         TO partitioned_operands
           INHERIT ALL
-          BRANCHED BY by_operand_id
           SET left = input.left / input.divisor
+          BRANCHED BY by_operand_id
+          SET id = message.id
           FLUSH EACH 100ms MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR SEND TO numeric_errors
           SET input_id = input.id,

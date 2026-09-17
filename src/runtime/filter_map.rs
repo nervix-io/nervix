@@ -2553,10 +2553,8 @@ mod tests {
 
     #[tokio::test]
     async fn sqs_fifo_group_expression_reports_the_code_of_a_failed_row() {
-        let input_schema = test_schema(&[
-            ("left", ParseAsType::I64),
-            ("divisor", ParseAsType::I64),
-        ]);
+        let input_schema =
+            test_schema(&[("left", ParseAsType::I64), ("divisor", ParseAsType::I64)]);
         let emitter = sqs_fifo_group_emitter("(input.left / input.divisor) AS STRING");
         let program = sqs_fifo_group_program(&emitter, &input_schema);
         let messages = [(7, 2), (7, 0)]
@@ -2601,7 +2599,9 @@ mod tests {
         use crate::runtime::subscription_predicate::SubscriptionPredicateExecutionError;
 
         let schema = test_schema(&[("left", ParseAsType::I64), ("divisor", ParseAsType::I64)]);
-        let where_clause = expression("input.left / input.divisor > 0");
+        // `coalesce` still selects the row whose division failed, and a selected row that recorded
+        // an error fails the predicate instead of being delivered.
+        let where_clause = expression("coalesce(input.left / input.divisor, 1) > 0");
         let predicate = compile_subscription_predicate(
             &domain("default"),
             &named("ratio_subscription"),
@@ -2618,12 +2618,16 @@ mod tests {
             ("divisor".to_string(), RuntimeValue::I64(0)),
         ]);
 
-        let error =
-            execute_subscription_predicate_on_record(&predicate, &record, Timestamp::from_unix_nanos(1))
-                .await
-                .expect_err("a zero divisor must fail the predicate");
+        let error = execute_subscription_predicate_on_record(
+            &predicate,
+            &record,
+            Timestamp::from_unix_nanos(1),
+        )
+        .await
+        .expect_err("a selected row that divided by zero must fail the predicate");
 
-        let SubscriptionPredicateExecutionError::Evaluation { reason, .. } = error.current_context()
+        let SubscriptionPredicateExecutionError::Evaluation { reason, .. } =
+            error.current_context()
         else {
             panic!("unexpected subscription predicate error: {error:#}");
         };
@@ -2631,12 +2635,9 @@ mod tests {
             reason,
             &nervix_vm::SideErrorReason::DivisionByZero(nervix_vm::DivisionOperation::Division)
         );
-        assert!(
-            error
-                .current_context()
-                .to_string()
-                .starts_with("predicate evaluation error division_by_zero: integer division by zero at ")
-        );
+        assert!(error.current_context().to_string().starts_with(
+            "predicate evaluation error division_by_zero: integer division by zero at "
+        ));
     }
 
     #[tokio::test]
