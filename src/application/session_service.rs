@@ -177,10 +177,6 @@ pub(in crate::application) struct SessionServiceInner {
     /// commits in independent domains.
     pub(in crate::application) transaction_executions:
         DashMap<String, StdArc<AsyncMutex<()>>, RandomState>,
-    /// Transactions in the same domain serialize the state transitions that can conflict while
-    /// independent domains continue applying.
-    pub(in crate::application) transaction_domain_executions:
-        DashMap<DomainName, StdArc<AsyncMutex<()>>, RandomState>,
     /// Serializes destination preparation with authority reconciliation so a request from a
     /// superseded leader cannot race a current leader's preparation into the runtime.
     pub(in crate::application) ownership_handoff_operations: AsyncMutex<()>,

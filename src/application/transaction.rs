@@ -875,11 +875,12 @@ impl SessionServiceImpl {
             .await;
         let mut prepared = None;
         if current.is_none() {
-            let candidate = ReplicatedTransaction::open(
+            let candidate = ReplicatedTransaction::open_for_command(
                 transaction_id.clone(),
                 domain.clone(),
                 owner.clone(),
                 current_timestamp(),
+                queued.request_reference.clone(),
             );
             if let Err(error) = candidate.queue_admission(&owner, &domain, &queued, limits) {
                 return command_error(error.to_string());
@@ -1010,7 +1011,10 @@ impl SessionServiceImpl {
         first_operation_index: usize,
         allow_incomplete_final_model_run: bool,
     ) -> Result<PlannedTransaction, Report<TransactionPlanningError>> {
-        if self.inner.runtime.domain_alter_is_active(domain) {
+        let mutates_domain = statements
+            .iter()
+            .any(Statement::requires_domain_mutation_ownership);
+        if mutates_domain && self.inner.runtime.domain_alter_is_active(domain) {
             return Err(Report::new(
                 TransactionPlanningError::ConcurrentDomainAlter {
                     domain: domain.clone(),
@@ -1336,13 +1340,6 @@ impl SessionServiceImpl {
         if matches!(transaction.state, TransactionState::Finished(_)) {
             return Ok(transaction);
         }
-        let domain_execution = self
-            .inner
-            .transaction_domain_executions
-            .entry(transaction.domain.clone())
-            .or_insert_with(|| StdArc::new(tokio::sync::Mutex::new(())))
-            .clone();
-        let _domain_execution_guard = domain_execution.lock().await;
         let result = Box::pin(self.run_replicated_commit(id)).await;
         if result
             .as_ref()
@@ -1750,7 +1747,7 @@ impl SessionServiceImpl {
                 .change_context(TransactionCommitError::RecoverQuiescence {
                     id: transaction.id.clone(),
                 })?;
-            self.resume_domain_after_alter(domain)
+            self.resume_domain_after_alter(domain, transaction.domain_mutation())
                 .await
                 .change_context(TransactionCommitError::RecoverQuiescence {
                     id: transaction.id.clone(),
