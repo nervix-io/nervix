@@ -1435,12 +1435,14 @@ pub fn expr_semantics(expr: &SpannedExpr) -> Option<ExpressionSemantics> {
         )),
         Expr::Call { function, args } => {
             let operation = if let FunctionName::WindowAggregate(_) = function {
+                // An aggregate is a typed null when no retained row contributed to it, which
+                // depends on the function rather than only on its arguments.
                 OperationSemantics {
                     volatility: Volatility::Stable,
                     dependency_scope: DependencyScope::ExecutionLocal,
                     has_side_effects: false,
                     can_error: true,
-                    null_propagation: NullPropagation::NeverNull,
+                    null_propagation: NullPropagation::Custom,
                 }
             } else if let FunctionName::ReadHeader | FunctionName::ReadHeaders = function {
                 OperationSemantics {

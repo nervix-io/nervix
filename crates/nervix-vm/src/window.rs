@@ -1,8 +1,11 @@
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Lowering semantic window assignments into VM expressions and aggregate demands.
+//! - **Owns.** Lowering semantic window assignments into VM expressions and aggregate demands, and
+//!   which shared aggregate structure and per-row arguments each aggregate function reads.
 //! - **Depends on.** The vocabulary and the VM's program frontend.
 //! - **Must not know.** NSPL tokens or diagnostics, registry state, or runtime tasks.
+
+mod route;
 
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -13,13 +16,15 @@ use nervix_models::{AssignmentTargetScope, Expression, RouteConstruction};
 use sorted_vec::SortedSet;
 use thiserror::Error;
 
-pub use crate::program::WindowAggregateFunction;
+pub use self::route::{
+    CompiledWindowAssignment, CompiledWindowDemand, CompiledWindowExpr, CompiledWindowInvocation,
+    CompiledWindowRoute, WINDOW_ARGUMENT_NAMESPACE, WindowArgumentColumn, WindowRouteCompileError,
+    WindowRouteSchemas,
+};
+pub use crate::program::{WindowAggregateFunction, WindowAggregateInvocation};
 use crate::{
     frontend::lower_expression,
-    program::{
-        Expr, FieldRef, FunctionName, Literal, Span, SpannedExpr, SpannedNode,
-        WindowAggregateInvocation, spanned,
-    },
+    program::{Expr, FieldRef, FunctionName, Literal, Span, SpannedExpr, SpannedNode, spanned},
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,13 +55,74 @@ pub struct WindowLinearHistogramConfig {
     pub delay: Duration,
 }
 
+/// The shared structure a window keeps for one demand. Functions that can be answered from the
+/// same structure over the same arguments share one demand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WindowAggregateStorageKind {
+    /// The earliest and latest contributing row by key, for `ARG_MIN` and `ARG_MAX`.
+    ArgExtremes,
+    /// The count, means and centered co-moments of two arguments, for covariance and correlation.
+    CoMoments,
+    /// The number of retained rows, for `COUNT`.
     Counter,
+    /// The smallest and largest contributing value, for `MIN` and `MAX`.
+    Extremes,
+    /// Bucket counts over a fixed range, for `PERCENTILE_LINEAR_HISTOGRAM`.
     Histogram,
+    /// The count, mean and centered second moment of one argument, for `AVG`, variance and
+    /// standard deviation.
+    Moments,
+    /// The earliest and latest contributing row by arrival, for `FIRST` and `LAST`.
     Sequence,
-    SortedMap,
+    /// The exact or compensated sum of one argument, for `SUM`.
     Sum,
+    /// The numbers of true and false rows of one argument, for `COUNT_IF`, `BOOL_AND` and
+    /// `BOOL_OR`.
+    TruthCounter,
+}
+
+/// The per-row arguments one aggregate demand reads, in written order.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WindowArguments<T> {
+    /// The single per-row argument.
+    Single(T),
+    /// Two per-row arguments: the value and key of `ARG_MIN` and `ARG_MAX`, or the two variables
+    /// of a covariance or correlation.
+    Pair { first: T, second: T },
+}
+
+impl<T> WindowArguments<T> {
+    pub fn first(&self) -> &T {
+        match self {
+            Self::Single(first) | Self::Pair { first, .. } => first,
+        }
+    }
+
+    pub fn second(&self) -> Option<&T> {
+        match self {
+            Self::Single(_) => None,
+            Self::Pair { second, .. } => Some(second),
+        }
+    }
+
+    /// Every argument, in written order.
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        std::iter::once(self.first()).chain(self.second())
+    }
+
+    /// The same arguments, each converted by `convert`, which stops at the first failure.
+    pub fn try_convert<U, E>(
+        &self,
+        mut convert: impl FnMut(&T) -> Result<U, E>,
+    ) -> Result<WindowArguments<U>, E> {
+        match self {
+            Self::Single(first) => Ok(WindowArguments::Single(convert(first)?)),
+            Self::Pair { first, second } => Ok(WindowArguments::Pair {
+                first: convert(first)?,
+                second: convert(second)?,
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,7 +130,7 @@ pub struct WindowAggregateDemand {
     pub id: WindowAggregateDemandId,
     pub functions: SortedSet<WindowAggregateFunction>,
     pub storage: WindowAggregateStorageKind,
-    pub input: Option<Expr>,
+    pub arguments: WindowArguments<Expr>,
     pub linear_histogram: Option<WindowLinearHistogramConfig>,
 }
 
@@ -93,9 +159,17 @@ impl WindowAggregateFunction {
 
     pub fn storage(self) -> WindowAggregateStorageKind {
         match self {
+            Self::ArgMax | Self::ArgMin => WindowAggregateStorageKind::ArgExtremes,
+            Self::Avg | Self::StddevPop | Self::StddevSamp | Self::VarPop | Self::VarSamp => {
+                WindowAggregateStorageKind::Moments
+            }
+            Self::BoolAnd | Self::BoolOr | Self::CountIf => {
+                WindowAggregateStorageKind::TruthCounter
+            }
+            Self::Corr | Self::CovarPop | Self::CovarSamp => WindowAggregateStorageKind::CoMoments,
             Self::Count => WindowAggregateStorageKind::Counter,
             Self::First | Self::Last => WindowAggregateStorageKind::Sequence,
-            Self::Max | Self::Min => WindowAggregateStorageKind::SortedMap,
+            Self::Max | Self::Min => WindowAggregateStorageKind::Extremes,
             Self::PercentileLinearHistogram => WindowAggregateStorageKind::Histogram,
             Self::Sum => WindowAggregateStorageKind::Sum,
         }
@@ -103,13 +177,30 @@ impl WindowAggregateFunction {
 }
 
 impl WindowAggregateStorageKind {
+    /// Whether the structure reads its arguments as numbers, so a floating-point argument must be
+    /// finite before its row can be admitted.
+    pub fn reads_finite_numbers(self) -> bool {
+        match self {
+            Self::CoMoments | Self::Histogram | Self::Moments | Self::Sum => true,
+            Self::ArgExtremes
+            | Self::Counter
+            | Self::Extremes
+            | Self::Sequence
+            | Self::TruthCounter => false,
+        }
+    }
+
     pub fn nspl_name(self) -> &'static str {
         match self {
+            Self::ArgExtremes => "arg_extremes",
+            Self::CoMoments => "co_moments",
             Self::Counter => "counter",
+            Self::Extremes => "extremes",
             Self::Histogram => "linear_histogram",
+            Self::Moments => "moments",
             Self::Sequence => "sequence",
-            Self::SortedMap => "sorted_map",
             Self::Sum => "sum",
+            Self::TruthCounter => "truth_counter",
         }
     }
 }
@@ -434,7 +525,8 @@ fn validate_aggregate_call(
 ) -> WindowAggregateResult<()> {
     if args.len() != function.expected_arity() {
         return Err(invalid_window_aggregate(format!(
-            "{function:?} expects {} argument(s), found {}",
+            "{} expects {} argument(s), found {}",
+            function.nspl_name(),
             function.expected_arity(),
             args.len()
         )));
@@ -660,24 +752,33 @@ fn aggregate_demand_for_call(
     linear_histogram: Option<WindowLinearHistogramConfig>,
     id: WindowAggregateDemandId,
 ) -> WindowAggregateDemand {
-    let input = Some(
-        args.first()
-            .verified("aggregate validation above enforces the function's nonzero arity")
+    let first = args
+        .first()
+        .verified("aggregate validation above enforces the function's nonzero arity")
+        .inner
+        .clone();
+    let arguments = if function.reads_argument_pair() {
+        let second = args
+            .get(1)
+            .verified("aggregate validation above enforces the arity of a two-argument function")
             .inner
-            .clone(),
-    );
+            .clone();
+        WindowArguments::Pair { first, second }
+    } else {
+        WindowArguments::Single(first)
+    };
     WindowAggregateDemand {
         id,
         functions: SortedSet::from_unsorted(vec![function]),
         storage: function.storage(),
-        input,
+        arguments,
         linear_histogram,
     }
 }
 
 fn demand_matches(left: &WindowAggregateDemand, right: &WindowAggregateDemand) -> bool {
     left.storage == right.storage
-        && left.input == right.input
+        && left.arguments == right.arguments
         && left.linear_histogram == right.linear_histogram
 }
 
@@ -763,7 +864,7 @@ mod tests {
         assert_eq!(demands.len(), 4);
         assert_eq!(demands[0].storage, WindowAggregateStorageKind::Histogram);
         assert_eq!(demands[0].id, 0);
-        assert_eq!(demands[1].storage, WindowAggregateStorageKind::SortedMap);
+        assert_eq!(demands[1].storage, WindowAggregateStorageKind::Extremes);
         assert_eq!(demands[2].storage, WindowAggregateStorageKind::Sequence);
         assert_eq!(demands[3].storage, WindowAggregateStorageKind::Histogram);
     }
@@ -872,6 +973,102 @@ mod tests {
     }
 
     #[test]
+    fn statistics_over_the_same_arguments_share_one_structure() {
+        let parsed = lower_aggregate_program(
+            "mean = AVG(input.value), spread = VAR_SAMP(input.value), deviation = \
+             STDDEV_POP(input.value), covariance = COVAR_POP(input.value, input.load), \
+             correlation = CORR(input.value, input.load), reversed = COVAR_POP(input.load, \
+             input.value), healthy = COUNT_IF(input.healthy), all_healthy = \
+             BOOL_AND(input.healthy), any_healthy = BOOL_OR(input.healthy), lowest = \
+             ARG_MIN(input.sensor, input.value), highest = ARG_MAX(input.sensor, input.value)",
+        )
+        .expect("statistics should lower");
+
+        let structures = parsed
+            .demands()
+            .iter()
+            .map(|demand| {
+                (
+                    demand.storage,
+                    demand.functions.as_slice().to_vec(),
+                    demand.arguments.iter().count(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            structures,
+            vec![
+                (
+                    WindowAggregateStorageKind::Moments,
+                    vec![
+                        WindowAggregateFunction::Avg,
+                        WindowAggregateFunction::StddevPop,
+                        WindowAggregateFunction::VarSamp,
+                    ],
+                    1,
+                ),
+                (
+                    WindowAggregateStorageKind::CoMoments,
+                    vec![
+                        WindowAggregateFunction::Corr,
+                        WindowAggregateFunction::CovarPop,
+                    ],
+                    2,
+                ),
+                (
+                    WindowAggregateStorageKind::CoMoments,
+                    vec![WindowAggregateFunction::CovarPop],
+                    2,
+                ),
+                (
+                    WindowAggregateStorageKind::TruthCounter,
+                    vec![
+                        WindowAggregateFunction::BoolAnd,
+                        WindowAggregateFunction::BoolOr,
+                        WindowAggregateFunction::CountIf,
+                    ],
+                    1,
+                ),
+                (
+                    WindowAggregateStorageKind::ArgExtremes,
+                    vec![
+                        WindowAggregateFunction::ArgMax,
+                        WindowAggregateFunction::ArgMin,
+                    ],
+                    2,
+                ),
+            ]
+        );
+        assert_eq!(parsed.demand_reference_counts(), vec![3, 2, 1, 3, 2]);
+        let WindowArguments::Pair { first, second } = &parsed.demands()[4].arguments else {
+            panic!("ARG_MIN reads its value and key as a pair");
+        };
+        assert_eq!(
+            (first, second),
+            (
+                &Expr::FieldRef(FieldRef {
+                    relay: "input".to_string(),
+                    field: "sensor".to_string(),
+                }),
+                &Expr::FieldRef(FieldRef {
+                    relay: "input".to_string(),
+                    field: "value".to_string(),
+                }),
+            )
+        );
+    }
+
+    #[test]
+    fn statistics_report_their_arity_by_name() {
+        let error = lower_aggregate_program("correlation = CORR(input.value)")
+            .expect_err("CORR needs two arguments");
+        assert_eq!(error, "CORR expects 2 argument(s), found 1");
+        let error = lower_aggregate_program("mean = AVG(input.value, input.load)")
+            .expect_err("AVG takes one argument");
+        assert_eq!(error, "AVG expects 1 argument(s), found 2");
+    }
+
+    #[test]
     fn rejects_non_constant_percentile() {
         lower_aggregate_program(
             "p = PERCENTILE_LINEAR_HISTOGRAM(input.latency, input.rank, 2048, 0, 10000, '2s')",
@@ -969,8 +1166,8 @@ mod tests {
         let demands = parsed.demands();
         assert_eq!(demands.len(), 2);
         assert!(matches!(
-            demands[1].input,
-            Some(Expr::Call {
+            demands[1].arguments,
+            WindowArguments::Single(Expr::Call {
                 function: FunctionName::Datetime(DatetimeFunction::DateTrunc(FixedTimeUnit::Hour)),
                 ..
             })
