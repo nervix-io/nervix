@@ -43,6 +43,7 @@ use crate::registry::{
             writable_binding_for_internal_schema,
         },
         vm::{BRANCH_NAMESPACE, INNER_OUTPUT_NAMESPACE, udf_compile_options},
+        window_route::validate_window_route_types,
         wire::schema_for_ack_model,
     },
 };
@@ -448,6 +449,18 @@ fn validate_window_processor_output(
             ),
         }));
     }
+    validate_window_route_types(
+        ModelValidationContext {
+            domain,
+            identifier,
+            models,
+        },
+        output,
+        &aggregate.inner,
+        output_schema,
+        input_schema,
+        branch_schema,
+    )?;
     validate_window_route_where(
         domain,
         identifier,

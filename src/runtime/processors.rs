@@ -17,13 +17,11 @@ use nervix_models::{
 use nervix_roto::UdfExecutor;
 use nervix_vm::{
     CompileBinding as VmCompileBinding, CompileOptions as VmCompileOptions,
-    CompiledProgram as VmCompiledProgram, InstructionKind as VmInstructionKind,
-    OutputMode as VmOutputMode, SchemaSensitivity as VmSchemaSensitivity, SemanticNamespaces,
+    CompiledProgram as VmCompiledProgram, OutputMode as VmOutputMode,
+    SchemaSensitivity as VmSchemaSensitivity, SemanticNamespaces,
     compile_program_with_options_for_bindings_with_sensitivity as compile_vm_program,
-    infer_set_expr_types_for_bindings_with_udfs as infer_vm_set_expr_types_for_bindings_with_udfs,
     lower_route_construction,
-    program::{FieldRef, Program as VmProgram, Span, SpannedNode},
-    window::{WindowAggregateExpr, WindowAggregateProgram},
+    window::{CompiledWindowRoute, WindowAggregateProgram, WindowRouteSchemas},
 };
 use nervix_wasm::CompiledWasmProcessor;
 use ordered_float::OrderedFloat;
@@ -36,8 +34,8 @@ use super::{
     RelayBoundaryServices, RelayMessage, RelayRecordBatch, RelayRegistry,
     ReplicatedWasmProcessorState, ReplicatedWindowProcessorState, RuntimeFlushPolicy,
     RuntimeInputCollectPolicy, RuntimeInputCollector, SharedActiveGraph, WasmLiveInstance,
-    WindowProcessorState, branch_key_display, inferencer::OnnxInferencerSession,
-    relay_batch::RelayRecordBatchError,
+    WindowAccumulatorPlan, WindowProcessorState, branch_key_display,
+    inferencer::OnnxInferencerSession, relay_batch::RelayRecordBatchError,
 };
 use crate::{
     registry::ActiveGraph,
@@ -269,7 +267,10 @@ pub(super) enum RelayProcessorOperationTemplate {
         step_messages: Option<usize>,
         width_duration: Option<Duration>,
         step_duration: Option<Duration>,
+        /// The routes' combined aggregate program, which decides whether a changed processor can
+        /// keep its live window.
         aggregate: WindowAggregateProgram,
+        plan: WindowAccumulatorPlan,
         compiled_aggregates: Vec<CompiledWindowAggregateProgram>,
     },
     Reorderer {
@@ -355,6 +356,7 @@ pub(super) enum RelayProcessorOperationNode {
         width_duration: Option<Duration>,
         step_duration: Option<Duration>,
         aggregate: WindowAggregateProgram,
+        plan: WindowAccumulatorPlan,
         compiled_aggregates: Vec<CompiledWindowAggregateProgram>,
         state: WindowProcessorState,
         replicated_state: Arc<ReplicatedWindowProcessorState>,
@@ -427,25 +429,8 @@ pub(super) enum ProcessorCompileError {
     WindowWithoutInput,
     #[error("window aggregate input relay '{}' has no runtime schema", .relay.as_str())]
     WindowInputSchema { relay: RelayName },
-    #[error("window aggregate output schema is missing field '{field}'")]
-    WindowOutputField { field: String },
-    #[error("window aggregate demand {demand} has no compiled invocation")]
-    WindowDemandUncompiled { demand: usize },
-    #[error("window aggregate input VM type inference failed")]
-    WindowInputInference,
-    #[error("window aggregate input VM compile failed")]
-    WindowInputCompile,
-    #[error("window aggregate VM compile failed")]
-    WindowExprCompile,
-    #[error("window aggregate array cannot be assigned to {data_type:?} field '{field}'")]
-    WindowArrayTarget {
-        data_type: arrow_schema::DataType,
-        field: String,
-    },
-    #[error("compiled window aggregate references unknown demand {demand}")]
-    WindowUnknownDemand { demand: usize },
-    #[error("window aggregate demand {demand} has incompatible output types")]
-    WindowDemandTypes { demand: usize },
+    #[error("window aggregate route to '{}' failed to compile", .relay.as_str())]
+    WindowRoute { relay: RelayName },
     #[error(
         "deduplicator '{}' requires at least one DEDUPLICATE ON expression",
         .processor.as_str()
@@ -643,28 +628,16 @@ impl RelayProcessorOperationNode {
     }
 }
 
+/// One window route's aggregate program compiled for its relays, placed among the window's
+/// demands.
 #[derive(Debug, Clone)]
 pub(super) struct CompiledWindowAggregateProgram {
-    pub(super) input_program: Arc<VmCompiledProgram>,
-    pub(super) input_fields: Vec<Option<String>>,
-    pub(super) assignments: Vec<CompiledWindowAggregateAssignment>,
-    pub(super) demand_types: Vec<arrow_schema::DataType>,
+    pub(super) route: CompiledWindowRoute,
+    /// For each field of the route's output schema, in schema order, the index of the route
+    /// assignment that initializes it.
+    pub(super) field_assignments: Vec<Option<usize>>,
+    /// How many demands the routes written before this one declared.
     pub(super) demand_offset: usize,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct CompiledWindowAggregateAssignment {
-    pub(super) target: FieldRef,
-    pub(super) value: CompiledWindowAggregateExpr,
-}
-
-#[derive(Debug, Clone)]
-pub(super) enum CompiledWindowAggregateExpr {
-    Scalar(Arc<VmCompiledProgram>),
-    Array {
-        items: Vec<CompiledWindowAggregateExpr>,
-        fixed_size: bool,
-    },
 }
 
 impl CompiledWindowAggregateProgram {
@@ -688,265 +661,43 @@ impl CompiledWindowAggregateProgram {
                 relay: input_relay.clone(),
             })
         })?;
-        let (input_program, input_fields) =
-            Self::compile_inputs(aggregate, input_schema.arrow_schema(), udfs)?;
-        let bindings = vec![
-            VmCompileBinding::readonly("input", input_schema.arrow_schema())
-                .with_sensitivity(input_schema.vm_sensitivity()),
-        ];
-        let mut assignments = Vec::with_capacity(aggregate.assignments.len());
-        for assignment in &aggregate.assignments {
-            let target_field = output_schema
-                .arrow_schema()
-                .field_with_name(&assignment.target.field)
-                .cloned()
-                .map_err(|_| {
-                    Report::new(ProcessorCompileError::WindowOutputField {
-                        field: assignment.target.field.clone(),
-                    })
-                })?;
-            let target_sensitive = output_schema
-                .vm_sensitivity()
-                .is_sensitive(&assignment.target.field);
-            let value = Self::compile_expr(
-                &assignment.value.inner,
-                &assignment.target,
-                target_field.data_type(),
-                target_sensitive,
-                &bindings,
-                udfs,
-            )?;
-            assignments.push(CompiledWindowAggregateAssignment {
-                target: assignment.target.clone(),
-                value,
-            });
+        let input_arrow_schema = input_schema.arrow_schema();
+        let input_sensitivity = input_schema.vm_sensitivity();
+        let output_arrow_schema = output_schema.arrow_schema();
+        let output_sensitivity = output_schema.vm_sensitivity();
+        let route = CompiledWindowRoute::compile(
+            aggregate,
+            WindowRouteSchemas {
+                input: &input_arrow_schema,
+                input_sensitivity: &input_sensitivity,
+                readable: &[],
+                output: &output_arrow_schema,
+                output_sensitivity: &output_sensitivity,
+            },
+            &super::runtime_udf_compile_options(udfs, VmCompileOptions::default()),
+        )
+        .change_context_lazy(|| ProcessorCompileError::WindowRoute {
+            relay: output_relay.clone(),
+        })?;
+        let mut assignment_by_field = HashMap::default();
+        for (index, assignment) in route.assignments.iter().enumerate() {
+            assignment_by_field.insert(assignment.field.as_str(), index);
         }
-        let mut demand_types = vec![None; aggregate.demands().len()];
-        for assignment in &assignments {
-            assignment.value.collect_demand_types(&mut demand_types)?;
-        }
-        let mut compiled_demand_types = Vec::with_capacity(demand_types.len());
-        for (demand, data_type) in demand_types.into_iter().enumerate() {
-            let data_type = data_type.ok_or_else(|| {
-                Report::new(ProcessorCompileError::WindowDemandUncompiled { demand })
-            })?;
-            compiled_demand_types.push(data_type);
-        }
+        let field_assignments = output_arrow_schema
+            .fields()
+            .iter()
+            .map(|field| assignment_by_field.get(field.name().as_str()).copied())
+            .collect();
         Ok(Self {
-            input_program,
-            input_fields,
-            assignments,
-            demand_types: compiled_demand_types,
+            route,
+            field_assignments,
             demand_offset: 0,
         })
-    }
-
-    fn compile_inputs(
-        aggregate: &WindowAggregateProgram,
-        input_schema: StdArc<arrow_schema::Schema>,
-        udfs: Option<&UdfExecutor>,
-    ) -> error_stack::Result<(Arc<VmCompiledProgram>, Vec<Option<String>>), ProcessorCompileError>
-    {
-        const OUTPUT_NAMESPACE: &str = "window_input";
-        let span: Span = (0..0).into();
-        let input_fields = aggregate
-            .demands()
-            .iter()
-            .map(|demand| {
-                demand
-                    .input
-                    .as_ref()
-                    .map(|_| format!("demand_{}", demand.id))
-            })
-            .collect::<Vec<_>>();
-        let mut set = Vec::new();
-        for demand in aggregate.demands() {
-            let Some(input) = demand.input.as_ref() else {
-                continue;
-            };
-            set.push((
-                FieldRef {
-                    relay: OUTPUT_NAMESPACE.to_string(),
-                    field: format!("demand_{}", demand.id),
-                },
-                SpannedNode {
-                    inner: input.clone(),
-                    span,
-                },
-            ));
-        }
-        let program = SpannedNode {
-            inner: VmProgram {
-                filter: None,
-                set,
-                invoke: Vec::new(),
-            },
-            span,
-        };
-        let empty_output = StdArc::new(arrow_schema::Schema::empty());
-        let infer_bindings = vec![
-            VmCompileBinding::writeonly(OUTPUT_NAMESPACE, empty_output),
-            VmCompileBinding::readonly("input", input_schema.clone()),
-        ];
-        let signatures = super::runtime_udf_signatures(udfs);
-        let inferred =
-            infer_vm_set_expr_types_for_bindings_with_udfs(&program, infer_bindings, signatures)
-                .change_context(ProcessorCompileError::WindowInputInference)?;
-        let output_schema = StdArc::new(arrow_schema::Schema::new(
-            inferred
-                .into_iter()
-                .map(|inferred| {
-                    arrow_schema::Field::new(inferred.field, inferred.data_type, inferred.nullable)
-                })
-                .collect::<Vec<_>>(),
-        ));
-        let compile_bindings = vec![
-            VmCompileBinding::writeonly(OUTPUT_NAMESPACE, output_schema.clone()),
-            VmCompileBinding::readonly("input", input_schema),
-        ];
-        let compiled = compile_vm_program(
-            &program,
-            output_schema,
-            VmSchemaSensitivity::default(),
-            compile_bindings,
-            super::runtime_udf_compile_options(
-                udfs,
-                VmCompileOptions {
-                    output_mode: VmOutputMode::ExplicitOnly,
-                    ..VmCompileOptions::default()
-                },
-            ),
-        )
-        .change_context(ProcessorCompileError::WindowInputCompile)?;
-        Ok((Arc::new(compiled), input_fields))
     }
 
     pub(super) fn with_demand_offset(mut self, demand_offset: usize) -> Self {
         self.demand_offset = demand_offset;
         self
-    }
-
-    fn compile_expr(
-        expr: &WindowAggregateExpr,
-        target: &FieldRef,
-        target_type: &arrow_schema::DataType,
-        target_sensitive: bool,
-        bindings: &[VmCompileBinding],
-        udfs: Option<&UdfExecutor>,
-    ) -> error_stack::Result<CompiledWindowAggregateExpr, ProcessorCompileError> {
-        match expr {
-            WindowAggregateExpr::Scalar(expr) => {
-                let output_schema =
-                    StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
-                        &target.field,
-                        target_type.clone(),
-                        false,
-                    )]));
-                let output_sensitivity = if target_sensitive {
-                    VmSchemaSensitivity::from_sensitive_fields([target.field.clone()])
-                } else {
-                    VmSchemaSensitivity::default()
-                };
-                let mut compile_bindings = bindings.to_vec();
-                compile_bindings.push(VmCompileBinding::writeonly(
-                    target.relay.clone(),
-                    output_schema.clone(),
-                ));
-                let program = SpannedNode {
-                    inner: VmProgram {
-                        filter: None,
-                        set: vec![(target.clone(), expr.clone())],
-                        invoke: Vec::new(),
-                    },
-                    span: expr.span,
-                };
-                compile_vm_program(
-                    &program,
-                    output_schema,
-                    output_sensitivity,
-                    compile_bindings,
-                    super::runtime_udf_compile_options(
-                        udfs,
-                        VmCompileOptions {
-                            output_mode: VmOutputMode::ExplicitOnly,
-                            ..VmCompileOptions::default()
-                        },
-                    ),
-                )
-                .map(|program| CompiledWindowAggregateExpr::Scalar(Arc::new(program)))
-                .change_context(ProcessorCompileError::WindowExprCompile)
-            }
-            WindowAggregateExpr::Array(items) => {
-                let (element_type, fixed_size) = match target_type {
-                    arrow_schema::DataType::FixedSizeList(field, _) => (field.data_type(), true),
-                    arrow_schema::DataType::List(field) => (field.data_type(), false),
-                    other => {
-                        return Err(Report::new(ProcessorCompileError::WindowArrayTarget {
-                            data_type: other.clone(),
-                            field: target.field.clone(),
-                        }));
-                    }
-                };
-                Ok(CompiledWindowAggregateExpr::Array {
-                    items: items
-                        .iter()
-                        .map(|item| {
-                            Self::compile_expr(
-                                &item.inner,
-                                target,
-                                element_type,
-                                target_sensitive,
-                                bindings,
-                                udfs,
-                            )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
-                    fixed_size,
-                })
-            }
-        }
-    }
-}
-
-impl CompiledWindowAggregateExpr {
-    fn collect_demand_types(
-        &self,
-        demand_types: &mut [Option<arrow_schema::DataType>],
-    ) -> error_stack::Result<(), ProcessorCompileError> {
-        match self {
-            Self::Scalar(program) => {
-                for instruction in &program.instructions {
-                    if let VmInstructionKind::Inject {
-                        function: nervix_vm::program::FunctionName::WindowAggregate(invocation),
-                        output_type,
-                        ..
-                    } = &instruction.kind
-                    {
-                        let Some(existing) = demand_types.get_mut(invocation.demand_id) else {
-                            return Err(Report::new(ProcessorCompileError::WindowUnknownDemand {
-                                demand: invocation.demand_id,
-                            }));
-                        };
-                        if existing
-                            .as_ref()
-                            .is_some_and(|existing| existing != output_type)
-                        {
-                            return Err(Report::new(ProcessorCompileError::WindowDemandTypes {
-                                demand: invocation.demand_id,
-                            }));
-                        }
-                        *existing = Some(output_type.clone());
-                    }
-                }
-                Ok(())
-            }
-            Self::Array { items, .. } => {
-                for item in items {
-                    item.collect_demand_types(demand_types)?;
-                }
-                Ok(())
-            }
-        }
     }
 }
 

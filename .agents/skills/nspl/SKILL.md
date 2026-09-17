@@ -168,6 +168,12 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   only `F32` and `F64`. Give `bitwise_and`, `bitwise_or`, and `bitwise_xor` two arguments of one
   integer type, and treat shifts as checked: a negative count, or a `shift_left` whose product does
   not fit the value's type, fails that message.
+- In window routes, prefer the dedicated aggregates (`AVG`, `COUNT_IF`, `BOOL_AND`, `BOOL_OR`,
+  `ARG_MIN`, `ARG_MAX`, `*_POP` and `*_SAMP` variance, deviation, and covariance, `CORR`) over
+  hand-built formulas. Check `Processors` → `Window aggregate functions`: a null argument
+  contributes nothing while `COUNT` counts every row, and an aggregate that can be null (sample
+  statistics, `CORR`, anything over an `OPTIONAL` argument) needs an `OPTIONAL` output field or
+  `COALESCE`.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Declare datetime encoding explicitly when required.
 - For every JAQ-backed codec, use `WITH JAQ TRANSFORMATIONS` and declare `ON INGESTION`,

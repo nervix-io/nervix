@@ -1396,8 +1396,11 @@ async fn window_processor_snapshot_task_persists_published_state_on_interval() {
             snapshot_request_tx,
         )
         .expect("persisted runtime should spawn a snapshot task");
-    let live_state =
-        WindowProcessorState::new(&window_aggregate("SET count = COUNT(input.latency)"));
+    let live_state = WindowProcessorState::new(&window_plan(
+        "SET count = COUNT(input.latency)",
+        ParseAsType::I64,
+        &[("count", ParseAsType::I64)],
+    ));
     let snapshot_state = state.clone();
     let snapshot_branch = placement.branch_key.clone();
     let snapshot_owner = tokio::spawn(async move {
@@ -1444,8 +1447,11 @@ fn a_window_state_publication_proceeds_while_a_snapshot_reads_the_previous_one()
     };
     let state = ReplicatedWindowProcessorState::new(placement, None)
         .expect("window processor state should initialize");
-    let live_state =
-        WindowProcessorState::new(&window_aggregate("SET count = COUNT(input.latency)"));
+    let live_state = WindowProcessorState::new(&window_plan(
+        "SET count = COUNT(input.latency)",
+        ParseAsType::I64,
+        &[("count", ParseAsType::I64)],
+    ));
     state
         .replace_state(&live_state)
         .expect("the first window state should publish");
