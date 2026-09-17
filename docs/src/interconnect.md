@@ -461,6 +461,17 @@ bulk class. Receivers stage and validate the owning artifact while releasing HTT
 chunk. The whole transfer may exceed the 32 MiB bulk-memory budget because only bounded chunks and
 the active decoded section are resident at once.
 
+A runtime-state placement names exactly the state it addresses: the domain, entity, state kind,
+schema fingerprint, and concrete branch, and for WASM processor guest state the generation the
+committed schedule names for that branch. A node answers a synchronization request, and acts on a
+checkpoint announcement or a handoff checkpoint, only while the placement is current on that node,
+so an owner never serves, and a replica never installs, guest state of a generation that has been
+replaced. A replication acknowledgement counts only toward the placement it names, so an
+acknowledgement for a replaced generation never satisfies the replica quorum of the current one.
+The schedule fingerprint an ownership handoff or forced recovery is bound to covers those
+generations, so a preparation staged against an earlier generation cannot activate after a later one
+is committed.
+
 Runtime-state synchronization replies and materialized-snapshot descriptions carry the shared
 typed remote-operation failure envelope. Rejection, absence, temporary unreadiness, and execution
 failure remain distinct across the node boundary, and the requester keeps that classification in
