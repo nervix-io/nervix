@@ -235,6 +235,7 @@ fn test_session_service(
             transaction_bindings: DashMap::with_hasher(RandomState::new()),
             command_executions: DashMap::with_hasher(RandomState::new()),
             transaction_executions: DashMap::with_hasher(RandomState::new()),
+            transaction_recovery: Default::default(),
             ownership_handoff_operations: tokio::sync::Mutex::new(()),
             resource_upload_executions: DashMap::with_hasher(RandomState::new()),
             resource_replication_executions: DashMap::with_hasher(RandomState::new()),
