@@ -22,6 +22,7 @@ mod expression;
 mod message_error;
 mod model_index;
 mod names;
+mod node_endpoint;
 mod node_ref;
 mod quiesce;
 mod rebind_resource;
@@ -64,6 +65,9 @@ pub use names::{
     QueueGroupName, QueueName, ReingestorName, RelayName, ReordererName, ResourceName, SchemaName,
     SignalingProtocolName, SubjectName, SubscriptionName, TableName, TopicName, UdfName, UserName,
     VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
+};
+pub use node_endpoint::{
+    NodeEndpoint, NodeEndpointParseError, NodeServiceUrl, NodeServiceUrlParseError,
 };
 pub use node_ref::{DomainNodeRef, NodeRef};
 pub use quiesce::{

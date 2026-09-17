@@ -47,6 +47,10 @@ pub enum AppError {
     ParseInterconnectAdvertiseAddress,
     #[error("failed to derive interconnect address from gRPC address")]
     DeriveInterconnectAddress,
+    #[error("failed to build the advertised client url")]
+    BuildClientAdvertiseUrl,
+    #[error("failed to build the advertised web console url")]
+    BuildConsoleAdvertiseUrl,
     #[error("gRPC https mode requires an https listen address")]
     MissingGrpcHttpsListenAddress,
     #[error("gRPC https mode requires an https advertise address")]
