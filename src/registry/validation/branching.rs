@@ -1098,6 +1098,7 @@ mod tests {
         PlacementPolicy, ProcessorInputs, SchemaField, WireSchemaField, WireSchemaName,
     };
     use nonzero_ext::nonzero;
+    use triomphe::Arc;
 
     use super::*;
     use crate::registry::{
@@ -1111,6 +1112,96 @@ mod tests {
             with_processor_branching,
         },
     };
+
+    #[test]
+    fn assign_stream_branching_preserves_exact_identity_and_schema() {
+        let domain: DomainName = named("default");
+        let producer: ModelName = named("producer");
+        let relay_name: RelayName = named("events");
+        let branch_name: BranchName = named("by_tenant");
+        let branch_schema = CreateSchema {
+            name: named("tenant_branch_schema"),
+            fields: vec![SchemaField {
+                name: named("tenant"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            }],
+        };
+        let branching = ResolvedBranching::branched(branch_name.clone(), branch_schema.clone());
+        let mut graph = DiGraph::<ActiveNode, EdgeKind>::new();
+        let relay_index = graph.add_node(ActiveNode {
+            identifier: named("events"),
+            kind: ModelKind::Relay,
+            config: Arc::new(relay("events", "event_schema")),
+            resolved_branching: None,
+        });
+        let mut indices = HashMap::default();
+        indices.insert(
+            NodeRef::new(ModelKind::Relay, relay_name.clone()),
+            relay_index,
+        );
+
+        let changed = assign_stream_branching(
+            &domain,
+            &producer,
+            &relay_name,
+            branching.clone(),
+            &indices,
+            &mut graph,
+        )
+        .expect("the first producer should establish the relay branch");
+        assert!(changed);
+        assert_eq!(
+            graph
+                .node_weight(relay_index)
+                .expect("the relay node should remain present")
+                .resolved_branching,
+            Some(branching.clone())
+        );
+
+        let changed = assign_stream_branching(
+            &domain,
+            &producer,
+            &relay_name,
+            branching,
+            &indices,
+            &mut graph,
+        )
+        .expect("an identical branch should be accepted");
+        assert!(!changed);
+
+        let sensitive_schema = CreateSchema {
+            name: branch_schema.name.clone(),
+            fields: vec![SchemaField {
+                name: named("tenant"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: true,
+            }],
+        };
+        let schema_error = assign_stream_branching(
+            &domain,
+            &producer,
+            &relay_name,
+            ResolvedBranching::branched(branch_name, sensitive_schema),
+            &indices,
+            &mut graph,
+        )
+        .expect_err("a conflicting branch schema should be rejected");
+        assert!(format!("{schema_error}").contains("conflicting branch schemas"));
+
+        let identity_error = assign_stream_branching(
+            &domain,
+            &producer,
+            &relay_name,
+            ResolvedBranching::branched(named("by_account"), branch_schema),
+            &indices,
+            &mut graph,
+        )
+        .expect_err("a conflicting branch identity should be rejected");
+        assert!(format!("{identity_error}").contains("conflicting branch names"));
+    }
 
     #[test]
     fn apply_batch_accepts_unbranched_ingestor_without_branch_schema() {
