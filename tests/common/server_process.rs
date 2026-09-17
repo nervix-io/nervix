@@ -115,6 +115,10 @@ pub(crate) enum ServerProcessOption {
     StateSnapshotInterval(Duration),
     /// `--shutdown-timeout`.
     ShutdownTimeout(Duration),
+    /// `--transaction-idle-timeout`.
+    TransactionIdleTimeout(Duration),
+    /// `--transaction-tombstone-retention`.
+    TransactionTombstoneRetention(Duration),
 }
 
 impl ServerProcessOption {
@@ -134,6 +138,16 @@ impl ServerProcessOption {
                 command
                     .arg("--shutdown-timeout")
                     .arg(humantime::format_duration(timeout).to_string());
+            }
+            Self::TransactionIdleTimeout(timeout) => {
+                command
+                    .arg("--transaction-idle-timeout")
+                    .arg(humantime::format_duration(timeout).to_string());
+            }
+            Self::TransactionTombstoneRetention(retention) => {
+                command
+                    .arg("--transaction-tombstone-retention")
+                    .arg(humantime::format_duration(retention).to_string());
             }
         }
     }
