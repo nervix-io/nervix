@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use shuttle::{
     Config, FailurePersistence, Runner,
-    scheduler::{DfsScheduler, PctScheduler, ReplayScheduler, Scheduler},
+    scheduler::{DfsScheduler, PctScheduler, RandomScheduler, ReplayScheduler, Scheduler},
 };
 
 // Shuttle executes each modeled thread on a coroutine stack. The server test binary's allocator
@@ -17,26 +17,28 @@ use shuttle::{
 // its first scheduling point, which the guard page reports as SIGSEGV rather than a Rust panic.
 const SERVER_MODEL_STACK_SIZE: usize = 1_048_576;
 
-/// Explores every interleaving of a model small enough to enumerate exhaustively.
 pub(crate) fn check_dfs<F>(invariant: F, max_iterations: Option<usize>)
 where
     F: Fn() + Send + Sync + 'static,
 {
-    run_model(invariant, DfsScheduler::new(max_iterations, false));
+    check_with_scheduler(invariant, DfsScheduler::new(max_iterations, false));
 }
 
-/// Samples interleavings of a model too large to enumerate, biased towards schedules that need up
-/// to `depth` ordering constraints to fail.
 pub(crate) fn check_pct<F>(invariant: F, iterations: usize, depth: usize)
 where
     F: Fn() + Send + Sync + 'static,
 {
-    run_model(invariant, PctScheduler::new(depth, iterations));
+    check_with_scheduler(invariant, PctScheduler::new(depth, iterations));
 }
 
-/// Runs `invariant` under `exploration`, or under the schedule `SHUTTLE_TRACE_FILE` names, so a
-/// persisted failure replays whichever scheduler found it.
-fn run_model<F, S>(invariant: F, exploration: S)
+pub(crate) fn check_random<F>(invariant: F, iterations: usize)
+where
+    F: Fn() + Send + Sync + 'static,
+{
+    check_with_scheduler(invariant, RandomScheduler::new(iterations));
+}
+
+fn check_with_scheduler<F, S>(invariant: F, scheduler: S)
 where
     F: Fn() + Send + Sync + 'static,
     S: Scheduler + 'static,
@@ -67,5 +69,5 @@ where
         config.failure_persistence = FailurePersistence::File(Some(trace_directory));
     }
 
-    Runner::new(exploration, config).run(invariant);
+    Runner::new(scheduler, config).run(invariant);
 }
