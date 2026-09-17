@@ -11,7 +11,8 @@ use ahash::{HashMap, HashSet};
 use meticulous::OptionExt as _;
 use nervix_models::{
     CreateInferencer, CreateLookup, DomainName, DomainPace, InferencerTensorDimension,
-    InferencerTensorSchema, Model, ModelKind, VhostTlsResource,
+    InferencerTensorSchema, Model, ModelKind, RequestedResourceVersion, ResourceId,
+    VhostTlsResource,
 };
 use ort::{
     session::Session,
@@ -20,7 +21,6 @@ use ort::{
 use tokio::time::Duration;
 
 use super::{
-    resource::resolve_resource_id,
     session_service::SessionServiceImpl,
     tls::{ensure_file_exists, load_vhost_tls_materials},
 };
@@ -249,13 +249,14 @@ impl SessionServiceImpl {
             .map_err(|error| format!("invalid UDF '{}': {error}", changed_udfs.join(", ")))
     }
 
+    /// Proves the TLS material of the version the VHOST pins loads. Planning already resolved that
+    /// version against the completed versions of the domain.
     async fn validate_vhost_tls_binding(
         &self,
         domain: &DomainName,
         tls: &VhostTlsResource,
     ) -> Result<(), String> {
-        let resources = self.inner.consensus.current_resources().await;
-        let id = resolve_resource_id(&resources, domain, &tls.resource, tls.version)?;
+        let id = ResourceId::new(domain.clone(), tls.resource.clone(), tls.version);
         load_vhost_tls_materials(&self.inner.resource_store, &id).await?;
         Ok(())
     }
@@ -266,7 +267,10 @@ impl SessionServiceImpl {
         lookup: &CreateLookup,
     ) -> Result<(), String> {
         let resources = self.inner.consensus.current_resources().await;
-        let id = resolve_resource_id(&resources, domain, &lookup.resource, None)?;
+        let id = resources
+            .uploads
+            .resolve_completed_version(domain, &lookup.resource, RequestedResourceVersion::Latest)
+            .map_err(|error| error.to_string())?;
         let path = self
             .inner
             .resource_store
@@ -287,13 +291,11 @@ impl SessionServiceImpl {
                 error
             )
         })?;
-        let resources = self.inner.consensus.current_resources().await;
-        let id = resolve_resource_id(
-            &resources,
-            domain,
-            &processor.resource,
+        let id = ResourceId::new(
+            domain.clone(),
+            processor.resource.clone(),
             processor.resource_version,
-        )?;
+        );
         let path = self
             .inner
             .resource_store

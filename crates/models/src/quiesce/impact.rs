@@ -23,7 +23,10 @@ use strum::AsRefStr;
 use thiserror::Error;
 
 use super::{ModelChangeAspect, QuiesceLevel, StatePurge};
-use crate::{BranchName, ClusterNodeName, DomainName, NodeRef, RelayName, ResourceName};
+use crate::{
+    BranchName, ClusterNodeName, DomainName, NodeRef, RelayName, RequestedResourceVersion,
+    ResourceName,
+};
 #[cfg(test)]
 use crate::{ModelKind, ModelName};
 
@@ -1114,6 +1117,29 @@ pub struct ResourceCatalogImpact {
     pub attribution: ImpactAttribution,
 }
 
+/// The resource version a created or changed model binds. `requested` keeps the version as the
+/// statement wrote it, so a `LATEST` binding reports the number it resolved to beside the request.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct ResourceBindingImpact {
+    pub node: NodeRef,
+    pub resource: ResourceName,
+    pub requested: RequestedResourceVersion,
+    pub version: u64,
+    pub attribution: ImpactAttribution,
+}
+
 #[derive(
     Debug,
     Clone,
@@ -1323,6 +1349,7 @@ pub struct ImpactEffects {
     pub state_resets: CanonicalImpactSet<StateResetImpact>,
     pub force_flushes: CanonicalImpactSet<ForceFlushImpact>,
     pub resource_catalog: CanonicalImpactSet<ResourceCatalogImpact>,
+    pub resource_bindings: CanonicalImpactSet<ResourceBindingImpact>,
 }
 
 #[derive(

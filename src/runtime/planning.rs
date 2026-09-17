@@ -1140,7 +1140,7 @@ mod tests {
                     }],
                 },
                 resource: named("fraud_model"),
-                resource_version: Some(1),
+                resource_version: 1,
                 file: "models/fraud.onnx".to_string(),
                 inputs: Vec::new(),
                 output_schema: Vec::new(),
@@ -1519,7 +1519,7 @@ mod tests {
                     }],
                 },
                 resource: named("fraud_model"),
-                resource_version: Some(1),
+                resource_version: 1,
                 file: "models/fraud.onnx".to_string(),
                 inputs: vec![InferencerTensorMapping {
                     tensor: "features".to_string(),
@@ -1896,7 +1896,7 @@ mod tests {
                             .with_flush_policy(FlushPolicy::Immediate),
                         branched_by: processor_branched_by("features", &["tenant"]),
                         resource: named("fraud_model"),
-                        resource_version: Some(3),
+                        resource_version: 3,
                         file: "models/fraud.onnx".to_string(),
                         inputs: vec![InferencerTensorMapping {
                             tensor: "features".to_string(),
@@ -1962,7 +1962,7 @@ mod tests {
             .expect("inferencer should have output route");
         assert_eq!(output.relay, named("scores"));
         assert_eq!(resource, &named("fraud_model"));
-        assert_eq!(*resource_version, Some(3));
+        assert_eq!(*resource_version, 3);
         assert_eq!(file, "models/fraud.onnx");
         assert_eq!(inputs.len(), 1);
         assert_eq!(output_schema.len(), 1);
@@ -2563,7 +2563,7 @@ mod tests {
                         output_routes: ProcessorOutputs::single(named("filtered_orders")),
                         branched_by: BranchSelection::unbranched(),
                         resource: named("filter_resource"),
-                        resource_version: None,
+                        resource_version: 1,
                         file: "filter.wasm".to_string(),
                         limits: nervix_models::WasmProcessorLimits {
                             max_fuel: nonzero!(1_000_000_000u64),

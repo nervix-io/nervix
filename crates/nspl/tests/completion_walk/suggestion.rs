@@ -26,6 +26,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("array_length", "4"),
     ("batch_size", "1000"),
     ("byte_size_literal", "1MiB"),
+    ("completed_resource_version", "1"),
     ("instance_count", "2"),
     ("integer_literal", "1"),
     ("max_fuel", "1000000"),

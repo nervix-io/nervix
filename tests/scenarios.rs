@@ -4081,39 +4081,46 @@ async fn given_node_has_large_resource_file(
         .insert(placeholder, resource_dir.display().to_string());
 }
 
-#[given(expr = "node {string} has ONNX fixture resource directory {string}")]
-async fn given_node_has_onnx_fixture_resource_directory(
+/// The generated ONNX models a fixture resource directory carries under `models/`.
+const ONNX_FIXTURE_MODELS: [&str; 7] = [
+    "simple_score.onnx",
+    "alternate_score.onnx",
+    "batch_score.onnx",
+    "dynamic_batch_score.onnx",
+    "matrix_identity.onnx",
+    "scalar_identity.onnx",
+    "f64_score.onnx",
+];
+
+fn onnx_fixture_path(fixture: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("onnx")
+        .join(fixture)
+}
+
+/// Writes every generated ONNX model into a fresh resource directory for `node_id` and registers
+/// the directory under `placeholder`.
+fn place_onnx_fixture_resource_directory(
     world: &mut ScenarioWorld,
-    node_id: String,
-    placeholder: String,
-) {
+    node_id: &str,
+    placeholder: &str,
+) -> PathBuf {
     ensure_onnx_runtime_loaded();
 
     let base_dir = world
         .cluster()
-        .node_base_dir(&node_id)
+        .node_base_dir(node_id)
         .expect("node base dir should exist");
-    let resource_dir = base_dir.join("fixtures").join(&placeholder);
+    let resource_dir = base_dir.join("fixtures").join(placeholder);
     if resource_dir.exists() {
         std::fs::remove_dir_all(&resource_dir).expect("old fixture directory should be removed");
     }
     std::fs::create_dir_all(resource_dir.join("models"))
         .expect("fixture model directory should be created");
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let source_path = repo_root
-        .join("tests")
-        .join("fixtures")
-        .join("onnx")
-        .join("simple_score.onnx");
-    for fixture in [
-        "simple_score.onnx",
-        "batch_score.onnx",
-        "dynamic_batch_score.onnx",
-        "matrix_identity.onnx",
-        "scalar_identity.onnx",
-        "f64_score.onnx",
-    ] {
-        let source_path = source_path.with_file_name(fixture);
+    for fixture in ONNX_FIXTURE_MODELS {
+        let source_path = onnx_fixture_path(fixture);
         let destination_path = resource_dir.join("models").join(fixture);
         std::fs::copy(&source_path, &destination_path).unwrap_or_else(|error| {
             panic!(
@@ -4126,7 +4133,40 @@ async fn given_node_has_onnx_fixture_resource_directory(
 
     world
         .placeholders
-        .insert(placeholder, resource_dir.display().to_string());
+        .insert(placeholder.to_string(), resource_dir.display().to_string());
+    resource_dir
+}
+
+#[given(expr = "node {string} has ONNX fixture resource directory {string}")]
+async fn given_node_has_onnx_fixture_resource_directory(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    placeholder: String,
+) {
+    place_onnx_fixture_resource_directory(world, &node_id, &placeholder);
+}
+
+#[given(
+    expr = "node {string} has ONNX fixture resource directory {string} with {string} copied from \
+            fixture {string}"
+)]
+async fn given_node_has_onnx_fixture_resource_directory_with_replaced_model(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    placeholder: String,
+    relative_path: String,
+    fixture: String,
+) {
+    let resource_dir = place_onnx_fixture_resource_directory(world, &node_id, &placeholder);
+    let source_path = onnx_fixture_path(&fixture);
+    let destination_path = resource_dir.join(&relative_path);
+    std::fs::copy(&source_path, &destination_path).unwrap_or_else(|error| {
+        panic!(
+            "failed to copy ONNX fixture '{}' over '{}': {error}",
+            source_path.display(),
+            destination_path.display()
+        )
+    });
 }
 
 #[given(expr = "node {string} has WASM processor fixture resource directory {string}")]
@@ -5387,6 +5427,14 @@ async fn given_resource_installation_pause(world: &mut ScenarioWorld, node_id: S
     world
         .fault_injection
         .pause_resource_installation_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[given(expr = "resource installation on node {string} fails before promotion")]
+async fn given_resource_installation_failure(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .fail_next_resource_installation_on(crate::common::cluster::node_name(&node_id));
 }
 
 #[then(expr = "the resource installation pause on node {string} is reached")]
@@ -14763,6 +14811,47 @@ async fn then_within_duration_repeatedly_posting_http_payload_yields_subscriptio
             Instant::now() < deadline,
             "timed out waiting for http payload posted to host '{host}' path '{path}' to reach \
              the relay subscription"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(
+    expr = "within {string} repeatedly posting https payload to host {string} path {string} using \
+            CA from resource directory {string} yields a relay subscription payload"
+)]
+async fn then_within_duration_repeatedly_posting_https_payload_yields_subscription_payload(
+    world: &mut ScenarioWorld,
+    duration: String,
+    host: String,
+    path: String,
+    ca_resource_directory: String,
+    #[step] step: &Step,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let ca_pem = resource_directory_ca_pem(world, &ca_resource_directory);
+    let deadline = Instant::now() + duration;
+
+    loop {
+        tokio::task::consume_budget().await;
+        let publish = world
+            .cluster()
+            .publish_https("node-1", &host, &path, &payload, &ca_pem)
+            .await;
+
+        if try_capture_any_subscription_payload(world, Duration::from_millis(350)).await {
+            return;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for https payload posted to host '{host}' path '{path}' with the \
+             CA from '{ca_resource_directory}' to reach the relay subscription; last publish: \
+             {publish:?}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

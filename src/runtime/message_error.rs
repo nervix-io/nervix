@@ -1330,7 +1330,13 @@ mod tests {
         let Statement::Create(create) = statement else {
             panic!("test source should create a runtime model");
         };
-        *create.body
+        create
+            .body
+            .try_map_resource_versions(|resource, requested| match requested {
+                nervix_models::RequestedResourceVersion::Number(version) => Ok(version),
+                nervix_models::RequestedResourceVersion::Latest => Err(resource.clone()),
+            })
+            .expect("test sources name explicit resource versions")
     }
 
     fn install_message_error_test_execution(

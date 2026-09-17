@@ -20,10 +20,11 @@ use nervix_models::{
     ImpactReportCompleteness, ImpactReportError, ImpactTopology, ImpactTopologyEdge,
     ModelChangeAspect, ModelIndex, NodeRef, OperationImpactReason, OperationImpactReport,
     OwnershipMoveImpact, PauseRequirement, PlacementPolicy, PlannedExecutionStepImpact,
-    QuiesceLevel, QuiesceSubgraph, RebuildImpact, RebuildReason, ResourceCatalogAction,
-    ResourceCatalogImpact, ResourceName, StateResetImpact, Statement, TransactionImpactReport,
-    TransactionOperation, TransactionOperationNumber, TransactionOperationRange,
-    TransactionPosition,
+    QuiesceLevel, QuiesceSubgraph, RebuildImpact, RebuildReason, RequestedResourceVersion,
+    ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact, ResourceName,
+    ResourceUploads, ResourceVersionResolutionError, StateResetImpact, Statement,
+    TransactionImpactReport, TransactionOperation, TransactionOperationNumber,
+    TransactionOperationRange, TransactionPosition,
 };
 use thiserror::Error;
 
@@ -39,6 +40,10 @@ pub(crate) struct TransactionPlanningSnapshot {
     pub(crate) domain: ControlDomainState,
     pub(crate) models: ModelIndex,
     pub(crate) resources: BTreeSet<ResourceName>,
+    /// The upload outcomes of the planned domain. Every resource version a statement writes is
+    /// resolved against these, so `LATEST` names the highest version completed when this snapshot
+    /// was captured.
+    pub(crate) resource_uploads: ResourceUploads,
     pub(crate) schedule: Option<DomainSchedule>,
     pub(crate) basis: ImpactPlanningBasis,
 }
@@ -166,6 +171,11 @@ pub(crate) enum TransactionPlanningError {
     InvalidOperation {
         operation: TransactionOperationNumber,
     },
+    #[error("transaction operation {operation} failed resource version resolution: {error}")]
+    ResourceVersion {
+        operation: TransactionOperationNumber,
+        error: ResourceVersionResolutionError,
+    },
     #[error("transaction operation {operation} failed model preflight: {error}")]
     ModelPreflight {
         operation: TransactionOperationNumber,
@@ -210,6 +220,7 @@ struct ModelRunPlan {
 struct ModelRunPlanningInput<'a> {
     domain: &'a DomainName,
     domain_state: &'a ControlDomainState,
+    resource_uploads: &'a ResourceUploads,
     base_models: ModelIndex,
     current_schedule: Option<DomainSchedule>,
     statements: &'a [Statement],
@@ -306,6 +317,7 @@ impl Registry {
         let mut domain_state = snapshot.domain;
         let mut models = snapshot.models;
         let mut resources = snapshot.resources;
+        let resource_uploads = snapshot.resource_uploads;
         let mut current_schedule = snapshot.schedule;
         let mut operations = Vec::with_capacity(statements.len());
         let mut steps = Vec::new();
@@ -336,6 +348,7 @@ impl Registry {
                 let input = ModelRunPlanningInput {
                     domain: &domain,
                     domain_state: &domain_state,
+                    resource_uploads: &resource_uploads,
                     base_models: models,
                     current_schedule,
                     statements: run_statements,
@@ -603,6 +616,7 @@ impl Registry {
         let ModelRunPlanningInput {
             domain,
             domain_state,
+            resource_uploads,
             base_models,
             current_schedule,
             statements,
@@ -620,6 +634,9 @@ impl Registry {
         let mut no_op_operations = BTreeSet::new();
         let mut pending_operations = Vec::with_capacity(statements.len());
         let mut touched_by_node = BTreeMap::<NodeRef, Vec<TransactionOperationNumber>>::new();
+        // The resource versions the latest create of each node bound. Dropping the node removes
+        // its entry, so what remains after the run describes the models the run leaves behind.
+        let mut bindings_by_node = BTreeMap::<NodeRef, Vec<ResourceBindingImpact>>::new();
 
         for (run_index, statement) in statements.iter().enumerate() {
             let absolute_index = first_operation_index
@@ -644,13 +661,31 @@ impl Registry {
                     touched_nodes: BTreeSet::new(),
                 }
             } else {
-                let mutation = RegistryMutation::try_from(statement).map_err(|_| {
+                let written = RegistryMutation::try_from(statement).map_err(|_| {
                     Report::new(TransactionPlanningError::InvalidOperation { operation: number })
                 })?;
+                let target = written.target_key();
+                let pinned = pin_written_resource_versions(PinnedResourceVersionsInput {
+                    domain,
+                    resource_uploads,
+                    target: &target,
+                    operation: number,
+                    written,
+                })?;
+                match &pinned.mutation {
+                    RegistryMutation::Create(_) => {
+                        bindings_by_node.insert(target, pinned.bindings.clone());
+                    }
+                    RegistryMutation::Drop(_) => {
+                        bindings_by_node.remove(&target);
+                    }
+                    _ => {}
+                }
                 let before = prefix_models.clone();
-                mutation.fold_into_models(&mut prefix_models);
-                let contribution = model_contribution(&before, &prefix_models, number);
-                mutations.push(mutation);
+                pinned.mutation.fold_into_models(&mut prefix_models);
+                let mut contribution = model_contribution(&before, &prefix_models, number);
+                contribution.effects.resource_bindings = CanonicalImpactSet::new(pinned.bindings);
+                mutations.push(pinned.mutation);
                 contribution
             };
             for node in &contribution.touched_nodes {
@@ -757,12 +792,20 @@ impl Registry {
             )
         };
         let completeness = completeness_for_pause(diagnostics);
+        let mut step_bindings = Vec::new();
+        for (node, bindings) in bindings_by_node {
+            if candidate_models.contains(&node) {
+                step_bindings.extend(bindings);
+            }
+        }
+        let mut effects = completed.effects;
+        effects.resource_bindings = CanonicalImpactSet::new(step_bindings);
         let impact = ExecutionStepImpactReport::new(
             range,
             PlannedExecutionStepImpact {
                 completeness,
                 pause,
-                effects: completed.effects,
+                effects,
             },
             ActualExecutionStepImpact::unattempted(),
         );
@@ -787,6 +830,61 @@ impl Registry {
     }
 }
 
+/// A written mutation together with everything needed to pin the resource versions it names.
+struct PinnedResourceVersionsInput<'a> {
+    domain: &'a DomainName,
+    resource_uploads: &'a ResourceUploads,
+    target: &'a NodeRef,
+    operation: TransactionOperationNumber,
+    written: RegistryMutation<RequestedResourceVersion>,
+}
+
+/// A mutation whose resource versions are pinned, with one binding per version it names.
+struct PinnedResourceVersions {
+    mutation: RegistryMutation,
+    bindings: Vec<ResourceBindingImpact>,
+}
+
+/// Resolves every resource version a statement wrote against the captured upload outcomes of its
+/// domain. An explicit number has to be a completed version, and `LATEST` becomes the highest
+/// completed one.
+fn pin_written_resource_versions(
+    input: PinnedResourceVersionsInput<'_>,
+) -> Result<PinnedResourceVersions, Report<TransactionPlanningError>> {
+    let PinnedResourceVersionsInput {
+        domain,
+        resource_uploads,
+        target,
+        operation,
+        written,
+    } = input;
+    let mut bindings = Vec::new();
+    let pinned = written.pin_resource_versions(|resource, requested| {
+        let id = resource_uploads.resolve_completed_version(domain, resource, requested)?;
+        bindings.push(ResourceBindingImpact {
+            node: target.clone(),
+            resource: resource.clone(),
+            requested,
+            version: id.version,
+            attribution: ImpactAttribution::single(operation),
+        });
+        Ok::<u64, Report<ResourceVersionResolutionError>>(id.version)
+    });
+    let mutation = match pinned {
+        Ok(mutation) => mutation,
+        Err(error) => {
+            let resolution = error.current_context().clone();
+            return Err(
+                error.change_context(TransactionPlanningError::ResourceVersion {
+                    operation,
+                    error: resolution,
+                }),
+            );
+        }
+    };
+    Ok(PinnedResourceVersions { mutation, bindings })
+}
+
 fn ensure_domain_not_paused(
     domain: &ControlDomainState,
 ) -> Result<(), Report<TransactionPlanningError>> {
@@ -803,7 +901,7 @@ fn model_operation(
     statement: &Statement,
     operation: TransactionOperationNumber,
 ) -> Result<TransactionOperation, Report<TransactionPlanningError>> {
-    let mutation = RegistryMutation::try_from(statement)
+    let mutation = RegistryMutation::<RequestedResourceVersion>::try_from(statement)
         .map_err(|_| Report::new(TransactionPlanningError::InvalidOperation { operation }))?;
     let operation = match statement {
         Statement::Create(_) => TransactionOperation::CreateConfiguration {
@@ -1756,9 +1854,11 @@ mod tests {
     use nervix_models::{
         AckMode, AlterJunction, AlterProcessorOperation, AlterRelay, AlterRelayOperation,
         AlterSchema, AlterSchemaOperation, BranchSelection, ClusterNodeName,
-        ConcreteBranchCoverage, CreateResource, CreateStatement, DomainConfig, DomainPace,
-        DomainStartPoint, DropModel, FieldName, ImpactEdgeKind, ImpactPlanningBasis, Model,
-        ModelKind, OutputBranch, ParseAsType, ResourceName, SchemaField, Statement,
+        ConcreteBranchCoverage, CreateResource, CreateStatement, CreateVhost, DomainConfig,
+        DomainPace, DomainStartPoint, DropModel, FieldName, ImpactEdgeKind, ImpactPlanningBasis,
+        Model, ModelKind, OutputBranch, ParseAsType, ResourceId, ResourceName, ResourceUpload,
+        ResourceUploadIdentity, ResourceUploadKey, ResourceUploadState, SchemaField, Statement,
+        UserName, VhostTlsResource,
     };
     use nonzero_ext::nonzero;
 
@@ -1789,6 +1889,7 @@ mod tests {
             domain: domain_state(status),
             models: models.into_iter().collect(),
             resources: BTreeSet::new(),
+            resource_uploads: ResourceUploads::default(),
             schedule: None,
             basis: ImpactPlanningBasis::new([7; 32]),
         }
@@ -1810,6 +1911,7 @@ mod tests {
             domain: domain_state(status),
             models,
             resources: BTreeSet::new(),
+            resource_uploads: ResourceUploads::default(),
             schedule: Some(schedule),
             basis: ImpactPlanningBasis::new([7; 32]),
         }
@@ -1871,7 +1973,7 @@ mod tests {
     fn an_incomplete_model_run_cannot_be_repaired_after_a_resource_boundary() {
         let statements = vec![
             Statement::Create(CreateStatement::new(
-                Box::new(relay("events", "missing_schema")),
+                Box::new(relay("events", "missing_schema").into()),
                 false,
             )),
             Statement::CreateResource(CreateStatement::new(
@@ -1882,7 +1984,7 @@ mod tests {
                 false,
             )),
             Statement::Create(CreateStatement::new(
-                Box::new(schema("missing_schema")),
+                Box::new(schema("missing_schema").into()),
                 false,
             )),
         ];
@@ -1919,7 +2021,7 @@ mod tests {
                 kind: ModelKind::Schema,
                 name: named("events"),
             }),
-            Statement::Create(CreateStatement::new(Box::new(replacement), false)),
+            Statement::Create(CreateStatement::new(Box::new(replacement.into()), false)),
         ];
 
         let plan = Registry::plan_transaction(
@@ -2002,7 +2104,7 @@ mod tests {
         let destination = nervix_models::ClusterNodeName::parse("node-b")
             .assured("the destination node fixture is an identifier-shaped literal");
         let statement = Statement::Create(CreateStatement::new(
-            Box::new(relay("events", "event_schema")),
+            Box::new(relay("events", "event_schema").into()),
             false,
         ));
         let plan = Registry::plan_transaction(
@@ -2311,7 +2413,7 @@ mod tests {
         let cluster_node = ClusterNodeName::parse("node-a")
             .assured("the scheduler fixture node is an identifier-shaped literal");
         let statement = Statement::Create(CreateStatement::new(
-            Box::new(relay("events", "event_schema")),
+            Box::new(relay("events", "event_schema").into()),
             false,
         ));
         let plan = Registry::plan_transaction(
@@ -2367,7 +2469,7 @@ mod tests {
                 kind: ModelKind::Junction,
                 name: named("changed"),
             }),
-            Statement::Create(CreateStatement::new(Box::new(replacement), false)),
+            Statement::Create(CreateStatement::new(Box::new(replacement.into()), false)),
         ];
         let plan = Registry::plan_transaction(
             scheduled_snapshot(
@@ -2473,8 +2575,14 @@ mod tests {
     #[test]
     fn if_not_exists_uses_the_ordered_prefix_and_keeps_operation_positions() {
         let statements = [
-            Statement::Create(CreateStatement::new(Box::new(schema("events")), false)),
-            Statement::Create(CreateStatement::new(Box::new(schema("events")), true)),
+            Statement::Create(CreateStatement::new(
+                Box::new(schema("events").into()),
+                false,
+            )),
+            Statement::Create(CreateStatement::new(
+                Box::new(schema("events").into()),
+                true,
+            )),
         ];
         let plan = Registry::plan_transaction(
             snapshot(DomainStatus::Running, []),
@@ -2495,6 +2603,204 @@ mod tests {
             &model_plan.no_op_operations,
             &BTreeSet::from([TransactionOperationNumber::from_index(1)
                 .assured("the second fixture operation is addressable")])
+        );
+    }
+
+    /// The outcome of one fixture upload of the `tls_bundle` resource.
+    enum FixtureUploadOutcome {
+        Completed,
+        Applying,
+    }
+
+    fn tls_bundle_uploads(uploads: &[(u64, FixtureUploadOutcome)]) -> ResourceUploads {
+        let domain = named::<DomainName>("default");
+        let mut records = Vec::new();
+        for (version, outcome) in uploads {
+            let root_checksum = format!("root-{version}");
+            let state = match outcome {
+                FixtureUploadOutcome::Completed => ResourceUploadState::Completed {
+                    root_checksum,
+                    outcome_revision: *version,
+                },
+                FixtureUploadOutcome::Applying => ResourceUploadState::Applying { root_checksum },
+            };
+            records.push(ResourceUpload {
+                key: ResourceUploadKey::new(
+                    UserName::parse("default")
+                        .assured("the fixture owner is an identifier-shaped literal"),
+                    domain.clone(),
+                    named("tls_bundle"),
+                    ResourceUploadIdentity::parse(format!("upload-{version}"))
+                        .assured("fixture upload identities use accepted characters"),
+                ),
+                version: *version,
+                state,
+            });
+        }
+        ResourceUploads::try_from_uploads(records)
+            .assured("fixture uploads have unique identities and versions")
+    }
+
+    fn create_tls_vhost(version: RequestedResourceVersion, if_not_exists: bool) -> Statement {
+        Statement::Create(CreateStatement::new(
+            Box::new(Model::Vhost(CreateVhost {
+                name: named("edge"),
+                hostnames: vec!["edge.example.com".to_string()],
+                tls: Some(VhostTlsResource {
+                    resource: named("tls_bundle"),
+                    version,
+                }),
+            })),
+            if_not_exists,
+        ))
+    }
+
+    fn operation(number: usize) -> TransactionOperationNumber {
+        TransactionOperationNumber::from_index(
+            number
+                .checked_sub(1)
+                .assured("fixture operation numbers are one-based"),
+        )
+        .assured("fixture operation numbers are addressable")
+    }
+
+    #[test]
+    fn latest_binds_the_highest_version_completed_in_the_captured_uploads() {
+        let mut snapshot = snapshot(DomainStatus::Stopped, []);
+        snapshot.resource_uploads = tls_bundle_uploads(&[
+            (1, FixtureUploadOutcome::Completed),
+            (2, FixtureUploadOutcome::Completed),
+            (3, FixtureUploadOutcome::Applying),
+        ]);
+        let statements = vec![create_tls_vhost(RequestedResourceVersion::Latest, false)];
+
+        let plan = Registry::plan_transaction(snapshot, &statements, 0, false, preserve_schedule)
+            .assured("the latest completed version is bindable");
+
+        let binding = ResourceBindingImpact {
+            node: node_ref(ModelKind::Vhost, "edge"),
+            resource: named("tls_bundle"),
+            requested: RequestedResourceVersion::Latest,
+            version: 2,
+            attribution: ImpactAttribution::single(operation(1)),
+        };
+        let step = plan.first_step().verified("the create forms one model run");
+        assert_eq!(
+            step.impact.planned().effects.resource_bindings.as_slice(),
+            std::slice::from_ref(&binding)
+        );
+        let report = plan
+            .report()
+            .assured("a plan from the first operation has a whole-transaction report");
+        assert_eq!(
+            report.operations()[0]
+                .contribution
+                .resource_bindings
+                .as_slice(),
+            std::slice::from_ref(&binding)
+        );
+        let PlannedTransactionStepKind::Models { plan: model_plan } = &step.kind else {
+            unreachable!("the create produces a model plan");
+        };
+        let planned = model_plan
+            .planned
+            .as_ref()
+            .verified("a complete model run carries its planned mutations");
+        let [Model::Vhost(vhost)] = planned.changed_models().as_slice() else {
+            panic!("the plan persists exactly the created VHOST");
+        };
+        let tls = vhost.tls.as_ref().verified("the created VHOST binds TLS");
+        assert_eq!(tls.version, 2);
+    }
+
+    #[test]
+    fn an_incomplete_version_fails_the_operation_that_names_it() {
+        let mut snapshot = snapshot(DomainStatus::Stopped, []);
+        snapshot.resource_uploads = tls_bundle_uploads(&[
+            (1, FixtureUploadOutcome::Completed),
+            (2, FixtureUploadOutcome::Applying),
+        ]);
+        let statements = vec![
+            Statement::Create(CreateStatement::new(
+                Box::new(schema("events").into()),
+                false,
+            )),
+            create_tls_vhost(RequestedResourceVersion::Number(2), false),
+        ];
+
+        let error = Registry::plan_transaction(snapshot, &statements, 0, false, preserve_schedule)
+            .expect_err("an applying version is not bindable");
+
+        assert!(matches!(
+            error.current_context(),
+            TransactionPlanningError::ResourceVersion {
+                operation,
+                error: ResourceVersionResolutionError::NotCompleted(id),
+            } if operation.get() == 2
+                && id == &ResourceId::new(named("default"), named("tls_bundle"), 2)
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("resource 'tls_bundle@2' is not a completed version in domain 'default'")
+        );
+    }
+
+    #[test]
+    fn an_existing_model_skipped_by_if_not_exists_resolves_no_version() {
+        let existing: Model = Model::Vhost(CreateVhost {
+            name: named("edge"),
+            hostnames: vec!["edge.example.com".to_string()],
+            tls: Some(VhostTlsResource {
+                resource: named("tls_bundle"),
+                version: 1,
+            }),
+        });
+        let statements = vec![create_tls_vhost(RequestedResourceVersion::Latest, true)];
+
+        let plan = Registry::plan_transaction(
+            snapshot(DomainStatus::Stopped, [existing]),
+            &statements,
+            0,
+            false,
+            preserve_schedule,
+        )
+        .assured("an IF NOT EXISTS no-op does not need a completed version");
+
+        let step = plan.first_step().verified("the create forms one model run");
+        assert!(step.impact.planned().effects.resource_bindings.is_empty());
+        let PlannedTransactionStepKind::Models { plan: model_plan } = &step.kind else {
+            unreachable!("the create produces a model plan");
+        };
+        assert!(model_plan.no_op_operations.contains(&operation(1)));
+    }
+
+    #[test]
+    fn a_binding_dropped_later_in_the_run_is_not_reported_by_its_step() {
+        let mut snapshot = snapshot(DomainStatus::Stopped, []);
+        snapshot.resource_uploads = tls_bundle_uploads(&[(1, FixtureUploadOutcome::Completed)]);
+        let statements = vec![
+            create_tls_vhost(RequestedResourceVersion::Latest, false),
+            Statement::Drop(DropModel {
+                kind: ModelKind::Vhost,
+                name: named("edge"),
+            }),
+        ];
+
+        let plan = Registry::plan_transaction(snapshot, &statements, 0, false, preserve_schedule)
+            .assured("creating and dropping a VHOST is a valid run");
+
+        let step = plan
+            .first_step()
+            .verified("both statements form one model run");
+        assert!(step.impact.planned().effects.resource_bindings.is_empty());
+        let report = plan
+            .report()
+            .assured("a plan from the first operation has a whole-transaction report");
+        assert_eq!(
+            report.operations()[0].contribution.resource_bindings.len(),
+            1,
+            "the create still reports the version it resolved"
         );
     }
 }

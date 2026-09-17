@@ -28,9 +28,9 @@ use crate::{
     DomainTimeRate, EmitterName, EndpointName, FieldName, GeneratorName, InferencerName,
     IngestorName, JsonType, JunctionName, LookupName, ModelName, NodeRef, ParseAsType,
     PlacementName, PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName, RelayName,
-    ReordererName, ResourceName, SchemaName, SignalingProtocolName, SubjectName, SubscriptionName,
-    TableName, Timestamp, TopicName, UdfName, UserName, VhostName, WasmProcessorName,
-    WindowProcessorName, WireSchemaName,
+    ReordererName, RequestedResourceVersion, ResourceName, SchemaName, SignalingProtocolName,
+    SubjectName, SubscriptionName, TableName, Timestamp, TopicName, UdfName, UserName, VhostName,
+    WasmProcessorName, WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
@@ -44,7 +44,7 @@ pub enum Statement {
     UploadResource(UploadResource),
     StartDomain(StartDomain),
     StopDomain(StopDomain),
-    Create(CreateStatement<Box<Model>>),
+    Create(CreateStatement<Box<Model<RequestedResourceVersion>>>),
     AlterSchema(AlterSchema),
     AlterWireJsonSchema(AlterWireSchema<JsonType>),
     AlterWireCborSchema(AlterWireSchema<CborType>),
@@ -1091,7 +1091,12 @@ pub trait UniquelyKindedModel: Sized {
 /// [`UniquelyKindedModel`] projection. `shared` says the pairing is broken in one direction or the
 /// other, so naming the kind leaves the union as the only honest answer.
 macro_rules! declare_models {
-    ($($Variant:ident($Model:ty) => $Kind:ident, $client_label:expr, $family:ident;)+) => {
+    ($($Variant:ident($Model:ident $(<$Version:ident>)?) => $Kind:ident, $client_label:expr, $family:ident;)+) => {
+        /// One domain entity's configuration.
+        ///
+        /// `Version` is the type a resource binding's version takes. A stored Model binds concrete
+        /// numbers, which is the default; a parsed `CREATE` statement carries
+        /// [`RequestedResourceVersion`] until planning resolves it.
         #[derive(
             Debug,
             Clone,
@@ -1103,11 +1108,11 @@ macro_rules! declare_models {
             RkyvSerialize,
             RkyvDeserialize,
         )]
-        pub enum Model {
-            $($Variant($Model),)+
+        pub enum Model<Version = u64> {
+            $($Variant($Model $(<$Version>)?),)+
         }
 
-        impl Model {
+        impl<Version> Model<Version> {
             pub fn kind(&self) -> ModelKind {
                 match self {
                     $(Self::$Variant(_) => ModelKind::$Kind,)+
@@ -1125,9 +1130,30 @@ macro_rules! declare_models {
                     $(Self::$Variant(_) => $client_label,)+
                 }
             }
+
+            /// Rebuilds this model with the version of every resource it binds passed through
+            /// `map`, in the order the model declares its bindings. A model that binds no resource
+            /// is rebuilt unchanged.
+            pub fn try_map_resource_versions<Next, Error>(
+                self,
+                mut map: impl FnMut(&ResourceName, Version) -> Result<Next, Error>,
+            ) -> Result<Model<Next>, Error> {
+                let mapped = match self {
+                    $(Self::$Variant(model) => {
+                        Model::$Variant(declare_models!(@map_versions model, map $(, $Version)?))
+                    })+
+                };
+                Ok(mapped)
+            }
         }
 
         $(declare_models!(@family $family $Variant($Model) => $Kind);)+
+    };
+    (@map_versions $model:ident, $map:ident) => {
+        $model
+    };
+    (@map_versions $model:ident, $map:ident, $Version:ident) => {
+        $model.try_map_resource_versions(&mut $map)?
     };
     (@family paired $Variant:ident($Model:ty) => $Kind:ident) => {
         impl UniquelyKindedModel for $Model {
@@ -1166,7 +1192,7 @@ declare_models! {
     WireJsonSchema(CreateJsonWireSchema) => WireJsonSchema, None, shared;
     WireCborSchema(CreateCborWireSchema) => WireCborSchema, None, shared;
     WireAvroSchema(CreateAvroWireSchema) => WireAvroSchema, None, paired;
-    Codec(CreateCodec) => Codec, None, paired;
+    Codec(CreateCodec<Version>) => Codec, None, paired;
     ClientKafka(CreateClientKafka) => Client, Some("KAFKA"), shared;
     ClientPulsar(CreateClientPulsar) => Client, Some("PULSAR"), shared;
     ClientHttp(CreateClientHttp) => Client, Some("HTTP"), shared;
@@ -1189,13 +1215,13 @@ declare_models! {
     ClientGcs(CreateClientGcs) => Client, Some("GCS"), shared;
     ClientAzureBlob(CreateClientAzureBlob) => Client, Some("AZURE_BLOB"), shared;
     ClientIcebergRest(CreateClientIcebergRest) => Client, Some("ICEBERG_REST"), shared;
-    Vhost(CreateVhost) => Vhost, None, paired;
+    Vhost(CreateVhost<Version>) => Vhost, None, paired;
     Branch(CreateBranch) => Branch, None, paired;
     Endpoint(CreateEndpoint) => Endpoint, None, paired;
-    SignalingProtocol(CreateSignalingProtocol) => SignalingProtocol, None, paired;
+    SignalingProtocol(CreateSignalingProtocol<Version>) => SignalingProtocol, None, paired;
     Generator(CreateGenerator) => Generator, None, paired;
-    Inferencer(CreateInferencer) => Inferencer, None, paired;
-    WasmProcessor(CreateWasmProcessor) => WasmProcessor, None, paired;
+    Inferencer(CreateInferencer<Version>) => Inferencer, None, paired;
+    WasmProcessor(CreateWasmProcessor<Version>) => WasmProcessor, None, paired;
     Ingestor(CreateIngestor) => Ingestor, None, paired;
     Reingestor(CreateReingestor) => Reingestor, None, paired;
     Relay(CreateRelay) => Relay, None, paired;
@@ -1257,7 +1283,9 @@ impl Model {
             _ => None,
         }
     }
+}
 
+impl<Version> Model<Version> {
     /// How this model is addressed: the kind it is and the name it carries, together.
     pub fn node_ref(&self) -> NodeRef {
         NodeRef::new(self.kind(), self.name())
@@ -1267,9 +1295,9 @@ impl Model {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct CreateCodec {
+pub struct CreateCodec<Version = u64> {
     pub name: CodecName,
-    pub wire_format: CodecWireFormat,
+    pub wire_format: CodecWireFormat<Version>,
     pub schema: SchemaName,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub encoding_rules: Vec<CodecEncodingRule>,
@@ -1323,7 +1351,7 @@ pub enum CodecJaqFormat {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub enum CodecWireFormat {
+pub enum CodecWireFormat<Version = u64> {
     Json {
         wire_schema: WireSchemaName,
     },
@@ -1338,7 +1366,7 @@ pub enum CodecWireFormat {
         format: CodecJaqFormat,
         transformations: CodecJaqTransformations,
     },
-    Protobuf(CodecProtobufConfig),
+    Protobuf(CodecProtobufConfig<Version>),
 }
 
 impl CodecWireFormat {
@@ -1453,9 +1481,9 @@ pub trait WireSchemaLookup {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct CodecProtobufConfig {
+pub struct CodecProtobufConfig<Version = u64> {
     pub resource: ResourceName,
-    pub resource_version: Option<u64>,
+    pub resource_version: Version,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config: Vec<ClientConfigEntry>,
     pub message: String,
@@ -2955,14 +2983,13 @@ impl CreateReingestor {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct CreateInferencer {
+pub struct CreateInferencer<Version = u64> {
     pub name: InferencerName,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
     pub branched_by: BranchSelection,
     pub resource: ResourceName,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resource_version: Option<u64>,
+    pub resource_version: Version,
     pub file: String,
     pub inputs: Vec<InferencerTensorMapping>,
     pub output_schema: Vec<InferencerTensorDeclaration>,
@@ -3032,14 +3059,13 @@ pub enum InferencerTensorSchemaError {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct CreateWasmProcessor {
+pub struct CreateWasmProcessor<Version = u64> {
     pub name: WasmProcessorName,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
     pub branched_by: BranchSelection,
     pub resource: ResourceName,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resource_version: Option<u64>,
+    pub resource_version: Version,
     pub file: String,
     pub limits: WasmProcessorLimits,
     pub global_error_policy: GeneralErrorPolicy,
@@ -3225,18 +3251,18 @@ impl InferencerTensorDimension {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct CreateVhost {
+pub struct CreateVhost<Version = u64> {
     pub name: VhostName,
     pub hostnames: Vec<String>,
-    pub tls: Option<VhostTlsResource>,
+    pub tls: Option<VhostTlsResource<Version>>,
 }
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct VhostTlsResource {
+pub struct VhostTlsResource<Version = u64> {
     pub resource: ResourceName,
-    pub version: Option<u64>,
+    pub version: Version,
 }
 
 #[derive(
@@ -3272,9 +3298,9 @@ pub enum EndpointType {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct CreateSignalingProtocol {
+pub struct CreateSignalingProtocol<Version = u64> {
     pub name: SignalingProtocolName,
-    pub format: SignalingWireFormat,
+    pub format: SignalingWireFormat<Version>,
     pub on_connect: SignalingProtocolOnConnect,
 }
 
@@ -3291,22 +3317,22 @@ pub struct CreateSignalingProtocol {
     AsRefStr,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
-pub enum SignalingWireFormat {
+pub enum SignalingWireFormat<Version = u64> {
     Json,
     Yaml,
     Toml,
     Xml,
     Cbor,
     Raw,
-    Protobuf(SignalingProtobufConfig),
+    Protobuf(SignalingProtobufConfig<Version>),
 }
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct SignalingProtobufConfig {
+pub struct SignalingProtobufConfig<Version = u64> {
     pub resource: ResourceName,
-    pub resource_version: Option<u64>,
+    pub resource_version: Version,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config: Vec<ClientConfigEntry>,
     pub send_message: String,

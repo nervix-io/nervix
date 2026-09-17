@@ -1200,8 +1200,11 @@ impl SessionServiceImpl {
             .iter()
             .filter(|counter| Some(&counter.domain) == active_domain)
             .map(|counter| {
-                let latest =
-                    resources.resolve_completed_version(&counter.domain, &counter.identifier, None);
+                let latest = resources.uploads.resolve_completed_version(
+                    &counter.domain,
+                    &counter.identifier,
+                    nervix_models::RequestedResourceVersion::Latest,
+                );
                 let detail = match latest {
                     Ok(id) => format!("v{}", id.version),
                     Err(_) => "catalog".to_string(),

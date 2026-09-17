@@ -16,7 +16,7 @@ CREATE RELAY output SCHEMA output_schema BRANCHED BY tenant CAPACITY 1;
 
 CREATE ATTACHED INFERENCER score_message
   FROM input
-  USING RESOURCE inference
+  USING RESOURCE inference VERSION 1
   FILE 'score.onnx'
   INPUTS {
     'features' DENSE TENSOR<F32>[128] = input.features
