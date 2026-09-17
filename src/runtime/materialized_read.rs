@@ -377,6 +377,17 @@ impl Runtime {
             }
             MaterializedLookupKeyMode::Root => None,
         };
+        // The schedule can publish a materialized relay's destination before that destination
+        // activates its prepared state. The ownership gate already fences records headed to the
+        // relay across that interval; dependency reads observe the same fence so a REQUIRED WAIT
+        // batch remains parked instead of racing a snapshot transfer against activation.
+        if routing
+            .relay_services
+            .get(relay)
+            .is_some_and(|services| services.dispatch_is_fenced())
+        {
+            return Ok(None);
+        }
         let owner = routing
             .materialized_stream_owner_nodes
             .get(relay)
@@ -591,14 +602,20 @@ impl Runtime {
             relay,
             None,
         );
-        let Some(restored) = self
+        let restored = match self
             .fetch_sealed_materialized_snapshot(target_node_id, &placement, schema, None)
             .await
-            .change_context(MaterializedReadError::RemoteSnapshot {
-                target: target_node_id.clone(),
-                placement: placement.clone(),
-            })?
-        else {
+        {
+            Ok(restored) => restored,
+            Err(error) if error.current_context().is_between_assignments() => return Ok(None),
+            Err(error) => {
+                return Err(error.change_context(MaterializedReadError::RemoteSnapshot {
+                    target: target_node_id.clone(),
+                    placement,
+                }));
+            }
+        };
+        let Some(restored) = restored else {
             return Ok(None);
         };
         Ok(restored

@@ -4,6 +4,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use meticulous::OptionExt as _;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -23,6 +24,7 @@ pub struct LoadedBenchmark {
     directory: PathBuf,
     definition: BenchmarkDefinition,
     templates: BTreeMap<String, String>,
+    after_start_templates: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -203,6 +205,7 @@ impl BenchmarkCatalog {
 
         let engine = upon::Engine::new();
         let mut templates = BTreeMap::new();
+        let mut after_start_templates = BTreeMap::new();
         for (implementation, configuration) in &definition.implementations {
             let relative_path = configuration.template();
             validate_relative_path(slug, implementation, relative_path)?;
@@ -219,10 +222,31 @@ impl BenchmarkCatalog {
                 .map_err(|source| BenchmarkError::CompileTemplate {
                     slug: slug.to_string(),
                     implementation: implementation.clone(),
-                    path: relative_path.clone(),
+                    path: relative_path.to_path_buf(),
                     source: Box::new(source),
                 })?;
             templates.insert(implementation.clone(), source);
+
+            if let Some(relative_path) = configuration.after_start_template() {
+                validate_relative_path(slug, implementation, relative_path)?;
+                let source_path = directory.join(relative_path);
+                let source = read_contained_utf8(
+                    slug,
+                    implementation,
+                    &directory,
+                    relative_path,
+                    &source_path,
+                )?;
+                engine.compile(source.as_str()).map_err(|source| {
+                    BenchmarkError::CompileTemplate {
+                        slug: slug.to_string(),
+                        implementation: implementation.clone(),
+                        path: relative_path.to_path_buf(),
+                        source: Box::new(source),
+                    }
+                })?;
+                after_start_templates.insert(implementation.clone(), source);
+            }
         }
 
         Ok(LoadedBenchmark {
@@ -230,6 +254,7 @@ impl BenchmarkCatalog {
             directory,
             definition,
             templates,
+            after_start_templates,
         })
     }
 }
@@ -251,7 +276,7 @@ impl LoadedBenchmark {
         &self,
         implementation: &str,
         inputs: KafkaRenderInputs<'_>,
-    ) -> Result<String, BenchmarkError> {
+    ) -> error_stack::Result<String, BenchmarkError> {
         self.render_implementation_with_parameters(
             implementation,
             inputs,
@@ -264,13 +289,46 @@ impl LoadedBenchmark {
         implementation: &str,
         inputs: KafkaRenderInputs<'_>,
         parameters: &toml::Table,
-    ) -> Result<String, BenchmarkError> {
+    ) -> error_stack::Result<String, BenchmarkError> {
         let source = self.templates.get(implementation).ok_or_else(|| {
             BenchmarkError::UnknownImplementation {
                 slug: self.slug.clone(),
                 implementation: implementation.to_string(),
             }
         })?;
+        self.render_template(
+            implementation,
+            source,
+            self.definition.implementations[implementation].template(),
+            inputs,
+            parameters,
+        )
+    }
+
+    pub fn render_after_start_with_parameters(
+        &self,
+        implementation: &str,
+        inputs: KafkaRenderInputs<'_>,
+        parameters: &toml::Table,
+    ) -> error_stack::Result<Option<String>, BenchmarkError> {
+        let Some(source) = self.after_start_templates.get(implementation) else {
+            return Ok(None);
+        };
+        let path = self.definition.implementations[implementation]
+            .after_start_template()
+            .verified("the source map is populated only from an implementation template");
+        self.render_template(implementation, source, path, inputs, parameters)
+            .map(Some)
+    }
+
+    fn render_template(
+        &self,
+        implementation: &str,
+        source: &str,
+        path: &Path,
+        inputs: KafkaRenderInputs<'_>,
+        parameters: &toml::Table,
+    ) -> error_stack::Result<String, BenchmarkError> {
         let context = BenchmarkRenderContext {
             kafka_bootstrap_servers: inputs.kafka_bootstrap_servers,
             input_topic: inputs.input_topic,
@@ -283,23 +341,22 @@ impl LoadedBenchmark {
         let engine = upon::Engine::new();
         let template =
             engine
-                .compile(source.as_str())
+                .compile(source)
                 .map_err(|source| BenchmarkError::CompileTemplate {
                     slug: self.slug.clone(),
                     implementation: implementation.to_string(),
-                    path: self.definition.implementations[implementation]
-                        .template()
-                        .clone(),
+                    path: path.to_path_buf(),
                     source: Box::new(source),
                 })?;
-        template
+        let rendered = template
             .render(&engine, &context)
             .to_string()
             .map_err(|source| BenchmarkError::RenderTemplate {
                 slug: self.slug.clone(),
                 implementation: implementation.to_string(),
                 source: Box::new(source),
-            })
+            })?;
+        Ok(rendered)
     }
 }
 

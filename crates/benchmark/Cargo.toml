@@ -14,6 +14,7 @@ workspace = true
 anyhow = { workspace = true }
 arch-into = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
+error-stack = { workspace = true }
 humantime = { workspace = true }
 meticulous = { workspace = true }
 nervix-approx-into = { workspace = true }
@@ -33,6 +34,7 @@ rdkafka = { workspace = true, features = [
   "aws-lc",
 ] }
 reqwest = { workspace = true, features = ["rustls"] }
+rcgen = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 testcontainers = { workspace = true }
