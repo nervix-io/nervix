@@ -2338,11 +2338,7 @@ impl Application {
                 }
             }
         }));
-        background_tasks.push(
-            service
-                .start_http_tls_resource_observer(shutdown.clone())
-                .await,
-        );
+        service.initialize_http_tls_server_config().await;
 
         let domain_apply_service = service.clone();
         let domain_apply_shutdown = shutdown.clone();

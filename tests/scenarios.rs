@@ -2197,25 +2197,18 @@ impl IngestorLogicTransportFixture {
             }
             Self::Kafka => {
                 let topic = expand_placeholders(world, "logic_notifications_{{test_id}}");
-                let deadline = Instant::now() + Duration::from_secs(5);
-                loop {
-                    tokio::task::consume_budget().await;
-                    world
-                        .cluster()
-                        .publish_kafka_with_headers(&topic, payload, &headers)
-                        .await
-                        .expect("failed to publish ingestor logic kafka payload with headers");
-                    if try_capture_any_subscription_payload(world, Duration::from_millis(500)).await
-                    {
-                        return;
-                    }
-                    assert!(
-                        Instant::now() < deadline,
-                        "timed out waiting for ingestor logic kafka payload with headers to reach \
-                         the relay subscription"
-                    );
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
+                world
+                    .cluster()
+                    .publish_kafka_with_headers(&topic, payload, &headers)
+                    .await
+                    .expect("failed to publish ingestor logic kafka payload with headers");
+                let delivered =
+                    try_capture_any_subscription_payload(world, Duration::from_secs(5)).await;
+                assert!(
+                    delivered,
+                    "timed out waiting for ingestor logic kafka payload with headers to reach the \
+                     relay subscription"
+                );
             }
             Self::Nats => {
                 let subject = expand_placeholders(world, "logic_notifications_{{test_id}}");
@@ -14725,6 +14718,30 @@ async fn when_https_payload_is_posted(
         .publish_https("node-1", &host, &path, &payload, &ca_pem)
         .await
         .expect("failed to post https payload");
+}
+
+#[then(
+    expr = "the leader HTTPS listener for host {string} presents the certificate from resource \
+            directory {string}"
+)]
+async fn then_leader_https_listener_presents_resource_certificate(
+    world: &mut ScenarioWorld,
+    host: String,
+    resource_directory: String,
+) {
+    let host = expand_placeholders(world, &host);
+    let ca_pem = resource_directory_ca_pem(world, &resource_directory);
+    let leader = current_leader_node(world).await;
+    world
+        .cluster()
+        .connect_https(&leader, &host, &ca_pem)
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "leader '{leader}' did not present the certificate trusted by resource directory \
+                 '{resource_directory}' for host '{host}': {error}"
+            )
+        });
 }
 
 #[when(expr = "http payload is posted to node {string} with host {string} path {string}")]
