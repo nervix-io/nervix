@@ -8,6 +8,7 @@
 
 use std::{fmt, net::SocketAddr, str::FromStr};
 
+use error_stack::Report;
 use thiserror::Error;
 use url::Url;
 
@@ -117,9 +118,12 @@ pub struct NodeServiceUrl(String);
 
 impl NodeServiceUrl {
     /// The URL of the service reached at `endpoint` over `scheme`.
-    pub fn new(scheme: &str, endpoint: &NodeEndpoint) -> Result<Self, NodeServiceUrlParseError> {
+    pub fn new(
+        scheme: &str,
+        endpoint: &NodeEndpoint,
+    ) -> error_stack::Result<Self, NodeServiceUrlParseError> {
         let advertised = format!("{scheme}://{}", endpoint.authority());
-        advertised.parse()
+        advertised.parse().map_err(Report::new)
     }
 
     pub fn as_str(&self) -> &str {

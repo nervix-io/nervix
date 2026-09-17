@@ -723,7 +723,7 @@ pub(in crate::application) fn web_console_advertise_url(
     advertise_addr: Option<NodeEndpoint>,
     listen_addr: SocketAddr,
     https_listen_addr: Option<SocketAddr>,
-) -> Result<NodeServiceUrl, NodeServiceUrlParseError> {
+) -> error_stack::Result<NodeServiceUrl, NodeServiceUrlParseError> {
     if let Some(endpoint) = advertise_addr {
         return NodeServiceUrl::new("http", &endpoint);
     }

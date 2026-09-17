@@ -640,7 +640,7 @@ impl Application {
             web_console_listen_addr,
             web_console_https_listen_addr,
         )
-        .map_err(|error| Report::new(AppError::BuildConsoleAdvertiseUrl).attach_printable(error))?;
+        .change_context(AppError::BuildConsoleAdvertiseUrl)?;
         let graceful_shutdown_drain = self.graceful_shutdown_drain;
         let drain_timeout = self.drain_timeout;
         let cluster_id = self.cluster_id.clone();
@@ -652,9 +652,7 @@ impl Application {
                 .ok_or_else(|| Report::new(AppError::MissingGrpcHttpsAdvertiseAddress))?,
         };
         let grpc_advertise_url = NodeServiceUrl::new(grpc_mode.scheme(), &grpc_advertise_addr)
-            .map_err(|error| {
-                Report::new(AppError::BuildClientAdvertiseUrl).attach_printable(error)
-            })?;
+            .change_context(AppError::BuildClientAdvertiseUrl)?;
         let interconnect_listen_addr = self.interconnect_listen_addr;
         let interconnect_advertise_addr = self.interconnect_advertise_addr.clone();
         let interconnect_tls_paths = InterconnectTlsPaths {
