@@ -89,7 +89,8 @@ pub(in crate::runtime) struct RuntimeInner {
     /// Also held by every outstanding `DomainAlterGuard`, which clears its entry on drop.
     pub(in crate::runtime) active_domain_alters:
         Arc<DashMap<DomainName, ActiveDomainAlter, RandomState>>,
-    pub(in crate::runtime) state_schema_fingerprints: DashMap<DomainNodeRef, [u8; 32], RandomState>,
+    pub(in crate::runtime) state_identities:
+        DashMap<DomainNodeRef, ScheduledStateIdentity, RandomState>,
     pub(in crate::runtime) domain_graphs: DashMap<DomainName, SharedActiveGraph, RandomState>,
     pub(in crate::runtime) endpoint_bindings:
         DashMap<HttpRouteKey, Vec<EndpointIngestBinding>, RandomState>,

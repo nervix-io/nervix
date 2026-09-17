@@ -1088,7 +1088,7 @@ async fn relay_state_shutdown_drains_every_ready_batch() {
         .replicated_materialized_stream_state(
             RuntimeStatePlacement {
                 domain: domain.clone(),
-                state: RuntimeStateKind::MaterializedRelay,
+                state: RuntimeState::MaterializedRelay,
                 kind: ModelKind::Relay,
                 identifier: ModelName::from(&relay.clone()),
                 schema_fingerprint: [0; 32],

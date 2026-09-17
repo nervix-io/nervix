@@ -540,6 +540,7 @@ impl ImpactAttribution {
     RkyvDeserialize,
 )]
 #[serde(transparent)]
+#[rkyv(derive(PartialEq, Eq, PartialOrd, Ord))]
 pub struct BranchKeyFingerprint([u8; 32]);
 
 impl BranchKeyFingerprint {

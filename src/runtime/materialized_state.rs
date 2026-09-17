@@ -563,7 +563,7 @@ mod tests {
         RuntimeStatePlacement {
             domain: DomainName::parse("default")
                 .assured("the test domain name satisfies the domain grammar"),
-            state: super::super::RuntimeStateKind::MaterializedRelay,
+            state: super::super::RuntimeState::MaterializedRelay,
             kind: ModelKind::Relay,
             identifier: ModelName::from(
                 &RelayName::parse(relay).assured("the test relay name satisfies the relay grammar"),

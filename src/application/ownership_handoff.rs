@@ -115,6 +115,16 @@ impl AssignmentRelocation {
         }
     }
 
+    /// Whether the move replaces an owner that could not hand its state over. Its forced recovery
+    /// starts a new guest-state lifetime for every branch, so no snapshot the former owner or a
+    /// stale replica still holds can become current again, whatever revision it carries.
+    pub(in crate::application) fn replaces_owner_state(self) -> bool {
+        match self {
+            Self::Planned => false,
+            Self::Failure => true,
+        }
+    }
+
     pub(in crate::application) fn retains_former_owner_as_replica(self) -> bool {
         match self {
             Self::Planned => true,

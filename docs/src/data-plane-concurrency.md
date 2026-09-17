@@ -105,6 +105,12 @@ publication retains that buffer rather than copying it for every persistence or 
 Input buffered by the guest host and ACK tokens remain execution state and are never included in a
 guest save.
 
+Every branch save is addressed by the guest-state generation in the committed schedule. Forced
+recovery publishes a new generation with the replacement schedule, so a late save, replica
+installation, or recovered checkpoint from the generation it replaced cannot address current
+state. The state store performs durable guest-state writes on its storage workers; the async worker
+that owns the branch never performs that storage operation synchronously.
+
 ### Materialized relay entries
 
 One assigned materialized-relay originator owns updates. The state contains at most one latest

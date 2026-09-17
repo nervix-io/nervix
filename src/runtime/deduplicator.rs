@@ -334,14 +334,14 @@ mod tests {
         DeduplicatorKey, ReorderKeyPart, ReplicatedDeduplicatorState, RuntimeStatePlacement,
         decode_deduplicator_snapshot, encode_deduplicator_snapshot,
     };
-    use crate::runtime::RuntimeStateKind;
+    use crate::runtime::RuntimeState;
 
     const MAX_TIME: Duration = Duration::from_secs(600);
 
     fn empty_state() -> Arc<ReplicatedDeduplicatorState> {
         let placement = RuntimeStatePlacement {
             domain: DomainName::parse("test").assured("the domain name is well formed"),
-            state: RuntimeStateKind::Deduplicator,
+            state: RuntimeState::Deduplicator,
             kind: ModelKind::Deduplicator,
             identifier: ModelName::parse("dedup_orders").assured("the identifier is well formed"),
             schema_fingerprint: [0; 32],
