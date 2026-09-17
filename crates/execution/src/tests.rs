@@ -1,18 +1,10 @@
-use std::{
-    io::Write as _,
-    num::NonZeroUsize,
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::{io::Write as _, num::NonZeroUsize};
 
 use ubyte::ByteUnit;
 
 use crate::{
-    AdmissionError, BudgetedBuffer, CpuClass, ExecutionConfig, ExecutionConfigError, Executor,
-    MemoryBudgets, MemoryClass, OperationLimits, StorageClass, WorkerCounts,
+    AdmissionError, BudgetedBuffer, ExecutionConfig, ExecutionConfigError, Executor, MemoryBudgets,
+    MemoryClass, OperationLimits, WorkerCounts,
 };
 
 fn one() -> NonZeroUsize {
@@ -38,6 +30,7 @@ fn small_executor() -> Executor {
 /// One ordered consensus worker with a wait queue deep enough to hold every job a test submits
 /// before the first one is allowed to finish. `small_executor` deliberately allows one waiter, so
 /// it cannot express a queue.
+#[cfg(feature = "shuttle")]
 fn queued_executor(pending_jobs: usize) -> Executor {
     Executor::new(ExecutionConfig {
         workers: WorkerCounts {
@@ -57,20 +50,8 @@ fn queued_executor(pending_jobs: usize) -> Executor {
     .expect("the default budgets hold the default operation limits")
 }
 
-/// Spin until `reached` holds, failing with `whose` rather than hanging the suite when it never
-/// does.
-async fn wait_for(whose: &str, mut reached: impl FnMut() -> bool) {
-    for _ in 0..100_000 {
-        if reached() {
-            return;
-        }
-        tokio::task::yield_now().await;
-    }
-    panic!("{whose} never happened");
-}
-
-#[test]
-fn default_limits_validate_together() {
+#[tokio::test]
+async fn default_limits_validate_together() {
     let executor = Executor::new(ExecutionConfig::default()).expect("defaults are consistent");
     let snapshot = executor.snapshot();
     assert_eq!(
@@ -82,8 +63,8 @@ fn default_limits_validate_together() {
     assert_eq!(snapshot.filesystem_storage.workers, 2);
 }
 
-#[test]
-fn a_relay_budget_below_two_maximum_operations_fails_to_start() {
+#[tokio::test]
+async fn a_relay_budget_below_two_maximum_operations_fails_to_start() {
     let error = Executor::new(ExecutionConfig {
         budgets: MemoryBudgets {
             relay: ByteUnit::Mebibyte(96),
@@ -103,8 +84,8 @@ fn a_relay_budget_below_two_maximum_operations_fails_to_start() {
     );
 }
 
-#[test]
-fn a_management_budget_below_one_event_fails_to_start() {
+#[tokio::test]
+async fn a_management_budget_below_one_event_fails_to_start() {
     let error = Executor::new(ExecutionConfig {
         budgets: MemoryBudgets {
             management: ByteUnit::Kibibyte(32),
@@ -128,8 +109,8 @@ fn a_management_budget_below_one_event_fails_to_start() {
 /// that answer against the same class. A budget that cannot hold the whole resident window beside
 /// one batch being encoded would let a full window leave no room to produce the answer that
 /// releases it, so the node refuses to start instead of deadlocking on its first catch-up.
-#[test]
-fn a_commands_budget_below_the_resident_replication_window_fails_to_start() {
+#[tokio::test]
+async fn a_commands_budget_below_the_resident_replication_window_fails_to_start() {
     let error = Executor::new(ExecutionConfig {
         budgets: MemoryBudgets {
             commands: ByteUnit::Mebibyte(8),
@@ -189,265 +170,595 @@ async fn an_operation_larger_than_its_class_is_refused_rather_than_queued() {
     );
 }
 
-#[tokio::test]
-async fn a_saturated_class_leaves_the_other_classes_untouched() {
-    let executor = small_executor();
-    let relay = executor.snapshot().relay_memory.capacity_bytes;
-    let _held = executor
-        .try_reserve(MemoryClass::Relay, relay)
-        .expect("the whole relay class is available");
-    for class in [
-        MemoryClass::Management,
-        MemoryClass::Commands,
-        MemoryClass::Bulk,
-    ] {
-        executor
-            .try_reserve(class, 1024)
-            .unwrap_or_else(|error| panic!("{class:?} must not borrow from relay work: {error}"));
-    }
-}
+#[cfg(feature = "shuttle")]
+mod shuttle_checks {
+    use std::{future::Future, path::PathBuf, sync::Arc as StdArc, task::Poll};
 
-#[tokio::test]
-async fn occupied_bulk_execution_does_not_delay_control_execution() {
-    let executor = small_executor();
-    let (release_bulk, bulk_released) = tokio::sync::oneshot::channel::<()>();
-    let bulk_started = StdArc::new(tokio::sync::Notify::new());
-    let started = StdArc::clone(&bulk_started);
-    let bulk_reservation = executor
-        .try_reserve(MemoryClass::Bulk, 1024)
-        .expect("the bulk class is empty");
-    let bulk_executor = executor.clone();
-    let bulk = tokio::spawn(async move {
-        bulk_executor
-            .run_cpu(
-                CpuClass::Bulk,
-                bulk_reservation,
-                move |_charge, _cancellation| {
-                    started.notify_waiters();
-                    // The bulk worker is deliberately occupied for the whole of the control request.
-                    let _ = bulk_released.blocking_recv();
-                },
-            )
-            .await
-            .expect("the bulk job runs")
-    });
-    // Wait for the single bulk worker to actually be occupied before measuring the control class.
-    while executor.snapshot().bulk_cpu.running == 0 {
-        tokio::task::yield_now().await;
+    use meticulous::{OptionExt as _, ResultExt as _};
+    use shuttle::{
+        Config, FailurePersistence, Runner,
+        scheduler::{PctScheduler, RandomScheduler},
+    };
+
+    use super::*;
+    use crate::{CpuClass, StorageClass};
+
+    const RANDOM_ITERATIONS: usize = 100;
+    const PCT_ITERATIONS: usize = 100;
+    const PCT_DEPTH: usize = 3;
+
+    struct ReservationProbe {
+        started: tokio::sync::oneshot::Receiver<()>,
+        release: tokio::sync::oneshot::Sender<()>,
+        task: tokio::task::JoinHandle<()>,
     }
 
-    let control_reservation = executor
-        .try_reserve(MemoryClass::Management, 1024)
-        .expect("management capacity is reserved");
-    let control = tokio::time::timeout(
-        Duration::from_secs(5),
-        executor.run_cpu(CpuClass::Control, control_reservation, |_, _| 7_u32),
-    )
-    .await
-    .expect("control execution completes while bulk execution is occupied")
-    .expect("the control job runs");
-    assert_eq!(control, 7);
-    assert_eq!(executor.snapshot().bulk_cpu.running, 1);
+    fn check_invariant(invariant: fn()) {
+        if let Some(schedule) = std::env::var_os("SHUTTLE_TRACE_FILE") {
+            shuttle::replay_from_file(invariant, schedule);
+            return;
+        }
 
-    release_bulk
-        .send(())
-        .expect("the bulk job is still waiting");
-    bulk.await.expect("the bulk job finishes");
-}
+        let Some(trace_directory) = std::env::var_os("SHUTTLE_TRACE_DIR") else {
+            shuttle::check_random(invariant, RANDOM_ITERATIONS);
+            shuttle::check_pct(invariant, PCT_ITERATIONS, PCT_DEPTH);
+            return;
+        };
 
-#[tokio::test]
-async fn a_job_dropped_while_queued_releases_its_reservation() {
-    let executor = small_executor();
-    let (release, released) = tokio::sync::oneshot::channel::<()>();
-    let occupying = executor
-        .try_reserve(MemoryClass::Relay, 1024)
-        .expect("the relay class is empty");
-    let occupied = executor.clone();
-    let running = tokio::spawn(async move {
-        occupied
-            .run_cpu(CpuClass::Data, occupying, move |_charge, _| {
-                let _ = released.blocking_recv();
-            })
-            .await
-            .expect("the occupying job runs")
-    });
-    while executor.snapshot().data_cpu.running == 0 {
-        tokio::task::yield_now().await;
+        let trace_directory = PathBuf::from(trace_directory);
+        if let Err(error) = std::fs::create_dir_all(&trace_directory) {
+            panic!(
+                "cannot create Shuttle failure directory {}: {error}",
+                trace_directory.display()
+            );
+        }
+
+        let mut config = Config::new();
+        config.failure_persistence = FailurePersistence::File(Some(trace_directory));
+
+        Runner::new(RandomScheduler::new(RANDOM_ITERATIONS), config.clone()).run(invariant);
+        Runner::new(PctScheduler::new(PCT_DEPTH, PCT_ITERATIONS), config).run(invariant);
     }
 
-    let queued_bytes = 4096;
-    let queued = executor
-        .try_reserve(MemoryClass::Relay, queued_bytes)
-        .expect("the relay class has room");
-    let reserved_before = executor.snapshot().relay_memory.reserved_bytes;
-    let waiting = executor.clone();
-    let cancelled = tokio::spawn(async move {
-        waiting
-            .run_cpu(CpuClass::Data, queued, |_, _| ())
-            .await
-            .expect("the queued job either runs or is dropped")
-    });
-    while executor.snapshot().data_cpu.pending == 0 {
-        tokio::task::yield_now().await;
-    }
-    cancelled.abort();
-    let _ = cancelled.await;
-    while executor.snapshot().relay_memory.reserved_bytes == reserved_before {
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(
-        executor.snapshot().relay_memory.reserved_bytes,
-        reserved_before
-            .checked_sub(queued_bytes)
-            .expect("the queued job's charge was part of the total"),
-    );
-
-    release
-        .send(())
-        .expect("the occupying job is still waiting");
-    running.await.expect("the occupying job finishes");
-}
-
-#[tokio::test]
-async fn a_running_job_observes_cancellation_and_keeps_its_charge_until_it_exits() {
-    let executor = small_executor();
-    let observed = StdArc::new(AtomicUsize::new(0));
-    let job_observed = StdArc::clone(&observed);
-    let (exited, has_exited) = tokio::sync::oneshot::channel::<u64>();
-    let reservation = executor
-        .try_reserve(MemoryClass::Relay, 8192)
-        .expect("the relay class is empty");
-    let running = executor.clone();
-    let waiting_snapshot = executor.clone();
-    let task = tokio::spawn(async move {
-        running
-            .run_cpu(CpuClass::Data, reservation, move |_charge, cancellation| {
-                job_observed.store(1, Ordering::Release);
-                while cancellation.check().is_ok() {
-                    std::thread::yield_now();
-                }
-                job_observed.store(2, Ordering::Release);
-                let _ = exited.send(waiting_snapshot.snapshot().relay_memory.reserved_bytes);
-            })
-            .await
-            .expect("the job runs")
-    });
-    while observed.load(Ordering::Acquire) == 0 {
-        tokio::task::yield_now().await;
-    }
-    task.abort();
-    let charged_at_exit = has_exited.await.expect("the job reports as it exits");
-    assert_eq!(
-        charged_at_exit, 8192,
-        "a running job keeps its charge until it actually exits"
-    );
-    while executor.snapshot().relay_memory.reserved_bytes != 0 {
-        tokio::task::yield_now().await;
-    }
-}
-
-#[tokio::test]
-async fn a_full_wait_queue_is_typed_backpressure_rather_than_unbounded_growth() {
-    let executor = small_executor();
-    let (release, released) = tokio::sync::oneshot::channel::<()>();
-    let occupying = executor
-        .try_reserve(MemoryClass::Relay, 1024)
-        .expect("the relay class is empty");
-    let occupied = executor.clone();
-    let running = tokio::spawn(async move {
-        occupied
-            .run_cpu(CpuClass::Data, occupying, move |_charge, _| {
-                let _ = released.blocking_recv();
-            })
-            .await
-            .expect("the occupying job runs")
-    });
-    while executor.snapshot().data_cpu.running == 0 {
-        tokio::task::yield_now().await;
+    fn assert_live_reservations_fit(executor: &Executor) {
+        let snapshot = executor.snapshot();
+        for (class, budget) in [
+            ("management", snapshot.management_memory),
+            ("commands", snapshot.commands_memory),
+            ("relay", snapshot.relay_memory),
+            ("bulk", snapshot.bulk_memory),
+        ] {
+            assert!(
+                budget.reserved_bytes <= budget.capacity_bytes,
+                "{class} has {} live reservation bytes but capacity is {}",
+                budget.reserved_bytes,
+                budget.capacity_bytes
+            );
+        }
     }
 
-    let queued = executor
-        .try_reserve(MemoryClass::Relay, 1024)
-        .expect("the relay class has room");
-    let waiting = executor.clone();
-    let pending =
-        tokio::spawn(async move { waiting.run_cpu(CpuClass::Data, queued, |_, _| ()).await });
-    while executor.snapshot().data_cpu.pending == 0 {
-        tokio::task::yield_now().await;
+    fn assert_every_permit_returned(executor: &Executor) {
+        let snapshot = executor.snapshot();
+        for (class, workers) in [
+            ("control_cpu", snapshot.control_cpu),
+            ("data_cpu", snapshot.data_cpu),
+            ("bulk_cpu", snapshot.bulk_cpu),
+            ("consensus_storage", snapshot.consensus_storage),
+            ("filesystem_storage", snapshot.filesystem_storage),
+        ] {
+            assert_eq!(
+                workers.running, 0,
+                "{class} must return every worker permit"
+            );
+            assert_eq!(workers.pending, 0, "{class} must return every queue permit");
+        }
+        for (class, budget) in [
+            ("management", snapshot.management_memory),
+            ("commands", snapshot.commands_memory),
+            ("relay", snapshot.relay_memory),
+            ("bulk", snapshot.bulk_memory),
+        ] {
+            assert_eq!(
+                budget.reserved_bytes, 0,
+                "{class} must return every memory permit"
+            );
+        }
     }
 
-    let refused = executor
-        .try_reserve(MemoryClass::Relay, 1024)
-        .expect("the relay class has room");
-    let error = executor
-        .run_cpu(CpuClass::Data, refused, |_, _| ())
-        .await
-        .expect_err("the single wait slot is already taken");
-    assert!(
-        matches!(
-            error.current_context(),
-            crate::ExecutionError::QueueFull { class, pending }
-                if *class == "data_cpu" && *pending == 1
-        ),
-        "expected typed queue backpressure, got {error}"
-    );
-
-    release
-        .send(())
-        .expect("the occupying job is still waiting");
-    running.await.expect("the occupying job finishes");
-    pending
-        .await
-        .expect("the queued job is joined")
-        .expect("the queued job runs once a worker frees up");
-}
-
-#[tokio::test]
-async fn consensus_storage_runs_its_jobs_in_admission_order() {
-    let executor = queued_executor(16);
-    let order = StdArc::new(parking_lot::Mutex::new(Vec::new()));
-    // Submit every job before any of them can finish, so the single ordered worker is what decides
-    // the order rather than the caller awaiting them one at a time.
-    let (release, released) = tokio::sync::oneshot::channel::<()>();
-    let mut held = Some(released);
-    let mut submissions = Vec::new();
-    for index in 0..8_usize {
-        let reservation = executor
-            .try_reserve(MemoryClass::Commands, 1024)
-            .expect("the commands class has room");
-        let submitted = executor.clone();
-        let order = StdArc::clone(&order);
-        // The first job parks until the test releases it, so the rest queue behind it.
-        let gate = held.take();
-        submissions.push(tokio::spawn(async move {
-            submitted
-                .run_storage(StorageClass::Consensus, reservation, move |_charge, _| {
-                    if let Some(gate) = gate {
-                        let _ = gate.blocking_recv();
-                    }
-                    order.lock().push(index);
-                })
-                .await
-        }));
-        // Admission is taken in submission order, so let each spawn reach the semaphore before the
-        // next one is submitted.
-        let submitted_so_far = u64::try_from(index).expect("a small index fits") + 1;
-        let admitted = executor.clone();
-        wait_for(&format!("job {index} reaching consensus admission"), || {
-            admitted.snapshot().consensus_storage.admitted >= submitted_so_far
+    async fn announce_after_first_pending<F>(
+        future: F,
+        pending: tokio::sync::oneshot::Sender<()>,
+    ) -> F::Output
+    where
+        F: Future,
+    {
+        let mut future = std::pin::pin!(future);
+        std::future::poll_fn(|context| match future.as_mut().poll(context) {
+            Poll::Ready(_) => {
+                panic!("the worker was expected to remain occupied while this job queued")
+            }
+            Poll::Pending => Poll::Ready(()),
         })
         .await;
+        pending
+            .send(())
+            .assured("the test waits for the exact admission point before it can finish");
+        future.await
     }
 
-    release.send(()).expect("the first job is still parked");
-    for submission in submissions {
-        submission
-            .await
-            .expect("every submission is joined")
-            .expect("every ordered storage job runs");
+    fn saturated_class_invariant() {
+        shuttle::future::block_on(async {
+            let executor = small_executor();
+            let relay_capacity = executor.snapshot().relay_memory.capacity_bytes;
+            let relay = executor
+                .try_reserve(MemoryClass::Relay, relay_capacity)
+                .assured("the untouched relay class starts with every permit available");
+            assert_live_reservations_fit(&executor);
+
+            let mut probes = Vec::new();
+            for class in [
+                MemoryClass::Management,
+                MemoryClass::Commands,
+                MemoryClass::Bulk,
+            ] {
+                let (started, has_started) = tokio::sync::oneshot::channel();
+                let (release, released) = tokio::sync::oneshot::channel();
+                let probe_executor = executor.clone();
+                let task = tokio::spawn(async move {
+                    let reservation = probe_executor
+                        .try_reserve(class, 1024)
+                        .assured("a saturated relay class cannot consume another class's permits");
+                    assert_live_reservations_fit(&probe_executor);
+                    started
+                        .send(())
+                        .assured("the test holds the receiver until every class is charged");
+                    released
+                        .await
+                        .assured("the test releases every held class before it exits");
+                    drop(reservation);
+                });
+                probes.push(ReservationProbe {
+                    started: has_started,
+                    release,
+                    task,
+                });
+            }
+
+            for probe in &mut probes {
+                tokio::task::consume_budget().await;
+                (&mut probe.started)
+                    .await
+                    .assured("each independent memory class reports its live reservation");
+                assert_live_reservations_fit(&executor);
+            }
+
+            let snapshot = executor.snapshot();
+            assert_eq!(snapshot.relay_memory.reserved_bytes, relay_capacity);
+            assert_eq!(snapshot.management_memory.reserved_bytes, 1024);
+            assert_eq!(snapshot.commands_memory.reserved_bytes, 1024);
+            assert_eq!(snapshot.bulk_memory.reserved_bytes, 1024);
+
+            let Err(error) = executor.try_reserve(MemoryClass::Relay, 1) else {
+                panic!("a saturated relay class must refuse another byte");
+            };
+            assert_eq!(
+                *error.current_context(),
+                AdmissionError::BudgetExhausted {
+                    class: "relay",
+                    requested: 1,
+                }
+            );
+            assert_live_reservations_fit(&executor);
+
+            for probe in probes {
+                tokio::task::consume_budget().await;
+                probe
+                    .release
+                    .send(())
+                    .assured("the reservation task remains blocked on its release signal");
+                probe
+                    .task
+                    .await
+                    .assured("an independent reservation task does not panic");
+                assert_live_reservations_fit(&executor);
+            }
+            drop(relay);
+            assert_every_permit_returned(&executor);
+        });
     }
 
-    assert_eq!(*order.lock(), (0..8).collect::<Vec<_>>());
+    #[test]
+    fn shuttle_saturated_class_keeps_live_reservations_within_each_class_capacity() {
+        check_invariant(saturated_class_invariant);
+    }
+
+    fn occupied_bulk_execution_invariant() {
+        shuttle::future::block_on(async {
+            let executor = small_executor();
+            let (started, has_started) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let bulk_reservation = executor
+                .try_reserve(MemoryClass::Bulk, 1024)
+                .assured("the untouched bulk class starts with room");
+            let bulk_executor = executor.clone();
+            let bulk = tokio::spawn(async move {
+                bulk_executor
+                    .run_cpu(
+                        CpuClass::Bulk,
+                        bulk_reservation,
+                        move |_charge, _cancellation| {
+                            started
+                                .send(())
+                                .assured("the test awaits the occupied bulk worker");
+                            released
+                                .blocking_recv()
+                                .assured("the test releases the bulk worker before it exits");
+                        },
+                    )
+                    .await
+                    .assured("the admitted bulk job runs");
+            });
+            has_started
+                .await
+                .assured("the bulk job reports after taking its worker permit");
+
+            let snapshot = executor.snapshot();
+            assert_eq!(snapshot.bulk_cpu.running, 1);
+            assert_eq!(snapshot.bulk_cpu.pending, 0);
+            assert_live_reservations_fit(&executor);
+
+            let control_reservation = executor
+                .try_reserve(MemoryClass::Management, 1024)
+                .assured("the bulk job cannot consume management memory");
+            let value = executor
+                .run_cpu(CpuClass::Control, control_reservation, |_, _| 7_u32)
+                .await
+                .assured("the occupied bulk class cannot consume the control worker");
+            assert_eq!(value, 7);
+            assert_eq!(executor.snapshot().bulk_cpu.running, 1);
+            assert_live_reservations_fit(&executor);
+
+            release
+                .send(())
+                .assured("the bulk job remains blocked until control work finishes");
+            bulk.await
+                .assured("the occupied bulk job exits after its release");
+            assert_every_permit_returned(&executor);
+        });
+    }
+
+    #[test]
+    fn shuttle_occupied_bulk_execution_leaves_control_execution_untouched() {
+        check_invariant(occupied_bulk_execution_invariant);
+    }
+
+    fn queued_job_drop_invariant() {
+        shuttle::future::block_on(async {
+            let executor = small_executor();
+            let (started, has_started) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let occupying_bytes = 1024;
+            let occupying = executor
+                .try_reserve(MemoryClass::Relay, occupying_bytes)
+                .assured("the untouched relay class starts with room");
+            let occupied = executor.clone();
+            let running = tokio::spawn(async move {
+                occupied
+                    .run_cpu(CpuClass::Data, occupying, move |_charge, _| {
+                        started
+                            .send(())
+                            .assured("the test awaits the occupying data job");
+                        released
+                            .blocking_recv()
+                            .assured("the test releases the occupying job before it exits");
+                    })
+                    .await
+                    .assured("the occupying data job runs");
+            });
+            has_started
+                .await
+                .assured("the occupying job reports after taking its worker permit");
+
+            let queued_bytes = 4096;
+            let queued = executor
+                .try_reserve(MemoryClass::Relay, queued_bytes)
+                .assured("the relay class has room for the queued job");
+            let (admitted, is_admitted) = tokio::sync::oneshot::channel();
+            let waiting = executor.clone();
+            let cancelled = tokio::spawn(async move {
+                announce_after_first_pending(
+                    waiting.run_cpu(CpuClass::Data, queued, |_, _| ()),
+                    admitted,
+                )
+                .await
+            });
+            is_admitted
+                .await
+                .assured("the queued job reports after taking its queue permit");
+
+            let queued_snapshot = executor.snapshot();
+            assert_eq!(queued_snapshot.data_cpu.running, 1);
+            assert_eq!(queued_snapshot.data_cpu.pending, 1);
+            assert_eq!(
+                queued_snapshot.relay_memory.reserved_bytes,
+                occupying_bytes + queued_bytes
+            );
+            assert_live_reservations_fit(&executor);
+
+            cancelled.abort();
+            let cancelled_result = cancelled.await;
+            assert!(
+                cancelled_result.is_err(),
+                "the queued job must be cancelled before it can take the occupied worker"
+            );
+
+            let cancelled_snapshot = executor.snapshot();
+            assert_eq!(cancelled_snapshot.data_cpu.running, 1);
+            assert_eq!(cancelled_snapshot.data_cpu.pending, 0);
+            assert_eq!(
+                cancelled_snapshot.relay_memory.reserved_bytes,
+                occupying_bytes
+            );
+            assert_live_reservations_fit(&executor);
+
+            release
+                .send(())
+                .assured("the occupying job remains blocked while the queued job is dropped");
+            running
+                .await
+                .assured("the occupying job exits after its release");
+            assert_every_permit_returned(&executor);
+        });
+    }
+
+    #[test]
+    fn shuttle_queued_job_drop_releases_its_reservation_and_exact_queue_slot() {
+        check_invariant(queued_job_drop_invariant);
+    }
+
+    fn running_job_cancellation_invariant() {
+        shuttle::future::block_on(async {
+            let executor = small_executor();
+            let (started, has_started) = tokio::sync::oneshot::channel();
+            let (continue_job, may_continue) = tokio::sync::oneshot::channel();
+            let (exited, has_exited) = tokio::sync::oneshot::channel();
+            let reservation = executor
+                .try_reserve(MemoryClass::Relay, 8192)
+                .assured("the untouched relay class starts with room");
+            let running = executor.clone();
+            let waiting_snapshot = executor.clone();
+            let task = tokio::spawn(async move {
+                running
+                    .run_cpu(CpuClass::Data, reservation, move |_charge, cancellation| {
+                        started
+                            .send(())
+                            .assured("the test awaits the running job before cancelling it");
+                        may_continue
+                            .blocking_recv()
+                            .assured("the test lets the running job inspect cancellation");
+                        assert!(
+                            cancellation.check().is_err(),
+                            "the running job must observe cancellation after its waiter is dropped"
+                        );
+                        exited
+                            .send(waiting_snapshot.snapshot().relay_memory.reserved_bytes)
+                            .assured("the test waits for the job's charged exit point");
+                    })
+                    .await
+                    .assured("the running job itself exits normally after observing cancellation");
+            });
+            has_started
+                .await
+                .assured("the job reports after taking its worker permit");
+
+            let running_snapshot = executor.snapshot();
+            assert_eq!(running_snapshot.data_cpu.running, 1);
+            assert_eq!(running_snapshot.data_cpu.pending, 0);
+            assert_eq!(running_snapshot.relay_memory.reserved_bytes, 8192);
+            assert_live_reservations_fit(&executor);
+
+            task.abort();
+            let cancelled_result = task.await;
+            assert!(
+                cancelled_result.is_err(),
+                "dropping the running job's waiter must cancel that waiter"
+            );
+            let cancelled_snapshot = executor.snapshot();
+            assert_eq!(cancelled_snapshot.data_cpu.running, 1);
+            assert_eq!(cancelled_snapshot.data_cpu.pending, 0);
+            assert_eq!(cancelled_snapshot.relay_memory.reserved_bytes, 8192);
+
+            continue_job
+                .send(())
+                .assured("the running job remains alive after its waiter is cancelled");
+            let charged_at_exit = has_exited
+                .await
+                .assured("the running job reports the charge it sees at exit");
+            assert_eq!(
+                charged_at_exit, 8192,
+                "a running job keeps its charge until it actually exits"
+            );
+
+            let capacity = executor.snapshot().relay_memory.capacity_bytes;
+            let every_memory_permit = executor
+                .reserve(MemoryClass::Relay, capacity)
+                .await
+                .assured("the cancelled job eventually returns its whole reservation");
+            executor
+                .run_cpu(CpuClass::Data, every_memory_permit, |_, _| ())
+                .await
+                .assured("the cancelled job eventually returns its worker permit");
+            assert_every_permit_returned(&executor);
+        });
+    }
+
+    #[test]
+    fn shuttle_running_job_observes_cancellation_and_keeps_its_charge_until_exit() {
+        check_invariant(running_job_cancellation_invariant);
+    }
+
+    fn full_wait_queue_invariant() {
+        shuttle::future::block_on(async {
+            let executor = small_executor();
+            let (started, has_started) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let occupying = executor
+                .try_reserve(MemoryClass::Relay, 1024)
+                .assured("the untouched relay class starts with room");
+            let occupied = executor.clone();
+            let running = tokio::spawn(async move {
+                occupied
+                    .run_cpu(CpuClass::Data, occupying, move |_charge, _| {
+                        started
+                            .send(())
+                            .assured("the test awaits the occupying data job");
+                        released
+                            .blocking_recv()
+                            .assured("the test releases the occupying job before it exits");
+                    })
+                    .await
+                    .assured("the occupying data job runs");
+            });
+            has_started
+                .await
+                .assured("the occupying job reports after taking its worker permit");
+
+            let queued = executor
+                .try_reserve(MemoryClass::Relay, 1024)
+                .assured("the relay class has room for the queued job");
+            let (admitted, is_admitted) = tokio::sync::oneshot::channel();
+            let waiting = executor.clone();
+            let pending = tokio::spawn(async move {
+                announce_after_first_pending(
+                    waiting.run_cpu(CpuClass::Data, queued, |_, _| ()),
+                    admitted,
+                )
+                .await
+            });
+            is_admitted
+                .await
+                .assured("the queued job reports after taking the only queue permit");
+
+            let full_snapshot = executor.snapshot();
+            assert_eq!(full_snapshot.data_cpu.running, 1);
+            assert_eq!(full_snapshot.data_cpu.pending, 1);
+            assert_live_reservations_fit(&executor);
+
+            let refused = executor
+                .try_reserve(MemoryClass::Relay, 1024)
+                .assured("memory remains independent from worker queue admission");
+            let error = executor
+                .run_cpu(CpuClass::Data, refused, |_, _| ())
+                .await
+                .expect_err("the single wait slot is already taken");
+            assert!(
+                matches!(
+                    error.current_context(),
+                    crate::ExecutionError::QueueFull { class, pending }
+                        if *class == "data_cpu" && *pending == 1
+                ),
+                "expected typed queue backpressure, got {error}"
+            );
+
+            let refused_snapshot = executor.snapshot();
+            assert_eq!(refused_snapshot.data_cpu.running, 1);
+            assert_eq!(refused_snapshot.data_cpu.pending, 1);
+            assert_eq!(refused_snapshot.data_cpu.refused, 1);
+            assert_live_reservations_fit(&executor);
+
+            release
+                .send(())
+                .assured("the occupying job remains blocked until backpressure is observed");
+            running
+                .await
+                .assured("the occupying job exits after its release");
+            pending
+                .await
+                .assured("the queued job is joined")
+                .assured("the queued job runs once the worker permit returns");
+            assert_every_permit_returned(&executor);
+        });
+    }
+
+    #[test]
+    fn shuttle_full_wait_queue_is_exact_typed_backpressure() {
+        check_invariant(full_wait_queue_invariant);
+    }
+
+    fn consensus_admission_order_invariant() {
+        shuttle::future::block_on(async {
+            let executor = queued_executor(16);
+            let order = StdArc::new(parking_lot::Mutex::new(Vec::new()));
+            let (release, released) = tokio::sync::oneshot::channel::<()>();
+            let mut held = Some(released);
+            let mut submissions = Vec::new();
+
+            for index in 0..8_usize {
+                tokio::task::consume_budget().await;
+                let reservation = executor
+                    .try_reserve(MemoryClass::Commands, 1024)
+                    .assured("the commands class has room for every ordered job");
+                let submitted = executor.clone();
+                let job_order = StdArc::clone(&order);
+                let gate = held.take();
+                let (admitted, is_admitted) = tokio::sync::oneshot::channel();
+                submissions.push(tokio::spawn(async move {
+                    announce_after_first_pending(
+                        submitted.run_storage(
+                            StorageClass::Consensus,
+                            reservation,
+                            move |_charge, _| {
+                                if let Some(gate) = gate {
+                                    gate.blocking_recv()
+                                        .assured("the test releases the first admitted job");
+                                }
+                                job_order.lock().push(index);
+                            },
+                        ),
+                        admitted,
+                    )
+                    .await
+                }));
+                is_admitted
+                    .await
+                    .assured("each job reports after entering consensus admission");
+
+                let submitted_so_far = index
+                    .checked_add(1)
+                    .assured("the test submits a fixed eight jobs");
+                let snapshot = executor.snapshot();
+                assert_eq!(
+                    snapshot.consensus_storage.admitted,
+                    u64::try_from(submitted_so_far).assured("eight jobs fit in u64")
+                );
+                assert_eq!(snapshot.consensus_storage.pending, index);
+                assert_live_reservations_fit(&executor);
+            }
+
+            let queued_snapshot = executor.snapshot();
+            assert_eq!(queued_snapshot.consensus_storage.running, 1);
+            assert_eq!(queued_snapshot.consensus_storage.pending, 7);
+            release
+                .send(())
+                .assured("the first consensus job remains held while its followers queue");
+
+            for submission in submissions {
+                tokio::task::consume_budget().await;
+                submission
+                    .await
+                    .assured("every consensus submission is joined")
+                    .assured("every admitted consensus job runs");
+            }
+
+            assert_eq!(*order.lock(), (0..8_usize).collect::<Vec<_>>());
+            assert_every_permit_returned(&executor);
+        });
+    }
+
+    #[test]
+    fn shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit() {
+        check_invariant(consensus_admission_order_invariant);
+    }
 }
 
 #[tokio::test]
