@@ -4,10 +4,13 @@
 //!
 //! - **Owns.** Each operation's accepted argument types, result type, volatility, dependency scope,
 //!   null propagation and whether it can report a per-row error, and the value contracts, such as
-//!   case mapping, that compile-time folding and columnar execution both apply.
+//!   case mapping, floating-point classification and integer bit operations, that compile-time
+//!   folding and columnar execution both apply.
 //! - **Depends on.** The VM program model and Arrow data types.
 //! - **Must not know.** How execution walks Arrow buffers, registers or batches, and anything about
 //!   relays, branches, connectors or the registry.
+
+use std::ops::{BitAnd, BitOr, BitXor, Not};
 
 use arrow_schema::{DataType, TimeUnit};
 
@@ -138,6 +141,115 @@ impl ExpressionSemantics {
     }
 }
 
+/// The IEEE 754 class `is_nan`, `is_finite` and `is_infinite` test a floating-point value for.
+///
+/// Folding a call over a literal and executing it over a column both test through
+/// [`FloatClass::contains`], so a literal and a column holding the same value always classify the
+/// same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatClass {
+    /// NaN, whatever its sign or payload.
+    Nan,
+    /// Every value that is neither NaN nor an infinity, including both zeros and subnormals.
+    Finite,
+    /// Positive or negative infinity.
+    Infinite,
+}
+
+impl FloatClass {
+    /// Whether `value` belongs to this class.
+    pub fn contains<F: ClassifiedFloat>(self, value: F) -> bool {
+        match self {
+            Self::Nan => value.is_nan_value(),
+            Self::Finite => value.is_finite_value(),
+            Self::Infinite => value.is_infinite_value(),
+        }
+    }
+}
+
+/// A floating-point type whose values `is_nan`, `is_finite` and `is_infinite` classify.
+pub trait ClassifiedFloat: Copy {
+    fn is_nan_value(self) -> bool;
+
+    fn is_finite_value(self) -> bool;
+
+    fn is_infinite_value(self) -> bool;
+}
+
+macro_rules! classified_float {
+    ($($native:ty),+ $(,)?) => {
+        $(
+            impl ClassifiedFloat for $native {
+                fn is_nan_value(self) -> bool {
+                    self.is_nan()
+                }
+
+                fn is_finite_value(self) -> bool {
+                    self.is_finite()
+                }
+
+                fn is_infinite_value(self) -> bool {
+                    self.is_infinite()
+                }
+            }
+        )+
+    };
+}
+
+classified_float!(f32, f64);
+
+/// The operator `bitwise_and`, `bitwise_or` or `bitwise_xor` applies to two integers of one type.
+///
+/// Folding a call over literals and executing it over columns both combine values through
+/// [`BitwiseOperation::apply`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitwiseOperation {
+    And,
+    Or,
+    Xor,
+}
+
+impl BitwiseOperation {
+    /// Combines the two's complement bits of `left` and `right` at their shared width.
+    pub fn apply<N: IntegerBits>(self, left: N, right: N) -> N {
+        match self {
+            Self::And => left & right,
+            Self::Or => left | right,
+            Self::Xor => left ^ right,
+        }
+    }
+}
+
+/// An integer type whose two's complement bits `bitwise_not` and `bit_count` read at the type's own
+/// width. Folding and columnar execution both use these methods.
+pub trait IntegerBits:
+    Copy + BitAnd<Output = Self> + BitOr<Output = Self> + BitXor<Output = Self> + Not<Output = Self>
+{
+    /// `bitwise_not`: every bit inverted, so an unsigned value maps to its type's maximum minus the
+    /// value and a signed value `v` maps to `-v - 1`.
+    fn complement(self) -> Self {
+        !self
+    }
+
+    /// `bit_count`: how many bits are set. A negative value counts its sign-extended bits, so `-1`
+    /// counts every bit of its type.
+    fn one_bits(self) -> i64;
+}
+
+macro_rules! integer_bits {
+    ($($native:ty),+ $(,)?) => {
+        $(
+            impl IntegerBits for $native {
+                fn one_bits(self) -> i64 {
+                    i64::from(self.count_ones())
+                }
+            }
+        )+
+    };
+}
+
+integer_bits!(u8, i8, u16, i16, u32, i32, u64, i64);
+
 /// The case mapping `lower` and `upper` apply: Unicode's full case mapping, which never depends on
 /// a locale. Folding a call over a literal and executing it over a column both apply this one
 /// mapping, so a literal and a column holding the same text always convert to the same value.
@@ -216,6 +328,23 @@ pub enum BuiltinLowering {
     Tan,
     ToHex,
     Translate,
+    Sin,
+    Atan2,
+    Log2,
+    Radians,
+    Degrees,
+    Sign,
+    Trunc,
+    IsNan,
+    IsFinite,
+    IsInfinite,
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
+    BitwiseNot,
+    ShiftLeft,
+    ShiftRight,
+    BitCount,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -458,6 +587,23 @@ pub const fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescri
         FunctionName::Tan => BuiltinLowering::Tan,
         FunctionName::ToHex => BuiltinLowering::ToHex,
         FunctionName::Translate => BuiltinLowering::Translate,
+        FunctionName::Sin => BuiltinLowering::Sin,
+        FunctionName::Atan2 => BuiltinLowering::Atan2,
+        FunctionName::Log2 => BuiltinLowering::Log2,
+        FunctionName::Radians => BuiltinLowering::Radians,
+        FunctionName::Degrees => BuiltinLowering::Degrees,
+        FunctionName::Sign => BuiltinLowering::Sign,
+        FunctionName::Trunc => BuiltinLowering::Trunc,
+        FunctionName::IsNan => BuiltinLowering::IsNan,
+        FunctionName::IsFinite => BuiltinLowering::IsFinite,
+        FunctionName::IsInfinite => BuiltinLowering::IsInfinite,
+        FunctionName::BitwiseAnd => BuiltinLowering::BitwiseAnd,
+        FunctionName::BitwiseOr => BuiltinLowering::BitwiseOr,
+        FunctionName::BitwiseXor => BuiltinLowering::BitwiseXor,
+        FunctionName::BitwiseNot => BuiltinLowering::BitwiseNot,
+        FunctionName::ShiftLeft => BuiltinLowering::ShiftLeft,
+        FunctionName::ShiftRight => BuiltinLowering::ShiftRight,
+        FunctionName::BitCount => BuiltinLowering::BitCount,
         FunctionName::LeakSensitive
         | FunctionName::LookupHashMap
         | FunctionName::ReadHeader
@@ -519,7 +665,15 @@ pub const fn builtin_semantics_for_lowering(lowering: BuiltinLowering) -> Operat
         | BuiltinLowering::Count
         | BuiltinLowering::First
         | BuiltinLowering::Last
-        | BuiltinLowering::Nth => OperationSemantics {
+        | BuiltinLowering::Nth
+        | BuiltinLowering::IsNan
+        | BuiltinLowering::IsFinite
+        | BuiltinLowering::IsInfinite
+        | BuiltinLowering::BitwiseAnd
+        | BuiltinLowering::BitwiseOr
+        | BuiltinLowering::BitwiseXor
+        | BuiltinLowering::BitwiseNot
+        | BuiltinLowering::BitCount => OperationSemantics {
             volatility: Volatility::Immutable,
             dependency_scope: DependencyScope::Constant,
             has_side_effects: false,
@@ -559,7 +713,16 @@ pub const fn builtin_semantics_for_lowering(lowering: BuiltinLowering) -> Operat
         | BuiltinLowering::Round
         | BuiltinLowering::Sqrt
         | BuiltinLowering::Sum
-        | BuiltinLowering::Tan => OperationSemantics {
+        | BuiltinLowering::Tan
+        | BuiltinLowering::Sin
+        | BuiltinLowering::Atan2
+        | BuiltinLowering::Log2
+        | BuiltinLowering::Radians
+        | BuiltinLowering::Degrees
+        | BuiltinLowering::Sign
+        | BuiltinLowering::Trunc
+        | BuiltinLowering::ShiftLeft
+        | BuiltinLowering::ShiftRight => OperationSemantics {
             volatility: Volatility::Immutable,
             dependency_scope: DependencyScope::Constant,
             has_side_effects: false,
@@ -695,17 +858,96 @@ fn builtin_output_type(
         | BuiltinLowering::Exp
         | BuiltinLowering::Ln
         | BuiltinLowering::Sqrt
-        | BuiltinLowering::Tan => {
+        | BuiltinLowering::Tan
+        | BuiltinLowering::Sin
+        | BuiltinLowering::Log2
+        | BuiltinLowering::Radians
+        | BuiltinLowering::Degrees => {
             require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
             let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
             require_numeric_arg(function, input, span)?;
             Ok(DataType::Float64)
         }
-        BuiltinLowering::Ceil | BuiltinLowering::Floor | BuiltinLowering::Round => {
+        BuiltinLowering::Ceil
+        | BuiltinLowering::Floor
+        | BuiltinLowering::Sign
+        | BuiltinLowering::Trunc => {
             require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
             let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
             require_numeric_arg(function, input, span)?;
             Ok(input.data_type())
+        }
+        BuiltinLowering::Round => match arg_types {
+            [value] => {
+                let input = require_supported_register_type(function, value, span.clone())?;
+                require_numeric_arg(function, input, span)?;
+                Ok(input.data_type())
+            }
+            [value, digits] => {
+                let input = require_supported_register_type(function, value, span.clone())?;
+                let digits = require_supported_register_type(function, digits, span.clone())?;
+                require_numeric_arg(function, input, span.clone())?;
+                require_integral_arg(function, digits, span)?;
+                Ok(input.data_type())
+            }
+            _ => Err(invalid_builtin_arity_error(function, arg_types.len(), span)),
+        },
+        BuiltinLowering::IsNan | BuiltinLowering::IsFinite | BuiltinLowering::IsInfinite => {
+            require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
+            let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
+            // No integer is NaN or infinite, so classification accepts only floats.
+            if let RegisterType::Float32 | RegisterType::Float64 = input {
+                Ok(DataType::Boolean)
+            } else {
+                Err(CompileError {
+                    code: "unsupported_function",
+                    message: format!(
+                        "function '{}' requires floating-point input, found {input}",
+                        function.as_str()
+                    ),
+                    span: span.into(),
+                })
+            }
+        }
+        BuiltinLowering::BitwiseAnd | BuiltinLowering::BitwiseOr | BuiltinLowering::BitwiseXor => {
+            require_builtin_arity_exact(function, arg_types, 2, span.clone())?;
+            let left = require_supported_register_type(function, &arg_types[0], span.clone())?;
+            let right = require_supported_register_type(function, &arg_types[1], span.clone())?;
+            require_integral_arg(function, left, span.clone())?;
+            require_integral_arg(function, right, span.clone())?;
+            if left != right {
+                return Err(CompileError {
+                    code: "type_mismatch",
+                    message: format!(
+                        "function '{}' requires matching operand types, found {:?} and {:?}",
+                        function.as_str(),
+                        arg_types[0],
+                        arg_types[1]
+                    ),
+                    span: span.into(),
+                });
+            }
+            Ok(left.data_type())
+        }
+        BuiltinLowering::BitwiseNot => {
+            require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
+            let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
+            require_integral_arg(function, input, span)?;
+            Ok(input.data_type())
+        }
+        BuiltinLowering::BitCount => {
+            require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
+            let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
+            require_integral_arg(function, input, span)?;
+            Ok(DataType::Int64)
+        }
+        BuiltinLowering::ShiftLeft | BuiltinLowering::ShiftRight => {
+            require_builtin_arity_exact(function, arg_types, 2, span.clone())?;
+            let value = require_supported_register_type(function, &arg_types[0], span.clone())?;
+            let count = require_supported_register_type(function, &arg_types[1], span.clone())?;
+            require_integral_arg(function, value, span.clone())?;
+            require_integral_arg(function, count, span)?;
+            Ok(value.data_type())
         }
         BuiltinLowering::Concat => {
             require_builtin_min_arity(function, arg_types, 1, span.clone())?;
@@ -782,7 +1024,7 @@ fn builtin_output_type(
             require_utf8_arg(function, fill, span)?;
             Ok(DataType::Utf8)
         }
-        BuiltinLowering::Pow => {
+        BuiltinLowering::Pow | BuiltinLowering::Atan2 => {
             require_builtin_arity_exact(function, arg_types, 2, span.clone())?;
             let left = require_supported_register_type(function, &arg_types[0], span.clone())?;
             let right = require_supported_register_type(function, &arg_types[1], span.clone())?;
@@ -1186,8 +1428,9 @@ pub fn expr_semantics(expr: &SpannedExpr) -> Option<ExpressionSemantics> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DependencyScope, ExpressionSemantics, NullPropagation, Volatility, binary_op_semantics,
-        builtin_function_semantics, cast_semantics, expr_semantics, unary_op_semantics,
+        BitwiseOperation, DependencyScope, ExpressionSemantics, FloatClass, IntegerBits,
+        NullPropagation, Volatility, binary_op_semantics, builtin_function_semantics,
+        cast_semantics, expr_semantics, unary_op_semantics,
     };
     use crate::program::{BinaryOp, Expr, FieldRef, FunctionName, Literal, SpannedNode, UnaryOp};
 
@@ -1224,6 +1467,87 @@ mod tests {
         }
 
         assert!(builtin_function_semantics(&FunctionName::Unknown("rand".to_string())).is_none());
+    }
+
+    #[test]
+    fn numeric_additions_fail_exactly_where_a_row_can_fail() {
+        let infallible = [
+            FunctionName::IsNan,
+            FunctionName::IsFinite,
+            FunctionName::IsInfinite,
+            FunctionName::BitwiseAnd,
+            FunctionName::BitwiseOr,
+            FunctionName::BitwiseXor,
+            FunctionName::BitwiseNot,
+            FunctionName::BitCount,
+        ];
+        for function in infallible {
+            let semantics =
+                builtin_function_semantics(&function).expect("the builtin must be classified");
+            assert!(!semantics.can_error, "{function:?}");
+            assert_eq!(semantics.null_propagation, NullPropagation::Strict);
+            assert_eq!(semantics.volatility, Volatility::Immutable);
+        }
+        let fallible = [
+            FunctionName::Sin,
+            FunctionName::Atan2,
+            FunctionName::Log2,
+            FunctionName::Radians,
+            FunctionName::Degrees,
+            FunctionName::Sign,
+            FunctionName::Trunc,
+            FunctionName::ShiftLeft,
+            FunctionName::ShiftRight,
+        ];
+        for function in fallible {
+            let semantics =
+                builtin_function_semantics(&function).expect("the builtin must be classified");
+            assert!(semantics.can_error, "{function:?}");
+            assert_eq!(semantics.null_propagation, NullPropagation::Strict);
+        }
+        for name in [
+            "sin",
+            "atan2",
+            "log2",
+            "radians",
+            "degrees",
+            "sign",
+            "trunc",
+            "is_nan",
+            "is_finite",
+            "is_infinite",
+            "bitwise_and",
+            "bitwise_or",
+            "bitwise_xor",
+            "bitwise_not",
+            "shift_left",
+            "shift_right",
+            "bit_count",
+        ] {
+            let function = FunctionName::parse(name);
+            assert_eq!(function.as_str(), name);
+            assert!(builtin_function_semantics(&function).is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn value_contracts_classify_and_combine_at_the_operand_width() {
+        assert!(FloatClass::Nan.contains(f32::NAN));
+        assert!(!FloatClass::Nan.contains(f64::INFINITY));
+        assert!(FloatClass::Finite.contains(-0.0_f64));
+        assert!(FloatClass::Finite.contains(f32::from_bits(1)));
+        assert!(!FloatClass::Finite.contains(f64::NEG_INFINITY));
+        assert!(FloatClass::Infinite.contains(f32::NEG_INFINITY));
+        assert!(!FloatClass::Infinite.contains(f64::MAX));
+
+        assert_eq!(BitwiseOperation::And.apply(0b1100_u8, 0b1010), 0b1000);
+        assert_eq!(BitwiseOperation::Or.apply(-128_i8, 1), -127);
+        assert_eq!(BitwiseOperation::Xor.apply(u64::MAX, 1), u64::MAX - 1);
+        assert_eq!(0_u8.complement(), u8::MAX);
+        assert_eq!(i16::MIN.complement(), i16::MAX);
+        assert_eq!((-1_i8).one_bits(), 8);
+        assert_eq!(u32::MAX.one_bits(), 32);
+        assert_eq!(0_u64.one_bits(), 0);
     }
 
     #[test]

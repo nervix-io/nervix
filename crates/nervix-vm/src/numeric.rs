@@ -3,10 +3,13 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The batch kernels behind every numeric operator and numeric builtin: integer and
-//!   floating-point arithmetic, negation, comparison, `abs`, rounding and the math functions. Each
-//!   kernel is one pass over its operands' value buffers that yields the result column, the lanes
-//!   whose operation failed, and why a failed lane failed.
-//! - **Depends on.** Arrow arrays and buffers, and the side-error reasons of the VM.
+//!   floating-point arithmetic, negation, comparison, `abs`, `sign`, rounding and truncation,
+//!   floating-point classification, the math functions, and, in its submodules, integer bit
+//!   operations and rounding to decimal digits. Each kernel is one pass over its operands' value
+//!   buffers that yields the result column, the lanes whose operation failed, and why a failed lane
+//!   failed.
+//! - **Depends on.** Arrow arrays and buffers, the value contracts of the semantic catalog, and the
+//!   side-error reasons of the VM.
 //! - **Must not know.** Registers, programs, spans, or how a failed lane is recorded as a row
 //!   error.
 //!
@@ -14,6 +17,14 @@
 //! bitmap 64 lanes at a time, so the loop vectorizes wherever the lane operation itself does. It
 //! never reruns a batch: the failure bitmap, restricted to lanes whose operands are valid, is the
 //! only record of a failure, and its set bits are the only lanes an error is built for.
+//!
+//! Vectorization here is LLVM's auto-vectorization, not explicit SIMD. No kernel names a SIMD
+//! instruction set or intrinsic. A loop whose lane operation compiles to a few instructions, such
+//! as an integer operation, a comparison, `sqrt`, `trunc` or a multiplication by a constant, is
+//! written so the compiler can widen it to the vector instructions of the CPU the binary targets,
+//! and its results are the same whether or not it does. A function the platform math library
+//! computes, such as `sin` or `log2`, is an opaque call per lane that no loop vectorizes, so those
+//! kernels skip null lanes instead.
 
 use std::ops::{Add, Div, Mul, Neg, Rem, Sub};
 
@@ -27,7 +38,14 @@ use nervix_approx_into::ApproxInto as _;
 use crate::{
     batch::TypedArray,
     error::{DivisionOperation, FloatOperation, IntegerOperation, SideErrorReason},
+    semantics::{ClassifiedFloat, FloatClass},
 };
+
+mod bitwise;
+mod decimal_rounding;
+
+pub(crate) use bitwise::{Shift, ShiftCounts, ShiftedInteger, bit_count, bitwise_complement};
+pub(crate) use decimal_rounding::{DecimalRounding, IntegerRounding, RoundingDigits};
 
 /// The lanes one failure bitmap word covers.
 const LANES_PER_WORD: usize = 64;
@@ -399,6 +417,13 @@ pub(crate) trait CheckedFloat:
 
     /// Rounds to the nearest integer, with halves rounded away from zero.
     fn rounded_half_away(self) -> Self;
+
+    /// Rounds toward zero, which keeps the sign of a result that is zero.
+    fn rounded_toward_zero(self) -> Self;
+
+    /// `-1` for a negative value and `1` for a positive one, infinities included, and the value
+    /// itself for a zero, which keeps its sign, or for NaN, which has no sign.
+    fn sign_or_self(self) -> Self;
 }
 
 macro_rules! checked_float {
@@ -423,6 +448,20 @@ macro_rules! checked_float {
 
                 fn rounded_half_away(self) -> Self {
                     self.round()
+                }
+
+                fn rounded_toward_zero(self) -> Self {
+                    self.trunc()
+                }
+
+                fn sign_or_self(self) -> Self {
+                    if self > 0.0 {
+                        1.0
+                    } else if self < 0.0 {
+                        -1.0
+                    } else {
+                        self
+                    }
                 }
             }
         )+
@@ -469,12 +508,98 @@ where
     Checked::from_lanes(lanes, input.nulls().cloned())
 }
 
+/// An integer type whose `sign` is `-1`, `0` or `1` at the type's own width. The sign of every
+/// value fits every integer type, so it never fails.
+pub(crate) trait IntegerSign: ArrowNativeType {
+    fn sign(self) -> Self;
+}
+
+macro_rules! signed_integer_sign {
+    ($($native:ty),+ $(,)?) => {
+        $(
+            impl IntegerSign for $native {
+                fn sign(self) -> Self {
+                    if self > 0 {
+                        1
+                    } else if self < 0 {
+                        -1
+                    } else {
+                        0
+                    }
+                }
+            }
+        )+
+    };
+}
+
+signed_integer_sign!(i8, i16, i32, i64);
+
+macro_rules! unsigned_integer_sign {
+    ($($native:ty),+ $(,)?) => {
+        $(
+            impl IntegerSign for $native {
+                fn sign(self) -> Self {
+                    if self > 0 { 1 } else { 0 }
+                }
+            }
+        )+
+    };
+}
+
+unsigned_integer_sign!(u8, u16, u32, u64);
+
+pub(crate) fn integer_sign<T>(input: &PrimitiveArray<T>) -> PrimitiveArray<T>
+where
+    T: ArrowPrimitiveType,
+    T::Native: IntegerSign,
+{
+    input.unary(IntegerSign::sign)
+}
+
+/// The sign of every lane of a float column. Only NaN has no sign, so only a NaN lane fails.
+pub(crate) fn float_sign<T>(input: &PrimitiveArray<T>) -> Checked<T>
+where
+    T: ArrowPrimitiveType,
+    T::Native: CheckedFloat,
+{
+    let lanes = Lanes::unary(input.values(), |value: T::Native| {
+        value.sign_or_self().finite_lane()
+    });
+    Checked::from_lanes(lanes, input.nulls().cloned())
+}
+
+impl FloatClass {
+    /// Tests every lane of a float column for this class. A null lane stays null, and no lane
+    /// fails: every value, NaN included, has a class.
+    pub(crate) fn evaluate<T>(self, input: &PrimitiveArray<T>) -> BooleanArray
+    where
+        T: ArrowPrimitiveType,
+        T::Native: ClassifiedFloat,
+    {
+        let lanes = input.len();
+        let values = &input.values()[..lanes];
+        let results = match self {
+            Self::Nan => {
+                BooleanBuffer::collect_bool(lanes, |lane| Self::Nan.contains(values[lane]))
+            }
+            Self::Finite => {
+                BooleanBuffer::collect_bool(lanes, |lane| Self::Finite.contains(values[lane]))
+            }
+            Self::Infinite => {
+                BooleanBuffer::collect_bool(lanes, |lane| Self::Infinite.contains(values[lane]))
+            }
+        };
+        BooleanArray::new(results, input.nulls().cloned())
+    }
+}
+
 /// A builtin that rounds to an integral value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rounding {
     Ceil,
     Floor,
     Round,
+    Trunc,
 }
 
 impl Rounding {
@@ -493,6 +618,9 @@ impl Rounding {
             Self::Round => Lanes::unary(values, |value: T::Native| {
                 value.rounded_half_away().finite_lane()
             }),
+            Self::Trunc => Lanes::unary(values, |value: T::Native| {
+                value.rounded_toward_zero().finite_lane()
+            }),
         };
         Checked::from_lanes(lanes, input.nulls().cloned())
     }
@@ -504,6 +632,7 @@ impl Rounding {
             Self::Ceil => FloatOperation::Ceil,
             Self::Floor => FloatOperation::Floor,
             Self::Round => FloatOperation::Round,
+            Self::Trunc => FloatOperation::Trunc,
         };
         SideErrorReason::NonFiniteResult(operation)
     }
@@ -663,6 +792,12 @@ impl F64Operand {
     }
 }
 
+/// The `F64` nearest to π/180, the radians in one degree.
+const RADIANS_PER_DEGREE: f64 = 0.017_453_292_519_943_295;
+
+/// The `F64` nearest to 180/π, the degrees in one radian.
+const DEGREES_PER_RADIAN: f64 = 57.295_779_513_082_32;
+
 /// A math builtin of one argument, evaluated in `f64`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MathFunction {
@@ -674,8 +809,14 @@ pub(crate) enum MathFunction {
     Ln,
     /// `log` with one argument, the base-10 logarithm.
     Log10,
+    Log2,
     Sqrt,
     Tan,
+    Sin,
+    /// Degrees to radians: one multiplication by [`RADIANS_PER_DEGREE`].
+    Radians,
+    /// Radians to degrees: one multiplication by [`DEGREES_PER_RADIAN`].
+    Degrees,
 }
 
 impl MathFunction {
@@ -689,8 +830,12 @@ impl MathFunction {
             Self::Exp => FloatOperation::Exp,
             Self::Ln => FloatOperation::Ln,
             Self::Log10 => FloatOperation::Log,
+            Self::Log2 => FloatOperation::Log2,
             Self::Sqrt => FloatOperation::Sqrt,
             Self::Tan => FloatOperation::Tan,
+            Self::Sin => FloatOperation::Sin,
+            Self::Radians => FloatOperation::Radians,
+            Self::Degrees => FloatOperation::Degrees,
         };
         SideErrorReason::NonFiniteResult(operation)
     }
@@ -704,8 +849,12 @@ impl MathFunction {
             Self::Exp => operand.library_lanes(f64::exp),
             Self::Ln => operand.library_lanes(f64::ln),
             Self::Log10 => operand.library_lanes(f64::log10),
+            Self::Log2 => operand.library_lanes(f64::log2),
             Self::Sqrt => operand.every_lane(f64::sqrt),
             Self::Tan => operand.library_lanes(f64::tan),
+            Self::Sin => operand.library_lanes(f64::sin),
+            Self::Radians => operand.every_lane(|degrees| degrees * RADIANS_PER_DEGREE),
+            Self::Degrees => operand.every_lane(|radians| radians * DEGREES_PER_RADIAN),
         }
     }
 }
@@ -717,6 +866,8 @@ pub(crate) enum BinaryMathFunction {
     Log,
     /// `pow(base, exponent)`.
     Pow,
+    /// `atan2(y, x)`, the angle of the point `(x, y)`.
+    Atan2,
 }
 
 impl BinaryMathFunction {
@@ -725,11 +876,12 @@ impl BinaryMathFunction {
         let operation = match self {
             Self::Log => FloatOperation::Log,
             Self::Pow => FloatOperation::Pow,
+            Self::Atan2 => FloatOperation::Atan2,
         };
         SideErrorReason::NonFiniteResult(operation)
     }
 
-    /// Evaluates the function over two arguments of one batch. Both call into the platform math
+    /// Evaluates the function over two arguments of one batch. Each calls into the platform math
     /// library, so lanes with a null argument are not evaluated.
     pub(crate) fn evaluate(self, left: &F64Operand, right: &F64Operand) -> Checked<Float64Type> {
         let nulls = NullBuffer::union(left.nulls.as_ref(), right.nulls.as_ref());
@@ -752,6 +904,14 @@ impl BinaryMathFunction {
                     base.powf(exponent).finite_lane()
                 })
             }
+            (Self::Atan2, Some(valid)) => {
+                Lanes::binary_valid(&left.values, &right.values, valid, |y: f64, x| {
+                    y.atan2(x).finite_lane()
+                })
+            }
+            (Self::Atan2, None) => Lanes::binary(&left.values, &right.values, |y: f64, x| {
+                y.atan2(x).finite_lane()
+            }),
         };
         Checked::from_lanes(lanes, nulls)
     }
@@ -760,3 +920,7 @@ impl BinaryMathFunction {
 #[cfg(test)]
 #[path = "numeric_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "numeric_function_tests.rs"]
+mod function_tests;
