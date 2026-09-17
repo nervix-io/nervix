@@ -7,13 +7,9 @@
 //! - **Depends on.** Vocabulary clock models and branch-local runtime state.
 //! - **Must not know.** NSPL parsing, consensus decisions or clock-authority selection.
 
-use std::{
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicI64, Ordering},
-    },
-    time::Duration,
-};
+#[cfg(not(feature = "shuttle"))]
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::{sync::Arc as StdArc, time::Duration};
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -26,6 +22,10 @@ use nervix_models::{
 };
 #[cfg(test)]
 use nervix_wasm::WasmExecutionContext;
+// Shuttle schedules around the watermark's atomic maximum, so a read can be preempted between
+// loading its publication and raising the watermark published with it.
+#[cfg(feature = "shuttle")]
+use shuttle::sync::atomic::{AtomicI64, Ordering};
 use thiserror::Error;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -1979,5 +1979,532 @@ mod tests {
                 "logical clock source directly imports physical time through '{forbidden}'"
             );
         }
+    }
+}
+
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_lifecycle_tests {
+    use nervix_models::DomainTimeRate;
+    use parking_lot::Mutex;
+    use shuttle::thread;
+
+    use super::*;
+    use crate::{
+        runtime::{domain, paced_domain_state, test_domain_clock_authority},
+        shuttle_test::{check_pct, check_random},
+    };
+
+    // Shuttle does not model time, so every mapping in these models anchors its physical start at
+    // the latest representable instant. Each projection is then exactly the mapping's logical
+    // start: a read returns the same time in every run, and a persisted schedule replays the same
+    // reads. A logical deadline years past a projection converts to a physical wait beyond the
+    // one-year horizon within which Shuttle completes a sleep at once, so a waiter parked on that
+    // deadline can return only through a lifecycle notification.
+
+    /// The domain every model clock belongs to.
+    const MODEL_DOMAIN: &str = "paced";
+    /// The logical time the model mappings start from.
+    const ORIGIN: &str = "2030-01-01T00:00:00Z";
+    /// A logical time after the origin, for a generation-one mapping that projects later.
+    const AFTER_ORIGIN: &str = "2031-01-01T00:00:00Z";
+    /// A logical deadline whose physical wait from the origin is beyond Shuttle's sleep horizon.
+    const BEYOND_SLEEP_HORIZON: &str = "2040-01-01T00:00:00Z";
+
+    const RANDOM_ITERATIONS: usize = 200;
+    const PCT_ITERATIONS: usize = 200;
+    const PCT_DEPTH: usize = 3;
+
+    /// The operations each concurrent reader performs, so that some can finish on either side of a
+    /// concurrent publication.
+    const READER_OPERATIONS: usize = 3;
+
+    /// Why a join never returns a panic: the panic ends the schedule before the join resumes.
+    const PANICS_END_THE_SCHEDULE: &str = "Shuttle ends the schedule when a model task panics";
+
+    /// Explores `model` under the random scheduler and then under the PCT scheduler.
+    fn check_random_and_pct(model: fn()) {
+        check_random(model, RANDOM_ITERATIONS);
+        check_pct(model, PCT_ITERATIONS, PCT_DEPTH);
+    }
+
+    fn model_time(rfc3339: &str) -> Timestamp {
+        rfc3339
+            .parse()
+            .assured("every model time is a valid RFC 3339 literal")
+    }
+
+    /// A committed mapping that projects `logical_start` for every read a model makes.
+    fn frozen_mapping(logical_start: &str) -> DomainClockState {
+        DomainClockState::new(
+            Timestamp::from_unix_nanos(i64::MAX),
+            model_time(logical_start),
+            DomainTimeRate::ONE,
+        )
+    }
+
+    /// A running paced generation committed with a frozen mapping.
+    fn running_generation(generation: u64, logical_start: &str) -> DomainState {
+        let mut state = paced_domain_state(MODEL_DOMAIN);
+        state.start_version = generation;
+        state.clock = Some(frozen_mapping(logical_start));
+        state
+    }
+
+    /// A lifecycle whose generation one is installed from `logical_start` under an assigned
+    /// authority.
+    fn installed_generation_one(logical_start: &str) -> DomainClockLifecycle {
+        let lifecycle = DomainClockLifecycle::new(domain(MODEL_DOMAIN));
+        lifecycle.synchronize(
+            &running_generation(1, logical_start),
+            &test_domain_clock_authority(),
+        );
+        lifecycle
+    }
+
+    /// The latest time returned by a read that has finished.
+    #[derive(Default)]
+    struct FinishedReads {
+        latest: Mutex<Option<Timestamp>>,
+    }
+
+    impl FinishedReads {
+        fn latest(&self) -> Option<Timestamp> {
+            *self.latest.lock()
+        }
+
+        fn record(&self, now: Timestamp) {
+            let mut latest = self.latest.lock();
+            if *latest < Some(now) {
+                *latest = Some(now);
+            }
+        }
+
+        /// Reads `clock` repeatedly and requires every read to return no earlier than each read
+        /// that had finished when it began.
+        fn read_without_decreasing(&self, clock: &DomainClock) {
+            for _ in 0..READER_OPERATIONS {
+                let finished_before = self.latest();
+                let snapshot = clock
+                    .snapshot()
+                    .assured("the model keeps generation one installed for every read");
+                if let Some(finished_before) = finished_before {
+                    assert!(
+                        snapshot.now() >= finished_before,
+                        "a read of generation one returned {} after another read had returned \
+                         {finished_before}",
+                        snapshot.now()
+                    );
+                }
+                self.record(snapshot.now());
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_reads_of_one_installed_generation_never_decrease() {
+        check_random_and_pct(race_readers_against_an_earlier_mapping_of_their_generation);
+    }
+
+    /// Two readers race a replacement that keeps generation one installed but projects an earlier
+    /// time, so only the read watermark the replacement shares keeps their reads from decreasing.
+    fn race_readers_against_an_earlier_mapping_of_their_generation() {
+        let lifecycle = installed_generation_one(AFTER_ORIGIN);
+        let clock = lifecycle
+            .bind()
+            .assured("the model installs generation one before it binds");
+        let finished = Arc::new(FinishedReads::default());
+
+        let replacement = thread::spawn(move || lifecycle.install_paced(1, frozen_mapping(ORIGIN)));
+        let first_clock = clock.clone();
+        let first_finished = Arc::clone(&finished);
+        let first_reader =
+            thread::spawn(move || first_finished.read_without_decreasing(&first_clock));
+        let second_clock = clock.clone();
+        let second_finished = Arc::clone(&finished);
+        let second_reader =
+            thread::spawn(move || second_finished.read_without_decreasing(&second_clock));
+
+        replacement.join().assured(PANICS_END_THE_SCHEDULE);
+        first_reader.join().assured(PANICS_END_THE_SCHEDULE);
+        second_reader.join().assured(PANICS_END_THE_SCHEDULE);
+        finished.read_without_decreasing(&clock);
+    }
+
+    /// The refusal a generation-one handle receives once generation two is published.
+    fn generation_one_replaced_by_two() -> DomainClockAccessError {
+        DomainClockAccessError::StaleGeneration {
+            domain: domain(MODEL_DOMAIN),
+            bound_generation: 1,
+            current_generation: 2,
+        }
+    }
+
+    fn assert_refused_by_generation_two(error: &Report<DomainClockAccessError>) {
+        assert_eq!(
+            error.current_context(),
+            &generation_one_replaced_by_two(),
+            "generation one was refused for a reason other than its replacement"
+        );
+    }
+
+    /// Revalidates a generation-one handle and tests a deadline due at its origin while generation
+    /// two is published. A refusal must name the replacement, and nothing may accept the handle
+    /// once anything has refused it.
+    fn revalidate_across_the_generation_change(
+        clock: &DomainClock,
+        deadline: &LogicalDeadline,
+        snapshot: &DomainExecutionSnapshot,
+    ) {
+        let mut refused = false;
+        for _ in 0..READER_OPERATIONS {
+            match clock.revalidate() {
+                Ok(()) => assert!(
+                    !refused,
+                    "revalidation accepted generation one after its replacement was observed"
+                ),
+                Err(error) => {
+                    assert_refused_by_generation_two(&error);
+                    refused = true;
+                }
+            }
+            match clock.deadline_reached(deadline, snapshot) {
+                Ok(reached) => {
+                    assert!(
+                        !refused,
+                        "a deadline check accepted generation one after its replacement was \
+                         observed"
+                    );
+                    assert!(
+                        reached,
+                        "the model deadline is due at generation one's origin"
+                    );
+                }
+                Err(error) => {
+                    assert_refused_by_generation_two(&error);
+                    refused = true;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_clock_bound_to_a_replaced_generation_is_refused_by_revalidation() {
+        check_random_and_pct(check_a_bound_clock_across_a_generation_change);
+    }
+
+    fn check_a_bound_clock_across_a_generation_change() {
+        let lifecycle = installed_generation_one(ORIGIN);
+        let clock = lifecycle
+            .bind()
+            .assured("the model installs generation one before it binds");
+        let snapshot = clock
+            .snapshot()
+            .assured("generation one stays installed until the replacement starts");
+        let deadline = clock.deadline_at(model_time(ORIGIN));
+
+        let replacing_lifecycle = lifecycle.clone();
+        let replacement = thread::spawn(move || {
+            replacing_lifecycle.synchronize(
+                &running_generation(2, ORIGIN),
+                &test_domain_clock_authority(),
+            );
+        });
+        let checking_clock = clock.clone();
+        let checking_deadline = deadline.clone();
+        let checking_snapshot = snapshot.clone();
+        let checker = thread::spawn(move || {
+            revalidate_across_the_generation_change(
+                &checking_clock,
+                &checking_deadline,
+                &checking_snapshot,
+            );
+        });
+        replacement.join().assured(PANICS_END_THE_SCHEDULE);
+        checker.join().assured(PANICS_END_THE_SCHEDULE);
+
+        let Err(revalidation) = clock.revalidate() else {
+            panic!("revalidation accepted generation one after generation two was installed");
+        };
+        assert_refused_by_generation_two(&revalidation);
+        let Err(read) = clock.snapshot() else {
+            panic!("a generation-one handle read the clock after generation two was installed");
+        };
+        assert_refused_by_generation_two(&read);
+        let Err(deadline_check) = clock.deadline_reached(&deadline, &snapshot) else {
+            panic!("a generation-one deadline was tested after generation two was installed");
+        };
+        assert_refused_by_generation_two(&deadline_check);
+        let rebound = lifecycle
+            .bind()
+            .assured("generation two is installed once its synchronization returns");
+        assert_eq!(rebound.generation, 2);
+    }
+
+    /// The stages of one generation, in the order the publication model publishes them.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum ObservedStage {
+        Uninstalled,
+        Installed,
+        Stopped,
+    }
+
+    /// The installation one lifecycle read revealed, ordered as the publication model publishes
+    /// installations.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum ObservedInstallation {
+        Generation {
+            generation: u64,
+            stage: ObservedStage,
+        },
+        Missing,
+    }
+
+    impl ObservedInstallation {
+        /// Binds a new handle, which reveals the published installation exactly.
+        fn by_binding(lifecycle: &DomainClockLifecycle) -> Self {
+            match lifecycle.bind() {
+                Ok(clock) => Self::Generation {
+                    generation: clock.generation,
+                    stage: ObservedStage::Installed,
+                },
+                Err(error) => Self::refused(&error),
+            }
+        }
+
+        /// Reads through a handle bound before the observation.
+        fn by_reading(clock: &DomainClock) -> Self {
+            match clock.snapshot() {
+                Ok(snapshot) => Self::Generation {
+                    generation: snapshot.generation(),
+                    stage: ObservedStage::Installed,
+                },
+                Err(error) => Self::refused(&error),
+            }
+        }
+
+        /// The installation a refused read revealed. A handle bound to an earlier generation sees
+        /// a later one only as stale, which names the later generation but not its stage, so that
+        /// refusal records the first stage the model publishes for it.
+        fn refused(error: &Report<DomainClockAccessError>) -> Self {
+            match error.current_context() {
+                DomainClockAccessError::Missing { .. } => Self::Missing,
+                DomainClockAccessError::Stopped { generation, .. } => Self::Generation {
+                    generation: *generation,
+                    stage: ObservedStage::Stopped,
+                },
+                DomainClockAccessError::Uninstalled { generation, .. } => Self::Generation {
+                    generation: *generation,
+                    stage: ObservedStage::Uninstalled,
+                },
+                DomainClockAccessError::StaleGeneration {
+                    current_generation, ..
+                } => Self::Generation {
+                    generation: *current_generation,
+                    stage: ObservedStage::Uninstalled,
+                },
+                DomainClockAccessError::DeadlineDomainMismatch { .. }
+                | DomainClockAccessError::Arithmetic { .. } => {
+                    panic!(
+                        "a lifecycle read failed for a reason the model never publishes: {error:?}"
+                    )
+                }
+            }
+        }
+    }
+
+    /// The installations one reader has observed, which must follow publication order.
+    #[derive(Default)]
+    struct ReaderHistory {
+        latest: Option<ObservedInstallation>,
+    }
+
+    impl ReaderHistory {
+        fn observe(&mut self, observed: ObservedInstallation) {
+            if let Some(latest) = self.latest {
+                assert!(
+                    observed >= latest,
+                    "a reader observed {observed:?} after it had already observed {latest:?}"
+                );
+            }
+            self.latest = Some(observed);
+        }
+    }
+
+    fn bind_in_publication_order(lifecycle: &DomainClockLifecycle) {
+        let mut history = ReaderHistory::default();
+        for _ in 0..READER_OPERATIONS {
+            history.observe(ObservedInstallation::by_binding(lifecycle));
+        }
+    }
+
+    fn read_in_publication_order(clock: &DomainClock) {
+        let mut history = ReaderHistory::default();
+        for _ in 0..READER_OPERATIONS {
+            history.observe(ObservedInstallation::by_reading(clock));
+        }
+    }
+
+    /// Publishes generation one's stop, generation two without and then with an assigned
+    /// authority, and the domain's removal.
+    fn publish_the_lifecycle(lifecycle: &DomainClockLifecycle) {
+        lifecycle.stop(1);
+        lifecycle.synchronize(
+            &running_generation(2, ORIGIN),
+            &DomainClockAuthority::initial(),
+        );
+        lifecycle.synchronize(
+            &running_generation(2, ORIGIN),
+            &test_domain_clock_authority(),
+        );
+        lifecycle.mark_missing();
+    }
+
+    #[test]
+    fn readers_never_observe_an_installation_older_than_one_they_observed() {
+        check_random_and_pct(race_readers_against_the_published_lifecycle);
+    }
+
+    /// One reader binds new handles and another reads through a generation-one handle while the
+    /// lifecycle is published.
+    fn race_readers_against_the_published_lifecycle() {
+        let lifecycle = installed_generation_one(ORIGIN);
+        let clock = lifecycle
+            .bind()
+            .assured("the model installs generation one before it binds");
+
+        let publishing_lifecycle = lifecycle.clone();
+        let publisher = thread::spawn(move || publish_the_lifecycle(&publishing_lifecycle));
+        let binding_lifecycle = lifecycle.clone();
+        let binding_reader = thread::spawn(move || bind_in_publication_order(&binding_lifecycle));
+        let reading_clock = clock.clone();
+        let handle_reader = thread::spawn(move || read_in_publication_order(&reading_clock));
+        publisher.join().assured(PANICS_END_THE_SCHEDULE);
+        binding_reader.join().assured(PANICS_END_THE_SCHEDULE);
+        handle_reader.join().assured(PANICS_END_THE_SCHEDULE);
+
+        assert_eq!(
+            ObservedInstallation::by_binding(&lifecycle),
+            ObservedInstallation::Missing
+        );
+        assert_eq!(
+            ObservedInstallation::by_reading(&clock),
+            ObservedInstallation::Missing
+        );
+    }
+
+    async fn wait_uncancelled(
+        clock: DomainClock,
+        deadline: LogicalDeadline,
+    ) -> DomainClockWaitResult<LogicalDeadlineReached> {
+        let cancellation = CancellationToken::new();
+        clock.wait_until(deadline, &cancellation).await
+    }
+
+    /// Parks a generation-one waiter on a deadline Shuttle never sleeps through, applies `change`
+    /// while the waiter can be anywhere in its wait loop, and returns the waiter's outcome.
+    async fn wait_across(
+        change: fn(&DomainClockLifecycle),
+    ) -> DomainClockWaitResult<LogicalDeadlineReached> {
+        let lifecycle = installed_generation_one(ORIGIN);
+        let clock = lifecycle
+            .bind()
+            .assured("the model installs generation one before it binds");
+        let deadline = clock.deadline_at(model_time(BEYOND_SLEEP_HORIZON));
+        let waiter = tokio::spawn(wait_uncancelled(clock, deadline));
+        change(&lifecycle);
+        waiter.await.assured(PANICS_END_THE_SCHEDULE)
+    }
+
+    fn assert_waiter_refused(
+        outcome: DomainClockWaitResult<LogicalDeadlineReached>,
+        expected: &DomainClockAccessError,
+    ) {
+        let Err(error) = outcome else {
+            panic!("a waiter reached a deadline that its generation's clock never reached");
+        };
+        assert_eq!(
+            error.downcast_ref::<DomainClockAccessError>(),
+            Some(expected),
+            "a waiter returned a refusal other than the change it waited across: {error:?}"
+        );
+    }
+
+    fn stop_generation_one(lifecycle: &DomainClockLifecycle) {
+        lifecycle.stop(1);
+    }
+
+    #[test]
+    fn a_logical_waiter_wakes_when_its_generation_stops() {
+        check_random_and_pct(wait_across_a_stop);
+    }
+
+    fn wait_across_a_stop() {
+        let outcome = shuttle::future::block_on(wait_across(stop_generation_one));
+        assert_waiter_refused(
+            outcome,
+            &DomainClockAccessError::Stopped {
+                domain: domain(MODEL_DOMAIN),
+                generation: 1,
+            },
+        );
+    }
+
+    fn install_generation_two(lifecycle: &DomainClockLifecycle) {
+        lifecycle.synchronize(
+            &running_generation(2, ORIGIN),
+            &test_domain_clock_authority(),
+        );
+    }
+
+    #[test]
+    fn a_logical_waiter_wakes_when_its_generation_is_replaced() {
+        check_random_and_pct(wait_across_a_generation_change);
+    }
+
+    fn wait_across_a_generation_change() {
+        let outcome = shuttle::future::block_on(wait_across(install_generation_two));
+        assert_waiter_refused(outcome, &generation_one_replaced_by_two());
+    }
+
+    #[test]
+    fn a_logical_waiter_wakes_when_its_domain_is_removed() {
+        check_random_and_pct(wait_across_a_removal);
+    }
+
+    fn wait_across_a_removal() {
+        let outcome = shuttle::future::block_on(wait_across(DomainClockLifecycle::mark_missing));
+        assert_waiter_refused(
+            outcome,
+            &DomainClockAccessError::Missing {
+                domain: domain(MODEL_DOMAIN),
+            },
+        );
+    }
+
+    fn map_generation_one_to_the_deadline(lifecycle: &DomainClockLifecycle) {
+        lifecycle.install_paced(1, frozen_mapping(BEYOND_SLEEP_HORIZON));
+    }
+
+    #[test]
+    fn a_logical_waiter_wakes_when_a_replacement_mapping_reaches_its_deadline() {
+        check_random_and_pct(wait_across_a_mapping_that_reaches_the_deadline);
+    }
+
+    fn wait_across_a_mapping_that_reaches_the_deadline() {
+        let outcome = shuttle::future::block_on(wait_across(map_generation_one_to_the_deadline));
+        let reached = match outcome {
+            Ok(reached) => reached,
+            Err(error) => panic!(
+                "a waiter did not reach the deadline its replacement mapping reached: {error:?}"
+            ),
+        };
+        assert_eq!(reached.due_at(), model_time(BEYOND_SLEEP_HORIZON));
+        assert_eq!(reached.snapshot().generation(), 1);
+        assert!(
+            reached.snapshot().now() >= reached.due_at(),
+            "a waiter returned {} before its deadline {}",
+            reached.snapshot().now(),
+            reached.due_at()
+        );
     }
 }
