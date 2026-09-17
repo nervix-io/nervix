@@ -1680,6 +1680,7 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
                 if result.is_err() {
                     inner.failed.store(true, Ordering::Release);
                 }
+                drop(reservation);
                 job_completion.complete(result);
             })
             .await;
