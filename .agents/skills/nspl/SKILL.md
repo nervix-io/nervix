@@ -230,6 +230,14 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - Require `WITH MAX BATCH <positive_n>` for ClickHouse, Postgres, MySQL, and MongoDB emitters. For
   SQS, use `FIFO GROUP FROM BRANCH|<string_expression>` exactly when the externally provisioned
   queue name ends in `.fifo`; `FROM BRANCH` requires branched input.
+- Give every client resource mount an explicit `MOUNT <resource> VERSION <u64>|LATEST` clause. Put
+  database pool bounds before the mount, and keep a WebSocket client's `WITH SIGNALING PROTOCOL`
+  clause before the mount. `LATEST` is resolved when the statement is applied; the stored client
+  and `SHOW CREATE CLIENT` contain the resulting number, so later uploads and restarts do not move
+  the mount.
+- Give every hash map an explicit `FROM RESOURCE <resource> VERSION <u64>|LATEST` clause. `LATEST`
+  is resolved when the statement is applied, and the stored hash map and `SHOW CREATE HASH MAP`
+  contain the resulting number.
 - Declare connection-pool bounds on every `POSTGRES`, `MYSQL`, `MONGODB`, and `REDIS` client, after
   `TYPE` and before an optional `MOUNT`: `POOL SIZE MIN <u32> MAX <positive_u32>`, in that order,
   with the minimum no greater than the maximum. The clause is required even when only ingestors

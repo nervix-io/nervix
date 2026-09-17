@@ -108,7 +108,7 @@ mod tests {
         assert!(err.to_string().contains("invalid HTTP timeout_ms"));
 
         let err = ingestors::prometheus::PrometheusIngestor::client_from_config_for_test(
-            &CreateClientPrometheus {
+            &CreateClientPrometheus::<u64> {
                 name: named("prom"),
                 mount: None,
                 config: vec![ClientConfigEntry {

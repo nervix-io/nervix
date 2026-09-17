@@ -153,7 +153,7 @@ Feature: Domain-owned resources
         TO SCHEMA lookup_entry;
       CREATE HASH MAP entries_by_key
         KEY key
-        FROM RESOURCE lookup_bundle
+        FROM RESOURCE lookup_bundle VERSION 1
         PATH 'alpha.jsonl'
         DECODE USING lookup_entry_codec;
       """
@@ -175,7 +175,7 @@ Feature: Domain-owned resources
       """
       CREATE HASH MAP entries_by_key
         KEY key
-        FROM RESOURCE lookup_bundle
+        FROM RESOURCE lookup_bundle VERSION 1
         PATH 'alpha.jsonl'
         DECODE USING lookup_entry_codec;
       """
@@ -191,7 +191,7 @@ Feature: Domain-owned resources
       """
       CREATE HASH MAP entries_by_key
         KEY key
-        FROM RESOURCE lookup_bundle
+        FROM RESOURCE lookup_bundle VERSION 1
         PATH 'beta.jsonl'
         DECODE USING lookup_entry_codec;
       """
@@ -199,7 +199,7 @@ Feature: Domain-owned resources
       """
       CREATE HASH MAP entries_by_beta_key
         KEY key
-        FROM RESOURCE lookup_bundle
+        FROM RESOURCE lookup_bundle VERSION 1
         PATH 'beta.jsonl'
         DECODE USING lookup_entry_codec;
       """

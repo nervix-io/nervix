@@ -32,7 +32,7 @@ Feature: Pulsar TLS resource mounts
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_pulsar_notifications;
         CREATE CLIENT pulsar_tls
         TYPE PULSAR
-        MOUNT dev_tls
+        MOUNT dev_tls VERSION 1
         CONFIG {
           'addr' = '{{pulsar_tls_addr}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'

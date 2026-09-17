@@ -136,7 +136,7 @@ Feature: Database client connection pool bounds
       """
     And these NSPL commands fail with "expected POOL SIZE, found MOUNT"
       """
-      CREATE CLIENT mount_first TYPE REDIS MOUNT dev_tls POOL SIZE MIN 1 MAX 4
+      CREATE CLIENT mount_first TYPE REDIS MOUNT dev_tls VERSION 1 POOL SIZE MIN 1 MAX 4
         CONFIG { 'addr' = 'rediss://127.0.0.1:6380/' };
       """
     And these NSPL commands fail with "maximum pool size must be greater than zero"

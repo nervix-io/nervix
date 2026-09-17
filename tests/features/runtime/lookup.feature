@@ -39,7 +39,7 @@ Feature: Resource-backed lookups
 
       CREATE HASH MAP zip_codes_by_zip
         KEY zip
-        FROM RESOURCE zip_codes
+        FROM RESOURCE zip_codes VERSION 1
         PATH 'lookup.jsonl'
         DECODE USING zip_code_entry_codec;
       """
@@ -117,7 +117,7 @@ Feature: Resource-backed lookups
       """
       CREATE HASH MAP malformed_by_key
         KEY key
-        FROM RESOURCE malformed_lookup
+        FROM RESOURCE malformed_lookup VERSION 1
         PATH 'lookup.jsonl'
         DECODE USING malformed_entry_codec;
       """
@@ -159,7 +159,7 @@ Feature: Resource-backed lookups
 
       CREATE HASH MAP zip_codes_by_zip
         KEY zip
-        FROM RESOURCE zip_codes
+        FROM RESOURCE zip_codes VERSION 1
         PATH 'lookup.jsonl'
         DECODE USING zip_code_entry_codec;
       """
@@ -211,7 +211,7 @@ Feature: Resource-backed lookups
 
       CREATE HASH MAP zip_codes_by_zip
         KEY zip
-        FROM RESOURCE zip_codes
+        FROM RESOURCE zip_codes VERSION 1
         PATH 'lookup.jsonl'
         DECODE USING zip_code_entry_codec;
       """
@@ -258,6 +258,12 @@ Feature: Resource-backed lookups
         "lookup.jsonl": "{\"zip\":\"60601\",\"city\":\"Chicago\"}\n{\"zip\":\"10001\",\"city\":\"New York\"}\n"
       }
       """
+    And node "node-1" has resource directory "zip_codes_v2_dir" containing
+      """
+      {
+        "lookup.jsonl": "{\"zip\":\"60601\",\"city\":\"Madison\"}\n{\"zip\":\"10001\",\"city\":\"New York\"}\n"
+      }
+      """
     And the leader node is configured with these NSPL commands
       """
       CREATE DOMAIN {{domain}};
@@ -286,11 +292,23 @@ Feature: Resource-backed lookups
 
       CREATE HASH MAP zip_codes_by_zip
         KEY zip
-        FROM RESOURCE zip_codes
+        FROM RESOURCE zip_codes VERSION 1
         PATH 'lookup.jsonl'
         DECODE USING zip_code_entry_codec;
       """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_v2_dir}}';
+      """
     When the cluster is restarted
+    When these NSPL commands are executed on the leader node
+      """
+      DESCRIBE HASH MAP zip_codes_by_zip;
+      """
+    Then the last command output contains
+      """
+      resource: zip_codes@1
+      """
     When these NSPL commands are executed on the leader node
       """
       LOOKUP zip_codes_by_zip KEY '60601';
@@ -302,6 +320,10 @@ Feature: Resource-backed lookups
     And the last command output contains
       """
       "zip":"60601"
+      """
+    And the last command output does not contain
+      """
+      "city":"Madison"
       """
 
     Examples:
@@ -346,7 +368,7 @@ Feature: Resource-backed lookups
 
       CREATE HASH MAP zip_codes_by_zip
         KEY zip
-        FROM RESOURCE zip_batches
+        FROM RESOURCE zip_batches VERSION 1
         PATH 'lookup.jsonl'
         DECODE USING zip_batch_codec;
       """

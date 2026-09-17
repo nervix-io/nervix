@@ -36,7 +36,7 @@ Feature: Prometheus TLS resource mounts
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;
         CREATE CLIENT prom_tls
         TYPE PROMETHEUS
-        MOUNT dev_tls
+        MOUNT dev_tls VERSION 1
         CONFIG {
           'addr' = '{{prometheus_tls_addr}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
