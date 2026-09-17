@@ -199,6 +199,16 @@ mod deterministic {
         }
     }
 
+    /// Run one opaque publication operation between two scheduling points, so Shuttle can run
+    /// another thread just before it and just after it. A value read this way may already be
+    /// stale by the time its reader acts on it, exactly as it may be in production.
+    fn scheduled<R>(operation: impl FnOnce() -> R) -> R {
+        super::yield_now();
+        let result = operation();
+        super::yield_now();
+        result
+    }
+
     /// An atomic `Arc` publication whose opaque operations are visible to Shuttle.
     #[derive(Debug)]
     pub struct ArcSwap<T> {
@@ -213,31 +223,26 @@ mod deterministic {
         }
 
         pub fn load(&self) -> Guard<Arc<T>> {
-            super::yield_now();
-            self.inner.load()
+            scheduled(|| self.inner.load())
         }
 
         pub fn load_full(&self) -> Arc<T> {
-            super::yield_now();
-            self.inner.load_full()
+            scheduled(|| self.inner.load_full())
         }
 
         pub fn store(&self, value: Arc<T>) {
-            super::yield_now();
-            self.inner.store(value);
+            scheduled(|| self.inner.store(value));
         }
 
         pub fn compare_and_swap(&self, current: &Arc<T>, new: Arc<T>) -> Guard<Arc<T>> {
-            super::yield_now();
-            self.inner.compare_and_swap(current, new)
+            scheduled(|| self.inner.compare_and_swap(current, new))
         }
 
         pub fn rcu<R>(&self, update: impl FnMut(&Arc<T>) -> R) -> Arc<T>
         where
             R: Into<Arc<T>>,
         {
-            super::yield_now();
-            self.inner.rcu(update)
+            scheduled(|| self.inner.rcu(update))
         }
     }
 
@@ -263,18 +268,15 @@ mod deterministic {
         }
 
         pub fn load(&self) -> Guard<Option<Arc<T>>> {
-            super::yield_now();
-            self.inner.load()
+            scheduled(|| self.inner.load())
         }
 
         pub fn load_full(&self) -> Option<Arc<T>> {
-            super::yield_now();
-            self.inner.load_full()
+            scheduled(|| self.inner.load_full())
         }
 
         pub fn store(&self, value: Option<Arc<T>>) {
-            super::yield_now();
-            self.inner.store(value);
+            scheduled(|| self.inner.store(value));
         }
     }
 
