@@ -2197,25 +2197,18 @@ impl IngestorLogicTransportFixture {
             }
             Self::Kafka => {
                 let topic = expand_placeholders(world, "logic_notifications_{{test_id}}");
-                let deadline = Instant::now() + Duration::from_secs(5);
-                loop {
-                    tokio::task::consume_budget().await;
-                    world
-                        .cluster()
-                        .publish_kafka_with_headers(&topic, payload, &headers)
-                        .await
-                        .expect("failed to publish ingestor logic kafka payload with headers");
-                    if try_capture_any_subscription_payload(world, Duration::from_millis(500)).await
-                    {
-                        return;
-                    }
-                    assert!(
-                        Instant::now() < deadline,
-                        "timed out waiting for ingestor logic kafka payload with headers to reach \
-                         the relay subscription"
-                    );
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
+                world
+                    .cluster()
+                    .publish_kafka_with_headers(&topic, payload, &headers)
+                    .await
+                    .expect("failed to publish ingestor logic kafka payload with headers");
+                let delivered =
+                    try_capture_any_subscription_payload(world, Duration::from_secs(5)).await;
+                assert!(
+                    delivered,
+                    "timed out waiting for ingestor logic kafka payload with headers to reach the \
+                     relay subscription"
+                );
             }
             Self::Nats => {
                 let subject = expand_placeholders(world, "logic_notifications_{{test_id}}");
