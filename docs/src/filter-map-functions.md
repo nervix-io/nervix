@@ -401,28 +401,36 @@ A shift takes `count` from any integer type, independently of the type of `value
 A `DATETIME` is a UTC instant with nanosecond precision. Its range is the signed Unix-nanosecond
 range, `1677-09-21T00:12:43.145224192Z` through `2262-04-11T23:47:16.854775807Z`. Datetime functions
 compute exactly from the values they are given and never read a clock, so a call gives the same
-result for the same arguments whenever it runs. The current time enters an expression as a value only
-through `now()`, which returns the execution-local domain time: `date_trunc('day', now())` follows a
-paced domain's logical clock at any `TIME RATE`.
+result for the same arguments whenever and on whichever node it runs. The current time enters an
+expression as a value only through `now()`, which returns the execution-local domain time:
+`date_trunc('day', now(), 'Europe/Berlin')` follows a paced domain's logical clock at any
+`TIME RATE`, while the work a call does, and how long it takes, never depends on the domain's pace.
 
 | Function | Returns | Notes |
 | --- | --- | --- |
-| `date_part(part, value)` | `I64` | One part of `value` in UTC, named by `part` from the table of date parts below |
-| `date_trunc(unit, value)` | `DATETIME` | The start of the `unit` that holds `value`. A day starts at midnight UTC and a week on Monday |
+| `date_part(part, value[, zone])` | `I64` | One part of `value`'s local date and time in `zone`, named by `part` from the table of date parts below |
+| `date_trunc(unit, value[, zone])` | `DATETIME` | The first instant of the local `unit` that holds `value` in `zone`. See [Calendar Arithmetic](#calendar-arithmetic) |
 | `date_bin(unit, width, value, origin)` | `DATETIME` | The start of the bin that holds `value`, for bins `width` units wide that start at `origin` and at every whole number of widths before and after it |
-| `date_add(unit, amount, value)` | `DATETIME` | `value` moved by `amount` units, backward when `amount` is negative. `amount` may be any integer type |
-| `date_diff(unit, start, end)` | `I64` | The whole units from `start` to `end`, rounded toward zero. Negative when `end` is before `start` |
+| `date_add(unit, amount, value[, zone])` | `DATETIME` | `value` moved by `amount` units in `zone`, backward when `amount` is negative. `amount` may be any integer type |
+| `date_diff(unit, start, end[, zone])` | `I64` | The whole units from `start` to `end` in `zone`, rounded toward zero. Negative when `end` is before `start` |
 | `to_unix(unit, value)` | `I64` | The whole units from `1970-01-01T00:00:00Z` to `value`, rounded down |
 | `from_unix(unit, count)` | `DATETIME` | The instant `count` units after `1970-01-01T00:00:00Z`, or before it when `count` is negative. `count` may be any integer type |
+| `format_datetime(format, value[, zone])` | `STRING` | `value`'s local date and time in `zone`, written in `format`. See [Datetime Formats](#datetime-formats) |
+| `parse_datetime(format, text[, zone[, disambiguation]])` | `DATETIME` | The instant `text` names when read in `format`. See [Datetime Formats](#datetime-formats) |
 
-`unit`, `part`, and `width` are literals written in the call, not expressions, and they are checked
-when the statement is applied. `unit` and `part` are `STRING` literals whose names are
-case-insensitive. `width` is a positive integer literal, and `width` units must not exceed
-9,223,372,036,854,775,807 nanoseconds, about 292 years. A call with an unknown name, a non-literal
-argument, or a width that is not positive is rejected, and its message names what the call accepts.
+`unit`, `part`, `width`, `zone`, `format`, and `disambiguation` are literals written in the call, not
+expressions, and they are checked when the statement is applied: a zone is resolved and a format is
+compiled once then, never for each message. `unit`, `part`, `zone`, and `disambiguation` are
+`STRING` literals whose names are case-insensitive, and `format` is a `STRING` literal. `width` is a
+positive integer literal, and `width` units must not exceed 9,223,372,036,854,775,807 nanoseconds,
+about 292 years. A call with an unknown name, a non-literal argument, an invalid format, or a width
+that is not positive is rejected, and its message names what the call accepts. A call that names no
+`zone` reads in UTC; see [Time Zones](#time-zones) for the zones a call can name.
 
-Every unit has a fixed length. A `DATETIME` has no leap seconds, so every UTC day is exactly 86,400
-seconds long. A calendar month or year has no fixed length and is not a unit.
+The units `nanosecond` through `week` have a fixed length. A `DATETIME` has no leap seconds, so
+every UTC day is exactly 86,400 seconds long. `month`, `quarter`, and `year` are calendar units,
+whose length depends on the month they count from. `date_trunc`, `date_add`, and `date_diff` accept
+every unit; `date_bin`, `to_unix`, and `from_unix` accept only units of fixed length.
 
 | Unit | Length |
 | --- | --- |
@@ -432,8 +440,13 @@ seconds long. A calendar month or year has no fixed length and is not a unit.
 | `second` | 1,000 milliseconds |
 | `minute` | 60 seconds |
 | `hour` | 60 minutes |
-| `day` | 24 hours |
-| `week` | 7 days |
+| `day` | 24 hours, or one local calendar day in an IANA time zone |
+| `week` | 7 days, or seven local calendar days in an IANA time zone |
+| `month` | One calendar month |
+| `quarter` | Three calendar months, starting in January, April, July, and October |
+| `year` | Twelve calendar months, starting in January |
+
+A date part reads `value`'s local date and time in `zone`:
 
 | Part | Range | Meaning |
 | --- | --- | --- |
@@ -459,36 +472,238 @@ Results are exact to the nanosecond, and each function rounds in one fixed direc
   epoch and before an origin, so a value belongs to the unit or bin that starts at or before it.
   `date_trunc('day', ...)` of `1969-12-31T23:59:59.999999999Z` is `1969-12-31T00:00:00Z`, and
   `to_unix('millisecond', ...)` of the same value is `-1`.
-- A day, and every shorter unit, starts a whole number of units after the Unix epoch. A week starts
-  on Monday in `date_trunc`, while `to_unix('week', ...)` counts whole weeks from the epoch itself,
-  which was a Thursday.
+- In UTC, a day, and every shorter unit, starts a whole number of units after the Unix epoch. A week
+  starts on Monday in `date_trunc`, while `to_unix('week', ...)` counts whole weeks from the epoch
+  itself, which was a Thursday.
 - `date_bin` accepts an `origin` before or after `value`. A value exactly on a bin boundary starts
   its own bin.
-- `date_diff` rounds toward zero, so exchanging `start` and `end` only changes the sign of its result.
-  `date_diff('second', start, end)` is `0` when the two values are less than a second apart in either
-  direction.
+- `date_diff` rounds toward zero. For units that count elapsed time, exchanging `start` and `end`
+  only changes the sign of the result, and `date_diff('second', start, end)` is `0` when the two
+  values are less than a second apart in either direction.
 
-A null argument produces a null result. `date_part` and `to_unix` never fail. Another function
-reports a per-message `overflow` error and yields null exactly where its result cannot be
-represented:
+A null argument produces a null result. `date_part`, `to_unix`, and `format_datetime` never fail.
+Another function reports a per-message error and yields null exactly where it cannot produce a
+result:
 
 | Function | Fails when |
 | --- | --- |
-| `date_trunc`, `date_bin` | The unit or bin that holds `value` starts before the `DATETIME` range |
-| `date_add` | The moved instant is outside the `DATETIME` range, even when `amount` units alone would be longer than the range |
-| `from_unix` | The instant is outside the `DATETIME` range |
-| `date_diff` | The whole units do not fit `I64`, which only a count of nanoseconds between values more than about 292 years apart can reach |
+| `date_trunc`, `date_bin` | The unit or bin that holds `value` starts before the `DATETIME` range, with an `overflow` error |
+| `date_add` | The moved instant is outside the `DATETIME` range, even when `amount` units alone would be longer than the range, with an `overflow` error |
+| `from_unix` | The instant is outside the `DATETIME` range, with an `overflow` error |
+| `date_diff` | The whole units do not fit `I64`, which only a count of nanoseconds between values more than about 292 years apart can reach, with an `overflow` error |
+| `parse_datetime` | `text` does not name an instant in `format`, with a `cast_failed` error; its local time does not exist or is ambiguous in `zone`, with an `invalid_argument` error; or the instant is outside the `DATETIME` range, with an `overflow` error. See [Reading Text](#reading-text) |
 
-The error's message names the function, such as `date_add result is outside the DATETIME range` or
-`date_diff result does not fit I64`.
+The error's message names the function, such as `date_add result is outside the DATETIME range`,
+`date_diff result does not fit I64`, or
+`parse_datetime local time is ambiguous in America/New_York`.
 
 ```nspl,ignore
 SET hour = date_part('hour', input.occurred_at),
+    local_hour = date_part('hour', input.occurred_at, 'America/New_York'),
     quarter_hour = date_bin('minute', 15, input.occurred_at, from_unix('second', 0)),
+    local_day = date_trunc('day', input.occurred_at, 'Europe/Berlin'),
+    renewal = date_add('month', 1, input.subscribed_at),
     deadline = date_add('millisecond', input.timeout_ms, input.occurred_at),
     age_seconds = date_diff('second', input.occurred_at, now()),
-    received_at = from_unix('millisecond', input.epoch_ms)
+    received_at = from_unix('millisecond', input.epoch_ms),
+    label = format_datetime('%a %d %b %Y %H:%M %Z', input.occurred_at, 'Asia/Tokyo'),
+    logged_at = parse_datetime('%d/%b/%Y:%H:%M:%S %z', input.log_time)
 ```
+
+## Calendar Arithmetic
+
+`date_trunc`, `date_add`, and `date_diff` work on the local calendar of their `zone`. In UTC and at a
+fixed offset every day is 24 hours long. Under the rules of an IANA time zone a local day can be
+shorter or longer, because daylight saving time and other transitions skip or repeat local times. An
+`hour` or any shorter unit is always elapsed time: `date_add('hour', 1, ...)` is one hour later in
+every zone.
+
+`date_trunc` returns the first instant of the local unit that holds `value`: the earliest instant
+from which the zone's clock showed times inside that unit without interruption until `value`. A day
+starts at local midnight, a week on Monday, a month on its first day, a quarter on the first day of
+January, April, July, or October, and a year on January 1.
+
+- `date_trunc('day', ...)` of `2024-03-10T11:00:00Z` in `America/New_York` is
+  `2024-03-10T05:00:00Z`, midnight in New York, even though that day is only 23 hours long.
+- A unit whose local start a transition skips starts when the skipped span ends. `America/Sao_Paulo`
+  skipped midnight on 2018-11-04, so that day starts at `2018-11-04T03:00:00Z`, local `01:00`.
+- A local time a transition repeats stays in one unit. New York showed `01:00` through `02:00` twice
+  on 2024-11-03, and `date_trunc('hour', ...)` of both `2024-11-03T05:30:00Z` and
+  `2024-11-03T06:30:00Z` is `2024-11-03T05:00:00Z`, where the repeated hour began.
+- In an IANA zone every unit follows the zone's clock, including local mean time before standard
+  time: New York ran 4:56:02 behind UTC until noon on 1883-11-18, so `date_trunc('day', ...)` of
+  `1883-11-18T17:01:00Z` there is `1883-11-18T04:56:02Z`.
+
+`date_add` moves `value` in local time:
+
+- An `hour` and every shorter unit move by elapsed time.
+- A `day` or a `week` moves by 24 hours or 7 days in UTC and at a fixed offset. In an IANA zone it
+  moves the local date and keeps the local time of day, so `date_add('day', 1, ...)` of
+  `2024-03-09T12:00:00Z` in `America/New_York` is `2024-03-10T11:00:00Z`, 23 hours later.
+- A `month`, `quarter`, or `year` moves the local month and keeps the day of the month and the local
+  time of day, unless the new month is shorter, in which case the result is on its last day:
+  `date_add('month', 1, ...)` of `2024-01-31T23:30:00Z` is `2024-02-29T23:30:00Z`, and
+  `date_add('year', 1, ...)` of `2024-02-29T12:00:00Z` is `2025-02-28T12:00:00Z`. Each call moves
+  once from `value`, so adding one month twice to January 31 lands on March 29, while adding two
+  months at once lands on March 31.
+- When the moved local time falls in a span the zone skips, the result moves forward by the length
+  of that span, and when the zone shows the moved local time twice, the result is the earlier
+  instant. Adding a `day` to `2024-03-09T07:30:00Z` in New York lands on the skipped `02:30`, so the
+  result is `2024-03-10T07:30:00Z`, local `03:30`.
+- An `amount` of `0` returns `value` itself.
+
+`date_diff` counts elapsed time for an `hour` and every shorter unit, and for a `day` or a `week` in
+UTC or at a fixed offset. It counts whole calendar units for a `day` or a `week` in an IANA zone and
+for a `month`, `quarter`, or `year` in every zone. A calendar count measures from `start`:
+
+1. The count runs to `end`'s local date, moved toward `start` by as few days as it takes for
+   `start`'s local time of day on that date to not lie past `end`. `date_diff('day', ...)` from
+   `2024-03-09T12:00:00Z` to `2024-03-10T11:00:00Z` in `America/New_York` is `1`, because noon on
+   2024-03-10 in New York is `11:00` in UTC, and it is `0` in UTC, where the two instants are 23
+   hours apart.
+2. Days count the dates between. Weeks are whole sevens of those days.
+3. Months count from `start`'s local date, and a month is complete once the date has reached
+   `start`'s day of the month. `date_diff('month', ...)` from `2024-01-31T00:00:00Z` to
+   `2024-02-29T00:00:00Z` is `0`, even though `date_add('month', 1, ...)` of the start is the end.
+   Quarters and years are whole threes and twelves of those months.
+
+Because a calendar count measures from `start`, exchanging `start` and `end` can change its
+magnitude as well as its sign. Two instants on the same local date are `0` days apart.
+
+## Time Zones
+
+A `zone` is one of:
+
+- `'UTC'`.
+- An IANA time zone name, such as `'Europe/Berlin'`, `'America/New_York'`, or `'Asia/Kolkata'`,
+  matched without regard to letter case.
+- A fixed UTC offset written `'+HH:MM'` or `'-HH:MM'`, from `'-23:59'` to `'+23:59'`.
+
+Anything else, including an abbreviation such as `'CEST'` that is not also an IANA name, the
+host's local zone, or an offset written another way, is rejected when the statement is applied. A zone only
+decides how an instant reads as a local date and time: every `DATETIME` a function returns is a UTC
+instant.
+
+Time zone rules come from the IANA Time Zone Database bundled into Nervix, release `2026c` in this
+version. Nervix never reads the time zone database, the time zone, or the locale of the host it runs
+on, so every node of a cluster computes the same local times. A Nervix upgrade can bundle a newer
+release, and a zone whose rules the release changed then reads differently in every computation
+after the upgrade, including computations over instants in the past.
+
+An IANA zone keeps the name the database gives it: `%Q` writes `America/New_York` for
+`'america/new_york'`, and `US/Eastern` for the alias `'US/Eastern'`. A fixed offset is written in
+its `+HH:MM` form by both `%Q` and `%Z`, and UTC as `UTC`.
+
+## Datetime Formats
+
+`format_datetime` writes a local date and time in a format, and `parse_datetime` reads one. A format
+is a `STRING` literal in which `%` starts a directive and every other character, including
+whitespace, is literal text written as it is and read only where it appears exactly. Names are
+English and never depend on a locale.
+
+| Directive | Writes and reads | Longest |
+| --- | --- | --- |
+| `%Y` | The year, in four digits | 4 |
+| `%m` | The month, `01`–`12` | 2 |
+| `%b`, `%B` | The month's name, abbreviated as `Jan` or in full as `January` | 3, 9 |
+| `%d` | The day of the month, `01`–`31` | 2 |
+| `%e` | The day of the month padded with a space, ` 1`–`31` | 2 |
+| `%j` | The day of the year, `001`–`366` | 3 |
+| `%a`, `%A` | The day of the week's name, abbreviated as `Mon` or in full as `Monday` | 3, 9 |
+| `%u` | The ISO 8601 day of the week, from Monday as `1` to Sunday as `7` | 1 |
+| `%w` | The day of the week, from Sunday as `0` to Saturday as `6` | 1 |
+| `%G` | The ISO 8601 week-numbering year, in four digits | 4 |
+| `%V` | The ISO 8601 week, `01`–`53` | 2 |
+| `%H` | The hour of the 24-hour clock, `00`–`23` | 2 |
+| `%I` | The hour of the 12-hour clock, `01`–`12` | 2 |
+| `%p` | `AM` before noon and `PM` from noon | 2 |
+| `%M` | The minute, `00`–`59` | 2 |
+| `%S` | The second, `00`–`59` | 2 |
+| `%f` | The fraction of the second in nine digits | 9 |
+| `%1f`–`%9f` | The fraction of the second in exactly that many digits, truncated | 1–9 |
+| `%.f` | Nothing for a whole second, and otherwise `.` and the fraction without trailing zeros | 10 |
+| `%z` | The UTC offset as `+hhmm`, followed by `ss` when the offset has seconds | 7 |
+| `%:z` | The UTC offset as `+hh:mm`, followed by `:ss` when the offset has seconds | 9 |
+| `%::z` | The UTC offset as `+hh:mm:ss` | 9 |
+| `%s` | The whole seconds since `1970-01-01T00:00:00Z`, rounded down | 20 |
+| `%Z` | The abbreviation the zone shows, such as `EST`; written only | The zone's longest |
+| `%Q` | The zone's name, such as `Europe/Berlin`; written only | The name's length |
+| `%F` | `%Y-%m-%d` | 10 |
+| `%T` | `%H:%M:%S` | 8 |
+| `%R` | `%H:%M` | 5 |
+| `%%`, `%n`, `%t` | A `%`, a newline, and a tab | 1 |
+
+The `-` flag writes a number without padding: `%-m`, `%-d`, `%-j`, `%-V`, `%-H`, `%-I`, `%-M`, and
+`%-S`. Any other directive, including a two-digit year, a locale's date or time such as `%c`, and a
+flag on a directive that does not take it, is rejected when the statement is applied, and the
+message names the directive and the byte of the format it starts at. Offsets from local mean time
+can have seconds, as New York's `-04:56:02` before 1883 does. `%s` counts whole seconds rounded
+down, so `%s%.f` writes `1969-12-31T23:59:59.5Z` as `-1.5`: one second before the epoch plus half a
+second.
+
+Every value a format describes must fit in 256 bytes, counting every directive at its longest in
+the call's zone. A format that could describe a longer value is rejected when the statement is
+applied, so each value of a formatted column holds at most 256 bytes.
+
+### Writing Values
+
+`format_datetime` writes `value`'s local date and time in `zone`, and writes a null `value` as null.
+It never fails. `format_datetime('%FT%T%:z', ...)` of `2024-11-03T06:30:00Z` in `America/New_York`
+is `2024-11-03T01:30:00-05:00`.
+
+### Reading Text
+
+`parse_datetime` reads `text` from its first byte to its last and never guesses or normalizes what
+it reads:
+
+- Literal text must appear exactly, and a directive reads exactly its field: `%m` reads two digits,
+  and `%e` reads a space and a digit, or two digits. A `-` flag reads one digit up to the field's
+  width, with or without a leading zero. `%.f` reads nothing, or `.` and one to nine digits. `%s`
+  reads an optional `-` and one to nineteen digits.
+- Month and weekday names, and `AM` and `PM`, are read without regard to letter case. `%z`, `%:z`,
+  and `%::z` read the forms they write, and also read `Z` as UTC.
+- Every field must lie in its range: a 13th month, hour `24`, and second `60` are rejected, since a
+  `DATETIME` has no leap seconds. The date must exist, so `2023-02-29` is rejected rather than read
+  as March 1, and a day of the week read with a calendar or ordinal date must be that date's day.
+
+A readable format reads each field at most once and names exactly one instant:
+
+- A date, as `%Y` with a month and a day of the month, `%Y` with `%j`, `%G` with `%V` and a day of
+  the week, or `%s` with nothing but a fraction of a second. `%Z` and `%Q` cannot be read.
+- Optionally a time of day, as `%H`, or `%I` with `%p`. `%M` requires an hour, `%S` requires `%M`,
+  and a fraction of a second requires `%S`. A time of day the format does not read is midnight.
+- Optionally a UTC offset. A format that reads `%z`, `%:z`, or `%::z` places its local date and time
+  at that offset, and one that reads `%s` names its instant directly: both take no `zone`. Every
+  other format reads a local date and time and requires a `zone` to place it.
+
+`disambiguation` decides the instant of a local date and time that `zone` skips or repeats:
+
+| Disambiguation | Skipped local time | Repeated local time |
+| --- | --- | --- |
+| `reject` | Fails with an `invalid_argument` error | Fails with an `invalid_argument` error |
+| `earlier` | The earlier of the two instants it could mean, read at the offset after the transition | The earlier instant |
+| `later` | The later instant, read at the offset before the transition | The later instant |
+| `compatible` | The later instant, as `date_add` moves local times | The earlier instant, as `date_add` moves local times |
+
+A call without `disambiguation` rejects. In `America/New_York`, `2024-03-10 02:30:00` does not exist
+and `2024-11-03 01:30:00` happens twice: `earlier` reads them as `2024-03-10T06:30:00Z` and
+`2024-11-03T05:30:00Z`, and `later` as `2024-03-10T07:30:00Z` and `2024-11-03T06:30:00Z`.
+
+A null `text` produces a null result. Every other failure fails only its message:
+
+| Error | Message |
+| --- | --- |
+| `cast_failed` | `parse_datetime input does not match its format at byte 4: expected '-'`, naming the literal text or directive that did not match |
+| `cast_failed` | `parse_datetime input continues past its format at byte 19` |
+| `cast_failed` | `parse_datetime hour is out of range`, naming the field |
+| `cast_failed` | `parse_datetime date does not exist` |
+| `cast_failed` | `parse_datetime day of the week does not match the date` |
+| `invalid_argument` | `parse_datetime local time does not exist in America/New_York` |
+| `invalid_argument` | `parse_datetime local time is ambiguous in America/New_York` |
+| `overflow` | `parse_datetime result is outside the DATETIME range` |
+
+A message never quotes the text it could not read, only byte positions, directives, and field
+names.
 
 ## Array And Vector Functions
 
