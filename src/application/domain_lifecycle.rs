@@ -9,6 +9,7 @@
 //! - **Must not know.** How the domain's graph is scheduled or executed.
 
 use error_stack::Report;
+use nervix_consensus::DomainMutationLease;
 use nervix_interconnect::DomainDrainStatusEnvelope;
 use nervix_models::{
     AlterDomain, ClusterNodeName, CreateDomain, CreateStatement, DomainClockState, DomainName,
@@ -85,6 +86,7 @@ impl SessionServiceImpl {
         if_not_exists: bool,
         existed_at_admission: bool,
         state: DomainState,
+        mutation: Option<&DomainMutationLease>,
     ) -> CommandResult {
         if existed_at_admission {
             if !if_not_exists {
@@ -118,7 +120,12 @@ impl SessionServiceImpl {
             }
             Some(_) => {}
             None => {
-                if let Err(error) = self.inner.consensus.put_domain(state.clone()).await {
+                if let Err(error) = self
+                    .inner
+                    .consensus
+                    .put_domain(state.clone(), mutation)
+                    .await
+                {
                     return self
                         .consensus_error_response(
                             &error,
@@ -146,10 +153,11 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn pause_and_drain_domain_for_alter(
         &self,
         domain: &DomainName,
+        mutation: Option<&DomainMutationLease>,
     ) -> Result<(), Report<DomainAlterError>> {
         self.inner
             .consensus
-            .pause_domain(domain.clone())
+            .pause_domain(domain.clone(), mutation)
             .await
             .map_err(|error| {
                 let reason = error.to_string();
@@ -163,6 +171,7 @@ impl SessionServiceImpl {
             return Err(self
                 .abort_domain_alter_pause(
                     domain,
+                    mutation,
                     Report::new(DomainAlterError::StopIngestion {
                         domain: domain.clone(),
                         reason: error.to_string(),
@@ -173,7 +182,9 @@ impl SessionServiceImpl {
 
         match self.wait_for_paused_domain_drain(domain).await {
             Ok(()) => Ok(()),
-            Err(reason) => Err(self.abort_domain_alter_pause(domain, reason).await),
+            Err(reason) => Err(self
+                .abort_domain_alter_pause(domain, mutation, reason)
+                .await),
         }
     }
 
@@ -261,9 +272,10 @@ impl SessionServiceImpl {
     async fn abort_domain_alter_pause(
         &self,
         domain: &DomainName,
+        mutation: Option<&DomainMutationLease>,
         reason: Report<DomainAlterError>,
     ) -> Report<DomainAlterError> {
-        match self.resume_domain_after_alter(domain).await {
+        match self.resume_domain_after_alter(domain, mutation).await {
             Ok(()) => reason,
             Err(resume_error) => {
                 let reason = format!("{reason}; automatic resume failed: {resume_error}");
@@ -278,10 +290,11 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn resume_domain_after_alter(
         &self,
         domain: &DomainName,
+        mutation: Option<&DomainMutationLease>,
     ) -> Result<(), Report<DomainAlterError>> {
         self.inner
             .consensus
-            .resume_domain(domain.clone())
+            .resume_domain(domain.clone(), mutation)
             .await
             .map_err(|error| {
                 let reason = error.to_string();
@@ -306,7 +319,12 @@ impl SessionServiceImpl {
     /// than dropped: nothing else in the command's answer would mention it.
     async fn roll_back_started_domain(&self, domain_id: &DomainName) -> String {
         let mut failures = Vec::new();
-        if let Err(error) = self.inner.consensus.stop_domain(domain_id.clone()).await {
+        if let Err(error) = self
+            .inner
+            .consensus
+            .stop_domain(domain_id.clone(), None)
+            .await
+        {
             failures.push(format!("stopping it again failed: {error}"));
         }
         if let Err(error) = self.apply_current_cluster_state().await {
@@ -329,6 +347,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
         planned: crate::registry::PlannedMutations,
         classified_level: QuiesceLevel,
+        mutation: Option<&DomainMutationLease>,
     ) -> Result<(), Report<DomainAlterError>> {
         let runtime_changes = self
             .inner
@@ -340,7 +359,7 @@ impl SessionServiceImpl {
                     reason: format!("registry rollback failed: {error}"),
                 })
             })?;
-        self.publish_domain_schedule(domain, runtime_changes.graph)
+        self.publish_domain_schedule(domain, runtime_changes.graph, mutation)
             .await
             .map_err(|error| {
                 Report::new(DomainAlterError::Rollback {
@@ -349,7 +368,7 @@ impl SessionServiceImpl {
                 })
             })?;
         if classified_level.requires_domain_pause() {
-            self.resume_domain_after_alter(domain).await
+            self.resume_domain_after_alter(domain, mutation).await
         } else {
             Ok(())
         }
@@ -397,7 +416,7 @@ impl SessionServiceImpl {
             last_start: DomainStartPoint::Resume,
             clock: None,
         };
-        match self.inner.consensus.put_domain(state).await {
+        match self.inner.consensus.put_domain(state, None).await {
             Ok(()) => {
                 if let Err(error) = self.apply_current_cluster_state().await {
                     return command_error(format!(
@@ -548,6 +567,7 @@ impl SessionServiceImpl {
                 previous_schedule,
                 next_state,
                 next_schedule,
+                None,
             )
             .await
         {
@@ -688,6 +708,7 @@ impl SessionServiceImpl {
                     .is_paced()
                     .then_some(resolved_start.clock.clone()),
                 authority,
+                None,
             )
             .await
         {
@@ -725,7 +746,12 @@ impl SessionServiceImpl {
                 domain_id.as_str()
             ));
         }
-        match self.inner.consensus.stop_domain(domain_id.clone()).await {
+        match self
+            .inner
+            .consensus
+            .stop_domain(domain_id.clone(), None)
+            .await
+        {
             Ok(()) => {
                 if let Err(error) = self.apply_current_cluster_state().await {
                     return command_error(format!(
@@ -819,11 +845,11 @@ mod tests {
         };
 
         let first = service
-            .apply_persistent_domain_creation(false, false, state.clone())
+            .apply_persistent_domain_creation(false, false, state.clone(), None)
             .await;
         assert!(first.success, "{first:?}");
         let resumed = service
-            .apply_persistent_domain_creation(false, false, state)
+            .apply_persistent_domain_creation(false, false, state, None)
             .await;
         assert_eq!(resumed, first);
 

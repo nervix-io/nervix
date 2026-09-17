@@ -646,6 +646,10 @@ impl SessionServiceImpl {
                 return command_error("invalid domain".to_string());
             }
         };
+        let domain_mutation = transaction_step
+            .as_ref()
+            .and_then(|step| step.transaction.domain_mutation())
+            .cloned();
 
         let leader = Box::pin(self.inner.consensus.current_leader()).await;
         if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
@@ -984,7 +988,10 @@ impl SessionServiceImpl {
             if !is_noop
                 && requires_domain_pause
                 && !adopted_domain_pause
-                && let Err(error) = Box::pin(self.pause_and_drain_domain_for_alter(&domain)).await
+                && let Err(error) = Box::pin(
+                    self.pause_and_drain_domain_for_alter(&domain, domain_mutation.as_ref()),
+                )
+                .await
             {
                 let response = match error.downcast_ref::<ConsensusError>() {
                     Some(cause) => {
@@ -1077,9 +1084,11 @@ impl SessionServiceImpl {
                             );
                         }
                         let resume_error = if requires_domain_pause {
-                            Box::pin(self.resume_domain_after_alter(&domain))
-                                .await
-                                .err()
+                            Box::pin(
+                                self.resume_domain_after_alter(&domain, domain_mutation.as_ref()),
+                            )
+                            .await
+                            .err()
                         } else {
                             None
                         };
@@ -1215,13 +1224,17 @@ impl SessionServiceImpl {
                             } else {
                                 None
                             };
-                            let resume_error = if requires_domain_pause {
-                                Box::pin(self.resume_domain_after_alter(&domain))
+                            let resume_error =
+                                if requires_domain_pause {
+                                    Box::pin(self.resume_domain_after_alter(
+                                        &domain,
+                                        domain_mutation.as_ref(),
+                                    ))
                                     .await
                                     .err()
-                            } else {
-                                None
-                            };
+                                } else {
+                                    None
+                                };
                             let error = match rollback_error {
                                 Some(rollback) => error.attach(format!(
                                     "local registry rollback also failed: {rollback}"
@@ -1247,6 +1260,7 @@ impl SessionServiceImpl {
                         domain.clone(),
                         expected_schedule.clone(),
                         prepared_schedule.clone(),
+                        domain_mutation.as_ref(),
                     ))
                     .await
                     {
@@ -1262,6 +1276,7 @@ impl SessionServiceImpl {
                                 &domain,
                                 rollback_plan,
                                 classified_level,
+                                domain_mutation.as_ref(),
                             ))
                             .await
                         {
@@ -1312,7 +1327,11 @@ impl SessionServiceImpl {
                             Box::pin(self.release_cluster_entity_gates(gate)).await;
                         }
                         let paused = if requires_domain_pause {
-                            match Box::pin(self.resume_domain_after_alter(&domain)).await {
+                            match Box::pin(
+                                self.resume_domain_after_alter(&domain, domain_mutation.as_ref()),
+                            )
+                            .await
+                            {
                                 Ok(()) => String::new(),
                                 Err(resume) => {
                                     format!("; the domain also remains paused: {resume}")
@@ -1335,7 +1354,11 @@ impl SessionServiceImpl {
                             Box::pin(self.release_cluster_entity_gates(gate)).await;
                         }
                         let paused = if requires_domain_pause {
-                            match Box::pin(self.resume_domain_after_alter(&domain)).await {
+                            match Box::pin(
+                                self.resume_domain_after_alter(&domain, domain_mutation.as_ref()),
+                            )
+                            .await
+                            {
                                 Ok(()) => String::new(),
                                 Err(resume) => {
                                     format!("; the domain also remains paused: {resume}")
@@ -1372,6 +1395,7 @@ impl SessionServiceImpl {
                                         &domain,
                                         rollback_plan,
                                         classified_level,
+                                        domain_mutation.as_ref(),
                                     ))
                                     .await
                             {
@@ -1380,7 +1404,10 @@ impl SessionServiceImpl {
                             return command_error(error.to_string());
                         }
                     }
-                    if let Err(error) = Box::pin(self.resume_domain_after_alter(&domain)).await {
+                    if let Err(error) =
+                        Box::pin(self.resume_domain_after_alter(&domain, domain_mutation.as_ref()))
+                            .await
+                    {
                         if transaction_step.is_some() {
                             transaction_application_failure = Some(format!(
                                 "committed transaction model step in domain '{}' failed to \
@@ -1398,6 +1425,7 @@ impl SessionServiceImpl {
                                         &domain,
                                         rollback_plan,
                                         classified_level,
+                                        domain_mutation.as_ref(),
                                     ))
                                     .await
                             {
@@ -1672,12 +1700,12 @@ impl SessionServiceImpl {
             Statement::UncordonNode(uncordon) => {
                 self.set_node_cordoned(uncordon.node_id, false).await
             }
-            Statement::DrainNode(drain) => self.drain_node(drain.node_id).await,
+            Statement::DrainNode(drain) => self.drain_node(drain.node_id, None).await,
             Statement::Relocate(relocation) => {
                 let domain = domain
                     .as_ref()
                     .verified("this statement requires a request domain, which was resolved above");
-                self.relocate(domain, relocation).await
+                self.relocate(domain, relocation, None).await
             }
             Statement::DescribeRelocation(relocation) => {
                 let domain = domain

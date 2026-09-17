@@ -13,7 +13,7 @@ use std::{collections::BTreeSet, num::NonZeroU64};
 use ahash::{HashMap, HashSet};
 use meticulous::OptionExt as _;
 use nervix_client_core::Client as NervixClient;
-use nervix_consensus::ConsensusError;
+use nervix_consensus::{CommandExecution, ConsensusError, DomainMutationLease};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, DomainName, IngestSource, IngestorName, KafkaOffsetMode,
     KafkaPartitionSchedule, Model, ModelKind, ModelName, NodeRef, PlacementGroupSchedule,
@@ -182,6 +182,7 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         graph: Option<ActiveGraph>,
+        mutation: Option<&DomainMutationLease>,
     ) -> Result<usize, String> {
         #[cfg(feature = "testing")]
         if self
@@ -217,7 +218,7 @@ impl SessionServiceImpl {
             .await?;
         self.inner
             .consensus
-            .replace_domain_schedule(domain.clone(), expected_schedule, schedule)
+            .replace_domain_schedule(domain.clone(), expected_schedule, schedule, mutation)
             .await
             .map_err(|error| error.to_string())?;
         self.apply_current_cluster_state().await.map_err(|error| {
@@ -348,6 +349,7 @@ impl SessionServiceImpl {
                     domain.clone(),
                     current_schedule.domain(&domain).cloned(),
                     Some(schedule),
+                    None,
                 )
                 .await
             {
@@ -448,6 +450,7 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn drain_node(
         &self,
         node_id: ClusterNodeName,
+        execution: Option<&CommandExecution>,
     ) -> CommandResult {
         let membership = self.inner.consensus.membership_nodes().await;
         if !membership.contains_key(&node_id) {
@@ -515,6 +518,41 @@ impl SessionServiceImpl {
                     ));
                     continue;
                 };
+                let domain_mutation = if let Some(execution) = execution {
+                    let acquired = match self
+                        .inner
+                        .consensus
+                        .acquire_command_domain_mutation(
+                            execution.reference.clone(),
+                            execution.owner.clone(),
+                            execution.request_digest,
+                            domain.clone(),
+                        )
+                        .await
+                    {
+                        Ok(acquired) => acquired,
+                        Err(error) => {
+                            return self
+                                .consensus_error_response(
+                                    error.current_context(),
+                                    format!(
+                                        "failed to acquire drain ownership for domain '{}': \
+                                         {error}",
+                                        domain.as_str()
+                                    ),
+                                )
+                                .await;
+                        }
+                    };
+                    Some(
+                        acquired
+                            .domain_mutation(&domain)
+                            .cloned()
+                            .verified("a successful command-domain acquisition records its lease"),
+                    )
+                } else {
+                    None
+                };
                 let Some(domain_state) = self.inner.consensus.current_domain(&domain).await else {
                     continue;
                 };
@@ -538,7 +576,12 @@ impl SessionServiceImpl {
                     if let Err(error) = self
                         .inner
                         .consensus
-                        .replace_domain_schedule(domain.clone(), None, Some(desired))
+                        .replace_domain_schedule(
+                            domain.clone(),
+                            None,
+                            Some(desired),
+                            domain_mutation.as_ref(),
+                        )
                         .await
                     {
                         if let ConsensusError::LeadershipLost { .. } = &error {
@@ -629,6 +672,7 @@ impl SessionServiceImpl {
                         domain.clone(),
                         Some(current_domain.clone()),
                         Some(next),
+                        domain_mutation.as_ref(),
                     )
                     .await
                 {
@@ -886,7 +930,7 @@ impl SessionServiceImpl {
         &self,
         local_node_id: &ClusterNodeName,
     ) -> ShutdownPhaseOutcome {
-        let result = self.drain_node(local_node_id.clone()).await;
+        let result = self.drain_node(local_node_id.clone(), None).await;
         if result.success {
             info!(
                 node_id = %local_node_id,
@@ -1815,6 +1859,7 @@ impl SessionServiceImpl {
                 domain.clone(),
                 Some(existing_domain_schedule.clone()),
                 Some(next_domain_schedule),
+                None,
             )
             .await
             .map_err(|error| error.to_string())

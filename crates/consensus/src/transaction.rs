@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use strum::IntoStaticStr;
 use thiserror::Error;
 
+use crate::{DomainMutationLease, DomainMutationOwner};
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -177,6 +179,8 @@ pub struct TransactionCommitProgress {
     pub results: Vec<TransactionStepResult>,
     /// A step whose authoritative effect is durable but whose application is still in progress.
     pub applying: Option<TransactionApplyingStep>,
+    /// Authority retained from commit admission through the final application acknowledgement.
+    pub domain_mutation: Option<DomainMutationLease>,
 }
 
 #[derive(
@@ -266,10 +270,38 @@ pub struct ReplicatedTransaction {
     pub statement_count: usize,
     pub queued_source_bytes: u64,
     pub statements: Vec<TransactionStatement>,
+    mutation_owner: DomainMutationOwner,
 }
 
 impl ReplicatedTransaction {
     pub fn open(id: String, domain: DomainName, owner: UserName, now: Timestamp) -> Self {
+        let mutation_owner = DomainMutationOwner::transaction(id.clone());
+        Self::open_with_mutation_owner(id, domain, owner, now, mutation_owner)
+    }
+
+    pub fn open_for_command(
+        id: String,
+        domain: DomainName,
+        owner: UserName,
+        now: Timestamp,
+        command: CommandExecutionReference,
+    ) -> Self {
+        Self::open_with_mutation_owner(
+            id,
+            domain,
+            owner,
+            now,
+            DomainMutationOwner::command(command),
+        )
+    }
+
+    fn open_with_mutation_owner(
+        id: String,
+        domain: DomainName,
+        owner: UserName,
+        now: Timestamp,
+        mutation_owner: DomainMutationOwner,
+    ) -> Self {
         Self {
             id,
             domain,
@@ -280,7 +312,25 @@ impl ReplicatedTransaction {
             statement_count: 0,
             queued_source_bytes: 0,
             statements: Vec::new(),
+            mutation_owner,
         }
+    }
+
+    pub fn domain_mutation(&self) -> Option<&DomainMutationLease> {
+        match &self.state {
+            TransactionState::Committing(progress) => progress.domain_mutation.as_ref(),
+            TransactionState::Open | TransactionState::Finished(_) => None,
+        }
+    }
+
+    pub(crate) fn mutation_owner(&self) -> &DomainMutationOwner {
+        &self.mutation_owner
+    }
+
+    pub(crate) fn requires_domain_mutation(&self) -> bool {
+        self.statements
+            .iter()
+            .any(|statement| statement.statement.requires_domain_mutation_ownership())
     }
 
     pub fn pending_statement_count(&self) -> usize {
@@ -437,6 +487,7 @@ impl ReplicatedTransaction {
         &mut self,
         owner: &UserName,
         at: Timestamp,
+        domain_mutation: Option<DomainMutationLease>,
     ) -> Result<(), TransactionMutationError> {
         self.ensure_owner(owner)?;
         if !matches!(self.state, TransactionState::Open) {
@@ -450,6 +501,7 @@ impl ReplicatedTransaction {
             next_statement: 0,
             results: Vec::new(),
             applying: None,
+            domain_mutation,
         }));
         Ok(())
     }
@@ -808,6 +860,14 @@ pub enum TransactionMutationError {
     EffectMismatch { id: String },
     #[error("transaction '{id}' commit step conflicted with replicated state: {reason}")]
     StepConflict { id: String, reason: String },
+    #[error("transaction '{id}' cannot mutate domain '{domain}' while it is owned by {owner}")]
+    DomainMutationConflict {
+        id: String,
+        domain: DomainName,
+        owner: DomainMutationOwner,
+    },
+    #[error("transaction '{id}' lost its mutation lease for domain '{domain}'")]
+    DomainMutationFenceLost { id: String, domain: DomainName },
 }
 
 #[cfg(test)]
@@ -855,7 +915,7 @@ mod tests {
             )
             .assured("the first test statement is within every admission limit");
         transaction
-            .start_commit(&owner, Timestamp::from_unix_nanos(3))
+            .start_commit(&owner, Timestamp::from_unix_nanos(3), None)
             .assured("an open test transaction can begin committing");
         transaction
     }
@@ -1014,7 +1074,7 @@ mod tests {
             Timestamp::from_unix_nanos(1),
         );
         empty
-            .start_commit(&owner, Timestamp::from_unix_nanos(2))
+            .start_commit(&owner, Timestamp::from_unix_nanos(2), None)
             .assured("the empty test transaction can begin committing");
         empty
             .finish_empty_commit(Timestamp::from_unix_nanos(3), 7)
