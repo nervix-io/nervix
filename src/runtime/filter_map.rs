@@ -2447,22 +2447,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn sqs_fifo_group_expression_evaluates_per_source_row_in_order() {
-        let input_schema = test_schema(&[
-            ("tenant", ParseAsType::String),
-            ("region", ParseAsType::String),
-        ]);
-        let emitter = CreateEmitter {
+    fn sqs_fifo_group_emitter(group: &str) -> CreateEmitter {
+        CreateEmitter {
             name: named("sqs_notifications"),
             from: ProcessorInputs::single(named("notifications")),
             encode_using_codec: Some(named("notification_codec")),
             sink: Box::new(EmitSink::Sqs {
                 client: named("sqs_main"),
                 queue: "notifications.fifo".to_string(),
-                fifo_group: Some(SqsFifoGroup::Expression(expression(
-                    "concat(input.tenant, '-', input.region)",
-                ))),
+                fifo_group: Some(SqsFifoGroup::Expression(expression(group))),
             }),
             flush_policy: FlushPolicy::Each {
                 interval: "100ms".to_string(),
@@ -2478,10 +2471,16 @@ mod tests {
             },
             construction: construction("INHERIT ALL"),
             materialized_state: Vec::new(),
-        };
-        let program = compile_sqs_fifo_group_program(
+        }
+    }
+
+    fn sqs_fifo_group_program(
+        emitter: &CreateEmitter,
+        input_schema: &Arc<CompiledSchema>,
+    ) -> CompiledProgramWithMaterializedInterest {
+        compile_sqs_fifo_group_program(
             &domain("default"),
-            &emitter,
+            emitter,
             input_schema.arrow_schema(),
             VmSchemaSensitivity::default(),
             RuntimeVmCompileContext {
@@ -2494,7 +2493,17 @@ mod tests {
             },
         )
         .expect("SQS FIFO group expression must compile")
-        .expect("expression mode must produce a program");
+        .expect("expression mode must produce a program")
+    }
+
+    #[tokio::test]
+    async fn sqs_fifo_group_expression_evaluates_per_source_row_in_order() {
+        let input_schema = test_schema(&[
+            ("tenant", ParseAsType::String),
+            ("region", ParseAsType::String),
+        ]);
+        let emitter = sqs_fifo_group_emitter("concat(input.tenant, '-', input.region)");
+        let program = sqs_fifo_group_program(&emitter, &input_schema);
         let messages = [("acme", "us"), ("globex", "eu"), ("acme", "ap")]
             .into_iter()
             .map(|(tenant, region)| {
@@ -2539,6 +2548,94 @@ mod tests {
                 Some("globex-eu".to_string()),
                 Some("acme-ap".to_string()),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sqs_fifo_group_expression_reports_the_code_of_a_failed_row() {
+        let input_schema = test_schema(&[
+            ("left", ParseAsType::I64),
+            ("divisor", ParseAsType::I64),
+        ]);
+        let emitter = sqs_fifo_group_emitter("(input.left / input.divisor) AS STRING");
+        let program = sqs_fifo_group_program(&emitter, &input_schema);
+        let messages = [(7, 2), (7, 0)]
+            .into_iter()
+            .map(|(left, divisor)| {
+                let (acks, _completion) = AckSet::root();
+                RelayMessage {
+                    key: None,
+                    record: test_runtime_row([
+                        ("left".to_string(), RuntimeValue::I64(left)),
+                        ("divisor".to_string(), RuntimeValue::I64(divisor)),
+                    ]),
+                    acks,
+                }
+            })
+            .collect::<Vec<_>>();
+        let batch = RelayRecordBatch::from_messages(input_schema, messages)
+            .expect("SQS source batch must build");
+
+        let groups = evaluate_sqs_fifo_group_program(
+            &emitter.name,
+            &program,
+            &batch,
+            Timestamp::from_unix_nanos(1),
+            &HashMap::default(),
+        )
+        .await
+        .expect("SQS FIFO group expression must execute");
+
+        let [divided, failed] = groups.as_slice() else {
+            panic!("every input row must produce an SQS FIFO group outcome: {groups:?}");
+        };
+        assert_eq!(divided, &Ok(Some("3".to_string())));
+        let Err(SqsMessageGroupError::ExpressionFailed { code, .. }) = failed else {
+            panic!("dividing by zero must fail only its own row: {failed:?}");
+        };
+        assert_eq!(*code, nervix_vm::ErrorCode::DivisionByZero);
+    }
+
+    #[tokio::test]
+    async fn subscription_predicate_reports_a_typed_evaluation_error() {
+        use crate::runtime::subscription_predicate::SubscriptionPredicateExecutionError;
+
+        let schema = test_schema(&[("left", ParseAsType::I64), ("divisor", ParseAsType::I64)]);
+        let where_clause = expression("input.left / input.divisor > 0");
+        let predicate = compile_subscription_predicate(
+            &domain("default"),
+            &named("ratio_subscription"),
+            &where_clause,
+            SubscriptionPredicateCompileContext::new(
+                schema.arrow_schema(),
+                VmSchemaSensitivity::default(),
+                None,
+            ),
+        )
+        .expect("subscription predicate must compile");
+        let record = test_runtime_row([
+            ("left".to_string(), RuntimeValue::I64(7)),
+            ("divisor".to_string(), RuntimeValue::I64(0)),
+        ]);
+
+        let error =
+            execute_subscription_predicate_on_record(&predicate, &record, Timestamp::from_unix_nanos(1))
+                .await
+                .expect_err("a zero divisor must fail the predicate");
+
+        let SubscriptionPredicateExecutionError::Evaluation { reason, .. } = error.current_context()
+        else {
+            panic!("unexpected subscription predicate error: {error:#}");
+        };
+        assert_eq!(
+            reason,
+            &nervix_vm::SideErrorReason::DivisionByZero(nervix_vm::DivisionOperation::Division)
+        );
+        assert!(
+            error
+                .current_context()
+                .to_string()
+                .starts_with("predicate evaluation error division_by_zero: integer division by zero at ")
         );
     }
 
