@@ -1307,6 +1307,26 @@ async fn given_nervix_server_process_is_started_with_state_snapshot_interval(
 }
 
 #[given(
+    expr = "a nervix-server process is started with transaction idle timeout {string} and \
+            tombstone retention {string}"
+)]
+async fn given_nervix_server_process_is_started_with_transaction_retention(
+    world: &mut ScenarioWorld,
+    idle_timeout: String,
+    tombstone_retention: String,
+) {
+    let idle_timeout = humantime::parse_duration(&idle_timeout)
+        .expect("transaction idle timeout must be a valid duration");
+    let tombstone_retention = humantime::parse_duration(&tombstone_retention)
+        .expect("transaction tombstone retention must be a valid duration");
+    let options = [
+        ServerProcessOption::TransactionIdleTimeout(idle_timeout),
+        ServerProcessOption::TransactionTombstoneRetention(tombstone_retention),
+    ];
+    start_ready_server_process(world, &options).await;
+}
+
+#[given(
     expr = "a nervix-server process is started with drain timeout {string} and shutdown timeout \
             {string}"
 )]
@@ -1384,6 +1404,38 @@ async fn given_server_process_is_configured_with_nspl_commands(
     }
 }
 
+#[when(expr = "an open transaction is held on the server process as placeholder {string}")]
+async fn when_open_transaction_is_held_on_server_process(
+    world: &mut ScenarioWorld,
+    placeholder: String,
+) {
+    let domain = world.domain.clone();
+    let mut session = world
+        .server_process
+        .as_ref()
+        .verified("the preceding step started a nervix-server process")
+        .open_session(&domain)
+        .await
+        .unwrap_or_else(|error| panic!("failed to open the server process session: {error}"));
+    let result = session
+        .run_command_result("BEGIN;")
+        .await
+        .unwrap_or_else(|error| panic!("failed to open the retained transaction: {error}"));
+    assert!(
+        result.success,
+        "the retained transaction must open: {}",
+        result.message
+    );
+    let transaction = result
+        .transaction
+        .verified("a successful BEGIN returns its transaction identity");
+    world
+        .placeholders
+        .insert(placeholder, transaction.id.clone());
+    world.last_command_output = Some(result.message);
+    world.active_session = Some(session);
+}
+
 #[when("these NSPL commands are executed on the server process")]
 async fn when_nspl_commands_are_executed_on_server_process(
     world: &mut ScenarioWorld,
@@ -1403,6 +1455,47 @@ async fn when_nspl_commands_are_executed_on_server_process(
                 process.log_tail()
             )
         }));
+    }
+}
+
+#[then(expr = "server process transaction {string} eventually has state {string}")]
+async fn then_server_process_transaction_eventually_has_state(
+    world: &mut ScenarioWorld,
+    transaction_id: String,
+    expected_state: String,
+) {
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let expected_state = expand_placeholders(world, &expected_state).to_ascii_uppercase();
+    let expected_id = format!("id={transaction_id}");
+    let expected_state_fragment = format!("state={expected_state}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last_output = String::new();
+    loop {
+        tokio::task::consume_budget().await;
+        assert!(
+            Instant::now() < deadline,
+            "server process transaction '{transaction_id}' did not reach state \
+             '{expected_state}'; last output: {last_output}"
+        );
+        let output = world
+            .server_process
+            .as_ref()
+            .verified("the preceding step started a nervix-server process")
+            .run_commands(&world.domain, "SHOW TRANSACTIONS;")
+            .await;
+        match output {
+            Ok(output)
+                if output.lines().any(|line| {
+                    line.contains(&expected_id) && line.contains(&expected_state_fragment)
+                }) =>
+            {
+                world.last_command_output = Some(output);
+                return;
+            }
+            Ok(output) => last_output = output,
+            Err(error) => last_output = error.to_string(),
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -1558,6 +1651,9 @@ async fn then_server_process_exits_because_of_signal(world: &mut ScenarioWorld, 
         describe_exit(status),
         process.log_tail()
     );
+    world.active_session = None;
+    world.active_session_node = None;
+    world.active_session_has_subscription = false;
 }
 
 #[then(expr = "the server process is terminated by {word} within {string} of the last signal")]

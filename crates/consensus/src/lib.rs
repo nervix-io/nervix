@@ -100,11 +100,12 @@ pub use storage_fault::{StorageBoundary, StorageFault, StoragePause};
 mod wire;
 
 pub use transaction::{
-    FinishedTransaction, ReplicatedTransaction, TransactionApplyingStep, TransactionCommandResult,
-    TransactionCommitAdvance, TransactionCommitProgress, TransactionDiagnostic,
-    TransactionMutationError, TransactionMutationResponse, TransactionOutcome,
-    TransactionQueueAdmission, TransactionQueueLimits, TransactionState, TransactionStatement,
-    TransactionStatementRequest, TransactionStepEffect, TransactionStepResult,
+    FinishedTransaction, ReplicatedTransaction, TransactionActivity, TransactionApplyingStep,
+    TransactionCommandResult, TransactionCommitAdvance, TransactionCommitProgress,
+    TransactionDiagnostic, TransactionMutationError, TransactionMutationResponse,
+    TransactionOutcome, TransactionQueueAdmission, TransactionQueueLimits, TransactionState,
+    TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
+    TransactionStepResult,
 };
 
 /// Domain-owned authoritative inputs captured from one state-machine read for transaction
@@ -237,19 +238,19 @@ pub enum ConsensusCommand {
         id: String,
         owner: UserName,
         domain: DomainName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
         statement: Box<TransactionStatement>,
         limits: TransactionQueueLimits,
     },
     TouchTransaction {
         id: String,
         owner: UserName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
     },
     StartTransactionCommit {
         id: String,
         owner: UserName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
     },
     AdvanceTransactionCommit {
         id: String,
@@ -273,12 +274,11 @@ pub enum ConsensusCommand {
     RevertTransaction {
         id: String,
         owner: UserName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
     },
     ExpireTransaction {
         id: String,
         at: nervix_models::Timestamp,
-        idle_before: nervix_models::Timestamp,
     },
     RemoveFinishedTransactions {
         finished_before: nervix_models::Timestamp,
@@ -2864,7 +2864,7 @@ impl Proposer {
         id: String,
         owner: UserName,
         domain: DomainName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
         statement: TransactionStatement,
         limits: TransactionQueueLimits,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
@@ -2872,7 +2872,7 @@ impl Proposer {
             id,
             owner,
             domain,
-            at,
+            activity,
             statement: Box::new(statement),
             limits,
         })
@@ -2883,20 +2883,28 @@ impl Proposer {
         &self,
         id: String,
         owner: UserName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
-        self.write_transaction(ConsensusCommand::TouchTransaction { id, owner, at })
-            .await
+        self.write_transaction(ConsensusCommand::TouchTransaction {
+            id,
+            owner,
+            activity,
+        })
+        .await
     }
 
     pub async fn start_transaction_commit(
         &self,
         id: String,
         owner: UserName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
-        self.write_transaction(ConsensusCommand::StartTransactionCommit { id, owner, at })
-            .await
+        self.write_transaction(ConsensusCommand::StartTransactionCommit {
+            id,
+            owner,
+            activity,
+        })
+        .await
     }
 
     pub async fn advance_transaction_commit(
@@ -2953,24 +2961,23 @@ impl Proposer {
         &self,
         id: String,
         owner: UserName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
-        self.write_transaction(ConsensusCommand::RevertTransaction { id, owner, at })
-            .await
+        self.write_transaction(ConsensusCommand::RevertTransaction {
+            id,
+            owner,
+            activity,
+        })
+        .await
     }
 
     pub async fn expire_transaction(
         &self,
         id: String,
         at: nervix_models::Timestamp,
-        idle_before: nervix_models::Timestamp,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
-        self.write_transaction(ConsensusCommand::ExpireTransaction {
-            id,
-            at,
-            idle_before,
-        })
-        .await
+        self.write_transaction(ConsensusCommand::ExpireTransaction { id, at })
+            .await
     }
 
     pub async fn remove_finished_transactions(
@@ -4330,28 +4337,71 @@ fn apply_consensus_command_at(
             id,
             owner,
             domain,
-            at,
+            activity,
             statement,
             limits,
         } => {
+            let outcome_revision = match &state.last_applied_log_id {
+                Some(log_id) => log_id.index,
+                None => 0,
+            };
             let result = mutate_transaction(state, id, |transaction| {
-                transaction.queue(owner, domain, *at, statement.as_ref().clone(), *limits)
+                transaction.queue(
+                    owner,
+                    domain,
+                    *activity,
+                    outcome_revision,
+                    statement.as_ref().clone(),
+                    *limits,
+                )
             });
             changes.transactions_changed = result.is_ok();
             return AppliedConsensusCommand::transaction(result, changes);
         }
-        ConsensusCommand::TouchTransaction { id, owner, at } => {
-            let result = mutate_transaction(state, id, |transaction| transaction.touch(owner, *at));
+        ConsensusCommand::TouchTransaction {
+            id,
+            owner,
+            activity,
+        } => {
+            let outcome_revision = match &state.last_applied_log_id {
+                Some(log_id) => log_id.index,
+                None => 0,
+            };
+            let result = mutate_transaction(state, id, |transaction| {
+                transaction.touch(owner, *activity, outcome_revision)
+            });
             changes.transactions_changed = result.is_ok();
             return AppliedConsensusCommand::transaction(result, changes);
         }
-        ConsensusCommand::StartTransactionCommit { id, owner, at } => {
+        ConsensusCommand::StartTransactionCommit {
+            id,
+            owner,
+            activity,
+        } => {
+            let outcome_revision = match &state.last_applied_log_id {
+                Some(log_id) => log_id.index,
+                None => 0,
+            };
             let Some(mut transaction) = state.transactions.get(id).cloned() else {
                 return AppliedConsensusCommand::transaction(
                     Err(TransactionMutationError::Unknown { id: id.clone() }),
                     changes,
                 );
             };
+            if let Err(error) = transaction.ensure_owner(owner) {
+                return AppliedConsensusCommand::transaction(Err(error), changes);
+            }
+            match transaction.expire(activity.last_activity_at(), outcome_revision) {
+                Ok(true) => {
+                    state.transactions.insert(id.clone(), transaction.clone());
+                    changes.transactions_changed = true;
+                    return AppliedConsensusCommand::transaction(Ok(transaction), changes);
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    return AppliedConsensusCommand::transaction(Err(error), changes);
+                }
+            }
             let domain_mutation = if transaction.requires_domain_mutation() {
                 let admission = DomainMutationAdmission::decide(
                     state.domain_mutations.get(&transaction.domain),
@@ -4372,7 +4422,12 @@ fn apply_consensus_command_at(
             } else {
                 None
             };
-            if let Err(error) = transaction.start_commit(owner, *at, domain_mutation.clone()) {
+            if let Err(error) = transaction.start_commit(
+                owner,
+                *activity,
+                outcome_revision,
+                domain_mutation.clone(),
+            ) {
                 return AppliedConsensusCommand::transaction(Err(error), changes);
             }
             if let Some(lease) = domain_mutation {
@@ -4520,22 +4575,22 @@ fn apply_consensus_command_at(
             changes.transactions_changed = result.is_ok();
             return AppliedConsensusCommand::transaction(result, changes);
         }
-        ConsensusCommand::RevertTransaction { id, owner, at } => {
+        ConsensusCommand::RevertTransaction {
+            id,
+            owner,
+            activity,
+        } => {
             let outcome_revision = match &state.last_applied_log_id {
                 Some(log_id) => log_id.index,
                 None => 0,
             };
             let result = mutate_transaction(state, id, |transaction| {
-                transaction.revert(owner, *at, outcome_revision)
+                transaction.revert(owner, *activity, outcome_revision)
             });
             changes.transactions_changed = result.is_ok();
             return AppliedConsensusCommand::transaction(result, changes);
         }
-        ConsensusCommand::ExpireTransaction {
-            id,
-            at,
-            idle_before,
-        } => {
+        ConsensusCommand::ExpireTransaction { id, at } => {
             let outcome_revision = match &state.last_applied_log_id {
                 Some(log_id) => log_id.index,
                 None => 0,
@@ -4546,7 +4601,7 @@ fn apply_consensus_command_at(
                     changes,
                 );
             };
-            match transaction.expire(*at, *idle_before, outcome_revision) {
+            match transaction.expire(*at, outcome_revision) {
                 Ok(expired) => {
                     if expired {
                         state.transactions.insert(id.clone(), transaction.clone());
@@ -4892,6 +4947,7 @@ mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
         ops::RangeInclusive,
+        time::Duration,
     };
 
     use fjall::Database;
@@ -4925,12 +4981,16 @@ mod tests {
         validate_protocol_origin,
     };
     use crate::{
-        ClusterNodeName, ConsensusError, LogIdOf, ReplicatedTransaction, TransactionQueueLimits,
-        TransactionState, UserName, VoteOf,
+        ClusterNodeName, ConsensusError, LogIdOf, ReplicatedTransaction, TransactionActivity,
+        TransactionQueueLimits, TransactionState, UserName, VoteOf,
     };
 
     fn domain(raw: &str) -> DomainName {
         DomainName::try_from(raw).expect("valid domain")
+    }
+
+    fn transaction_activity(at: i64) -> TransactionActivity {
+        TransactionActivity::from_timeout(Timestamp::from_unix_nanos(at), Duration::from_nanos(10))
     }
 
     #[test]
@@ -6140,7 +6200,7 @@ mod tests {
             "tx-append".to_string(),
             domain_id.clone(),
             owner.clone(),
-            Timestamp::from_unix_nanos(1),
+            transaction_activity(1),
         );
         let limits = TransactionQueueLimits {
             max_statements: 4,
@@ -6157,7 +6217,8 @@ mod tests {
             .queue(
                 &owner,
                 &domain_id,
-                Timestamp::from_unix_nanos(2),
+                transaction_activity(2),
+                2,
                 first.clone(),
                 limits,
             )
@@ -6166,13 +6227,17 @@ mod tests {
             .queue(
                 &owner,
                 &domain_id,
-                Timestamp::from_unix_nanos(3),
+                transaction_activity(3),
+                3,
                 first.clone(),
                 limits,
             )
             .assured("an exact duplicate joins the append already admitted above");
         assert_eq!(transaction.statements.len(), 1);
-        assert_eq!(transaction.last_activity_at, Timestamp::from_unix_nanos(2));
+        assert_eq!(
+            transaction.last_activity_at(),
+            Timestamp::from_unix_nanos(2)
+        );
         assert_eq!(
             transaction
                 .queue_admission(&owner, &domain_id, &first.request, limits)
@@ -6186,13 +6251,17 @@ mod tests {
             transaction.queue(
                 &owner,
                 &domain_id,
-                Timestamp::from_unix_nanos(4),
+                transaction_activity(4),
+                4,
                 changed,
                 limits,
             ),
             Err(TransactionMutationError::RequestConflict { .. })
         ));
-        assert_eq!(transaction.last_activity_at, Timestamp::from_unix_nanos(2));
+        assert_eq!(
+            transaction.last_activity_at(),
+            Timestamp::from_unix_nanos(2)
+        );
 
         let mut second = TransactionStatement::test_admitted(TransactionStatementRequest {
             request_reference: nervix_models::CommandExecutionReference::parse("append-2")
@@ -6205,7 +6274,8 @@ mod tests {
             transaction.queue(
                 &owner,
                 &domain_id,
-                Timestamp::from_unix_nanos(5),
+                transaction_activity(5),
+                5,
                 second.clone(),
                 limits,
             ),
@@ -6215,18 +6285,60 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(transaction.last_activity_at, Timestamp::from_unix_nanos(2));
+        assert_eq!(
+            transaction.last_activity_at(),
+            Timestamp::from_unix_nanos(2)
+        );
         second.request.expected_position = 1;
         transaction
             .queue(
                 &owner,
                 &domain_id,
-                Timestamp::from_unix_nanos(6),
+                transaction_activity(6),
+                6,
                 second,
                 limits,
             )
             .assured("the corrected append uses the current position and a new reference");
         assert_eq!(transaction.statements.len(), 2);
+    }
+
+    #[test]
+    fn transaction_tombstone_retention_starts_at_the_terminal_decision_inclusively() {
+        let owner =
+            UserName::parse("app_user").assured("the test owner is an identifier-shaped literal");
+        let mut transaction = ReplicatedTransaction::open(
+            "retained".to_string(),
+            domain("tenant"),
+            owner.clone(),
+            transaction_activity(1),
+        );
+        transaction
+            .revert(&owner, transaction_activity(2), 7)
+            .assured("the open test transaction can be reverted");
+        let TransactionState::Finished(finished) = &transaction.state else {
+            panic!("revert must make the test transaction terminal");
+        };
+        assert_eq!(finished.finished_at, Timestamp::from_unix_nanos(2));
+
+        let mut state = StateMachineData::default();
+        state
+            .transactions
+            .insert(transaction.id.clone(), transaction);
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::RemoveFinishedTransactions {
+                finished_before: Timestamp::from_unix_nanos(1),
+            },
+        );
+        assert!(state.transactions.contains_key("retained"));
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::RemoveFinishedTransactions {
+                finished_before: Timestamp::from_unix_nanos(2),
+            },
+        );
+        assert!(!state.transactions.contains_key("retained"));
     }
 
     #[test]
@@ -6244,7 +6356,7 @@ mod tests {
             "tx-1".to_string(),
             domain_id.clone(),
             owner.clone(),
-            nervix_models::Timestamp::from_unix_nanos(1),
+            transaction_activity(1),
         );
         apply_consensus_command(
             &mut state,
@@ -6268,7 +6380,7 @@ mod tests {
                     id: "tx-1".to_string(),
                     owner: owner.clone(),
                     domain: domain_id.clone(),
-                    at: nervix_models::Timestamp::from_unix_nanos(
+                    activity: transaction_activity(
                         i64::try_from(at)
                             .unwrap_or_default()
                             .checked_add(2)
@@ -6297,7 +6409,7 @@ mod tests {
             &ConsensusCommand::StartTransactionCommit {
                 id: "tx-1".to_string(),
                 owner,
-                at: nervix_models::Timestamp::from_unix_nanos(4),
+                activity: transaction_activity(4),
             },
         );
 

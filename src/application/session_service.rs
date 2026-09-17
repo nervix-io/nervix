@@ -57,6 +57,7 @@ use super::{
     scheduling::RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
     service_tasks::ServiceTasks,
     subscription::{SessionSubscriptions, SubscriptionInterestKey},
+    transaction::TransactionRecovery,
 };
 use crate::{
     cluster, proto,
@@ -176,6 +177,8 @@ pub(in crate::application) struct SessionServiceInner {
     /// commits in independent domains.
     pub(in crate::application) transaction_executions:
         DashMap<String, StdArc<AsyncMutex<()>>, RandomState>,
+    /// Bounded fair admission for leader-side recovery of durable COMMITTING work.
+    pub(in crate::application) transaction_recovery: TransactionRecovery,
     /// Serializes destination preparation with authority reconciliation so a request from a
     /// superseded leader cannot race a current leader's preparation into the runtime.
     pub(in crate::application) ownership_handoff_operations: AsyncMutex<()>,
