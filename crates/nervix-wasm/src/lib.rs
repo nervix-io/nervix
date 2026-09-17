@@ -2232,8 +2232,6 @@ mod tests {
             (global $emit_len (mut i32) (i32.const 0))
             (global $read_ptr (mut i32) (i32.const 1024))
             (global $processed (mut i64) (i64.const 0))
-            (global $last_now (mut i64) (i64.const 0))
-            (global $last_timeout (mut i64) (i64.const 0))
 
             (func (export "nervix_buffer_ptr") (result i32)
                 global.get $read_ptr)
@@ -2249,19 +2247,15 @@ mod tests {
                 i32.const 0)
 
             (func (export "nervix_current_domain_time_nanos") (result i64)
-                call $now
-                global.set $last_now
-                global.get $last_now)
+                call $now)
 
             (func (export "nervix_process_batch")
                 (param $ptr i32)
                 (param $size i32)
                 (result i32)
-                call $now
-                global.set $last_now
                 i64.const 5000000
                 call $timeout
-                global.set $last_timeout
+                drop
                 local.get $ptr
                 global.set $read_ptr
                 global.get $processed
@@ -2273,8 +2267,6 @@ mod tests {
                 i32.const 0)
 
             (func (export "nervix_on_timeout") (param $handle i64) (result i32)
-                local.get $handle
-                global.set $last_timeout
                 i32.const 0)
 
             (func (export "nervix_flush") (result i32)
@@ -2293,44 +2285,24 @@ mod tests {
                 i32.const 1024
                 global.get $processed
                 i64.store
-                i32.const 1032
-                global.get $last_now
-                i64.store
-                i32.const 1040
-                global.get $last_timeout
-                i64.store
-                i32.const 24)
+                i32.const 8)
 
             (func (export "nervix_load_state") (param $ptr i32) (param $size i32) (result i32)
                 local.get $size
-                i32.const 24
+                i32.const 8
                 i32.ne
                 if (result i32)
-                    i32.const -2
+                    i32.const -8
                 else
                     local.get $ptr
                     i64.load
                     global.set $processed
-                    local.get $ptr
-                    i32.const 8
-                    i32.add
-                    i64.load
-                    global.set $last_now
-                    local.get $ptr
-                    i32.const 16
-                    i32.add
-                    i64.load
-                    global.set $last_timeout
                     i32.const 0
                 end)
 
             (func (export "nervix_reset_state") (result i32)
                 i64.const 0
                 global.set $processed
-                i64.const 0
-                global.set $last_now
-                i64.const 0
-                global.set $last_timeout
                 i32.const 0
                 global.set $emit_len
                 i32.const 0)
@@ -3756,12 +3728,23 @@ mod tests {
         );
     }
 
-    /// Drives the exact sequence an `ENTITY_PAUSE` handoff performs: gate, flush, snapshot,
-    /// restore. Both halves of the assertion matter — the snapshot must not carry the batch the
-    /// flush already emitted, and skipping the flush must leave it in the snapshot, which is what
-    /// makes the flush call load-bearing rather than decorative.
+    /// The ACK sidecar of the only route in the only output group one guest callback emitted.
+    fn only_route_acks(envelopes: &[WasmEnvelope]) -> &WasmAckSidecar {
+        let [WasmEnvelope::Output { outputs, .. }] = envelopes else {
+            panic!("expected exactly one output group, got {envelopes:?}");
+        };
+        let [route] = outputs.as_slice() else {
+            panic!("expected exactly one routed output, got {outputs:?}");
+        };
+        &route.acks
+    }
+
+    /// Drives the sequence an `ENTITY_PAUSE` handoff performs: gate, flush, snapshot, restore. The
+    /// flush is where the guest releases the batch it buffers, because its snapshot holds only the
+    /// row ordinal: the replacement numbers its rows after the released batch and emits only the
+    /// input it receives itself.
     #[tokio::test]
-    async fn a_quiesce_flush_drains_the_guest_before_its_handoff_snapshot() {
+    async fn a_quiesce_flush_releases_buffered_input_before_the_handoff_snapshot() {
         let runtime = runtime();
         let compiled = runtime
             .compile_processor(read_guest(&rust_guest_path()))
@@ -3782,7 +3765,7 @@ mod tests {
             },
         );
 
-        let mut flushed_branch = compiled
+        let mut owner = compiled
             .instantiate_branch(
                 limits(),
                 init(),
@@ -3791,81 +3774,59 @@ mod tests {
             )
             .await
             .expect("guest branch must instantiate");
-        flushed_branch
-            .process_envelope(&buffered, test_execution_context())
-            .await
-            .expect("input must process");
-        assert_eq!(
-            flushed_branch
-                .flush(test_execution_context())
+        assert!(
+            owner
+                .process_envelope(&buffered, test_execution_context())
                 .await
-                .expect("quiesce flush must reach the guest")
-                .len(),
-            1,
-            "the flush releases the buffered batch"
+                .expect("input must process")
+                .is_empty(),
+            "the guest buffers this batch instead of emitting it"
         );
-        let drained_snapshot = flushed_branch
+        let released = owner
+            .flush(test_execution_context())
+            .await
+            .expect("quiesce flush must reach the guest");
+        assert_eq!(
+            only_route_acks(&released),
+            &WasmAckSidecar {
+                acked: vec![token_set(10)],
+                ..WasmAckSidecar::default()
+            },
+            "the flush releases the buffered batch, whose only row has the odd ordinal 1"
+        );
+        let snapshot = owner
             .save_state(test_execution_context())
             .await
-            .expect("a flushed guest must still snapshot");
+            .expect("a flushed guest must save its state");
 
-        let mut stranded_branch = compiled
-            .instantiate_branch(
-                limits(),
-                init(),
-                WasmExecutionContext::new(Timestamp::from_unix_nanos(1_234)),
-                None,
-            )
-            .await
-            .expect("guest branch must instantiate");
-        stranded_branch
-            .process_envelope(&buffered, test_execution_context())
-            .await
-            .expect("input must process");
-        let stranded_snapshot = stranded_branch
-            .save_state(test_execution_context())
-            .await
-            .expect("an unflushed guest must snapshot");
-
-        let mut resumed = compiled
+        let mut replacement = compiled
             .instantiate_branch(
                 limits(),
                 init(),
                 WasmExecutionContext::new(Timestamp::from_unix_nanos(2_345)),
-                Some(&drained_snapshot),
+                Some(&snapshot),
             )
             .await
-            .expect("the replacement must restore the drained snapshot");
-        assert_eq!(
-            resumed
+            .expect("the replacement must restore the handoff snapshot");
+        assert!(
+            replacement
                 .process_envelope(&follow_up, test_execution_context())
                 .await
                 .expect("the replacement must accept new input")
-                .len(),
-            1,
-            "a replacement restored from a drained snapshot emits only the batch it just \
-             received, never the one the flush already released"
+                .is_empty(),
+            "the replacement buffers the batch it receives"
         );
-
-        let mut resumed_without_flush = compiled
-            .instantiate_branch(
-                limits(),
-                init(),
-                WasmExecutionContext::new(Timestamp::from_unix_nanos(2_345)),
-                Some(&stranded_snapshot),
-            )
+        let resumed = replacement
+            .flush(test_execution_context())
             .await
-            .expect("the replacement must restore the unflushed snapshot");
+            .expect("quiesce flush must reach the replacement");
         assert_eq!(
-            resumed_without_flush
-                .process_envelope(&follow_up, test_execution_context())
-                .await
-                .expect("the replacement must accept new input")
-                .len(),
-            2,
-            "without the flush the buffered batch rides through the snapshot and only surfaces \
-             once later input happens to arrive, which is exactly what the quiesce contract \
-             exists to avoid"
+            only_route_acks(&resumed),
+            &WasmAckSidecar {
+                rows: vec![output_row(20)],
+                ..WasmAckSidecar::default()
+            },
+            "the replacement numbers its first row 2, after the released batch, and keeps it"
         );
     }
 
@@ -4033,11 +3994,94 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn rust_guest_state_restores_pending_batch_and_row_ordinals() {
+    fn input_row_batch(value: i32, token: u64) -> WasmEnvelope {
+        WasmEnvelope::input(
+            sample_arrow_ipc(&[value]),
+            WasmAckSidecar {
+                rows: vec![output_row(token)],
+                ..WasmAckSidecar::default()
+            },
+        )
+    }
+
+    /// A bundled guest saves its row ordinal and nothing it buffers. A replacement restored from a
+    /// snapshot taken while the guest still held a batch numbers its next row after that batch and
+    /// emits only the input it received itself.
+    async fn guest_restores_its_row_ordinal_without_the_input_it_buffered(path: &Path) {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(read_guest(&rust_guest_path()))
+            .compile_processor(read_guest(path))
+            .await
+            .expect("guest module must compile");
+        let mut owner = compiled
+            .instantiate_branch(
+                limits(),
+                init(),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1_234)),
+                None,
+            )
+            .await
+            .expect("guest branch must instantiate");
+        assert!(
+            owner
+                .process_envelope(&input_row_batch(1, 10), test_execution_context())
+                .await
+                .expect("input must process")
+                .is_empty(),
+            "the guest buffers this batch instead of emitting it"
+        );
+        let snapshot = owner
+            .save_state(test_execution_context())
+            .await
+            .expect("a guest that buffers input must save its state");
+
+        let mut replacement = compiled
+            .instantiate_branch(
+                limits(),
+                init(),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(5_678)),
+                Some(&snapshot),
+            )
+            .await
+            .expect("the replacement must restore the snapshot");
+        assert!(
+            replacement
+                .process_envelope(&input_row_batch(2, 20), test_execution_context())
+                .await
+                .expect("the replacement must accept new input")
+                .is_empty(),
+            "the replacement buffers the batch it receives"
+        );
+        let released = replacement
+            .flush(test_execution_context())
+            .await
+            .expect("quiesce flush must reach the replacement");
+        assert_eq!(
+            only_route_acks(&released),
+            &WasmAckSidecar {
+                rows: vec![output_row(20)],
+                ..WasmAckSidecar::default()
+            },
+            "the replacement numbers its first row 2 and keeps it"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_rust_guest_restores_its_row_ordinal_without_the_input_it_buffered() {
+        guest_restores_its_row_ordinal_without_the_input_it_buffered(&rust_guest_path()).await;
+    }
+
+    #[tokio::test]
+    async fn the_go_guest_restores_its_row_ordinal_without_the_input_it_buffered() {
+        guest_restores_its_row_ordinal_without_the_input_it_buffered(&go_guest_path()).await;
+    }
+
+    /// The sentinel `-400` leaves a bundled guest unable to serialize its state, so the save reports
+    /// the guest's reason instead of returning a snapshot.
+    async fn guest_that_cannot_serialize_its_state_reports_why(path: &Path) {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(read_guest(path))
             .await
             .expect("guest module must compile");
         let mut branch = compiled
@@ -4049,57 +4093,159 @@ mod tests {
             )
             .await
             .expect("guest branch must instantiate");
-        let first = WasmEnvelope::input(
-            sample_arrow_ipc(&[2]),
-            WasmAckSidecar {
-                rows: vec![output_row(10)],
-                ..WasmAckSidecar::default()
-            },
-        );
-        assert!(
-            branch
-                .process_envelope(&first, test_execution_context())
-                .await
-                .expect("first input must process")
-                .is_empty()
-        );
-        let state = branch
+        branch
+            .process_envelope(&input_row_batch(-400, 10), test_execution_context())
+            .await
+            .expect("the guest accepts the batch that leaves it unable to serialize its state");
+
+        let failure = branch
             .save_state(test_execution_context())
             .await
-            .expect("guest state must dump");
+            .expect_err("a guest that cannot serialize its state must not look saved");
 
-        let mut restored = compiled
+        assert_eq!(failure.export(), Some("nervix_dump_state"));
+        assert!(
+            matches!(
+                &failure,
+                WasmGuestError::Failed {
+                    operation: WasmGuestOperation::StateSnapshot,
+                    cause: WasmGuestCallError::GlobalError { reason },
+                } if reason == "guest cannot serialize its state for value -400"
+            ),
+            "unexpected snapshot failure: {failure:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_rust_guest_reports_why_it_cannot_serialize_its_state() {
+        guest_that_cannot_serialize_its_state_reports_why(&rust_guest_path()).await;
+    }
+
+    #[tokio::test]
+    async fn the_go_guest_reports_why_it_cannot_serialize_its_state() {
+        guest_that_cannot_serialize_its_state_reports_why(&go_guest_path()).await;
+    }
+
+    /// A callback that fails latches the SDK guest into error state, which refuses every later
+    /// callback of that instance. The error state belongs to the instance: its snapshot still holds
+    /// the application state, and a replacement restored from it processes input again.
+    #[tokio::test]
+    async fn a_rust_guest_restored_after_its_error_state_processes_input() {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(read_guest(&rust_guest_path()))
+            .await
+            .expect("guest module must compile");
+        let mut owner = compiled
+            .instantiate_branch(
+                limits(),
+                init(),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1_234)),
+                None,
+            )
+            .await
+            .expect("guest branch must instantiate");
+        owner
+            .process_envelope(&input_row_batch(1, 10), test_execution_context())
+            .await
+            .expect("input must process");
+        owner
+            .process_envelope(&input_row_batch(-300, 20), test_execution_context())
+            .await
+            .expect_err("the sentinel latches the guest into error state");
+        let snapshot = owner
+            .save_state(test_execution_context())
+            .await
+            .expect("a guest in error state still saves its application state");
+
+        let mut replacement = compiled
             .instantiate_branch(
                 limits(),
                 init(),
                 WasmExecutionContext::new(Timestamp::from_unix_nanos(5_678)),
-                Some(&state),
+                Some(&snapshot),
             )
             .await
-            .expect("restored branch must instantiate");
-        let second = WasmEnvelope::input(
-            sample_arrow_ipc(&[4]),
-            WasmAckSidecar {
-                rows: vec![output_row(20)],
+            .expect("the replacement must restore the snapshot");
+        assert!(
+            replacement
+                .process_envelope(&input_row_batch(2, 30), test_execution_context())
+                .await
+                .expect("the replacement must process input")
+                .is_empty(),
+            "the replacement buffers the batch it receives"
+        );
+        let released = replacement
+            .flush(test_execution_context())
+            .await
+            .expect("quiesce flush must reach the replacement");
+        assert_eq!(
+            only_route_acks(&released),
+            &WasmAckSidecar {
+                rows: vec![output_row(30)],
                 ..WasmAckSidecar::default()
             },
+            "the replacement numbers its first row 2 and keeps it"
         );
-        let groups = restored
-            .process_envelope(&second, test_execution_context())
-            .await
-            .expect("second input must flush the restored pending batch");
+    }
 
-        assert_eq!(groups.len(), 2);
-        let WasmEnvelope::Output { outputs, .. } = &groups[0] else {
-            panic!("restored pending batch must flush as an output group");
-        };
-        assert!(outputs[0].acks.rows.is_empty());
-        assert_eq!(outputs[0].acks.acked, vec![token_set(10)]);
-        let WasmEnvelope::Output { outputs, .. } = &groups[1] else {
-            panic!("second batch must flush as an output group");
-        };
-        assert_eq!(outputs[0].acks.rows, vec![output_row(20)]);
-        assert!(outputs[0].acks.acked.is_empty());
+    /// A snapshot names the branch configuration it was taken under, and a bundled guest refuses to
+    /// restore it into an instance initialized with another one.
+    async fn guest_rejects_a_snapshot_of_another_branch_configuration(path: &Path) {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(read_guest(path))
+            .await
+            .expect("guest module must compile");
+        let mut owner = compiled
+            .instantiate_branch(
+                limits(),
+                init(),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1_234)),
+                None,
+            )
+            .await
+            .expect("guest branch must instantiate");
+        owner
+            .process_envelope(&input_row_batch(1, 10), test_execution_context())
+            .await
+            .expect("input must process");
+        let snapshot = owner
+            .save_state(test_execution_context())
+            .await
+            .expect("guest state must save");
+        let mut other_branch = init();
+        other_branch.branch_key = Some(b"user=7".to_vec());
+
+        let error = compiled
+            .instantiate_branch(
+                limits(),
+                other_branch,
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(5_678)),
+                Some(&snapshot),
+            )
+            .await
+            .expect_err("a snapshot of another branch configuration must not restore");
+
+        let failure = error.current_context();
+        assert!(
+            matches!(
+                failure,
+                WasmGuestError::SnapshotEnvelopeRejected { reason: Some(reason) }
+                    if reason == "saved snapshot was taken under a different branch configuration"
+            ),
+            "unexpected restore failure: {failure:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_rust_guest_rejects_a_snapshot_of_another_branch_configuration() {
+        guest_rejects_a_snapshot_of_another_branch_configuration(&rust_guest_path()).await;
+    }
+
+    #[tokio::test]
+    async fn the_go_guest_rejects_a_snapshot_of_another_branch_configuration() {
+        guest_rejects_a_snapshot_of_another_branch_configuration(&go_guest_path()).await;
     }
 
     #[tokio::test]
@@ -4123,13 +4269,13 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn the_rust_guest_rejects_application_state_its_processor_cannot_restore() {
-        let guest = read_guest(&rust_guest_path());
+    /// A bundled guest saves its row ordinal as exactly eight bytes and refuses any other
+    /// application state, with its own reason.
+    async fn guest_rejects_application_state_that_is_not_a_row_ordinal(path: &Path) {
+        let guest = read_guest(path);
         let snapshot = protocol::GuestSnapshot {
             init_metadata: init().to_protocol().encode(),
-            saved_state: vec![1, 2, 3],
-            ..protocol::GuestSnapshot::default()
+            application_state: vec![1, 2, 3],
         }
         .encode();
 
@@ -4145,10 +4291,20 @@ mod tests {
             matches!(
                 failure,
                 WasmGuestError::ApplicationStateRejected { reason: Some(reason) }
-                    if reason == "byte size is negative or does not fit the guest address space"
+                    if reason == "saved row ordinal must be exactly 8 bytes"
             ),
-            "the processor's own restore error is the reason: {failure:?}"
+            "the guest's own restore error is the reason: {failure:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_rust_guest_rejects_application_state_its_processor_cannot_restore() {
+        guest_rejects_application_state_that_is_not_a_row_ordinal(&rust_guest_path()).await;
+    }
+
+    #[tokio::test]
+    async fn the_go_guest_rejects_application_state_it_cannot_restore() {
+        guest_rejects_application_state_that_is_not_a_row_ordinal(&go_guest_path()).await;
     }
 
     #[tokio::test]
@@ -4301,8 +4457,7 @@ mod tests {
             .await
             .expect("state must dump");
 
-        assert_eq!(&restored_state[..8], &1_i64.to_le_bytes());
-        assert_eq!(&restored_state[8..16], &700_i64.to_le_bytes());
+        assert_eq!(restored_state, 1_i64.to_le_bytes());
     }
 
     #[tokio::test]

@@ -4,9 +4,16 @@
 //! preserved with their complete input row sidecars, odd ordinals are dropped
 //! into the `acked` sidecar. Batches accumulate until every second batch or a
 //! guest-requested one-second domain-clock timeout flushes the pending batch.
+//!
+//! The processed row count is the guest's durable computation state and the
+//! only state it saves: a recreated instance numbers the rows that follow from
+//! it. The batch the guest still buffers belongs to the live instance together
+//! with its ACK tokens, so a quiesce flush releases it and it is never saved.
+//!
 //! Sentinel first values exercise the error paths: `-100` routes a message
-//! error, `-200` reports a global error, and `-300` latches guest error
-//! state.
+//! error, `-200` reports a global error, `-300` latches guest error state, and
+//! `-400` is filtered like any other value but leaves the guest unable to
+//! serialize its state.
 
 use std::{sync::Arc, time::Duration};
 
@@ -20,13 +27,23 @@ use nervix_wasm_sdk::{
 
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 const FLUSH_EVERY_BATCHES: u64 = 2;
-const STATE_HEADER_BYTES: usize = 24;
+const UNSERIALIZABLE_STATE_VALUE: i32 = -400;
 
 struct EvenRowFilter {
-    processed_batches: u64,
+    /// Rows this branch has accepted. Saved and restored, it numbers the rows that follow.
     processed_rows: u64,
-    pending_start_row: u64,
-    pending: Option<InputBatch>,
+    /// Batches this instance has received, which drives the every-second-batch flush.
+    processed_batches: u64,
+    /// The accepted batch whose keep or drop decisions are not emitted yet.
+    pending: Option<PendingBatch>,
+    /// The sentinel value that left this instance unable to serialize its state.
+    unserializable_by: Option<i32>,
+}
+
+/// An accepted batch the guest still buffers, and the ordinal of the row before its first row.
+struct PendingBatch {
+    input: InputBatch,
+    start_row: u64,
 }
 
 impl EvenRowFilter {
@@ -37,22 +54,20 @@ impl EvenRowFilter {
         let output = filter_even_rows(
             ctx.branch().input_schema(),
             ctx.branch().output_schemas(),
-            &pending,
-            self.pending_start_row,
+            &pending.input,
+            pending.start_row,
         )?;
-        ctx.emit(output)?;
-        self.pending_start_row = self.processed_rows;
-        Ok(())
+        ctx.emit(output)
     }
 }
 
 impl Processor for EvenRowFilter {
     fn create(_branch: &BranchContext) -> Result<Self, GuestError> {
         Ok(Self {
-            processed_batches: 0,
             processed_rows: 0,
-            pending_start_row: 0,
+            processed_batches: 0,
             pending: None,
+            unserializable_by: None,
         })
     }
 
@@ -65,8 +80,6 @@ impl Processor for EvenRowFilter {
             .processed_batches
             .checked_add(1)
             .expect("a guest cannot process 2^64 batches in the lifetime of an instance");
-        ctx.domain_time();
-        ctx.request_timeout(FLUSH_TIMEOUT)?;
         match first_i32_value(&input)? {
             Some(-300) => return Err(GuestError::failed("guest error state for value -300")),
             Some(-200) => {
@@ -88,18 +101,24 @@ impl Processor for EvenRowFilter {
                 ctx.emit(output)?;
                 return Ok(());
             }
+            Some(UNSERIALIZABLE_STATE_VALUE) => {
+                self.unserializable_by = Some(UNSERIALIZABLE_STATE_VALUE);
+            }
             _ => {}
         }
         self.flush_pending(ctx)?;
-        self.pending_start_row = self.processed_rows;
+        let start_row = self.processed_rows;
         self.processed_rows = self
             .processed_rows
             .checked_add(input.row_count())
             .expect("a guest cannot process 2^64 rows in the lifetime of an instance");
-        self.pending = Some(input);
-        if self.processed_batches.is_multiple_of(FLUSH_EVERY_BATCHES) {
-            self.flush_pending(ctx)?;
+        self.pending = Some(PendingBatch { input, start_row });
+        if self.unserializable_by.is_some()
+            || self.processed_batches.is_multiple_of(FLUSH_EVERY_BATCHES)
+        {
+            return self.flush_pending(ctx);
         }
+        ctx.request_timeout(FLUSH_TIMEOUT)?;
         Ok(())
     }
 
@@ -115,39 +134,26 @@ impl Processor for EvenRowFilter {
         self.flush_pending(ctx)
     }
 
-    fn save_state(&self) -> Vec<u8> {
-        let pending = self
-            .pending
-            .as_ref()
-            .map(InputBatch::envelope_bytes)
-            .unwrap_or_default();
-        let mut state = Vec::with_capacity(STATE_HEADER_BYTES + pending.len());
-        state.extend_from_slice(&self.processed_batches.to_le_bytes());
-        state.extend_from_slice(&self.processed_rows.to_le_bytes());
-        state.extend_from_slice(&self.pending_start_row.to_le_bytes());
-        state.extend_from_slice(pending);
-        state
+    fn save_state(&self) -> Result<Vec<u8>, GuestError> {
+        if let Some(value) = self.unserializable_by {
+            return Err(GuestError::failed(format!(
+                "guest cannot serialize its state for value {value}"
+            )));
+        }
+        Ok(self.processed_rows.to_le_bytes().to_vec())
     }
 
     fn restore(_branch: &BranchContext, state: &[u8]) -> Result<Self, GuestError> {
-        if state.len() < STATE_HEADER_BYTES {
-            return Err(GuestError::InvalidSize);
-        }
-        let (header, pending) = state.split_at(STATE_HEADER_BYTES);
-        let counters = header
-            .chunks_exact(8)
-            .map(|chunk| u64::from_le_bytes(chunk.try_into().expect("chunks are eight bytes")))
-            .collect::<Vec<_>>();
-        let pending = if pending.is_empty() {
-            None
-        } else {
-            Some(InputBatch::from_envelope_bytes(pending.to_vec())?)
+        let Ok(processed_rows) = <[u8; 8]>::try_from(state) else {
+            return Err(GuestError::failed(
+                "saved row ordinal must be exactly 8 bytes",
+            ));
         };
         Ok(Self {
-            processed_batches: counters[0],
-            processed_rows: counters[1],
-            pending_start_row: counters[2],
-            pending,
+            processed_rows: u64::from_le_bytes(processed_rows),
+            processed_batches: 0,
+            pending: None,
+            unserializable_by: None,
         })
     }
 }

@@ -3,6 +3,8 @@
 package main
 
 import (
+	"bytes"
+
 	nervixwasm "github.com/apache/arrow-go/v18/arrow/nervix-wasm-processor-go-guest/nervixwasm"
 	flatbuffers "github.com/google/flatbuffers/go"
 )
@@ -329,29 +331,15 @@ func decodeBranchInitOutputRelays(data []byte) ([]string, int32) {
 	return relays, success
 }
 
-func encodeSnapshot(snapshot guestSnapshot) ([]byte, bool) {
+func encodeSnapshot(snapshot guestSnapshot) []byte {
 	builder := flatbuffers.NewBuilder(1024)
-	pendingBatch := builder.CreateByteVector(snapshot.PendingBatch)
 	initMetadata := builder.CreateByteVector(snapshot.InitMetadata)
-	savedState := builder.CreateByteVector(snapshot.SavedState)
-	var errorState flatbuffers.UOffsetT
-	if snapshot.ErrorState != "" {
-		errorState = builder.CreateString(snapshot.ErrorState)
-	}
+	applicationState := builder.CreateByteVector(snapshot.ApplicationState)
 	nervixwasm.GuestSnapshotStart(builder)
-	nervixwasm.GuestSnapshotAddProcessedBatches(builder, snapshot.ProcessedBatches)
-	nervixwasm.GuestSnapshotAddProcessedRows(builder, snapshot.ProcessedRows)
-	nervixwasm.GuestSnapshotAddPendingStartRow(builder, snapshot.PendingStartRow)
-	nervixwasm.GuestSnapshotAddLastDomainTimeNanos(builder, snapshot.LastDomainTimeNanos)
-	nervixwasm.GuestSnapshotAddLastTimeoutHandle(builder, snapshot.LastTimeoutHandle)
-	nervixwasm.GuestSnapshotAddPendingBatch(builder, pendingBatch)
 	nervixwasm.GuestSnapshotAddInitMetadata(builder, initMetadata)
-	nervixwasm.GuestSnapshotAddSavedState(builder, savedState)
-	if snapshot.ErrorState != "" {
-		nervixwasm.GuestSnapshotAddErrorState(builder, errorState)
-	}
+	nervixwasm.GuestSnapshotAddApplicationState(builder, applicationState)
 	payload := nervixwasm.GuestSnapshotEnd(builder)
-	return finishMessage(builder, nervixwasm.MessagePayloadGuestSnapshot, payload), true
+	return finishMessage(builder, nervixwasm.MessagePayloadGuestSnapshot, payload)
 }
 
 func decodeSnapshot(data []byte) (guestSnapshot, bool) {
@@ -365,18 +353,104 @@ func decodeSnapshot(data []byte) (guestSnapshot, bool) {
 	}
 	snapshot := nervixwasm.GuestSnapshot{}
 	snapshot.Init(payload.Bytes, payload.Pos)
-	if snapshot.PendingBatchBytes() == nil || snapshot.InitMetadataBytes() == nil || snapshot.SavedStateBytes() == nil {
+	if snapshot.InitMetadataBytes() == nil || snapshot.ApplicationStateBytes() == nil {
 		return guestSnapshot{}, false
 	}
 	return guestSnapshot{
-		ProcessedBatches:    snapshot.ProcessedBatches(),
-		ProcessedRows:       snapshot.ProcessedRows(),
-		PendingStartRow:     snapshot.PendingStartRow(),
-		LastDomainTimeNanos: snapshot.LastDomainTimeNanos(),
-		LastTimeoutHandle:   snapshot.LastTimeoutHandle(),
-		PendingBatch:        append([]byte(nil), snapshot.PendingBatchBytes()...),
-		InitMetadata:        append([]byte(nil), snapshot.InitMetadataBytes()...),
-		SavedState:          append([]byte(nil), snapshot.SavedStateBytes()...),
-		ErrorState:          string(snapshot.ErrorState()),
+		InitMetadata:     append([]byte(nil), snapshot.InitMetadataBytes()...),
+		ApplicationState: append([]byte(nil), snapshot.ApplicationStateBytes()...),
 	}, true
+}
+
+func decodeBranchInit(data []byte) (*nervixwasm.BranchInit, bool) {
+	message, ok := validFlatBufferMessage(data)
+	if !ok || message.PayloadType() != nervixwasm.MessagePayloadBranchInit {
+		return nil, false
+	}
+	var payload flatbuffers.Table
+	if !message.Payload(&payload) {
+		return nil, false
+	}
+	init := nervixwasm.BranchInit{}
+	init.Init(payload.Bytes, payload.Pos)
+	return &init, true
+}
+
+// sameBranchConfiguration reports whether saved init metadata describes the same branch
+// configuration as the init metadata this instance was initialized with. It compares the decoded
+// fields rather than the bytes, so two encodings of one configuration match. The second result is
+// false when the saved init metadata cannot be decoded.
+func sameBranchConfiguration(saved []byte, current []byte) (bool, bool) {
+	savedInit, ok := decodeBranchInit(saved)
+	if !ok {
+		return false, false
+	}
+	currentInit, ok := decodeBranchInit(current)
+	if !ok {
+		return false, false
+	}
+	if !bytes.Equal(savedInit.DomainName(), currentInit.DomainName()) {
+		return false, true
+	}
+	if !bytes.Equal(savedInit.DomainType(), currentInit.DomainType()) {
+		return false, true
+	}
+	savedKey := savedInit.BranchKeyBytes()
+	currentKey := currentInit.BranchKeyBytes()
+	if (savedKey == nil) != (currentKey == nil) || !bytes.Equal(savedKey, currentKey) {
+		return false, true
+	}
+	if !sameProcessorSchema(savedInit.InputSchema(nil), currentInit.InputSchema(nil)) {
+		return false, true
+	}
+	if savedInit.OutputSchemasLength() != currentInit.OutputSchemasLength() {
+		return false, true
+	}
+	for i := 0; i < savedInit.OutputSchemasLength(); i++ {
+		var savedSchema nervixwasm.ProcessorSchema
+		var currentSchema nervixwasm.ProcessorSchema
+		if !savedInit.OutputSchemas(&savedSchema, i) || !currentInit.OutputSchemas(&currentSchema, i) {
+			return false, true
+		}
+		if !sameProcessorSchema(&savedSchema, &currentSchema) {
+			return false, true
+		}
+	}
+	return true, true
+}
+
+func sameProcessorSchema(saved *nervixwasm.ProcessorSchema, current *nervixwasm.ProcessorSchema) bool {
+	if saved == nil || current == nil {
+		return saved == current
+	}
+	if !bytes.Equal(saved.Name(), current.Name()) || saved.FieldsLength() != current.FieldsLength() {
+		return false
+	}
+	for i := 0; i < saved.FieldsLength(); i++ {
+		var savedField nervixwasm.ProcessorField
+		var currentField nervixwasm.ProcessorField
+		if !saved.Fields(&savedField, i) || !current.Fields(&currentField, i) {
+			return false
+		}
+		if !bytes.Equal(savedField.Name(), currentField.Name()) {
+			return false
+		}
+		if savedField.Optional() != currentField.Optional() {
+			return false
+		}
+		if !sameProcessorType(savedField.Type(nil), currentField.Type(nil)) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameProcessorType(saved *nervixwasm.ProcessorType, current *nervixwasm.ProcessorType) bool {
+	if saved == nil || current == nil {
+		return saved == current
+	}
+	if saved.Kind() != current.Kind() || saved.ArrayLen() != current.ArrayLen() {
+		return false
+	}
+	return sameProcessorType(saved.Element(nil), current.Element(nil))
 }

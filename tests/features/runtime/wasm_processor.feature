@@ -1114,6 +1114,129 @@ Feature: WASM processor runtime behavior
       | 3            | 0             |
       | 3            | 1             |
 
+  Scenario Outline: WASM processor restarts each branch from its last saved guest state after a failed save and a guest error
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has WASM processor fixture resource directory "wasm_processor"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE wasm_checkpointed_filter;
+      UPLOAD RESOURCE wasm_checkpointed_filter VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA metric ( value I32, tenant STRING );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
+      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE INGESTOR metric_source
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
+        BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
+        USING RESOURCE wasm_checkpointed_filter VERSION 1
+        FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
+        BRANCHED BY by_tenant
+        TO filtered_metrics
+        SET value = value, tenant = tenant
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
+      START;
+      """
+    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":1,"tenant":"acme"}
+      """
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":11,"tenant":"beta"}
+      """
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":2,"tenant":"acme"}
+      """
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":12,"tenant":"beta"}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"acme"} | "tenant":"acme" | "value":2
+      key={"tenant":"beta"} | "tenant":"beta" | "value":12
+      """
+    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":-400,"tenant":"acme"}
+      """
+    Then within "10s" the active session observes a server error containing
+      """
+      wasm processor 'filter_even_rows' state snapshot failed (branch {"tenant":"acme"}, resource 'wasm_checkpointed_filter' version 1 file 'processors/filter_even.wasm', export 'nervix_dump_state'): wasm guest state snapshot failed: wasm guest reported global error: guest cannot serialize its state for value -400
+      """
+    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":-300,"tenant":"beta"}
+      """
+    Then within "10s" the active session observes a server error containing
+      """
+      wasm processor 'filter_even_rows' batch processing failed (branch {"tenant":"beta"}, resource 'wasm_checkpointed_filter' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: wasm guest reported global error: guest error state for value -300
+      """
+    When the cluster is restarted
+    Then node "node-1" eventually observes a stable leader
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
+      """
+    Then within "10s" repeatedly posting http payload to host "http-{{test_id}}.example.com" path "/metrics" yields a relay subscription payload
+      """
+      {"value":2,"tenant":"probe"}
+      """
+    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":4,"tenant":"acme"}
+      """
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":14,"tenant":"beta"}
+      """
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":6,"tenant":"acme"}
+      """
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":16,"tenant":"beta"}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"acme"} | "tenant":"acme" | "value":6
+      key={"tenant":"beta"} | "tenant":"beta" | "value":16
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+      | 3            | 1             |
+
   Scenario Outline: WASM processor receives referenced input columns from a guest timeout
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

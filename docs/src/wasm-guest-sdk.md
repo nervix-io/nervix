@@ -129,10 +129,11 @@ callbacks onto the trait:
 | Trait method | When the host calls it |
 | --- | --- |
 | `create` | Branch initialization, with the decoded `BranchInit` payload as a `BranchContext`: domain, serialized branch key, and the exact input and output schemas. |
-| `process_batch` | One input envelope, decoded into an `InputBatch`: Arrow record batches, the ACK sidecar, and the original envelope bytes. |
+| `process_batch` | One input envelope, decoded into an `InputBatch`: Arrow record batches and the ACK sidecar. |
 | `on_timeout` | A previously requested domain-clock timeout fired. |
 | `flush` | The runtime is quiescing this branch for a handoff or shutdown. Emit everything the processor still buffers; whatever it keeps stays unacknowledged until the branch resumes. |
-| `save_state` / `restore` | The runtime snapshots or recreates the branch instance. |
+| `save_state` | After the host dispatches the output of a successful `process_batch` or `on_timeout`, and when it checkpoints the branch for an ownership handoff. Return the processor's durable computation state, or an error when it cannot be serialized. |
+| `restore` | The host recreates the branch instance, for example after a restart or on the node a branch moved to, and hands it the application state saved last. |
 
 Keep all state branch-local. Never aggregate across branch keys inside one
 guest, and reject init payloads whose schemas the guest does not implement
@@ -189,29 +190,47 @@ surface as Wasmtime traps, which the host also treats as global errors.
 
 ## Guest State
 
-The runtime persists and replicates guest state across branch instance
-recreation. `save_state` returns processor-owned bytes; the SDK stores them
-opaquely inside its snapshot together with the framework state it manages.
-`restore` receives those bytes back and must stay strict: reject bytes the
-current build cannot interpret instead of silently resetting. The default
-implementations suit stateless processors — they save nothing and reject
-non-empty state.
+The runtime persists and replicates guest state so it can recreate a branch
+instance. `save_state` returns the processor's durable computation state:
+whatever a recreated instance needs to continue the computation, such as
+counters, aggregates, or open windows. The SDK stores those application bytes
+in its snapshot together with the branch configuration the instance was
+initialized with, and `restore` receives the application bytes back.
+
+Save computation state, never execution state. The input a processor still
+buffers, its ACK tokens and row sidecars, output envelopes it has not emitted,
+and timeout handles belong to the live instance and mean nothing to one created
+later. Release buffered input from `flush`; ACK tokens are host-local runtime
+capabilities that are never persisted or replicated, and when ACK state is lost
+with a processor owner, the upstream ingestor reacts according to its delivery
+mode and retry policy. The SDK keeps its own execution state out of the
+snapshot as well: a recreated instance starts without error state, with an
+empty emit queue, and without pending timeouts.
+
+`save_state` is fallible. Return an error when the state cannot be serialized:
+Nervix reports a `state snapshot`
+[failure](./wasm-processor-guests.md#failure-diagnostics) and keeps the state
+saved last, so a recreated instance restores that state rather than a save that
+never completed. The error follows the same rules as a callback error:
+`GuestError::failed` puts its reason on the global-error channel and latches
+the instance into error state.
+
+`restore` must stay strict: reject bytes the current build cannot interpret
+instead of silently resetting. Empty application bytes are the valid state of a
+stateless processor, not a request to discard state: the default `save_state`
+returns them, the SDK still wraps them in a snapshot, and the default `restore`
+accepts them and rejects anything else.
 
 The SDK reports every restore verdict with the reserved
 [`nervix_load_state` codes](./wasm-processor-guests.md#contract-summary): a
-snapshot it cannot decode, including its branch configuration, is a rejected
-snapshot envelope, and any error `restore` returns is a rejected application
-state with that error as the reason. Nervix keeps the saved state after a
-rejection and reports it under the `snapshot envelope decoding` or
-`application state restoration` [failure stage](./wasm-processor-guests.md#failure-diagnostics),
-so return an error from `restore` only when the saved state itself is unusable.
-
-A processor that buffers input across callbacks can persist the buffered
-batch: `InputBatch::envelope_bytes` returns the complete original envelope and
-`InputBatch::from_envelope_bytes` restores it.
-
-ACK tokens are not guest state. They are host-local runtime capabilities, so
-restored output referring to tokens from a previous host instance is rejected.
+snapshot it cannot decode, including its branch configuration, or a snapshot
+taken under a different branch configuration than the one the instance was
+just initialized with, is a rejected snapshot envelope, and any error `restore`
+returns is a rejected application state with that error as the reason. Nervix
+keeps the saved state after a rejection and reports it under the
+`snapshot envelope decoding` or `application state restoration`
+[failure stage](./wasm-processor-guests.md#failure-diagnostics), so return an
+error from `restore` only when the saved state itself is unusable.
 
 ## Timeouts
 
@@ -221,6 +240,11 @@ time the host calls `on_timeout` with that handle. Output emitted from the
 timeout callback is routed exactly like batch output. WASM processors have no
 `FLUSH` clause — guest-requested timeouts and emitted envelopes own the output
 cadence.
+
+Timeouts belong to the branch instance that requested them and are never part
+of its saved state. A recreated instance starts without pending timeouts, so a
+processor whose restored state needs a timer requests it again from its next
+`process_batch` or `on_timeout` call.
 
 ## Deploying A Guest
 
@@ -256,9 +280,9 @@ grammar.
 ## Reference Guest
 
 The complete reference guest — global-row filtering across buffered batches, a
-generated column shared by multiple routes, message errors, global errors, and
-snapshot restoration — is `examples/wasm-processors/rust-guest` in the Nervix
-repository. Build it with:
+generated column shared by multiple routes, message errors, global errors, a
+failing state save, and a row ordinal as its only saved state — is
+`examples/wasm-processors/rust-guest` in the Nervix repository. Build it with:
 
 ```bash
 cargo build \
