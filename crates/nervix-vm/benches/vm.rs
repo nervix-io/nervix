@@ -2,7 +2,8 @@ use std::sync::Arc as StdArc;
 
 use arch_into::ArchInto as _;
 use arrow_array::{
-    BooleanArray, Float64Array, Int32Array, Int64Array, ListArray, StringArray, types::Int64Type,
+    BooleanArray, Float64Array, Int8Array, Int32Array, Int64Array, ListArray, StringArray,
+    UInt32Array, types::Int64Type,
 };
 use arrow_schema::{DataType, Field, Schema};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
@@ -1127,6 +1128,164 @@ fn transcendental_batch(program: &CompiledProgram, nulls: NullDensity) -> TypedB
     .expect("transcendental benchmark batch must build")
 }
 
+fn float_function_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new("value", DataType::Float64, true),
+        Field::new("digits", DataType::Int8, true),
+        Field::new("y", DataType::Float64, true),
+        Field::new("x", DataType::Float64, true),
+    ]))
+}
+
+const FLOAT_CLASSIFICATION_SOURCE: &str =
+    "SET not_a_number = is_nan(input.value), finite = is_finite(input.value), infinite = \
+     is_infinite(input.value), signed = sign(input.value), truncated = trunc(input.value)";
+
+fn float_classification_outputs() -> [(&'static str, DataType); 5] {
+    [
+        ("not_a_number", DataType::Boolean),
+        ("finite", DataType::Boolean),
+        ("infinite", DataType::Boolean),
+        ("signed", DataType::Float64),
+        ("truncated", DataType::Float64),
+    ]
+}
+
+const PRECISION_ROUNDING_SOURCE: &str = "SET cents = round(input.value, 2), hundreds = \
+                                         round(input.value, -2), per_row = round(input.value, \
+                                         input.digits)";
+
+fn precision_rounding_outputs() -> [(&'static str, DataType); 3] {
+    [
+        ("cents", DataType::Float64),
+        ("hundreds", DataType::Float64),
+        ("per_row", DataType::Float64),
+    ]
+}
+
+const ANGLE_AND_LOGARITHM_SOURCE: &str = "SET sine = sin(input.value), heading = atan2(input.y, \
+                                          input.x), octaves = log2(input.x), in_radians = \
+                                          radians(input.value), in_degrees = degrees(input.y)";
+
+fn angle_and_logarithm_outputs() -> [(&'static str, DataType); 5] {
+    [
+        ("sine", DataType::Float64),
+        ("heading", DataType::Float64),
+        ("octaves", DataType::Float64),
+        ("in_radians", DataType::Float64),
+        ("in_degrees", DataType::Float64),
+    ]
+}
+
+/// A failing row holds NaN, which has no sign, truncation, rounding, sine or radians, and a
+/// negative `x`, which has no base-2 logarithm.
+fn float_function_batch(program: &CompiledProgram, failures: FailureDensity) -> TypedBatch {
+    let rows = 0..NUMERIC_KERNEL_ROWS;
+    let value = Float64Array::from_iter_values(rows.clone().map(|row| {
+        if failures.fails(row) {
+            f64::NAN
+        } else {
+            benchmark_row_f64(row % 1_000) * 0.37 - 185.005
+        }
+    }));
+    let digits = Int8Array::from_iter_values(
+        rows.clone()
+            .map(|row| i8::try_from(row % 5).assured("a remainder of 5 fits an i8") - 2),
+    );
+    let y =
+        Float64Array::from_iter_values(rows.clone().map(|row| benchmark_row_f64(row % 17) - 8.0));
+    let x = Float64Array::from_iter_values(rows.map(|row| {
+        if failures.fails(row) {
+            -1.0
+        } else {
+            benchmark_row_f64(row % 13) + 0.5
+        }
+    }));
+    TypedBatch::try_new(
+        program.input_schema.clone(),
+        vec![
+            TypedArray::Float64(value),
+            TypedArray::Int8(digits),
+            TypedArray::Float64(y),
+            TypedArray::Float64(x),
+        ],
+    )
+    .expect("float function benchmark batch must build")
+}
+
+fn integer_bit_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new("flags", DataType::UInt32, true),
+        Field::new("mask", DataType::UInt32, true),
+        Field::new("value", DataType::Int64, true),
+        Field::new("count", DataType::Int64, true),
+    ]))
+}
+
+const INTEGER_BIT_SOURCE: &str = "SET masked = bitwise_and(input.flags, input.mask), merged = \
+                                  bitwise_or(input.flags, input.mask), toggled = \
+                                  bitwise_xor(input.flags, input.mask), inverted = \
+                                  bitwise_not(input.flags), ones = bit_count(input.flags)";
+
+fn integer_bit_outputs() -> [(&'static str, DataType); 5] {
+    [
+        ("masked", DataType::UInt32),
+        ("merged", DataType::UInt32),
+        ("toggled", DataType::UInt32),
+        ("inverted", DataType::UInt32),
+        ("ones", DataType::Int64),
+    ]
+}
+
+const INTEGER_SHIFT_SOURCE: &str = "SET doubled = shift_left(input.value, input.count), halved = \
+                                    shift_right(input.value, input.count), tens = \
+                                    round(input.value, -1)";
+
+fn integer_shift_outputs() -> [(&'static str, DataType); 3] {
+    [
+        ("doubled", DataType::Int64),
+        ("halved", DataType::Int64),
+        ("tens", DataType::Int64),
+    ]
+}
+
+/// A failing row shifts the maximum value by a negative count, which fails both shifts, and rounds
+/// it to a multiple of ten, which overflows.
+fn integer_bit_batch(program: &CompiledProgram, failures: FailureDensity) -> TypedBatch {
+    let rows = 0..NUMERIC_KERNEL_ROWS;
+    // Rows stay below 2^11, so each product stays below 2^43 and scatters the low 32 bits.
+    let flags = UInt32Array::from_iter_values(rows.clone().map(|row| {
+        u32::try_from(row * 2_654_435_761 % 4_294_967_296).assured("a remainder of 2^32 fits a u32")
+    }));
+    let mask = UInt32Array::from_iter_values(rows.clone().map(|row| {
+        u32::try_from(row * 40_503 % 4_294_967_296).assured("a remainder of 2^32 fits a u32")
+    }));
+    let value = Int64Array::from_iter_values(rows.clone().map(|row| {
+        if failures.fails(row) {
+            i64::MAX
+        } else {
+            benchmark_row_i64(row % 1_000) - 500
+        }
+    }));
+    let count = Int64Array::from_iter_values(rows.map(|row| {
+        if failures.fails(row) {
+            -1
+        } else {
+            benchmark_row_i64(row % 8)
+        }
+    }));
+    TypedBatch::try_new(
+        program.input_schema.clone(),
+        vec![
+            TypedArray::UInt32(flags),
+            TypedArray::UInt32(mask),
+            TypedArray::Int64(value),
+            TypedArray::Int64(count),
+        ],
+    )
+    .expect("integer bit benchmark batch must build")
+}
+
 /// Numeric operators and builtins over one inline batch. Arithmetic and unary programs vary how
 /// many rows fail, which exercises error reporting, and the transcendental program varies how many
 /// rows are null, which is what separates evaluating every lane from evaluating only valid ones.
@@ -1160,6 +1319,31 @@ fn numeric_kernel_benches(c: &mut Criterion) {
         TRANSCENDENTAL_SOURCE,
         transcendental_schema(),
         &transcendental_outputs(),
+    );
+    let float_classification_compiled = compile_numeric_program(
+        FLOAT_CLASSIFICATION_SOURCE,
+        float_function_schema(),
+        &float_classification_outputs(),
+    );
+    let precision_rounding_compiled = compile_numeric_program(
+        PRECISION_ROUNDING_SOURCE,
+        float_function_schema(),
+        &precision_rounding_outputs(),
+    );
+    let angle_and_logarithm_compiled = compile_numeric_program(
+        ANGLE_AND_LOGARITHM_SOURCE,
+        float_function_schema(),
+        &angle_and_logarithm_outputs(),
+    );
+    let integer_bit_compiled = compile_numeric_program(
+        INTEGER_BIT_SOURCE,
+        integer_bit_schema(),
+        &integer_bit_outputs(),
+    );
+    let integer_shift_compiled = compile_numeric_program(
+        INTEGER_SHIFT_SOURCE,
+        integer_bit_schema(),
+        &integer_shift_outputs(),
     );
     let runtime = benchmark_runtime();
 
@@ -1218,6 +1402,43 @@ fn numeric_kernel_benches(c: &mut Criterion) {
                 })
             },
         );
+        for (label, compiled) in [
+            ("float_classification", &float_classification_compiled),
+            ("precision_rounding", &precision_rounding_compiled),
+            ("angle_and_logarithm", &angle_and_logarithm_compiled),
+        ] {
+            let batch = float_function_batch(compiled, failures);
+            group.bench_with_input(
+                BenchmarkId::new(label, failures.label()),
+                &batch,
+                |b, batch| {
+                    b.iter(|| {
+                        runtime.block_on(execute_benchmark_program(
+                            black_box(compiled),
+                            black_box(batch),
+                        ))
+                    })
+                },
+            );
+        }
+        for (label, compiled) in [
+            ("integer_bits", &integer_bit_compiled),
+            ("integer_shifts", &integer_shift_compiled),
+        ] {
+            let batch = integer_bit_batch(compiled, failures);
+            group.bench_with_input(
+                BenchmarkId::new(label, failures.label()),
+                &batch,
+                |b, batch| {
+                    b.iter(|| {
+                        runtime.block_on(execute_benchmark_program(
+                            black_box(compiled),
+                            black_box(batch),
+                        ))
+                    })
+                },
+            );
+        }
     }
     let batch = comparison_batch(&comparison_compiled);
     group.bench_with_input(
