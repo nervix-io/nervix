@@ -1,0 +1,49 @@
+BEGIN;
+CREATE SCHEMA benchmark_record (
+  value STRING
+);
+CREATE WIRE JSON SCHEMA benchmark_wire MODE STRICT (
+  value string
+);
+CREATE CODEC benchmark_codec
+  FROM WIRE JSON SCHEMA benchmark_wire
+  TO SCHEMA benchmark_record;
+CREATE CLIENT kafka_input
+  TYPE KAFKA
+  CONFIG {
+    'bootstrap.servers' = '{{ kafka_bootstrap_servers }}',
+    'auto.offset.reset' = 'earliest'
+  };
+CREATE CLIENT kafka_output
+  TYPE KAFKA
+  CONFIG {
+    'bootstrap.servers' = '{{ kafka_bootstrap_servers }}',
+    'enable.idempotence' = 'true',
+    'acks' = 'all'
+  };
+CREATE RELAY benchmark_records SCHEMA benchmark_record UNBRANCHED;
+{% for lane in lanes %}
+CREATE INGESTOR kafka_in_{{ lane }}
+  FROM KAFKA kafka_input
+  TOPIC {{ input_topic }}
+  OFFSET BY CONSUMER GROUP {{ consumer_group }}
+  INSTANCES 1
+  MODE NO_ACK PARALLEL
+  ON QUIESCE SUSPEND DECODE USING benchmark_codec
+  TO benchmark_records
+    INHERIT ALL
+    UNBRANCHED
+    FLUSH EACH {{ parameters.ingestor_flush_each }} MAX BATCH SIZE {{ parameters.ingestor_max_batch_size }}
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+{% endfor %}
+CREATE EMITTER kafka_out
+  FROM benchmark_records
+  TO KAFKA kafka_output TOPIC {{ output_topic }}
+    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING benchmark_codec
+  INHERIT ALL
+  FLUSH EACH {{ parameters.emitter_flush_each }} MAX BATCH SIZE {{ parameters.emitter_max_batch_size }}
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+COMMIT;

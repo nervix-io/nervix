@@ -503,6 +503,10 @@ impl RelayConsumerFanout {
         self.dispatch_gate.clone()
     }
 
+    pub(super) fn dispatch_is_fenced(&self) -> bool {
+        self.dispatch_gate.is_engaged()
+    }
+
     pub(super) fn runtime_consumer_buffer_len(&self) -> usize {
         self.attached_runtime_consumers
             .len()
@@ -715,6 +719,13 @@ impl RelayBoundaryFanout {
         match self {
             Self::Direct(fanout) => fanout.dispatch_gate(),
             Self::BranchCollapse(branch_collapse) => branch_collapse.fanout.dispatch_gate(),
+        }
+    }
+
+    pub(super) fn dispatch_is_fenced(&self) -> bool {
+        match self {
+            Self::Direct(fanout) => fanout.dispatch_is_fenced(),
+            Self::BranchCollapse(branch_collapse) => branch_collapse.fanout.dispatch_is_fenced(),
         }
     }
 
@@ -953,6 +964,10 @@ impl RelayBoundaryServices {
         self.owner_node.store(owner_node.map(StdArc::new));
     }
 
+    pub(super) fn dispatch_is_fenced(&self) -> bool {
+        self.fanout.dispatch_is_fenced()
+    }
+
     pub(super) fn is_owned_by(&self, node_id: Option<&ClusterNodeName>) -> bool {
         let owner_node = self.owner_node.load();
         owner_node
@@ -989,13 +1004,21 @@ impl RelayBoundaryServices {
         kind: RelayPayloadKind,
         branch: &Option<BranchKey>,
     ) -> Arc<RelayOutboundSlot> {
+        // Remote destinations are stable for the lifetime of a published routing snapshot. Avoid
+        // taking the shard's exclusive `entry` path for every batch after the channel has been
+        // installed. Name and branch clones here only increment their shared allocations; the
+        // miss path owns the one key that enters the map.
+        let channel = RelayOutboundChannel {
+            node_id: node_id.clone(),
+            relay: relay.clone(),
+            kind,
+            branch: branch.clone(),
+        };
+        if let Some(existing) = self.outbound_slots.get(&channel) {
+            return existing.clone();
+        }
         self.outbound_slots
-            .entry(RelayOutboundChannel {
-                node_id: node_id.clone(),
-                relay: relay.clone(),
-                kind,
-                branch: branch.clone(),
-            })
+            .entry(channel)
             .or_insert_with(|| Arc::new(RelayOutboundSlot::new()))
             .clone()
     }

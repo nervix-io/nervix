@@ -459,6 +459,13 @@ node's opaque diagnostic text. A materialized snapshot is streamed only after a 
 description identifies its exact length, digest, schema fingerprint, revision, fence, and branch
 generation.
 
+A materialized dependency reader may observe the committed destination just before that node
+activates its prepared state, or the previous destination just after it leaves the assignment. A
+rejected, absent, or not-ready snapshot description in this handoff window means the dependency has
+no available record for that read. The dependency policy then waits, skips, or supplies its declared
+default; `REQUIRED WAIT` retains the batch and retries after routing, state, or bounded poll progress.
+Execution failures and transport failures remain errors.
+
 The [Control Plane](./control-plane.md) defines when replicated changes and resources become
 authoritative. The [Data Plane](./data-plane.md) defines how a local execution consumes transferred
 state. The interconnect supplies bounded delivery between those owners and does not reinterpret

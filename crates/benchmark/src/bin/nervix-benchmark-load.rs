@@ -83,6 +83,11 @@ struct CommonArgs {
 enum ShapeArgs {
     /// Identical payloads and one output message for every accepted input message.
     UniformPassthrough,
+    /// Identical payloads copied to a fixed number of output consumers.
+    UniformFanout {
+        #[arg(long)]
+        outputs_per_input: u64,
+    },
     /// Cycles of distinct keys whose duplicates and filtered-out payloads are dropped by the
     /// measured path, aggregated into window summaries carrying a record count.
     KeyedWindowed {
@@ -101,6 +106,9 @@ impl ShapeArgs {
     fn into_shape(self) -> LoadShape {
         match self {
             Self::UniformPassthrough => LoadShape::UniformPassthrough,
+            Self::UniformFanout { outputs_per_input } => {
+                LoadShape::UniformFanout { outputs_per_input }
+            }
             Self::KeyedWindowed {
                 keys_per_cycle,
                 retained_keys,
@@ -191,7 +199,7 @@ enum PayloadWriter {
 impl PayloadWriter {
     fn new(shape: &LoadShape, value_bytes: usize) -> Result<Self> {
         match shape {
-            LoadShape::UniformPassthrough => Ok(Self::Uniform {
+            LoadShape::UniformPassthrough | LoadShape::UniformFanout { .. } => Ok(Self::Uniform {
                 payload: format!(r#"{{"value":"{}"}}"#, "x".repeat(value_bytes)).into_bytes(),
             }),
             LoadShape::KeyedWindowed {
@@ -724,7 +732,10 @@ impl BenchmarkRunner {
                 "warm-up input",
             )?;
 
-            let warmup_records = self.shape.expected_output_records(warmup.cycles());
+            let warmup_records = self
+                .shape
+                .expected_output_records(warmup.cycles())
+                .context("expected warm-up output record count overflowed")?;
             let baseline = self.wait_for_output_records(
                 &meter,
                 &output_partitions,
@@ -757,7 +768,10 @@ impl BenchmarkRunner {
                     target_duration,
                 },
             )?;
-            let expected_output_records = self.shape.expected_output_records(measured.cycles());
+            let expected_output_records = self
+                .shape
+                .expected_output_records(measured.cycles())
+                .context("expected output record count overflowed")?;
 
             let at_generation_end = self
                 .output_counts(
@@ -881,7 +895,9 @@ impl BenchmarkRunner {
 
     fn start_output_meter(&self, partitions: &[i32]) -> Result<OutputMeter> {
         match &self.shape {
-            LoadShape::UniformPassthrough => Ok(OutputMeter::Watermarks),
+            LoadShape::UniformPassthrough | LoadShape::UniformFanout { .. } => {
+                Ok(OutputMeter::Watermarks)
+            }
             LoadShape::KeyedWindowed { count_field, .. } => SummaryDrain::start(
                 &self.args.bootstrap_servers,
                 &self.args.output_topic,
