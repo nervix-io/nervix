@@ -68,7 +68,8 @@ Feature: Branch namespace
           INHERIT ALL EXCEPT active
           SET branch_tenant = branch.tenant,
               amount = input.amount + 1
-          WHERE branch.tenant = input.tenant
+          WHERE output.branch_tenant = input.tenant
+            AND branch.tenant = input.tenant
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
 
@@ -95,6 +96,58 @@ Feature: Branch namespace
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 0             |
+
+  Scenario: Correlators require explicit left and right expression scopes
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a 1 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA correlation_side (
+        id STRING,
+        score I64
+      );
+      CREATE SCHEMA correlation_result (
+        id STRING,
+        total I64
+      );
+      CREATE RELAY left_records SCHEMA correlation_side UNBRANCHED;
+      CREATE RELAY right_records SCHEMA correlation_side UNBRANCHED;
+      CREATE RELAY correlated_records SCHEMA correlation_result UNBRANCHED;
+      CREATE CORRELATOR explicit_scopes
+        LEFT FROM left_records
+        RIGHT FROM right_records
+        CORRELATE WHERE left.id = right.id
+        MATCH EARLIEST
+        MAX TIME 5s
+        ON CORRELATION TIMEOUT DROP, DROP
+        UNBRANCHED
+        TO correlated_records
+          SET id = left.id,
+              total = left.score + right.score
+          WHERE output.total > 0
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      """
+    And these NSPL commands fail with "bare field reads are unavailable in this expression context"
+      """
+      CREATE CORRELATOR ambiguous_scope
+        LEFT FROM left_records
+        RIGHT FROM right_records
+        CORRELATE WHERE id = right.id
+        MATCH EARLIEST
+        MAX TIME 5s
+        ON CORRELATION TIMEOUT DROP, DROP
+        UNBRANCHED
+        TO correlated_records
+          SET id = left.id,
+              total = left.score + right.score
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      """
 
   Scenario Outline: Reingestor branch mapping reads the current branch key
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"

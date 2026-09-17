@@ -101,7 +101,7 @@ use nervix_vm::{
     CompiledProgram as VmCompiledProgram, ExecutionContext as VmExecutionContext,
     FunctionInjector as VmFunctionInjector, OutputMode as VmOutputMode,
     PredicateCompileOptions as VmPredicateCompileOptions, SchemaSensitivity as VmSchemaSensitivity,
-    SemanticNamespaces, TypedArray as VmTypedArray, TypedBatch as VmTypedBatch,
+    SemanticScopePolicy, TypedArray as VmTypedArray, TypedBatch as VmTypedBatch,
     UdfSignatures as VmUdfSignatures,
     compile_predicate_with_options_for_bindings as compile_vm_predicate_with_options_for_bindings,
     compile_program_with_options_for_bindings_with_sensitivity as compile_vm_program_with_options_for_bindings_with_sensitivity,
@@ -370,8 +370,8 @@ use materialized_state::{
 use message_error::{
     MessageErrorCompileSchemas, MessageErrorFailure, MessageErrorHandling,
     MessageErrorSourceContext, SingleRecordFilterMapOutcome, captured_partial_output,
-    invalid_output_fields, operation_for_filter_label, planned_structured_message_error,
-    structured_message_error, vm_partial_output_row_to_runtime_batch,
+    invalid_output_fields, planned_structured_message_error, structured_message_error,
+    vm_partial_output_row_to_runtime_batch,
 };
 use message_error_delivery::{
     MessageErrorDelivery, MessageErrorRouteKey, MessageErrorRouteRuntime, MessageErrorRouteTarget,
