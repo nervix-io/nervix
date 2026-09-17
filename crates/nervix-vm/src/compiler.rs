@@ -21,7 +21,7 @@ use crate::{
         Literal, Program, Span, SpannedExpr, SpannedNode, UnaryOp, WindowAggregateFunction,
     },
     semantics::{
-        BuiltinLowering, binary_descriptor, binary_output_type, builtin_descriptor,
+        BuiltinLowering, CaseMapping, binary_descriptor, binary_output_type, builtin_descriptor,
         builtin_semantics_for_lowering, builtin_signature, cast_descriptor, expr_semantics,
         unary_descriptor,
     },
@@ -2279,7 +2279,7 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
                 return None;
             };
             Some(FoldedValue::NonNull(ScalarValue::Utf8(
-                value.to_lowercase(),
+                CaseMapping::Lower.apply(value),
             )))
         }
         FunctionName::Upper => {
@@ -2287,7 +2287,7 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
                 return None;
             };
             Some(FoldedValue::NonNull(ScalarValue::Utf8(
-                value.to_uppercase(),
+                CaseMapping::Upper.apply(value),
             )))
         }
         FunctionName::Trim => {
@@ -4276,6 +4276,44 @@ mod tests {
                 }
             )
         }));
+    }
+
+    #[test]
+    fn folds_nullif_with_the_equality_execution_uses() {
+        // NaN is unequal to itself, so `nullif` keeps its first argument.
+        let not_a_number = fold_builtin_call(
+            &FunctionName::NullIf,
+            &[
+                FoldedValue::NonNull(ScalarValue::Float64(f64::NAN)),
+                FoldedValue::NonNull(ScalarValue::Float64(f64::NAN)),
+            ],
+        );
+        let Some(FoldedValue::NonNull(ScalarValue::Float64(value))) = &not_a_number else {
+            panic!("nullif(NaN, NaN) must fold to its first argument, got {not_a_number:?}");
+        };
+        assert!(value.is_nan());
+
+        // `0.0` equals `-0.0`, so `nullif` folds to a null of the argument type.
+        assert_eq!(
+            fold_builtin_call(
+                &FunctionName::NullIf,
+                &[
+                    FoldedValue::NonNull(ScalarValue::Float64(0.0)),
+                    FoldedValue::NonNull(ScalarValue::Float64(-0.0)),
+                ],
+            ),
+            Some(FoldedValue::Null(RegisterType::Float64))
+        );
+        assert_eq!(
+            fold_builtin_call(
+                &FunctionName::NullIf,
+                &[
+                    FoldedValue::NonNull(ScalarValue::Utf8("ß".to_string())),
+                    FoldedValue::NonNull(ScalarValue::Utf8("ß".to_string())),
+                ],
+            ),
+            Some(FoldedValue::Null(RegisterType::Utf8))
+        );
     }
 
     #[test]

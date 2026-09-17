@@ -285,7 +285,9 @@ impl SyslogClientConfig {
     ) -> Result<StdArc<rustls::ClientConfig>, SyslogConfigError> {
         RustlsClientConfigSource::new(&self.entries)
             .build_with_default_roots()
-            .map_err(|reason| SyslogConfigError::TlsMaterial { reason })
+            .map_err(|error| SyslogConfigError::TlsMaterial {
+                reason: error.to_string(),
+            })
     }
 
     pub(super) fn tls_server_config(&self) -> Result<StdArc<ServerConfig>, SyslogConfigError> {
@@ -305,10 +307,18 @@ impl SyslogClientConfig {
                 direction: "ingestor",
                 key: "tls_key_file",
             })?;
-        let cert_pem = read_tls_file(cert_file, "Syslog TLS server certificate")
-            .map_err(|reason| SyslogConfigError::TlsMaterial { reason })?;
-        let key_pem = read_tls_file(key_file, "Syslog TLS server private key")
-            .map_err(|reason| SyslogConfigError::TlsMaterial { reason })?;
+        let cert_pem =
+            read_tls_file(cert_file, "Syslog TLS server certificate").map_err(|error| {
+                SyslogConfigError::TlsMaterial {
+                    reason: error.to_string(),
+                }
+            })?;
+        let key_pem =
+            read_tls_file(key_file, "Syslog TLS server private key").map_err(|error| {
+                SyslogConfigError::TlsMaterial {
+                    reason: error.to_string(),
+                }
+            })?;
         let certs = CertificateDer::pem_slice_iter(&cert_pem)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| SyslogConfigError::TlsMaterial {
@@ -335,8 +345,12 @@ impl SyslogClientConfig {
         })?;
         let builder = ServerConfig::builder();
         let config = if let Some(ca_file) = tls.ca_file.as_ref() {
-            let ca_pem = read_tls_file(ca_file, "Syslog TLS client CA certificate")
-                .map_err(|reason| SyslogConfigError::TlsMaterial { reason })?;
+            let ca_pem =
+                read_tls_file(ca_file, "Syslog TLS client CA certificate").map_err(|error| {
+                    SyslogConfigError::TlsMaterial {
+                        reason: error.to_string(),
+                    }
+                })?;
             let mut roots = RootCertStore::empty();
             for cert in CertificateDer::pem_slice_iter(&ca_pem) {
                 let cert = cert.map_err(|error| SyslogConfigError::TlsMaterial {
@@ -461,5 +475,58 @@ mod tests {
         )
         .expect_err("protocol values use one lowercase shape");
         assert!(uppercase_protocol.to_string().contains("protocol"));
+    }
+
+    #[test]
+    fn syslog_tls_material_read_failures_keep_their_context() {
+        let missing = "/definitely/missing/nervix-syslog-tls.pem";
+        let emitter = SyslogClientConfig::parse(
+            &entries(&[
+                ("protocol", "tls"),
+                ("addr", "localhost:6514"),
+                ("tls_ca_file", missing),
+            ]),
+            SyslogDirection::Emit,
+        )
+        .expect("the emitter TLS shape is valid before reading its files");
+        let error = emitter
+            .tls_client_config()
+            .expect_err("a missing emitter CA file must fail");
+        assert!(matches!(error, SyslogConfigError::TlsMaterial { .. }));
+
+        let ingestor = SyslogClientConfig::parse(
+            &entries(&[
+                ("protocol", "tls"),
+                ("addr", "localhost:6514"),
+                ("tls_cert_file", missing),
+                ("tls_key_file", missing),
+            ]),
+            SyslogDirection::Ingest,
+        )
+        .expect("the ingestor TLS shape is valid before reading its files");
+        let error = ingestor
+            .tls_server_config()
+            .expect_err("a missing server certificate must fail");
+        assert!(matches!(error, SyslogConfigError::TlsMaterial { .. }));
+
+        let root = tempfile::tempdir().expect("temporary Syslog TLS directory should open");
+        let certificate = root.path().join("certificate.pem");
+        std::fs::write(&certificate, b"certificate fixture")
+            .expect("the Syslog certificate fixture should be writable");
+        let certificate = certificate.to_string_lossy().into_owned();
+        let ingestor = SyslogClientConfig::parse(
+            &entries(&[
+                ("protocol", "tls"),
+                ("addr", "localhost:6514"),
+                ("tls_cert_file", &certificate),
+                ("tls_key_file", missing),
+            ]),
+            SyslogDirection::Ingest,
+        )
+        .expect("the ingestor TLS shape is valid before reading its files");
+        let error = ingestor
+            .tls_server_config()
+            .expect_err("a missing server private key must fail");
+        assert!(matches!(error, SyslogConfigError::TlsMaterial { .. }));
     }
 }

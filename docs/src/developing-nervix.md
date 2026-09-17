@@ -185,6 +185,14 @@ For test runs:
 just test
 ```
 
+Connector crates have a focused recipe. `just test-connectors` runs the unit tests of the
+`nervix-connector` contract crate and of every `nervix-connector-*` integration crate. Arguments are
+passed to the test binaries, so a test name filter narrows the run:
+
+```bash
+just test-connectors <filter>
+```
+
 ## Building The Documentation
 
 `just book <version>` renders this book, and `just book-pdf <version>` additionally produces

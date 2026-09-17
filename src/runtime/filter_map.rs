@@ -782,13 +782,34 @@ pub(super) async fn plan_emitter_filter_map_batch(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub(in crate::runtime) enum SqsMessageGroupError {
+    #[error("SQS FIFO GROUP FROM BRANCH received an unbranched record")]
+    UnbranchedRecord,
+    #[error("SQS FIFO GROUP expression omitted its input row")]
+    OmittedInputRow,
+    #[error("SQS FIFO GROUP expression failed with {} at {span}", .code.as_str())]
+    ExpressionFailed {
+        code: nervix_vm::ErrorCode,
+        span: VmSpan,
+    },
+    #[error("SQS FIFO GROUP expression produced {actual}, expected STRING")]
+    WrongType { actual: &'static str },
+    #[error("SQS FIFO GROUP expression produced NULL")]
+    Null,
+    #[error("SQS FIFO GROUP expression output could not be read")]
+    OutputRead,
+    #[error("SQS FIFO group source row {row} is outside the source batch")]
+    SourceRowOutOfBounds { row: usize },
+}
+
 pub(in crate::runtime) async fn evaluate_sqs_fifo_group_program(
     emitter: &EmitterName,
     program: &CompiledProgramWithMaterializedInterest,
     batch: &RelayRecordBatch,
     execution_now: Timestamp,
     side_inputs: &HashMap<String, RuntimeValue>,
-) -> PlannedGeneralResult<Vec<PlannedGeneralResult<Option<String>>>> {
+) -> PlannedGeneralResult<Vec<Result<Option<String>, SqsMessageGroupError>>> {
     let row_count = batch.batch.batch().num_rows();
     let result = execute_filter_map_program_on_batch(
         "emitter",
@@ -807,12 +828,7 @@ pub(in crate::runtime) async fn evaluate_sqs_fifo_group_program(
     )
     .await?;
     let mut groups = (0..row_count)
-        .map(|_| {
-            Err(Report::new(PlannedGeneralError {
-                acks: Vec::new(),
-                reason: "SQS FIFO GROUP expression omitted its input row".to_string(),
-            }))
-        })
+        .map(|_| Err(SqsMessageGroupError::OmittedInputRow))
         .collect::<Vec<_>>();
     for (output_row, input_row) in result.selected_rows.iter().enumerate() {
         if input_row >= row_count {
@@ -826,33 +842,19 @@ pub(in crate::runtime) async fn evaluate_sqs_fifo_group_program(
             }));
         }
         if let Some(side_error) = result.batch.errors().row(output_row).first() {
-            groups[input_row] = Err(Report::new(PlannedGeneralError {
-                acks: Vec::new(),
-                reason: format!(
-                    "SQS FIFO GROUP expression failed with {} at {}",
-                    side_error.code.as_str(),
-                    side_error.span
-                ),
-            }));
+            groups[input_row] = Err(SqsMessageGroupError::ExpressionFailed {
+                code: side_error.code,
+                span: side_error.span,
+            });
             continue;
         }
         groups[input_row] = match vm_output_value(&result.batch, output_row, "fifo_group") {
             Ok(Some(RuntimeValue::String(value))) => Ok(Some(value)),
-            Ok(Some(value)) => Err(Report::new(PlannedGeneralError {
-                acks: Vec::new(),
-                reason: format!(
-                    "SQS FIFO GROUP expression produced {}, expected STRING",
-                    runtime_value_type_name(&value)
-                ),
-            })),
-            Ok(None) => Err(Report::new(PlannedGeneralError {
-                acks: Vec::new(),
-                reason: "SQS FIFO GROUP expression produced NULL".to_string(),
-            })),
-            Err(error) => Err(Report::new(PlannedGeneralError {
-                acks: Vec::new(),
-                reason: error.to_string(),
-            })),
+            Ok(Some(value)) => Err(SqsMessageGroupError::WrongType {
+                actual: runtime_value_type_name(&value),
+            }),
+            Ok(None) => Err(SqsMessageGroupError::Null),
+            Err(_) => Err(SqsMessageGroupError::OutputRead),
         };
     }
     Ok(groups)
@@ -2527,7 +2529,7 @@ mod tests {
         .expect("SQS FIFO group expression must execute");
         let groups = groups
             .into_iter()
-            .collect::<PlannedGeneralResult<Vec<_>>>()
+            .collect::<Result<Vec<_>, _>>()
             .expect("every input row must produce an SQS FIFO group");
 
         assert_eq!(

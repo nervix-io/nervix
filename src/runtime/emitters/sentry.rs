@@ -31,11 +31,9 @@ impl SentryEmitter {
         resolved: Option<&ResolvedClientConfig>,
     ) -> EmitterRuntimeResult<Self> {
         let config = client_config_entries(resolved, client.config.as_slice());
-        let dsn = emitter_config_value(config, "dsn", || {
-            "missing Sentry client config key 'dsn'".to_string()
-        })?
-        .parse::<Dsn>()
-        .map_err(|error| emitter_config_error(format!("invalid Sentry dsn: {error}")))?;
+        let dsn = emitter_config_value(config, "dsn", "Sentry")?
+            .parse::<Dsn>()
+            .map_err(|error| emitter_config_error(format!("invalid Sentry dsn: {error}")))?;
         let client = HttpClientConfig::new(config, "Sentry")
             .build()
             .map_err(emitter_config_error)?;

@@ -42,7 +42,7 @@ use triomphe::Arc;
 use super::{
     BranchBufferTimingResult, BranchKey, DomainClock, DomainForceFlushCompletion,
     DomainForceFlushParticipant, NodeQuiesceCounters, NodeQuiesceWorkGuard, RelayRecordBatch,
-    RelayRuntimeFanIn, RuntimeInputCollectPolicy, RuntimeInputCollector,
+    RelayRuntimeFanIn, RelayTryRecv, RuntimeInputCollectPolicy, RuntimeInputCollector,
     branch_buffering::{BranchBufferDeadline, RuntimeWake, wait_for_branch_buffer_deadline},
 };
 use crate::runtime_ack::AckSet;
@@ -344,18 +344,10 @@ struct RelayInteractionSource {
 
 impl Drop for RelayInteractionSource {
     fn drop(&mut self) {
-        loop {
-            match self.receiver.try_recv() {
-                Ok(batch) => batch
-                    .merged_acks()
-                    .no_ack("relay interaction dropped queued input"),
-                Err(
-                    async_broadcast::TryRecvError::Empty | async_broadcast::TryRecvError::Closed,
-                ) => break,
-                Err(async_broadcast::TryRecvError::Overflowed(_)) => {
-                    unreachable!("relay broadcasts are backpressured and must not overflow")
-                }
-            }
+        while let RelayTryRecv::Batch(batch) = self.receiver.try_recv() {
+            batch
+                .merged_acks()
+                .no_ack("relay interaction dropped queued input");
         }
     }
 }
@@ -463,25 +455,22 @@ impl RelayInteractionInputs {
                 .receiver
                 .try_recv_with_quiesce(quiesce_counters.as_ref())
             {
-                Ok((batch, work)) => {
+                RelayTryRecv::Batch((batch, work)) => {
                     remaining[index] = remaining[index]
                         .checked_sub(1)
                         .verified("this loop skips a source whose remaining cut is already empty");
                     self.receive_cursor = (index + 1) % source_count;
                     return ReadyInput::Batch(index, batch, work);
                 }
-                Err(async_broadcast::TryRecvError::Empty) => {
+                RelayTryRecv::Empty => {
                     // The finite cut only includes batches ready when it was captured. `len()` and
                     // `try_recv()` are observed by this interaction's sole receiver, so this is a
                     // defensive race fallback rather than a reason to extend the drain.
                     remaining[index] = 0;
                 }
-                Err(async_broadcast::TryRecvError::Closed) => {
+                RelayTryRecv::Closed => {
                     self.sources[index].closed = true;
                     remaining[index] = 0;
-                }
-                Err(async_broadcast::TryRecvError::Overflowed(_)) => {
-                    unreachable!("relay broadcasts are backpressured and must not overflow")
                 }
             }
         }

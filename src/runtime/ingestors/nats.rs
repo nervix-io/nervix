@@ -6,11 +6,22 @@
 //! - **Must not know.** NSPL parsing, registry validation or placement computation.
 
 use async_nats::Client as NatsClient;
+use error_stack::ResultExt as _;
 
 use super::super::*;
 use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct NatsIngestor;
+
+#[derive(Debug, Error)]
+pub(in crate::runtime) enum NatsIngestorError {
+    #[error("invalid NATS client configuration")]
+    ClientConfig,
+    #[error("NATS TLS client authentication requires both 'tls_cert_file' and 'tls_key_file'")]
+    IncompleteTlsIdentity,
+    #[error("failed to connect NATS client")]
+    Connect,
+}
 
 /// The headers of one borrowed NATS message, each value visited under its own name.
 struct NatsMessageHeaders<'a>(&'a async_nats::Message);
@@ -423,10 +434,9 @@ impl NatsIngestor {
 
     async fn client_from_config(
         config: &[nervix_models::ClientConfigEntry],
-    ) -> Result<NatsClient, String> {
-        let addr = client_config_value(config, "addr", || {
-            "missing NATS client config key 'addr'".to_string()
-        })?;
+    ) -> Result<NatsClient, Report<NatsIngestorError>> {
+        let addr = client_config_value(config, "addr", "NATS")
+            .change_context(NatsIngestorError::ClientConfig)?;
         let mut options = async_nats::ConnectOptions::new();
         let tls = client_tls_paths(config);
         if let Some(ca_file) = tls.ca_file.as_ref() {
@@ -438,19 +448,17 @@ impl NatsIngestor {
             }
             (None, None) => {}
             _ => {
-                return Err(
-                    "NATS TLS client authentication requires both 'tls_cert_file' and \
-                     'tls_key_file'"
-                        .to_string(),
-                );
+                return Err(Report::new(NatsIngestorError::IncompleteTlsIdentity));
             }
         }
-        if ServiceUrl::new(&addr, "NATS addr").has_scheme("tls")? {
+        if ServiceUrl::new(&addr, "NATS addr")
+            .has_scheme("tls")
+            .change_context(NatsIngestorError::ClientConfig)?
+        {
             options = options.require_tls(true);
         }
-        options
-            .connect(addr)
-            .await
-            .map_err(|source| source.to_string())
+        options.connect(addr).await.map_err(|source| {
+            Report::new(NatsIngestorError::Connect).attach_printable(source.to_string())
+        })
     }
 }
