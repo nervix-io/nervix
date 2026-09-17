@@ -295,12 +295,16 @@ Feature: Resource-backed lookups
         FROM RESOURCE zip_codes VERSION 1
         PATH 'lookup.jsonl'
         DECODE USING zip_code_entry_codec;
+
+      START;
       """
     When these NSPL commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_v2_dir}}';
       """
     When the cluster is restarted
+    Then node "node-1" eventually observes a stable leader
+    And node "node-1" eventually reports status containing "{{domain}} status=Running"
     When these NSPL commands are executed on the leader node
       """
       DESCRIBE HASH MAP zip_codes_by_zip;

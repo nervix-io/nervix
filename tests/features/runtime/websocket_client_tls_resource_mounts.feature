@@ -67,6 +67,7 @@ Feature: Websocket client TLS resource mounts
       """
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
+    And node "node-1" eventually reports status containing "{{domain}} status=Running"
     When these NSPL commands are executed on the leader node
       """
       SHOW CREATE CLIENT ws_tls;
