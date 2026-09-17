@@ -278,6 +278,8 @@ mod tests {
                 "nervix".to_string(),
                 Implementation::Nervix(NervixImplementation {
                     template: "graph.nspl".into(),
+                    nodes: 1,
+                    after_start: None,
                 }),
             )]),
         }

@@ -109,7 +109,8 @@ pub(super) async fn flush_branch_inferencer_output(
     let messages = match forwarded.try_into_messages() {
         Ok(messages) => messages,
         Err(error_and_batch) => {
-            let (error, batch) = *error_and_batch;
+            let failure = *error_and_batch;
+            let batch = failure.preserved;
             branch.runtime.handle_internal_processor_error_for_acks(
                 &branch.domain,
                 node_kind,
@@ -119,7 +120,7 @@ pub(super) async fn flush_branch_inferencer_output(
                 format!(
                     "inferencer '{}' failed to decode arrow batch: {}",
                     processor.as_str(),
-                    error
+                    failure.error
                 ),
             );
             return;

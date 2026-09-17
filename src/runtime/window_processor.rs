@@ -51,11 +51,8 @@ pub(super) enum WindowProcessorError {
     AggregateInputRowsDropped { expected: usize },
     #[error("window aggregate input VM produced no '{field}' field")]
     AggregateInputFieldMissing { field: String },
-    #[error("window aggregate input VM failed with {}: {message}", .code.as_str())]
-    AggregateInputRow {
-        code: nervix_vm::ErrorCode,
-        message: String,
-    },
+    #[error("window aggregate input VM failed with {}: {reason}", .reason.code().as_str())]
+    AggregateInputRow { reason: nervix_vm::SideErrorReason },
     #[error(
         "window aggregate arguments evaluated for {evaluated} structures, the window has {demands}"
     )]
@@ -643,8 +640,7 @@ pub(super) async fn evaluate_window_arguments(
             }
             if let Some(error) = result.batch.errors().row(row).first() {
                 *failure = Some(Report::new(WindowProcessorError::AggregateInputRow {
-                    code: error.code,
-                    message: error.message.clone(),
+                    reason: error.reason.clone(),
                 }));
             }
         }

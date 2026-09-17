@@ -1,0 +1,11 @@
+// A client frame: one request of a session.
+//
+// This file declares a frame root for code generators; every shape it names lives in session.fbs.
+
+include "session.fbs";
+
+namespace nervix.session;
+
+root_type ClientMessage;
+file_identifier "NXCM";
+file_extension "nxcm";

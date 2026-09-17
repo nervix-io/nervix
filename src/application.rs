@@ -33,7 +33,6 @@ use background_task::{
 };
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
-use dashmap::DashMap;
 use domain_clock::{
     DomainClockRetirements, DomainClockTask, reconcile_domain_clock_tasks,
     run_domain_clock_authority_reconciliation,
@@ -48,7 +47,7 @@ use http_endpoint::{serve_http, serve_https};
 use interconnect_relay::InterconnectRelayPayloadLane;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{ConsensusSettings, RaftRetentionPolicy, TransactionState};
-use nervix_execution::Executor;
+use nervix_execution::{Executor, sync::DashMap};
 use nervix_interconnect::{
     ActivateOwnershipHandoffStateRequest as RemoteActivateOwnershipHandoffStateRequest,
     ApplicationHealthProbe,
@@ -899,15 +898,6 @@ impl Application {
             }
         };
         startup.consensus = Some(consensus);
-        let consensus = startup
-            .consensus
-            .as_ref()
-            .verified("startup assigns this handle before it reaches this point");
-        startup.runtime.attach_resources(
-            startup.resource_store.clone(),
-            consensus.observer().current_resources().await,
-        );
-
         let cluster_result = cluster::start_cluster(cluster::ClusterSettings {
             cluster_id,
             node_id: node_id.clone(),
@@ -1130,7 +1120,10 @@ impl Application {
                             && !orphaned_alter_committing_domains.contains(&domain)
                             && !runtime_for_reconcile.domain_alter_is_active(&domain)
                         {
-                            match consensus_for_reconcile.resume_domain(domain.clone()).await {
+                            match consensus_for_reconcile
+                                .resume_domain(domain.clone(), None)
+                                .await
+                            {
                                 Ok(()) => {
                                     info!(
                                         domain = domain.as_str(),
@@ -1656,26 +1649,6 @@ impl Application {
                 }
             }
         }));
-        let runtime_for_resources = runtime.clone();
-        let mut resources_rx = consensus.observer().subscribe_resources();
-        let resources_shutdown = shutdown.clone();
-        let consensus_for_resources = consensus.observer();
-        background_tasks.push(tokio::spawn(async move {
-            runtime_for_resources.update_resource_versions(consensus_for_resources.current_resources().await);
-            loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
-                    _ = resources_shutdown.cancelled() => break,
-                    changed = resources_rx.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                        runtime_for_resources
-                            .update_resource_versions(consensus_for_resources.current_resources().await);
-                    }
-                }
-            }
-        }));
         let events = SessionEvents::new(SESSION_EVENT_CAPACITY);
         let service = SessionServiceImpl {
             inner: Arc::new(SessionServiceInner {
@@ -1705,7 +1678,6 @@ impl Application {
                 transaction_bindings: DashMap::with_hasher(RandomState::new()),
                 command_executions: DashMap::with_hasher(RandomState::new()),
                 transaction_executions: DashMap::with_hasher(RandomState::new()),
-                transaction_domain_executions: DashMap::with_hasher(RandomState::new()),
                 ownership_handoff_operations: tokio::sync::Mutex::new(()),
                 resource_upload_executions: DashMap::with_hasher(RandomState::new()),
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),
@@ -2124,7 +2096,7 @@ impl Application {
                         .await;
                         match result {
                             Ok(checkpoints) => Ok(checkpoints),
-                            Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                            Err(error) => Err(OwnershipHandoffError::remote_rejection(&error)),
                         }
                     }
                 },
@@ -2169,7 +2141,7 @@ impl Application {
                         .await;
                         match result {
                             Ok(preparation) => Ok(preparation),
-                            Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                            Err(error) => Err(OwnershipHandoffError::remote_rejection(&error)),
                         }
                     }
                 },
@@ -2184,7 +2156,7 @@ impl Application {
                     async move {
                         match service.confirm_local_ownership_handoff_state(request).await {
                             Ok(()) => Ok(()),
-                            Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                            Err(error) => Err(OwnershipHandoffError::remote_rejection(&error)),
                         }
                     }
                 },
@@ -2202,7 +2174,7 @@ impl Application {
                             .await;
                         match result {
                             Ok(()) => Ok(()),
-                            Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                            Err(error) => Err(OwnershipHandoffError::remote_rejection(&error)),
                         }
                     }
                 },
@@ -2365,11 +2337,7 @@ impl Application {
                 }
             }
         }));
-        background_tasks.push(
-            service
-                .start_http_tls_resource_observer(shutdown.clone())
-                .await,
-        );
+        service.initialize_http_tls_server_config().await;
 
         let domain_apply_service = service.clone();
         let domain_apply_shutdown = shutdown.clone();

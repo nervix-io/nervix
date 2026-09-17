@@ -4,9 +4,8 @@ use std::sync::{
 };
 
 use ahash::RandomState;
-use dashmap::DashMap;
 use error_stack::Report;
-use nervix_execution::Executor;
+use nervix_execution::{Executor, sync::DashMap};
 use nervix_models::ClusterNodeName;
 use triomphe::Arc;
 

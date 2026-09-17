@@ -1532,8 +1532,8 @@ async fn sql_mapped_batch_values(
                 format!(
                     "{} VALUES side error {}: {} at {}",
                     program.label,
-                    side_error.code.as_str(),
-                    side_error.message,
+                    side_error.code().as_str(),
+                    side_error.reason,
                     side_error.span
                 ),
                 side_error.span,
@@ -4306,7 +4306,7 @@ fn resolve_emitter_client(
     sink: &EmitSink,
     client: Option<&Model>,
 ) -> Result<Option<ResolvedClientConfig>, RuntimeError> {
-    let resolve = |mount: Option<&ResourceName>, config: &[ClientConfigEntry]| {
+    let resolve = |mount: Option<&ClientResourceMount>, config: &[ClientConfigEntry]| {
         runtime
             .resolve_client_config(domain, mount, config)
             .map_err(|error| error.to_string())
@@ -4466,8 +4466,11 @@ impl EmitterBatchContext<'_> {
         let messages = match batch.batch.try_into_messages() {
             Ok(messages) => messages,
             Err(error) => {
-                let (message, batch) = *error;
-                self.report_general_error(batch.acks.iter(), format!("{reason}; {message}"));
+                let failure = *error;
+                self.report_general_error(
+                    failure.preserved.acks.iter(),
+                    format!("{reason}; {}", failure.error),
+                );
                 return;
             }
         };
@@ -6324,8 +6327,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn sink_context_reports_configuration_and_publish_failures() {
+    #[tokio::test]
+    async fn sink_context_reports_configuration_and_publish_failures() {
         let context = sink_context();
         let mut events = context.runtime.events().subscribe();
 
@@ -6344,13 +6347,13 @@ mod tests {
                 .is_none()
         );
 
-        let messages = (0..4)
-            .map(|_| {
-                let RuntimeEvent::Error(message) =
-                    events.try_recv().expect("error event must be emitted");
-                message
-            })
-            .collect::<Vec<_>>();
+        let mut messages = Vec::with_capacity(4);
+        for _ in 0..4 {
+            tokio::task::consume_budget().await;
+            let RuntimeEvent::Error(message) =
+                events.recv().await.expect("error event must be emitted");
+            messages.push(message);
+        }
         assert!(messages[0].contains("failed to initialize nats emitter"));
         assert!(messages[1].contains("failed to publish nats message"));
         assert!(messages[2].contains("failed to flush nats rows"));

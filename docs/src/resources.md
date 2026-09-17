@@ -83,8 +83,7 @@ On each node, Nervix verifies the archive digest, enforces the staged-archive qu
 extracted-byte and file-count quotas from tar headers before writing each entry. It writes into a
 staging tree, verifies the manifest, and atomically promotes the complete version. Failed installs
 remove their staging trees, and startup removes staging trees abandoned by an interrupted process.
-Before the upload returns success, each node rebuilds its TLS configuration from the versions its
-VHOSTs pin. An upload never changes the version an existing binding uses.
+An upload never changes the version an existing binding uses.
 
 The per-version limits are configured with `NERVIX_RESOURCE_MAX_ARCHIVE_BYTES`, `NERVIX_RESOURCE_MAX_EXTRACTED_BYTES`, and `NERVIX_RESOURCE_MAX_FILE_COUNT`. Their defaults are 4 GiB, 16 GiB, and 1,000,000 files.
 
@@ -109,8 +108,13 @@ Client configs can mount a resource version into a temporary directory at runtim
 Declare the mount directly on the client:
 
 ```nspl,ignore
-MOUNT <resource_name>
+MOUNT <resource_name> VERSION <n>|LATEST
 ```
+
+Every mount includes a version. A number binds that exact completed resource version. With
+`VERSION LATEST`, Nervix resolves the highest completed version when the client definition is
+applied and stores the resulting number. Later uploads and restarts therefore keep using the same
+files, and `SHOW CREATE CLIENT` renders the stored number.
 
 Inside other client config values, Nervix renders values with a lightweight Jinja-like template language. The mounted resource path is exposed as a template variable named after the mounted resource:
 
@@ -123,7 +127,7 @@ Example:
 ```nspl
 CREATE IF NOT EXISTS CLIENT kafka_tls
   TYPE KAFKA
-  MOUNT dev_tls
+  MOUNT dev_tls VERSION 1
   CONFIG {
     'bootstrap.servers' = '127.0.0.1:9094',
     'security.protocol' = 'ssl',
@@ -138,7 +142,7 @@ Nervix creates one temporary mount root per instantiated client and keeps it ali
 The general pattern for TLS-enabled external clients is:
 
 1. upload a resource containing the PEM files you want to use
-2. mount that resource on the client with `MOUNT <resource_name>`
+2. mount that resource on the client with `MOUNT <resource_name> VERSION <n>|LATEST`
 3. reference mounted paths from the client config template
 
 Example:
@@ -150,7 +154,7 @@ UPLOAD RESOURCE dev_tls VERSION './tls/dev';
 CREATE IF NOT EXISTS CLIENT redis_tls
   TYPE REDIS
   POOL SIZE MIN 1 MAX 4
-  MOUNT dev_tls
+  MOUNT dev_tls VERSION 1
   CONFIG {
     'addr' = 'rediss://127.0.0.1:6380/',
     'tls_ca_file' = '{{ dev_tls }}/ca.pem'

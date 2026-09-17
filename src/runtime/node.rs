@@ -104,8 +104,6 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) fault_injection: ConfiguredFaultInjection,
     /// Published once during startup. The session service holds the same store.
     pub(in crate::runtime) resource_store: ArcSwapOption<ResourceStore>,
-    /// Replaced whole whenever consensus reports a new set of installed resource versions.
-    pub(in crate::runtime) resource_versions: ArcSwap<ResourceVersionStatus>,
     /// Published once, when this node has joined its cluster, and never replaced. It carries the
     /// node's identity and incarnation, and every relay boundary built afterwards holds it too.
     pub(in crate::runtime) remote_dispatcher: ArcSwapOption<RemoteDispatcher>,

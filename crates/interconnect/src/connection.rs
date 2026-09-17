@@ -21,9 +21,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use arc_swap::ArcSwap;
 use bytes::Bytes;
-use dashmap::{DashMap, mapref::entry::Entry};
+use dashmap::mapref::entry::Entry;
 use error_stack::Report;
 use futures_util::stream::FuturesUnordered;
 use h2::{Reason, RecvStream, SendStream, client, server};
@@ -31,6 +30,7 @@ use http::{Method, Request, Response, StatusCode, Version};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{
     BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
+    sync::{ArcSwap, CancellationToken, DashMap},
 };
 use nervix_models::{
     ClusterNodeName, CoordinationIdentity, RemoteAckOutcome, RemoteAckRegistration,
@@ -44,7 +44,7 @@ use tokio::{
     time::{Instant, sleep, sleep_until, timeout},
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::task::TaskTracker;
 use tracing::{debug, warn};
 use triomphe::Arc;
 
@@ -402,6 +402,15 @@ impl RelayChannelWatermark {
 enum RelayAttemptEntry {
     Active(StdArc<RelayAdmissionRecord>),
     CancellationFence,
+}
+
+enum RelayGrantRegistration {
+    Registered,
+    Existing(RelayAttemptEntry),
+    Retired(RelayGrantDisposition),
+    InvalidSequence,
+    ChannelBusy,
+    AdmissionBusy,
 }
 
 impl RelayAttemptEntry {

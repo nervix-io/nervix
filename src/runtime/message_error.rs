@@ -887,7 +887,7 @@ impl Runtime {
                     domain: domain.clone(),
                     node: owner.clone(),
                     relay: relay.clone(),
-                    reason,
+                    reason: reason.to_string(),
                 })
             },
         )?;
@@ -1281,7 +1281,7 @@ impl Runtime {
             return Err(MessageErrorHandlingError::record_construction(
                 error,
                 MessageErrorRecordConstructionError::SideError {
-                    code: side_error.code,
+                    code: side_error.code(),
                     span: side_error.span,
                 },
             ));

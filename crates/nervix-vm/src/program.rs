@@ -24,6 +24,13 @@ pub struct Span {
     pub end: usize,
 }
 
+impl Span {
+    /// Whether `other` lies entirely inside this span, as the span of a nested operation does.
+    pub fn contains(self, other: Self) -> bool {
+        other.start >= self.start && other.end <= self.end
+    }
+}
+
 impl From<Range<usize>> for Span {
     fn from(range: Range<usize>) -> Self {
         Self {

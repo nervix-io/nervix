@@ -442,8 +442,8 @@ impl Runtime {
                         format!(
                             "reingestor '{}' FILTER-MAP side error {}: {} at {}",
                             reingestor.as_str(),
-                            side_error.code.as_str(),
-                            side_error.message,
+                            side_error.code().as_str(),
+                            side_error.reason,
                             side_error.span
                         ),
                         side_error.span,
@@ -1478,7 +1478,7 @@ mod tests {
     use std::sync::{Arc as StdArc, atomic::Ordering};
 
     use ahash::HashMap;
-    use arc_swap::ArcSwapOption;
+    use nervix_execution::sync::ArcSwapOption;
     use nervix_models::{
         AckMode, CreateReingestor, DomainSchedule, ErrorPolicies, ModelKind, NodeRef, ParseAsType,
         ProcessorInputs, ProcessorOutputs, ReingestorName, RelayName,

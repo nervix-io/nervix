@@ -40,7 +40,7 @@ Feature: Hash map metrics
 
       CREATE HASH MAP zip_codes_by_zip
         KEY zip
-        FROM RESOURCE zip_codes
+        FROM RESOURCE zip_codes VERSION 1
         PATH 'lookup.jsonl'
         DECODE USING zip_code_entry_codec;
 

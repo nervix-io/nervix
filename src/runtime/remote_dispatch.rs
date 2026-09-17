@@ -906,7 +906,7 @@ impl Runtime {
         .map_err(|reason| RuntimeError::DecodeRemoteRelay {
             domain: remote.domain.as_str().to_string(),
             relay: remote.relay.as_str().to_string(),
-            reason,
+            reason: reason.to_string(),
         })?;
         let dispatch = async {
             let dispatch = if owner_ingress {
@@ -1037,7 +1037,7 @@ impl Runtime {
         .map_err(|reason| RuntimeError::DecodeRemoteRelay {
             domain: remote.domain.as_str().to_string(),
             relay: remote.relay.as_str().to_string(),
-            reason,
+            reason: reason.to_string(),
         })?;
         let dispatch = services.fanout_local_subscriptions(&batch);
         if let Some(admission) = admission {

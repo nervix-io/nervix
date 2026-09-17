@@ -28,7 +28,6 @@ use std::{
 };
 
 use ahash::{HashMap, HashMapExt, HashSet, RandomState};
-use arc_swap::{ArcSwap, ArcSwapOption, cache::Cache};
 use arch_into::ArchInto as _;
 use arrow_array::{
     Array, ArrayRef, BooleanArray, ListArray, RecordBatch, RecordBatchOptions, StringArray,
@@ -48,13 +47,15 @@ use arrow_select::{
     take::take as take_arrow_array,
 };
 use chrono::{TimeZone, Utc};
-use dashmap::DashMap;
 use error_stack::Report;
 use fjall::Database;
 use futures_util::{future::BoxFuture, stream::FuturesUnordered};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
-use nervix_execution::{ChargedBytes, Executor};
+use nervix_execution::{
+    ChargedBytes, Executor,
+    sync::{AbortOnDropHandle, ArcSwap, ArcSwapOption, Cache, DashMap},
+};
 use nervix_interconnect::{
     EntityGatePurpose, Envelope, InterconnectRequest, RelayAdmission, RelayAdmissionDecision,
     RelayAdmissionStatus, RelayCancellationGuard, RelayDelivery, RelayPayload, RelayPayloadKind,
@@ -62,8 +63,8 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     AckMode, Assignment, AtomicTimestamp, BranchName, ClickHouseValueMapping, ClientConfigEntry,
-    ClientName, ClientPoolBounds, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule,
-    CodecName, CodecWireFormat, CoordinationIdentity, CorrelationTimeoutAction,
+    ClientName, ClientPoolBounds, ClientResourceMount, ClusterNodeIncarnation, ClusterNodeName,
+    ClusterSchedule, CodecName, CodecWireFormat, CoordinationIdentity, CorrelationTimeoutAction,
     CorrelatorMatchPolicy, CreateClientAzureBlob, CreateClientGcs, CreateClientIcebergRest,
     CreateClientKafka, CreateClientMqtt, CreateClientNats, CreateClientOtel, CreateClientPulsar,
     CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
@@ -83,10 +84,9 @@ use nervix_models::{
     OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
     PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
     RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
-    RemoteRuntimeField, RequestedResourceVersion, ResourceId, ResourceName,
-    ResourceVersionResolutionError, ResourceVersionStatus, RetryPolicy, RouteConstruction,
-    ScheduledModel, ScheduledNode, ScheduledNodes, SignalingProtocolName, SignalingWireFormat,
-    SqsFifoGroup, SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp,
+    RemoteRuntimeField, ResourceId, ResourceName, RetryPolicy, RouteConstruction, ScheduledModel,
+    ScheduledNode, ScheduledNodes, SignalingProtocolName, SignalingWireFormat, SqsFifoGroup,
+    SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp,
 };
 #[cfg(test)]
 use nervix_models::{CreateClientHttp, CreateClientPrometheus, CreateClientWebsockets};
@@ -135,10 +135,7 @@ use tokio::{
     time::{Duration, Instant, sleep, sleep_until},
 };
 use tokio_stream::StreamExt;
-use tokio_util::{
-    sync::CancellationToken,
-    task::{AbortOnDropHandle, TaskTracker},
-};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, error, info, trace, warn};
 use triomphe::Arc;
 use upon::Engine as TemplateEngine;
@@ -424,7 +421,6 @@ use processors::{
     ReordererRowOrder, WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext,
     WindowBounds, WindowFlushContext,
 };
-use rdkafka::consumer::StreamConsumer;
 pub(in crate::runtime) use reconnect_backoff::RuntimeReconnectBackoff;
 use reingestor::ReingestorInputSpec;
 pub(in crate::runtime) use relay_batch::RelayDispatchResult;
@@ -511,8 +507,10 @@ use wasm_output::{
     WasmOutputContext, checkpoint_wasm_guest_state, dispatch_wasm_output_envelopes,
     persist_wasm_guest_state,
 };
-use wasm_processor::{WasmInstanceError, flush_branch_wasm_processor};
-use wasm_state::{ReplicatedWasmProcessorState, WasmGuestState};
+use wasm_processor::{
+    WasmBranchModule, WasmInstanceError, WasmLiveInstance, flush_branch_wasm_processor,
+};
+use wasm_state::{ReplicatedWasmProcessorState, RestorableGuestState, WasmGuestState};
 pub(in crate::runtime) use websocket_signaling::SignalingProtobufDescriptors;
 use window_accumulator::{
     RetainedWindowRows, WindowAccumulator, WindowAccumulatorPlan, WindowArgumentColumns, WindowRow,

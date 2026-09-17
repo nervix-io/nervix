@@ -70,7 +70,7 @@ Feature: LOOKUP_HASH_MAP filter-map function
 
       CREATE HASH MAP titles_by_normalized
         KEY normalized_title
-        FROM RESOURCE titles_data
+        FROM RESOURCE titles_data VERSION 1
         PATH 'lookup.jsonl'
         DECODE USING title_lookup_codec;
 
@@ -213,7 +213,7 @@ Feature: LOOKUP_HASH_MAP filter-map function
 
       CREATE HASH MAP titles_by_normalized
         KEY normalized_title
-        FROM RESOURCE titles_data
+        FROM RESOURCE titles_data VERSION 1
         PATH 'lookup.jsonl'
         DECODE USING title_lookup_codec;
       """
@@ -306,7 +306,7 @@ Feature: LOOKUP_HASH_MAP filter-map function
 
       CREATE HASH MAP titles_by_normalized
         KEY normalized_title
-        FROM RESOURCE titles_data
+        FROM RESOURCE titles_data VERSION 1
         PATH 'lookup.jsonl'
         DECODE USING title_lookup_codec;
 

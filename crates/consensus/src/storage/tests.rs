@@ -1,6 +1,9 @@
 //! Recovery and publication checks through the Raft storage traits.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 use nervix_execution::{ExecutionConfig, MemoryBudgets, OperationLimits};
 use nervix_models::{
@@ -146,6 +149,7 @@ impl Harness {
                     password_hash: "x".repeat(bytes),
                 },
             )),
+            mutation_domains: BTreeSet::new(),
         })
     }
     fn admissions(
@@ -220,6 +224,7 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
                     expected_schedule: None,
                     domain: Box::new(domain.clone()),
                     schedule: Some(Box::new(schedule.clone())),
+                    mutation: None,
                 },
             )
             .await?;
@@ -233,6 +238,7 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
             expected_schedule: Some(Box::new(schedule)),
             domain: Box::new(changed_domain.clone()),
             schedule: None,
+            mutation: None,
         };
         harness
             .store
@@ -377,6 +383,7 @@ async fn responses_and_notifications_wait_for_storage_on_a_single_async_worker()
                                 1,
                                 ConsensusCommand::PutDomain {
                                     domain: Box::new(Harness::domain("tenant")),
+                                    mutation: None,
                                 },
                             ),
                             None,
@@ -408,6 +415,7 @@ async fn a_committed_range_is_published_once_after_its_single_durable_write() ->
                 index,
                 ConsensusCommand::PutDomain {
                     domain: Box::new(Harness::domain(name)),
+                    mutation: None,
                 },
             ),
             None,
@@ -864,6 +872,7 @@ async fn snapshots_recover_state_and_snapshot_metadata_atomically() -> TestResul
             1,
             ConsensusCommand::PutDomain {
                 domain: Box::new(Harness::domain("source")),
+                mutation: None,
             },
         )
         .await?;
@@ -877,6 +886,7 @@ async fn snapshots_recover_state_and_snapshot_metadata_atomically() -> TestResul
                 1,
                 ConsensusCommand::PutDomain {
                     domain: Box::new(Harness::domain("target")),
+                    mutation: None,
                 },
             )
             .await?;
@@ -942,6 +952,7 @@ async fn an_interrupted_installation_finishes_on_the_next_start() -> TestResult 
             1,
             ConsensusCommand::PutDomain {
                 domain: Box::new(Harness::domain("source")),
+                mutation: None,
             },
         )
         .await?;
@@ -956,6 +967,7 @@ async fn an_interrupted_installation_finishes_on_the_next_start() -> TestResult 
                     1,
                     ConsensusCommand::PutDomain {
                         domain: Box::new(Harness::domain("target")),
+                        mutation: None,
                     },
                 )
                 .await?;
@@ -1004,6 +1016,7 @@ async fn a_snapshot_is_sealed_as_bounded_sections() -> TestResult {
                 index,
                 ConsensusCommand::PutDomain {
                     domain: Box::new(Harness::domain(&format!("domain_{index}"))),
+                    mutation: None,
                 },
             )
             .await?;
@@ -1172,6 +1185,7 @@ async fn a_superseded_generation_is_deleted_once_nothing_reads_it() -> TestResul
             1,
             ConsensusCommand::PutDomain {
                 domain: Box::new(Harness::domain("first")),
+                mutation: None,
             },
         )
         .await?;
@@ -1182,6 +1196,7 @@ async fn a_superseded_generation_is_deleted_once_nothing_reads_it() -> TestResul
             2,
             ConsensusCommand::PutDomain {
                 domain: Box::new(Harness::domain("second")),
+                mutation: None,
             },
         )
         .await?;
@@ -1422,6 +1437,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                 1,
                 ConsensusCommand::PutDomain {
                     domain: Box::new(domain.clone()),
+                    mutation: None,
                 },
             )
             .await?;
@@ -1477,6 +1493,14 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
             )
             .await?;
         let preceding = harness.store.inner.state();
+        let mutation = preceding
+            .transactions
+            .get("transaction")
+            .and_then(ReplicatedTransaction::domain_mutation)
+            .cloned()
+            .ok_or("committing transaction mutation lease missing")?;
+        assert_eq!(mutation.recovery_fence().revision(), 4);
+        assert_eq!(preceding.domain_mutations.get(&domain.id), Some(&mutation));
         let command = ConsensusCommand::AdvanceTransactionCommit {
             id: "transaction".into(),
             expected_next_statement: 0,
@@ -1508,6 +1532,11 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
         assert!(harness.apply(5, command).await.is_err());
         assert_eq!(harness.store.inner.state(), preceding);
         let mut harness = harness.reopen().await?;
+        assert_eq!(
+            harness.store.inner.state().domain_mutations.get(&domain.id),
+            Some(&mutation),
+            "reopening retains the committing transaction's domain mutation fence"
+        );
         match boundary {
             StorageBoundary::BeforeCommit => assert_eq!(harness.store.inner.state(), preceding),
             StorageBoundary::AfterSync => {
@@ -1559,6 +1588,10 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                 assert_eq!(
                     transaction.finished_outcome(),
                     Some(&TransactionOutcome::Committed)
+                );
+                assert!(
+                    !completed.domain_mutations.contains_key(&domain.id),
+                    "the terminal explicit transaction releases its domain mutation"
                 );
                 harness
                     .apply(
@@ -1633,6 +1666,7 @@ async fn current_record_storage_requires_its_metadata() -> TestResult {
             1,
             ConsensusCommand::PutDomain {
                 domain: Box::new(Harness::domain("tenant")),
+                mutation: None,
             },
         )
         .await?;

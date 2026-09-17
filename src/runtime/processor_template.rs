@@ -391,11 +391,11 @@ pub(super) fn wasm_guest_call_schemas(
 }
 
 pub(super) fn wasm_instance_next_deadline(
-    instance: Option<&nervix_wasm::WasmBranchInstance>,
+    instance: Option<&WasmLiveInstance>,
 ) -> Option<Timestamp> {
     let instance = instance?;
     let mut next_deadline: Option<Timestamp> = None;
-    for request in instance.timeout_requests() {
+    for request in instance.guest.timeout_requests() {
         let Ok(delay_nanos) = i64::try_from(request.delay.as_nanos()) else {
             continue;
         };

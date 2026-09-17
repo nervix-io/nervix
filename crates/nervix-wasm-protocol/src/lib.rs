@@ -5,8 +5,8 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The FlatBuffers schema of the ABI, its encoders, its verified decoders, and the
-//!   borrowed views decoding produces.
+//! - **Owns.** The FlatBuffers schema of the ABI, its encoders, its verified decoders, the borrowed
+//!   views decoding produces, and the return codes that classify a rejected saved state.
 //! - **Depends on.** `flatbuffers`.
 //! - **Must not know.** Anything in Nervix, deliberately. Guests link this crate, so a Model or a
 //!   name type named here would pull the server's vocabulary into every guest.
@@ -31,6 +31,43 @@ use generated::nervix_wasm as wire;
 
 pub const FILE_IDENTIFIER: &str = wire::MESSAGE_IDENTIFIER;
 pub const SERIALIZATION_NAME: &str = "FlatBuffers";
+
+const SNAPSHOT_ENVELOPE_REJECTED: i32 = -7;
+const APPLICATION_STATE_REJECTED: i32 = -8;
+
+/// A guest's verdict that the saved state `nervix_load_state` handed it cannot be restored.
+///
+/// Each verdict has its own `nervix_load_state` return code, and those two codes are the only
+/// restore outcome that says anything about the saved bytes. A trap, an exhausted execution limit,
+/// or any other negative code while restoring is a failure of the restore itself, so the host keeps
+/// the saved state exactly as it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SavedStateRejection {
+    /// The saved bytes are not a snapshot envelope this guest can decode.
+    SnapshotEnvelope,
+    /// The guest decoded the snapshot envelope and refuses the application state it carries.
+    ApplicationState,
+}
+
+impl SavedStateRejection {
+    /// The `nervix_load_state` return code that reports this verdict.
+    pub const fn code(self) -> i32 {
+        match self {
+            Self::SnapshotEnvelope => SNAPSHOT_ENVELOPE_REJECTED,
+            Self::ApplicationState => APPLICATION_STATE_REJECTED,
+        }
+    }
+
+    /// The verdict a `nervix_load_state` return code reports, or `None` for every code that is not
+    /// one.
+    pub const fn from_code(code: i32) -> Option<Self> {
+        match code {
+            SNAPSHOT_ENVELOPE_REJECTED => Some(Self::SnapshotEnvelope),
+            APPLICATION_STATE_REJECTED => Some(Self::ApplicationState),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum ProtocolError {
@@ -154,17 +191,19 @@ pub enum OutputColumnRef {
     Uninitialized,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// The state a guest saves for one branch instance.
+///
+/// A snapshot carries durable computation state only. Everything an instance uses to execute —
+/// buffered input with its ACK tokens, output it has not emitted, timeout handles, and a latched
+/// error — belongs to that instance and has no field here.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GuestSnapshot {
-    pub processed_batches: u64,
-    pub processed_rows: u64,
-    pub pending_start_row: u64,
-    pub last_domain_time_nanos: i64,
-    pub last_timeout_handle: i64,
-    pub pending_batch: Vec<u8>,
+    /// A `BranchInit` message of the branch configuration the instance was initialized with,
+    /// which a restore checks against the configuration of the instance it restores into.
     pub init_metadata: Vec<u8>,
-    pub saved_state: Vec<u8>,
-    pub error_state: Option<String>,
+    /// The guest's durable computation state. Empty bytes are the state of a guest with nothing to
+    /// carry over.
+    pub application_state: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -293,25 +332,13 @@ impl GuestSnapshot {
 
     /// Encodes and finishes this message in the supplied FlatBuffer builder.
     pub fn encode_in<'a, A: Allocator + 'a>(&self, builder: &mut FlatBufferBuilder<'a, A>) {
-        let pending_batch = builder.create_vector(&self.pending_batch);
         let init_metadata = builder.create_vector(&self.init_metadata);
-        let saved_state = builder.create_vector(&self.saved_state);
-        let error_state = self
-            .error_state
-            .as_deref()
-            .map(|error| builder.create_string(error));
+        let application_state = builder.create_vector(&self.application_state);
         let payload = wire::GuestSnapshot::create(
             builder,
             &wire::GuestSnapshotArgs {
-                processed_batches: self.processed_batches,
-                processed_rows: self.processed_rows,
-                pending_start_row: self.pending_start_row,
-                last_domain_time_nanos: self.last_domain_time_nanos,
-                last_timeout_handle: self.last_timeout_handle,
-                pending_batch: Some(pending_batch),
                 init_metadata: Some(init_metadata),
-                saved_state: Some(saved_state),
-                error_state,
+                application_state: Some(application_state),
             },
         );
         finish_message(
@@ -330,15 +357,8 @@ impl GuestSnapshot {
             }
         })?;
         Ok(Self {
-            processed_batches: snapshot.processed_batches(),
-            processed_rows: snapshot.processed_rows(),
-            pending_start_row: snapshot.pending_start_row(),
-            last_domain_time_nanos: snapshot.last_domain_time_nanos(),
-            last_timeout_handle: snapshot.last_timeout_handle(),
-            pending_batch: snapshot.pending_batch().bytes().to_vec(),
             init_metadata: snapshot.init_metadata().bytes().to_vec(),
-            saved_state: snapshot.saved_state().bytes().to_vec(),
-            error_state: snapshot.error_state().map(str::to_string),
+            application_state: snapshot.application_state().bytes().to_vec(),
         })
     }
 }
@@ -944,6 +964,89 @@ mod tests {
             Envelope::decode(&encoded),
             Err(ProtocolError::InvalidUninitializedColumnIndex { column_index: 1 })
         ));
+    }
+
+    fn branch_init() -> BranchInit {
+        BranchInit {
+            domain_name: "events".to_string(),
+            domain_type: "runtime".to_string(),
+            branch_key: Some(b"tenant=alpha".to_vec()),
+            input_schema: ProcessorSchema {
+                name: "input_events".to_string(),
+                fields: vec![ProcessorField {
+                    name: "value".to_string(),
+                    ty: ProcessorType::I32,
+                    optional: false,
+                }],
+            },
+            output_schemas: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn guest_snapshot_round_trips_its_init_metadata_and_application_state() {
+        let snapshot = GuestSnapshot {
+            init_metadata: branch_init().encode(),
+            application_state: 7_u64.to_le_bytes().to_vec(),
+        };
+
+        let encoded = snapshot.encode();
+
+        assert_eq!(
+            GuestSnapshot::decode(&encoded).expect("must decode"),
+            snapshot
+        );
+    }
+
+    #[test]
+    fn guest_snapshot_keeps_empty_application_state_inside_its_envelope() {
+        let snapshot = GuestSnapshot {
+            init_metadata: branch_init().encode(),
+            application_state: Vec::new(),
+        };
+
+        let encoded = snapshot.encode();
+
+        assert!(!encoded.is_empty());
+        assert_eq!(
+            GuestSnapshot::decode(&encoded).expect("must decode"),
+            snapshot
+        );
+    }
+
+    #[test]
+    fn guest_snapshot_decoding_rejects_another_message() {
+        let encoded = branch_init().encode();
+
+        assert!(matches!(
+            GuestSnapshot::decode(&encoded),
+            Err(ProtocolError::UnexpectedPayload {
+                expected: "guest snapshot",
+                actual: "BranchInit",
+            })
+        ));
+    }
+
+    #[test]
+    fn every_saved_state_rejection_is_read_back_from_its_own_code() {
+        let rejections = [
+            SavedStateRejection::SnapshotEnvelope,
+            SavedStateRejection::ApplicationState,
+        ];
+
+        for rejection in rejections {
+            assert_eq!(
+                SavedStateRejection::from_code(rejection.code()),
+                Some(rejection)
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_restore_code_is_not_a_saved_state_rejection() {
+        for code in [0, -1, -2, -3, -4, -5, -6] {
+            assert_eq!(SavedStateRejection::from_code(code), None);
+        }
     }
 
     #[test]

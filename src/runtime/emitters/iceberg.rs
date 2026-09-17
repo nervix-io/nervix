@@ -1103,8 +1103,8 @@ impl IcebergEmitter {
             };
             let reason = format!(
                 "Iceberg VALUES side error {}: {} at {}",
-                side_error.code.as_str(),
-                side_error.message,
+                side_error.code().as_str(),
+                side_error.reason,
                 side_error.span
             );
             rejected.push(IcebergRejectedRow {

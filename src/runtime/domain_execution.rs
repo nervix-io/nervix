@@ -167,7 +167,6 @@ impl DomainExecution {
 #[derive(Debug)]
 pub(crate) struct LookupRuntime {
     pub(super) model: CreateLookup,
-    pub(super) resource_version: u64,
     pub(super) schema: Arc<CompiledSchema>,
     pub(super) batch: Arc<RuntimeRecordBatch>,
     pub(super) entries: Arc<HashMap<String, usize>>,

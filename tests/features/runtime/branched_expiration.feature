@@ -256,6 +256,11 @@ Feature: Branched branch expiration
 
       START;
       """
+    And these NSPL commands are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "correlator" "match_users" is saved as placeholder "correlator_owner"
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/left"
       """
       {"user_id":42}
@@ -264,9 +269,21 @@ Feature: Branched branch expiration
       """
       DESCRIBE RELAY left_events WHERE (user_id = 42);
       """
+    And node "{{correlator_owner}}" observability metric "nervix_branch_instances" with labels eventually equals 1
+      """
+      domain="{{domain}}"
+      branch="by_correlated_users"
+      physical_node_id="{{correlator_owner}}"
+      """
     And within "30s" node "node-1" eventually reports describe relay as "not exists"
       """
       DESCRIBE RELAY left_events WHERE (user_id = 42);
+      """
+    And node "{{correlator_owner}}" observability metric "nervix_branch_instances" with labels eventually equals 0
+      """
+      domain="{{domain}}"
+      branch="by_correlated_users"
+      physical_node_id="{{correlator_owner}}"
       """
     Then the relay subscription does not receive a payload within "500ms"
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/right"

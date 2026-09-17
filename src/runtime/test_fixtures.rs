@@ -10,10 +10,10 @@ use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc as StdArc};
 pub(in crate::runtime) const STUPID_CHANNEL_CAPACITY_REMOVE_ME: NonZeroUsize = NonZeroUsize::MIN;
 
 use ahash::HashMap;
-use arc_swap::ArcSwapOption;
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::Schema as ArrowSchema;
+use nervix_execution::sync::ArcSwapOption;
 use nervix_models::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BranchName, BranchSelection,
     ClusterNodeIncarnation, ClusterNodeName, CreateBranch, CreateSchema, DomainConfig, DomainName,

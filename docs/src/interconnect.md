@@ -111,7 +111,11 @@ names the schedule change; it does not authorize coordination traffic.
 
 The coordinator records every destination as an attempted participant before sending its prepare
 request. A timeout, cancellation, or missing response after the destination persisted the request
-therefore remains explicit cleanup work. Discard is exact and idempotent over the coordination
+therefore remains explicit cleanup work. A participant that refuses capture, preparation, forced
+recovery preparation, confirmation, activation, or reconciliation answers with a rejection whose
+text is its complete failure chain rather than only the outermost failure, so the coordinator
+reports, for example, a destination WASM guest's classified restore failure with its stage, branch,
+module, and saved state revision. Discard is exact and idempotent over the coordination
 identity, transition ID, domain, and entity; a delayed discard for one operation cannot remove a
 replacement prepared by another operation.
 
@@ -454,6 +458,13 @@ its local replication or snapshot-exchange error. Only an execution failure incl
 node's opaque diagnostic text. A materialized snapshot is streamed only after a successful typed
 description identifies its exact length, digest, schema fingerprint, revision, fence, and branch
 generation.
+
+A materialized dependency reader may observe the committed destination just before that node
+activates its prepared state, or the previous destination just after it leaves the assignment. A
+rejected, absent, or not-ready snapshot description in this handoff window means the dependency has
+no available record for that read. The dependency policy then waits, skips, or supplies its declared
+default; `REQUIRED WAIT` retains the batch and retries after routing, state, or bounded poll progress.
+Execution failures and transport failures remain errors.
 
 The [Control Plane](./control-plane.md) defines when replicated changes and resources become
 authoritative. The [Data Plane](./data-plane.md) defines how a local execution consumes transferred

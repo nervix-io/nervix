@@ -311,7 +311,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       {"value":1}
       """
-    When these NSPL commands fail with "rejected transferred branch 'none'"
+    When these NSPL commands fail with "wasm processor 'stateful_guest' application state restoration failed (unbranched, resource 'rejecting_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision"
       """
       RELOCATE WASM PROCESSOR stateful_guest ONTO NODE node-2 IGNORE PREFERENCES;
       """
@@ -1455,11 +1455,11 @@ Feature: Relocating runtime nodes onto a named cluster node
       RELOCATE JUNCTION exclusive_route ONTO NODE node-2 FOLLOW PREFERENCES;
       """
     Then the entity gate pause for domain "{{domain}}" is reached
-    When these NSPL commands fail with "domain '{{domain}}' already has a model alteration in progress"
+    When these NSPL commands fail with "domain '{{domain}}' mutation is owned by command"
       """
       ALTER RELAY exclusive_output SET CAPACITY 32;
       """
-    And these NSPL commands fail with "domain '{{domain}}' already has a model alteration in progress"
+    And these NSPL commands fail with "domain '{{domain}}' mutation is owned by command"
       """
       RELOCATE JUNCTION exclusive_route ONTO NODE node-3 FOLLOW PREFERENCES;
       """

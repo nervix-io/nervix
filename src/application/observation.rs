@@ -975,7 +975,7 @@ impl SessionServiceImpl {
             {
                 Ok(description) => Ok(LookupDescribeEnvelope {
                     resource: lookup.resource.clone(),
-                    resource_version: description.resource_version,
+                    resource_version: lookup.resource_version,
                     path: lookup.path.clone(),
                     decode_using_codec: lookup.decode_using_codec.clone(),
                     key_field: lookup.key_field.clone(),
@@ -1049,7 +1049,7 @@ impl SessionServiceImpl {
             })?;
         Ok(LookupDescribeEnvelope {
             resource: description.model.resource,
-            resource_version: description.resource_version,
+            resource_version: description.model.resource_version,
             path: description.model.path,
             decode_using_codec: description.model.decode_using_codec,
             key_field: description.model.key_field,
@@ -2464,17 +2464,20 @@ mod tests {
             .await
             .expect("resource upload should complete");
         proposer
-            .put_domain(DomainState {
-                id: DomainName::parse("default").expect("valid domain"),
-                config: DomainConfig {
-                    pace: DomainPace::Unpaced,
-                    placement: nervix_models::PlacementPolicy::Neutral,
+            .put_domain(
+                DomainState {
+                    id: DomainName::parse("default").expect("valid domain"),
+                    config: DomainConfig {
+                        pace: DomainPace::Unpaced,
+                        placement: nervix_models::PlacementPolicy::Neutral,
+                    },
+                    status: DomainStatus::Stopped,
+                    start_version: 0,
+                    last_start: nervix_models::DomainStartPoint::Resume,
+                    clock: None,
                 },
-                status: DomainStatus::Stopped,
-                start_version: 0,
-                last_start: nervix_models::DomainStartPoint::Resume,
-                clock: None,
-            })
+                None,
+            )
             .await
             .expect("domain should persist");
         let (tx, _rx) = mpsc::channel(16);

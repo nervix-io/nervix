@@ -19,12 +19,13 @@ use crate::{
     AlterRelayOperation, AlterReorderer, AlterReordererOperation, AlterSchema,
     AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AssignmentTargetScope,
     AvroType, BinaryOperator, BranchEviction, BranchSelection, ClickHouseValueMapping,
-    ClientConfigEntry, CodecEncoding, CodecEncodingRule, CodecJaqTransformations, CodecWireFormat,
-    CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse,
-    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
-    CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
-    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
-    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    ClientConfigEntry, ClientResourceMount, CodecEncoding, CodecEncodingRule,
+    CodecJaqTransformations, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
+    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
+    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
+    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
+    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
+    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
     CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
@@ -39,10 +40,10 @@ use crate::{
     MqttSession, MySqlConflictAction, NatsIngestMode, OtelMetricKind, OtelSignal, OutputBranch,
     ParseAsType, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
     ProcessorOutputs, PulsarIngestMode, QueueName, RabbitMqIngestMode, RedisPubSubIngestMode,
-    RelayBranching, RelayName, ResourceName, RetryPolicy, RouteConstruction, SchemaField,
-    SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup,
-    SqsIngestMode, Statement, SubscriptionLiteral, TopicName, UnaryOperator, WebsocketsIngestMode,
-    WindowBound, WireSchemaField, ZeroMqIngestMode,
+    RelayBranching, RelayName, RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName,
+    SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, Statement,
+    SubscriptionLiteral, TopicName, UnaryOperator, WebsocketsIngestMode, WindowBound,
+    WireSchemaField, ZeroMqIngestMode,
 };
 
 /// Width of one canonical indentation level.
@@ -1113,7 +1114,11 @@ macro_rules! client_head_clauses {
             )),
         ];
         if let Some(mount) = $client.mount.as_ref() {
-            clauses.push(Clause::line(format!("MOUNT {}", mount.as_str())));
+            clauses.push(Clause::line(format!(
+                "MOUNT {} VERSION {}",
+                mount.resource.as_str(),
+                mount.version
+            )));
         }
         clauses
     }};
@@ -1122,7 +1127,7 @@ macro_rules! client_head_clauses {
 macro_rules! impl_standard_client_canonical_nspl {
     ($($Client:ident => $type_label:literal, $pooling:ident;)+) => {
         $(
-            impl $Client {
+            impl<Version: Display> $Client<Version> {
                 pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
                     let config = self
                         .config
@@ -1167,7 +1172,7 @@ impl_standard_client_canonical_nspl! {
     CreateClientMongoDb => "MONGODB", pooled;
 }
 
-impl CreateClientS3 {
+impl<Version: Display> CreateClientS3<Version> {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         let config = self
             .config
@@ -1185,7 +1190,7 @@ impl CreateClientS3 {
     }
 }
 
-impl CreateClientWebsockets {
+impl<Version: Display> CreateClientWebsockets<Version> {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         let config = self
             .config
@@ -1208,9 +1213,13 @@ impl CreateClientWebsockets {
     }
 }
 
-fn client_mount_clause(mount: Option<&ResourceName>) -> String {
+fn client_mount_clause<Version: Display>(mount: Option<&ClientResourceMount<Version>>) -> String {
     match mount {
-        Some(mount) => format!(" MOUNT {}", mount.as_str()),
+        Some(mount) => format!(
+            " MOUNT {} VERSION {}",
+            mount.resource.as_str(),
+            mount.version
+        ),
         None => String::new(),
     }
 }
@@ -1592,13 +1601,14 @@ impl CreateRelay {
     }
 }
 
-impl CreateLookup {
+impl<Version: Display> CreateLookup<Version> {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         Ok(format!(
-            "CREATE HASH MAP {} KEY {} FROM RESOURCE {} PATH {} DECODE USING {};",
+            "CREATE HASH MAP {} KEY {} FROM RESOURCE {} VERSION {} PATH {} DECODE USING {};",
             self.name.as_str(),
             self.key_field.as_str(),
             self.resource.as_str(),
+            self.resource_version,
             string_literal(&self.path),
             self.decode_using_codec.as_str()
         ))
@@ -3551,19 +3561,19 @@ mod tests {
     use nonzero_ext::nonzero;
 
     use crate::{
-        AckMode, AvroType, BinaryOperator, BranchSelection, ClientPoolBounds, CodecEncoding,
-        CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
-        CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
-        CreateClientHttp, CreateClientKafka, CreateClientMqtt, CreateClientNats,
-        CreateClientPostgres, CreateClientPrometheus, CreateClientRabbitMq, CreateClientRedis,
-        CreateClientSentry, CreateClientSqs, CreateClientSyslog, CreateClientWebsockets,
-        CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
-        CreateEndpoint, CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor,
-        CreateRelay, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
-        CreateWindowProcessor, CreateWireSchema, EmitSink, EmitterPublishingMode,
-        EndpointIngestMode, EndpointType, ErrorPolicies, Expression, FieldScope, FlushPolicy,
-        GeneralErrorPolicy, HttpConfigEntry, IngestSource, JsonType, KafkaConfigEntry,
-        KafkaIngestMode, KafkaOffsetMode, Literal, MessageErrorPolicy, Model,
+        AckMode, AvroType, BinaryOperator, BranchSelection, ClientPoolBounds, ClientResourceMount,
+        CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations,
+        CodecProtobufConfig, CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
+        CorrelatorMatchPolicy, CreateClientHttp, CreateClientKafka, CreateClientMqtt,
+        CreateClientNats, CreateClientPostgres, CreateClientPrometheus, CreateClientRabbitMq,
+        CreateClientRedis, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+        CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
+        CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction,
+        CreatePlacement, CreateReingestor, CreateRelay, CreateSchema, CreateSignalingProtocol,
+        CreateUdf, CreateVhost, CreateWindowProcessor, CreateWireSchema, EmitSink,
+        EmitterPublishingMode, EndpointIngestMode, EndpointType, ErrorPolicies, Expression,
+        FieldScope, FlushPolicy, GeneralErrorPolicy, HttpConfigEntry, IngestSource, JsonType,
+        KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal, MessageErrorPolicy, Model,
         MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
         MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch, ParseAsType,
         PlacementPolicy, PostgresConflictAction, PostgresValueMapping, ProcessorInputs,
@@ -3757,7 +3767,7 @@ mod tests {
 
     #[test]
     fn renders_transport_values_as_string_literals() {
-        let model = CreateClientKafka {
+        let model: CreateClientKafka = CreateClientKafka {
             name: named("kafka_main"),
             mount: None,
             config: vec![
@@ -3776,7 +3786,7 @@ mod tests {
 
     #[test]
     fn renders_config_values_that_mix_quote_styles() {
-        let model = CreateClientKafka {
+        let model: CreateClientKafka = CreateClientKafka {
             name: named("k"),
             mount: None,
             config: vec![KafkaConfigEntry {
@@ -3880,7 +3890,7 @@ mod tests {
     fn renders_all_client_types_canonical() {
         let expectations = [
             (
-                CreateClientHttp {
+                CreateClientHttp::<u64> {
                     name: named("http_main"),
                     mount: None,
                     config: vec![HttpConfigEntry {
@@ -3893,7 +3903,7 @@ mod tests {
                 "CREATE CLIENT http_main\n  TYPE HTTP\n  CONFIG {\n    'base_url' = 'https://example.com'\n  };",
             ),
             (
-                CreateClientSentry {
+                CreateClientSentry::<u64> {
                     name: named("sentry_main"),
                     mount: None,
                     config: vec![SentryConfigEntry {
@@ -3906,7 +3916,7 @@ mod tests {
                 "CREATE CLIENT sentry_main\n  TYPE SENTRY\n  CONFIG {\n    'dsn' = 'https://key@sentry.example/42'\n  };",
             ),
             (
-                CreateClientMqtt {
+                CreateClientMqtt::<u64> {
                     name: named("mqtt_main"),
                     mount: None,
                     config: vec![config_entry("host", "mqtt.internal")],
@@ -3916,7 +3926,7 @@ mod tests {
                 "CREATE CLIENT mqtt_main\n  TYPE MQTT\n  CONFIG {\n    'host' = 'mqtt.internal'\n  };",
             ),
             (
-                CreateClientNats {
+                CreateClientNats::<u64> {
                     name: named("nats_main"),
                     mount: None,
                     config: vec![config_entry("servers", "nats://localhost:4222")],
@@ -3926,7 +3936,7 @@ mod tests {
                 "CREATE CLIENT nats_main\n  TYPE NATS\n  CONFIG {\n    'servers' = 'nats://localhost:4222'\n  };",
             ),
             (
-                CreateClientPrometheus {
+                CreateClientPrometheus::<u64> {
                     name: named("prom_main"),
                     mount: None,
                     config: vec![PrometheusConfigEntry {
@@ -3939,7 +3949,7 @@ mod tests {
                 "CREATE CLIENT prom_main\n  TYPE PROMETHEUS\n  CONFIG {\n    'url' = 'http://prometheus:9090'\n  };",
             ),
             (
-                CreateClientRabbitMq {
+                CreateClientRabbitMq::<u64> {
                     name: named("rmq_main"),
                     mount: None,
                     config: vec![config_entry("uri", "amqp://guest:guest@localhost:5672")],
@@ -3949,7 +3959,7 @@ mod tests {
                 "CREATE CLIENT rmq_main\n  TYPE RABBITMQ\n  CONFIG {\n    'uri' = 'amqp://guest:guest@localhost:5672'\n  };",
             ),
             (
-                CreateClientRedis {
+                CreateClientRedis::<u64> {
                     name: named("redis_main"),
                     pool: pool_bounds(1, 4),
                     mount: None,
@@ -3960,10 +3970,13 @@ mod tests {
                 "CREATE CLIENT redis_main\n  TYPE REDIS\n  POOL SIZE MIN 1 MAX 4\n  CONFIG {\n    'url' = 'redis://localhost:6379'\n  };",
             ),
             (
-                CreateClientPostgres {
+                CreateClientPostgres::<u64> {
                     name: named("postgres_tls"),
                     pool: pool_bounds(0, 1),
-                    mount: Some(named("dev_tls")),
+                    mount: Some(ClientResourceMount {
+                        resource: named("dev_tls"),
+                        version: 3,
+                    }),
                     config: vec![
                         config_entry(
                             "addr",
@@ -3974,10 +3987,10 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE CLIENT postgres_tls\n  TYPE POSTGRES\n  POOL SIZE MIN 0 MAX 1\n  MOUNT dev_tls\n  CONFIG {\n    'addr' = 'postgresql://db.example.com/nervix?sslmode=verify-full',\n    'tls_ca_file' = '{{ dev_tls }}/ca.pem'\n  };",
+                "CREATE CLIENT postgres_tls\n  TYPE POSTGRES\n  POOL SIZE MIN 0 MAX 1\n  MOUNT dev_tls VERSION 3\n  CONFIG {\n    'addr' = 'postgresql://db.example.com/nervix?sslmode=verify-full',\n    'tls_ca_file' = '{{ dev_tls }}/ca.pem'\n  };",
             ),
             (
-                CreateClientZeroMq {
+                CreateClientZeroMq::<u64> {
                     name: named("zmq_main"),
                     mount: None,
                     config: vec![config_entry("bind", "tcp://*:5555")],
@@ -3987,9 +4000,12 @@ mod tests {
                 "CREATE CLIENT zmq_main\n  TYPE ZEROMQ\n  CONFIG {\n    'bind' = 'tcp://*:5555'\n  };",
             ),
             (
-                CreateClientSyslog {
+                CreateClientSyslog::<u64> {
                     name: named("syslog_main"),
-                    mount: Some(named("syslog_tls")),
+                    mount: Some(ClientResourceMount {
+                        resource: named("syslog_tls"),
+                        version: 2,
+                    }),
                     config: vec![
                         config_entry("protocol", "tls"),
                         config_entry("addr", "logs.example.com:6514"),
@@ -3998,10 +4014,10 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE CLIENT syslog_main\n  TYPE SYSLOG MOUNT syslog_tls\n  CONFIG {\n    'protocol' = 'tls',\n    'addr' = 'logs.example.com:6514',\n    'tls_ca_file' = '{{ syslog_tls }}/ca.pem'\n  };",
+                "CREATE CLIENT syslog_main\n  TYPE SYSLOG MOUNT syslog_tls VERSION 2\n  CONFIG {\n    'protocol' = 'tls',\n    'addr' = 'logs.example.com:6514',\n    'tls_ca_file' = '{{ syslog_tls }}/ca.pem'\n  };",
             ),
             (
-                CreateClientSqs {
+                CreateClientSqs::<u64> {
                     name: named("sqs_main"),
                     mount: None,
                     config: vec![config_entry("region", "us-east-1")],
@@ -4011,7 +4027,7 @@ mod tests {
                 "CREATE CLIENT sqs_main\n  TYPE SQS\n  CONFIG {\n    'region' = 'us-east-1'\n  };",
             ),
             (
-                CreateClientWebsockets {
+                CreateClientWebsockets::<u64> {
                     name: named("ws_main"),
                     mount: None,
                     signaling_protocol: None,
@@ -4022,7 +4038,7 @@ mod tests {
                 "CREATE CLIENT ws_main\n  TYPE WEBSOCKETS\n  CONFIG {\n    'url' = 'wss://example.com/socket'\n  };",
             ),
             (
-                CreateClientWebsockets {
+                CreateClientWebsockets::<u64> {
                     name: named("ws_main"),
                     mount: None,
                     signaling_protocol: Some(named("binance_ws")),

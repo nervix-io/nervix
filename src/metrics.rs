@@ -21,11 +21,12 @@ use std::{
 };
 
 use arch_into::ArchInto as _;
-use dashmap::{DashMap, mapref::entry::Entry};
+use dashmap::mapref::entry::Entry;
 use hdrhistogram::Histogram as HdrHistogram;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowMetricRef, DataflowStatistics};
+use nervix_execution::sync::DashMap;
 use nervix_models::{
     BranchName, ClusterNodeName, DomainName, IngestorName, ModelKind, ModelName, RelayName,
     Timestamp,

@@ -3588,6 +3588,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "deterministic_collections"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "840cd0e7a7aab89e504ff08a6fe0e2899887ab0fdcc9e8267b2cb7e545728c7f"
+dependencies = [
+ "serde",
+ "siphasher 0.3.11",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4185,21 +4195,6 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
-]
-
-[[package]]
-name = "generator"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3b854b0e584ead1a33f18b2fcad7cf7be18b3875c78816b753639aa501513ae"
-dependencies = [
- "cc",
- "cfg-if",
- "libc",
- "log",
- "rustversion",
- "windows-link",
- "windows-result",
 ]
 
 [[package]]
@@ -5903,19 +5898,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "loom"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "419e0dc8046cb947daa77eb95ae174acfbddb7673b4151f56d1eed8e93fbfaca"
-dependencies = [
- "cfg-if",
- "generator",
- "scoped-tls",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "lru"
 version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6542,6 +6524,7 @@ dependencies = [
  "anyhow",
  "arch-into",
  "clap",
+ "error-stack",
  "humantime",
  "meticulous",
  "nervix-approx-into",
@@ -6551,6 +6534,7 @@ dependencies = [
  "nervix-test-environment",
  "ordered-float 4.6.0",
  "parking_lot",
+ "rcgen",
  "rdkafka",
  "reqwest 0.13.4",
  "serde",
@@ -6601,15 +6585,34 @@ dependencies = [
  "nervix-recovery",
  "prost 0.13.5",
  "rustls",
+ "shuttle-tokio",
+ "shuttle-tokio-stream",
  "strum 0.26.3",
  "tempfile",
  "thiserror 2.0.20",
- "tokio",
- "tokio-stream",
  "tonic 0.13.1",
  "triomphe",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "nervix-client-wire"
+version = "0.1.0-dev"
+dependencies = [
+ "bytes",
+ "error-stack",
+ "flatbuffers",
+ "flatc-rust",
+ "futures-util",
+ "meticulous",
+ "nervix-models",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite 0.24.0",
+ "tonic 0.13.1",
+ "url",
 ]
 
 [[package]]
@@ -6631,16 +6634,16 @@ dependencies = [
  "nervix-models",
  "nervix-recovery",
  "openraft",
- "parking_lot",
  "rkyv",
  "serde",
+ "shuttle-parking_lot",
+ "shuttle-tokio",
+ "shuttle-tokio-util",
  "sorted-vec",
  "storekey",
  "strum 0.26.3",
  "tempfile",
  "thiserror 2.0.20",
- "tokio",
- "tokio-util",
  "tracing",
  "triomphe",
  "ubyte",
@@ -6661,12 +6664,15 @@ dependencies = [
 name = "nervix-execution"
 version = "0.1.0-dev"
 dependencies = [
+ "arc-swap",
  "arch-into",
  "error-stack",
  "meticulous",
- "parking_lot",
  "shuttle",
+ "shuttle-dashmap",
+ "shuttle-parking_lot",
  "shuttle-tokio",
+ "shuttle-tokio-util",
  "thiserror 2.0.20",
  "triomphe",
  "ubyte",
@@ -6688,10 +6694,8 @@ version = "0.1.0-dev"
 dependencies = [
  "ahash",
  "alloc_count",
- "arc-swap",
  "arch-into",
  "bytes",
- "dashmap 6.2.1",
  "error-stack",
  "fastrand",
  "futures-util",
@@ -6701,19 +6705,20 @@ dependencies = [
  "nervix-execution",
  "nervix-models",
  "nervix-recovery",
- "parking_lot",
  "percent-encoding",
  "rand_core 0.6.4",
  "rcgen",
  "rkyv",
  "rustls",
  "rustls-pki-types",
+ "shuttle-dashmap",
+ "shuttle-parking_lot",
+ "shuttle-tokio",
+ "shuttle-tokio-util",
  "strum 0.26.3",
  "tempfile",
  "thiserror 2.0.20",
- "tokio",
  "tokio-rustls",
- "tokio-util",
  "tracing",
  "triomphe",
  "ubyte",
@@ -6838,7 +6843,6 @@ dependencies = [
  "alloc_count",
  "anyhow",
  "apache-avro",
- "arc-swap",
  "arch-into",
  "argon2",
  "arrow-arith",
@@ -6869,7 +6873,6 @@ dependencies = [
  "concurrent-queue",
  "criterion 0.5.1",
  "cucumber",
- "dashmap 6.2.1",
  "error-stack",
  "fastrand",
  "fjall",
@@ -6893,7 +6896,6 @@ dependencies = [
  "jaq-json",
  "jaq-std",
  "lapin",
- "loom",
  "meticulous",
  "mongodb",
  "multer",
@@ -6922,7 +6924,6 @@ dependencies = [
  "opentelemetry_sdk",
  "ordered-float 4.6.0",
  "ort",
- "parking_lot",
  "parquet",
  "petgraph 0.8.3",
  "playwright-rs",
@@ -6947,6 +6948,12 @@ dependencies = [
  "sentry-types",
  "serde",
  "serde_json",
+ "shuttle",
+ "shuttle-dashmap",
+ "shuttle-parking_lot",
+ "shuttle-tokio",
+ "shuttle-tokio-stream",
+ "shuttle-tokio-util",
  "signal-hook 0.4.4",
  "simd-json",
  "sorted-vec",
@@ -6960,9 +6967,7 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "tokio-rustls",
- "tokio-stream",
  "tokio-tungstenite 0.24.0",
- "tokio-util",
  "tonic 0.13.1",
  "tonic 0.14.6",
  "tonic-types",
@@ -7046,9 +7051,10 @@ dependencies = [
  "nervix-recovery",
  "nervix-wasm-protocol",
  "nonzero_ext",
- "parking_lot",
+ "shuttle-parking_lot",
+ "shuttle-tokio",
+ "strum 0.26.3",
  "thiserror 2.0.20",
- "tokio",
  "triomphe",
  "wasmtime",
 ]
@@ -8190,7 +8196,7 @@ version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67eabc2ef2a60eb7faa00097bd1ffdb5bd28e62bf39990626a582201b7a754e5"
 dependencies = [
- "siphasher",
+ "siphasher 1.0.3",
 ]
 
 [[package]]
@@ -10605,6 +10611,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "shuttle-dashmap"
+version = "6.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7087e118e37dd0647e8346ff3651452a15139c64cc3ccd8087ea53f6e917ac47"
+dependencies = [
+ "cfg-if",
+ "dashmap 6.2.1",
+ "shuttle-dashmap-impl",
+]
+
+[[package]]
+name = "shuttle-dashmap-impl"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc061039a68dc511025c7ee7ddf48072f2299cb0dc250f516517e2184bd1103e"
+dependencies = [
+ "deterministic_collections",
+ "shuttle",
+]
+
+[[package]]
 name = "shuttle-engine"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10622,6 +10649,28 @@ dependencies = [
  "rand_pcg 0.3.1",
  "scoped-tls",
  "smallvec",
+ "tracing",
+]
+
+[[package]]
+name = "shuttle-parking_lot"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1e19861a540ea53c42c73b8c81d09c9e83cc6894a720e7a16fb490c5a5297b4"
+dependencies = [
+ "cfg-if",
+ "parking_lot",
+ "shuttle-parking_lot-impl",
+]
+
+[[package]]
+name = "shuttle-parking_lot-impl"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "332ef6341839c115508206d9511f63bfa880284d82e994e07e5f2bcf08a54914"
+dependencies = [
+ "lock_api",
+ "shuttle",
  "tracing",
 ]
 
@@ -10703,6 +10752,53 @@ dependencies = [
  "quote",
  "shuttle",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "shuttle-tokio-stream"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ce83daa578b4ebf55c05951b3b8f2835c79905ddf25a59366d7884c567f1a05"
+dependencies = [
+ "cfg-if",
+ "shuttle-tokio-stream-impl",
+ "tokio-stream",
+]
+
+[[package]]
+name = "shuttle-tokio-stream-impl"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cf2ef3c411596013485173eff59b240fa2ba10f94553bb10836de25d7d5a93e"
+dependencies = [
+ "futures-core",
+ "pin-project-lite",
+ "shuttle",
+ "shuttle-tokio-impl",
+ "tokio-util",
+]
+
+[[package]]
+name = "shuttle-tokio-util"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10dae2deddf8965d750653b2c711cd25a6761ce3184ed488530247a3b33e86c6"
+dependencies = [
+ "cfg-if",
+ "shuttle-tokio-util-impl",
+ "tokio-util",
+]
+
+[[package]]
+name = "shuttle-tokio-util-impl"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8da6b4727e962e361089ef7bd5dd208df4f33edc15670109903a2c4385311b5f"
+dependencies = [
+ "pin-project-lite",
+ "shuttle",
+ "shuttle-tokio-impl",
+ "tokio-util",
 ]
 
 [[package]]
@@ -10791,6 +10887,12 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "siphasher"
+version = "0.3.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38b58827f4464d87d377d175e90bf58eb00fd8716ff0a62f80356b5e61555d0d"
 
 [[package]]
 name = "siphasher"

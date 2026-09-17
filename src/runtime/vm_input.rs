@@ -476,7 +476,7 @@ pub(super) async fn compute_lookup_hash_map_columns(
             if let Some(side_error) = result.batch.errors().row(output_row).first() {
                 return Err(Report::new(RuntimeSchemaError::VmSideError {
                     operation: RuntimeVmOperation::ExecuteKeyProjection,
-                    code: side_error.code,
+                    code: side_error.code(),
                     span: side_error.span,
                 }));
             }

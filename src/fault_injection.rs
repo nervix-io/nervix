@@ -16,9 +16,8 @@ use std::{
 };
 
 use ahash::RandomState;
-use dashmap::DashMap;
 use meticulous::ResultExt as _;
-use nervix_execution::{CpuClass, Executor, MemoryClass};
+use nervix_execution::{CpuClass, Executor, MemoryClass, sync::DashMap};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, DomainName, EmitterName,
     IngestorName,

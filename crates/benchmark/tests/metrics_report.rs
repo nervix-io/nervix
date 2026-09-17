@@ -1,3 +1,4 @@
+use meticulous::ResultExt as _;
 use nervix_benchmark::{MetricsReportError, NervixMetricsReport};
 use nervix_models::ClusterNodeName;
 
@@ -51,6 +52,19 @@ fn derives_target_batch_sizes_and_relay_percentiles_from_prometheus_histograms()
     assert_eq!(relay.p50, 1.0);
     assert_eq!(relay.p90, 4.0);
     assert_eq!(relay.p99, 8.0);
+}
+
+#[test]
+fn cluster_scrapes_do_not_count_the_same_node_label_twice() {
+    let single = NervixMetricsReport::from_prometheus(PROMETHEUS_FIXTURE, "benchmark_run")
+        .assured("the static fixture contains a complete metrics report");
+    let cluster = NervixMetricsReport::from_prometheus_scrapes(
+        [PROMETHEUS_FIXTURE, PROMETHEUS_FIXTURE],
+        "benchmark_run",
+    )
+    .assured("two copies of the complete fixture describe the same cluster metrics");
+
+    assert_eq!(cluster, single);
 }
 
 #[test]

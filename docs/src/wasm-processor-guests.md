@@ -85,7 +85,19 @@ nervix_load_state(ptr: i32, size: i32) -> i32
 nervix_reset_state() -> i32
 ```
 
-Return `0` from fallible functions on success. Return a negative code on guest rejection. Nervix treats negative codes as runtime errors and applies the processor error policy.
+Return `0` from fallible functions on success. Return a negative code on guest rejection. Nervix treats negative codes as runtime errors and applies the processor error policy. `nervix_dump_state` returns the size of the snapshot it wrote, or a negative code when it cannot serialize its state; Nervix then keeps the state saved last.
+
+`nervix_load_state` has two reserved codes that classify the saved state itself:
+
+| Code | Verdict |
+| --- | --- |
+| `-7` | The saved bytes are not a snapshot envelope the guest can decode. |
+| `-8` | The guest decoded the snapshot envelope and refuses the application state it carries. |
+
+Only these two codes are a rejection of the saved state. A trap, an exhausted `MAX FUEL` or
+`MAX MEMORY`, or any other negative code while restoring is a failure of the restore itself and says
+nothing about the saved bytes. Nervix keeps the saved state after every failed restore, including a
+rejection, and reports each outcome as a distinct [failure stage](#failure-diagnostics).
 
 ## Buffer Ownership
 
@@ -298,7 +310,7 @@ nervix_global_error_len() -> i32
 nervix_clear_global_error() -> i32
 ```
 
-If any of these exports exists, all three must exist. After host calls into the guest (`nervix_process_batch`, `nervix_on_timeout`, `nervix_flush`, and emit reads), it checks `nervix_global_error_len()`. A positive length means `nervix_global_error_ptr()` points at UTF-8 error bytes. The host reads the bytes, calls `nervix_clear_global_error()`, and applies `ON GLOBAL ERROR`. Wasmtime call failures and traps are also handled as global processor errors.
+If any of these exports exists, all three must exist. After host calls into the guest (`nervix_init`, `nervix_process_batch`, `nervix_on_timeout`, `nervix_flush`, and emit reads), and after a negative result from `nervix_dump_state`, `nervix_load_state`, or an emit read, it checks `nervix_global_error_len()`. A positive length means `nervix_global_error_ptr()` points at UTF-8 error bytes. The host reads the bytes, calls `nervix_clear_global_error()`, and reports them as the reason for the failure. Failures of initialization, restore, input processing, timeout callbacks, quiesce flush, and output validation apply `ON GLOBAL ERROR`; a failure to save, persist, or replicate guest state is always reported. Wasmtime call failures and traps are also handled as global processor errors.
 
 The guest decides lineage; the host performs the actual ACK/NACK operation. Tokens are host-local hot-path capabilities. They are valid only while the current host instance is alive, and they are never persisted.
 
@@ -342,20 +354,48 @@ or fallback path. Rebuild every guest for this FlatBuffers contract.
 
 ## State
 
-Use branch-local guest state for data the guest needs across runtime instance recreation.
+Use branch-local guest state for the durable computation state a recreated instance needs to
+continue: counters, aggregates, open windows, or whatever else the guest derives from the input it
+has already accepted.
 
-Nervix saves guest state through `nervix_dump_state`, persists and replicates the returned bytes, and restores them through `nervix_load_state` when the branch instance is recreated.
+Nervix saves guest state through `nervix_dump_state` after it dispatches the output of a successful
+`nervix_process_batch` or `nervix_on_timeout` call, and when it checkpoints a branch for an
+ownership handoff. It persists and replicates the returned bytes and restores them through
+`nervix_load_state`, after `nervix_init`, when the branch instance is recreated.
+
+A save that fails — a negative `nervix_dump_state` code, a trap, or an exhausted limit — is reported
+as a `state snapshot` failure and leaves the state saved last in place. Nervix never replaces saved
+state with the result of a failed save, so a recreated instance restores the last completed save.
+
+Guest state holds computation state only. Everything an instance uses to execute belongs to that
+instance and is never saved:
+
+- input the guest still buffers, together with its ACK tokens, row sidecars, and input-column
+  references;
+- output groups the guest has not emitted yet;
+- timeout handles, which the host issues per instance;
+- error state the guest latched after a failed callback.
+
+A recreated instance therefore starts without buffered input, pending output, error state, or
+pending timeouts. A guest releases buffered input from `nervix_flush` before a handoff, and a guest
+whose restored state needs a timer requests it again from its next input or timeout callback.
+
+Keep `nervix_load_state` strict about what it restores. Save what a restore needs to validate the
+state, such as the branch configuration it was taken under, and reject state that does not match
+the instance it is handed to.
+
+A zero-length `nervix_dump_state` result saves no state at all: the next instance is initialized
+without a `nervix_load_state` call. A guest whose computation state can be empty therefore wraps it
+in an envelope, as both example guests do with `GuestSnapshot`, so that empty computation state is
+still restored as state.
+
+A restore that fails leaves the saved state in place. The next input for that branch instantiates
+the guest again and hands it the same saved state, so a guest that rejects its state keeps being
+reported with the same saved state revision instead of silently starting fresh. Rejecting the
+state with `-7` or `-8` is the only outcome that classifies the saved bytes as unusable; keep
+`nervix_load_state` strict and use those codes only for a verdict on the state.
 
 ACK tokens are separate from guest state. They are host-local hot-path runtime capabilities and are not persisted or replicated. If ACK state is lost with a processor owner, the upstream ingestor reacts according to its delivery mode and retry policy.
-
-A guest may include a pending FlatBuffers envelope in its `GuestSnapshot`, but tokens
-and input-column references remain usable only while the originating live host
-ACK map exists. Restored output that refers to lost tokens is rejected. Guest
-state that retains a pending output group must retain the complete generated
-Arrow IPC bytes, every routed output, all column references, and every sidecar.
-Generated indexes are not host capabilities and have no meaning without that
-complete envelope. Guest load code must reject old-format pending envelopes
-rather than silently reset the snapshot.
 
 ## Timeouts
 
@@ -372,6 +412,10 @@ After any successful timeout callback, the host repeatedly calls
 `nervix_read_emit()` and forwards every emitted output group. Shared generated
 columns work identically in timeout output. Input-column references remain
 valid while their source token is live.
+
+Timeout handles belong to the branch instance that requested them. A recreated
+instance starts without pending timeouts and never receives a handle issued to
+an earlier instance.
 
 ## Quiesce Flush
 
@@ -523,16 +567,58 @@ GOTOOLCHAIN="$(sed -n 's/^toolchain //p' go.mod)" tinygo build \
 - Do not ack/nack a token and also carry it into an emitted row.
 - Do not silently accept an init payload whose schema does not match what the guest implements.
 - Do not persist guest state in a custom host-facing format unless `load_state` can reject bad bytes cleanly.
+- Do not save buffered input, ACK tokens, pending output, timeout handles, or latched error state in guest state; save only durable computation state.
 - Do not call host ACK/NACK directly. The guest only reports lineage and decisions in the sidecar.
+
+## Failure Diagnostics
+
+Nervix reports a module that fails to compile, and every failure of a branch instance's guest
+operations and saved state, in one shape:
+
+```text
+wasm processor '<processor>' <stage> failed (<branch>, resource '<resource>' version <version> file '<file>'[, export '<export>'][, saved state revision <revision>]): <cause>
+```
+
+`<branch>` is `branch` followed by the concrete branch key, or `unbranched`. `<export>` names the
+guest export whose call failed, or the export that runs the failed operation. `<revision>` appears
+when the failure involves saved state: the revision being restored or the revision being persisted.
+`<cause>` is the complete chain of failures below the stage, ending with the guest's own reason when
+it put one on the global-error channel. A module that fails to compile is reported without a branch
+or export. Diagnostics never contain guest payloads or saved state bytes, and a diagnostic raised on
+another node reaches the session unchanged.
+
+| Stage | What failed |
+| --- | --- |
+| `module compilation` | Resolving, reading, or compiling the pinned module file. |
+| `instantiation` | Creating the branch store, instantiating the module, or resolving its exports. |
+| `initialization` | `nervix_init`. The saved state revision appears when the instance was about to restore state. |
+| `snapshot envelope decoding` | `nervix_load_state` rejected the saved bytes with `-7`. |
+| `application state restoration` | `nervix_load_state` rejected the saved application state with `-8`. |
+| `state restore` | `nervix_load_state` failed without a verdict: a trap, an exhausted limit, or another negative code. |
+| `batch processing` | `nervix_process_batch` and the emit reads that follow it. |
+| `timeout callback` | `nervix_on_timeout` and the emit reads that follow it. |
+| `quiesce flush` | `nervix_flush` and the emit reads that follow it. |
+| `output emission` | An emitted envelope the host cannot decode, or output that fails validation. |
+| `state snapshot` | `nervix_dump_state`. Nervix keeps the state saved last. |
+| `local state persistence` | Writing the saved state to the node's state store. |
+| `state replication` | Confirming the saved state with its replicas. |
+| `state authority check` | A replica or peer refused to serve the state because it is not the state's authority. |
+
+For example, a branch whose guest rejects its saved counters after an instance was recreated is
+reported as:
+
+```text
+wasm processor 'sessionizer' application state restoration failed (branch {"tenant":"alpha"}, resource 'sessionizer' version 3 file 'sessionizer.wasm', export 'nervix_load_state', saved state revision 12): wasm guest rejected the application state in its saved snapshot: counters header is truncated
+```
 
 ## Troubleshooting
 
-`failed to compile wasm processor`
+`module compilation failed`
 
 : The module is not valid `wasm32-unknown-unknown`, imports something outside
   the `env` functions listed above, or is not actually a WASM module.
 
-`missing export`
+`missing required export`
 
 : The guest did not export one of the required `nervix_*` functions with the
   expected C ABI signature.
@@ -569,7 +655,15 @@ GOTOOLCHAIN="$(sed -n 's/^toolchain //p' go.mod)" tinygo build \
 : The guest emitted or completed a token that did not come from the host input
   sidecar for the current live instance.
 
-`nervix_load_state` returned a negative code
+`snapshot envelope decoding failed` or `application state restoration failed`
 
-: The guest rejected saved state. Keep `load_state` strict; returning an error
-  is preferred to running with partially decoded state.
+: The guest rejected the saved state it was asked to restore. Nervix keeps that
+  state and reports the rejection again, with the same saved state revision,
+  each time the branch is instantiated. Keep `load_state` strict; rejecting the
+  state is preferred to running with partially decoded state.
+
+`state restore failed`
+
+: Restoring the saved state failed without a verdict on it, for example because
+  the guest trapped or exhausted `MAX FUEL`. Fix the failure; the saved state is
+  unchanged and is restored again on the next attempt.
