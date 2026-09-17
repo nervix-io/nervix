@@ -1,0 +1,5 @@
+{% for lane in lanes %}
+RELOCATE INGESTOR kafka_in_{{ lane }} ONTO NODE node-1 IGNORE PREFERENCES;
+{% endfor %}
+RELOCATE RELAY benchmark_records ONTO NODE node-2 IGNORE PREFERENCES;
+RELOCATE EMITTER kafka_out ONTO NODE node-2 IGNORE PREFERENCES;
