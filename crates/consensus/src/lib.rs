@@ -30,8 +30,9 @@ use nervix_interconnect::{HandlerRegistrationError, Transport};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule,
     CoordinationIdentity, DomainClockAuthority, DomainClockState, DomainName, DomainSchedule,
-    DomainStartPoint, DomainState, DomainStatus, ResourceName, ResourceNodeStatus, ResourceUpload,
-    ResourceUploadKey, ResourceVersion, ResourceVersionStatus, Statement, UserName,
+    DomainStartPoint, DomainState, DomainStatus, NodeEndpoint, NodeServiceUrl, ResourceName,
+    ResourceNodeStatus, ResourceUpload, ResourceUploadKey, ResourceVersion, ResourceVersionStatus,
+    Statement, UserName,
 };
 use nervix_recovery::Discarded as _;
 pub use openraft::raft::{
@@ -485,7 +486,7 @@ static NEXT_SNAPSHOT_TRANSFER_ID: AtomicU64 = AtomicU64::new(1);
 pub struct ConsensusSettings {
     pub cluster_name: String,
     pub node_id: ClusterNodeName,
-    pub interconnect_advertise_addr: String,
+    pub interconnect_advertise_addr: NodeEndpoint,
     pub interconnect: Transport,
     pub executor: nervix_execution::Executor,
     pub raft_heartbeat_interval: Duration,
@@ -494,14 +495,22 @@ pub struct ConsensusSettings {
     pub raft_retention: RaftRetentionPolicy,
 }
 
+/// One node as cluster discovery currently describes it.
+///
+/// Each advertised endpoint is present only once the node has published a value this build accepts.
+/// Discovery converges field by field, so a node can be seen before any of them arrives, and a node
+/// whose interconnect endpoint is still unavailable is never a membership admission candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GossipNode {
     pub node_id: ClusterNodeName,
     pub incarnation: ClusterNodeIncarnation,
     pub terminating: bool,
-    pub grpc_advertise_addr: String,
-    pub web_console_advertise_addr: String,
-    pub interconnect_advertise_addr: String,
+    /// Where clients reach this node's session service.
+    pub client_url: Option<NodeServiceUrl>,
+    /// Where operators reach this node's web console.
+    pub console_url: Option<NodeServiceUrl>,
+    /// Where peers reach this node's interconnect listener.
+    pub interconnect_endpoint: Option<NodeEndpoint>,
 }
 
 impl GossipNode {
@@ -664,6 +673,7 @@ impl AutomaticScheduleInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MembershipSnapshot {
     voters: BTreeSet<ClusterNodeName>,
+    /// The address Raft holds for each member, in the `BasicNode` form openraft stores.
     nodes: BTreeMap<ClusterNodeName, String>,
 }
 
@@ -671,7 +681,7 @@ struct MembershipSnapshot {
 enum MembershipMutation {
     AddLearner {
         node_id: ClusterNodeName,
-        address: String,
+        endpoint: NodeEndpoint,
         refresh: bool,
     },
     ChangeVoters {
@@ -688,9 +698,9 @@ impl MembershipSnapshot {
         let mut mutations = Vec::new();
         let mut desired_voters = self.voters.clone();
         for node in gossip.latest_admission_candidates().into_values() {
-            if node.interconnect_advertise_addr.is_empty() {
+            let Some(endpoint) = node.interconnect_endpoint else {
                 continue;
-            }
+            };
             let is_fenced = match admission_fences.get(&node.node_id) {
                 Some(incarnation) => node.incarnation <= *incarnation,
                 None => false,
@@ -699,14 +709,15 @@ impl MembershipSnapshot {
                 continue;
             }
 
+            let advertised = endpoint.to_string();
             let known_address = self.nodes.get(&node.node_id);
             let is_voter = self.voters.contains(&node.node_id);
-            if !is_voter || known_address != Some(&node.interconnect_advertise_addr) {
-                let refresh = known_address.is_some()
-                    && known_address != Some(&node.interconnect_advertise_addr);
+            let address_changed = known_address != Some(&advertised);
+            if !is_voter || address_changed {
+                let refresh = known_address.is_some() && address_changed;
                 mutations.push(MembershipMutation::AddLearner {
                     node_id: node.node_id.clone(),
-                    address: node.interconnect_advertise_addr,
+                    endpoint,
                     refresh,
                 });
             }
@@ -1332,7 +1343,7 @@ struct ConsensusState {
     // The Raft runtime independently owns the store as both log storage and state machine.
     store: FjallStore,
     local_node_id: ClusterNodeName,
-    interconnect_advertise_addr: String,
+    interconnect_advertise_addr: NodeEndpoint,
     interconnect: Transport,
     connectivity: ConnectivityFault,
     raft_retention: RaftRetentionPolicy,
@@ -2996,7 +3007,7 @@ impl Administrator {
         let mut nodes = BTreeMap::new();
         nodes.insert(
             self.inner.local_node_id.clone(),
-            BasicNode::new(self.inner.interconnect_advertise_addr.clone()),
+            BasicNode::new(self.inner.interconnect_advertise_addr.to_string()),
         );
         self.inner
             .raft
@@ -3031,22 +3042,24 @@ impl Administrator {
             match mutation {
                 MembershipMutation::AddLearner {
                     node_id,
-                    address,
+                    endpoint,
                     refresh,
                 } => {
                     let operation = if refresh {
-                        format!("refresh learner '{node_id}' at {address}")
+                        format!("refresh learner '{node_id}' at {endpoint}")
                     } else if before.nodes.contains_key(&node_id) {
-                        format!("wait for learner '{node_id}' to catch up at {address}")
+                        format!("wait for learner '{node_id}' to catch up at {endpoint}")
                     } else {
-                        format!("add learner '{node_id}' at {address}")
+                        format!("add learner '{node_id}' at {endpoint}")
                     };
                     self.inner.events.report(format!("raft {operation}"));
                     let admission = timeout(
                         MEMBERSHIP_MUTATION_TIMEOUT,
-                        self.inner
-                            .raft
-                            .add_learner(node_id, BasicNode::new(address), true),
+                        self.inner.raft.add_learner(
+                            node_id,
+                            BasicNode::new(endpoint.to_string()),
+                            true,
+                        ),
                     )
                     .await;
                     let result = match admission {
@@ -4886,7 +4899,7 @@ mod tests {
     use nervix_models::{
         ClusterNodeIdentity, ClusterNodeIncarnation, DomainClockAuthority, DomainClockState,
         DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
-        DomainStatus, DomainTimeRate, ResourceId, ResourceName, ResourceNodeState,
+        DomainStatus, DomainTimeRate, NodeEndpoint, ResourceId, ResourceName, ResourceNodeState,
         ResourceNodeStatus, ResourceReplicaKey, ResourceUploadIdentity, ResourceUploadKey,
         ResourceUploadState, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus,
         Statement, Timestamp,
@@ -4996,26 +5009,30 @@ mod tests {
         Ok(())
     }
 
+    /// One discovered node whose endpoints have not been published yet.
+    fn undiscovered_node(name: &str, incarnation: u64) -> GossipNode {
+        GossipNode {
+            node_id: ClusterNodeName::parse(name).assured("the test node name is valid"),
+            incarnation: ClusterNodeIncarnation::new(incarnation),
+            terminating: false,
+            client_url: None,
+            console_url: None,
+            interconnect_endpoint: None,
+        }
+    }
+
+    fn node_endpoint(advertised: &str) -> NodeEndpoint {
+        advertised
+            .parse()
+            .assured("the test endpoint is a host and port")
+    }
+
     #[test]
     fn dead_gossip_nodes_are_not_membership_admission_candidates() {
         let state = GossipState {
             live_nodes: vec![
-                GossipNode {
-                    node_id: ClusterNodeName::parse("node-2").expect("valid name"),
-                    incarnation: ClusterNodeIncarnation::new(2),
-                    terminating: false,
-                    grpc_advertise_addr: String::new(),
-                    web_console_advertise_addr: String::new(),
-                    interconnect_advertise_addr: String::new(),
-                },
-                GossipNode {
-                    node_id: ClusterNodeName::parse("node-3").expect("valid name"),
-                    incarnation: ClusterNodeIncarnation::new(3),
-                    terminating: false,
-                    grpc_advertise_addr: String::new(),
-                    web_console_advertise_addr: String::new(),
-                    interconnect_advertise_addr: String::new(),
-                },
+                undiscovered_node("node-2", 2),
+                undiscovered_node("node-3", 3),
             ],
             dead_node_ids: [ClusterNodeName::parse("node-3").expect("valid node name")]
                 .into_iter()
@@ -5033,19 +5050,11 @@ mod tests {
 
     #[test]
     fn live_identities_require_the_newest_nondead_node_incarnation() {
-        let gossip_node = |name: &str, incarnation| GossipNode {
-            node_id: ClusterNodeName::parse(name).expect("valid node name"),
-            incarnation: ClusterNodeIncarnation::new(incarnation),
-            terminating: false,
-            grpc_advertise_addr: String::new(),
-            web_console_advertise_addr: String::new(),
-            interconnect_advertise_addr: String::new(),
-        };
         let state = GossipState {
             live_nodes: vec![
-                gossip_node("node-1", 10),
-                gossip_node("node-1", 11),
-                gossip_node("node-2", 20),
+                undiscovered_node("node-1", 10),
+                undiscovered_node("node-1", 11),
+                undiscovered_node("node-2", 20),
             ],
             dead_node_ids: BTreeSet::from([
                 ClusterNodeName::parse("node-2").expect("valid node name")
@@ -5061,12 +5070,8 @@ mod tests {
     #[test]
     fn placement_candidates_exclude_only_the_newest_terminating_incarnation() {
         let gossip_node = |name: &str, incarnation, terminating| GossipNode {
-            node_id: ClusterNodeName::parse(name).assured("the test node name is valid"),
-            incarnation: ClusterNodeIncarnation::new(incarnation),
             terminating,
-            grpc_advertise_addr: String::new(),
-            web_console_advertise_addr: String::new(),
-            interconnect_advertise_addr: String::new(),
+            ..undiscovered_node(name, incarnation)
         };
         let mut state = GossipState {
             live_nodes: vec![
@@ -5108,20 +5113,16 @@ mod tests {
         let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
         let gossip = GossipState {
             live_nodes: vec![GossipNode {
-                node_id: joining.clone(),
-                incarnation: ClusterNodeIncarnation::new(2),
-                terminating: false,
-                grpc_advertise_addr: String::new(),
-                web_console_advertise_addr: String::new(),
-                interconnect_advertise_addr: "https://node-2.test:7443".to_string(),
+                interconnect_endpoint: Some(node_endpoint("node-2.test:7443")),
+                ..undiscovered_node("node-2", 2)
             }],
             dead_node_ids: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
             nodes: BTreeMap::from([
-                (first.clone(), "https://node-1.test:7443".to_string()),
-                (joining.clone(), "https://node-2.test:7443".to_string()),
+                (first.clone(), "node-1.test:7443".to_string()),
+                (joining.clone(), "node-2.test:7443".to_string()),
             ]),
         };
         let admission_fences = BTreeMap::new();
@@ -5131,7 +5132,59 @@ mod tests {
             vec![
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
-                    address: "https://node-2.test:7443".to_string(),
+                    endpoint: node_endpoint("node-2.test:7443"),
+                    refresh: false,
+                },
+                MembershipMutation::ChangeVoters {
+                    voters: BTreeSet::from([first, joining]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unavailable_interconnect_endpoint_is_never_an_admission_candidate() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![undiscovered_node("node-2", 2)],
+            dead_node_ids: BTreeSet::new(),
+        };
+        let membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone()]),
+            nodes: BTreeMap::from([(first, "node-1.test:7443".to_string())]),
+        };
+        let admission_fences = BTreeMap::new();
+
+        assert!(
+            membership
+                .automatic_mutations(&gossip, &admission_fences)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_unavailable_client_or_console_url_does_not_withhold_admission() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![GossipNode {
+                interconnect_endpoint: Some(node_endpoint("node-2.test:7443")),
+                ..undiscovered_node("node-2", 2)
+            }],
+            dead_node_ids: BTreeSet::new(),
+        };
+        let membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone()]),
+            nodes: BTreeMap::new(),
+        };
+        let admission_fences = BTreeMap::new();
+
+        assert_eq!(
+            membership.automatic_mutations(&gossip, &admission_fences),
+            vec![
+                MembershipMutation::AddLearner {
+                    node_id: joining.clone(),
+                    endpoint: node_endpoint("node-2.test:7443"),
                     refresh: false,
                 },
                 MembershipMutation::ChangeVoters {
@@ -5145,23 +5198,19 @@ mod tests {
     fn changed_endpoint_is_refreshed_before_membership_promotion() {
         let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
         let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
-        let current_address = "https://node-2.test:7443".to_string();
-        let replacement_address = "https://node-2.test:8443".to_string();
+        let current_address = "node-2.test:7443".to_string();
+        let replacement_endpoint = node_endpoint("node-2.test:8443");
         let gossip = GossipState {
             live_nodes: vec![GossipNode {
-                node_id: joining.clone(),
-                incarnation: ClusterNodeIncarnation::new(3),
-                terminating: false,
-                grpc_advertise_addr: String::new(),
-                web_console_advertise_addr: String::new(),
-                interconnect_advertise_addr: replacement_address.clone(),
+                interconnect_endpoint: Some(replacement_endpoint.clone()),
+                ..undiscovered_node("node-2", 3)
             }],
             dead_node_ids: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
             nodes: BTreeMap::from([
-                (first.clone(), "https://node-1.test:7443".to_string()),
+                (first.clone(), "node-1.test:7443".to_string()),
                 (joining.clone(), current_address),
             ]),
         };
@@ -5172,7 +5221,7 @@ mod tests {
             vec![
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
-                    address: replacement_address,
+                    endpoint: replacement_endpoint,
                     refresh: true,
                 },
                 MembershipMutation::ChangeVoters {
@@ -5188,18 +5237,14 @@ mod tests {
         let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
         let gossip = GossipState {
             live_nodes: vec![GossipNode {
-                node_id: joining.clone(),
-                incarnation: ClusterNodeIncarnation::new(2),
-                terminating: false,
-                grpc_advertise_addr: String::new(),
-                web_console_advertise_addr: String::new(),
-                interconnect_advertise_addr: "https://node-2.test:7443".to_string(),
+                interconnect_endpoint: Some(node_endpoint("node-2.test:7443")),
+                ..undiscovered_node("node-2", 2)
             }],
             dead_node_ids: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
-            nodes: BTreeMap::from([(first.clone(), "https://node-1.test:7443".to_string())]),
+            nodes: BTreeMap::from([(first.clone(), "node-1.test:7443".to_string())]),
         };
         let admission_fences = BTreeMap::from([(joining.clone(), ClusterNodeIncarnation::new(2))]);
 
@@ -5220,7 +5265,7 @@ mod tests {
             vec![
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
-                    address: "https://node-2.test:7443".to_string(),
+                    endpoint: node_endpoint("node-2.test:7443"),
                     refresh: false,
                 },
                 MembershipMutation::ChangeVoters {
