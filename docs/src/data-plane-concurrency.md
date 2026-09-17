@@ -127,9 +127,11 @@ assignment or branch generation cannot restore state that a newer owner or evict
 ### Acknowledgement state
 
 Each source attempt owns one in-memory acknowledgement tree. Fan-out reserves shares in an atomic
-pending count, and each completion resolves one share with a compare-and-swap. Separate atomic
-state records whether shares still count against ownership handoff; a message parked on materialized
-`REQUIRED WAIT` does not keep a handoff blocked.
+pending count, and each completion resolves one share with a compare-and-swap. A second atomic word
+encodes either a typed tracking state with its active-share count or the completed state; its
+reserved raw representation stays inside the encoding's owner. That state records whether shares
+still count against ownership handoff; a message parked on materialized `REQUIRED WAIT` does not
+keep a handoff blocked.
 
 Root trackers count attempts rather than individual shares. Their transition ordering may briefly
 overcount but cannot let handoff miss active work. Exactly one terminal transition takes the
