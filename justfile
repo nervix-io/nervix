@@ -110,24 +110,26 @@ test-execution *args:
     cargo test --package nervix-execution --lib -- {{ args }}
 
 # Explore the filtered execution, interconnect and server invariants under Shuttle. The former Loom
-# recipe is retired: acknowledgement races now exercise production types, while the reduced relay
-# models document their memory-ordering claims in-module.
-test-shuttle: build-web-console wasm-processor-guests download-onnxruntime
+# recipe is retired: acknowledgement races, the relay dispatch gate and the relay fan-out exercise
+# production types. A non-empty `filter` runs only the checks whose full names contain it.
+test-shuttle filter="": build-web-console wasm-processor-guests download-onnxruntime
     #!/usr/bin/env bash
     set -euo pipefail
     shuttle_packages=(nervix-execution nervix-interconnect nervix-server)
     for shuttle_package in "${shuttle_packages[@]}"; do
-        just test-shuttle-package "${shuttle_package}"
+        just test-shuttle-package "${shuttle_package}" {{ quote(filter) }}
     done
 
 # Explore one package's filtered invariants under Shuttle. Each test gets its own process so a
 # persisted schedule identifies its package and test. The server's invariants need the build
-# dependencies that `test-shuttle` prepares.
-test-shuttle-package package:
+# dependencies that `test-shuttle` prepares. A non-empty `filter` runs only the checks whose full
+# names contain it.
+test-shuttle-package package filter="":
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     shuttle_package={{ quote(package) }}
+    filter={{ quote(filter) }}
     trace_root="{{ cargo_target_dir }}/shuttle-failures"
     mkdir -p "${trace_root}"
     shuttle_test_list="$(
@@ -140,6 +142,9 @@ test-shuttle-package package:
     fi
     mapfile -t shuttle_tests <<< "${shuttle_test_list}"
     for shuttle_test in "${shuttle_tests[@]}"; do
+        if [[ "${shuttle_test}" != *"${filter}"* ]]; then
+            continue
+        fi
         trace_directory="${trace_root}/${shuttle_package}/${shuttle_test}"
         mkdir -p "${trace_directory}"
         SHUTTLE_TRACE_DIR="${trace_directory}" \
