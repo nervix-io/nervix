@@ -790,10 +790,11 @@ impl RelayProcessorNode {
                     step_messages,
                     width_duration,
                     step_duration,
-                    aggregate,
+                    plan,
                     compiled_aggregates,
                     state,
                     replicated_state,
+                    ..
                 } => {
                     let messages = match batch.try_into_messages() {
                         Ok(messages) => messages,
@@ -818,66 +819,20 @@ impl RelayProcessorNode {
                     let Some(first_message) = messages.first() else {
                         return;
                     };
-                    let row_count = messages.len();
-                    let mut aggregate_inputs_by_row =
-                        (0..row_count).map(|_| Ok(Vec::new())).collect::<Vec<
-                            error_stack::Result<Vec<WindowAggregateInput>, WindowProcessorError>,
-                        >>();
-                    // A failure of the whole input batch fails every row that had not already
-                    // failed on its own, so it is kept once rather than copied into each row.
-                    let mut batch_failure = None;
-                    for compiled in compiled_aggregates.iter() {
-                        tokio::task::consume_budget().await;
-                        let evaluated = match evaluate_window_aggregate_inputs(
-                            compiled,
-                            first_message.record.batch(),
-                            execution_now,
-                        )
-                        .await
-                        {
-                            Ok(evaluated) => evaluated,
-                            Err(error) => {
-                                batch_failure = Some(error);
-                                break;
-                            }
-                        };
-                        if evaluated.len() != row_count {
-                            batch_failure =
-                                Some(Report::new(WindowProcessorError::AggregateInputRowCount {
-                                    rows: evaluated.len(),
-                                    expected: row_count,
-                                }));
-                            break;
-                        }
-                        for (inputs, evaluated) in aggregate_inputs_by_row.iter_mut().zip(evaluated)
-                        {
-                            match evaluated {
-                                Ok(evaluated) => {
-                                    if let Ok(inputs) = inputs {
-                                        inputs.extend(evaluated);
-                                    }
-                                }
-                                Err(error) => {
-                                    if inputs.is_ok() {
-                                        *inputs = Err(error);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    for (message, aggregate_inputs) in
-                        messages.into_iter().zip(aggregate_inputs_by_row)
-                    {
-                        tokio::task::consume_budget().await;
-                        let timestamp = message_timestamp(&message);
-                        let row_inputs = match (aggregate_inputs, &batch_failure) {
-                            (Ok(aggregate_inputs), None) => Ok(aggregate_inputs),
-                            (Ok(_), Some(error)) => Err(format!("{error:#}")),
-                            (Err(error), _) => Err(format!("{error:#}")),
-                        };
-                        let aggregate_inputs = match row_inputs {
-                            Ok(aggregate_inputs) => aggregate_inputs,
-                            Err(failure) => {
+                    // Every route's aggregate arguments are evaluated over the whole batch once.
+                    let evaluated = evaluate_window_arguments(
+                        plan,
+                        compiled_aggregates,
+                        first_message.record.batch(),
+                        execution_now,
+                    )
+                    .await;
+                    let mut evaluated = match evaluated {
+                        Ok(evaluated) => evaluated,
+                        Err(failure) => {
+                            // A failure of the whole batch fails every one of its messages.
+                            for message in messages {
+                                tokio::task::consume_budget().await;
                                 branch
                                     .runtime
                                     .handle_message_error(
@@ -893,56 +848,59 @@ impl RelayProcessorNode {
                                             None,
                                             format!(
                                                 "window processor '{}' aggregate input failed: \
-                                                 {failure}",
+                                                 {failure:#}",
                                                 self.processor.as_str(),
                                             ),
                                         ),
                                     )
                                     .await;
-                                continue;
                             }
-                        };
-                        if let Err(failure) =
-                            state.push_message(aggregate, timestamp, message, aggregate_inputs)
-                        {
-                            let WindowPushFailure { error, message } = *failure;
-                            branch
-                                .runtime
-                                .handle_message_error(
-                                    MessageErrorSourceContext {
-                                        domain: &branch.domain,
-                                        node_kind: self.kind,
-                                        node: &self.processor,
-                                        execution_now,
-                                    },
-                                    &self.error_policies,
-                                    message,
-                                    MessageErrorFailure::publish(
-                                        None,
-                                        format!(
-                                            "window processor '{}' aggregate input failed: \
-                                             {error:#}",
-                                            self.processor.as_str(),
-                                        ),
-                                    ),
-                                )
-                                .await;
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind,
-                                &self.processor,
-                                &self.error_policies,
-                                state.entries.iter().map(|entry| &entry.message.acks),
-                                format!(
-                                    "window processor '{}' aggregate state failed: {error:#}",
-                                    self.processor.as_str(),
-                                ),
-                            );
-                            state.clear(aggregate);
-                            replicated_state.generations.mark_live_dirty();
-                            continue;
+                            return;
                         }
+                    };
+                    let mut pending = VecDeque::with_capacity(messages.len());
+                    for (row, message) in messages.into_iter().enumerate() {
+                        tokio::task::consume_budget().await;
+                        let Some(refusal) = evaluated.take_refusal(row) else {
+                            pending.push_back(WindowAdmission { message, row });
+                            continue;
+                        };
+                        branch
+                            .runtime
+                            .handle_message_error(
+                                MessageErrorSourceContext {
+                                    domain: &branch.domain,
+                                    node_kind: self.kind,
+                                    node: &self.processor,
+                                    execution_now,
+                                },
+                                &self.error_policies,
+                                message,
+                                MessageErrorFailure::publish(
+                                    None,
+                                    format!(
+                                        "window processor '{}' aggregate input failed: {refusal:#}",
+                                        self.processor.as_str(),
+                                    ),
+                                ),
+                            )
+                            .await;
+                    }
+                    // Rows are admitted in runs that end where the window fills, so every
+                    // emission covers exactly the rows admitted before it.
+                    while !pending.is_empty() {
+                        tokio::task::consume_budget().await;
+                        let run_len =
+                            state.admission_run_len(&pending, *width_messages, *width_duration);
+                        let run = pending.drain(..run_len).collect::<Vec<_>>();
+                        let last_timestamp = run
+                            .last()
+                            .map(|admission| message_timestamp(&admission.message));
+                        state.admit(&evaluated.columns, run);
                         replicated_state.generations.mark_live_dirty();
+                        let Some(now) = last_timestamp else {
+                            continue;
+                        };
                         let changed = flush_ready_window_processor(
                             WindowFlushContext {
                                 graph,
@@ -955,7 +913,7 @@ impl RelayProcessorNode {
                                 execution_now,
                             },
                             state,
-                            aggregate,
+                            plan,
                             compiled_aggregates,
                             WindowBounds {
                                 width_messages: *width_messages,
@@ -963,7 +921,7 @@ impl RelayProcessorNode {
                                 width_duration: *width_duration,
                                 step_duration: *step_duration,
                             },
-                            timestamp,
+                            now,
                         )
                         .await;
                         if changed {
@@ -1893,10 +1851,11 @@ impl RelayProcessorNode {
                     step_messages,
                     width_duration,
                     step_duration,
-                    aggregate,
+                    plan,
                     compiled_aggregates,
                     state,
                     replicated_state,
+                    ..
                 } => {
                     let changed = flush_ready_window_processor(
                         WindowFlushContext {
@@ -1910,7 +1869,7 @@ impl RelayProcessorNode {
                             execution_now: now,
                         },
                         state,
-                        aggregate,
+                        plan,
                         compiled_aggregates,
                         WindowBounds {
                             width_messages: *width_messages,
@@ -2396,7 +2355,7 @@ impl RelayProcessorNode {
                 Ok(())
             }
             RelayProcessorOperationNode::WindowProcessor {
-                aggregate,
+                plan,
                 state,
                 replicated_state,
                 ..
@@ -2415,7 +2374,7 @@ impl RelayProcessorNode {
                         state.entries.iter().map(|entry| &entry.message.acks),
                         format!("{error:#}"),
                     );
-                    state.clear(aggregate);
+                    state.clear(plan);
                     replicated_state.generations.mark_live_dirty();
                     return Err(error.change_context(ProcessorLiveStateError {
                         branch: branch.key.clone(),
