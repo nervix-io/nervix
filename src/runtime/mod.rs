@@ -28,7 +28,6 @@ use std::{
 };
 
 use ahash::{HashMap, HashMapExt, HashSet, RandomState};
-use arc_swap::{ArcSwap, ArcSwapOption, cache::Cache};
 use arch_into::ArchInto as _;
 use arrow_array::{
     Array, ArrayRef, BooleanArray, ListArray, RecordBatch, RecordBatchOptions, StringArray,
@@ -48,13 +47,15 @@ use arrow_select::{
     take::take as take_arrow_array,
 };
 use chrono::{TimeZone, Utc};
-use dashmap::DashMap;
 use error_stack::Report;
 use fjall::Database;
 use futures_util::{future::BoxFuture, stream::FuturesUnordered};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
-use nervix_execution::{ChargedBytes, Executor};
+use nervix_execution::{
+    ChargedBytes, Executor,
+    sync::{AbortOnDropHandle, ArcSwap, ArcSwapOption, Cache, DashMap},
+};
 use nervix_interconnect::{
     EntityGatePurpose, Envelope, InterconnectRequest, RelayAdmission, RelayAdmissionDecision,
     RelayAdmissionStatus, RelayCancellationGuard, RelayDelivery, RelayPayload, RelayPayloadKind,
@@ -133,10 +134,7 @@ use tokio::{
     time::{Duration, Instant, sleep, sleep_until},
 };
 use tokio_stream::StreamExt;
-use tokio_util::{
-    sync::CancellationToken,
-    task::{AbortOnDropHandle, TaskTracker},
-};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, error, info, trace, warn};
 use triomphe::Arc;
 use upon::Engine as TemplateEngine;

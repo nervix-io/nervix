@@ -12,9 +12,9 @@ use std::sync::Arc as StdArc;
 
 use ahash::RandomState;
 use arch_into::ArchInto;
-use dashmap::DashMap;
 use futures_util::future::BoxFuture;
 use nervix_consensus::{Administrator, CommandExecutionState, ConsensusError, Observer, Proposer};
+use nervix_execution::sync::DashMap;
 use nervix_interconnect::Transport;
 use nervix_models::{
     CommandExecutionReference, DomainName, ModelKind, ModelName, ResourceId, ResourceName,

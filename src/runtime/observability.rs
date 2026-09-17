@@ -697,6 +697,7 @@ impl Runtime {
 mod tests {
     use ahash::HashMap;
     use fjall::Database;
+    use futures_util::FutureExt as _;
     use nervix_models::{
         ClusterNodeName, CreateLookup, IngestorName, ModelKind, ModelName, ParseAsType,
     };
@@ -707,8 +708,8 @@ mod tests {
     use super::*;
     use crate::metrics::RuntimeMetrics;
 
-    #[test]
-    fn a_reported_runtime_error_reaches_every_attached_observer() {
+    #[tokio::test]
+    async fn a_reported_runtime_error_reaches_every_attached_observer() {
         let events = RuntimeEvents::new();
         let mut first = events.subscribe();
         let mut second = events.subscribe();
@@ -716,8 +717,10 @@ mod tests {
         events.report_error("ingestor 'orders' failed to decode a message");
 
         for observer in [&mut first, &mut second] {
+            tokio::task::consume_budget().await;
             let RuntimeEvent::Error(message) = observer
-                .try_recv()
+                .recv()
+                .await
                 .expect("an attached observer must receive the report");
             assert_eq!(message, "ingestor 'orders' failed to decode a message");
         }
@@ -732,8 +735,8 @@ mod tests {
         events.report_error("emitter 'ledger' failed to publish");
     }
 
-    #[test]
-    fn an_observer_that_attaches_later_sees_only_what_follows_it() {
+    #[tokio::test]
+    async fn an_observer_that_attaches_later_sees_only_what_follows_it() {
         let events = RuntimeEvents::new();
         events.report_error("reported before anyone was listening");
 
@@ -741,11 +744,12 @@ mod tests {
         events.report_error("reported after the observer attached");
 
         let RuntimeEvent::Error(message) = observer
-            .try_recv()
+            .recv()
+            .await
             .expect("the observer must receive the later report");
         assert_eq!(message, "reported after the observer attached");
         assert!(
-            observer.try_recv().is_err(),
+            observer.recv().now_or_never().is_none(),
             "the bus must not replay reports that predate the observer"
         );
     }

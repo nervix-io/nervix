@@ -8,13 +8,12 @@ use std::{
 };
 
 use ahash::{HashMap, RandomState};
-use arc_swap::ArcSwap;
 #[cfg(test)]
 use arch_into::ArchInto as _;
-use dashmap::DashMap;
 use error_stack::Report;
 #[cfg(test)]
 use meticulous::OptionExt as _;
+use nervix_execution::sync::{ArcSwap, DashMap};
 use nervix_models::ClusterNodeName;
 #[cfg(test)]
 use nervix_models::KafkaPartitionSchedule;

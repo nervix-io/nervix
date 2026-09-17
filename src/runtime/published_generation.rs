@@ -12,7 +12,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
-use arc_swap::ArcSwap;
+use nervix_execution::sync::ArcSwap;
 
 use super::lsm_sequence::LsmSequence;
 

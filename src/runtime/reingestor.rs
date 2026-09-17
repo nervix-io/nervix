@@ -1478,7 +1478,7 @@ mod tests {
     use std::sync::{Arc as StdArc, atomic::Ordering};
 
     use ahash::HashMap;
-    use arc_swap::ArcSwapOption;
+    use nervix_execution::sync::ArcSwapOption;
     use nervix_models::{
         AckMode, CreateReingestor, DomainSchedule, ErrorPolicies, ModelKind, NodeRef, ParseAsType,
         ProcessorInputs, ProcessorOutputs, ReingestorName, RelayName,

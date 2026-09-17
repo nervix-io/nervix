@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ahash::RandomState;
-use dashmap::DashMap;
+use nervix_execution::sync::DashMap;
 use nervix_models::ClusterNodeName;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use tokio::sync::Notify;

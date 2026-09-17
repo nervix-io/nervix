@@ -10,8 +10,8 @@
 use std::sync::Arc as StdArc;
 
 use ahash::HashMap;
-use arc_swap::ArcSwapOption;
 use arrow_array::Array;
+use nervix_execution::sync::ArcSwapOption;
 use nervix_interconnect::{EntityGatePurpose, RelayPayload, RelayPayloadKind};
 use nervix_models::{
     AckMode, ClusterNodeName, CreateRelay, CreateSchema, DomainName, DomainSchedule, ModelKind,
