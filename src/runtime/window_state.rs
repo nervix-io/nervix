@@ -5,7 +5,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use super::{
     PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
-    WindowProcessorState,
+    WindowProcessorError, WindowProcessorState,
     published_generation::{Generation, PublishedGenerations},
 };
 
@@ -120,7 +120,7 @@ impl ReplicatedWindowProcessorState {
         &self,
         program: &WindowAggregateProgram,
         input_schema: &crate::runtime_schema::CompiledSchema,
-    ) -> Result<WindowProcessorState, String> {
+    ) -> error_stack::Result<WindowProcessorState, WindowProcessorError> {
         let published = self.generations.load();
         let Some(snapshot) = &published.value else {
             return Ok(WindowProcessorState::new(program));
@@ -135,7 +135,7 @@ impl ReplicatedWindowProcessorState {
     ) -> Result<(), RuntimePersistenceError> {
         let snapshot = state
             .to_snapshot()
-            .map_err(RuntimePersistenceError::EncodeState)?;
+            .map_err(|error| RuntimePersistenceError::EncodeState(format!("{error:#}")))?;
         self.generations.publish(Some(snapshot));
         Ok(())
     }

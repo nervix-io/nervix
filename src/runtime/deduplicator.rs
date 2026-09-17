@@ -1,6 +1,6 @@
 use std::{sync::Arc as StdArc, time::Duration};
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use nervix_expiry_map::ExpiryMap;
 use nervix_models::{Expression, ModelName, RelayName, Timestamp};
 use nervix_vm::CompiledProgram as VmCompiledProgram;
@@ -9,8 +9,8 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use triomphe::Arc;
 
 use super::{
-    KeyProjectionKind, PersistedRuntimeStateEntry, ReorderKeyPart, RuntimePersistenceError,
-    RuntimeStatePlacement, UdfExecutor, checked_add_duration_to_timestamp,
+    KeyProjectionKind, PersistedRuntimeStateEntry, ProcessorCompileError, ReorderKeyPart,
+    RuntimePersistenceError, RuntimeStatePlacement, UdfExecutor, checked_add_duration_to_timestamp,
     compile_key_projection_program,
     published_generation::{Generation, PublishedGenerations},
 };
@@ -133,11 +133,12 @@ pub(super) fn compile_deduplicator_key_program(
     deduplicate_on: &[Expression],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
-) -> Result<CompiledDeduplicatorKeyProgram, String> {
+) -> error_stack::Result<CompiledDeduplicatorKeyProgram, ProcessorCompileError> {
     if deduplicate_on.is_empty() {
-        return Err(format!(
-            "deduplicator '{}' requires at least one DEDUPLICATE ON expression",
-            processor.as_str()
+        return Err(Report::new(
+            ProcessorCompileError::DeduplicatorWithoutKeys {
+                processor: processor.clone(),
+            },
         ));
     }
     let compiled = compile_key_projection_program(
@@ -148,7 +149,9 @@ pub(super) fn compile_deduplicator_key_program(
         input_schema,
         udfs,
     )
-    .map_err(|error| format!("{error:#}"))?;
+    .change_context_lazy(|| ProcessorCompileError::DeduplicatorKeyProgram {
+        processor: processor.clone(),
+    })?;
     Ok(CompiledDeduplicatorKeyProgram {
         key_column_offset: 0,
         key_count: deduplicate_on.len(),
@@ -465,5 +468,22 @@ mod tests {
         let mut next = ReplicatedDeduplicatorState::keyspace(&state);
         assert!(!next.reserve_new_key(key("txn-1"), Timestamp::from_unix_nanos(3), MAX_TIME));
         assert!(next.reserve_new_key(key("txn-2"), Timestamp::from_unix_nanos(3), MAX_TIME));
+    }
+
+    #[test]
+    fn deduplicator_key_program_requires_deduplicate_on_expressions() {
+        let Err(error) = super::compile_deduplicator_key_program(
+            &ModelName::parse("dedup_orders").assured("the identifier is well formed"),
+            &[],
+            &[],
+            std::sync::Arc::new(arrow_schema::Schema::empty()),
+            None,
+        ) else {
+            panic!("a deduplicator without DEDUPLICATE ON expressions must not compile");
+        };
+        assert_eq!(
+            error.current_context().to_string(),
+            "deduplicator 'dedup_orders' requires at least one DEDUPLICATE ON expression"
+        );
     }
 }

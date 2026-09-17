@@ -1,3 +1,5 @@
+use error_stack::{Report, ResultExt as _};
+
 use super::*;
 
 struct ProcessorInputExpressionContext<'a> {
@@ -39,8 +41,12 @@ impl RelayProcessorNode {
         branch: &mut BranchRuntime,
         branch_key: &Option<BranchKey>,
         execution_now: Timestamp,
-    ) -> Result<MaterializedDependencyResolution, String> {
-        let routing = branch.domain_routing().map_err(|error| error.to_string())?;
+    ) -> error_stack::Result<MaterializedDependencyResolution, ProcessorMaterializedError> {
+        let routing = branch.domain_routing().change_context_lazy(|| {
+            ProcessorMaterializedError::DomainRouting {
+                branch: branch_key.clone(),
+            }
+        })?;
         branch
             .runtime
             .resolve_materialized_dependencies(
@@ -51,7 +57,9 @@ impl RelayProcessorNode {
                 execution_now,
             )
             .await
-            .map_err(|error| error.to_string())
+            .change_context_lazy(|| ProcessorMaterializedError::Resolve {
+                branch: branch_key.clone(),
+            })
     }
 
     pub(super) fn refresh(
@@ -121,32 +129,32 @@ impl RelayProcessorNode {
             Ok(template) => template,
             Err(error) => return Some(error.to_string()),
         };
-        self.apply_node_template(template).err()
+        match self.apply_node_template(template) {
+            Ok(()) => None,
+            Err(error) => Some(format!("{error:#}")),
+        }
     }
 
     pub(super) fn apply_node_template(
         &mut self,
         template: RelayProcessorTemplate,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), ProcessorTemplateError> {
         if self.kind != template.kind || self.processor != template.processor {
-            return Err(format!(
-                "processor template targets {} '{}', not {} '{}'",
-                template.kind.as_str(),
-                template.processor.as_str(),
-                self.kind.as_str(),
-                self.processor.as_str()
-            ));
+            return Err(Report::new(ProcessorTemplateError::TargetMismatch {
+                template_kind: template.kind,
+                template_processor: template.processor.clone(),
+                kind: self.kind,
+                processor: self.processor.clone(),
+            }));
         }
         if self.input_relays != template.input_relays {
-            return Err(format!(
-                "dynamic {} update changed processor input topology",
-                self.kind.as_str()
-            ));
+            return Err(Report::new(ProcessorTemplateError::InputTopology {
+                kind: self.kind,
+            }));
         }
         if self.materialized_state != template.materialized_state {
-            return Err(format!(
-                "dynamic {} update changed materialized-state dependencies",
-                self.kind.as_str()
+            return Err(Report::new(
+                ProcessorTemplateError::MaterializedDependencies { kind: self.kind },
             ));
         }
         self.operation.apply_template(&template.operation)?;
@@ -576,11 +584,7 @@ impl RelayProcessorNode {
                         &self.processor,
                         &self.error_policies,
                         batch.acks.iter(),
-                        format!(
-                            "{} '{}' failed to resolve materialized dependencies: {error}",
-                            self.kind.as_str(),
-                            self.processor
-                        ),
+                        format!("{} '{}' {error:#}", self.kind.as_str(), self.processor),
                     );
                     return;
                 }
@@ -814,9 +818,13 @@ impl RelayProcessorNode {
                         return;
                     };
                     let row_count = messages.len();
-                    let mut aggregate_inputs_by_row = (0..row_count)
-                        .map(|_| Ok(Vec::new()))
-                        .collect::<Vec<Result<Vec<WindowAggregateInput>, String>>>();
+                    let mut aggregate_inputs_by_row =
+                        (0..row_count).map(|_| Ok(Vec::new())).collect::<Vec<
+                            error_stack::Result<Vec<WindowAggregateInput>, WindowProcessorError>,
+                        >>();
+                    // A failure of the whole input batch fails every row that had not already
+                    // failed on its own, so it is kept once rather than copied into each row.
+                    let mut batch_failure = None;
                     for compiled in compiled_aggregates.iter() {
                         tokio::task::consume_budget().await;
                         let evaluated = match evaluate_window_aggregate_inputs(
@@ -828,25 +836,16 @@ impl RelayProcessorNode {
                         {
                             Ok(evaluated) => evaluated,
                             Err(error) => {
-                                for inputs in &mut aggregate_inputs_by_row {
-                                    if inputs.is_ok() {
-                                        *inputs = Err(error.clone());
-                                    }
-                                }
+                                batch_failure = Some(error);
                                 break;
                             }
                         };
                         if evaluated.len() != row_count {
-                            let error = format!(
-                                "window aggregate input VM produced {} rows for {row_count} input \
-                                 rows",
-                                evaluated.len()
-                            );
-                            for inputs in &mut aggregate_inputs_by_row {
-                                if inputs.is_ok() {
-                                    *inputs = Err(error.clone());
-                                }
-                            }
+                            batch_failure =
+                                Some(Report::new(WindowProcessorError::AggregateInputRowCount {
+                                    rows: evaluated.len(),
+                                    expected: row_count,
+                                }));
                             break;
                         }
                         for (inputs, evaluated) in aggregate_inputs_by_row.iter_mut().zip(evaluated)
@@ -870,9 +869,14 @@ impl RelayProcessorNode {
                     {
                         tokio::task::consume_budget().await;
                         let timestamp = message_timestamp(&message);
-                        let aggregate_inputs = match aggregate_inputs {
+                        let row_inputs = match (aggregate_inputs, &batch_failure) {
+                            (Ok(aggregate_inputs), None) => Ok(aggregate_inputs),
+                            (Ok(_), Some(error)) => Err(format!("{error:#}")),
+                            (Err(error), _) => Err(format!("{error:#}")),
+                        };
+                        let aggregate_inputs = match row_inputs {
                             Ok(aggregate_inputs) => aggregate_inputs,
-                            Err(error) => {
+                            Err(failure) => {
                                 branch
                                     .runtime
                                     .handle_message_error(
@@ -887,9 +891,9 @@ impl RelayProcessorNode {
                                         MessageErrorFailure::publish(
                                             None,
                                             format!(
-                                                "window processor '{}' aggregate input failed: {}",
+                                                "window processor '{}' aggregate input failed: \
+                                                 {failure}",
                                                 self.processor.as_str(),
-                                                error
                                             ),
                                         ),
                                     )
@@ -897,10 +901,10 @@ impl RelayProcessorNode {
                                 continue;
                             }
                         };
-                        if let Err(error_and_message) =
+                        if let Err(failure) =
                             state.push_message(aggregate, timestamp, message, aggregate_inputs)
                         {
-                            let (error, message) = *error_and_message;
+                            let WindowPushFailure { error, message } = *failure;
                             branch
                                 .runtime
                                 .handle_message_error(
@@ -915,9 +919,9 @@ impl RelayProcessorNode {
                                     MessageErrorFailure::publish(
                                         None,
                                         format!(
-                                            "window processor '{}' aggregate input failed: {}",
+                                            "window processor '{}' aggregate input failed: \
+                                             {error:#}",
                                             self.processor.as_str(),
-                                            error
                                         ),
                                     ),
                                 )
@@ -929,9 +933,8 @@ impl RelayProcessorNode {
                                 &self.error_policies,
                                 state.entries.iter().map(|entry| &entry.message.acks),
                                 format!(
-                                    "window processor '{}' aggregate state failed: {}",
+                                    "window processor '{}' aggregate state failed: {error:#}",
                                     self.processor.as_str(),
-                                    error
                                 ),
                             );
                             state.clear(aggregate);
@@ -1301,7 +1304,7 @@ impl RelayProcessorNode {
                                     &self.processor,
                                     &self.error_policies,
                                     batch.acks.iter(),
-                                    error,
+                                    format!("{error:#}"),
                                 );
                                 return;
                             }
@@ -1529,7 +1532,7 @@ impl RelayProcessorNode {
                                     correlations.iter().flat_map(|(left, right)| {
                                         [&left.message.acks, &right.message.acks]
                                     }),
-                                    error,
+                                    format!("{error:#}"),
                                 );
                                 return;
                             }
@@ -1573,7 +1576,7 @@ impl RelayProcessorNode {
                                 }),
                                 format!(
                                     "correlator '{}' failed to build matched Arrow batches: \
-                                     {error}",
+                                     {error:#}",
                                     self.processor.as_str()
                                 ),
                             );
@@ -2209,7 +2212,7 @@ impl RelayProcessorNode {
                             &self.processor,
                             &self.error_policies,
                             std::iter::empty::<&AckSet>(),
-                            error,
+                            format!("{error:#}"),
                         );
                     }
                 }
@@ -2347,7 +2350,10 @@ impl RelayProcessorNode {
     }
 
     /// Publish the live state this branch task owns for everything outside the task to read.
-    pub(super) fn snapshot_live_state(&mut self, branch: &mut BranchRuntime) -> Result<(), String> {
+    pub(super) fn snapshot_live_state(
+        &mut self,
+        branch: &mut BranchRuntime,
+    ) -> error_stack::Result<(), ProcessorLiveStateError> {
         match &mut self.operation {
             RelayProcessorOperationNode::Deduplicator { keyspace, .. } => {
                 keyspace.publish();
@@ -2371,11 +2377,13 @@ impl RelayProcessorNode {
                         &self.processor,
                         &self.error_policies,
                         state.entries.iter().map(|entry| &entry.message.acks),
-                        error.clone(),
+                        format!("{error:#}"),
                     );
                     state.clear(aggregate);
                     replicated_state.generations.mark_live_dirty();
-                    return Err(error);
+                    return Err(error.change_context(ProcessorLiveStateError {
+                        branch: branch.key.clone(),
+                    }));
                 }
                 Ok(())
             }
@@ -2406,7 +2414,7 @@ impl RelayProcessorNode {
                     return Ok(());
                 }
                 snapshot_window_processor_live_state(&self.processor, replicated_state, state)
-                    .map_err(OwnershipHandoffError::checkpoint)
+                    .map_err(|error| OwnershipHandoffError::checkpoint(format!("{error:#}")))
             }
             RelayProcessorOperationNode::WasmProcessor {
                 instance,

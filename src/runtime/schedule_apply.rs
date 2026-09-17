@@ -1533,7 +1533,7 @@ impl Runtime {
                 .await
                 .map_err(|reason| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
-                    reason,
+                    reason: format!("{reason:#}"),
                 })?;
             let had_old_task = old_task.is_some();
             let handoffs = if let Some(old_task) = old_task {

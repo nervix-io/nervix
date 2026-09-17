@@ -1,4 +1,25 @@
+use error_stack::{Report, ResultExt as _};
+
 use super::*;
+
+/// Every way dispatching a stateful processor's output fails before it reaches its routes.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ProcessorOutputError {
+    #[error("failed to build the processor output relay batch: {reason}")]
+    RelayBatch { reason: String },
+    #[error(
+        "pending output has {input_rows} input rows, {keys} keys, {arrow_rows} Arrow rows, and \
+         {metadata_rows} metadata rows"
+    )]
+    PendingShape {
+        input_rows: usize,
+        keys: usize,
+        arrow_rows: usize,
+        metadata_rows: usize,
+    },
+    #[error("failed to select the pending output rows of one branch")]
+    TakeBranchRows,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum ProcessorOutputFilterSource<'a> {
@@ -61,38 +82,41 @@ impl ProcessorMaterializedState<'_> {
         routing: &DomainRoutingSnapshot,
         context: &ProcessorOutputDispatchContext<'_>,
         branch_key: &Option<BranchKey>,
-    ) -> Result<HashMap<String, RuntimeValue>, String> {
-        match self {
-            Self::Admitted(values) => Ok((*values).clone()),
-            Self::ResolvedAtDispatch(dependencies) => {
-                match context
-                    .branch
-                    .runtime
-                    .resolve_materialized_dependencies(
-                        routing,
-                        &context.branch.domain,
-                        branch_key,
-                        dependencies,
-                        context.execution_now,
-                    )
-                    .await
-                    .map_err(|error| error.to_string())?
-                {
-                    MaterializedDependencyResolution::Ready(values) => Ok(values),
-                    MaterializedDependencyResolution::Skip => Err(format!(
-                        "{} '{}' requires materialized state that was evicted after the batch was \
-                         admitted",
-                        context.node_kind.as_str(),
-                        context.processor.as_str()
-                    )),
-                    MaterializedDependencyResolution::Wait => Err(format!(
-                        "{} '{}' awaits materialized state that was evicted after the batch was \
-                         admitted",
-                        context.node_kind.as_str(),
-                        context.processor.as_str()
-                    )),
-                }
-            }
+    ) -> error_stack::Result<HashMap<String, RuntimeValue>, ProcessorMaterializedError> {
+        let dependencies = match self {
+            Self::Admitted(values) => return Ok((*values).clone()),
+            Self::ResolvedAtDispatch(dependencies) => dependencies,
+        };
+        let resolution = context
+            .branch
+            .runtime
+            .resolve_materialized_dependencies(
+                routing,
+                &context.branch.domain,
+                branch_key,
+                dependencies,
+                context.execution_now,
+            )
+            .await
+            .change_context_lazy(|| ProcessorMaterializedError::Resolve {
+                branch: branch_key.clone(),
+            })?;
+        match resolution {
+            MaterializedDependencyResolution::Ready(values) => Ok(values),
+            MaterializedDependencyResolution::Skip => Err(Report::new(
+                ProcessorMaterializedError::EvictedRequiredSkip {
+                    node_kind: context.node_kind,
+                    processor: context.processor.clone(),
+                    branch: branch_key.clone(),
+                },
+            )),
+            MaterializedDependencyResolution::Wait => Err(Report::new(
+                ProcessorMaterializedError::EvictedRequiredWait {
+                    node_kind: context.node_kind,
+                    processor: context.processor.clone(),
+                    branch: branch_key.clone(),
+                },
+            )),
         }
     }
 }
@@ -106,8 +130,12 @@ pub(super) struct PendingProcessorOutputBatch {
 }
 
 impl PendingProcessorOutputBatch {
-    pub(super) fn into_relay_batch(self, acks: Vec<AckSet>) -> Result<RelayRecordBatch, String> {
+    pub(super) fn into_relay_batch(
+        self,
+        acks: Vec<AckSet>,
+    ) -> error_stack::Result<RelayRecordBatch, ProcessorOutputError> {
         RelayRecordBatch::from_filtered_parts(self.key, self.batch, self.metadata, acks)
+            .map_err(|reason| Report::new(ProcessorOutputError::RelayBatch { reason }))
     }
 }
 
@@ -117,18 +145,17 @@ pub(super) fn pending_output_batches_by_key(
     keys: Vec<Option<BranchKey>>,
     batch: RuntimeRecordBatch,
     metadata: &[RuntimeRecordMetadata],
-) -> Result<Vec<PendingProcessorOutputBatch>, String> {
+) -> error_stack::Result<Vec<PendingProcessorOutputBatch>, ProcessorOutputError> {
     if input_rows.len() != keys.len()
         || input_rows.len() != batch.batch().num_rows()
         || input_rows.len() != metadata.len()
     {
-        return Err(format!(
-            "pending output has {} input rows, {} keys, {} Arrow rows, and {} metadata rows",
-            input_rows.len(),
-            keys.len(),
-            batch.batch().num_rows(),
-            metadata.len()
-        ));
+        return Err(Report::new(ProcessorOutputError::PendingShape {
+            input_rows: input_rows.len(),
+            keys: keys.len(),
+            arrow_rows: batch.batch().num_rows(),
+            metadata_rows: metadata.len(),
+        }));
     }
     let mut groups = Vec::<(Option<BranchKey>, Vec<usize>)>::new();
     let mut positions = HashMap::<Option<BranchKey>, usize>::default();
@@ -140,18 +167,20 @@ pub(super) fn pending_output_batches_by_key(
             groups.push((key, vec![row]));
         }
     }
-    groups
-        .into_iter()
-        .map(|(key, rows)| {
-            Ok(PendingProcessorOutputBatch {
-                output_index,
-                input_rows: rows.iter().map(|row| input_rows[*row]).collect(),
-                key,
-                batch: batch.take(&rows).map_err(|error| error.to_string())?,
-                metadata: rows.iter().map(|row| metadata[*row].clone()).collect(),
-            })
-        })
-        .collect()
+    let mut pending = Vec::with_capacity(groups.len());
+    for (key, rows) in groups {
+        let branch_batch = batch
+            .take(&rows)
+            .change_context(ProcessorOutputError::TakeBranchRows)?;
+        pending.push(PendingProcessorOutputBatch {
+            output_index,
+            input_rows: rows.iter().map(|row| input_rows[*row]).collect(),
+            key,
+            batch: branch_batch,
+            metadata: rows.iter().map(|row| metadata[*row].clone()).collect(),
+        });
+    }
+    Ok(pending)
 }
 
 pub(super) struct PendingProcessorOutputMessageError {
@@ -464,7 +493,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
                     context.processor,
                     context.error_policies,
                     batch.acks.iter(),
-                    reason,
+                    format!("{reason:#}"),
                 );
             return None;
         }
@@ -578,7 +607,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
                         context.processor,
                         context.error_policies,
                         error_acks.iter(),
-                        error,
+                        format!("{error:#}"),
                     );
                 return None;
             }
@@ -910,5 +939,26 @@ async fn flush_processor_outputs(
                     ),
                 );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nervix_models::ParseAsType;
+
+    use super::*;
+
+    #[test]
+    fn pending_output_batches_reject_rows_keys_and_metadata_that_disagree() {
+        let batch = test_schema(&[("id", ParseAsType::U32)])
+            .batch_from_test_rows([[("id".to_string(), RuntimeValue::U32(7))]])
+            .expect("one test row should form a batch");
+        let Err(error) = pending_output_batches_by_key(0, &[0, 1], vec![None], batch, &[]) else {
+            panic!("rows, keys and metadata that disagree must not form pending batches");
+        };
+        assert_eq!(
+            error.current_context().to_string(),
+            "pending output has 2 input rows, 1 keys, 1 Arrow rows, and 0 metadata rows"
+        );
     }
 }
