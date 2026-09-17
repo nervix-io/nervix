@@ -8,12 +8,21 @@ version.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+shuttle = [
+  "dashmap/shuttle",
+  "nervix-execution/shuttle",
+  "parking_lot/shuttle",
+  "tokio/shuttle",
+  "tokio-util/shuttle",
+]
+
 [dependencies]
 ahash = { workspace = true }
-arc-swap = { workspace = true }
 arch-into = { workspace = true }
 bytes = { workspace = true }
-dashmap = { workspace = true }
+dashmap = { package = "shuttle-dashmap", version = "6" }
 error-stack = { workspace = true }
 fastrand = { workspace = true }
 futures-util = { workspace = true }
@@ -23,7 +32,7 @@ meticulous = { workspace = true }
 nervix-execution = { workspace = true }
 nervix-models = { workspace = true }
 nervix-recovery = { workspace = true }
-parking_lot = { workspace = true }
+parking_lot = { package = "shuttle-parking_lot", version = "0.12" }
 percent-encoding = { workspace = true }
 rand_core = { workspace = true }
 rkyv = { workspace = true }
@@ -31,9 +40,11 @@ rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
+tokio = { package = "shuttle-tokio", version = "1", features = ["full"] }
 tokio-rustls = { workspace = true }
-tokio-util = { workspace = true }
+tokio-util = { package = "shuttle-tokio-util", version = "0.7", features = [
+  "rt",
+] }
 tracing = { workspace = true }
 triomphe = { workspace = true }
 url = { workspace = true }

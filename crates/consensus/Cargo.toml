@@ -9,6 +9,14 @@ version.workspace = true
 workspace = true
 
 [features]
+default = []
+shuttle = [
+  "nervix-execution/shuttle",
+  "nervix-interconnect/shuttle",
+  "parking_lot/shuttle",
+  "tokio/shuttle",
+  "tokio-util/shuttle",
+]
 testing = []
 
 [dependencies]
@@ -23,19 +31,21 @@ nervix-interconnect = { workspace = true }
 nervix-models = { workspace = true }
 nervix-recovery = { workspace = true }
 openraft = { workspace = true }
-parking_lot = { workspace = true }
+parking_lot = { package = "shuttle-parking_lot", version = "0.12" }
 rkyv = { workspace = true }
 serde = { workspace = true }
 sorted-vec = { workspace = true }
 storekey = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
-tokio-util = { workspace = true }
+tokio = { package = "shuttle-tokio", version = "1", features = ["full"] }
+tokio-util = { package = "shuttle-tokio-util", version = "0.7", features = [
+  "rt",
+] }
 tracing = { workspace = true }
 triomphe = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { package = "shuttle-tokio", version = "1", features = ["test-util"] }
 ubyte = { workspace = true }

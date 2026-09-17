@@ -9,15 +9,15 @@
 //! - **Must not know.** What is being acknowledged. It counts outstanding work, and ack state is
 //!   hot-path memory that is never persisted.
 
-#[cfg(not(all(test, runtime_ack_loom)))]
+#[cfg(not(feature = "shuttle"))]
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-#[cfg(all(test, runtime_ack_loom))]
-use loom::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use meticulous::OptionExt as _;
 use nervix_recovery::NoReceiver as _;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "shuttle")]
+use shuttle::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::{oneshot, watch};
 use triomphe::Arc;
 
@@ -843,12 +843,13 @@ mod tests {
     }
 }
 
-#[cfg(all(test, runtime_ack_loom))]
-mod loom_tests {
-    use loom::{model, thread};
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_tests {
+    use shuttle::thread;
     use triomphe::Arc;
 
     use super::{AckRequiredWaitGuard, AckRootTracker, AckSet, HANDOFF_TRACKING_COMPLETE};
+    use crate::shuttle_test::check_dfs;
 
     fn assert_tracker_matches_root(root: &AckSet, tracker: &AckRootTracker) {
         let handle = &root.handles[0];
@@ -867,96 +868,108 @@ mod loom_tests {
 
     #[test]
     fn concurrent_attachment_and_final_ack_leave_exact_tracking() {
-        model(|| {
-            let tracker = Arc::new(AckRootTracker::default());
-            let (root, completion) = AckSet::tracked_root(tracker.clone());
-            let attachment_source = root.clone();
-            let observer = root.clone();
+        check_dfs(
+            || {
+                let tracker = Arc::new(AckRootTracker::default());
+                let (root, completion) = AckSet::tracked_root(tracker.clone());
+                let attachment_source = root.clone();
+                let observer = root.clone();
 
-            let attach_thread = thread::spawn(move || attachment_source.attached());
-            let ack_thread = thread::spawn(move || root.ack_success());
+                let attach_thread = thread::spawn(move || attachment_source.attached());
+                let ack_thread = thread::spawn(move || root.ack_success());
 
-            let attached = attach_thread.join().expect("attachment thread should join");
-            ack_thread.join().expect("ack thread should join");
-            assert_tracker_matches_root(&observer, &tracker);
+                let attached = attach_thread.join().expect("attachment thread should join");
+                ack_thread.join().expect("ack thread should join");
+                assert_tracker_matches_root(&observer, &tracker);
 
-            attached.ack_success();
-            assert_tracker_matches_root(&observer, &tracker);
-            assert_eq!(tracker.outstanding(), 0);
-            drop(completion);
-        });
+                attached.ack_success();
+                assert_tracker_matches_root(&observer, &tracker);
+                assert_eq!(tracker.outstanding(), 0);
+                drop(completion);
+            },
+            None,
+        );
     }
 
     #[test]
     fn concurrent_wait_and_active_ack_exempt_the_remaining_root() {
-        model(|| {
-            let tracker = Arc::new(AckRootTracker::default());
-            let (root, completion) = AckSet::tracked_root(tracker.clone());
-            let attached = root.attached();
-            let waiting = root.clone();
-            let observer = root.clone();
+        check_dfs(
+            || {
+                let tracker = Arc::new(AckRootTracker::default());
+                let (root, completion) = AckSet::tracked_root(tracker.clone());
+                let attached = root.attached();
+                let waiting = root.clone();
+                let observer = root.clone();
 
-            let wait_thread = thread::spawn(move || AckRequiredWaitGuard::new([&waiting]));
-            let ack_thread = thread::spawn(move || attached.ack_success());
+                let wait_thread = thread::spawn(move || AckRequiredWaitGuard::new([&waiting]));
+                let ack_thread = thread::spawn(move || attached.ack_success());
 
-            let required_wait = wait_thread.join().expect("wait thread should join");
-            ack_thread.join().expect("ack thread should join");
-            assert_tracker_matches_root(&observer, &tracker);
-            assert_eq!(tracker.outstanding(), 1);
-            assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+                let required_wait = wait_thread.join().expect("wait thread should join");
+                ack_thread.join().expect("ack thread should join");
+                assert_tracker_matches_root(&observer, &tracker);
+                assert_eq!(tracker.outstanding(), 1);
+                assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
 
-            drop(required_wait);
-            assert_tracker_matches_root(&observer, &tracker);
-            assert_eq!(tracker.outstanding_for_ownership_handoff(), 1);
+                drop(required_wait);
+                assert_tracker_matches_root(&observer, &tracker);
+                assert_eq!(tracker.outstanding_for_ownership_handoff(), 1);
 
-            observer.no_ack("test completion");
-            assert_tracker_matches_root(&observer, &tracker);
-            assert_eq!(tracker.outstanding(), 0);
-            drop(completion);
-        });
+                observer.no_ack("test completion");
+                assert_tracker_matches_root(&observer, &tracker);
+                assert_eq!(tracker.outstanding(), 0);
+                drop(completion);
+            },
+            None,
+        );
     }
 
     #[test]
     fn concurrent_wait_release_and_completion_leave_no_tracking() {
-        model(|| {
-            let tracker = Arc::new(AckRootTracker::default());
-            let (root, completion) = AckSet::tracked_root(tracker.clone());
-            let required_wait = AckRequiredWaitGuard::new([&root]);
-            let observer = root.clone();
+        check_dfs(
+            || {
+                let tracker = Arc::new(AckRootTracker::default());
+                let (root, completion) = AckSet::tracked_root(tracker.clone());
+                let required_wait = AckRequiredWaitGuard::new([&root]);
+                let observer = root.clone();
 
-            let release_thread = thread::spawn(move || drop(required_wait));
-            let completion_thread = thread::spawn(move || root.no_ack("test completion"));
+                let release_thread = thread::spawn(move || drop(required_wait));
+                let completion_thread = thread::spawn(move || root.no_ack("test completion"));
 
-            release_thread.join().expect("release thread should join");
-            completion_thread
-                .join()
-                .expect("completion thread should join");
+                release_thread.join().expect("release thread should join");
+                completion_thread
+                    .join()
+                    .expect("completion thread should join");
 
-            assert_tracker_matches_root(&observer, &tracker);
-            assert_eq!(tracker.outstanding(), 0);
-            assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
-            drop(completion);
-        });
+                assert_tracker_matches_root(&observer, &tracker);
+                assert_eq!(tracker.outstanding(), 0);
+                assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+                drop(completion);
+            },
+            None,
+        );
     }
 
     #[test]
     fn concurrent_success_and_failure_choose_one_terminal_transition() {
-        model(|| {
-            let tracker = Arc::new(AckRootTracker::default());
-            let (root, completion) = AckSet::tracked_root(tracker.clone());
-            let competing = root.clone();
-            let observer = root.clone();
+        check_dfs(
+            || {
+                let tracker = Arc::new(AckRootTracker::default());
+                let (root, completion) = AckSet::tracked_root(tracker.clone());
+                let competing = root.clone();
+                let observer = root.clone();
 
-            let ack_thread = thread::spawn(move || root.ack_success());
-            let no_ack_thread = thread::spawn(move || competing.no_ack("test failure"));
+                let ack_thread = thread::spawn(move || root.ack_success());
+                let no_ack_thread = thread::spawn(move || competing.no_ack("test failure"));
 
-            ack_thread.join().expect("ack thread should join");
-            no_ack_thread.join().expect("no-ack thread should join");
+                ack_thread.join().expect("ack thread should join");
+                no_ack_thread.join().expect("no-ack thread should join");
 
-            assert_tracker_matches_root(&observer, &tracker);
-            assert_eq!(tracker.outstanding(), 0);
-            assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
-            drop(completion);
-        });
+                assert_tracker_matches_root(&observer, &tracker);
+                assert_eq!(tracker.outstanding(), 0);
+                assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+                drop(completion);
+            },
+            None,
+        );
     }
 }

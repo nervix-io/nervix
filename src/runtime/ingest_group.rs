@@ -11,7 +11,7 @@ use ahash::RandomState;
 use bytes::Bytes;
 use indexmap::{Equivalent, IndexMap};
 
-use super::*;
+use super::{ingestors::kafka::KafkaOffsetInitialization, *};
 
 /// Why an ingestor that keeps running discards the summary a flush returns.
 ///
@@ -1490,11 +1490,15 @@ impl Runtime {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
-        topic: &str,
-        consumer: &StreamConsumer,
-        state: &KafkaOffsetStateOriginator,
-        instance_idx: u64,
+        initialization: KafkaOffsetInitialization<'_>,
     ) -> Result<(u64, bool), String> {
+        let KafkaOffsetInitialization {
+            topic,
+            consumer,
+            consumer_assignment,
+            state,
+            instance_idx,
+        } = initialization;
         let (start_version, last_start) = if let Some(domain_state) = self.inner.domains.get(domain)
         {
             (domain_state.start_version, domain_state.last_start.clone())
@@ -1543,6 +1547,7 @@ impl Runtime {
             &offsets,
             scheduled_partition_schedule.as_ref(),
             instance_idx,
+            consumer_assignment,
         )
         .map_err(|error| error.to_string())?;
 
@@ -1615,7 +1620,7 @@ mod tests {
     use std::sync::Arc as StdArc;
 
     use ahash::HashMap;
-    use arc_swap::ArcSwapOption;
+    use nervix_execution::sync::ArcSwapOption;
     use nervix_models::{
         AckMode, CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec,
         CreateSchema, CreateWireSchema, ErrorPolicies, JsonType, ModelKind, ParseAsType,

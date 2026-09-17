@@ -9,10 +9,10 @@ use std::{
 };
 
 use ahash::HashMap;
-use arc_swap::{ArcSwap, Guard};
 use error_stack::Report;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_execution::sync::{ArcSwap, Guard};
 pub(crate) use nervix_interconnect::RuntimeStateKind;
 use nervix_models::{
     ClusterNodeIncarnation, ClusterNodeName, CoordinationIdentity, DomainName, DomainNodeRef,
@@ -282,7 +282,7 @@ impl StateAdmissions {
                     .verified("the loop only spins while below ADMISSION_SPINS_BEFORE_YIELD");
                 std::hint::spin_loop();
             } else {
-                std::thread::yield_now();
+                nervix_execution::sync::yield_now();
             }
         }
     }
@@ -2110,7 +2110,7 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "the rebind did not publish its binding within ten seconds"
             );
-            std::thread::yield_now();
+            nervix_execution::sync::yield_now();
         }
         release_tx
             .send(())
