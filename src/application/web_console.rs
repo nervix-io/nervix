@@ -39,8 +39,9 @@ use meticulous::ResultExt as _;
 use nervix_consensus::ConsensusError;
 use nervix_dataflow_graph::DataflowGraph;
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainStatus, RelayName, ResourceName, ResourceUploadIdentity,
-    ResourceUploadKey, UserName,
+    ClusterNodeName, DomainName, DomainStatus, NodeEndpoint, NodeServiceUrl,
+    NodeServiceUrlParseError, RelayName, ResourceName, ResourceUploadIdentity, ResourceUploadKey,
+    UserName,
 };
 use nervix_nspl::client_statement::{ClientStatement, parse_client_statements};
 use parking_lot::RwLock;
@@ -69,12 +70,11 @@ use super::{
     http_endpoint::{is_websocket_upgrade_request, response_with_bytes, text_response},
     model_mutation::command_error,
     observation::dataflow_metric_target,
-    peer_grpc::grpc_uri_from_advertise_addr,
     session_service::SessionServiceImpl,
     subscription::SessionSubscriptions,
 };
 use crate::{
-    cluster, proto,
+    proto,
     proto::{
         ClusterSummary, CommandRequest, CommandResult, CommandResultKind, Diagnostic,
         DomainEntitySnapshot, DomainInfo, DomainList, DomainSnapshot, ServerEvent,
@@ -720,20 +720,19 @@ pub(in crate::application) async fn serve_web_console_https(
 }
 
 pub(in crate::application) fn web_console_advertise_url(
-    advertise_addr: Option<cluster::HostPort>,
+    advertise_addr: Option<NodeEndpoint>,
     listen_addr: SocketAddr,
     https_listen_addr: Option<SocketAddr>,
-) -> String {
-    if let Some(addr) = advertise_addr {
-        return format!("http://{addr}");
+) -> error_stack::Result<NodeServiceUrl, NodeServiceUrlParseError> {
+    if let Some(endpoint) = advertise_addr {
+        return NodeServiceUrl::new("http", &endpoint);
     }
 
     let (scheme, default_addr) = match https_listen_addr {
         Some(addr) => ("https", addr),
         None => ("http", listen_addr),
     };
-    let addr = cluster::HostPort::from_socket_addr(default_addr);
-    format!("{scheme}://{addr}")
+    NodeServiceUrl::new(scheme, &NodeEndpoint::from(default_addr))
 }
 
 impl SessionServiceImpl {
@@ -1368,16 +1367,18 @@ impl SessionServiceImpl {
                 .find(|node| node.node_id == *leader_id),
             None => None,
         };
+        // A redirect names the leader's advertised endpoints only where discovery has established
+        // them; an unavailable advertisement stays absent rather than becoming a guessed address.
         let mut leader_grpc_uri = String::new();
-        if let Some(node) = leader_node.as_ref()
-            && let Some(uri) = grpc_uri_from_advertise_addr(&node.grpc_advertise_addr)
-        {
-            leader_grpc_uri = uri;
+        let mut leader_web_console_uri = String::new();
+        if let Some(node) = leader_node {
+            if let Some(url) = node.client_url {
+                leader_grpc_uri = url.to_string();
+            }
+            if let Some(url) = node.console_url {
+                leader_web_console_uri = url.to_string();
+            }
         }
-        let leader_web_console_uri = match leader_node {
-            Some(node) => node.web_console_advertise_addr,
-            None => String::new(),
-        };
         let diagnostic = match leader.as_ref() {
             Some(leader) => format!("retry this command on leader '{leader}'"),
             None => "retry this command on the current leader".to_string(),
@@ -1412,26 +1413,32 @@ mod tests {
         *,
     };
     use crate::{
-        cluster, proto,
+        proto,
         proto::{SessionRequest, SuggestRequest},
     };
 
     #[test]
     fn web_console_advertise_url_uses_https_listener_when_available() {
         assert_eq!(
-            web_console_advertise_url(None, test_addr(17420), Some(test_addr(17443))),
+            web_console_advertise_url(None, test_addr(17420), Some(test_addr(17443)))
+                .expect("a listen address forms a url")
+                .as_str(),
             "https://127.0.0.1:17443"
         );
         assert_eq!(
             web_console_advertise_url(
-                Some(cluster::HostPort::from_socket_addr(test_addr(17420))),
+                Some(NodeEndpoint::from(test_addr(17420))),
                 test_addr(17420),
                 Some(test_addr(17443))
-            ),
+            )
+            .expect("an advertised endpoint forms a url")
+            .as_str(),
             "http://127.0.0.1:17420"
         );
         assert_eq!(
-            web_console_advertise_url(None, test_addr(17420), None),
+            web_console_advertise_url(None, test_addr(17420), None)
+                .expect("a listen address forms a url")
+                .as_str(),
             "http://127.0.0.1:17420"
         );
     }

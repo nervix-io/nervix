@@ -81,11 +81,12 @@ use nervix_interconnect::{
     SubscriptionInterestVisibilityResponse as RemoteSubscriptionInterestVisibilityResponse,
     Transport,
 };
-use nervix_models::{ClusterNodeName, DomainName, DomainStatus, ModelKind, UserName};
+use nervix_models::{
+    ClusterNodeName, DomainName, DomainStatus, ModelKind, NodeEndpoint, NodeServiceUrl, UserName,
+};
 use observability_http::serve_observability_http;
 use ownership_handoff::{FORCED_OWNERSHIP_RECOVERY_BUDGET, ForcedOwnershipRecoveryCoordinator};
 use parking_lot::RwLock;
-use peer_grpc::grpc_base_url;
 use scheduling::{
     KafkaPartitionWatcherKey, KafkaPartitionWatcherTask, LEADER_KAFKA_PARTITION_WATCH_INTERVAL,
 };
@@ -492,6 +493,12 @@ impl InternalTransportMode {
     }
 }
 
+/// One live peer whose advertised interconnect endpoint this health round can reach.
+struct ReachablePeer {
+    node_id: ClusterNodeName,
+    endpoint: NodeEndpoint,
+}
+
 #[derive(Debug, Clone, TypedBuilder)]
 pub struct Application {
     pub addr: SocketAddr,
@@ -500,14 +507,14 @@ pub struct Application {
     #[builder(default)]
     pub grpc_https_listen_addr: Option<SocketAddr>,
     #[builder(default)]
-    pub grpc_https_advertise_addr: Option<cluster::HostPort>,
+    pub grpc_https_advertise_addr: Option<NodeEndpoint>,
     pub http_listen_addr: SocketAddr,
     pub https_listen_addr: SocketAddr,
     pub observability_listen_addr: SocketAddr,
     #[builder(default = SocketAddr::from(([127, 0, 0, 1], 0)))]
     pub web_console_listen_addr: SocketAddr,
     #[builder(default)]
-    pub web_console_advertise_addr: Option<cluster::HostPort>,
+    pub web_console_advertise_addr: Option<NodeEndpoint>,
     #[builder(default)]
     pub web_console_https_listen_addr: Option<SocketAddr>,
     #[builder(default)]
@@ -516,9 +523,9 @@ pub struct Application {
     pub web_console_tls_key: Option<PathBuf>,
     pub cluster_id: String,
     pub node_id: ClusterNodeName,
-    pub grpc_advertise_addr: cluster::HostPort,
+    pub grpc_advertise_addr: NodeEndpoint,
     pub interconnect_listen_addr: SocketAddr,
-    pub interconnect_advertise_addr: cluster::HostPort,
+    pub interconnect_advertise_addr: NodeEndpoint,
     pub interconnect_tls_ca: PathBuf,
     pub interconnect_tls_cert: PathBuf,
     pub interconnect_tls_key: PathBuf,
@@ -632,7 +639,8 @@ impl Application {
             self.web_console_advertise_addr,
             web_console_listen_addr,
             web_console_https_listen_addr,
-        );
+        )
+        .change_context(AppError::BuildConsoleAdvertiseUrl)?;
         let graceful_shutdown_drain = self.graceful_shutdown_drain;
         let drain_timeout = self.drain_timeout;
         let cluster_id = self.cluster_id.clone();
@@ -643,7 +651,8 @@ impl Application {
                 .grpc_https_advertise_addr
                 .ok_or_else(|| Report::new(AppError::MissingGrpcHttpsAdvertiseAddress))?,
         };
-        let grpc_advertise_url = grpc_base_url(grpc_mode, &grpc_advertise_addr);
+        let grpc_advertise_url = NodeServiceUrl::new(grpc_mode.scheme(), &grpc_advertise_addr)
+            .change_context(AppError::BuildClientAdvertiseUrl)?;
         let interconnect_listen_addr = self.interconnect_listen_addr;
         let interconnect_advertise_addr = self.interconnect_advertise_addr.clone();
         let interconnect_tls_paths = InterconnectTlsPaths {
@@ -879,7 +888,7 @@ impl Application {
         let consensus_settings = ConsensusSettings {
             cluster_name: cluster_id.clone(),
             node_id: node_id.clone(),
-            interconnect_advertise_addr: interconnect_advertise_addr.to_string(),
+            interconnect_advertise_addr: interconnect_advertise_addr.clone(),
             interconnect: interconnect.clone(),
             executor: startup.runtime.executor().clone(),
             raft_heartbeat_interval,
@@ -902,8 +911,8 @@ impl Application {
             cluster_id,
             node_id: node_id.clone(),
             grpc_listen_addr,
-            grpc_advertise_addr: grpc_advertise_url.clone(),
-            web_console_advertise_addr: web_console_advertise_url.clone(),
+            client_advertise_url: grpc_advertise_url.clone(),
+            console_advertise_url: web_console_advertise_url.clone(),
             interconnect_advertise_addr,
             bootstrap_host: cluster_bootstrap_host.clone(),
             interconnect: interconnect.clone(),
@@ -1460,17 +1469,28 @@ impl Application {
                     .iter()
                     .map(|node| node.node_id.clone())
                     .collect::<std::collections::BTreeSet<_>>();
-                let peer_nodes = gossip
-                    .live_nodes
-                    .into_iter()
-                    .filter(|node| node.node_id != local_node_id)
-                    .collect::<Vec<_>>();
-                let health_endpoints = peer_nodes.iter().map(|node| {
-                    cluster::PeerHealthEndpoint::new(
-                        node.identity(),
-                        node.interconnect_advertise_addr.clone(),
-                    )
-                });
+                // A peer whose interconnect endpoint discovery has not established is neither
+                // observable nor reachable, so it becomes neither a health target nor an outbound
+                // target until a later round publishes one.
+                let mut reachable_peers = Vec::new();
+                let mut health_endpoints = Vec::new();
+                for node in gossip.live_nodes {
+                    if node.node_id == local_node_id {
+                        continue;
+                    }
+                    let identity = node.identity();
+                    let Some(endpoint) = node.interconnect_endpoint else {
+                        continue;
+                    };
+                    health_endpoints.push(cluster::PeerHealthEndpoint::new(
+                        identity,
+                        endpoint.clone(),
+                    ));
+                    reachable_peers.push(ReachablePeer {
+                        node_id: node.node_id,
+                        endpoint,
+                    });
+                }
                 let health_targets = cluster_for_health
                     .replace_peer_health_endpoints(health_endpoints)
                     .into_iter()
@@ -1480,22 +1500,9 @@ impl Application {
                 let mut outbound_targets = BTreeMap::new();
                 let mut scheduled_probes = Vec::new();
                 let mut topology_changed = false;
-                for node in peer_nodes {
+                for peer in reachable_peers {
                     tokio::task::consume_budget().await;
-                    let Some(health_target) = health_targets.get(&node.node_id).cloned() else {
-                        continue;
-                    };
-                    let Ok(target_addr) = node
-                        .interconnect_advertise_addr
-                        .parse::<cluster::HostPort>()
-                    else {
-                        cluster_for_health
-                            .record_peer_health_result(cluster::PeerHealthProbeResult::new(
-                                health_target,
-                                cluster::PeerHealthProbeOutcome::Unscheduled,
-                                std::time::Instant::now(),
-                            ))
-                            .await;
+                    let Some(health_target) = health_targets.get(&peer.node_id).cloned() else {
                         continue;
                     };
                     let resolution = tokio::select! {
@@ -1507,13 +1514,10 @@ impl Application {
                             topology_changed = true;
                             break;
                         }
-                        resolution = target_addr.resolve_all() => resolution,
+                        resolution = PeerTarget::resolve(&peer.endpoint) => resolution,
                     };
                     let targets = match resolution {
-                        Ok(addrs) => addrs
-                            .into_iter()
-                            .map(|addr| PeerTarget::new(addr, target_addr.host()))
-                            .collect::<BTreeSet<_>>(),
+                        Ok(targets) => targets.into_iter().collect::<BTreeSet<_>>(),
                         Err(_) => {
                             cluster_for_health
                                 .record_peer_health_result(cluster::PeerHealthProbeResult::new(
@@ -1525,7 +1529,7 @@ impl Application {
                             continue;
                         }
                     };
-                    outbound_targets.insert(node.node_id, targets);
+                    outbound_targets.insert(peer.node_id, targets);
                     scheduled_probes.push(health_target);
                 }
                 if topology_changed {

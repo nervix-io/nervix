@@ -320,8 +320,12 @@ pub(super) async fn attach_loopback_cluster(
         cluster_id: "test".to_string(),
         node_id: node_id.clone(),
         grpc_listen_addr: interconnect_addr,
-        grpc_advertise_addr: interconnect_addr.to_string(),
-        web_console_advertise_addr: format!("http://{interconnect_addr}"),
+        client_advertise_url: crate::application::test_fixtures::test_service_url(
+            interconnect_addr,
+        ),
+        console_advertise_url: crate::application::test_fixtures::test_service_url(
+            interconnect_addr,
+        ),
         interconnect_advertise_addr: interconnect_addr.into(),
         bootstrap_host: None,
         interconnect: interconnect.clone(),

@@ -6747,6 +6747,7 @@ dependencies = [
  "strum 0.26.3",
  "thiserror 2.0.20",
  "triomphe",
+ "url",
  "uuid",
 ]
 
