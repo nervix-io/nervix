@@ -219,6 +219,12 @@ connection, takes the exclusive path that starts it. A replaced endpoint gets a 
 with its own slot identities, so a lease can never select a connection that belongs to the endpoint
 it replaced.
 
+A connection stops granting stream leases the moment it begins to drain, whether it is retiring or
+the transport is shutting down. A lease checks for the drain only after it holds its slot, so it
+either returns that slot at once or was granted before the drain began and is one the drain waits
+for. The drain therefore completes only after every leased slot has returned, and the connection
+grants no further lease while it closes.
+
 Memory and CPU execution are isolated by class:
 
 | Class | Memory budget | CPU execution class |
@@ -279,9 +285,13 @@ visibility all answer in these terms.
 
 Each handler registration publishes a complete replacement dispatch table, so an arriving operation
 finds its handler without taking a lock and registrations that race each other all take effect.
-Discovery likewise publishes the complete live-node set at once, and the live-target check a typed
-request makes reads that set without a lock. Until discovery publishes its first set, every target
-counts as live so that bootstrap discovery can reach its peers.
+Registrations racing for one operation name within an exchange form publish it exactly once, and
+every other one is rejected as already registered. Discovery likewise publishes the complete
+live-node set at once, and the live-target check a typed request makes reads that set without a
+lock. A request waiting for its target to leave registers for membership changes before it reads
+that set, so a change published between the read and the wait still ends the wait. Until discovery
+publishes its first set, every target counts as live so that bootstrap discovery can reach its
+peers.
 
 Connection setup has a five-second deadline covering TCP, TLS, HTTP/2, and connection binding. The
 default bounded request deadline is ten seconds and includes time waiting for an admission or stream
