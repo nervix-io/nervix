@@ -7,6 +7,34 @@
 
 use super::*;
 
+/// What one node has applied of the cluster schedule its leader publishes.
+///
+/// The applied revision lives behind the same lock that serializes application, so the revision a
+/// node acts on and the revision it records cannot be read apart. Before the first successful
+/// application there is no applied revision, which absence states directly: every value a
+/// published revision can take, including the largest one, is an ordinary revision that still
+/// suppresses the stale revisions following it.
+#[derive(Debug, Default)]
+pub(in crate::runtime) struct ScheduleApplication {
+    applied_revision: Option<u64>,
+}
+
+impl ScheduleApplication {
+    /// Whether `revision` carries cluster state this node has not applied. The first revision a
+    /// node sees always does, and one at or below the applied revision carries nothing newer.
+    fn advances_beyond_applied(&self, revision: u64) -> bool {
+        match self.applied_revision {
+            None => true,
+            Some(applied) => revision > applied,
+        }
+    }
+
+    /// Record `revision` as this node's applied revision, once its schedule has been applied.
+    fn record_applied(&mut self, revision: u64) {
+        self.applied_revision = Some(revision);
+    }
+}
+
 impl Runtime {
     pub(super) fn branched_specs_by_identifier(
         specs: &[BranchedIngestorSpec],
@@ -27,7 +55,7 @@ impl Runtime {
         local_node_id: &ClusterNodeName,
         schedule: &ClusterSchedule,
     ) -> Result<(), RuntimeError> {
-        let _lock = self.inner.schedule_apply_lock.lock().await;
+        let _application = self.inner.schedule_application.lock().await;
         Box::pin(self.apply_cluster_schedule_locked(local_node_id, schedule, true)).await
     }
 
@@ -39,17 +67,16 @@ impl Runtime {
         domain_clock_authorities: &BTreeMap<DomainName, DomainClockAuthority>,
         schedule: &ClusterSchedule,
     ) -> Result<(), RuntimeError> {
-        let _lock = self.inner.schedule_apply_lock.lock().await;
-        let applied_revision = self.inner.applied_cluster_revision.load(Ordering::Acquire);
-        if applied_revision != u64::MAX && revision <= applied_revision {
+        let mut application = self.inner.schedule_application.lock().await;
+        if !application.advances_beyond_applied(revision) {
             return Ok(());
         }
 
         self.sync_committed_domains(domains, domain_clock_authorities);
+        // A failed application records nothing, so the same revision is applied again rather than
+        // being suppressed as one this node already holds.
         Box::pin(self.apply_cluster_schedule_locked(local_node_id, schedule, false)).await?;
-        self.inner
-            .applied_cluster_revision
-            .store(revision, Ordering::Release);
+        application.record_applied(revision);
         Ok(())
     }
 
@@ -2180,6 +2207,175 @@ mod tests {
             Some(&execution.schedule),
             current_schedule.domains.get(&domain)
         );
+        assert!(execution.relay_registries.contains_key(&relay));
+    }
+
+    #[test]
+    fn a_node_that_has_applied_nothing_accepts_every_revision() {
+        let application = ScheduleApplication::default();
+
+        assert!(application.advances_beyond_applied(0));
+        assert!(application.advances_beyond_applied(1));
+        assert!(application.advances_beyond_applied(u64::MAX));
+    }
+
+    #[test]
+    fn an_applied_revision_suppresses_equal_and_lower_revisions() {
+        let mut application = ScheduleApplication::default();
+
+        application.record_applied(0);
+        assert!(!application.advances_beyond_applied(0));
+        assert!(application.advances_beyond_applied(1));
+
+        application.record_applied(7);
+        assert!(!application.advances_beyond_applied(0));
+        assert!(!application.advances_beyond_applied(6));
+        assert!(!application.advances_beyond_applied(7));
+        assert!(application.advances_beyond_applied(8));
+    }
+
+    #[test]
+    fn the_largest_applied_revision_suppresses_every_other_revision() {
+        let mut application = ScheduleApplication::default();
+
+        application.record_applied(u64::MAX);
+
+        assert!(!application.advances_beyond_applied(u64::MAX));
+        assert!(!application.advances_beyond_applied(u64::MAX - 1));
+        assert!(!application.advances_beyond_applied(0));
+    }
+
+    #[tokio::test]
+    async fn the_largest_revision_still_suppresses_a_later_stale_cluster_state() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let schema = named::<SchemaName>("notification");
+        let relay = named::<RelayName>("notifications");
+        let domains = BTreeMap::from([(domain.clone(), unpaced_domain_state(domain.as_str()))]);
+        let schema_node = scheduled_model(nervix_models::Model::Schema(CreateSchema {
+            name: schema.clone(),
+            fields: vec![SchemaField {
+                name: named("user_id"),
+                ty: ParseAsType::I64,
+                optional: false,
+                sensitive: false,
+            }],
+        }));
+        let stale_schedule = ClusterSchedule::from_iter([DomainSchedule::new(
+            domain.clone(),
+            vec![schema_node.clone()],
+            Vec::new(),
+        )]);
+        let current_schedule = ClusterSchedule::from_iter([DomainSchedule::new(
+            domain.clone(),
+            vec![
+                schema_node,
+                scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                    name: relay.clone(),
+                    schema,
+                    buffer: nonzero!(2usize),
+                    branching: RelayBranching::unbranched(),
+                    materialized_state: None,
+                })),
+            ],
+            Vec::new(),
+        )]);
+
+        runtime
+            .apply_cluster_state(
+                &ClusterNodeName::parse("node-1").expect("valid name"),
+                u64::MAX,
+                &domains,
+                &BTreeMap::new(),
+                &current_schedule,
+            )
+            .await
+            .expect("current cluster state should build");
+        runtime
+            .apply_cluster_state(
+                &ClusterNodeName::parse("node-1").expect("valid name"),
+                1,
+                &domains,
+                &BTreeMap::new(),
+                &stale_schedule,
+            )
+            .await
+            .expect("stale cluster state should be ignored");
+
+        let execution = runtime
+            .inner
+            .executions
+            .get(&domain)
+            .expect("current execution should remain");
+        assert_eq!(
+            Some(&execution.schedule),
+            current_schedule.domains.get(&domain)
+        );
+        assert!(execution.relay_registries.contains_key(&relay));
+    }
+
+    #[tokio::test]
+    async fn a_failed_application_leaves_its_revision_ready_to_apply_again() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let schema = named::<SchemaName>("notification");
+        let relay = named::<RelayName>("notifications");
+        let domains = BTreeMap::from([(domain.clone(), unpaced_domain_state(domain.as_str()))]);
+        let relay_node = scheduled_model(nervix_models::Model::Relay(CreateRelay {
+            name: relay.clone(),
+            schema: schema.clone(),
+            buffer: nonzero!(2usize),
+            branching: RelayBranching::unbranched(),
+            materialized_state: None,
+        }));
+        let unbuildable_schedule = ClusterSchedule::from_iter([DomainSchedule::new(
+            domain.clone(),
+            vec![relay_node.clone()],
+            Vec::new(),
+        )]);
+        let buildable_schedule = ClusterSchedule::from_iter([DomainSchedule::new(
+            domain.clone(),
+            vec![
+                scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                    name: schema,
+                    fields: vec![SchemaField {
+                        name: named("user_id"),
+                        ty: ParseAsType::I64,
+                        optional: false,
+                        sensitive: false,
+                    }],
+                })),
+                relay_node,
+            ],
+            Vec::new(),
+        )]);
+
+        runtime
+            .apply_cluster_state(
+                &ClusterNodeName::parse("node-1").expect("valid name"),
+                4,
+                &domains,
+                &BTreeMap::new(),
+                &unbuildable_schedule,
+            )
+            .await
+            .expect_err("a relay without its schema should fail to build");
+        runtime
+            .apply_cluster_state(
+                &ClusterNodeName::parse("node-1").expect("valid name"),
+                4,
+                &domains,
+                &BTreeMap::new(),
+                &buildable_schedule,
+            )
+            .await
+            .expect("the revision that failed should be applied again");
+
+        let execution = runtime
+            .inner
+            .executions
+            .get(&domain)
+            .expect("the reapplied execution should exist");
         assert!(execution.relay_registries.contains_key(&relay));
     }
 

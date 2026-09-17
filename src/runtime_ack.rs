@@ -3,8 +3,8 @@
 //! Layer: data plane.
 //!
 //! - **Owns.** The root tracker per ingestor and per domain, the sets a batch fans out into, the
-//!   guard that holds a message waiting on materialized state, and the outcome each root resolves
-//!   to.
+//!   guard that holds a message waiting on materialized state, the one-word encoding of each
+//!   root's ownership-handoff tracking, and the outcome each root resolves to.
 //! - **Depends on.** The standard library and `triomphe`.
 //! - **Must not know.** What is being acknowledged. It counts outstanding work, and ack state is
 //!   hot-path memory that is never persisted.
@@ -21,9 +21,11 @@ use shuttle::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::{oneshot, watch};
 use triomphe::Arc;
 
-const HANDOFF_TRACKING_COMPLETE: usize = usize::MAX;
 const ACK_SHARES_FIT_IN_MEMORY: &str =
     "every pending ACK share has an in-memory owner, so their count fits in usize";
+const ACK_ACTIVE_SHARES_FIT_IN_ENCODING: &str = "every active ACK share has an in-memory owner, \
+                                                 so their count stays below the word the handoff \
+                                                 encoding reserves";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AckOutcome {
@@ -69,25 +71,70 @@ enum AckShareResolution {
     Complete,
 }
 
+/// What one root's ownership-handoff tracking holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AckHandoffState {
+    /// The root still tracks shares. No active share means every share it still holds is parked on
+    /// `REQUIRED WAIT`, which an ownership handoff does not wait for.
+    Tracking { active_shares: usize },
+    /// The root resolved, so nothing it tracked is outstanding and nothing may make it active
+    /// again.
+    Complete,
+}
+
+/// What publishing active shares did to one root's tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AckHandoffPublication {
+    /// The shares made an idle root active, so an ownership handoff waits for it once more.
+    Activated,
+    /// The shares joined a root an ownership handoff already waits for.
+    Joined,
+    /// The root resolved before the shares were published, so it tracks none of them.
+    AlreadyComplete,
+}
+
+/// What removing one active share did to one root's tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AckHandoffRemoval {
+    /// The share left and active shares remain.
+    Removed,
+    /// The last active share left, so an ownership handoff no longer waits for this root.
+    WentIdle,
+    /// The root resolved, so it holds no share to remove.
+    AlreadyComplete,
+    /// The root tracks no active share, so the caller owned none to remove.
+    NoActiveShare,
+}
+
+/// The [`AckHandoffState`] of one root, in one word.
+///
+/// An attachment, a wait release, and a completion race one another, so each transition is one
+/// atomic operation on this word rather than a flag beside a count or a lock around both. The
+/// encoding reserves the word's top value for [`AckHandoffState::Complete`] and holds the active
+/// share count below it, and the reserved value never leaves this type.
+#[derive(Debug)]
+struct AckHandoffTracking(AtomicUsize);
+
 #[derive(Debug)]
 struct AckState {
     /// Zero is terminal. Attaching a share reserves it here before publishing it as active below.
     /// An attachment that finds zero reserves nothing, yet still returns a handle to this root.
     pending: AtomicUsize,
-    /// Pending shares that are not parked on `REQUIRED WAIT`. `usize::MAX` closes the counter once
-    /// the root completes, so a racing wait release or attachment cannot reactivate it.
+    /// The pending shares that are not parked on `REQUIRED WAIT`. Completing the root closes this
+    /// tracking, so a racing wait release or attachment cannot reactivate it.
     ///
-    /// Only a handle that owns a share removes one from this count. An acknowledgement resolves
+    /// Only a handle that owns a share removes one from this tracking. An acknowledgement resolves
     /// its share in `pending` before it removes the share here, and a share parks only while
     /// `pending` is above zero. A handle whose attachment reserved nothing finds `pending` at zero
     /// on both paths, so it cannot remove an active share that another handle still owns before
-    /// the terminal transition closes this count.
+    /// the terminal transition closes this tracking.
     ///
-    /// The root trackers count roots rather than shares. A zero-to-positive transition therefore
-    /// reserves one tracker count before publishing the active share count. A positive-to-zero
-    /// transition publishes zero before releasing the tracker count. The tracker may briefly
-    /// overcount either transition, but it never lets an ownership handoff miss active work.
-    handoff_active: AtomicUsize,
+    /// The root trackers count roots rather than shares. Publishing onto an idle root therefore
+    /// reserves one tracker count before publishing the active share count, and removing the last
+    /// active share publishes the idle count before releasing the tracker count. The tracker may
+    /// briefly overcount either transition, but it never lets an ownership handoff miss active
+    /// work.
+    handoff: AckHandoffTracking,
     alive_counter: AtomicU64,
     alive_tx: watch::Sender<u64>,
     sender: Mutex<Option<oneshot::Sender<AckOutcome>>>,
@@ -98,6 +145,142 @@ struct OwnershipHandoffTrackerReservation<'a> {
     handle: &'a AckHandle,
     release_on_drop: bool,
 }
+
+impl AckHandoffState {
+    /// Whether an ownership handoff must still wait for this root.
+    fn holds_active_shares(self) -> bool {
+        match self {
+            Self::Tracking { active_shares } => active_shares != 0,
+            Self::Complete => false,
+        }
+    }
+}
+
+impl AckHandoffRemoval {
+    /// Whether this removal took the caller's share off the active count.
+    fn removed_share(self) -> bool {
+        match self {
+            Self::Removed | Self::WentIdle => true,
+            Self::AlreadyComplete | Self::NoActiveShare => false,
+        }
+    }
+}
+
+impl AckHandoffTracking {
+    /// The word this encoding reserves for [`AckHandoffState::Complete`].
+    const COMPLETE: usize = usize::MAX;
+    /// The greatest active-share count this encoding holds, directly below the reserved word.
+    const MAX_ACTIVE_SHARES: usize = Self::COMPLETE - 1;
+
+    fn tracking(active_shares: usize) -> Self {
+        Self(AtomicUsize::new(Self::encode(AckHandoffState::Tracking {
+            active_shares,
+        })))
+    }
+
+    fn state(&self) -> AckHandoffState {
+        Self::decode(self.0.load(Ordering::Acquire))
+    }
+
+    /// Publishes the `shares` the caller owns as active shares of a root that has not resolved.
+    fn publish_shares(&self, shares: usize) -> AckHandoffPublication {
+        debug_assert_ne!(
+            shares, 0,
+            "a caller publishes only shares it owns, and owning none publishes nothing"
+        );
+        let mut word = self.0.load(Ordering::Acquire);
+        loop {
+            let AckHandoffState::Tracking { active_shares } = Self::decode(word) else {
+                return AckHandoffPublication::AlreadyComplete;
+            };
+            let published = Self::total_active_shares(active_shares, shares)
+                .assured(ACK_ACTIVE_SHARES_FIT_IN_ENCODING);
+            let next = Self::encode(AckHandoffState::Tracking {
+                active_shares: published,
+            });
+            match self
+                .0
+                .compare_exchange_weak(word, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) if active_shares == 0 => return AckHandoffPublication::Activated,
+                Ok(_) => return AckHandoffPublication::Joined,
+                Err(observed) => word = observed,
+            }
+        }
+    }
+
+    /// Removes the one active share the caller owns.
+    fn remove_share(&self) -> AckHandoffRemoval {
+        let mut word = self.0.load(Ordering::Acquire);
+        loop {
+            let AckHandoffState::Tracking { active_shares } = Self::decode(word) else {
+                return AckHandoffRemoval::AlreadyComplete;
+            };
+            let Some(remaining) = active_shares.checked_sub(1) else {
+                debug_assert_ne!(
+                    active_shares, 0,
+                    "a handle removes an active ACK share only while it owns one"
+                );
+                return AckHandoffRemoval::NoActiveShare;
+            };
+            let next = Self::encode(AckHandoffState::Tracking {
+                active_shares: remaining,
+            });
+            match self
+                .0
+                .compare_exchange_weak(word, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) if remaining == 0 => return AckHandoffRemoval::WentIdle,
+                Ok(_) => return AckHandoffRemoval::Removed,
+                Err(observed) => word = observed,
+            }
+        }
+    }
+
+    /// Closes tracking for good and reports the state that closing replaced.
+    fn complete(&self) -> AckHandoffState {
+        Self::decode(
+            self.0
+                .swap(Self::encode(AckHandoffState::Complete), Ordering::AcqRel),
+        )
+    }
+
+    /// The total of `active_shares` and `published`, or `None` when that total would not stay
+    /// below the reserved word.
+    fn total_active_shares(active_shares: usize, published: usize) -> Option<usize> {
+        let total = active_shares.checked_add(published)?;
+        if total > Self::MAX_ACTIVE_SHARES {
+            return None;
+        }
+        Some(total)
+    }
+
+    fn decode(word: usize) -> AckHandoffState {
+        if word == Self::COMPLETE {
+            return AckHandoffState::Complete;
+        }
+        AckHandoffState::Tracking {
+            active_shares: word,
+        }
+    }
+
+    fn encode(state: AckHandoffState) -> usize {
+        match state {
+            AckHandoffState::Tracking { active_shares } => {
+                debug_assert!(
+                    active_shares <= Self::MAX_ACTIVE_SHARES,
+                    "an active ACK share count stays below the word the encoding reserves"
+                );
+                active_shares
+            }
+            AckHandoffState::Complete => Self::COMPLETE,
+        }
+    }
+}
+
+// The reserved word sits above every active-share count the encoding admits, so a count reaching
+// it would read back as a completed root.
+const _: () = assert!(AckHandoffTracking::MAX_ACTIVE_SHARES < AckHandoffTracking::COMPLETE);
 
 impl AckRootTracker {
     pub fn outstanding(&self) -> usize {
@@ -169,10 +352,13 @@ impl AckHandle {
     fn new_root(root_trackers: Vec<Arc<AckRootTracker>>) -> (Self, AckCompletion) {
         let (sender, receiver) = oneshot::channel();
         let (alive_tx, alive_rx) = watch::channel(0);
+        // A tracked root starts with its own share active. An untracked root tracks no handoff
+        // share at all, so it starts idle and stays idle.
+        let active_shares = usize::from(!root_trackers.is_empty());
         (
             Self(Arc::new(AckState {
                 pending: AtomicUsize::new(1),
-                handoff_active: AtomicUsize::new(usize::from(!root_trackers.is_empty())),
+                handoff: AckHandoffTracking::tracking(active_shares),
                 alive_counter: AtomicU64::new(0),
                 alive_tx,
                 sender: Mutex::new(Some(sender)),
@@ -257,82 +443,39 @@ impl AckHandle {
         self.0.pending.swap(0, Ordering::AcqRel) != 0
     }
 
+    /// Publishes `shares` the caller reserved a tracker count for, releasing that reservation
+    /// unless the shares are what an ownership handoff now waits for.
     fn publish_handoff_shares(
         &self,
         shares: usize,
         reservation: OwnershipHandoffTrackerReservation<'_>,
-    ) -> bool {
-        let mut current = self.0.handoff_active.load(Ordering::Acquire);
-        loop {
-            if current == HANDOFF_TRACKING_COMPLETE {
-                return false;
-            }
-            let next = current.checked_add(shares);
-            let next = match next {
-                Some(HANDOFF_TRACKING_COMPLETE) | None => None,
-                Some(next) => Some(next),
-            };
-            let next = next.assured(ACK_SHARES_FIT_IN_MEMORY);
-            match self.0.handoff_active.compare_exchange_weak(
-                current,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    if current == 0 {
-                        reservation.retain();
-                    }
-                    return true;
-                }
-                Err(observed) => current = observed,
-            }
+    ) {
+        match self.0.handoff.publish_shares(shares) {
+            AckHandoffPublication::Activated => reservation.retain(),
+            AckHandoffPublication::Joined | AckHandoffPublication::AlreadyComplete => {}
         }
     }
 
+    /// Removes one active share, and reports whether the caller's share was the one removed.
     fn remove_handoff_share(&self) -> bool {
-        let mut current = self.0.handoff_active.load(Ordering::Acquire);
-        loop {
-            if current == HANDOFF_TRACKING_COMPLETE {
-                return false;
-            }
-            if current == 0 {
-                debug_assert!(
-                    current > 0,
-                    "an active ACK share must exist before it leaves"
-                );
-                return false;
-            }
-            let next = current
-                .checked_sub(1)
-                .assured("a positive active ACK share count can be decremented");
-            match self.0.handoff_active.compare_exchange_weak(
-                current,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    if next == 0 {
-                        self.decrement_ownership_handoff_trackers();
-                    }
-                    return true;
-                }
-                Err(observed) => current = observed,
-            }
+        let removal = self.0.handoff.remove_share();
+        match removal {
+            AckHandoffRemoval::WentIdle => self.decrement_ownership_handoff_trackers(),
+            AckHandoffRemoval::Removed
+            | AckHandoffRemoval::AlreadyComplete
+            | AckHandoffRemoval::NoActiveShare => {}
         }
+        removal.removed_share()
     }
 
     fn finish_handoff_tracking(&self) {
-        let active = self
-            .0
-            .handoff_active
-            .swap(HANDOFF_TRACKING_COMPLETE, Ordering::AcqRel);
+        let previous = self.0.handoff.complete();
         debug_assert_ne!(
-            active, HANDOFF_TRACKING_COMPLETE,
+            previous,
+            AckHandoffState::Complete,
             "ACK handoff tracking must complete only once"
         );
-        if active != 0 && active != HANDOFF_TRACKING_COMPLETE {
+        if previous.holds_active_shares() {
             self.decrement_ownership_handoff_trackers();
         }
     }
@@ -341,9 +484,9 @@ impl AckHandle {
         if self.0.root_trackers.is_empty() {
             return false;
         }
-        // Pending shares never return from zero, so a handle that reads zero here owns no share
-        // to park, including one whose attachment found its root already resolved.
-        if self.0.pending.load(Ordering::Acquire) == 0 {
+        // Pending shares never return from zero, so a resolved root holds no share to park,
+        // including for a handle whose attachment found it already resolved.
+        if self.is_resolved() {
             return false;
         }
         self.remove_handoff_share()
@@ -377,8 +520,8 @@ impl AckHandle {
                 self.finish_completion(AckOutcome::Ack);
             }
             AckShareResolution::Pending => {
-                // The share was pending, so it is still counted as active unless a concurrent
-                // terminal transition closed handoff tracking, which leaves nothing to remove.
+                // The share was pending, so it is still active unless a concurrent terminal
+                // transition closed handoff tracking, which leaves nothing to remove.
                 self.remove_handoff_share();
             }
             AckShareResolution::AlreadyComplete => {}
@@ -411,8 +554,13 @@ impl AckHandle {
         self.clone()
     }
 
+    /// Whether every share of this root has resolved, which is terminal.
+    fn is_resolved(&self) -> bool {
+        self.0.pending.load(Ordering::Acquire) == 0
+    }
+
     pub fn ack_alive(&self) {
-        if self.0.pending.load(Ordering::Acquire) == 0 {
+        if self.is_resolved() {
             return;
         }
 
@@ -449,10 +597,10 @@ impl AckHandle {
 impl Drop for AckState {
     fn drop(&mut self) {
         if self.pending.load(Ordering::Acquire) != 0 && !self.root_trackers.is_empty() {
-            let handoff_active = self.handoff_active.load(Ordering::Acquire);
+            let handoff = self.handoff.state();
             for tracker in &self.root_trackers {
                 tracker.outstanding.fetch_sub(1, Ordering::AcqRel);
-                if handoff_active != 0 && handoff_active != HANDOFF_TRACKING_COMPLETE {
+                if handoff.holds_active_shares() {
                     tracker
                         .ownership_handoff_outstanding
                         .fetch_sub(1, Ordering::AcqRel);
@@ -865,8 +1013,8 @@ mod shuttle_tests {
     use triomphe::Arc;
 
     use super::{
-        AckCompletion, AckHandle, AckOutcome, AckRequiredWaitGuard, AckRootTracker, AckSet,
-        HANDOFF_TRACKING_COMPLETE, Ordering,
+        AckCompletion, AckHandle, AckHandoffState, AckOutcome, AckRequiredWaitGuard,
+        AckRootTracker, AckSet, Ordering,
     };
     use crate::shuttle_test::{check_dfs, check_pct};
 
@@ -917,17 +1065,16 @@ mod shuttle_tests {
             self.observer.0.pending.load(Ordering::Acquire)
         }
 
-        fn handoff_active_shares(&self) -> usize {
-            self.observer.0.handoff_active.load(Ordering::Acquire)
+        fn handoff_state(&self) -> AckHandoffState {
+            self.observer.0.handoff.state()
         }
 
         fn is_outstanding(&self) -> bool {
-            self.pending_shares() != 0
+            !self.observer.is_resolved()
         }
 
         fn holds_ownership_handoff(&self) -> bool {
-            let active = self.handoff_active_shares();
-            active != 0 && active != HANDOFF_TRACKING_COMPLETE
+            self.handoff_state().holds_active_shares()
         }
 
         /// The outcome a quiescent point observed this root deliver.
@@ -938,15 +1085,16 @@ mod shuttle_tests {
         /// Asserts this root where no operation on it is in flight, while `parked_shares` of its
         /// pending shares wait on `REQUIRED WAIT`.
         ///
-        /// An unresolved root counts exactly its pending shares that are not parked as active and
+        /// An unresolved root tracks exactly its pending shares that are not parked as active and
         /// has delivered no outcome. A resolved root won one terminal transition: it closed handoff
         /// tracking, and its receiver delivered one outcome and nothing after it.
         fn assert_quiescent(&mut self, parked_shares: usize) {
             let pending = self.pending_shares();
-            let handoff_active = self.handoff_active_shares();
+            let handoff = self.handoff_state();
             if pending == 0 {
                 assert_eq!(
-                    handoff_active, HANDOFF_TRACKING_COMPLETE,
+                    handoff,
+                    AckHandoffState::Complete,
                     "a resolved root must have closed handoff tracking"
                 );
                 self.observe_single_outcome();
@@ -958,12 +1106,13 @@ mod shuttle_tests {
                 "a parked share stays pending until it is resolved, but {pending} shares are \
                  pending while {parked_shares} are parked"
             );
-            let active = pending
+            let active_shares = pending
                 .checked_sub(parked_shares)
                 .verified("the assertion above bounds parked shares by pending shares");
             assert_eq!(
-                handoff_active, active,
-                "an unresolved root must count exactly its pending shares that are not parked as \
+                handoff,
+                AckHandoffState::Tracking { active_shares },
+                "an unresolved root must track exactly its pending shares that are not parked as \
                  active"
             );
             assert_eq!(
@@ -1027,8 +1176,9 @@ mod shuttle_tests {
     }
 
     /// Asserts at a quiescent point that `tracker` counts exactly `roots`, the roots it tracks:
-    /// each unresolved root is outstanding once, and each root with an active share holds
-    /// ownership handoff once. A root that released its counts twice wraps the tracker below zero.
+    /// each unresolved root is outstanding once, and each root holding an active share holds
+    /// ownership handoff once. A count released twice wraps the tracker below zero, so an
+    /// undercount fails here as loudly as an overcount.
     fn assert_tracker_counts(tracker: &AckRootTracker, roots: &[&ObservedRoot]) {
         let outstanding = roots
             .iter()
@@ -1238,8 +1388,8 @@ mod shuttle_tests {
     }
 
     /// A parked share leaves `REQUIRED WAIT` while the root's only active share is acknowledged,
-    /// so the active count drops to zero whenever the acknowledgement removes its share before
-    /// the released share is published again.
+    /// so the root goes idle whenever the acknowledgement removes its share before the released
+    /// share is published again.
     #[test]
     fn wait_release_racing_the_last_active_ack_holds_domain_and_ingestor_handoff_once() {
         check_dfs(
@@ -1268,7 +1418,7 @@ mod shuttle_tests {
     }
 
     /// A share is attached while the root's only active share parks on `REQUIRED WAIT`, so the
-    /// active count drops to zero whenever the share parks before the attachment publishes.
+    /// root goes idle whenever the share parks before the attachment publishes.
     #[test]
     fn attachment_racing_the_last_active_share_into_wait_publishes_one_active_share() {
         check_dfs(

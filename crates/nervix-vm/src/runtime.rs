@@ -56,7 +56,7 @@ use uuid::{NoContext, Timestamp as UuidTimestamp, Uuid};
 
 use crate::{
     batch::{TypedArray, TypedBatch},
-    datetime::{self, UnitCounts},
+    datetime::{self, FormattedColumn, TextFailure, UnitCounts, UnresolvedLocalTime},
     error::{
         DatetimeOperation, FloatOperation, IntegerOperation, RowErrorMask, RowErrors, RuntimeError,
         SideError, SideErrorReason,
@@ -689,7 +689,7 @@ impl Instruction {
                 inputs,
             } => {
                 let output = execute_builtin(
-                    *lowering, registers, inputs, row_count, row_errors, self.span, context,
+                    lowering, registers, inputs, row_count, row_errors, self.span, context,
                 )?;
                 registers.set_array(*dst, output)
             }
@@ -1271,7 +1271,7 @@ fn execute_cast(
 }
 
 fn execute_builtin(
-    lowering: BuiltinLowering,
+    lowering: &BuiltinLowering,
     registers: &RegisterBank,
     inputs: &[RegisterRef],
     row_count: usize,
@@ -1469,89 +1469,136 @@ fn execute_builtin(
                 .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
         }
         BuiltinLowering::Datetime(function) => {
-            execute_datetime(function, &values, row_errors, span)
-                .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
+            match execute_datetime(function, &values, row_errors, span) {
+                DatetimeExecution::Computed(output) => Ok(output),
+                DatetimeExecution::UnsupportedInputs => {
+                    Err(unsupported_builtin_inputs(lowering, &values))
+                }
+                DatetimeExecution::FormattedTooLarge { longest } => {
+                    Err(RuntimeError::FormattedDatetimesTooLarge {
+                        rows: row_count,
+                        longest,
+                    })
+                }
+            }
         }
     }
 }
 
 /// The error for a builtin whose input columns have types its signature rejects. Compilation
 /// checks every call against its signature, so this reports a program and a batch that disagree.
-fn unsupported_builtin_inputs(lowering: BuiltinLowering, inputs: &[TypedArray]) -> RuntimeError {
+fn unsupported_builtin_inputs(lowering: &BuiltinLowering, inputs: &[TypedArray]) -> RuntimeError {
     let input_types = inputs.iter().map(TypedArray::data_type).collect::<Vec<_>>();
     RuntimeError::InvalidBatch {
         message: format!("builtin {lowering:?} does not accept inputs of types {input_types:?}"),
     }
 }
 
+/// What executing a datetime builtin over one batch produced.
+enum DatetimeExecution {
+    Computed(TypedArray),
+    /// An operand has a type the builtin's signature rejects.
+    UnsupportedInputs,
+    /// The batch's formatted values, each up to `longest` bytes, could exceed the text one STRING
+    /// column holds.
+    FormattedTooLarge {
+        longest: usize,
+    },
+}
+
 /// Executes a datetime builtin over its row-valued operands, recording a row error for every lane
-/// whose result its type cannot hold. Answers `None` when an operand does not have a type the
-/// builtin's signature accepts.
+/// whose result its type cannot hold and for every text that names no instant.
 fn execute_datetime(
-    function: DatetimeFunction,
+    function: &DatetimeFunction,
     operands: &[TypedArray],
     row_errors: &mut RowErrors,
     span: Span,
-) -> Option<TypedArray> {
-    match (function, operands) {
-        (DatetimeFunction::DatePart(part), [TypedArray::Datetime(values)]) => {
-            Some(TypedArray::Int64(datetime::date_part(values, part)))
+) -> DatetimeExecution {
+    let output = match (function, operands) {
+        (DatetimeFunction::DatePart { part, zone }, [TypedArray::Datetime(values)]) => {
+            TypedArray::Int64(datetime::date_part(values, *part, zone))
         }
-        (DatetimeFunction::DateTrunc(unit), [TypedArray::Datetime(values)]) => {
-            let truncated = datetime::truncate(values, unit);
-            Some(record_datetime_failures(
-                truncated,
-                DatetimeOperation::DateTrunc,
-                row_errors,
-                span,
-            ))
+        (DatetimeFunction::DateTrunc { unit, zone }, [TypedArray::Datetime(values)]) => {
+            let truncated = datetime::truncate(values, *unit, zone);
+            record_datetime_failures(truncated, DatetimeOperation::DateTrunc, row_errors, span)
         }
         (
             DatetimeFunction::DateBin(width),
             [TypedArray::Datetime(values), TypedArray::Datetime(origins)],
         ) => {
-            let binned = datetime::bin(values, origins, width);
-            Some(record_datetime_failures(
-                binned,
-                DatetimeOperation::DateBin,
-                row_errors,
-                span,
-            ))
+            let binned = datetime::bin(values, origins, *width);
+            record_datetime_failures(binned, DatetimeOperation::DateBin, row_errors, span)
         }
-        (DatetimeFunction::DateAdd(unit), [amounts, TypedArray::Datetime(values)]) => {
-            let amounts = UnitCounts::from_typed(amounts)?;
-            let added = datetime::add(&amounts, values, unit);
-            Some(record_datetime_failures(
-                added,
-                DatetimeOperation::DateAdd,
-                row_errors,
-                span,
-            ))
+        (DatetimeFunction::DateAdd { unit, zone }, [amounts, TypedArray::Datetime(values)]) => {
+            let Some(amounts) = UnitCounts::from_typed(amounts) else {
+                return DatetimeExecution::UnsupportedInputs;
+            };
+            let added = datetime::add(&amounts, values, *unit, zone);
+            record_datetime_failures(added, DatetimeOperation::DateAdd, row_errors, span)
         }
         (
-            DatetimeFunction::DateDiff(unit),
+            DatetimeFunction::DateDiff { unit, zone },
             [TypedArray::Datetime(starts), TypedArray::Datetime(ends)],
         ) => {
-            let counted = datetime::difference(starts, ends, unit);
+            let counted = datetime::difference(starts, ends, *unit, zone);
             row_errors.push_failures(counted.failed.lanes(), span, |_| {
                 SideErrorReason::DateDiffOverflow
             });
-            Some(TypedArray::Int64(counted.column))
+            TypedArray::Int64(counted.column)
         }
         (DatetimeFunction::ToUnix(unit), [TypedArray::Datetime(values)]) => {
-            Some(TypedArray::Int64(datetime::to_unix(values, unit)))
+            TypedArray::Int64(datetime::to_unix(values, *unit))
         }
         (DatetimeFunction::FromUnix(unit), [counts]) => {
-            let counts = UnitCounts::from_typed(counts)?;
-            let converted = datetime::from_unix(&counts, unit);
-            Some(record_datetime_failures(
-                converted,
-                DatetimeOperation::FromUnix,
-                row_errors,
-                span,
-            ))
+            let Some(counts) = UnitCounts::from_typed(counts) else {
+                return DatetimeExecution::UnsupportedInputs;
+            };
+            let converted = datetime::from_unix(&counts, *unit);
+            record_datetime_failures(converted, DatetimeOperation::FromUnix, row_errors, span)
         }
-        _ => None,
+        (DatetimeFunction::FormatDatetime { format, zone }, [TypedArray::Datetime(values)]) => {
+            match datetime::format_datetimes(values, format, zone) {
+                FormattedColumn::Formatted(column) => TypedArray::Utf8(column),
+                FormattedColumn::TooLarge => {
+                    return DatetimeExecution::FormattedTooLarge {
+                        longest: format.longest_value(zone),
+                    };
+                }
+            }
+        }
+        (DatetimeFunction::ParseDatetime(parser), [TypedArray::Utf8(texts)]) => {
+            let parsed = datetime::parse_datetimes(texts, parser);
+            for failed in parsed.failures {
+                let error = SideError {
+                    reason: failed.failure.into_reason(),
+                    span,
+                };
+                row_errors.push(failed.lane, error);
+            }
+            TypedArray::Datetime(parsed.column)
+        }
+        _ => return DatetimeExecution::UnsupportedInputs,
+    };
+    DatetimeExecution::Computed(output)
+}
+
+impl TextFailure {
+    /// The row error that reports this failure.
+    fn into_reason(self) -> SideErrorReason {
+        match self {
+            Self::Unreadable(unreadable) => SideErrorReason::UnreadableDatetime(unreadable),
+            Self::Unresolved {
+                local_time: UnresolvedLocalTime::Skipped,
+                zone,
+            } => SideErrorReason::SkippedLocalTime { zone },
+            Self::Unresolved {
+                local_time: UnresolvedLocalTime::Repeated,
+                zone,
+            } => SideErrorReason::RepeatedLocalTime { zone },
+            Self::OutOfRange => {
+                SideErrorReason::DatetimeOutOfRange(DatetimeOperation::ParseDatetime)
+            }
+        }
     }
 }
 

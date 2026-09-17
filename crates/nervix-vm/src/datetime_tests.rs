@@ -21,7 +21,7 @@ use nervix_models::Timestamp;
 use super::{UnitCounts, add, bin, date_part, difference, from_unix, to_unix, truncate};
 use crate::{
     numeric::Checked,
-    program::{DateBinWidth, DatePart, FixedTimeUnit},
+    program::{DateBinWidth, DatePart, DatetimeUnit, FixedTimeUnit, Zone},
 };
 
 const UNITS: [FixedTimeUnit; 8] = [
@@ -194,7 +194,11 @@ fn extracts_every_date_part_of_a_leap_day() {
         (DatePart::IsoDayOfWeek, 2),
     ];
     for (part, value) in expected {
-        assert_eq!(date_part(&values, part).value(0), value, "{part}");
+        assert_eq!(
+            date_part(&values, part, &Zone::UTC).value(0),
+            value,
+            "{part}"
+        );
     }
 }
 
@@ -221,7 +225,7 @@ fn extracts_date_parts_before_the_epoch_and_across_iso_years() {
         (DatePart::IsoDayOfWeek, [3, 7, 4, 7, 2, 5]),
     ];
     for (part, parts) in expected {
-        let extracted = date_part(&values, part);
+        let extracted = date_part(&values, part, &Zone::UTC);
         assert_eq!(extracted.values().as_ref(), parts.as_slice(), "{part}");
     }
 }
@@ -234,7 +238,7 @@ fn date_parts_match_the_calendar_at_every_boundary_and_keep_nulls() {
     with_nulls[9] = None;
     let values = TimestampNanosecondArray::from(with_nulls.clone()).with_timezone_utc();
     for part in PARTS {
-        let extracted = date_part(&values, part);
+        let extracted = date_part(&values, part, &Zone::UTC);
         for (lane, value) in with_nulls.iter().enumerate() {
             let expected = value.map(|value| model_date_part(value, part));
             let actual = (!extracted.is_null(lane)).then(|| extracted.value(lane));
@@ -252,7 +256,7 @@ fn truncates_days_and_weeks_before_and_after_the_epoch() {
         nanoseconds("2000-02-29T23:52:30.250Z"),
     ]);
 
-    let days = truncate(&values, FixedTimeUnit::Day);
+    let days = truncate(&values, DatetimeUnit::Fixed(FixedTimeUnit::Day), &Zone::UTC);
     assert_eq!(
         days.column.values().as_ref(),
         [
@@ -262,7 +266,11 @@ fn truncates_days_and_weeks_before_and_after_the_epoch() {
             nanoseconds("2000-02-29T00:00:00Z"),
         ]
     );
-    let weeks = truncate(&values, FixedTimeUnit::Week);
+    let weeks = truncate(
+        &values,
+        DatetimeUnit::Fixed(FixedTimeUnit::Week),
+        &Zone::UTC,
+    );
     assert_eq!(
         weeks.column.values().as_ref(),
         [
@@ -282,7 +290,11 @@ fn truncation_fails_where_the_unit_starts_before_the_range() {
     let values = datetimes(&[nanoseconds("1677-09-21T00:12:43.145224192Z")]);
 
     assert_eq!(
-        checked_lanes(&truncate(&values, FixedTimeUnit::Nanosecond)),
+        checked_lanes(&truncate(
+            &values,
+            DatetimeUnit::Fixed(FixedTimeUnit::Nanosecond),
+            &Zone::UTC
+        )),
         [(Some(i64::MIN), false)]
     );
     for unit in [
@@ -291,7 +303,7 @@ fn truncation_fails_where_the_unit_starts_before_the_range() {
         FixedTimeUnit::Week,
     ] {
         assert_eq!(
-            checked_lanes(&truncate(&values, unit)),
+            checked_lanes(&truncate(&values, DatetimeUnit::Fixed(unit), &Zone::UTC)),
             [(None, true)],
             "{unit}"
         );
@@ -307,7 +319,11 @@ fn truncation_matches_floor_division_at_every_boundary() {
             .iter()
             .map(|value| expected_lane(model_truncate(*value, unit)))
             .collect::<Vec<_>>();
-        assert_eq!(checked_lanes(&truncate(&values, unit)), expected, "{unit}");
+        assert_eq!(
+            checked_lanes(&truncate(&values, DatetimeUnit::Fixed(unit), &Zone::UTC)),
+            expected,
+            "{unit}"
+        );
     }
 }
 
@@ -406,7 +422,8 @@ fn addition_is_exact_across_the_whole_range() {
     let milliseconds = add(
         &UnitCounts::UInt64(&amounts),
         &values,
-        FixedTimeUnit::Millisecond,
+        DatetimeUnit::Fixed(FixedTimeUnit::Millisecond),
+        &Zone::UTC,
     );
 
     // 9.3 * 10^18 nanoseconds do not fit `i64` on their own, but 1678 moved by them is in 1972.
@@ -426,7 +443,8 @@ fn addition_is_exact_across_the_whole_range() {
     let nanoseconds_added = add(
         &UnitCounts::UInt64(&across_range),
         &values,
-        FixedTimeUnit::Nanosecond,
+        DatetimeUnit::Fixed(FixedTimeUnit::Nanosecond),
+        &Zone::UTC,
     );
     assert_eq!(
         checked_lanes(&nanoseconds_added)[1],
@@ -450,7 +468,12 @@ fn addition_matches_the_exact_sum_for_every_boundary_and_amount() {
                     expected_lane(fits_i64(instant))
                 })
                 .collect::<Vec<_>>();
-            let added = add(&UnitCounts::Int64(&amounts), &values, unit);
+            let added = add(
+                &UnitCounts::Int64(&amounts),
+                &values,
+                DatetimeUnit::Fixed(unit),
+                &Zone::UTC,
+            );
             assert_eq!(checked_lanes(&added), expected, "{amount} {unit}");
         }
         for amount in unsigned_amounts {
@@ -463,7 +486,12 @@ fn addition_matches_the_exact_sum_for_every_boundary_and_amount() {
                     expected_lane(fits_i64(instant))
                 })
                 .collect::<Vec<_>>();
-            let added = add(&UnitCounts::UInt64(&amounts), &values, unit);
+            let added = add(
+                &UnitCounts::UInt64(&amounts),
+                &values,
+                DatetimeUnit::Fixed(unit),
+                &Zone::UTC,
+            );
             assert_eq!(checked_lanes(&added), expected, "{amount} {unit}");
         }
     }
@@ -478,7 +506,12 @@ fn differences_round_toward_zero_in_both_directions() {
     let starts = datetimes(&[origin, reading, epoch, i64::MIN, i64::MIN]);
     let ends = datetimes(&[reading, origin, before_epoch, i64::MAX, i64::MAX]);
 
-    let seconds = difference(&starts, &ends, FixedTimeUnit::Second);
+    let seconds = difference(
+        &starts,
+        &ends,
+        DatetimeUnit::Fixed(FixedTimeUnit::Second),
+        &Zone::UTC,
+    );
     assert_eq!(
         checked_lanes(&seconds)[..3],
         [
@@ -488,9 +521,19 @@ fn differences_round_toward_zero_in_both_directions() {
         ]
     );
 
-    let nanoseconds_apart = difference(&starts, &ends, FixedTimeUnit::Nanosecond);
+    let nanoseconds_apart = difference(
+        &starts,
+        &ends,
+        DatetimeUnit::Fixed(FixedTimeUnit::Nanosecond),
+        &Zone::UTC,
+    );
     assert_eq!(checked_lanes(&nanoseconds_apart)[3], (None, true));
-    let microseconds_apart = difference(&starts, &ends, FixedTimeUnit::Microsecond);
+    let microseconds_apart = difference(
+        &starts,
+        &ends,
+        DatetimeUnit::Fixed(FixedTimeUnit::Microsecond),
+        &Zone::UTC,
+    );
     assert_eq!(
         checked_lanes(&microseconds_apart)[4],
         (Some(18_446_744_073_709_551), false)
@@ -515,7 +558,12 @@ fn differences_match_truncated_division_for_every_boundary_pair() {
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            checked_lanes(&difference(&starts, &ends, unit)),
+            checked_lanes(&difference(
+                &starts,
+                &ends,
+                DatetimeUnit::Fixed(unit),
+                &Zone::UTC
+            )),
             expected,
             "{unit}"
         );
@@ -629,7 +677,8 @@ fn null_and_sliced_lanes_never_fail() {
     let added = add(
         &UnitCounts::Int64(&sliced_amounts),
         &sliced_values,
-        FixedTimeUnit::Day,
+        DatetimeUnit::Fixed(FixedTimeUnit::Day),
+        &Zone::UTC,
     );
 
     assert_eq!(
@@ -643,10 +692,14 @@ fn null_and_sliced_lanes_never_fail() {
         ]
     );
 
-    let truncated = truncate(&sliced_values, FixedTimeUnit::Week);
+    let truncated = truncate(
+        &sliced_values,
+        DatetimeUnit::Fixed(FixedTimeUnit::Week),
+        &Zone::UTC,
+    );
     assert_eq!(checked_lanes(&truncated)[0], (None, false));
     assert_eq!(checked_lanes(&truncated)[1], (None, true));
-    let extracted = date_part(&sliced_values, DatePart::DayOfYear);
+    let extracted = date_part(&sliced_values, DatePart::DayOfYear, &Zone::UTC);
     assert!(extracted.is_null(0));
     assert_eq!(extracted.value(2), 60);
 }
@@ -656,9 +709,20 @@ fn datetime_results_carry_the_utc_timezone() {
     let values = datetimes(&[0]);
     let counts = Int64Array::from(vec![0]);
     let columns: [PrimitiveArray<TimestampNanosecondType>; 4] = [
-        truncate(&values, FixedTimeUnit::Hour).column,
+        truncate(
+            &values,
+            DatetimeUnit::Fixed(FixedTimeUnit::Hour),
+            &Zone::UTC,
+        )
+        .column,
         bin(&values, &values, width(1, FixedTimeUnit::Day)).column,
-        add(&UnitCounts::Int64(&counts), &values, FixedTimeUnit::Second).column,
+        add(
+            &UnitCounts::Int64(&counts),
+            &values,
+            DatetimeUnit::Fixed(FixedTimeUnit::Second),
+            &Zone::UTC,
+        )
+        .column,
         from_unix(&UnitCounts::Int64(&counts), FixedTimeUnit::Second).column,
     ];
     for column in columns {
