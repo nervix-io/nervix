@@ -6847,6 +6847,7 @@ dependencies = [
  "argon2",
  "arrow-arith",
  "arrow-array",
+ "arrow-buffer",
  "arrow-data",
  "arrow-ipc",
  "arrow-ord",
