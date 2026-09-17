@@ -352,7 +352,7 @@ pub(in crate::registry) fn protobuf_codec(
         name: named(name),
         wire_format: CodecWireFormat::Protobuf(CodecProtobufConfig {
             resource: named("proto_bundle"),
-            resource_version: Some(1),
+            resource_version: 1,
             config: vec![ClientConfigEntry {
                 key: "file".to_string(),
                 value: "notification.proto".to_string(),
@@ -532,7 +532,7 @@ pub(in crate::registry) fn wasm_processor(name: &str, from_relay: &str, into_rel
         },
         branched_by: BranchSelection::unbranched(),
         resource: named("wasm_filter"),
-        resource_version: Some(1),
+        resource_version: 1,
         file: "processors/filter_even.wasm".to_string(),
         limits: nervix_models::WasmProcessorLimits {
             max_fuel: nonzero!(1_000_000_000u64),
@@ -832,7 +832,7 @@ pub(in crate::registry) fn example_graph_models(
                     domain = create.body.id;
                 }
                 nervix_models::Statement::Create(create) => {
-                    models.push(*create.body);
+                    models.push(pinned_test_model(*create.body));
                 }
                 nervix_models::Statement::CreateResource(_)
                 | nervix_models::Statement::UploadResource(_)
@@ -844,6 +844,23 @@ pub(in crate::registry) fn example_graph_models(
     }
 
     (domain, models)
+}
+
+/// A parsed fixture model with the resource versions its source names. Registry fixtures build
+/// graphs without a resource catalog, so a source that writes `VERSION LATEST` is a fixture defect.
+pub(in crate::registry) fn pinned_test_model(
+    model: nervix_models::Model<nervix_models::RequestedResourceVersion>,
+) -> Model {
+    let pinned = model.try_map_resource_versions(|resource, requested| match requested {
+        nervix_models::RequestedResourceVersion::Number(version) => Ok(version),
+        nervix_models::RequestedResourceVersion::Latest => Err(resource.clone()),
+    });
+    match pinned {
+        Ok(model) => model,
+        Err(resource) => {
+            panic!("fixture sources name explicit versions, but resource '{resource}' is LATEST")
+        }
+    }
 }
 
 pub(in crate::registry) fn assert_example_graph_validates(name: &str, source: &str) {

@@ -4884,7 +4884,7 @@ mod tests {
             name: named(name),
             wire_format: CodecWireFormat::Protobuf(CodecProtobufConfig {
                 resource: named("proto_bundle"),
-                resource_version: Some(1),
+                resource_version: 1,
                 config: vec![nervix_models::ClientConfigEntry {
                     key: "file".to_string(),
                     value: "notification.proto".to_string(),

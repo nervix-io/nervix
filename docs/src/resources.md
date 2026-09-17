@@ -60,13 +60,20 @@ does not poll them to finish an upload.
 ## Versioning
 
 Versions are monotonically increasing integers assigned by the cluster leader per domain and
-resource name. A resource binding may select only a completed version. An explicit `VERSION <n>`
-therefore fails while that upload is applying and remains unavailable if the upload fails. A
-binding that omits a version selects the highest completed version, so a newer applying or failed
-version does not displace the last usable one.
+resource name. A resource binding may select only a completed version, and every binding names the
+version it selects with a mandatory `VERSION <n>` or `VERSION LATEST` clause. An explicit
+`VERSION <n>` fails while that upload is applying and remains unavailable if the upload fails.
+`VERSION LATEST` selects the highest completed version, so a newer applying or failed version does
+not displace the last usable one. A resource with no completed version cannot be bound.
 
-There is no `latest` keyword in NSPL. `latest` in `DESCRIBE RESOURCE` is an observation of the
-version an omitted-version binding can currently select.
+`LATEST` is resolved when the statement is applied, and the stored model keeps the resolved number.
+A standalone statement resolves it immediately. A statement queued in a transaction resolves it
+provisionally when it is admitted, so the queued prefix can be validated, and again when `COMMIT`
+applies it; a version that completes in between is the one `COMMIT` binds. The command result names
+the version each `LATEST` resolved to, `SHOW CREATE` renders the stored number, and no later upload
+moves an existing binding.
+
+`latest` in `DESCRIBE RESOURCE` is the version `VERSION LATEST` would select at that moment.
 
 ## Upload Format
 
@@ -76,8 +83,8 @@ On each node, Nervix verifies the archive digest, enforces the staged-archive qu
 extracted-byte and file-count quotas from tar headers before writing each entry. It writes into a
 staging tree, verifies the manifest, and atomically promotes the complete version. Failed installs
 remove their staging trees, and startup removes staging trees abandoned by an interrupted process.
-TLS configuration and any other existing binding that selects the uploaded version refreshes before
-the upload returns success.
+Before the upload returns success, each node rebuilds its TLS configuration from the versions its
+VHOSTs pin. An upload never changes the version an existing binding uses.
 
 The per-version limits are configured with `NERVIX_RESOURCE_MAX_ARCHIVE_BYTES`, `NERVIX_RESOURCE_MAX_EXTRACTED_BYTES`, and `NERVIX_RESOURCE_MAX_FILE_COUNT`. Their defaults are 4 GiB, 16 GiB, and 1,000,000 files.
 

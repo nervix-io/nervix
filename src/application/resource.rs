@@ -34,6 +34,11 @@ use crate::{
 
 const MAX_CONCURRENT_RESOURCE_REPLICATIONS: usize = 4;
 
+/// The reason a scenario-armed installation failure records for the version it fails. The failure
+/// happens once the node installed and published the version, before the upload completes.
+#[cfg(feature = "testing")]
+const INJECTED_RESOURCE_INSTALLATION_FAILURE: &str = "injected resource installation failure";
+
 #[derive(Debug, Error)]
 pub(in crate::application) enum ResourceUploadError {
     #[error("failed to begin upload for resource '{identifier}'")]
@@ -176,19 +181,6 @@ async fn fetch_resource_archive(
     Ok(staged)
 }
 
-/// Resolves a model's resource reference to the concrete version it binds to. Resources are
-/// domain-owned, so a name only resolves against versions published in the referencing domain.
-pub(in crate::application) fn resolve_resource_id(
-    resources: &nervix_models::ResourceVersionStatus,
-    domain: &DomainName,
-    identifier: &ResourceName,
-    requested_version: Option<u64>,
-) -> Result<ResourceId, String> {
-    resources
-        .resolve_completed_version(domain, identifier, requested_version)
-        .map_err(|error| error.to_string())
-}
-
 pub(in crate::application) fn resource_ref_suggestions(
     resources: &nervix_models::ResourceVersionStatus,
     domain: &DomainName,
@@ -224,26 +216,35 @@ pub(in crate::application) fn resource_version_suggestions(
     suggestions
 }
 
-pub(in crate::application) fn requested_resource_versions(
+/// The completed versions of one resource that a binding may name, as completion offers them.
+pub(in crate::application) fn completed_resource_version_suggestions(
+    resources: &nervix_models::ResourceVersionStatus,
+    domain: &DomainName,
+    identifier: &ResourceName,
+    prefix: &str,
+) -> Vec<String> {
+    let mut suggestions = Vec::new();
+    for id in resources.uploads.completed_versions_of(domain, identifier) {
+        let version = id.version.to_string();
+        if prefix.is_empty() || version.starts_with(prefix) {
+            suggestions.push(version);
+        }
+    }
+    suggestions
+}
+
+/// The resource a version completion belongs to. `DESCRIBE RESOURCE` and every resource binding
+/// write the resource name immediately before the `VERSION` keyword, so the name is the last word
+/// before the last `VERSION` ahead of the cursor.
+pub(in crate::application) fn resource_named_before_version(
     input: &str,
     cursor: usize,
 ) -> Option<ResourceName> {
-    let safe_cursor = cursor.min(input.len());
-    let raw_prefix = &input[..safe_cursor];
+    let raw_prefix = input.get(..cursor.min(input.len()))?;
     let upper = raw_prefix.to_ascii_uppercase();
-    let version_index = upper.find(" VERSION ")?;
-    let before_version = raw_prefix[..version_index].trim_end();
-    let resource_prefix = "DESCRIBE RESOURCE ";
-    if !before_version
-        .to_ascii_uppercase()
-        .starts_with(resource_prefix)
-    {
-        return None;
-    }
-    let identifier = before_version[resource_prefix.len()..].trim();
-    if identifier.is_empty() {
-        return None;
-    }
+    let version_index = upper.rfind(" VERSION ")?;
+    let before_version = raw_prefix.get(..version_index)?.trim_end();
+    let identifier = before_version.rsplit(char::is_whitespace).next()?;
     ResourceName::parse(identifier).ok()
 }
 
@@ -582,14 +583,26 @@ impl SessionServiceImpl {
             }
         };
 
-        if let Err(error) = self
-            .refresh_http_tls_server_config(Some(&manifest.resource.id))
-            .await
+        let node_failure = match self.refresh_http_tls_server_config().await {
+            Ok(()) => None,
+            Err(error) => Some(format!("failed to refresh HTTP TLS config: {error}")),
+        };
+        #[cfg(feature = "testing")]
+        let node_failure = if node_failure.is_none()
+            && self
+                .inner
+                .runtime
+                .take_armed_resource_installation_failure(self.inner.consensus.local_node_id())
         {
+            Some(INJECTED_RESOURCE_INSTALLATION_FAILURE.to_string())
+        } else {
+            node_failure
+        };
+        if let Some(reason) = node_failure {
             if let Err(publish_error) = self
                 .publish_resource_replica(failed_replica(
                     Some(manifest.resource.root_checksum),
-                    format!("failed to refresh HTTP TLS config: {error}"),
+                    reason,
                 ))
                 .await
             {
@@ -797,11 +810,22 @@ impl SessionServiceImpl {
             .change_context(ResourceUploadError::Publish {
                 id: manifest.resource.id.clone(),
             })?;
-        if let Err(error) = self
-            .refresh_http_tls_server_config(Some(&manifest.resource.id))
-            .await
+        let node_failure = match self.refresh_http_tls_server_config().await {
+            Ok(()) => None,
+            Err(error) => Some(format!("failed to refresh HTTP TLS config: {error}")),
+        };
+        #[cfg(feature = "testing")]
+        let node_failure = if node_failure.is_none()
+            && self
+                .inner
+                .runtime
+                .take_armed_resource_installation_failure(self.inner.consensus.local_node_id())
         {
-            let reason = format!("failed to refresh HTTP TLS config: {error}");
+            Some(INJECTED_RESOURCE_INSTALLATION_FAILURE.to_string())
+        } else {
+            node_failure
+        };
+        if let Some(reason) = node_failure {
             let failed = ResourceNodeStatus {
                 key: ResourceReplicaKey::new(
                     manifest.resource.id.domain.clone(),
@@ -1059,7 +1083,7 @@ mod tests {
     }
 
     #[test]
-    fn resource_resolution_uses_only_completed_versions() {
+    fn binding_version_suggestions_offer_only_completed_versions() {
         let domain =
             DomainName::parse("tenant").assured("the test domain is an identifier-shaped literal");
         let identifier: ResourceName = named("model");
@@ -1112,23 +1136,31 @@ mod tests {
             .assured("the test uploads have unique identities and versions"),
         };
 
-        let latest = resolve_resource_id(&resources, &domain, &identifier, None)
-            .assured("the completed version is eligible for an omitted-version binding");
-        assert_eq!(latest.version, 1);
-        let pinned = resolve_resource_id(&resources, &domain, &identifier, Some(1))
-            .assured("the completed version is eligible for an explicit binding");
-        assert_eq!(pinned.version, 1);
-
-        for version in [2, 3] {
-            let error = match resolve_resource_id(&resources, &domain, &identifier, Some(version)) {
-                Ok(_) => panic!("an incomplete version must be ineligible for an explicit binding"),
-                Err(error) => error,
-            };
-            assert_eq!(
-                error,
-                format!("resource 'model@{version}' is not a completed version in domain 'tenant'")
-            );
-        }
+        assert_eq!(
+            completed_resource_version_suggestions(&resources, &domain, &identifier, ""),
+            vec!["1".to_string()]
+        );
+        assert!(
+            completed_resource_version_suggestions(&resources, &domain, &identifier, "2")
+                .is_empty(),
+            "an applying version is not offered to a binding"
+        );
+        assert!(
+            completed_resource_version_suggestions(&resources, &domain, &identifier, "3")
+                .is_empty(),
+            "a failed version is not offered to a binding"
+        );
+        let other =
+            DomainName::parse("other").assured("the test domain is an identifier-shaped literal");
+        assert!(
+            completed_resource_version_suggestions(&resources, &other, &identifier, "").is_empty(),
+            "another domain must not see this domain's completed versions"
+        );
+        assert_eq!(
+            resource_version_suggestions(&resources, &domain, &identifier, ""),
+            vec!["1".to_string(), "2".to_string(), "3".to_string()],
+            "DESCRIBE RESOURCE still offers every published version"
+        );
     }
 
     #[test]
@@ -1212,12 +1244,21 @@ mod tests {
             resource_version_suggestions(&resources, &other, &named("proto"), "").is_empty(),
             "another domain must not see this domain's resource versions"
         );
+        for input in [
+            "DESCRIBE RESOURCE proto VERSION ",
+            "CREATE VHOST edge api.example.com WITH TLS proto VERSION ",
+            "CREATE CODEC c FROM PROTOBUF USING RESOURCE proto VERSION 1",
+            "CREATE INFERENCER i FROM features USING RESOURCE proto VERSION ",
+        ] {
+            assert_eq!(
+                resource_named_before_version(input, input.len()),
+                Some(named("proto")),
+                "{input:?} names the resource its version belongs to"
+            );
+        }
         assert_eq!(
-            requested_resource_versions(
-                "DESCRIBE RESOURCE proto VERSION ",
-                "DESCRIBE RESOURCE proto VERSION ".len()
-            ),
-            Some(named("proto"))
+            resource_named_before_version("CREATE VHOST edge api.example.com", 33),
+            None
         );
     }
 

@@ -6,7 +6,8 @@ use nervix_models::{
     CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
     CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
     CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
-    CreateClientWebsockets, CreateClientZeroMq, CreateStatement, Model, ResourceName,
+    CreateClientWebsockets, CreateClientZeroMq, CreateStatement, Model, RequestedResourceVersion,
+    ResourceName,
 };
 
 use crate::{
@@ -175,7 +176,7 @@ macro_rules! declare_client_parsers {
         pub fn create_client_model_parser<'src>() -> impl Parser<
             'src,
             &'src [Token],
-            CreateStatement<Box<Model>>,
+            CreateStatement<Box<Model<RequestedResourceVersion>>>,
             extra::Err<ParseError<'src>>,
         > + Clone {
             boxed_choice!(

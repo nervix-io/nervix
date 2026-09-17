@@ -148,7 +148,7 @@ pub(super) enum BranchedProcessorOperationSpec {
     Inferencer {
         output_routes: BranchedProcessorOutputsSpec,
         resource: ResourceName,
-        resource_version: Option<u64>,
+        resource_version: u64,
         file: String,
         inputs: Vec<InferencerTensorMapping>,
         output_schema: Vec<InferencerTensorDeclaration>,
@@ -156,7 +156,7 @@ pub(super) enum BranchedProcessorOperationSpec {
     WasmProcessor {
         output_routes: BranchedProcessorOutputsSpec,
         resource: ResourceName,
-        resource_version: Option<u64>,
+        resource_version: u64,
         file: String,
         limits: nervix_models::WasmProcessorLimits,
     },
@@ -292,7 +292,7 @@ pub(super) enum RelayProcessorOperationTemplate {
     Inferencer {
         output_routes: RelayProcessorOutputsTemplate,
         resource: ResourceName,
-        resource_version: Option<u64>,
+        resource_version: u64,
         file: String,
         inputs: Vec<InferencerTensorMapping>,
         output_schema: Vec<InferencerTensorDeclaration>,
@@ -301,7 +301,7 @@ pub(super) enum RelayProcessorOperationTemplate {
     WasmProcessor {
         output_routes: RelayProcessorOutputsTemplate,
         resource: ResourceName,
-        resource_version: Option<u64>,
+        resource_version: u64,
         file: String,
         limits: nervix_models::WasmProcessorLimits,
         compiled: Option<WasmCompiledBranchProcessor>,
@@ -385,7 +385,7 @@ pub(super) enum RelayProcessorOperationNode {
     Inferencer {
         output_routes: RelayProcessorOutputsNode,
         resource: ResourceName,
-        resource_version: Option<u64>,
+        resource_version: u64,
         file: String,
         inputs: Vec<InferencerTensorMapping>,
         output_schema: Vec<InferencerTensorDeclaration>,
@@ -396,7 +396,7 @@ pub(super) enum RelayProcessorOperationNode {
     WasmProcessor {
         output_routes: RelayProcessorOutputsNode,
         resource: ResourceName,
-        resource_version: Option<u64>,
+        resource_version: u64,
         file: String,
         limits: nervix_models::WasmProcessorLimits,
         compiled: Option<WasmCompiledBranchProcessor>,
@@ -1368,7 +1368,7 @@ pub(super) struct InferencerFlushContext<'a> {
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
     pub(super) resource: &'a ResourceName,
-    pub(super) resource_version: Option<u64>,
+    pub(super) resource_version: u64,
     pub(super) file: &'a str,
     pub(super) inputs: &'a [InferencerTensorMapping],
     pub(super) output_schema: &'a [InferencerTensorDeclaration],
@@ -1388,23 +1388,23 @@ pub(super) struct WasmFlushContext<'a> {
     pub(super) input_relays: &'a [RelayName],
     pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
     pub(super) resource: &'a ResourceName,
-    pub(super) resource_version: Option<u64>,
+    pub(super) resource_version: u64,
     pub(super) file: &'a str,
     pub(super) limits: nervix_models::WasmProcessorLimits,
     pub(super) replicated_state: &'a ReplicatedWasmProcessorState,
     pub(super) execution_now: Timestamp,
 }
 
+/// The guest module of the one resource version a WASM processor pins, compiled once and shared
+/// by every branch instance of the processor.
 #[derive(Clone)]
 pub(super) struct WasmCompiledBranchProcessor {
-    pub(super) version: u64,
     pub(super) compiled: Arc<CompiledWasmProcessor>,
 }
 
 impl std::fmt::Debug for WasmCompiledBranchProcessor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WasmCompiledBranchProcessor")
-            .field("version", &self.version)
             .finish_non_exhaustive()
     }
 }

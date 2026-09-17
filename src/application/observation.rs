@@ -1976,11 +1976,14 @@ impl SessionServiceImpl {
                     .collect::<Vec<_>>()
                     .join(",")
             };
-            let latest =
-                match resources.resolve_completed_version(domain, &describe.identifier, None) {
-                    Ok(id) => id.version.to_string(),
-                    Err(_) => "(none)".to_string(),
-                };
+            let latest = match resources.uploads.resolve_completed_version(
+                domain,
+                &describe.identifier,
+                nervix_models::RequestedResourceVersion::Latest,
+            ) {
+                Ok(id) => id.version.to_string(),
+                Err(_) => "(none)".to_string(),
+            };
             let mut lines = vec![
                 format!("resource: {}", describe.identifier.as_str()),
                 format!("latest: {latest}"),

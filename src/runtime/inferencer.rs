@@ -140,7 +140,6 @@ pub(super) enum InferencerError {
 
 #[derive(Clone)]
 pub(super) struct OnnxInferencerSession {
-    version: u64,
     session: Arc<Mutex<Session>>,
 }
 
@@ -148,16 +147,12 @@ impl std::fmt::Debug for OnnxInferencerSession {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("OnnxInferencerSession")
-            .field("version", &self.version)
             .finish_non_exhaustive()
     }
 }
 
 impl OnnxInferencerSession {
-    pub(super) async fn load(
-        version: u64,
-        path: &Path,
-    ) -> error_stack::Result<Self, InferencerError> {
+    pub(super) async fn load(path: &Path) -> error_stack::Result<Self, InferencerError> {
         let path = path.to_path_buf();
         let session = tokio::task::spawn_blocking(move || {
             let mut builder =
@@ -169,13 +164,8 @@ impl OnnxInferencerSession {
         .await
         .change_context(InferencerError::JoinModelLoad)??;
         Ok(Self {
-            version,
             session: Arc::new(Mutex::new(session)),
         })
-    }
-
-    pub(super) fn version(&self) -> u64 {
-        self.version
     }
 
     pub(super) async fn execute(

@@ -1775,7 +1775,7 @@ mod tests {
             CREATE RELAY scored SCHEMA scored UNBRANCHED;
             CREATE INFERENCER score_model
               FROM features
-              USING RESOURCE fraud_model FILE 'models/simple_score.onnx'
+              USING RESOURCE fraud_model VERSION 1 FILE 'models/simple_score.onnx'
               INPUTS { "features" DENSE TENSOR<F32>[BATCH, 2] = input.vector }
               OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] }
               UNBRANCHED
@@ -1804,7 +1804,7 @@ mod tests {
             CREATE RELAY scored SCHEMA scored UNBRANCHED;
             CREATE INFERENCER score_model
               FROM features
-              USING RESOURCE fraud_model FILE 'models/simple_score.onnx'
+              USING RESOURCE fraud_model VERSION 1 FILE 'models/simple_score.onnx'
               INPUTS { "features" DENSE TENSOR<F32>[BATCH, BATCH, 2] = input.vector }
               OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[BATCH, 1] }
               UNBRANCHED
