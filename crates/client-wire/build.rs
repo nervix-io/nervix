@@ -12,9 +12,9 @@ const ROOT_SCHEMAS: [&str; 4] = [
     "schema/upload_reply.fbs",
 ];
 
-/// The lints flatc's Rust output trips, each admitted with the reason it cannot be avoided in code
-/// this crate does not write. The wrapper module carries them so the generated text stays as flatc
-/// produced it.
+/// The lints flatc's Rust output can trip, each admitted with the reason it cannot be avoided in
+/// code this crate does not write. The wrapper module carries them so the generated text stays as
+/// flatc produced it.
 const GENERATED_MODULE_HEADER: &str = "\
 #[expect(
     clippy::as_conversions,
@@ -28,9 +28,9 @@ const GENERATED_MODULE_HEADER: &str = "\
     clippy::extra_unused_lifetimes,
     reason = \"flatc declares a lifetime on verifier impls that do not use it\"
 )]
-#[expect(
+#[allow(
     unused_imports,
-    reason = \"flatc emits imports at the generated root that only nested modules use\"
+    reason = \"flatc releases vary in whether generated root imports are used\"
 )]
 mod generated {
 ";
