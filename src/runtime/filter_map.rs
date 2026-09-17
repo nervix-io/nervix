@@ -166,8 +166,8 @@ pub(super) async fn evaluate_filter_map_on_batch(
                     execution_now,
                     format!(
                         "FILTER-MAP side error {}: {} at {}",
-                        side_error.code.as_str(),
-                        side_error.message,
+                        side_error.code().as_str(),
+                        side_error.reason,
                         side_error.span
                     ),
                     side_error.span,
@@ -433,8 +433,8 @@ pub(super) async fn plan_filter_map_messages(
                 processor_kind,
                 processor.as_str(),
                 program_label,
-                side_error.code.as_str(),
-                side_error.message,
+                side_error.code().as_str(),
+                side_error.reason,
                 side_error.span
             );
             let reason = if let Some(partial_output_failure) = partial_output_failure {
@@ -633,8 +633,8 @@ pub(super) async fn plan_emitter_filter_map_batch(
             let reason = format!(
                 "emitter '{}' FILTER-MAP side error {}: {} at {}",
                 emitter.as_str(),
-                side_error.code.as_str(),
-                side_error.message,
+                side_error.code().as_str(),
+                side_error.reason,
                 side_error.span
             );
             message_errors.push(planned_structured_message_error(
@@ -830,7 +830,7 @@ pub(in crate::runtime) async fn evaluate_sqs_fifo_group_program(
                 acks: Vec::new(),
                 reason: format!(
                     "SQS FIFO GROUP expression failed with {} at {}",
-                    side_error.code.as_str(),
+                    side_error.code().as_str(),
                     side_error.span
                 ),
             }));
@@ -1130,8 +1130,8 @@ pub(super) async fn evaluate_output_branch_program(
                 acks: Vec::new(),
                 reason: format!(
                     "branch SET failed with {}: {} at {}",
-                    error.code.as_str(),
-                    error.message,
+                    error.code().as_str(),
+                    error.reason,
                     error.span
                 ),
             }));

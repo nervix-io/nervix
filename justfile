@@ -120,6 +120,11 @@ bench *args:
     cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
     cargo bench --package nervix-vm --bench vm -- {{ args }}
 
+# Run only the expression VM Criterion suite. Extra arguments are forwarded to Criterion, so a
+# group filter and `--save-baseline` or `--baseline` compare VM kernels without the relay suite.
+bench-vm *args:
+    cargo bench --package nervix-vm --bench vm -- {{ args }}
+
 # Build the reusable harness and forward its CLI arguments. This is enough for container subjects
 # such as Vector; local Nervix has a dedicated recipe below because it also builds the server.
 benchmark *args:

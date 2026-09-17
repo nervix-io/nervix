@@ -1,8 +1,14 @@
+use std::iter;
+
+use arrow_buffer::BooleanBuffer;
 use arrow_schema::DataType;
 use strum::IntoStaticStr;
 use thiserror::Error;
 
-use crate::{ir::RegisterRef, program::Span};
+use crate::{
+    ir::{RegisterRef, RegisterType},
+    program::Span,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
@@ -19,11 +25,119 @@ impl ErrorCode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One row's failure, recorded where the operation that failed executed.
+///
+/// The failure keeps the typed reason execution observed. Its text is formatted only where the
+/// error is reported, so a batch whose rows fail builds no message for any of them.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SideError {
-    pub code: ErrorCode,
-    pub message: String,
+    pub reason: SideErrorReason,
     pub span: Span,
+}
+
+impl SideError {
+    pub fn code(&self) -> ErrorCode {
+        self.reason.code()
+    }
+}
+
+/// Why one row of an operation failed.
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum SideErrorReason {
+    #[error("integer {0} overflowed")]
+    IntegerOverflow(IntegerOperation),
+    #[error("integer {0} by zero")]
+    DivisionByZero(DivisionOperation),
+    #[error("{0} produced a non-finite result")]
+    NonFiniteResult(FloatOperation),
+    #[error("cannot cast value to {target}")]
+    CastFailed { target: RegisterType },
+    #[error("invalid regular expression: {0}")]
+    InvalidRegularExpression(regex::Error),
+    /// A failure an injected function reported, with the code and text that function chose.
+    #[error("{message}")]
+    Injected { code: ErrorCode, message: String },
+}
+
+impl SideErrorReason {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            Self::IntegerOverflow(_) => ErrorCode::Overflow,
+            Self::DivisionByZero(_) => ErrorCode::DivisionByZero,
+            Self::NonFiniteResult(_) | Self::InvalidRegularExpression(_) => {
+                ErrorCode::InvalidArgument
+            }
+            Self::CastFailed { .. } => ErrorCode::CastFailed,
+            Self::Injected { code, .. } => *code,
+        }
+    }
+}
+
+/// An integer operation whose result did not fit its type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum IntegerOperation {
+    #[strum(to_string = "addition")]
+    Addition,
+    #[strum(to_string = "subtraction")]
+    Subtraction,
+    #[strum(to_string = "multiplication")]
+    Multiplication,
+    #[strum(to_string = "division")]
+    Division,
+    #[strum(to_string = "negation")]
+    Negation,
+    #[strum(to_string = "absolute value")]
+    AbsoluteValue,
+    #[strum(to_string = "sum")]
+    Sum,
+}
+
+/// An integer operation that divides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum DivisionOperation {
+    #[strum(to_string = "division")]
+    Division,
+    #[strum(to_string = "remainder")]
+    Remainder,
+}
+
+/// A floating-point operation whose result has to be finite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum FloatOperation {
+    /// An arithmetic operator.
+    #[strum(to_string = "floating-point operation")]
+    Arithmetic,
+    #[strum(to_string = "floating-point absolute value")]
+    AbsoluteValue,
+    #[strum(to_string = "floating-point sum")]
+    Sum,
+    #[strum(to_string = "ceil")]
+    Ceil,
+    #[strum(to_string = "floor")]
+    Floor,
+    #[strum(to_string = "round")]
+    Round,
+    #[strum(to_string = "acos")]
+    Acos,
+    #[strum(to_string = "asin")]
+    Asin,
+    #[strum(to_string = "atan")]
+    Atan,
+    #[strum(to_string = "cos")]
+    Cos,
+    #[strum(to_string = "exp")]
+    Exp,
+    #[strum(to_string = "ln")]
+    Ln,
+    /// `log`, with one argument or two.
+    #[strum(to_string = "log")]
+    Log,
+    #[strum(to_string = "pow")]
+    Pow,
+    #[strum(to_string = "sqrt")]
+    Sqrt,
+    #[strum(to_string = "tan")]
+    Tan,
 }
 
 /// Row-aligned side errors recorded while a program executes.
@@ -31,7 +145,7 @@ pub struct SideError {
 /// Executions that record no error are the common case, so the per-row storage is
 /// materialized only when the first error arrives. Until then the channel carries just a
 /// row count, which keeps construction and cloning independent of the batch row count.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RowErrors {
     row_count: usize,
     rows: Vec<Vec<SideError>>,
@@ -93,9 +207,43 @@ impl RowErrors {
 
     pub fn push(&mut self, row: usize, error: SideError) {
         if self.rows.is_empty() {
-            self.rows = vec![Vec::new(); self.row_count];
+            // `vec![Vec::new(); n]` clones the empty row once per row, which costs far more than
+            // constructing each one.
+            self.rows = iter::repeat_with(Vec::new).take(self.row_count).collect();
         }
         self.rows[row].push(error);
+    }
+
+    /// The rows holding an error recorded inside `span`, as a bitmap over the batch, or `None`
+    /// when no row does. A batch without errors answers without visiting a row.
+    pub(crate) fn rows_failed_within(&self, span: Span) -> Option<BooleanBuffer> {
+        if self.rows.is_empty() {
+            return None;
+        }
+        let failed = BooleanBuffer::collect_bool(self.row_count, |row| {
+            self.row(row).iter().any(|error| span.contains(error.span))
+        });
+        if failed.count_set_bits() == 0 {
+            return None;
+        }
+        Some(failed)
+    }
+
+    /// Records one error for every row in `rows`, built from that row alone, so an operation
+    /// constructs an error only for a row that failed.
+    pub(crate) fn push_failures(
+        &mut self,
+        rows: impl IntoIterator<Item = usize>,
+        span: Span,
+        reason: impl Fn(usize) -> SideErrorReason,
+    ) {
+        for row in rows {
+            let error = SideError {
+                reason: reason(row),
+                span,
+            };
+            self.push(row, error);
+        }
     }
 
     /// Builds the channel for a filtered batch, keeping only `rows` in the order given.
@@ -103,7 +251,16 @@ impl RowErrors {
         if self.rows.is_empty() {
             return Self::new(rows.len());
         }
-        let selected = rows.iter().map(|&row| self.row(row).to_vec()).collect();
+        let mut selected = Vec::with_capacity(rows.len());
+        for &row in rows {
+            let errors = self.row(row);
+            // Copying an empty row still clones through `to_vec`, so only failed rows are copied.
+            if errors.is_empty() {
+                selected.push(Vec::new());
+            } else {
+                selected.push(errors.to_vec());
+            }
+        }
         Self::from_materialized_rows(rows.len(), selected)
     }
 
@@ -224,7 +381,11 @@ pub enum RuntimeError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ErrorCode, RowErrors, SideError};
+    use super::{
+        DivisionOperation, ErrorCode, FloatOperation, IntegerOperation, RowErrors, SideError,
+        SideErrorReason,
+    };
+    use crate::ir::RegisterType;
 
     #[test]
     fn error_code_strings_are_stable() {
@@ -232,6 +393,98 @@ mod tests {
         assert_eq!(ErrorCode::Overflow.as_str(), "overflow");
         assert_eq!(ErrorCode::CastFailed.as_str(), "cast_failed");
         assert_eq!(ErrorCode::InvalidArgument.as_str(), "invalid_argument");
+    }
+
+    #[test]
+    fn side_error_reasons_render_their_published_messages_and_codes() {
+        let integer_overflows = [
+            (IntegerOperation::Addition, "integer addition overflowed"),
+            (
+                IntegerOperation::Subtraction,
+                "integer subtraction overflowed",
+            ),
+            (
+                IntegerOperation::Multiplication,
+                "integer multiplication overflowed",
+            ),
+            (IntegerOperation::Division, "integer division overflowed"),
+            (IntegerOperation::Negation, "integer negation overflowed"),
+            (
+                IntegerOperation::AbsoluteValue,
+                "integer absolute value overflowed",
+            ),
+            (IntegerOperation::Sum, "integer sum overflowed"),
+        ];
+        for (operation, message) in integer_overflows {
+            let reason = SideErrorReason::IntegerOverflow(operation);
+            assert_eq!(reason.to_string(), message);
+            assert_eq!(reason.code(), ErrorCode::Overflow);
+        }
+
+        let divisions = [
+            (DivisionOperation::Division, "integer division by zero"),
+            (DivisionOperation::Remainder, "integer remainder by zero"),
+        ];
+        for (operation, message) in divisions {
+            let reason = SideErrorReason::DivisionByZero(operation);
+            assert_eq!(reason.to_string(), message);
+            assert_eq!(reason.code(), ErrorCode::DivisionByZero);
+        }
+
+        let non_finite = [
+            (
+                FloatOperation::Arithmetic,
+                "floating-point operation produced a non-finite result",
+            ),
+            (
+                FloatOperation::AbsoluteValue,
+                "floating-point absolute value produced a non-finite result",
+            ),
+            (
+                FloatOperation::Sum,
+                "floating-point sum produced a non-finite result",
+            ),
+            (FloatOperation::Ceil, "ceil produced a non-finite result"),
+            (FloatOperation::Floor, "floor produced a non-finite result"),
+            (FloatOperation::Round, "round produced a non-finite result"),
+            (FloatOperation::Acos, "acos produced a non-finite result"),
+            (FloatOperation::Asin, "asin produced a non-finite result"),
+            (FloatOperation::Atan, "atan produced a non-finite result"),
+            (FloatOperation::Cos, "cos produced a non-finite result"),
+            (FloatOperation::Exp, "exp produced a non-finite result"),
+            (FloatOperation::Ln, "ln produced a non-finite result"),
+            (FloatOperation::Log, "log produced a non-finite result"),
+            (FloatOperation::Pow, "pow produced a non-finite result"),
+            (FloatOperation::Sqrt, "sqrt produced a non-finite result"),
+            (FloatOperation::Tan, "tan produced a non-finite result"),
+        ];
+        for (operation, message) in non_finite {
+            let reason = SideErrorReason::NonFiniteResult(operation);
+            assert_eq!(reason.to_string(), message);
+            assert_eq!(reason.code(), ErrorCode::InvalidArgument);
+        }
+
+        let cast = SideErrorReason::CastFailed {
+            target: RegisterType::Int64,
+        };
+        assert_eq!(cast.to_string(), "cannot cast value to Int64");
+        assert_eq!(cast.code(), ErrorCode::CastFailed);
+
+        let pattern_error = regex::Regex::new("(").expect_err("an unclosed group does not compile");
+        let expected = format!("invalid regular expression: {pattern_error}");
+        let invalid_pattern = SideErrorReason::InvalidRegularExpression(pattern_error);
+        assert_eq!(invalid_pattern.to_string(), expected);
+        assert_eq!(invalid_pattern.code(), ErrorCode::InvalidArgument);
+
+        let injected = SideErrorReason::Injected {
+            code: ErrorCode::DivisionByZero,
+            message: "UDF 'ratio': div failed: division by zero".to_string(),
+        };
+        assert_eq!(
+            injected.to_string(),
+            "UDF 'ratio': div failed: division by zero"
+        );
+        assert_eq!(injected.code(), ErrorCode::DivisionByZero);
     }
 
     #[test]
@@ -247,8 +500,7 @@ mod tests {
         errors.push(
             1,
             SideError {
-                code: ErrorCode::InvalidArgument,
-                message: "invalid input".to_string(),
+                reason: SideErrorReason::NonFiniteResult(FloatOperation::Sqrt),
                 span: (0..1).into(),
             },
         );

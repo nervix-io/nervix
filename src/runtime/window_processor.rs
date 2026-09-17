@@ -1033,8 +1033,8 @@ pub(super) async fn evaluate_window_aggregate_inputs(
             if let Some(error) = result.batch.errors().row(row).first() {
                 return Err(format!(
                     "window aggregate input VM failed with {}: {}",
-                    error.code.as_str(),
-                    error.message
+                    error.code().as_str(),
+                    error.reason
                 ));
             }
             input_columns

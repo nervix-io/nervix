@@ -140,6 +140,20 @@ macro_rules! declare_typed_arrays {
 
 with_typed_registers!(declare_typed_arrays);
 
+macro_rules! declare_typed_array_conversions {
+    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, $data_type:path;)+) => {
+        $(
+            impl From<$Array> for TypedArray {
+                fn from(array: $Array) -> Self {
+                    Self::$Variant(array)
+                }
+            }
+        )+
+    };
+}
+
+with_typed_registers!(declare_typed_array_conversions);
+
 /// One columnar batch a program runs over: the schema of its fields and one array per field.
 ///
 /// Every array already knows its own type, so the schema beside them is a second description of

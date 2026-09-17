@@ -442,8 +442,8 @@ impl Runtime {
                         format!(
                             "reingestor '{}' FILTER-MAP side error {}: {} at {}",
                             reingestor.as_str(),
-                            side_error.code.as_str(),
-                            side_error.message,
+                            side_error.code().as_str(),
+                            side_error.reason,
                             side_error.span
                         ),
                         side_error.span,
