@@ -1,4 +1,4 @@
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 
 use super::*;
 
@@ -13,6 +13,7 @@ pub(super) struct WasmOutputContext<'a> {
     pub(super) input_schema: &'a Arc<CompiledSchema>,
     pub(super) output_schemas: &'a [(RelayName, Arc<CompiledSchema>)],
     pub(super) key: &'a Option<BranchKey>,
+    pub(super) module: &'a WasmBranchModule,
     pub(super) dispatch_error: &'static str,
     pub(super) execution_now: Timestamp,
 }
@@ -656,7 +657,7 @@ pub(super) async fn dispatch_wasm_output_envelopes(
     context: WasmOutputContext<'_>,
     outputs: Vec<WasmEnvelope>,
     ack_map: &mut WasmAckMap,
-) -> error_stack::Result<(), WasmOutputError> {
+) -> error_stack::Result<(), WasmInstanceError> {
     let WasmOutputContext {
         graph,
         branch,
@@ -668,6 +669,7 @@ pub(super) async fn dispatch_wasm_output_envelopes(
         input_schema,
         output_schemas,
         key,
+        module,
         dispatch_error,
         execution_now,
     } = context;
@@ -681,18 +683,14 @@ pub(super) async fn dispatch_wasm_output_envelopes(
     {
         Ok(outputs) => outputs,
         Err(error) => {
-            let reason = format!(
-                "wasm processor '{}' produced invalid output: {}",
-                processor.as_str(),
-                error
-            );
+            let failure = module.emission_failure(Report::new(error));
             branch.runtime.handle_general_error_for_acks(
                 &branch.domain,
                 node_kind,
                 processor,
                 error_policies,
                 ack_map.values().map(|context| &context.acks),
-                reason,
+                format!("{failure:#}"),
             );
             ack_map.clear();
             return Ok(());
@@ -729,7 +727,8 @@ pub(super) async fn dispatch_wasm_output_envelopes(
                 token_use_counts: &mut token_use_counts,
                 execution_now,
             },
-        )?;
+        )
+        .map_err(|error| module.emission_failure(error))?;
         if output_batch.batch.message_count() == 0 {
             continue;
         }
@@ -1418,13 +1417,17 @@ pub(super) async fn apply_wasm_sidecar_terminal_decisions(
     }
 }
 
+/// Saves the guest state after the branch processed work, and persists and replicates it.
+///
+/// A save that exhausts an execution limit leaves the guest's store unusable, so the instance is
+/// discarded and the next work recreates it from the state saved last.
 pub(super) async fn persist_wasm_guest_state(
     runtime: &Runtime,
     processor: &ModelName,
     replicated_state: &ReplicatedWasmProcessorState,
-    instance: &mut Option<Box<nervix_wasm::WasmBranchInstance>>,
+    instance: &mut Option<Box<WasmLiveInstance>>,
     execution_now: Timestamp,
-) -> OwnershipHandoffResult<()> {
+) -> error_stack::Result<(), WasmInstanceError> {
     persist_wasm_guest_state_with_failure_mode(
         runtime,
         processor,
@@ -1436,11 +1439,14 @@ pub(super) async fn persist_wasm_guest_state(
     .await
 }
 
+/// Saves, persists, and replicates the guest state an ownership handoff transfers. The instance is
+/// kept whatever happens, because the handoff that asked for the checkpoint decides what becomes
+/// of the branch.
 pub(super) async fn checkpoint_wasm_guest_state(
     runtime: &Runtime,
     processor: &ModelName,
     replicated_state: &ReplicatedWasmProcessorState,
-    instance: &mut Option<Box<nervix_wasm::WasmBranchInstance>>,
+    instance: &mut Option<Box<WasmLiveInstance>>,
     execution_now: Timestamp,
 ) -> OwnershipHandoffResult<()> {
     persist_wasm_guest_state_with_failure_mode(
@@ -1452,6 +1458,9 @@ pub(super) async fn checkpoint_wasm_guest_state(
         WasmStateSaveFailureMode::RetainInstance,
     )
     .await
+    .change_context_lazy(|| OwnershipHandoffError::WasmCheckpoint {
+        processor: processor.clone(),
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -1464,45 +1473,37 @@ async fn persist_wasm_guest_state_with_failure_mode(
     runtime: &Runtime,
     processor: &ModelName,
     replicated_state: &ReplicatedWasmProcessorState,
-    instance: &mut Option<Box<nervix_wasm::WasmBranchInstance>>,
+    instance: &mut Option<Box<WasmLiveInstance>>,
     execution_now: Timestamp,
     failure_mode: WasmStateSaveFailureMode,
-) -> OwnershipHandoffResult<()> {
-    let save_result = match instance.as_mut() {
-        Some(instance) => {
-            instance
-                .save_state_in_context(nervix_wasm::WasmExecutionContext::new(execution_now))
-                .await
-        }
-        None => {
-            return Err(OwnershipHandoffError::checkpoint(format!(
-                "wasm processor '{}' instance is unavailable while saving guest state",
-                processor.as_str()
-            )));
-        }
+) -> error_stack::Result<(), WasmInstanceError> {
+    let Some(live) = instance.as_mut() else {
+        return Err(Report::new(WasmInstanceError::InstanceUnavailable {
+            processor: processor.clone(),
+        }));
     };
+    let save_result = live
+        .guest
+        .save_state_in_context(nervix_wasm::WasmExecutionContext::new(execution_now))
+        .await;
     let guest_state = match save_result {
         Ok(guest_state) => guest_state,
         Err(error) => {
             let resource_limit_exceeded = error.current_context().is_resource_limit_exceeded();
-            let reason = format!(
-                "wasm processor '{}' failed to save guest state: {}",
-                processor.as_str(),
-                error
-            );
+            let failure = live.module.guest_failure(error, None);
             if resource_limit_exceeded
                 && let WasmStateSaveFailureMode::InvalidateInstance = failure_mode
             {
                 *instance = None;
             }
-            return Err(OwnershipHandoffError::checkpoint(reason));
+            return Err(failure);
         }
     };
     let saved = replicated_state.replace_guest_state(guest_state);
     runtime
         .persist_wasm_processor_snapshot(replicated_state, &saved)
         .await
-        .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))
+        .map_err(|error| live.module.persistence_failure(error, saved.revision()))
 }
 
 pub(super) struct WasmOutputAttributionContext<'a> {
