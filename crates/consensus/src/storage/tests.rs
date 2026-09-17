@@ -1434,7 +1434,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
     use nervix_models::{StartDomain, Statement, Timestamp, UserName};
 
     use crate::{
-        ReplicatedTransaction, TransactionCommandResult, TransactionOutcome,
+        ReplicatedTransaction, TransactionActivity, TransactionCommandResult, TransactionOutcome,
         TransactionQueueLimits, TransactionState, TransactionStatement, TransactionStepEffect,
         TransactionStepResult,
     };
@@ -1444,6 +1444,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
         let domain = Harness::domain("tenant");
         let owner = UserName::parse("operator")?;
         let at = Timestamp::from_unix_nanos(1);
+        let activity = TransactionActivity::from_timeout(at, Duration::from_secs(60));
         harness
             .apply(
                 1,
@@ -1461,7 +1462,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                         "transaction".into(),
                         domain.id.clone(),
                         owner.clone(),
-                        at,
+                        activity,
                     )),
                     max_open_transactions: 10,
                 },
@@ -1474,7 +1475,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                     id: "transaction".into(),
                     owner: owner.clone(),
                     domain: domain.id.clone(),
-                    at,
+                    activity,
                     statement: Box::new(TransactionStatement::test_admitted(
                         crate::TransactionStatementRequest {
                             request_reference: nervix_models::CommandExecutionReference::parse(
@@ -1500,7 +1501,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                 ConsensusCommand::StartTransactionCommit {
                     id: "transaction".into(),
                     owner,
-                    at,
+                    activity,
                 },
             )
             .await?;
