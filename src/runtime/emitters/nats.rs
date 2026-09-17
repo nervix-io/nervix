@@ -81,9 +81,7 @@ impl NatsEmitter {
         config: &[nervix_models::ClientConfigEntry],
         retry_policy: ParsedRetryPolicy,
     ) -> EmitterRuntimeResult<NatsClient> {
-        let addr = emitter_config_value(config, "addr", || {
-            "missing NATS client config key 'addr'".to_string()
-        })?;
+        let addr = emitter_config_value(config, "addr", "NATS")?;
         let connected_once = StdArc::new(AtomicBool::new(false));
         let event_connected_once = connected_once.clone();
         let delay_connected_once = connected_once;
