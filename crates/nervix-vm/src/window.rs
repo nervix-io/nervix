@@ -839,7 +839,7 @@ mod tests {
     use nonzero_ext::nonzero;
 
     use super::*;
-    use crate::program::{DatetimeFunction, FixedTimeUnit};
+    use crate::program::{DatetimeFunction, DatetimeUnit, FixedTimeUnit, Zone};
 
     fn lower_aggregate_program(
         assignments: &str,
@@ -1150,7 +1150,10 @@ mod tests {
         };
         assert_eq!(
             *function,
-            FunctionName::Datetime(DatetimeFunction::DateTrunc(FixedTimeUnit::Minute))
+            FunctionName::Datetime(DatetimeFunction::DateTrunc {
+                unit: DatetimeUnit::Fixed(FixedTimeUnit::Minute),
+                zone: Zone::UTC,
+            })
         );
         assert!(matches!(
             args.as_slice(),
@@ -1168,7 +1171,10 @@ mod tests {
         assert!(matches!(
             demands[1].arguments,
             WindowArguments::Single(Expr::Call {
-                function: FunctionName::Datetime(DatetimeFunction::DateTrunc(FixedTimeUnit::Hour)),
+                function: FunctionName::Datetime(DatetimeFunction::DateTrunc {
+                    unit: DatetimeUnit::Fixed(FixedTimeUnit::Hour),
+                    ..
+                }),
                 ..
             })
         ));
