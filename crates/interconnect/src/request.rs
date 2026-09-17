@@ -1690,6 +1690,9 @@ impl InterconnectRequest for ReconcileOwnershipHandoffPreparationsRequest {
     }
 }
 
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_checks;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1769,16 +1772,6 @@ mod tests {
         );
     }
 
-    #[derive(Debug, Archive, Serialize, Deserialize)]
-    struct Ping;
-
-    impl InterconnectRequest for Ping {
-        type Response = ();
-
-        const NAME: &'static str = "test_ping";
-        const TIMEOUT: Duration = Duration::from_secs(1);
-    }
-
     #[test]
     fn every_target_is_live_until_membership_is_published() {
         let requests = RequestState::new(1, Arc::new(TransportObservations::default()));
@@ -1798,60 +1791,6 @@ mod tests {
         assert!(
             !requests.target_is_live(&node_a),
             "a published empty membership has no live target"
-        );
-    }
-
-    #[test]
-    fn concurrent_registrations_publish_every_handler() {
-        const NAMES: [&str; 8] = [
-            "test_first",
-            "test_second",
-            "test_third",
-            "test_fourth",
-            "test_fifth",
-            "test_sixth",
-            "test_seventh",
-            "test_eighth",
-        ];
-        let requests = StdArc::new(RequestState::new(
-            1,
-            Arc::new(TransportObservations::default()),
-        ));
-        let erased: Box<dyn ErasedRequestHandler> = Box::new(TypedRequestHandler::<Ping, _> {
-            handler: Arc::new(|_context: RequestContext, _request: Ping| async {}),
-            request: PhantomData,
-        });
-        let handler = Arc::new(erased);
-        let start = StdArc::new(std::sync::Barrier::new(NAMES.len()));
-        let mut registrations = Vec::with_capacity(NAMES.len());
-        for name in NAMES {
-            let requests = StdArc::clone(&requests);
-            let registration = HandlerRegistration::Request(Arc::clone(&handler));
-            let start = StdArc::clone(&start);
-            registrations.push(std::thread::spawn(move || {
-                start.wait();
-                requests.publish_handler(name, registration)
-            }));
-        }
-        for registration in registrations {
-            registration
-                .join()
-                .assured("a registration thread only publishes a handler table")
-                .assured("every concurrent registration uses a distinct name");
-        }
-
-        let table = requests.handlers.load();
-        for name in NAMES {
-            assert!(
-                table.requests.contains_key(name),
-                "the {name} registration was lost to a concurrent publication"
-            );
-        }
-        assert!(
-            requests
-                .publish_handler(NAMES[0], HandlerRegistration::Request(Arc::clone(&handler)))
-                .is_err(),
-            "a published name cannot be registered again"
         );
     }
 }
