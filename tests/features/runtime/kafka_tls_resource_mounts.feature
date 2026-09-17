@@ -32,7 +32,7 @@ Feature: Kafka TLS resource mounts
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE CLIENT kafka_tls
         TYPE KAFKA
-        MOUNT dev_tls
+        MOUNT dev_tls VERSION 1
         CONFIG {
           'bootstrap.servers' = '{{kafka_tls_addr}}',
           'security.protocol' = 'ssl',

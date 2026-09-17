@@ -53,7 +53,7 @@ Feature: MongoDB TLS resource mounts
         CREATE CLIENT mongodb_client
         TYPE MONGODB
         POOL SIZE MIN 2 MAX 8
-        MOUNT dev_tls
+        MOUNT dev_tls VERSION 1
         CONFIG {
           'addr' = '{{mongodb_tls_addr}}',
           'database' = 'nervix',

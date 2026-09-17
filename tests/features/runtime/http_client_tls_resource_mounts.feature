@@ -32,7 +32,7 @@ Feature: HTTP client TLS resource mounts
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE CLIENT http_tls
         TYPE HTTP
-        MOUNT dev_tls
+        MOUNT dev_tls VERSION 1
         CONFIG {
           'endpoint' = '{{mock_https_addr}}/http/{{test_id}}',
           'method' = 'GET',

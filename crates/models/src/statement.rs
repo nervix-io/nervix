@@ -1206,28 +1206,28 @@ declare_models! {
     WireCborSchema(CreateCborWireSchema) => WireCborSchema, None, shared;
     WireAvroSchema(CreateAvroWireSchema) => WireAvroSchema, None, paired;
     Codec(CreateCodec<Version>) => Codec, None, paired;
-    ClientKafka(CreateClientKafka) => Client, Some("KAFKA"), shared;
-    ClientPulsar(CreateClientPulsar) => Client, Some("PULSAR"), shared;
-    ClientHttp(CreateClientHttp) => Client, Some("HTTP"), shared;
-    ClientSentry(CreateClientSentry) => Client, Some("SENTRY"), shared;
-    ClientOtel(CreateClientOtel) => Client, Some("OTEL"), shared;
-    ClientPrometheus(CreateClientPrometheus) => Client, Some("PROMETHEUS"), shared;
-    ClientMqtt(CreateClientMqtt) => Client, Some("MQTT"), shared;
-    ClientNats(CreateClientNats) => Client, Some("NATS"), shared;
-    ClientRabbitMq(CreateClientRabbitMq) => Client, Some("RABBITMQ"), shared;
-    ClientRedis(CreateClientRedis) => Client, Some("REDIS"), shared;
-    ClientZeroMq(CreateClientZeroMq) => Client, Some("ZEROMQ"), shared;
-    ClientSqs(CreateClientSqs) => Client, Some("SQS"), shared;
-    ClientWebsockets(CreateClientWebsockets) => Client, Some("WEBSOCKETS"), shared;
-    ClientSyslog(CreateClientSyslog) => Client, Some("SYSLOG"), shared;
-    ClientClickHouse(CreateClientClickHouse) => Client, Some("CLICKHOUSE"), shared;
-    ClientPostgres(CreateClientPostgres) => Client, Some("POSTGRES"), shared;
-    ClientMySql(CreateClientMySql) => Client, Some("MYSQL"), shared;
-    ClientMongoDb(CreateClientMongoDb) => Client, Some("MONGODB"), shared;
-    ClientS3(CreateClientS3) => Client, Some("S3"), shared;
-    ClientGcs(CreateClientGcs) => Client, Some("GCS"), shared;
-    ClientAzureBlob(CreateClientAzureBlob) => Client, Some("AZURE_BLOB"), shared;
-    ClientIcebergRest(CreateClientIcebergRest) => Client, Some("ICEBERG_REST"), shared;
+    ClientKafka(CreateClientKafka<Version>) => Client, Some("KAFKA"), shared;
+    ClientPulsar(CreateClientPulsar<Version>) => Client, Some("PULSAR"), shared;
+    ClientHttp(CreateClientHttp<Version>) => Client, Some("HTTP"), shared;
+    ClientSentry(CreateClientSentry<Version>) => Client, Some("SENTRY"), shared;
+    ClientOtel(CreateClientOtel<Version>) => Client, Some("OTEL"), shared;
+    ClientPrometheus(CreateClientPrometheus<Version>) => Client, Some("PROMETHEUS"), shared;
+    ClientMqtt(CreateClientMqtt<Version>) => Client, Some("MQTT"), shared;
+    ClientNats(CreateClientNats<Version>) => Client, Some("NATS"), shared;
+    ClientRabbitMq(CreateClientRabbitMq<Version>) => Client, Some("RABBITMQ"), shared;
+    ClientRedis(CreateClientRedis<Version>) => Client, Some("REDIS"), shared;
+    ClientZeroMq(CreateClientZeroMq<Version>) => Client, Some("ZEROMQ"), shared;
+    ClientSqs(CreateClientSqs<Version>) => Client, Some("SQS"), shared;
+    ClientWebsockets(CreateClientWebsockets<Version>) => Client, Some("WEBSOCKETS"), shared;
+    ClientSyslog(CreateClientSyslog<Version>) => Client, Some("SYSLOG"), shared;
+    ClientClickHouse(CreateClientClickHouse<Version>) => Client, Some("CLICKHOUSE"), shared;
+    ClientPostgres(CreateClientPostgres<Version>) => Client, Some("POSTGRES"), shared;
+    ClientMySql(CreateClientMySql<Version>) => Client, Some("MYSQL"), shared;
+    ClientMongoDb(CreateClientMongoDb<Version>) => Client, Some("MONGODB"), shared;
+    ClientS3(CreateClientS3<Version>) => Client, Some("S3"), shared;
+    ClientGcs(CreateClientGcs<Version>) => Client, Some("GCS"), shared;
+    ClientAzureBlob(CreateClientAzureBlob<Version>) => Client, Some("AZURE_BLOB"), shared;
+    ClientIcebergRest(CreateClientIcebergRest<Version>) => Client, Some("ICEBERG_REST"), shared;
     Vhost(CreateVhost<Version>) => Vhost, None, paired;
     Branch(CreateBranch) => Branch, None, paired;
     Endpoint(CreateEndpoint) => Endpoint, None, paired;
@@ -1238,7 +1238,7 @@ declare_models! {
     Ingestor(CreateIngestor) => Ingestor, None, paired;
     Reingestor(CreateReingestor) => Reingestor, None, paired;
     Relay(CreateRelay) => Relay, None, paired;
-    Lookup(CreateLookup) => Lookup, None, paired;
+    Lookup(CreateLookup<Version>) => Lookup, None, paired;
     Junction(CreateJunction) => Junction, None, paired;
     Deduplicator(CreateDeduplicator) => Deduplicator, None, paired;
     Correlator(CreateCorrelator) => Correlator, None, paired;
@@ -2403,6 +2403,15 @@ pub struct ClientConfigEntry {
     pub value: String,
 }
 
+/// The one resource version mounted into a client's configuration namespace.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct ClientResourceMount<Version = u64> {
+    pub resource: ResourceName,
+    pub version: Version,
+}
+
 /// Why a declared pair of connection-pool sizes is not a usable bound.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ClientPoolBoundsError {
@@ -2476,9 +2485,9 @@ macro_rules! declare_clients {
                 RkyvSerialize,
                 RkyvDeserialize,
             )]
-            pub struct $Client {
+            pub struct $Client<Version = u64> {
                 pub name: ClientName,
-                pub mount: Option<ResourceName>,
+                pub mount: Option<ClientResourceMount<Version>>,
                 pub config: Vec<ClientConfigEntry>,
             }
 
@@ -2496,10 +2505,10 @@ macro_rules! declare_clients {
                 RkyvSerialize,
                 RkyvDeserialize,
             )]
-            pub struct $PooledClient {
+            pub struct $PooledClient<Version = u64> {
                 pub name: ClientName,
                 pub pool: ClientPoolBounds,
-                pub mount: Option<ResourceName>,
+                pub mount: Option<ClientResourceMount<Version>>,
                 pub config: Vec<ClientConfigEntry>,
             }
 
@@ -2539,9 +2548,9 @@ declare_clients! {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct CreateClientWebsockets {
+pub struct CreateClientWebsockets<Version = u64> {
     pub name: ClientName,
-    pub mount: Option<ResourceName>,
+    pub mount: Option<ClientResourceMount<Version>>,
     pub signaling_protocol: Option<SignalingProtocolName>,
     pub config: Vec<ClientConfigEntry>,
 }
@@ -4548,10 +4557,11 @@ impl ScheduledNode {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct CreateLookup {
+pub struct CreateLookup<Version = u64> {
     pub name: LookupName,
     pub key_field: FieldName,
     pub resource: ResourceName,
+    pub resource_version: Version,
     pub path: String,
     pub decode_using_codec: CodecName,
 }

@@ -350,7 +350,7 @@ General pattern:
 ```nspl,ignore
 CREATE [IF NOT EXISTS] CLIENT <name>
   TYPE <kind>
-  MOUNT <tls_resource>
+  MOUNT <tls_resource> VERSION <n>|LATEST
   CONFIG {
     ...
     'tls_ca_file' = '{{ tls_resource }}/ca.pem'
@@ -377,7 +377,7 @@ Example Kafka TLS client:
 ```nspl
 CREATE IF NOT EXISTS CLIENT kafka_tls
   TYPE KAFKA
-  MOUNT dev_tls
+  MOUNT dev_tls VERSION 1
   CONFIG {
     'bootstrap.servers' = '127.0.0.1:9094',
     'security.protocol' = 'ssl',
@@ -390,7 +390,7 @@ Example HTTP TLS client:
 ```nspl
 CREATE IF NOT EXISTS CLIENT http_tls
   TYPE HTTP
-  MOUNT dev_tls
+  MOUNT dev_tls VERSION 1
   CONFIG {
     'endpoint' = 'https://127.0.0.1:18443/http/notifications',
     'method' = 'GET',

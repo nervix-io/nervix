@@ -224,7 +224,7 @@ Feature: Resource lifecycle
       """
       CREATE HASH MAP zip_by_code
         KEY zip
-        FROM RESOURCE zip_codes
+        FROM RESOURCE zip_codes VERSION 1
         PATH 'lookup.jsonl'
         DECODE USING zip_codec;
       """

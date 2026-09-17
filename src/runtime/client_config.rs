@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn client_config_extractors_handle_defaults_and_missing_keys() {
-        let zeromq = CreateClientZeroMq {
+        let zeromq = CreateClientZeroMq::<u64> {
             name: named("zmq"),
             mount: None,
             config: vec![
@@ -226,7 +226,7 @@ mod tests {
             &zeromq.config
         ));
 
-        let http = CreateClientHttp {
+        let http = CreateClientHttp::<u64> {
             name: named("http"),
             mount: None,
             config: vec![ClientConfigEntry {
@@ -244,7 +244,7 @@ mod tests {
             reqwest::Method::GET
         );
 
-        let http_post = CreateClientHttp {
+        let http_post = CreateClientHttp::<u64> {
             name: named("http"),
             mount: None,
             config: vec![
@@ -265,7 +265,7 @@ mod tests {
         );
         assert!(
             ingestors::http::HttpIngestor::method_from_config(
-                &CreateClientHttp {
+                &CreateClientHttp::<u64> {
                     name: named("http"),
                     mount: None,
                     config: vec![ClientConfigEntry {
@@ -278,7 +278,7 @@ mod tests {
             .is_err()
         );
 
-        let websocket = CreateClientWebsockets {
+        let websocket = CreateClientWebsockets::<u64> {
             name: named("ws"),
             mount: None,
             signaling_protocol: None,
@@ -293,7 +293,7 @@ mod tests {
             "wss://example.com/socket"
         );
 
-        let prometheus = CreateClientPrometheus {
+        let prometheus = CreateClientPrometheus::<u64> {
             name: named("prom"),
             mount: None,
             config: vec![ClientConfigEntry {
@@ -307,7 +307,7 @@ mod tests {
             "http://prometheus:9090"
         );
 
-        let zeromq_default = CreateClientZeroMq {
+        let zeromq_default = CreateClientZeroMq::<u64> {
             name: named("zmq"),
             mount: None,
             config: vec![ClientConfigEntry {
@@ -321,7 +321,7 @@ mod tests {
 
         assert!(
             ingestors::zeromq::ZeroMqIngestor::addr_from_config(
-                &CreateClientZeroMq {
+                &CreateClientZeroMq::<u64> {
                     name: named("zmq"),
                     mount: None,
                     config: vec![],
@@ -334,7 +334,7 @@ mod tests {
         );
         assert!(
             ingestors::http::HttpIngestor::endpoint_from_config(
-                &CreateClientHttp {
+                &CreateClientHttp::<u64> {
                     name: named("http"),
                     mount: None,
                     config: vec![],
@@ -347,7 +347,7 @@ mod tests {
         );
         assert!(
             ingestors::websockets::WebsocketsIngestor::endpoint_from_config(
-                &CreateClientWebsockets {
+                &CreateClientWebsockets::<u64> {
                     name: named("ws"),
                     mount: None,
                     signaling_protocol: None,
@@ -361,7 +361,7 @@ mod tests {
         );
         assert!(
             ingestors::prometheus::PrometheusIngestor::addr_from_config(
-                &CreateClientPrometheus {
+                &CreateClientPrometheus::<u64> {
                     name: named("prom"),
                     mount: None,
                     config: vec![],

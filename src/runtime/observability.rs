@@ -139,11 +139,10 @@ impl Runtime {
     }
 }
 
-/// One instantiated lookup as this node sees it: the model it was built from, the resource
-/// version it loaded, and how many entries that version produced.
+/// One instantiated lookup as this node sees it: the pinned model it was built from and how many
+/// entries that resource version produced.
 pub(crate) struct LocalLookupDescription {
     pub(crate) model: CreateLookup,
-    pub(crate) resource_version: u64,
     pub(crate) entry_count: usize,
 }
 
@@ -642,7 +641,6 @@ impl Runtime {
         };
         Ok(LocalLookupDescription {
             model: lookup.model.clone(),
-            resource_version: lookup.resource_version,
             entry_count: lookup.entries.len(),
         })
     }
@@ -1090,10 +1088,10 @@ mod tests {
                 name: lookup.clone(),
                 key_field: named("postal_code"),
                 resource: named("postal_codes"),
+                resource_version: 7,
                 path: "postal_codes.jsonl".to_string(),
                 decode_using_codec: named("postal_code_codec"),
             },
-            resource_version: 7,
             schema,
             batch: Arc::new(batch),
             entries: Arc::new(HashMap::from_iter([("99926".to_string(), 1)])),

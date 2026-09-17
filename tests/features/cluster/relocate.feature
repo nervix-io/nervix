@@ -1455,11 +1455,11 @@ Feature: Relocating runtime nodes onto a named cluster node
       RELOCATE JUNCTION exclusive_route ONTO NODE node-2 FOLLOW PREFERENCES;
       """
     Then the entity gate pause for domain "{{domain}}" is reached
-    When these NSPL commands fail with "domain '{{domain}}' already has a model alteration in progress"
+    When these NSPL commands fail with "domain '{{domain}}' mutation is owned by command"
       """
       ALTER RELAY exclusive_output SET CAPACITY 32;
       """
-    And these NSPL commands fail with "domain '{{domain}}' already has a model alteration in progress"
+    And these NSPL commands fail with "domain '{{domain}}' mutation is owned by command"
       """
       RELOCATE JUNCTION exclusive_route ONTO NODE node-3 FOLLOW PREFERENCES;
       """

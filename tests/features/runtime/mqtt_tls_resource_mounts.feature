@@ -32,7 +32,7 @@ Feature: MQTT TLS resource mounts
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE CLIENT mqtt_tls
         TYPE MQTT
-        MOUNT dev_tls
+        MOUNT dev_tls VERSION 1
         CONFIG {
           'addr' = '{{mqtt_tls_addr}}',
           'client_id' = 'nervix-cucumber-mqtt-tls-{{test_id}}',
