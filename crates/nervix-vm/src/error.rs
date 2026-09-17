@@ -6,6 +6,7 @@ use strum::IntoStaticStr;
 use thiserror::Error;
 
 use crate::{
+    datetime::{UnreadableText, Zone},
     ir::{RegisterRef, RegisterType},
     program::Span,
 };
@@ -62,6 +63,15 @@ pub enum SideErrorReason {
     /// A `date_diff` whose count of units does not fit its `I64` result.
     #[error("date_diff result does not fit I64")]
     DateDiffOverflow,
+    /// A `parse_datetime` input that is not a date and time in the call's format.
+    #[error("parse_datetime {0}")]
+    UnreadableDatetime(UnreadableText),
+    /// A `parse_datetime` input naming a local time that its zone skips.
+    #[error("parse_datetime local time does not exist in {zone}")]
+    SkippedLocalTime { zone: Zone },
+    /// A `parse_datetime` input naming a local time that its zone repeats.
+    #[error("parse_datetime local time is ambiguous in {zone}")]
+    RepeatedLocalTime { zone: Zone },
     /// A failure an injected function reported, with the code and text that function chose.
     #[error("{message}")]
     Injected { code: ErrorCode, message: String },
@@ -76,8 +86,10 @@ impl SideErrorReason {
             Self::DivisionByZero(_) => ErrorCode::DivisionByZero,
             Self::NegativeShiftCount(_)
             | Self::NonFiniteResult(_)
-            | Self::InvalidRegularExpression(_) => ErrorCode::InvalidArgument,
-            Self::CastFailed { .. } => ErrorCode::CastFailed,
+            | Self::InvalidRegularExpression(_)
+            | Self::SkippedLocalTime { .. }
+            | Self::RepeatedLocalTime { .. } => ErrorCode::InvalidArgument,
+            Self::CastFailed { .. } | Self::UnreadableDatetime(_) => ErrorCode::CastFailed,
             Self::Injected { code, .. } => *code,
         }
     }
@@ -136,6 +148,8 @@ pub enum DatetimeOperation {
     DateAdd,
     #[strum(to_string = "from_unix")]
     FromUnix,
+    #[strum(to_string = "parse_datetime")]
+    ParseDatetime,
 }
 
 /// A floating-point operation whose result has to be finite.
@@ -428,6 +442,12 @@ pub enum RuntimeError {
     },
     #[error("injected function '{function}' failed: {message}")]
     InjectedFunctionFailed { function: String, message: String },
+    /// A batch whose formatted datetimes could exceed the 2 GiB of text one STRING column holds.
+    #[error(
+        "format_datetime values for {rows} messages of up to {longest} bytes each could exceed \
+         the text one STRING column holds"
+    )]
+    FormattedDatetimesTooLarge { rows: usize, longest: usize },
 }
 
 #[cfg(test)]

@@ -19,10 +19,14 @@ use nervix_models::{
 use strum::VariantNames as _;
 use thiserror::Error;
 
-use crate::program::{
-    BinaryOp, CaseArm, DateBinWidth, DatePart, DatetimeFunction, DatetimeFunctionName, Expr,
-    FieldRef, FixedTimeUnit, FunctionName, Invocation, Literal, Program, Span, SpannedExpr,
-    SpannedInvocation, SpannedNode, UnaryOp, spanned,
+use crate::{
+    datetime::{DatetimeFormat, DatetimeParser, FormatDefect, ParseFormat, ParserZoneMismatch},
+    program::{
+        BinaryOp, CalendarUnit, CaseArm, DateBinWidth, DatePart, DatetimeFunction,
+        DatetimeFunctionName, DatetimeUnit, Disambiguation, Expr, FieldRef, FixedTimeUnit,
+        FunctionName, Invocation, Literal, Program, Span, SpannedExpr, SpannedInvocation,
+        SpannedNode, UnaryOp, Zone, spanned,
+    },
 };
 
 /// A compile-time frontend failure together with the semantic operation it belongs to.
@@ -153,7 +157,7 @@ pub enum FrontendErrorKind {
     #[error("function '{function}' expects {expected} arguments, found {found}")]
     DatetimeArity {
         function: DatetimeFunctionName,
-        expected: usize,
+        expected: ArgumentCount,
         found: usize,
     },
     #[error("function '{function}' requires its {argument}")]
@@ -163,12 +167,47 @@ pub enum FrontendErrorKind {
     },
     #[error(
         "function '{function}' does not accept time unit '{unit}'; expected one of {expected}",
-        expected = FixedTimeUnit::VARIANTS.join(", ")
+        expected = function.accepted_units()
     )]
     UnknownTimeUnit {
         function: DatetimeFunctionName,
         unit: String,
     },
+    #[error(
+        "function '{function}' does not accept time zone '{zone}'; expected an IANA time zone \
+         name, UTC, or a UTC offset such as '+05:30'"
+    )]
+    UnknownTimeZone {
+        function: DatetimeFunctionName,
+        zone: String,
+    },
+    #[error("function '{function}' does not accept format '{format}': {defect}")]
+    InvalidDatetimeFormat {
+        function: DatetimeFunctionName,
+        format: String,
+        defect: FormatDefect,
+    },
+    #[error(
+        "function 'parse_datetime' format '{format}' reads its UTC offset from the input, so it \
+         takes no time zone"
+    )]
+    ParseFormatWithOffsetAndZone { format: String },
+    #[error(
+        "function 'parse_datetime' format '{format}' reads a Unix time from the input, so it \
+         takes no time zone"
+    )]
+    ParseFormatWithUnixTimeAndZone { format: String },
+    #[error(
+        "function 'parse_datetime' format '{format}' reads no UTC offset or Unix time from the \
+         input, so it requires a time zone"
+    )]
+    ParseFormatWithoutZone { format: String },
+    #[error(
+        "function 'parse_datetime' does not accept disambiguation '{disambiguation}'; expected one \
+         of {expected}",
+        expected = Disambiguation::VARIANTS.join(", ")
+    )]
+    UnknownDisambiguation { disambiguation: String },
     #[error(
         "function 'date_part' does not accept date part '{part}'; expected one of {expected}",
         expected = DatePart::VARIANTS.join(", ")
@@ -209,6 +248,32 @@ pub enum DatetimeLiteral {
     DatePart,
     #[strum(serialize = "width to be an integer literal")]
     Width,
+    #[strum(serialize = "time zone to be a STRING literal")]
+    TimeZone,
+    #[strum(serialize = "format to be a STRING literal")]
+    Format,
+    #[strum(serialize = "disambiguation to be a STRING literal")]
+    Disambiguation,
+}
+
+/// How many arguments a datetime builtin takes: from `fewest` to `most`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArgumentCount {
+    pub fewest: usize,
+    pub most: usize,
+}
+
+impl std::fmt::Display for ArgumentCount {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let one_more = self.fewest.checked_add(1);
+        if self.most == self.fewest {
+            write!(formatter, "{}", self.fewest)
+        } else if one_more == Some(self.most) {
+            write!(formatter, "{} or {}", self.fewest, self.most)
+        } else {
+            write!(formatter, "{} to {}", self.fewest, self.most)
+        }
+    }
 }
 
 pub type FrontendResult<T> = error_stack::Result<T, FrontendError>;
@@ -1401,44 +1466,68 @@ fn lower_expression_with_span(
 
 impl DatetimeFunctionName {
     /// Lowers a call of this datetime builtin. The literals that select what the call computes are
-    /// read once, here, so the lowered call keeps only the arguments that vary by row.
+    /// read once, here, into units, resolved time zones and compiled formats, so the lowered call
+    /// keeps only the arguments that vary by row.
     fn lower_call(self, args: Vec<SpannedExpr>, span: Span) -> FrontendResult<Expr> {
         let (function, operands) = match self {
             Self::DatePart => {
-                let [part, value] = self.arguments(args, span)?;
+                let ([part, value], [zone]) = self.arguments(args, span)?;
                 let part = self.date_part(&part, span)?;
-                (DatetimeFunction::DatePart(part), vec![value])
+                let zone = self.zone(zone.as_ref(), span)?;
+                (DatetimeFunction::DatePart { part, zone }, vec![value])
             }
             Self::DateTrunc => {
-                let [unit, value] = self.arguments(args, span)?;
-                let unit = self.time_unit(&unit, span)?;
-                (DatetimeFunction::DateTrunc(unit), vec![value])
+                let ([unit, value], [zone]) = self.arguments(args, span)?;
+                let unit = self.datetime_unit(&unit, span)?;
+                let zone = self.zone(zone.as_ref(), span)?;
+                (DatetimeFunction::DateTrunc { unit, zone }, vec![value])
             }
             Self::DateBin => {
-                let [unit, width, value, origin] = self.arguments(args, span)?;
-                let unit = self.time_unit(&unit, span)?;
+                let ([unit, width, value, origin], []) = self.arguments(args, span)?;
+                let unit = self.fixed_unit(&unit, span)?;
                 let width = self.bin_width(&width, unit, span)?;
                 (DatetimeFunction::DateBin(width), vec![value, origin])
             }
             Self::DateAdd => {
-                let [unit, amount, value] = self.arguments(args, span)?;
-                let unit = self.time_unit(&unit, span)?;
-                (DatetimeFunction::DateAdd(unit), vec![amount, value])
+                let ([unit, amount, value], [zone]) = self.arguments(args, span)?;
+                let unit = self.datetime_unit(&unit, span)?;
+                let zone = self.zone(zone.as_ref(), span)?;
+                (
+                    DatetimeFunction::DateAdd { unit, zone },
+                    vec![amount, value],
+                )
             }
             Self::DateDiff => {
-                let [unit, start, end] = self.arguments(args, span)?;
-                let unit = self.time_unit(&unit, span)?;
-                (DatetimeFunction::DateDiff(unit), vec![start, end])
+                let ([unit, start, end], [zone]) = self.arguments(args, span)?;
+                let unit = self.datetime_unit(&unit, span)?;
+                let zone = self.zone(zone.as_ref(), span)?;
+                (DatetimeFunction::DateDiff { unit, zone }, vec![start, end])
             }
             Self::ToUnix => {
-                let [unit, value] = self.arguments(args, span)?;
-                let unit = self.time_unit(&unit, span)?;
+                let ([unit, value], []) = self.arguments(args, span)?;
+                let unit = self.fixed_unit(&unit, span)?;
                 (DatetimeFunction::ToUnix(unit), vec![value])
             }
             Self::FromUnix => {
-                let [unit, count] = self.arguments(args, span)?;
-                let unit = self.time_unit(&unit, span)?;
+                let ([unit, count], []) = self.arguments(args, span)?;
+                let unit = self.fixed_unit(&unit, span)?;
                 (DatetimeFunction::FromUnix(unit), vec![count])
+            }
+            Self::FormatDatetime => {
+                let ([format, value], [zone]) = self.arguments(args, span)?;
+                let written = self.string_literal(&format, DatetimeLiteral::Format, span)?;
+                let zone = self.zone(zone.as_ref(), span)?;
+                let format = DatetimeFormat::compile(written, &zone)
+                    .map_err(|defect| self.format_defect(written, defect, span))?;
+                (
+                    DatetimeFunction::FormatDatetime { format, zone },
+                    vec![value],
+                )
+            }
+            Self::ParseDatetime => {
+                let ([format, text], [zone, disambiguation]) = self.arguments(args, span)?;
+                let parser = self.parser(&format, zone.as_ref(), disambiguation.as_ref(), span)?;
+                (DatetimeFunction::ParseDatetime(parser), vec![text])
             }
         };
         Ok(Expr::Call {
@@ -1447,60 +1536,196 @@ impl DatetimeFunctionName {
         })
     }
 
-    /// The written arguments of a call that takes exactly `N` of them.
-    fn arguments<const N: usize>(
+    /// The written arguments of a call that takes `REQUIRED` of them followed by up to `OPTIONAL`
+    /// more, in written order.
+    fn arguments<const REQUIRED: usize, const OPTIONAL: usize>(
         self,
         args: Vec<SpannedExpr>,
         span: Span,
-    ) -> FrontendResult<[SpannedExpr; N]> {
+    ) -> FrontendResult<([SpannedExpr; REQUIRED], [Option<SpannedExpr>; OPTIONAL])> {
         let found = args.len();
-        <[SpannedExpr; N]>::try_from(args).map_err(|_| {
-            FrontendError::report(
+        let expected = ArgumentCount {
+            fewest: REQUIRED,
+            most: REQUIRED
+                .checked_add(OPTIONAL)
+                .assured("a datetime builtin takes at most four arguments"),
+        };
+        if found < expected.fewest || found > expected.most {
+            return Err(FrontendError::report(
                 span,
                 FrontendErrorKind::DatetimeArity {
                     function: self,
-                    expected: N,
+                    expected,
                     found,
                 },
-            )
-        })
+            ));
+        }
+        let mut args = args.into_iter();
+        let required = std::array::from_fn(|_| {
+            args.next()
+                .verified("the call was checked above to have at least the required arguments")
+        });
+        let optional = std::array::from_fn(|_| args.next());
+        Ok((required, optional))
     }
 
-    fn time_unit(self, argument: &SpannedExpr, span: Span) -> FrontendResult<FixedTimeUnit> {
-        let Expr::Literal(Literal::String(unit)) = &argument.inner else {
+    /// The units a call of this builtin accepts, in the order a diagnostic lists them.
+    fn accepted_units(self) -> String {
+        match self {
+            Self::DateTrunc | Self::DateAdd | Self::DateDiff => {
+                let mut units = FixedTimeUnit::VARIANTS.to_vec();
+                units.extend_from_slice(CalendarUnit::VARIANTS);
+                units.join(", ")
+            }
+            Self::DatePart
+            | Self::DateBin
+            | Self::ToUnix
+            | Self::FromUnix
+            | Self::FormatDatetime
+            | Self::ParseDatetime => FixedTimeUnit::VARIANTS.join(", "),
+        }
+    }
+
+    fn string_literal(
+        self,
+        argument: &SpannedExpr,
+        literal: DatetimeLiteral,
+        span: Span,
+    ) -> FrontendResult<&str> {
+        let Expr::Literal(Literal::String(written)) = &argument.inner else {
             return Err(FrontendError::report(
                 span,
                 FrontendErrorKind::NonLiteralDatetimeArgument {
                     function: self,
-                    argument: DatetimeLiteral::TimeUnit,
+                    argument: literal,
                 },
             ));
         };
-        unit.parse().map_err(|_| {
-            FrontendError::report(
-                span,
-                FrontendErrorKind::UnknownTimeUnit {
-                    function: self,
-                    unit: unit.clone(),
-                },
-            )
-        })
+        Ok(written)
+    }
+
+    fn unknown_unit(self, unit: &str, span: Span) -> Report<FrontendError> {
+        FrontendError::report(
+            span,
+            FrontendErrorKind::UnknownTimeUnit {
+                function: self,
+                unit: unit.to_string(),
+            },
+        )
+    }
+
+    /// A unit of fixed length, which `date_bin`, `to_unix` and `from_unix` count in.
+    fn fixed_unit(self, argument: &SpannedExpr, span: Span) -> FrontendResult<FixedTimeUnit> {
+        let unit = self.string_literal(argument, DatetimeLiteral::TimeUnit, span)?;
+        unit.parse().map_err(|_| self.unknown_unit(unit, span))
+    }
+
+    /// A unit of fixed length or a calendar unit, which `date_trunc`, `date_add` and `date_diff`
+    /// count in.
+    fn datetime_unit(self, argument: &SpannedExpr, span: Span) -> FrontendResult<DatetimeUnit> {
+        let unit = self.string_literal(argument, DatetimeLiteral::TimeUnit, span)?;
+        unit.parse().map_err(|_| self.unknown_unit(unit, span))
     }
 
     fn date_part(self, argument: &SpannedExpr, span: Span) -> FrontendResult<DatePart> {
-        let Expr::Literal(Literal::String(part)) = &argument.inner else {
-            return Err(FrontendError::report(
-                span,
-                FrontendErrorKind::NonLiteralDatetimeArgument {
-                    function: self,
-                    argument: DatetimeLiteral::DatePart,
-                },
-            ));
-        };
+        let part = self.string_literal(argument, DatetimeLiteral::DatePart, span)?;
         part.parse().map_err(|_| {
             FrontendError::report(
                 span,
-                FrontendErrorKind::UnknownDatePart { part: part.clone() },
+                FrontendErrorKind::UnknownDatePart {
+                    part: part.to_string(),
+                },
+            )
+        })
+    }
+
+    /// The zone a call names, or UTC when it names none.
+    fn zone(self, argument: Option<&SpannedExpr>, span: Span) -> FrontendResult<Zone> {
+        let Some(argument) = argument else {
+            return Ok(Zone::UTC);
+        };
+        let written = self.string_literal(argument, DatetimeLiteral::TimeZone, span)?;
+        Zone::resolve(written).ok_or_else(|| {
+            FrontendError::report(
+                span,
+                FrontendErrorKind::UnknownTimeZone {
+                    function: self,
+                    zone: written.to_string(),
+                },
+            )
+        })
+    }
+
+    fn format_defect(
+        self,
+        written: &str,
+        defect: FormatDefect,
+        span: Span,
+    ) -> Report<FrontendError> {
+        FrontendError::report(
+            span,
+            FrontendErrorKind::InvalidDatetimeFormat {
+                function: self,
+                format: written.to_string(),
+                defect,
+            },
+        )
+    }
+
+    /// The parser of a `parse_datetime` call: its format, and the zone and disambiguation that
+    /// resolve the local times it reads.
+    fn parser(
+        self,
+        format: &SpannedExpr,
+        zone: Option<&SpannedExpr>,
+        disambiguation: Option<&SpannedExpr>,
+        span: Span,
+    ) -> FrontendResult<DatetimeParser> {
+        let written = self.string_literal(format, DatetimeLiteral::Format, span)?;
+        let format = ParseFormat::compile(written)
+            .map_err(|defect| self.format_defect(written, defect, span))?;
+        let local_time = match zone {
+            Some(zone) => {
+                let zone = self.zone(Some(zone), span)?;
+                let disambiguation = self.disambiguation(disambiguation, span)?;
+                Some((zone, disambiguation))
+            }
+            None => None,
+        };
+        DatetimeParser::new(format, local_time).map_err(|mismatch| {
+            let format = written.to_string();
+            let kind = match mismatch {
+                ParserZoneMismatch::ZoneWithOffset => {
+                    FrontendErrorKind::ParseFormatWithOffsetAndZone { format }
+                }
+                ParserZoneMismatch::ZoneWithUnixTime => {
+                    FrontendErrorKind::ParseFormatWithUnixTimeAndZone { format }
+                }
+                ParserZoneMismatch::MissingZone => {
+                    FrontendErrorKind::ParseFormatWithoutZone { format }
+                }
+            };
+            FrontendError::report(span, kind)
+        })
+    }
+
+    /// How a call resolves local times its zone skips or repeats, rejecting them when it does not
+    /// say.
+    fn disambiguation(
+        self,
+        argument: Option<&SpannedExpr>,
+        span: Span,
+    ) -> FrontendResult<Disambiguation> {
+        let Some(argument) = argument else {
+            return Ok(Disambiguation::Reject);
+        };
+        let written = self.string_literal(argument, DatetimeLiteral::Disambiguation, span)?;
+        written.parse().map_err(|_| {
+            FrontendError::report(
+                span,
+                FrontendErrorKind::UnknownDisambiguation {
+                    disambiguation: written.to_string(),
+                },
             )
         })
     }
@@ -2154,22 +2379,34 @@ mod tests {
         let calls = [
             (
                 "date_part('iso_day_of_week', input.occurred_at)",
-                DatetimeFunction::DatePart(DatePart::IsoDayOfWeek),
+                DatetimeFunction::DatePart {
+                    part: DatePart::IsoDayOfWeek,
+                    zone: Zone::UTC,
+                },
                 vec!["occurred_at"],
             ),
             (
                 "date_trunc('week', input.occurred_at)",
-                DatetimeFunction::DateTrunc(FixedTimeUnit::Week),
+                DatetimeFunction::DateTrunc {
+                    unit: DatetimeUnit::Fixed(FixedTimeUnit::Week),
+                    zone: Zone::UTC,
+                },
                 vec!["occurred_at"],
             ),
             (
                 "date_add('millisecond', input.delay, input.occurred_at)",
-                DatetimeFunction::DateAdd(FixedTimeUnit::Millisecond),
+                DatetimeFunction::DateAdd {
+                    unit: DatetimeUnit::Fixed(FixedTimeUnit::Millisecond),
+                    zone: Zone::UTC,
+                },
                 vec!["delay", "occurred_at"],
             ),
             (
                 "date_diff('second', input.started_at, input.occurred_at)",
-                DatetimeFunction::DateDiff(FixedTimeUnit::Second),
+                DatetimeFunction::DateDiff {
+                    unit: DatetimeUnit::Fixed(FixedTimeUnit::Second),
+                    zone: Zone::UTC,
+                },
                 vec!["started_at", "occurred_at"],
             ),
             (
@@ -2205,10 +2442,10 @@ mod tests {
         let past_widest_weeks = NonZeroU64::new(15_251).assured("15,251 is positive");
         let failures = [
             (
-                "date_trunc('month', input.occurred_at)",
+                "date_trunc('fortnight', input.occurred_at)",
                 FrontendErrorKind::UnknownTimeUnit {
                     function: DatetimeFunctionName::DateTrunc,
-                    unit: "month".to_string(),
+                    unit: "fortnight".to_string(),
                 },
             ),
             (
@@ -2257,7 +2494,7 @@ mod tests {
                 "from_unix(input.count)",
                 FrontendErrorKind::DatetimeArity {
                     function: DatetimeFunctionName::FromUnix,
-                    expected: 2,
+                    expected: ArgumentCount { fewest: 2, most: 2 },
                     found: 1,
                 },
             ),
@@ -2265,7 +2502,7 @@ mod tests {
                 "date_diff('second', input.started_at)",
                 FrontendErrorKind::DatetimeArity {
                     function: DatetimeFunctionName::DateDiff,
-                    expected: 3,
+                    expected: ArgumentCount { fewest: 3, most: 4 },
                     found: 2,
                 },
             ),
@@ -2281,10 +2518,11 @@ mod tests {
             (
                 FrontendErrorKind::UnknownTimeUnit {
                     function: DatetimeFunctionName::DateTrunc,
-                    unit: "month".to_string(),
+                    unit: "fortnight".to_string(),
                 },
-                "function 'date_trunc' does not accept time unit 'month'; expected one of \
-                 nanosecond, microsecond, millisecond, second, minute, hour, day, week",
+                "function 'date_trunc' does not accept time unit 'fortnight'; expected one of \
+                 nanosecond, microsecond, millisecond, second, minute, hour, day, week, month, \
+                 quarter, year",
             ),
             (
                 FrontendErrorKind::UnknownDatePart {
@@ -2315,3 +2553,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "frontend_datetime_tests.rs"]
+mod datetime_tests;

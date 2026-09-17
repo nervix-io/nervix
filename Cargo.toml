@@ -374,6 +374,10 @@ jaq-core = "3"
 jaq-fmts = "0.1"
 jaq-json = "2"
 jaq-std = "3"
+# The VM resolves time zone names only against the IANA database `jiff-tzdb` bundles, never against
+# the host, so every node running one build computes the same local times.
+jiff = { version = "0.2.35", default-features = false, features = ["std"] }
+jiff-tzdb = "0.1.8"
 js-sys = "0.3"
 lapin = "4.4.0"
 leptos = { version = "0.8.19", features = ["csr"] }
