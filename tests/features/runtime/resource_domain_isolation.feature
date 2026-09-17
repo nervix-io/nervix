@@ -153,7 +153,7 @@ Feature: Domain-owned resources
         TO SCHEMA lookup_entry;
       CREATE HASH MAP entries_by_key
         KEY key
-        FROM RESOURCE lookup_bundle
+        FROM RESOURCE lookup_bundle VERSION 1
         PATH 'alpha.jsonl'
         DECODE USING lookup_entry_codec;
       """
@@ -175,23 +175,23 @@ Feature: Domain-owned resources
       """
       CREATE HASH MAP entries_by_key
         KEY key
-        FROM RESOURCE lookup_bundle
+        FROM RESOURCE lookup_bundle VERSION 1
         PATH 'alpha.jsonl'
         DECODE USING lookup_entry_codec;
       """
     Then the last command error contains
       """
-      lookup file
+      resource file 'alpha.jsonl' in 'lookup_bundle@1'
       """
     And the last command error contains
       """
-      alpha.jsonl' does not exist
+      is unavailable
       """
     When client "beta" executes these NSPL commands
       """
       CREATE HASH MAP entries_by_key
         KEY key
-        FROM RESOURCE lookup_bundle
+        FROM RESOURCE lookup_bundle VERSION 1
         PATH 'beta.jsonl'
         DECODE USING lookup_entry_codec;
       """
@@ -199,15 +199,15 @@ Feature: Domain-owned resources
       """
       CREATE HASH MAP entries_by_beta_key
         KEY key
-        FROM RESOURCE lookup_bundle
+        FROM RESOURCE lookup_bundle VERSION 1
         PATH 'beta.jsonl'
         DECODE USING lookup_entry_codec;
       """
     Then the last command error contains
       """
-      lookup file
+      resource file 'beta.jsonl' in 'lookup_bundle@1'
       """
     And the last command error contains
       """
-      beta.jsonl' does not exist
+      is unavailable
       """

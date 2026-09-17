@@ -1,5 +1,5 @@
 Feature: Websocket client TLS resource mounts
-  Scenario Outline: Websocket client ingestor connects over native TLS with a mounted resource directory
+  Scenario Outline: Websocket client keeps its pinned TLS mount through upload and restart
     Given the HTTP mock server is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -8,6 +8,12 @@ Feature: Websocket client TLS resource mounts
       CREATE UNPACED DOMAIN {{domain}};
       """
     And node "node-1" has dev TLS resource directory "dev_tls"
+    And node "node-1" has resource directory "dev_tls_v2" containing
+      """
+      {
+        "ca.pem": "this is not a certificate\n"
+      }
+      """
     When these NSPL commands are executed
       """
       CREATE RESOURCE dev_tls;
@@ -32,7 +38,7 @@ Feature: Websocket client TLS resource mounts
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
         CREATE CLIENT ws_tls
         TYPE WEBSOCKETS
-        MOUNT dev_tls
+        MOUNT dev_tls VERSION 1
         CONFIG {
           'endpoint' = '{{mock_wss_addr}}/ws/{{test_id}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
@@ -55,6 +61,33 @@ Feature: Websocket client TLS resource mounts
       {"user_id":42}
       """
     And the last relay subscription payload contains key fragment '{"user_id":42}'
+    When these NSPL commands are executed through the client on the leader node
+      """
+      UPLOAD RESOURCE dev_tls VERSION "{{dev_tls_v2}}";
+      """
+    When the cluster is restarted
+    Then node "node-1" eventually observes a stable leader
+    And node "node-1" eventually reports status containing "{{domain}} status=Running"
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE CLIENT ws_tls;
+      """
+    Then the last command output contains
+      """
+      MOUNT dev_tls VERSION 1
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
+      """
+    When the websocket client test server sends a payload
+      """
+      {"user_id":43}
+      """
+    Then the relay subscription receives a payload
+      """
+      {"user_id":43}
+      """
 
     Examples:
       | cluster_size | replica_count |

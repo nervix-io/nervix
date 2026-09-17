@@ -1,21 +1,21 @@
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    ClientConfigEntry, ClientName, ClientPoolBounds, CreateClientAzureBlob, CreateClientClickHouse,
-    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
-    CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
-    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
-    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
-    CreateClientWebsockets, CreateClientZeroMq, CreateStatement, Model, RequestedResourceVersion,
-    ResourceName,
+    ClientConfigEntry, ClientName, ClientPoolBounds, ClientResourceMount, CreateClientAzureBlob,
+    CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
+    CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
+    CreateClientOtel, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar,
+    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
+    CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, CreateStatement, Model,
+    RequestedResourceVersion,
 };
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, boxed_choice, client_name, if_not_exists_clause, into_parse_error,
-        kw, kw_phrase2, lex_input, nonzero_u32_value, resource_ref, signaling_protocol_clause,
-        string_lit, suggest_from, tok, u32_value, word_raw,
+        kw, kw_phrase2, lex_input, nonzero_u32_value, resource_ref, resource_version_clause,
+        signaling_protocol_clause, string_lit, suggest_from, tok, u32_value, word_raw,
     },
     schema::ParseFromSourceError,
 };
@@ -47,10 +47,16 @@ fn config_entry<'src>()
         .map(|(key, value)| ClientConfigEntry { key, value })
 }
 
-fn client_mount<'src>()
--> impl Parser<'src, &'src [Token], Option<ResourceName>, extra::Err<ParseError<'src>>> + Clone {
+fn client_mount<'src>() -> impl Parser<
+    'src,
+    &'src [Token],
+    Option<ClientResourceMount<RequestedResourceVersion>>,
+    extra::Err<ParseError<'src>>,
+> + Clone {
     kw(Identifier::Mount)
         .ignore_then(resource_ref().labelled("resource_name"))
+        .then(resource_version_clause())
+        .map(|(resource, version)| ClientResourceMount { resource, version })
         .or_not()
 }
 
@@ -87,7 +93,14 @@ fn create_client_parser<'src, B: 'src, T>(
     between_type_and_mount: impl Parser<'src, &'src [Token], B, extra::Err<ParseError<'src>>>
     + Clone
     + 'src,
-    build: impl Fn(ClientName, B, Option<ResourceName>, Vec<ClientConfigEntry>) -> T + Clone + 'src,
+    build: impl Fn(
+        ClientName,
+        B,
+        Option<ClientResourceMount<RequestedResourceVersion>>,
+        Vec<ClientConfigEntry>,
+    ) -> T
+    + Clone
+    + 'src,
 ) -> impl Parser<'src, &'src [Token], CreateStatement<T>, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
@@ -121,7 +134,7 @@ macro_rules! declare_client_parsers {
             pub fn $before_parser<'src>() -> impl Parser<
                 'src,
                 &'src [Token],
-                CreateStatement<$BeforeClient>,
+                CreateStatement<$BeforeClient<RequestedResourceVersion>>,
                 extra::Err<ParseError<'src>>,
             > + Clone {
                 create_client_parser(
@@ -139,7 +152,7 @@ macro_rules! declare_client_parsers {
             pub fn $after_parser<'src>() -> impl Parser<
                 'src,
                 &'src [Token],
-                CreateStatement<$AfterClient>,
+                CreateStatement<$AfterClient<RequestedResourceVersion>>,
                 extra::Err<ParseError<'src>>,
             > + Clone {
                 create_client_parser(
@@ -157,7 +170,7 @@ macro_rules! declare_client_parsers {
             pub fn $pooled_parser<'src>() -> impl Parser<
                 'src,
                 &'src [Token],
-                CreateStatement<$PooledClient>,
+                CreateStatement<$PooledClient<RequestedResourceVersion>>,
                 extra::Err<ParseError<'src>>,
             > + Clone {
                 create_client_parser(
@@ -238,7 +251,7 @@ declare_client_parsers! {
 pub fn create_client_websockets_parser<'src>() -> impl Parser<
     'src,
     &'src [Token],
-    CreateStatement<CreateClientWebsockets>,
+    CreateStatement<CreateClientWebsockets<RequestedResourceVersion>>,
     extra::Err<ParseError<'src>>,
 > + Clone {
     create_client_parser(
@@ -264,7 +277,7 @@ fn transport_config<'src>()
 
 pub fn parse_create_client_kafka_tokens(
     tokens: &[Token],
-) -> Result<CreateStatement<CreateClientKafka>, Vec<ParseError<'_>>> {
+) -> Result<CreateStatement<CreateClientKafka<RequestedResourceVersion>>, Vec<ParseError<'_>>> {
     let out = create_client_kafka_parser()
         .then_ignore(end())
         .parse(tokens);
@@ -279,7 +292,7 @@ pub fn parse_create_client_kafka_tokens(
 
 pub fn parse_create_client_kafka(
     input: &str,
-) -> Result<CreateStatement<CreateClientKafka>, ParseFromSourceError> {
+) -> Result<CreateStatement<CreateClientKafka<RequestedResourceVersion>>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -335,7 +348,7 @@ mod tests {
         let input = r#"
             CREATE CLIENT kafka_tls
               TYPE KAFKA
-              MOUNT dev_tls
+              MOUNT dev_tls VERSION 4
               CONFIG {
                 'ssl.ca.location' = '{{dev_tls}}/ca.pem'
               };
@@ -346,11 +359,12 @@ mod tests {
 
         assert_eq!(parsed.name.as_str(), "kafka_tls");
         assert_eq!(
-            parsed
-                .mount
-                .as_ref()
-                .map(nervix_models::ResourceName::as_str),
+            parsed.mount.as_ref().map(|mount| mount.resource.as_str()),
             Some("dev_tls")
+        );
+        assert_eq!(
+            parsed.mount.as_ref().map(|mount| mount.version),
+            Some(RequestedResourceVersion::Number(4))
         );
         assert_eq!(parsed.config[0].value, "{{dev_tls}}/ca.pem");
     }
@@ -358,8 +372,9 @@ mod tests {
     #[test]
     fn parses_syslog_client_with_resource_mount() {
         let tokens = to_tokens(
-            "CREATE CLIENT syslog_tls TYPE SYSLOG MOUNT tls_bundle CONFIG { 'protocol' = 'tls', \
-             'addr' = 'logs.example.com:6514', 'tls_ca_file' = '{{tls_bundle}}/ca.pem' };",
+            "CREATE CLIENT syslog_tls TYPE SYSLOG MOUNT tls_bundle VERSION LATEST CONFIG { \
+             'protocol' = 'tls', 'addr' = 'logs.example.com:6514', 'tls_ca_file' = \
+             '{{tls_bundle}}/ca.pem' };",
         );
         let parsed = create_client_syslog_parser()
             .then_ignore(end())
@@ -369,11 +384,12 @@ mod tests {
 
         assert_eq!(parsed.name.as_str(), "syslog_tls");
         assert_eq!(
-            parsed
-                .mount
-                .as_ref()
-                .map(nervix_models::ResourceName::as_str),
+            parsed.mount.as_ref().map(|mount| mount.resource.as_str()),
             Some("tls_bundle")
+        );
+        assert_eq!(
+            parsed.mount.as_ref().map(|mount| mount.version),
+            Some(RequestedResourceVersion::Latest)
         );
         assert_eq!(parsed.config.len(), 3);
     }
@@ -497,11 +513,30 @@ mod tests {
 
     #[test]
     fn mount_context_suggests_config_without_type_leakage() {
-        let input = "CREATE CLIENT kafka_main TYPE KAFKA MOUNT dev_tls ";
+        let input = "CREATE CLIENT kafka_main TYPE KAFKA MOUNT dev_tls VERSION 1 ";
         let suggestions = suggest_create_client_kafka(input, input.len());
         assert!(suggestions.contains(&"CONFIG".to_string()));
         assert!(!suggestions.contains(&"HTTP".to_string()));
         assert!(!suggestions.contains(&"RABBITMQ".to_string()));
+    }
+
+    #[test]
+    fn mount_requires_a_resource_version() {
+        let input = "CREATE CLIENT kafka_main TYPE KAFKA MOUNT dev_tls CONFIG { 'a' = 'b' };";
+        assert!(parse_create_client_kafka(input).is_err());
+    }
+
+    #[test]
+    fn mount_context_requires_version_then_suggests_available_versions() {
+        let after_resource = "CREATE CLIENT kafka_main TYPE KAFKA MOUNT dev_tls ";
+        let suggestions = suggest_create_client_kafka(after_resource, after_resource.len());
+        assert_eq!(suggestions, vec!["VERSION".to_string()]);
+
+        let after_version = "CREATE CLIENT kafka_main TYPE KAFKA MOUNT dev_tls VERSION ";
+        let suggestions = suggest_create_client_kafka(after_version, after_version.len());
+        assert!(suggestions.contains(&"LATEST".to_string()));
+        assert!(suggestions.contains(&"completed_resource_version".to_string()));
+        assert!(!suggestions.contains(&"CONFIG".to_string()));
     }
 
     #[test]
@@ -802,8 +837,8 @@ mod tests {
         );
         assert!(
             statement_errors(
-                "CREATE CLIENT pg TYPE POSTGRES MOUNT dev_tls POOL SIZE MIN 2 MAX 8 CONFIG { \
-                 'addr' = 'postgresql://h/d' };"
+                "CREATE CLIENT pg TYPE POSTGRES MOUNT dev_tls VERSION 1 POOL SIZE MIN 2 MAX 8 \
+                 CONFIG { 'addr' = 'postgresql://h/d' };"
             )
             .contains("expected POOL SIZE, found MOUNT")
         );
@@ -1087,6 +1122,22 @@ mod tests {
                 .map(nervix_models::SignalingProtocolName::as_str),
             Some("binance_style")
         );
+    }
+
+    #[test]
+    fn parses_websocket_signaling_protocol_before_versioned_mount() {
+        let input = "CREATE CLIENT ws_main TYPE WEBSOCKETS WITH SIGNALING PROTOCOL binance_style \
+                     MOUNT ws_tls VERSION 2 CONFIG { 'endpoint' = 'wss://api.example.com/ws' };";
+        let tokens = to_tokens(input);
+        let parsed = create_client_websockets_parser()
+            .then_ignore(end())
+            .parse(tokens.as_slice())
+            .into_result()
+            .expect("parse should succeed");
+
+        let mount = parsed.mount.as_ref().expect("mount is present");
+        assert_eq!(mount.resource.as_str(), "ws_tls");
+        assert_eq!(mount.version, RequestedResourceVersion::Number(2));
     }
 
     #[test]

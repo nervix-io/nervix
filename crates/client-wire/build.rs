@@ -28,16 +28,12 @@ const GENERATED_MODULE_HEADER: &str = "\
     clippy::extra_unused_lifetimes,
     reason = \"flatc declares a lifetime on verifier impls that do not use it\"
 )]
-";
-
-const GENERATED_UNUSED_IMPORTS_EXPECTATION: &str = "\
-#[expect(
+#[allow(
     unused_imports,
-    reason = \"flatc emits imports at the generated root that only nested modules use\"
+    reason = \"some supported flatc releases emit imports used only by nested modules\"
 )]
+mod generated {
 ";
-
-const GENERATED_FIRST_CHILD_MARKER: &str = "pub mod nervix {";
 
 fn main() {
     println!("cargo:rerun-if-changed={SCHEMA}");
@@ -75,18 +71,7 @@ fn main() {
         Ok(generated) => generated,
         Err(error) => panic!("failed to read the generated FlatBuffers bindings: {error}"),
     };
-    let first_child = generated
-        .find(GENERATED_FIRST_CHILD_MARKER)
-        .assured("flatc generates the schema namespace as the first child module");
-    let generated_root = &generated[..first_child];
-    let unused_imports_expectation = if generated_root.contains("use core::mem;") {
-        GENERATED_UNUSED_IMPORTS_EXPECTATION
-    } else {
-        ""
-    };
-    let module = format!(
-        "{GENERATED_MODULE_HEADER}{unused_imports_expectation}mod generated {{\n{generated}\n}}\n"
-    );
+    let module = format!("{GENERATED_MODULE_HEADER}{generated}\n}}\n");
     if let Err(error) = fs::write(generated_dir.join("session_module.rs"), module) {
         panic!("failed to write the generated FlatBuffers module: {error}");
     }

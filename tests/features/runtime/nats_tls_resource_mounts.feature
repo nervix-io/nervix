@@ -32,7 +32,7 @@ Feature: NATS TLS resource mounts
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_nats_notifications;
         CREATE CLIENT nats_tls
         TYPE NATS
-        MOUNT dev_tls
+        MOUNT dev_tls VERSION 1
         CONFIG {
           'addr' = '{{nats_tls_addr}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'

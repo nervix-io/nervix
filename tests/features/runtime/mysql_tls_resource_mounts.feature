@@ -53,7 +53,7 @@ Feature: MySQL TLS resource mounts
         CREATE CLIENT mysql_client
         TYPE MYSQL
         POOL SIZE MIN 2 MAX 8
-        MOUNT dev_tls
+        MOUNT dev_tls VERSION 1
         CONFIG {
           'addr' = '{{mysql_tls_addr}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'

@@ -18,7 +18,7 @@ before an optional resource mount:
 CREATE [IF NOT EXISTS] CLIENT <name>
   TYPE POSTGRES|MYSQL|MONGODB|REDIS
   POOL SIZE MIN <minimum> MAX <maximum>
-  [MOUNT <resource>]
+  [MOUNT <resource> VERSION <n>|LATEST]
   CONFIG { <connector configuration> };
 ```
 
@@ -33,7 +33,7 @@ CREATE CLIENT postgres_main
 CREATE CLIENT redis_main
   TYPE REDIS
   POOL SIZE MIN 1 MAX 4
-  MOUNT dev_tls
+  MOUNT dev_tls VERSION 1
   CONFIG {
     'addr' = 'rediss://USER:PASSWORD@HOST:6379/0',
     'tls_ca_file' = '{{ dev_tls }}/ca.pem'

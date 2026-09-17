@@ -33,7 +33,7 @@ Feature: RabbitMQ TLS resource mounts
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_rabbit_notifications;
         CREATE CLIENT rabbit_tls
         TYPE RABBITMQ
-        MOUNT dev_tls
+        MOUNT dev_tls VERSION 1
         CONFIG {
           'addr' = '{{rabbitmq_tls_addr}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'

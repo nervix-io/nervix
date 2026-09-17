@@ -55,8 +55,6 @@ pub(crate) enum RuntimeResourceError {
         resource: ResourceName,
         version: u64,
     },
-    #[error(transparent)]
-    ResourceResolution(ResourceVersionResolutionError),
     #[error("client resource '{resource}' in domain '{domain}' requires a resource store")]
     ClientResourceStoreUnavailable {
         domain: DomainName,
@@ -347,27 +345,10 @@ impl Runtime {
         self.inner.resource_store.store(Some(resource_store));
     }
 
-    pub(crate) fn attach_resources(
-        &self,
-        resource_store: StdArc<ResourceStore>,
-        resource_versions: ResourceVersionStatus,
-    ) {
-        self.inner.resource_store.store(Some(resource_store));
-        self.inner
-            .resource_versions
-            .store(StdArc::new(resource_versions));
-    }
-
-    pub(crate) fn update_resource_versions(&self, resource_versions: ResourceVersionStatus) {
-        self.inner
-            .resource_versions
-            .store(StdArc::new(resource_versions));
-    }
-
     pub(crate) fn resolve_client_config(
         &self,
         domain: &DomainName,
-        mount: Option<&ResourceName>,
+        mount: Option<&ClientResourceMount>,
         config: &[nervix_models::ClientConfigEntry],
     ) -> error_stack::Result<ResolvedClientConfig, RuntimeResourceError> {
         self.resolve_client_config_with_template_vars(domain, mount, config, BTreeMap::default())
@@ -376,7 +357,7 @@ impl Runtime {
     pub(in crate::runtime) fn resolve_client_config_with_instance(
         &self,
         domain: &DomainName,
-        mount: Option<&ResourceName>,
+        mount: Option<&ClientResourceMount>,
         config: &[nervix_models::ClientConfigEntry],
         instance: u64,
     ) -> error_stack::Result<ResolvedClientConfig, RuntimeResourceError> {
@@ -391,7 +372,7 @@ impl Runtime {
     pub(super) fn resolve_client_config_with_template_vars(
         &self,
         domain: &DomainName,
-        mount: Option<&ResourceName>,
+        mount: Option<&ClientResourceMount>,
         config: &[nervix_models::ClientConfigEntry],
         mut context: BTreeMap<String, String>,
     ) -> error_stack::Result<ResolvedClientConfig, RuntimeResourceError> {
@@ -425,49 +406,35 @@ impl Runtime {
             return Err(Report::new(
                 RuntimeResourceError::ClientResourceStoreUnavailable {
                     domain: domain.clone(),
-                    resource: mount.clone(),
+                    resource: mount.resource.clone(),
                 },
             ));
         };
         let mount_root = tempfile::tempdir().map_err(|source| {
             Report::new(RuntimeResourceError::ClientMountRoot {
                 domain: domain.clone(),
-                resource: mount.clone(),
+                resource: mount.resource.clone(),
             })
             .attach_printable(source)
         })?;
         let mut aliases = BTreeMap::new();
-        // A client mount does not name a version, so it mounts the highest version completed when
-        // the client is instantiated.
-        let resolution = self
-            .inner
-            .resource_versions
-            .load()
-            .uploads
-            .resolve_completed_version(domain, mount, RequestedResourceVersion::Latest);
-        let id = match resolution {
-            Ok(id) => id,
-            Err(error) => {
-                let context = error.current_context().clone();
-                return Err(error.change_context(RuntimeResourceError::ResourceResolution(context)));
-            }
-        };
+        let id = ResourceId::new(domain.clone(), mount.resource.clone(), mount.version);
         let source_root = resource_store.content_root(&id);
         if !source_root.exists() {
             return Err(Report::new(
                 RuntimeResourceError::ClientMountContentMissing {
                     domain: domain.clone(),
-                    resource: mount.clone(),
+                    resource: mount.resource.clone(),
                     version: id.version,
                 },
             ));
         }
-        let mount_path = mount_root.path().join(mount.as_str());
+        let mount_path = mount_root.path().join(mount.resource.as_str());
         #[cfg(unix)]
         std::os::unix::fs::symlink(&source_root, &mount_path).map_err(|source| {
             Report::new(RuntimeResourceError::ClientMount {
                 domain: domain.clone(),
-                resource: mount.clone(),
+                resource: mount.resource.clone(),
                 version: id.version,
             })
             .attach_printable(source)
@@ -476,7 +443,7 @@ impl Runtime {
         {
             return Err(Report::new(RuntimeResourceError::ClientMountUnsupported));
         }
-        aliases.insert(mount.as_str().to_string(), mount_path);
+        aliases.insert(mount.resource.as_str().to_string(), mount_path);
 
         for (resource_name, mount_path) in &aliases {
             context.insert(
@@ -553,15 +520,19 @@ mod tests {
     use std::path::PathBuf;
 
     use nervix_models::{
-        ClientConfigEntry, ClusterNodeName, DomainName, ResourceId, ResourceUpload,
-        ResourceUploadIdentity, ResourceUploadKey, ResourceUploadState, ResourceUploads,
-        ResourceVersion, ResourceVersionCounter, ResourceVersionStatus, Timestamp, UserName,
+        ClientConfigEntry, ClientResourceMount, ClusterNodeName, DomainName, ResourceId, Timestamp,
     };
-    use sorted_vec::SortedVec;
     use tempfile::tempdir;
 
     use super::*;
     use crate::resource::ResourceStore;
+
+    fn mount(resource: &str, version: u64) -> ClientResourceMount {
+        ClientResourceMount {
+            resource: named(resource),
+            version,
+        }
+    }
 
     #[test]
     fn protobuf_descriptor_configuration_reports_typed_failures() {
@@ -683,8 +654,12 @@ mod tests {
         let runtime = Runtime::new();
         let domain = DomainName::parse("tenant").expect("valid domain");
         let resource = named::<ResourceName>("dev_tls");
+        let resource_mount = ClientResourceMount {
+            resource: resource.clone(),
+            version: 1,
+        };
         let unavailable = runtime
-            .resolve_client_config(&domain, Some(&resource), &[])
+            .resolve_client_config(&domain, Some(&resource_mount), &[])
             .expect_err("a client mount without a resource store must fail");
         assert!(matches!(
             unavailable.current_context(),
@@ -697,45 +672,9 @@ mod tests {
         let store_root = tempdir().expect("resource store tempdir");
         let store = ResourceStore::open(store_root.path(), Executor::default())
             .expect("resource store should open");
-        runtime.attach_resources(
-            StdArc::new(store),
-            ResourceVersionStatus {
-                next_version_by_resource: SortedVec::from_unsorted(vec![ResourceVersionCounter {
-                    domain: domain.clone(),
-                    identifier: resource.clone(),
-                    next_version: 2,
-                }]),
-                versions: SortedVec::from_unsorted(vec![ResourceVersion {
-                    id: ResourceId::new(domain.clone(), resource.clone(), 1),
-                    root_checksum: "root".to_string(),
-                    manifest_checksum: "manifest".to_string(),
-                    file_count: 0,
-                    total_bytes: 0,
-                    archive_bytes: 0,
-                    created_at: Timestamp::from_unix_nanos(0),
-                    created_by_node: ClusterNodeName::parse("node-1").expect("valid name"),
-                }]),
-                replicas: SortedVec::new(),
-                uploads: ResourceUploads::try_from_uploads([ResourceUpload {
-                    key: ResourceUploadKey::new(
-                        UserName::parse("default")
-                            .assured("the test owner is an identifier-shaped literal"),
-                        domain.clone(),
-                        resource.clone(),
-                        ResourceUploadIdentity::parse("missing-content")
-                            .assured("the test upload identity uses accepted characters"),
-                    ),
-                    version: 1,
-                    state: ResourceUploadState::Completed {
-                        root_checksum: "root".to_string(),
-                        outcome_revision: 1,
-                    },
-                }])
-                .assured("the test upload has a unique identity and version"),
-            },
-        );
+        runtime.attach_resource_store(StdArc::new(store));
         let missing_content = runtime
-            .resolve_client_config(&domain, Some(&resource), &[])
+            .resolve_client_config(&domain, Some(&resource_mount), &[])
             .expect_err("a client mount without installed content must fail");
         assert!(matches!(
             missing_content.current_context(),
@@ -767,81 +706,27 @@ mod tests {
             .await
             .expect("resource version should install");
 
+        let later_source_root = tempdir().expect("later resource source tempdir");
+        std::fs::write(later_source_root.path().join("ca.pem"), "later-ca")
+            .expect("later ca file should be written");
+        store
+            .install_from_directory(
+                ResourceId::new(mount_domain.clone(), named("dev_tls"), 2),
+                later_source_root.path(),
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                Timestamp::from_unix_nanos(1),
+            )
+            .await
+            .expect("later resource version should install");
+
         let runtime = Runtime::new();
-        runtime.attach_resources(
-            StdArc::new(store),
-            ResourceVersionStatus {
-                next_version_by_resource: SortedVec::from_unsorted(vec![ResourceVersionCounter {
-                    domain: mount_domain.clone(),
-                    identifier: named("dev_tls"),
-                    next_version: 4,
-                }]),
-                versions: SortedVec::from_unsorted(vec![ResourceVersion {
-                    id: ResourceId::new(mount_domain.clone(), named("dev_tls"), 1),
-                    root_checksum: "root".to_string(),
-                    manifest_checksum: "manifest".to_string(),
-                    file_count: 1,
-                    total_bytes: 7,
-                    archive_bytes: 2048,
-                    created_at: Timestamp::from_unix_nanos(0),
-                    created_by_node: ClusterNodeName::parse("node-1").expect("valid name"),
-                }]),
-                replicas: SortedVec::new(),
-                uploads: ResourceUploads::try_from_uploads([
-                    ResourceUpload {
-                        key: ResourceUploadKey::new(
-                            UserName::parse("default")
-                                .assured("the test owner is an identifier-shaped literal"),
-                            mount_domain.clone(),
-                            named("dev_tls"),
-                            ResourceUploadIdentity::parse("mount-upload")
-                                .assured("the test upload identity uses accepted characters"),
-                        ),
-                        version: 1,
-                        state: ResourceUploadState::Completed {
-                            root_checksum: "root".to_string(),
-                            outcome_revision: 1,
-                        },
-                    },
-                    ResourceUpload {
-                        key: ResourceUploadKey::new(
-                            UserName::parse("default")
-                                .assured("the test owner is an identifier-shaped literal"),
-                            mount_domain.clone(),
-                            named("dev_tls"),
-                            ResourceUploadIdentity::parse("applying-upload")
-                                .assured("the test upload identity uses accepted characters"),
-                        ),
-                        version: 2,
-                        state: ResourceUploadState::Applying {
-                            root_checksum: "applying-root".to_string(),
-                        },
-                    },
-                    ResourceUpload {
-                        key: ResourceUploadKey::new(
-                            UserName::parse("default")
-                                .assured("the test owner is an identifier-shaped literal"),
-                            mount_domain.clone(),
-                            named("dev_tls"),
-                            ResourceUploadIdentity::parse("failed-upload")
-                                .assured("the test upload identity uses accepted characters"),
-                        ),
-                        version: 3,
-                        state: ResourceUploadState::Failed {
-                            root_checksum: "failed-root".to_string(),
-                            outcome_revision: 2,
-                            reason: "installation failed".to_string(),
-                        },
-                    },
-                ])
-                .assured("the test uploads have unique identities and versions"),
-            },
-        );
+        runtime.attach_resource_store(StdArc::new(store));
+        let pinned_mount = mount("dev_tls", 1);
 
         let resolved = runtime
             .resolve_client_config(
                 &mount_domain,
-                Some(&named("dev_tls")),
+                Some(&pinned_mount),
                 &[ClientConfigEntry {
                     key: "tls_ca_file".to_string(),
                     value: "{{ dev_tls }}/ca.pem".to_string(),
@@ -861,7 +746,7 @@ mod tests {
         let template_error = runtime
             .resolve_client_config(
                 &mount_domain,
-                Some(&named("dev_tls")),
+                Some(&pinned_mount),
                 &[ClientConfigEntry {
                     key: "tls_ca_file".to_string(),
                     value: "{{missing}}/ca.pem".to_string(),
@@ -877,7 +762,7 @@ mod tests {
         let error = runtime
             .resolve_client_config(
                 &other_domain,
-                Some(&named("dev_tls")),
+                Some(&pinned_mount),
                 &[ClientConfigEntry {
                     key: "tls_ca_file".to_string(),
                     value: "{{ dev_tls }}/ca.pem".to_string(),
@@ -886,9 +771,11 @@ mod tests {
             .expect_err("another domain must not see this domain's resource");
         assert!(matches!(
             error.current_context(),
-            RuntimeResourceError::ResourceResolution(
-                ResourceVersionResolutionError::NoCompletedVersions { domain, identifier }
-            ) if domain == &other_domain && identifier.as_str() == "dev_tls"
+            RuntimeResourceError::ClientMountContentMissing {
+                domain,
+                resource,
+                version: 1,
+            } if domain == &other_domain && resource.as_str() == "dev_tls"
         ));
     }
 

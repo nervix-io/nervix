@@ -63,8 +63,8 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     AckMode, Assignment, AtomicTimestamp, BranchName, ClickHouseValueMapping, ClientConfigEntry,
-    ClientName, ClientPoolBounds, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule,
-    CodecName, CodecWireFormat, CoordinationIdentity, CorrelationTimeoutAction,
+    ClientName, ClientPoolBounds, ClientResourceMount, ClusterNodeIncarnation, ClusterNodeName,
+    ClusterSchedule, CodecName, CodecWireFormat, CoordinationIdentity, CorrelationTimeoutAction,
     CorrelatorMatchPolicy, CreateClientAzureBlob, CreateClientGcs, CreateClientIcebergRest,
     CreateClientKafka, CreateClientMqtt, CreateClientNats, CreateClientOtel, CreateClientPulsar,
     CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
@@ -84,10 +84,9 @@ use nervix_models::{
     OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
     PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
     RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
-    RemoteRuntimeField, RequestedResourceVersion, ResourceId, ResourceName,
-    ResourceVersionResolutionError, ResourceVersionStatus, RetryPolicy, RouteConstruction,
-    ScheduledModel, ScheduledNode, ScheduledNodes, SignalingProtocolName, SignalingWireFormat,
-    SqsFifoGroup, SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp,
+    RemoteRuntimeField, ResourceId, ResourceName, RetryPolicy, RouteConstruction, ScheduledModel,
+    ScheduledNode, ScheduledNodes, SignalingProtocolName, SignalingWireFormat, SqsFifoGroup,
+    SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp,
 };
 #[cfg(test)]
 use nervix_models::{CreateClientHttp, CreateClientPrometheus, CreateClientWebsockets};

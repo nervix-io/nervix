@@ -898,15 +898,6 @@ impl Application {
             }
         };
         startup.consensus = Some(consensus);
-        let consensus = startup
-            .consensus
-            .as_ref()
-            .verified("startup assigns this handle before it reaches this point");
-        startup.runtime.attach_resources(
-            startup.resource_store.clone(),
-            consensus.observer().current_resources().await,
-        );
-
         let cluster_result = cluster::start_cluster(cluster::ClusterSettings {
             cluster_id,
             node_id: node_id.clone(),
@@ -1654,26 +1645,6 @@ impl Application {
                         {
                             warn!(error = %error, "failed to apply updated cluster schedule");
                         }
-                    }
-                }
-            }
-        }));
-        let runtime_for_resources = runtime.clone();
-        let mut resources_rx = consensus.observer().subscribe_resources();
-        let resources_shutdown = shutdown.clone();
-        let consensus_for_resources = consensus.observer();
-        background_tasks.push(tokio::spawn(async move {
-            runtime_for_resources.update_resource_versions(consensus_for_resources.current_resources().await);
-            loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
-                    _ = resources_shutdown.cancelled() => break,
-                    changed = resources_rx.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                        runtime_for_resources
-                            .update_resource_versions(consensus_for_resources.current_resources().await);
                     }
                 }
             }

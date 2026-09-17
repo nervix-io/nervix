@@ -53,7 +53,7 @@ Feature: Postgres TLS resource mounts
         CREATE CLIENT postgres_client
         TYPE POSTGRES
         POOL SIZE MIN 2 MAX 8
-        MOUNT dev_tls
+        MOUNT dev_tls VERSION 1
         CONFIG {
           'addr' = '{{postgres_tls_addr}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
