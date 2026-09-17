@@ -438,7 +438,7 @@ impl Runtime {
             {
                 let state_placement = self.state_placement(
                     domain,
-                    RuntimeStateKind::MaterializedRelay,
+                    RuntimeState::MaterializedRelay,
                     ModelKind::Relay,
                     relay,
                     None,
@@ -457,7 +457,7 @@ impl Runtime {
             {
                 let state_placement = self.state_placement(
                     domain,
-                    RuntimeStateKind::MaterializedRelay,
+                    RuntimeState::MaterializedRelay,
                     ModelKind::Relay,
                     relay,
                     None,
@@ -681,7 +681,7 @@ impl Runtime {
         // Materialized relay state uses a start-version-qualified schema fingerprint. Install the
         // desired fingerprints before constructing state so the post-swap stale-state purge does
         // not discard the newly attached state instance.
-        self.install_state_schema_fingerprints(&schedule);
+        self.install_state_identities(&schedule);
         let mut materialized_routing_changed = self
             .rebind_reassigned_nodes(domain, &schedule, reassignments, local_node_id)
             .await?;
@@ -1725,7 +1725,7 @@ impl Runtime {
                 .replicated_materialized_stream_state(
                     self.state_placement(
                         domain,
-                        RuntimeStateKind::MaterializedRelay,
+                        RuntimeState::MaterializedRelay,
                         ModelKind::Relay,
                         &relay.name,
                         None,
@@ -1790,7 +1790,7 @@ impl Runtime {
                 .replicated_kafka_offset_state(
                     self.state_placement(
                         domain,
-                        RuntimeStateKind::KafkaOffset,
+                        RuntimeState::KafkaOffset,
                         node.kind(),
                         &node.identifier,
                         None,
@@ -1858,7 +1858,7 @@ impl Runtime {
                 .replicated_branch_aggregated_state(
                     self.state_placement(
                         domain,
-                        RuntimeStateKind::BranchAggregated,
+                        RuntimeState::BranchAggregated,
                         node.kind(),
                         &node.identifier,
                         None,
@@ -2478,13 +2478,13 @@ mod tests {
 
         let installed = runtime
             .inner
-            .state_schema_fingerprints
+            .state_identities
             .get(&DomainNodeRef::node_in(
                 domain,
                 ModelKind::Deduplicator,
                 ModelName::from(&processor),
             ))
-            .map(|entry| *entry.value());
+            .map(|entry| entry.value().schema_fingerprint);
         assert_eq!(
             installed,
             Some([7; 32]),

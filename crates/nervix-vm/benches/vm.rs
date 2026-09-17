@@ -1610,6 +1610,193 @@ fn datetime_kernel_benches(c: &mut Criterion) {
     group.finish();
 }
 
+/// A calendar, time zone or format program measured on its own, over instants from 1938 to 2038
+/// and their texts.
+struct CalendarProgram {
+    name: &'static str,
+    source: &'static str,
+    outputs: Vec<(&'static str, DataType)>,
+    /// How the `text` operand writes each instant.
+    texts: CalendarTexts,
+}
+
+/// The texts a calendar benchmark batch reads.
+#[derive(Clone, Copy)]
+enum CalendarTexts {
+    /// RFC 3339 with nanoseconds and a numeric offset, `2024-07-04T12:30:00.123456789+00:00`.
+    OffsetTimestamps,
+    /// Local wall-clock time in New York without an offset, `2024-07-04 08:30:00`.
+    NewYorkWallClock,
+}
+
+fn calendar_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new("occurred_at", datetime_type(), true),
+        Field::new("origin", datetime_type(), true),
+        Field::new("amount", DataType::Int64, true),
+        Field::new("text", DataType::Utf8, true),
+    ]))
+}
+
+fn calendar_programs() -> [CalendarProgram; 9] {
+    [
+        CalendarProgram {
+            name: "zoned_date_parts",
+            source: "SET hour = date_part('hour', input.occurred_at, 'America/New_York'), \
+                     day_of_year = date_part('day_of_year', input.occurred_at, 'America/New_York')",
+            outputs: vec![("hour", DataType::Int64), ("day_of_year", DataType::Int64)],
+            texts: CalendarTexts::OffsetTimestamps,
+        },
+        CalendarProgram {
+            name: "offset_truncation",
+            source: "SET hour_start = date_trunc('hour', input.occurred_at, '+05:30'), day_start \
+                     = date_trunc('day', input.occurred_at, '+05:30')",
+            outputs: vec![
+                ("hour_start", datetime_type()),
+                ("day_start", datetime_type()),
+            ],
+            texts: CalendarTexts::OffsetTimestamps,
+        },
+        CalendarProgram {
+            name: "zoned_truncation",
+            source: "SET day_start = date_trunc('day', input.occurred_at, 'America/New_York'), \
+                     month_start = date_trunc('month', input.occurred_at, 'America/New_York')",
+            outputs: vec![
+                ("day_start", datetime_type()),
+                ("month_start", datetime_type()),
+            ],
+            texts: CalendarTexts::OffsetTimestamps,
+        },
+        CalendarProgram {
+            name: "calendar_add_and_diff",
+            source: "SET renewed = date_add('month', input.amount, input.occurred_at), months = \
+                     date_diff('month', input.origin, input.occurred_at)",
+            outputs: vec![("renewed", datetime_type()), ("months", DataType::Int64)],
+            texts: CalendarTexts::OffsetTimestamps,
+        },
+        CalendarProgram {
+            name: "zoned_add_and_diff",
+            source: "SET next_day = date_add('day', input.amount, input.occurred_at, \
+                     'America/New_York'), days = date_diff('day', input.origin, \
+                     input.occurred_at, 'America/New_York')",
+            outputs: vec![("next_day", datetime_type()), ("days", DataType::Int64)],
+            texts: CalendarTexts::OffsetTimestamps,
+        },
+        CalendarProgram {
+            name: "format_fixed_width",
+            source: "SET text_out = format_datetime('%Y-%m-%dT%H:%M:%S.%f%:z', input.occurred_at)",
+            outputs: vec![("text_out", DataType::Utf8)],
+            texts: CalendarTexts::OffsetTimestamps,
+        },
+        CalendarProgram {
+            name: "format_zoned_names",
+            source: "SET text_out = format_datetime('%a %d %b %Y %H:%M:%S%.f %Z', \
+                     input.occurred_at, 'America/New_York')",
+            outputs: vec![("text_out", DataType::Utf8)],
+            texts: CalendarTexts::OffsetTimestamps,
+        },
+        CalendarProgram {
+            name: "parse_offset",
+            source: "SET parsed = parse_datetime('%Y-%m-%dT%H:%M:%S%.f%:z', input.text)",
+            outputs: vec![("parsed", datetime_type())],
+            texts: CalendarTexts::OffsetTimestamps,
+        },
+        CalendarProgram {
+            name: "parse_zoned_wall_clock",
+            source: "SET parsed = parse_datetime('%F %T', input.text, 'America/New_York', \
+                     'compatible')",
+            outputs: vec![("parsed", datetime_type())],
+            texts: CalendarTexts::NewYorkWallClock,
+        },
+    ]
+}
+
+/// Instants spread from 1938 to 2038 with their texts. A failing row adds more months than the
+/// DATETIME range holds, and its text does not match the format.
+fn calendar_batch(
+    program: &CompiledProgram,
+    texts: CalendarTexts,
+    failures: FailureDensity,
+) -> TypedBatch {
+    let rows = 0..DATETIME_KERNEL_ROWS;
+    let occurred_at = TimestampNanosecondArray::from_iter_values(
+        rows.clone()
+            .map(|row| benchmark_row_i64(row) * 3_083_000_000_000_017 - 1_000_000_000_000_000_000),
+    )
+    .with_timezone_utc();
+    let origin =
+        TimestampNanosecondArray::from_value(946_685_220_000_000_000, DATETIME_KERNEL_ROWS)
+            .with_timezone_utc();
+    let amount = Int64Array::from_iter_values(rows.clone().map(|row| {
+        if failures.fails(row) {
+            i64::MAX
+        } else {
+            benchmark_row_i64(row % 25) - 12
+        }
+    }));
+    let new_york_standard_offset =
+        chrono::FixedOffset::west_opt(5 * 3_600).expect("five hours west of UTC is a valid offset");
+    let text = StringArray::from_iter_values(occurred_at.values().iter().enumerate().map(
+        |(row, nanoseconds)| {
+            if failures.fails(row) {
+                return "not a timestamp".to_string();
+            }
+            let instant = chrono::DateTime::from_timestamp_nanos(*nanoseconds);
+            match texts {
+                CalendarTexts::OffsetTimestamps => {
+                    instant.format("%Y-%m-%dT%H:%M:%S%.9f%:z").to_string()
+                }
+                CalendarTexts::NewYorkWallClock => instant
+                    .with_timezone(&new_york_standard_offset)
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string(),
+            }
+        },
+    ));
+    TypedBatch::try_new(
+        program.input_schema.clone(),
+        vec![
+            TypedArray::Datetime(occurred_at),
+            TypedArray::Datetime(origin),
+            TypedArray::Int64(amount),
+            TypedArray::Utf8(text),
+        ],
+    )
+    .expect("calendar benchmark batch must build")
+}
+
+/// Calendar, time zone and format builtins over one inline batch. Every family runs without
+/// failures, and calendar arithmetic and parsing also run with failing rows, which exercises their
+/// range checks and error reporting.
+fn calendar_kernel_benches(c: &mut Criterion) {
+    let runtime = benchmark_runtime();
+    let mut group = c.benchmark_group("calendar_kernels");
+    group.throughput(Throughput::Elements(DATETIME_KERNEL_ROWS.arch_into()));
+    for program in calendar_programs() {
+        let compiled = compile_numeric_program(program.source, calendar_schema(), &program.outputs);
+        let densities: &[FailureDensity] = match program.name {
+            "calendar_add_and_diff" | "parse_offset" => &FailureDensity::ALL,
+            _ => &[FailureDensity::None],
+        };
+        for failures in densities {
+            let batch = calendar_batch(&compiled, program.texts, *failures);
+            group.bench_with_input(
+                BenchmarkId::new(program.name, failures.label()),
+                &batch,
+                |b, batch| {
+                    b.iter(|| {
+                        runtime.block_on(execute_benchmark_program(
+                            black_box(&compiled),
+                            black_box(batch),
+                        ))
+                    })
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
 fn benchmark_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .build()
@@ -1824,6 +2011,7 @@ criterion_group!(
     execute_benches,
     batch_size_sweep_benches,
     numeric_kernel_benches,
-    datetime_kernel_benches
+    datetime_kernel_benches,
+    calendar_kernel_benches
 );
 criterion_main!(benches);

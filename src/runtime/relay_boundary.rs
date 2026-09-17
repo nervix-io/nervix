@@ -1565,7 +1565,7 @@ impl Runtime {
     ) -> Arc<ExpiringRelayState> {
         let placement = self.state_placement(
             domain,
-            RuntimeStateKind::MaterializedRelay,
+            RuntimeState::MaterializedRelay,
             ModelKind::Relay,
             relay,
             None,

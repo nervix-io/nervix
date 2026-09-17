@@ -216,7 +216,9 @@ relay. Do not use them to scan across branches.
   negative code, after which Nervix keeps the state saved last. Its `nervix_load_state` rejects
   unusable saved state only with the reserved `-7` or `-8` codes; read a WASM failure by its
   `<stage> failed` diagnostic, and treat only `snapshot envelope decoding` and `application state
-  restoration` as a verdict on the saved state, which Nervix keeps.
+  restoration` as a verdict on the saved state, which Nervix keeps. Owner loss without a surviving
+  checkpoint of the current state generation resets the affected branches; a returning former
+  owner or stale replica never restores older guest state.
 - Paced ingestors declare their timestamp source.
 - External sensitive values use the required explicit leakage operation.
 - Transactions queue only the bound domain's replicated configuration statements. Commit progress

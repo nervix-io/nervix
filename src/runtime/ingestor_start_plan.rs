@@ -334,7 +334,7 @@ impl IngestorStartPlan {
                     scheduled.map(|node| KafkaOffsetStatePlacement {
                         placement: RuntimeStatePlacement {
                             domain: domain.clone(),
-                            state: RuntimeStateKind::KafkaOffset,
+                            state: RuntimeState::KafkaOffset,
                             kind: node.kind(),
                             identifier: node.identifier.clone(),
                             schema_fingerprint: [0; 32],
@@ -937,7 +937,7 @@ mod tests {
 
         assert_eq!(offset.primary_node, Some(named("node-a")));
         assert_eq!(offset.placement.domain, named("sales"));
-        assert_eq!(offset.placement.state, RuntimeStateKind::KafkaOffset);
+        assert_eq!(offset.placement.state, RuntimeState::KafkaOffset);
         assert_eq!(
             offset.placement.identifier,
             ModelName::from(&plan.ingestor.name)

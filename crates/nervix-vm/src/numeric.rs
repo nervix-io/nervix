@@ -63,7 +63,7 @@ pub(crate) struct Lanes<N> {
 impl<N: Copy + Default> Lanes<N> {
     /// Computes `lane` for every operand. Each bitmap word is filled by a loop with a fixed,
     /// branch-free body, which the compiler vectorizes whenever `lane` is vectorizable.
-    pub(crate) fn unary<I: Copy>(operands: &[I], lane: impl Fn(I) -> (N, bool)) -> Self {
+    pub(crate) fn unary<I: Copy>(operands: &[I], mut lane: impl FnMut(I) -> (N, bool)) -> Self {
         let mut values = vec![N::default(); operands.len()];
         let mut words = Vec::with_capacity(operands.len().div_ceil(LANES_PER_WORD));
         let value_words = values.chunks_mut(LANES_PER_WORD);
@@ -85,7 +85,7 @@ impl<N: Copy + Default> Lanes<N> {
     pub(crate) fn binary<L: Copy, R: Copy>(
         left: &[L],
         right: &[R],
-        lane: impl Fn(L, R) -> (N, bool),
+        mut lane: impl FnMut(L, R) -> (N, bool),
     ) -> Self {
         let mut values = vec![N::default(); left.len()];
         let mut words = Vec::with_capacity(left.len().div_ceil(LANES_PER_WORD));
@@ -108,10 +108,10 @@ impl<N: Copy + Default> Lanes<N> {
     /// Computes `lane` only for the lanes `valid` marks valid, leaving every other lane at its
     /// default value and unfailed. Valid lanes are visited one contiguous run at a time, so a
     /// column with few nulls pays for each run rather than for each lane.
-    fn unary_valid<I: Copy>(
+    pub(crate) fn unary_valid<I: Copy>(
         operands: &[I],
         valid: &NullBuffer,
-        lane: impl Fn(I) -> (N, bool),
+        mut lane: impl FnMut(I) -> (N, bool),
     ) -> Self {
         let mut values = vec![N::default(); operands.len()];
         let mut words = vec![0_u64; operands.len().div_ceil(LANES_PER_WORD)];
@@ -127,11 +127,11 @@ impl<N: Copy + Default> Lanes<N> {
 
     /// Computes `lane` only for the pairs of operands `valid` marks valid, one contiguous run of
     /// valid lanes at a time.
-    fn binary_valid<L: Copy, R: Copy>(
+    pub(crate) fn binary_valid<L: Copy, R: Copy>(
         left: &[L],
         right: &[R],
         valid: &NullBuffer,
-        lane: impl Fn(L, R) -> (N, bool),
+        mut lane: impl FnMut(L, R) -> (N, bool),
     ) -> Self {
         let mut values = vec![N::default(); left.len()];
         let mut words = vec![0_u64; left.len().div_ceil(LANES_PER_WORD)];

@@ -395,6 +395,28 @@ reported with the same saved state revision instead of silently starting fresh. 
 state with `-7` or `-8` is the only outcome that classifies the saved bytes as unusable; keep
 `nervix_load_state` strict and use those codes only for a verdict on the state.
 
+### State Generations
+
+Every branch's guest state belongs to a generation, one lifetime of that state that the committed
+schedule names. A save belongs to the generation that was current when the guest saved it, and
+Nervix persists, replicates, serves, restores, and recovers saved state only in the generation the
+committed schedule names for its branch. A snapshot of an earlier generation never becomes current
+again, whatever revision it carries: a former owner that restarts with older saves, a replica that
+missed a transition while it was offline, and a handoff prepared before the transition are all
+fenced out.
+
+A new WASM processor starts every branch in its first generation, and a planned ownership handoff
+keeps the generation. When an owner is lost and its state is recovered without it, the forced
+recovery starts a new generation for every branch of the processor in the same schedule
+publication that names the new owner. The checkpoint the recovery selects for a branch continues in
+that generation; a branch with no surviving checkpoint of the generation being replaced starts
+fresh, and `SHOW CLUSTER STATUS` reports it as a `wasm_processor` reset. Applying the same committed
+schedule again, after a restart or a rebuild, publishes nothing new.
+
+A save from an instance whose generation or ownership has already moved on is refused before
+anything is persisted or replicated, and is reported as a `state authority check` failure. Saves are
+written to the node's state store on its storage workers, never on the worker that runs the guest.
+
 ACK tokens are separate from guest state. They are host-local hot-path runtime capabilities and are not persisted or replicated. If ACK state is lost with a processor owner, the upstream ingestor reacts according to its delivery mode and retry policy.
 
 ## Timeouts
@@ -602,7 +624,7 @@ another node reaches the session unchanged.
 | `state snapshot` | `nervix_dump_state`. Nervix keeps the state saved last. |
 | `local state persistence` | Writing the saved state to the node's state store. |
 | `state replication` | Confirming the saved state with its replicas. |
-| `state authority check` | A replica or peer refused to serve the state because it is not the state's authority. |
+| `state authority check` | The state's authority refused it: a replica or peer that is not the state's authority, or this node after the branch's state generation or ownership moved on. |
 
 For example, a branch whose guest rejects its saved counters after an instance was recreated is
 reported as:
