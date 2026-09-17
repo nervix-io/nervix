@@ -8,10 +8,11 @@
 //! - **Must not know.** How a validated model is scheduled or executed.
 
 use ahash::{HashMap, HashSet};
+use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_models::{
     CreateInferencer, CreateLookup, DomainName, DomainPace, InferencerTensorDimension,
-    InferencerTensorSchema, Model, ModelKind, RequestedResourceVersion, ResourceId,
+    InferencerTensorSchema, LookupName, Model, ModelKind, ResourceId, ResourceName,
     VhostTlsResource,
 };
 use ort::{
@@ -32,6 +33,32 @@ struct OnnxModelMetadata {
 
 struct OnnxTensorMetadata {
     value_type: ValueType,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum LookupBindingValidationError {
+    #[error(
+        "failed to resolve path '{path}' in resource '{resource}@{version}' for HASH MAP \
+         '{lookup}' in domain '{domain}'"
+    )]
+    ResolveContentPath {
+        domain: DomainName,
+        lookup: LookupName,
+        resource: ResourceName,
+        version: u64,
+        path: String,
+    },
+    #[error(
+        "resource file '{path}' in '{resource}@{version}' for HASH MAP '{lookup}' in domain \
+         '{domain}' is unavailable"
+    )]
+    FileUnavailable {
+        domain: DomainName,
+        lookup: LookupName,
+        resource: ResourceName,
+        version: u64,
+        path: String,
+    },
 }
 
 impl OnnxModelMetadata {
@@ -265,18 +292,33 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         lookup: &CreateLookup,
-    ) -> Result<(), String> {
-        let resources = self.inner.consensus.current_resources().await;
-        let id = resources
-            .uploads
-            .resolve_completed_version(domain, &lookup.resource, RequestedResourceVersion::Latest)
-            .map_err(|error| error.to_string())?;
+    ) -> error_stack::Result<(), LookupBindingValidationError> {
+        let id = ResourceId::new(
+            domain.clone(),
+            lookup.resource.clone(),
+            lookup.resource_version,
+        );
         let path = self
             .inner
             .resource_store
             .resolve_content_path(&id, &lookup.path)
-            .map_err(|error| error.to_string())?;
-        ensure_file_exists(&path, "lookup").await
+            .change_context(LookupBindingValidationError::ResolveContentPath {
+                domain: domain.clone(),
+                lookup: lookup.name.clone(),
+                resource: lookup.resource.clone(),
+                version: lookup.resource_version,
+                path: lookup.path.clone(),
+            })?;
+        ensure_file_exists(&path, "lookup").await.map_err(|error| {
+            Report::new(LookupBindingValidationError::FileUnavailable {
+                domain: domain.clone(),
+                lookup: lookup.name.clone(),
+                resource: lookup.resource.clone(),
+                version: lookup.resource_version,
+                path: lookup.path.clone(),
+            })
+            .attach_printable(error)
+        })
     }
 
     async fn validate_inferencer_binding(

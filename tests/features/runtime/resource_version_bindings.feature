@@ -56,6 +56,21 @@ Feature: Resource version bindings
         ON MESSAGE ERROR LOG
         ON GLOBAL ERROR LOG;
       """
+    And these NSPL commands fail with "expected VERSION"
+      """
+      CREATE HASH MAP lookup_by_id
+        KEY id
+        FROM RESOURCE lookup_bundle
+        PATH 'lookup.jsonl'
+        DECODE USING lookup_codec;
+      """
+    And these NSPL commands fail with "expected VERSION"
+      """
+      CREATE CLIENT mounted_http
+        TYPE HTTP
+        MOUNT tls_bundle
+        CONFIG {'endpoint' = 'http://127.0.0.1:1'};
+      """
 
     Examples:
       | cluster_size | tensor_type       |
@@ -75,6 +90,12 @@ Feature: Resource version bindings
       """
     And node "node-1" has ONNX fixture resource directory "onnx_model"
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
+    And node "node-1" has resource directory "lookup_dir" containing
+      """
+      {
+        "lookup.jsonl": "{\"id\":\"one\",\"value\":1}\n"
+      }
+      """
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -93,6 +114,9 @@ Feature: Resource version bindings
       CREATE RESOURCE wasm_filter;
       UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
       UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
+      CREATE RESOURCE lookup_bundle;
+      UPLOAD RESOURCE lookup_bundle VERSION '{{lookup_dir}}';
+      UPLOAD RESOURCE lookup_bundle VERSION '{{lookup_dir}}';
       """
     And these NSPL commands are executed on the leader node
       """
@@ -148,7 +172,38 @@ Feature: Resource version bindings
         ON MESSAGE ERROR LOG
         ON GLOBAL ERROR LOG;
       """
-    And these NSPL commands are executed on the leader node
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA lookup_entry ( id STRING, value I64 );
+      CREATE WIRE JSON SCHEMA lookup_entry_wire MODE STRICT (
+        id string,
+        value integer
+      );
+      CREATE CODEC lookup_entry_codec
+        FROM WIRE JSON SCHEMA lookup_entry_wire
+        TO SCHEMA lookup_entry;
+      CREATE HASH MAP lookup_by_id
+        KEY id
+        FROM RESOURCE lookup_bundle VERSION LATEST
+        PATH 'lookup.jsonl'
+        DECODE USING lookup_entry_codec;
+      """
+    Then the last command output contains
+      """
+      resolved VERSION LATEST of resource 'lookup_bundle' to version 2 for lookup 'lookup_by_id'
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE CLIENT mounted_http
+        TYPE HTTP
+        MOUNT tls_bundle VERSION LATEST
+        CONFIG {'endpoint' = 'http://127.0.0.1:1'};
+      """
+    Then the last command output contains
+      """
+      resolved VERSION LATEST of resource 'tls_bundle' to version 2 for client 'mounted_http'
+      """
+    When these NSPL commands are executed on the leader node
       """
       SHOW CREATE VHOST secure;
       """
@@ -187,6 +242,22 @@ Feature: Resource version bindings
     Then the last command output contains
       """
       USING RESOURCE wasm_filter VERSION 2
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE HASH MAP lookup_by_id;
+      """
+    Then the last command output contains
+      """
+      FROM RESOURCE lookup_bundle VERSION 2
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE CLIENT mounted_http;
+      """
+    Then the last command output contains
+      """
+      MOUNT tls_bundle VERSION 2
       """
     When these NSPL commands are executed on the leader node
       """

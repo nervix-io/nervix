@@ -26,17 +26,18 @@ The current lookup model is a hash map:
 ```nspl,ignore
 CREATE [IF NOT EXISTS] HASH MAP <name>
   KEY <field>
-  FROM RESOURCE <resource>
-  [VERSION <n>]
+  FROM RESOURCE <resource> VERSION <n>|LATEST
   PATH '<file>'
   DECODE USING <codec>;
 ```
 
 The hash map loads records from a versioned `RESOURCE` file in the same domain as the hash map. The
-file is decoded through the declared codec, and the `KEY <field>` value becomes the lookup key. If
-`VERSION <n>` is omitted, the hash map resolves the latest version uploaded into that domain when
-the model is created. Creation succeeds only after the selected file has decoded and the index is
-usable on every current live node, including while the domain is stopped. The next command may run
+file is decoded through the declared codec, and the `KEY <field>` value becomes the lookup key.
+`VERSION` is mandatory. A number binds that exact completed version. `VERSION LATEST` resolves the
+highest completed version when the statement is applied and stores the resulting number, so later
+uploads and restarts do not move the hash map to another version. `SHOW CREATE HASH MAP` renders the
+stored number. Creation succeeds only after the selected file has decoded and the index is usable
+on every current live node, including while the domain is stopped. The next command may run
 `LOOKUP` immediately; malformed input fails creation.
 
 A resource file is read line by line, and each non-blank line is one payload for the codec. With a
@@ -64,7 +65,7 @@ CREATE CODEC zip_code_entry_codec
 
 CREATE HASH MAP zip_codes_by_zip
   KEY zip
-  FROM RESOURCE zip_codes
+  FROM RESOURCE zip_codes VERSION 1
   PATH 'lookup.jsonl'
   DECODE USING zip_code_entry_codec;
 ```

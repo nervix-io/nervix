@@ -4306,7 +4306,7 @@ fn resolve_emitter_client(
     sink: &EmitSink,
     client: Option<&Model>,
 ) -> Result<Option<ResolvedClientConfig>, RuntimeError> {
-    let resolve = |mount: Option<&ResourceName>, config: &[ClientConfigEntry]| {
+    let resolve = |mount: Option<&ClientResourceMount>, config: &[ClientConfigEntry]| {
         runtime
             .resolve_client_config(domain, mount, config)
             .map_err(|error| error.to_string())

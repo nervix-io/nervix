@@ -109,7 +109,7 @@ Feature: NSPL file formatting
   Scenario: A pooled client is rewritten with its pool clause between the type and the mount
     Given an NSPL file "pipeline.nspl" containing
       """
-      create client postgres_main type postgres pool size min 2 max 8 mount dev_tls
+      create client postgres_main type postgres pool size min 2 max 8 mount dev_tls version 1
         config { 'addr' = 'postgresql://HOST:5432/DATABASE?sslmode=verify-full' };
       """
     When nervix-nspl-format formats the NSPL file "pipeline.nspl"
@@ -119,7 +119,7 @@ Feature: NSPL file formatting
       CREATE CLIENT postgres_main
         TYPE POSTGRES
         POOL SIZE MIN 2 MAX 8
-        MOUNT dev_tls
+        MOUNT dev_tls VERSION 1
         CONFIG {
           'addr' = 'postgresql://HOST:5432/DATABASE?sslmode=verify-full'
         };

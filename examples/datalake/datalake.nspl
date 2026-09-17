@@ -72,7 +72,7 @@ CREATE CODEC edge_site_codec
   FROM WIRE JSON SCHEMA edge_site_wire
   TO SCHEMA edge_site;
 
-CREATE HASH MAP edge_sites_by_id KEY edge_id FROM RESOURCE reference_data PATH 'edge_sites.jsonl' DECODE USING edge_site_codec;
+CREATE HASH MAP edge_sites_by_id KEY edge_id FROM RESOURCE reference_data VERSION 1 PATH 'edge_sites.jsonl' DECODE USING edge_site_codec;
 
 CREATE SCHEMA device_activity (
   source STRING,

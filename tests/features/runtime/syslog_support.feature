@@ -236,7 +236,7 @@ Feature: Syslog support
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
       CREATE CLIENT syslog_listener
         TYPE SYSLOG
-        MOUNT syslog_tls
+        MOUNT syslog_tls VERSION 1
         CONFIG {
           'protocol' = 'tls',
           'addr' = '{{syslog_ingest_addr}}',
