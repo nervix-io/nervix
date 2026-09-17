@@ -795,11 +795,9 @@ impl TransportState {
                 _expiry: CancelOnDrop::new(expiry.clone()),
             },
         );
-        let attempt_entry = match self.relay_attempts.entry(attempt) {
-            Entry::Occupied(entry) => {
-                self.grants.remove(&grant_id);
-                let existing = entry.get().clone();
-                drop(entry);
+        match self.register_relay_grant(&record, grant_id) {
+            RelayGrantRegistration::Registered => {}
+            RelayGrantRegistration::Existing(existing) => {
                 match existing {
                     RelayAttemptEntry::Active(existing) => {
                         if existing.body_bytes != record.body_bytes
@@ -828,50 +826,21 @@ impl TransportState {
                 }
                 return Ok(());
             }
-            Entry::Vacant(entry) => {
-                if let Some(status) = self.retired_relay_status(&record.attempt) {
-                    drop(entry);
-                    self.grants.remove(&grant_id);
-                    let disposition = match status {
-                        RelayAdmissionStatus::Admitted => RelayGrantDisposition::Admitted,
-                        RelayAdmissionStatus::Rejected(reason) => {
-                            RelayGrantDisposition::Rejected(reason)
-                        }
-                        RelayAdmissionStatus::Cancelled => RelayGrantDisposition::Cancelled,
-                        RelayAdmissionStatus::Retired
-                        | RelayAdmissionStatus::Reserved
-                        | RelayAdmissionStatus::BodyReceived
-                        | RelayAdmissionStatus::Unknown
-                        | RelayAdmissionStatus::Indeterminate => RelayGrantDisposition::Retired,
-                    };
-                    self.send_relay_grant_response(respond, disposition).await?;
-                    return Ok(());
-                }
-                if !self.relay_sequence_follows_watermark(&record.attempt) {
-                    drop(entry);
-                    self.grants.remove(&grant_id);
-                    send_static_error(
-                        &mut respond,
-                        StatusCode::CONFLICT,
-                        "relay channel incarnation is unknown or its sequence is out of order",
-                        self.options.progress_timeout,
-                    )
-                    .await?;
-                    return Ok(());
-                }
-                entry.insert(RelayAttemptEntry::Active(StdArc::clone(&record)))
+            RelayGrantRegistration::Retired(disposition) => {
+                self.send_relay_grant_response(respond, disposition).await?;
+                return Ok(());
             }
-        };
-        match self
-            .active_relay_channels
-            .entry(record.attempt.channel.clone())
-        {
-            Entry::Occupied(occupied) => {
-                // Release the channel's shard before touching another map or awaiting the peer.
-                drop(occupied);
-                drop(attempt_entry);
-                self.relay_attempts.remove(&record.attempt);
-                self.grants.remove(&grant_id);
+            RelayGrantRegistration::InvalidSequence => {
+                send_static_error(
+                    &mut respond,
+                    StatusCode::CONFLICT,
+                    "relay channel incarnation is unknown or its sequence is out of order",
+                    self.options.progress_timeout,
+                )
+                .await?;
+                return Ok(());
+            }
+            RelayGrantRegistration::ChannelBusy => {
                 send_static_error(
                     &mut respond,
                     StatusCode::TOO_MANY_REQUESTS,
@@ -881,21 +850,7 @@ impl TransportState {
                 .await?;
                 return Ok(());
             }
-            Entry::Vacant(entry) => {
-                entry.insert(record.attempt.sequence);
-            }
-        }
-        match self.relay_admissions.entry(admission_key) {
-            Entry::Occupied(occupied) => {
-                // Release the admission's shard before touching another map or awaiting the peer.
-                drop(occupied);
-                drop(attempt_entry);
-                self.relay_attempts.remove(&record.attempt);
-                self.active_relay_channels
-                    .remove_if(&record.attempt.channel, |_, sequence| {
-                        *sequence == record.attempt.sequence
-                    });
-                self.grants.remove(&grant_id);
+            RelayGrantRegistration::AdmissionBusy => {
                 send_static_error(
                     &mut respond,
                     StatusCode::CONFLICT,
@@ -905,11 +860,7 @@ impl TransportState {
                 .await?;
                 return Ok(());
             }
-            Entry::Vacant(entry) => {
-                entry.insert(StdArc::clone(&record));
-            }
         }
-        drop(attempt_entry);
         let grants = self.clone();
         self.tasks.spawn(async move {
             tokio::select! {
@@ -927,6 +878,77 @@ impl TransportState {
         });
         self.send_relay_grant_response(respond, RelayGrantDisposition::SendBody { grant_id })
             .await
+    }
+
+    fn register_relay_grant(
+        &self,
+        record: &StdArc<RelayAdmissionRecord>,
+        grant_id: u64,
+    ) -> RelayGrantRegistration {
+        let attempt_entry = match self.relay_attempts.entry(record.attempt.clone()) {
+            Entry::Occupied(entry) => {
+                self.grants.remove(&grant_id);
+                return RelayGrantRegistration::Existing(entry.get().clone());
+            }
+            Entry::Vacant(entry) => {
+                if let Some(status) = self.retired_relay_status(&record.attempt) {
+                    drop(entry);
+                    self.grants.remove(&grant_id);
+                    let disposition = match status {
+                        RelayAdmissionStatus::Admitted => RelayGrantDisposition::Admitted,
+                        RelayAdmissionStatus::Rejected(reason) => {
+                            RelayGrantDisposition::Rejected(reason)
+                        }
+                        RelayAdmissionStatus::Cancelled => RelayGrantDisposition::Cancelled,
+                        RelayAdmissionStatus::Retired
+                        | RelayAdmissionStatus::Reserved
+                        | RelayAdmissionStatus::BodyReceived
+                        | RelayAdmissionStatus::Unknown
+                        | RelayAdmissionStatus::Indeterminate => RelayGrantDisposition::Retired,
+                    };
+                    return RelayGrantRegistration::Retired(disposition);
+                }
+                if !self.relay_sequence_follows_watermark(&record.attempt) {
+                    drop(entry);
+                    self.grants.remove(&grant_id);
+                    return RelayGrantRegistration::InvalidSequence;
+                }
+                entry.insert(RelayAttemptEntry::Active(StdArc::clone(record)))
+            }
+        };
+        match self
+            .active_relay_channels
+            .entry(record.attempt.channel.clone())
+        {
+            Entry::Occupied(occupied) => {
+                drop(occupied);
+                drop(attempt_entry);
+                self.relay_attempts.remove(&record.attempt);
+                self.grants.remove(&grant_id);
+                return RelayGrantRegistration::ChannelBusy;
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(record.attempt.sequence);
+            }
+        }
+        match self.relay_admissions.entry(record.admission_key.clone()) {
+            Entry::Occupied(occupied) => {
+                drop(occupied);
+                drop(attempt_entry);
+                self.relay_attempts.remove(&record.attempt);
+                self.active_relay_channels
+                    .remove_if(&record.attempt.channel, |_, sequence| {
+                        *sequence == record.attempt.sequence
+                    });
+                self.grants.remove(&grant_id);
+                RelayGrantRegistration::AdmissionBusy
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(StdArc::clone(record));
+                drop(attempt_entry);
+                RelayGrantRegistration::Registered
+            }
+        }
     }
 
     fn next_grant_id(&self) -> u64 {

@@ -1226,7 +1226,7 @@ mod tests {
     };
 
     use ahash::HashMap;
-    use arc_swap::ArcSwapOption;
+    use nervix_execution::sync::ArcSwapOption;
     use nervix_models::{
         CreateSchema, ErrorPolicies, MessageErrorPolicy, ModelKind, ModelName, NodeRef,
         ParseAsType, RelayName, SchemaField,

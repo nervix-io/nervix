@@ -4,8 +4,7 @@ use std::sync::{
 };
 
 use ahash::RandomState;
-use arc_swap::ArcSwap;
-use dashmap::DashMap;
+use nervix_execution::sync::{ArcSwap, DashMap};
 use nervix_models::ClusterNodeName;
 use tokio::sync::Notify;
 

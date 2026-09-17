@@ -958,7 +958,7 @@ mod tests {
     use std::sync::Arc as StdArc;
 
     use ahash::HashMap;
-    use arc_swap::ArcSwapOption;
+    use nervix_execution::sync::ArcSwapOption;
     use nervix_interconnect::{RemoteOperationFailure, RemoteOperationSubject};
     use nervix_models::{Assignment, AssignmentTarget, DomainSchedule, Expression, ParseAsType};
     use tokio::{

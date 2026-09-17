@@ -13,12 +13,6 @@ proto-fmt-check:
 proto-lint:
     buf lint
 
-test-loom: build-web-console wasm-processor-guests
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    RUSTFLAGS="--cfg runtime_ack_loom --cfg relay_dispatch_gate_loom --cfg relay_fanout_loom" cargo test -q --lib loom_tests -- --test-threads=1
-
 build-deps: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests
 
 tests-deps: build-deps build-nspl-format
@@ -27,12 +21,29 @@ test: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    # The execution crate's `shuttle` feature replaces Tokio primitives and is valid only inside a
-    # Shuttle runner. Keep it out of the ordinary workspace test process, then test execution with
-    # its default real-Tokio wrapper; `test-shuttle` exercises that feature separately.
-    cargo test --all-targets --all-features --features testing --workspace \
-        --exclude nervix-execution
-    cargo test --all-targets --package nervix-execution
+    # Shuttle features replace synchronization primitives and are valid only inside a Shuttle
+    # runner. Test their owning packages with production primitives here; `test-shuttle` exercises
+    # their modeled features separately.
+    shuttle_packages=(
+        nervix-client-core
+        nervix-consensus
+        nervix-execution
+        nervix-interconnect
+        nervix-server
+        nervix-wasm
+    )
+    workspace_exclusions=()
+    for package in "${shuttle_packages[@]}"; do
+        workspace_exclusions+=(--exclude "${package}")
+    done
+    cargo test --all-targets --all-features --workspace "${workspace_exclusions[@]}"
+    cargo test --all-targets --features testing --package nervix-server
+    cargo test --all-targets \
+        --package nervix-client-core \
+        --package nervix-consensus \
+        --package nervix-execution \
+        --package nervix-interconnect \
+        --package nervix-wasm
 
 test-scenarios *args: tests-deps
     #!/usr/bin/env bash
@@ -98,36 +109,42 @@ test-package-lib package *args:
 test-execution *args:
     cargo test --package nervix-execution --lib -- {{ args }}
 
-# Explore every bounded-execution race invariant under both Shuttle's random and PCT schedulers.
-# Each test gets its own process so a persisted schedule's parent directory identifies the exact
-# invariant that `test-shuttle-replay` must run.
-test-shuttle:
+# Explore the filtered execution and server invariants under Shuttle. The former Loom recipe is
+# retired: acknowledgement races now exercise production types, while the reduced relay models
+# document their memory-ordering claims in-module. Each test gets its own process so a persisted
+# schedule identifies its package and test.
+test-shuttle: build-web-console wasm-processor-guests download-onnxruntime
     #!/usr/bin/env bash
     set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     trace_root="{{ cargo_target_dir }}/shuttle-failures"
     mkdir -p "${trace_root}"
-    shuttle_test_list="$(
-        cargo test --package nervix-execution --features shuttle --lib shuttle_ -- \
-            --list --format terse | sed -n 's/: test$//p'
-    )"
-    if [[ -z "${shuttle_test_list}" ]]; then
-        echo "no shuttle_ tests found in nervix-execution" >&2
-        exit 1
-    fi
-    mapfile -t shuttle_tests <<< "${shuttle_test_list}"
-    for shuttle_test in "${shuttle_tests[@]}"; do
-        trace_directory="${trace_root}/${shuttle_test}"
-        mkdir -p "${trace_directory}"
-        SHUTTLE_TRACE_DIR="${trace_directory}" \
-            cargo test --package nervix-execution --features shuttle --lib \
-                "${shuttle_test}" -- --exact --test-threads=1
+    shuttle_packages=(nervix-execution nervix-server)
+    for shuttle_package in "${shuttle_packages[@]}"; do
+        shuttle_test_list="$(
+            cargo test --package "${shuttle_package}" --features shuttle --lib shuttle_ -- \
+                --list --format terse | sed -n 's/: test$//p'
+        )"
+        if [[ -z "${shuttle_test_list}" ]]; then
+            echo "no shuttle_ tests found in ${shuttle_package}" >&2
+            exit 1
+        fi
+        mapfile -t shuttle_tests <<< "${shuttle_test_list}"
+        for shuttle_test in "${shuttle_tests[@]}"; do
+            trace_directory="${trace_root}/${shuttle_package}/${shuttle_test}"
+            mkdir -p "${trace_directory}"
+            SHUTTLE_TRACE_DIR="${trace_directory}" \
+                cargo test --package "${shuttle_package}" --features shuttle --lib \
+                    "${shuttle_test}" -- --exact --test-threads=1
+        done
     done
 
 # Replay a schedule emitted under target/shuttle-failures. Its parent directory is the exact test
 # name written by `test-shuttle`, so the schedule cannot accidentally run against another invariant.
-test-shuttle-replay schedule:
+test-shuttle-replay schedule: build-web-console wasm-processor-guests download-onnxruntime
     #!/usr/bin/env bash
     set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     schedule={{ quote(schedule) }}
     if [[ ! -f "${schedule}" ]]; then
         echo "Shuttle schedule does not exist: ${schedule}" >&2
@@ -135,8 +152,9 @@ test-shuttle-replay schedule:
     fi
     schedule="$(realpath "${schedule}")"
     shuttle_test="$(basename "$(dirname "${schedule}")")"
+    shuttle_package="$(basename "$(dirname "$(dirname "${schedule}")")")"
     SHUTTLE_TRACE_FILE="${schedule}" \
-        cargo test --package nervix-execution --features shuttle --lib \
+        cargo test --package "${shuttle_package}" --features shuttle --lib \
             "${shuttle_test}" -- --exact --test-threads=1 --nocapture
 
 # Run the expression VM unit tests, which live in the nervix-vm crate rather than the server lib.
@@ -198,12 +216,30 @@ test-coverage: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    # Merge the default execution tests into the workspace profile without enabling the
-    # Shuttle-only Tokio implementation in ordinary downstream tests.
+    # Merge production-mode coverage for Shuttle-owning packages into the workspace profile
+    # without running modeled synchronization outside a Shuttle runner.
+    shuttle_packages=(
+        nervix-client-core
+        nervix-consensus
+        nervix-execution
+        nervix-interconnect
+        nervix-server
+        nervix-wasm
+    )
+    workspace_exclusions=()
+    for package in "${shuttle_packages[@]}"; do
+        workspace_exclusions+=(--exclude "${package}")
+    done
     cargo llvm-cov clean --workspace
-    cargo llvm-cov --no-report --all-targets --all-features --features testing --workspace \
-        --exclude nervix-execution
-    cargo llvm-cov --no-report --all-targets --package nervix-execution
+    cargo llvm-cov --no-report --all-targets --all-features --workspace \
+        "${workspace_exclusions[@]}"
+    cargo llvm-cov --no-report --all-targets --features testing --package nervix-server
+    cargo llvm-cov --no-report --all-targets \
+        --package nervix-client-core \
+        --package nervix-consensus \
+        --package nervix-execution \
+        --package nervix-interconnect \
+        --package nervix-wasm
     cargo llvm-cov report --lcov --output-path lcov.info
     cargo crap --lcov lcov.info --min 30 --threshold 30
 
@@ -350,7 +386,40 @@ autoinherit-check:
     git diff --exit-code
 
 cargo-clippy-all:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-all" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-features --all-targets --workspace
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-all"
+    export RUSTFLAGS="-Dwarnings {{ rustflags }}"
+    # Shuttle-backed targets require a Shuttle runner and deliberately omit Tokio's process and
+    # runtime-builder APIs. Lint their production targets normally, then lint the modeled library
+    # boundary separately. `test-shuttle` compiles and runs the modeled test targets.
+    shuttle_packages=(
+        nervix-client-core
+        nervix-consensus
+        nervix-execution
+        nervix-interconnect
+        nervix-server
+        nervix-wasm
+    )
+    workspace_exclusions=()
+    for package in "${shuttle_packages[@]}"; do
+        workspace_exclusions+=(--exclude "${package}")
+    done
+    cargo clippy --all-features --all-targets --workspace "${workspace_exclusions[@]}"
+    cargo clippy --all-targets --features 'benchmarks testing' --package nervix-server
+    cargo clippy --all-targets --features autocomplete --package nervix-client-core
+    cargo clippy --all-targets --features testing --package nervix-consensus
+    cargo clippy --all-targets \
+        --package nervix-execution \
+        --package nervix-interconnect \
+        --package nervix-wasm
+    cargo clippy --lib --features 'shuttle testing' \
+        --package nervix-client-core \
+        --package nervix-consensus \
+        --package nervix-execution \
+        --package nervix-interconnect \
+        --package nervix-server \
+        --package nervix-wasm
 
 cargo-clippy-server:
     CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-server" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-server -q
@@ -383,9 +452,34 @@ audit:
 ratchet *args:
     python3 scripts/ratchet.py {{ args }}
 
-validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries
+validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-shuttle-dependencies
 
-validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries
+validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-shuttle-dependencies
+
+# Production package manifests name only the pass-through synchronization wrappers. The real
+# primitive crates may appear transitively below those wrappers, but never as direct dependencies.
+validate-shuttle-dependencies:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    packages=(
+        nervix-client-core
+        nervix-consensus
+        nervix-execution
+        nervix-interconnect
+        nervix-server
+        nervix-wasm
+    )
+    for package in "${packages[@]}"; do
+        direct_dependencies="$(
+            cargo tree --package "${package}" --edges normal --depth 1 \
+                --no-default-features --prefix none
+        )"
+        if printf '%s\n' "${direct_dependencies}" \
+            | grep -E '^(dashmap|parking_lot|tokio|tokio-stream|tokio-util) v'; then
+            echo "${package} names a real synchronization primitive directly" >&2
+            exit 1
+        fi
+    done
 
 validate-clock-boundaries:
     python3 scripts/check_clock_boundaries.py

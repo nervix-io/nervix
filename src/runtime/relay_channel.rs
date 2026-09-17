@@ -8,20 +8,23 @@
 //!   classification.
 //! - **Must not know.** Relays, branches, batches, acknowledgements, placement, or any Model.
 
+#[cfg(not(feature = "shuttle"))]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{
     collections::BTreeMap,
     fmt,
     future::poll_fn,
     num::NonZeroUsize,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     task::{Context, Poll},
 };
 
-use arc_swap::{ArcSwap, Guard};
 use concurrent_queue::{ConcurrentQueue, PopError, PushError};
 use futures_util::task::AtomicWaker;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_execution::sync::{ArcSwap, Guard};
 use parking_lot::Mutex;
+#[cfg(feature = "shuttle")]
+use shuttle::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::{
     sync::Notify,
     time::{Instant, timeout_at},
@@ -571,30 +574,27 @@ mod gate_tests {
     }
 }
 
-#[cfg(all(test, relay_dispatch_gate_loom))]
-mod gate_loom_tests {
-    use loom::{
-        model,
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_gate_memory_ordering_tests {
+    use shuttle::{
         sync::{
             Arc,
-            atomic::{AtomicBool, AtomicUsize, Ordering, fence},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         thread,
     };
 
-    const MODEL_THREAD_STACK_BYTES: usize = 64 * 1024;
+    use crate::shuttle_test::check_dfs;
 
-    // Loom 0.7 can admit the forbidden store-buffer outcome for a model expressed only with
-    // sequentially consistent atomic operations. Its own specification test for that limitation is
-    // ignored upstream. These explicit fences model the same total order that the production
-    // sequentially consistent operations require.
+    // These reduced checks make only the memory-ordering claim of the production gate: its
+    // sequentially consistent close flag and in-flight count cannot both miss each other.
 
-    struct LoomDispatchGate {
+    struct ModelDispatchGate {
         closed: AtomicBool,
         in_flight_dispatches: AtomicUsize,
     }
 
-    impl LoomDispatchGate {
+    impl ModelDispatchGate {
         fn new() -> Self {
             Self {
                 closed: AtomicBool::new(false),
@@ -605,7 +605,6 @@ mod gate_loom_tests {
         fn try_acquire_dispatch(&self) -> bool {
             let previous = self.in_flight_dispatches.fetch_add(1, Ordering::SeqCst);
             assert_eq!(previous, 0, "the model has one dispatch contender");
-            fence(Ordering::SeqCst);
             if !self.closed.load(Ordering::SeqCst) {
                 return true;
             }
@@ -616,37 +615,24 @@ mod gate_loom_tests {
 
         fn engage_and_check_quiescent(&self) -> bool {
             self.closed.store(true, Ordering::SeqCst);
-            fence(Ordering::SeqCst);
             self.in_flight_dispatches.load(Ordering::SeqCst) == 0
         }
 
         fn finish_dispatch_and_check_notification(&self) -> bool {
             let previous = self.in_flight_dispatches.fetch_sub(1, Ordering::SeqCst);
             assert_eq!(previous, 1, "the model begins with one dispatch permit");
-            fence(Ordering::SeqCst);
             self.closed.load(Ordering::SeqCst)
         }
     }
 
-    fn spawn_model_thread<F, T>(operation: F) -> thread::JoinHandle<T>
-    where
-        F: FnOnce() -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        thread::Builder::new()
-            .stack_size(MODEL_THREAD_STACK_BYTES)
-            .spawn(operation)
-            .expect("loom thread construction should succeed")
-    }
-
     #[test]
     fn concurrent_dispatch_acquire_and_engage_preserve_the_fence() {
-        model(|| {
-            let model = spawn_model_thread(|| {
-                let gate = Arc::new(LoomDispatchGate::new());
+        check_dfs(
+            || {
+                let gate = Arc::new(ModelDispatchGate::new());
                 let dispatch = {
                     let gate = gate.clone();
-                    spawn_model_thread(move || gate.try_acquire_dispatch())
+                    thread::spawn(move || gate.try_acquire_dispatch())
                 };
                 let engagement_saw_quiescence = gate.engage_and_check_quiescent();
 
@@ -655,22 +641,22 @@ mod gate_loom_tests {
                     !dispatch_acquired || !engagement_saw_quiescence,
                     "an acquired dispatch must be visible to a concurrent engagement"
                 );
-            });
-            model.join().expect("model driver should join");
-        });
+            },
+            None,
+        );
     }
 
     #[test]
     fn final_dispatch_drop_cannot_miss_a_concurrent_engagement() {
-        model(|| {
-            let model = spawn_model_thread(|| {
-                let gate = Arc::new(LoomDispatchGate {
+        check_dfs(
+            || {
+                let gate = Arc::new(ModelDispatchGate {
                     closed: AtomicBool::new(false),
                     in_flight_dispatches: AtomicUsize::new(1),
                 });
                 let dispatch = {
                     let gate = gate.clone();
-                    spawn_model_thread(move || gate.finish_dispatch_and_check_notification())
+                    thread::spawn(move || gate.finish_dispatch_and_check_notification())
                 };
                 let engagement_saw_quiescence = gate.engage_and_check_quiescent();
 
@@ -679,9 +665,9 @@ mod gate_loom_tests {
                     dispatch_would_notify || engagement_saw_quiescence,
                     "the fence must either observe the final drop or receive its notification"
                 );
-            });
-            model.join().expect("model driver should join");
-        });
+            },
+            None,
+        );
     }
 }
 
@@ -1422,69 +1408,54 @@ mod tests {
     }
 }
 
-#[cfg(all(test, relay_fanout_loom))]
-mod fanout_loom_tests {
-    use loom::{
-        model,
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_fanout_memory_ordering_tests {
+    use shuttle::{
         sync::{
             Arc,
-            atomic::{AtomicUsize, Ordering, fence},
+            atomic::{AtomicUsize, Ordering},
         },
         thread,
     };
 
-    const MODEL_THREAD_STACK_BYTES: usize = 64 * 1024;
+    use crate::shuttle_test::check_dfs;
 
-    // As in the dispatch gate model, Loom 0.7 can admit the forbidden store-buffer outcome for a
-    // model expressed only with sequentially consistent atomic operations. These explicit fences
-    // model the total order that the production sequentially consistent operations require.
+    // This reduced check makes only the memory-ordering claim of fan-out admission: the
+    // sequentially consistent backlog and waiter counters cannot both miss each other.
 
-    struct LoomFanoutAdmission {
+    struct ModelFanoutAdmission {
         admitted: AtomicUsize,
         waiting_publishers: AtomicUsize,
     }
 
-    impl LoomFanoutAdmission {
+    impl ModelFanoutAdmission {
         fn take_and_check_notification(&self) -> bool {
             let previous = self.admitted.fetch_sub(1, Ordering::SeqCst);
             assert_eq!(
                 previous, 1,
                 "the model begins with the consumer at capacity"
             );
-            fence(Ordering::SeqCst);
             self.waiting_publishers.load(Ordering::SeqCst) > 0
         }
 
         fn begin_wait_and_check_admission(&self, capacity: usize) -> bool {
             let previous = self.waiting_publishers.fetch_add(1, Ordering::SeqCst);
             assert_eq!(previous, 0, "the model has one waiting publisher");
-            fence(Ordering::SeqCst);
             self.admitted.load(Ordering::SeqCst) < capacity
         }
     }
 
-    fn spawn_model_thread<F, T>(operation: F) -> thread::JoinHandle<T>
-    where
-        F: FnOnce() -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        thread::Builder::new()
-            .stack_size(MODEL_THREAD_STACK_BYTES)
-            .spawn(operation)
-            .expect("loom thread construction should succeed")
-    }
-
     #[test]
     fn consumer_take_cannot_miss_a_waiting_publisher() {
-        model(|| {
-            let model = spawn_model_thread(|| {
-                let admission = Arc::new(LoomFanoutAdmission {
+        check_dfs(
+            || {
+                let admission = Arc::new(ModelFanoutAdmission {
                     admitted: AtomicUsize::new(1),
                     waiting_publishers: AtomicUsize::new(0),
                 });
                 let consumer = {
                     let admission = admission.clone();
-                    spawn_model_thread(move || admission.take_and_check_notification())
+                    thread::spawn(move || admission.take_and_check_notification())
                 };
                 let publisher_admitted = admission.begin_wait_and_check_admission(1);
 
@@ -1493,8 +1464,8 @@ mod fanout_loom_tests {
                     publisher_admitted || consumer_would_notify,
                     "a waiting publisher must either observe the take or receive its notification"
                 );
-            });
-            model.join().expect("model driver should join");
-        });
+            },
+            None,
+        );
     }
 }

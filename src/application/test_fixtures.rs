@@ -16,10 +16,10 @@ use std::{
 
 use ahash::RandomState;
 use clap::Parser;
-use dashmap::DashMap;
 use fjall::Database;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{Consensus, ConsensusSettings, Proposer, RaftRetentionPolicy};
+use nervix_execution::sync::DashMap;
 use nervix_interconnect::{TlsConfigBundle, Transport};
 use nervix_models::{
     AckMode, BranchSelection, ClusterNodeName, CreateDeduplicator, CreateEmitter, CreateIngestor,

@@ -35,11 +35,17 @@ pub use enabled::{StorageFault, StoragePause};
 mod enabled {
     use std::{thread, time::Duration};
 
-    use parking_lot::{Condvar, Mutex, RwLock};
+    #[cfg(not(feature = "shuttle"))]
+    use parking_lot::Condvar as GateCondition;
+    use parking_lot::{Mutex, RwLock};
     use tokio::sync::Notify;
     use triomphe::Arc;
 
     use super::*;
+
+    #[cfg(feature = "shuttle")]
+    #[derive(Debug, Default)]
+    struct GateCondition;
 
     #[derive(Clone, Debug, Default)]
     pub struct StorageFault {
@@ -68,9 +74,32 @@ mod enabled {
     #[derive(Debug, Default)]
     struct Gate {
         released: Mutex<bool>,
-        condition: Condvar,
+        condition: GateCondition,
         entered: Notify,
     }
+
+    #[cfg(not(feature = "shuttle"))]
+    fn wait_until_released(gate: &Gate) {
+        let mut released = gate.released.lock();
+        while !*released {
+            gate.condition.wait(&mut released);
+        }
+    }
+
+    #[cfg(feature = "shuttle")]
+    fn wait_until_released(gate: &Gate) {
+        while !*gate.released.lock() {
+            nervix_execution::sync::yield_now();
+        }
+    }
+
+    #[cfg(not(feature = "shuttle"))]
+    fn notify_release(condition: &GateCondition) {
+        condition.notify_all();
+    }
+
+    #[cfg(feature = "shuttle")]
+    fn notify_release(_condition: &GateCondition) {}
 
     /// Dropping a test's pause releases the worker, including when an assertion panics.
     pub struct StoragePause {
@@ -83,7 +112,7 @@ mod enabled {
         }
         pub fn release(&self) {
             *self.gate.released.lock() = true;
-            self.gate.condition.notify_all();
+            notify_release(&self.gate.condition);
         }
     }
     impl Drop for StoragePause {
@@ -157,10 +186,7 @@ mod enabled {
                     ..
                 }) => {
                     gate.entered.notify_one();
-                    let mut released = gate.released.lock();
-                    while !*released {
-                        gate.condition.wait(&mut released);
-                    }
+                    wait_until_released(&gate);
                     Ok(())
                 }
                 None => Ok(()),

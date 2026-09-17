@@ -6327,8 +6327,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn sink_context_reports_configuration_and_publish_failures() {
+    #[tokio::test]
+    async fn sink_context_reports_configuration_and_publish_failures() {
         let context = sink_context();
         let mut events = context.runtime.events().subscribe();
 
@@ -6347,13 +6347,13 @@ mod tests {
                 .is_none()
         );
 
-        let messages = (0..4)
-            .map(|_| {
-                let RuntimeEvent::Error(message) =
-                    events.try_recv().expect("error event must be emitted");
-                message
-            })
-            .collect::<Vec<_>>();
+        let mut messages = Vec::with_capacity(4);
+        for _ in 0..4 {
+            tokio::task::consume_budget().await;
+            let RuntimeEvent::Error(message) =
+                events.recv().await.expect("error event must be emitted");
+            messages.push(message);
+        }
         assert!(messages[0].contains("failed to initialize nats emitter"));
         assert!(messages[1].contains("failed to publish nats message"));
         assert!(messages[2].contains("failed to flush nats rows"));

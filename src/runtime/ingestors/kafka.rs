@@ -19,6 +19,65 @@ use crate::runtime::physical_time::actual_utc_now;
 
 pub(crate) struct KafkaIngestor;
 
+#[derive(Debug, Default, Eq, PartialEq)]
+pub(in crate::runtime) enum KafkaConsumerAssignment {
+    #[default]
+    Unknown,
+    Cleared,
+    Partitions,
+}
+
+pub(in crate::runtime) struct KafkaOffsetInitialization<'a> {
+    pub(in crate::runtime) topic: &'a str,
+    pub(in crate::runtime) consumer: &'a StreamConsumer,
+    pub(in crate::runtime) consumer_assignment: &'a mut KafkaConsumerAssignment,
+    pub(in crate::runtime) state: &'a KafkaOffsetStateOriginator,
+    pub(in crate::runtime) instance_idx: u64,
+}
+
+impl KafkaConsumerAssignment {
+    fn apply(
+        &mut self,
+        consumer: &StreamConsumer,
+        topic: &str,
+        assignment: &TopicPartitionList,
+        assigned_any: bool,
+    ) -> Result<(), Report<KafkaIngestorError>> {
+        if assigned_any {
+            consumer.assign(assignment).map_err(|source| {
+                Report::new(KafkaIngestorError::Assign {
+                    topic: topic.to_string(),
+                })
+                .attach_printable(source.to_string())
+            })?;
+            *self = Self::Partitions;
+        } else {
+            self.clear(consumer, topic)?;
+        }
+        Ok(())
+    }
+
+    fn clear(
+        &mut self,
+        consumer: &StreamConsumer,
+        topic: &str,
+    ) -> Result<(), Report<KafkaIngestorError>> {
+        // librdkafka completes static assignment removal asynchronously. Repeating `unassign`
+        // before its partition-stop reply arrives can enqueue a second stop for that partition.
+        if *self == Self::Cleared {
+            return Ok(());
+        }
+        consumer.unassign().map_err(|source| {
+            Report::new(KafkaIngestorError::Unassign {
+                topic: topic.to_string(),
+            })
+            .attach_printable(source.to_string())
+        })?;
+        *self = Self::Cleared;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum KafkaIngestorError {
     #[error("failed to build Kafka offset commit for topic '{topic}' partition {partition}")]
@@ -287,6 +346,7 @@ impl KafkaIngestor {
                         ingestor: ingestor.name.as_str().to_string(),
                         reason: source.to_string(),
                     })?;
+            let mut consumer_assignment = KafkaConsumerAssignment::default();
             if let KafkaOffsetMode::ConsumerGroup(_) = &offset_mode {
                 consumer.subscribe(&[topic.as_str()]).map_err(|source| {
                     RuntimeError::StartIngestor {
@@ -303,10 +363,13 @@ impl KafkaIngestor {
                         .initialize_domain_kafka_consumer_offsets(
                             domain,
                             &ingestor.name,
-                            topic.as_str(),
-                            &consumer,
-                            state,
-                            instance_idx,
+                            KafkaOffsetInitialization {
+                                topic: topic.as_str(),
+                                consumer: &consumer,
+                                consumer_assignment: &mut consumer_assignment,
+                                state,
+                                instance_idx,
+                            },
                         )
                         .await
                         .map_err(|reason| RuntimeError::StartIngestor {
@@ -411,7 +474,9 @@ impl KafkaIngestor {
                         match &task_offset_mode {
                             KafkaOffsetMode::ConsumerGroup(_) => consumer.unsubscribe(),
                             KafkaOffsetMode::Domain => {
-                                if let Err(error) = consumer.unassign() {
+                                if let Err(error) =
+                                    consumer_assignment.clear(&consumer, task_topic.as_str())
+                                {
                                     task_events.report_error(format!(
                                         "failed to unassign kafka source while quiescing ingestor \
                                          '{}' in domain '{}': {}",
@@ -458,10 +523,13 @@ impl KafkaIngestor {
                                 .initialize_domain_kafka_consumer_offsets(
                                     &task_domain,
                                     &task_ingestor,
-                                    task_topic.as_str(),
-                                    &consumer,
-                                    state,
-                                    instance_idx,
+                                    KafkaOffsetInitialization {
+                                        topic: task_topic.as_str(),
+                                        consumer: &consumer,
+                                        consumer_assignment: &mut consumer_assignment,
+                                        state,
+                                        instance_idx,
+                                    },
                                 )
                                 .await
                             {
@@ -489,10 +557,13 @@ impl KafkaIngestor {
                                 .initialize_domain_kafka_consumer_offsets(
                                     &task_domain,
                                     &task_ingestor,
-                                    task_topic.as_str(),
-                                    &consumer,
-                                    state,
-                                    instance_idx,
+                                    KafkaOffsetInitialization {
+                                        topic: task_topic.as_str(),
+                                        consumer: &consumer,
+                                        consumer_assignment: &mut consumer_assignment,
+                                        state,
+                                        instance_idx,
+                                    },
                                 )
                                 .await
                             {
@@ -1321,6 +1392,7 @@ impl KafkaIngestor {
         offsets: &HashMap<KafkaTopicPartition, Offset>,
         schedule: Option<&KafkaPartitionSchedule>,
         instance_idx: u64,
+        consumer_assignment: &mut KafkaConsumerAssignment,
     ) -> Result<bool, Report<KafkaIngestorError>> {
         let mut partitions = Vec::new();
         for (key, offset) in offsets {
@@ -1356,21 +1428,7 @@ impl KafkaIngestor {
             }
         }
 
-        if assigned_any {
-            consumer.assign(&assignment).map_err(|source| {
-                Report::new(KafkaIngestorError::Assign {
-                    topic: topic.to_string(),
-                })
-                .attach_printable(source.to_string())
-            })?;
-        } else {
-            consumer.unassign().map_err(|source| {
-                Report::new(KafkaIngestorError::Unassign {
-                    topic: topic.to_string(),
-                })
-                .attach_printable(source.to_string())
-            })?;
-        }
+        consumer_assignment.apply(consumer, topic, &assignment, assigned_any)?;
 
         Ok(has_topic_partitions)
     }
