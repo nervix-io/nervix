@@ -22,7 +22,7 @@ use nervix_models::{
     ProcessorInputs, ProcessorOutputs, RelayName, RequestedResourceVersion, ScheduledNode,
     expression_to_nspl, ingest_quiesce_to_nspl,
 };
-use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram};
+use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
 use tokio::time::Duration;
 
 use crate::{
@@ -1072,8 +1072,17 @@ fn format_window_aggregate_demand(
             references.get(demand.id).copied().unwrap_or(0)
         ),
     ];
-    if let Some(input) = &demand.input {
-        lines.push(format!("  input: {}", format_window_aggregate_input(input)));
+    match &demand.arguments {
+        WindowArguments::Single(input) => {
+            lines.push(format!("  input: {}", format_window_aggregate_input(input)));
+        }
+        WindowArguments::Pair { first, second } => {
+            lines.push(format!(
+                "  inputs: {}, {}",
+                format_window_aggregate_input(first),
+                format_window_aggregate_input(second)
+            ));
+        }
     }
     if let Some(config) = &demand.linear_histogram {
         lines.push(format!("  buckets: {}", config.buckets));
