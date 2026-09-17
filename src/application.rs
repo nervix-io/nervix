@@ -2126,7 +2126,7 @@ impl Application {
                         .await;
                         match result {
                             Ok(checkpoints) => Ok(checkpoints),
-                            Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                            Err(error) => Err(OwnershipHandoffError::remote_rejection(&error)),
                         }
                     }
                 },
@@ -2171,7 +2171,7 @@ impl Application {
                         .await;
                         match result {
                             Ok(preparation) => Ok(preparation),
-                            Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                            Err(error) => Err(OwnershipHandoffError::remote_rejection(&error)),
                         }
                     }
                 },
@@ -2186,7 +2186,7 @@ impl Application {
                     async move {
                         match service.confirm_local_ownership_handoff_state(request).await {
                             Ok(()) => Ok(()),
-                            Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                            Err(error) => Err(OwnershipHandoffError::remote_rejection(&error)),
                         }
                     }
                 },
@@ -2204,7 +2204,7 @@ impl Application {
                             .await;
                         match result {
                             Ok(()) => Ok(()),
-                            Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                            Err(error) => Err(OwnershipHandoffError::remote_rejection(&error)),
                         }
                     }
                 },

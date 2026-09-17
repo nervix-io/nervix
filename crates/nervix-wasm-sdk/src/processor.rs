@@ -57,6 +57,11 @@ pub trait Processor: Sized {
     /// [`Processor::save_state`]. The default restores only stateless
     /// processors and rejects non-empty state instead of silently dropping
     /// it.
+    ///
+    /// Returning an error is the processor's verdict that the saved application
+    /// state cannot be restored: the SDK reports it to the host as a rejected
+    /// application state, with the error as the reason. Whether that state is
+    /// ever discarded is the host's decision, never this method's.
     fn restore(branch: &BranchContext, state: &[u8]) -> Result<Self, GuestError> {
         if state.is_empty() {
             Self::create(branch)

@@ -37,6 +37,25 @@ pub(super) struct WasmGuestState {
     bytes: Vec<u8>,
 }
 
+/// Saved guest state a new guest instance restores, and the revision it was saved at.
+pub(super) struct RestorableGuestState<'a> {
+    pub(super) revision: u64,
+    pub(super) bytes: &'a [u8],
+}
+
+impl<'a> RestorableGuestState<'a> {
+    /// The guest state a transferred snapshot carries, or `None` when the guest had saved nothing.
+    pub(super) fn of_snapshot(snapshot: &'a PersistedRuntimeStateEntry) -> Option<Self> {
+        if snapshot.payload.is_empty() {
+            return None;
+        }
+        Some(Self {
+            revision: snapshot.lsm,
+            bytes: &snapshot.payload,
+        })
+    }
+}
+
 impl WasmGuestState {
     pub(super) fn revision(&self) -> u64 {
         self.revision
@@ -46,12 +65,15 @@ impl WasmGuestState {
         &self.bytes
     }
 
-    /// The bytes a new guest instance restores from, or `None` while the guest has saved nothing.
-    pub(super) fn restorable(&self) -> Option<&[u8]> {
+    /// The state a new guest instance restores from, or `None` while the guest has saved nothing.
+    pub(super) fn restorable(&self) -> Option<RestorableGuestState<'_>> {
         if self.bytes.is_empty() {
             return None;
         }
-        Some(&self.bytes)
+        Some(RestorableGuestState {
+            revision: self.revision,
+            bytes: &self.bytes,
+        })
     }
 
     fn snapshot(&self, placement: &RuntimeStatePlacement) -> PersistedRuntimeStateEntry {
@@ -219,9 +241,12 @@ mod tests {
         let state = ReplicatedWasmProcessorState::new(placement(), Vec::new(), 0, Some(initial))
             .expect("state should initialize from persisted payload");
 
-        let restored = state.restore_guest_state();
-        assert_eq!(restored.restorable(), Some([9_u8, 8, 7].as_slice()));
-        assert_eq!(restored.revision(), 7);
+        let saved = state.restore_guest_state();
+        let restorable = saved
+            .restorable()
+            .expect("a persisted payload must be restorable");
+        assert_eq!(restorable.bytes, [9_u8, 8, 7].as_slice());
+        assert_eq!(restorable.revision, 7);
     }
 
     /// Guest state is saved after every batch. Keeping it for persistence, replication and the next

@@ -1,9 +1,13 @@
 //! Layer: data plane.
-//! Owns: typed failure contexts for capturing, validating, and activating runtime state handoffs.
-//! May depend on: runtime state persistence errors and `error-stack` reports.
+//! Owns: typed failure contexts for capturing, validating, and activating runtime state handoffs,
+//! and the rejection a peer receives for one.
+//! May depend on: runtime state persistence errors, the model vocabulary, the interconnect's
+//! handoff failure envelope, and `error-stack` reports.
 //! Must not know: schedules, consensus transactions, NSPL, or edge protocols.
 
 use error_stack::Report;
+use nervix_interconnect::OwnershipHandoffFailure;
+use nervix_models::ModelName;
 use thiserror::Error;
 
 use super::RuntimePersistenceError;
@@ -24,8 +28,10 @@ pub(crate) enum OwnershipHandoffError {
     Transport(String),
     #[error("ownership handoff deadline elapsed: {0}")]
     Deadline(String),
-    #[error("ownership handoff WASM restore failed: {0}")]
-    WasmRestore(String),
+    #[error("ownership handoff WASM restore failed for wasm processor '{}'", .processor.as_str())]
+    WasmRestore { processor: ModelName },
+    #[error("ownership handoff checkpoint failed for wasm processor '{}'", .processor.as_str())]
+    WasmCheckpoint { processor: ModelName },
     #[error(transparent)]
     Persistence(#[from] RuntimePersistenceError),
 }
@@ -55,8 +61,10 @@ impl OwnershipHandoffError {
         Report::new(Self::Deadline(reason.into()))
     }
 
-    pub(in crate::runtime) fn wasm_restore(reason: impl Into<String>) -> Report<Self> {
-        Report::new(Self::WasmRestore(reason.into()))
+    /// The rejection a peer receives for `report`, carrying every context the report accumulated
+    /// instead of only its outermost one.
+    pub(crate) fn remote_rejection(report: &Report<Self>) -> OwnershipHandoffFailure {
+        OwnershipHandoffFailure::rejected(format!("{report:#}"))
     }
 
     pub(crate) fn persistence(error: RuntimePersistenceError) -> Report<Self> {

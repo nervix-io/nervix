@@ -18,8 +18,8 @@ use meticulous::ResultExt as _;
 use nervix_models::{Timestamp, WasmProcessorLimits};
 use nervix_wasm::{
     WasmAckSidecar, WasmAckToken, WasmBranchInit, WasmEnvelope, WasmExecutionContext,
-    WasmOutputColumnRef, WasmOutputRow, WasmProcessorField, WasmProcessorSchema, WasmProcessorType,
-    WasmRuntime, WasmRuntimeConfig,
+    WasmGuestOperation, WasmOutputColumnRef, WasmOutputRow, WasmProcessorField,
+    WasmProcessorSchema, WasmProcessorType, WasmRuntime, WasmRuntimeConfig,
 };
 use nonzero_ext::nonzero;
 
@@ -314,13 +314,11 @@ async fn the_geo_guest_rejects_a_destination_schema_it_cannot_fill() {
         .await
         .expect_err("a destination the guest cannot fill must be rejected at init");
 
-    match error {
-        nervix_wasm::WasmProcessorError::GuestError { name, .. } => {
-            assert_eq!(
-                name, "nervix_init",
-                "a misdeclared destination is rejected before any data reaches the guest"
-            );
-        }
-        other => panic!("expected an init rejection, got {other:?}"),
-    }
+    let failure = error.current_context();
+    assert_eq!(
+        failure.operation(),
+        WasmGuestOperation::Initialization,
+        "a misdeclared destination is rejected before any data reaches the guest: {failure:?}"
+    );
+    assert_eq!(failure.export(), Some("nervix_init"));
 }

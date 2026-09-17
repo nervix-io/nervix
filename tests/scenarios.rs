@@ -4400,20 +4400,19 @@ async fn given_node_has_state_rejecting_wasm_processor_fixture_resource_director
 }
 
 #[given(
-    expr = "node {string} has {string} limit-exhausting WASM processor fixture resource directory \
-            {string}"
+    expr = "node {string} has {string} failing WASM processor fixture resource directory {string}"
 )]
-async fn given_node_has_limit_exhausting_wasm_processor_fixture_resource_directory(
+async fn given_node_has_failing_wasm_processor_fixture_resource_directory(
     world: &mut ScenarioWorld,
     node_id: String,
-    limit: String,
+    failure: String,
     placeholder: String,
 ) {
     place_generated_wasm_processor_fixture(
         world,
         &node_id,
         &placeholder,
-        limit_exhausting_wasm_fixture(&limit, "limited_events"),
+        WasmLifecycleFailureFixture::parse(&failure).wasm("limited_events"),
     )
     .await;
 }
@@ -4726,59 +4725,281 @@ fn state_rejecting_wasm_fixture(output_relay: &str) -> Vec<u8> {
             i32.const 16
             global.set $read_ptr
             i32.const 1)
-          (func (export "nervix_load_state") (param i32 i32) (result i32) (i32.const -1))
+          (func (export "nervix_load_state") (param i32 i32) (result i32)
+            (i32.const {rejected}))
           (func (export "nervix_reset_state") (result i32) (i32.const 0))
-        )"#
+        )"#,
+        rejected = nervix_wasm::SavedStateRejection::ApplicationState.code()
     )
     .into_bytes()
 }
 
-fn limit_exhausting_wasm_fixture(limit: &str, output_relay: &str) -> Vec<u8> {
-    let encoded = WasmEnvelope::output(
-        Vec::new(),
-        vec![WasmRoutedOutput::new(
-            output_relay,
-            vec![
-                WasmOutputColumnRef::uninitialized(),
-                WasmOutputColumnRef::uninitialized(),
-            ],
-            WasmAckSidecar {
-                rows: vec![WasmOutputRow::default()],
-                ..WasmAckSidecar::default()
-            },
-        )],
-    )
-    .encode()
-    .expect("limit-exhausting WASM output fixture must encode");
-    let encoded_wat = encoded
-        .iter()
-        .map(|byte| format!("\\{byte:02x}"))
-        .collect::<String>();
-    let encoded_len = encoded.len();
-    let failure = match limit {
-        "fuel" => {
-            r#"
-            loop $spin
-              br $spin
-            end
-        "#
-        }
-        "memory" => {
-            r#"
-            i32.const 1
-            memory.grow
-            drop
-        "#
-        }
-        other => panic!("unsupported WASM limit fixture '{other}'"),
-    };
+/// Which guest operation a generated lifecycle fixture fails, for the branches that trigger it.
+///
+/// Every variant emits one row with uninitialized columns per processed input, so a route can
+/// construct its output from the branch alone. A trigger is either an input envelope larger than
+/// the thresholds below, which a large message produces, or a branch key naming
+/// [`INIT_REFUSED_TENANT`].
+#[derive(Clone, Copy, Debug)]
+enum WasmLifecycleFailureFixture {
+    /// An input over the large threshold spins until `MAX FUEL` runs out.
+    Fuel,
+    /// An input over the large threshold grows linear memory past `MAX MEMORY`.
+    Memory,
+    /// A branch whose key names [`INIT_REFUSED_TENANT`] refuses its branch configuration.
+    Initialization,
+    /// An input over the large threshold requests a timeout whose callback fails.
+    Timeout,
+    /// An input over the large threshold leaves the guest unable to serialize its state.
+    StateSnapshot,
+    /// An input over the large threshold saves state the guest refuses to restore, and an input
+    /// over the huge threshold exhausts `MAX FUEL` so the instance is recreated from that state.
+    StateRestore,
+}
 
-    format!(
-        r#"(module
+/// The tenant whose branch configuration the initialization fixture refuses.
+const INIT_REFUSED_TENANT: &str = "init-refused";
+
+impl WasmLifecycleFailureFixture {
+    const LARGE_INPUT_BYTES: usize = 2_048;
+    const HUGE_INPUT_BYTES: usize = 8_192;
+    const INIT_REFUSAL: &str = "guest refuses its branch configuration";
+    const TIMEOUT_REFUSAL: &str = "guest refuses its timeout";
+    const SNAPSHOT_REFUSAL: &str = "guest cannot serialize its state";
+    const RESTORE_REFUSAL: &str = "guest refuses its saved counters";
+
+    fn parse(name: &str) -> Self {
+        match name {
+            "fuel" => Self::Fuel,
+            "memory" => Self::Memory,
+            "initialization" => Self::Initialization,
+            "timeout" => Self::Timeout,
+            "state snapshot" => Self::StateSnapshot,
+            "state restore" => Self::StateRestore,
+            other => panic!("unsupported failing WASM processor fixture '{other}'"),
+        }
+    }
+
+    fn init_body(self) -> String {
+        match self {
+            Self::Initialization => format!(
+                "local.get $ptr local.get $size call $contains_init_refused_tenant
+                 if
+                   i32.const 40100 i32.const {} call $report
+                   i32.const -6
+                   return
+                 end
+                 i32.const 0",
+                Self::INIT_REFUSAL.len()
+            ),
+            Self::Fuel
+            | Self::Memory
+            | Self::Timeout
+            | Self::StateSnapshot
+            | Self::StateRestore => "i32.const 0".to_string(),
+        }
+    }
+
+    fn process_body(self) -> String {
+        let large = Self::LARGE_INPUT_BYTES;
+        let huge = Self::HUGE_INPUT_BYTES;
+        match self {
+            Self::Fuel => format!(
+                "local.get $size i32.const {large} i32.gt_u
+                 if (loop $spin br $spin) end"
+            ),
+            Self::Memory => format!(
+                "local.get $size i32.const {large} i32.gt_u
+                 if i32.const 1 memory.grow drop end"
+            ),
+            Self::Timeout => format!(
+                "local.get $size i32.const {large} i32.gt_u
+                 if i64.const 1000000 call $timeout drop end"
+            ),
+            Self::StateSnapshot => format!(
+                "local.get $size i32.const {large} i32.gt_u
+                 if i32.const 1 global.set $poisoned end"
+            ),
+            Self::StateRestore => format!(
+                "local.get $size i32.const {huge} i32.gt_u
+                 if (loop $spin br $spin) end
+                 local.get $size i32.const {large} i32.gt_u
+                 if i32.const 1 global.set $poisoned end"
+            ),
+            Self::Initialization => String::new(),
+        }
+    }
+
+    fn on_timeout_body(self) -> String {
+        match self {
+            Self::Timeout => format!(
+                "i32.const 40300 i32.const {} call $report i32.const -6",
+                Self::TIMEOUT_REFUSAL.len()
+            ),
+            Self::Fuel
+            | Self::Memory
+            | Self::Initialization
+            | Self::StateSnapshot
+            | Self::StateRestore => "i32.const 0".to_string(),
+        }
+    }
+
+    fn dump_state_body(self) -> String {
+        match self {
+            Self::StateSnapshot => format!(
+                "global.get $poisoned
+                 if (result i32)
+                   i32.const 40200 i32.const {} call $report
+                   i32.const -6
+                 else
+                   i32.const 0
+                 end",
+                Self::SNAPSHOT_REFUSAL.len()
+            ),
+            Self::StateRestore => "global.get $poisoned
+                 if (result i32)
+                   i32.const 40600 global.set $read_ptr
+                   i32.const 1
+                 else
+                   i32.const 0
+                 end"
+            .to_string(),
+            Self::Fuel | Self::Memory | Self::Initialization | Self::Timeout => {
+                "i32.const 0".to_string()
+            }
+        }
+    }
+
+    fn load_state_body(self) -> String {
+        match self {
+            Self::StateRestore => format!(
+                "i32.const 40400 i32.const {} call $report i32.const {}",
+                Self::RESTORE_REFUSAL.len(),
+                nervix_wasm::SavedStateRejection::ApplicationState.code()
+            ),
+            Self::Fuel
+            | Self::Memory
+            | Self::Initialization
+            | Self::Timeout
+            | Self::StateSnapshot => "i32.const 0".to_string(),
+        }
+    }
+
+    fn wasm(self, output_relay: &str) -> Vec<u8> {
+        let encoded = WasmEnvelope::output(
+            Vec::new(),
+            vec![WasmRoutedOutput::new(
+                output_relay,
+                vec![
+                    WasmOutputColumnRef::uninitialized(),
+                    WasmOutputColumnRef::uninitialized(),
+                ],
+                WasmAckSidecar {
+                    rows: vec![WasmOutputRow::default()],
+                    ..WasmAckSidecar::default()
+                },
+            )],
+        )
+        .encode()
+        .expect("failing WASM output fixture must encode");
+        let encoded_wat = encoded
+            .iter()
+            .map(|byte| format!("\\{byte:02x}"))
+            .collect::<String>();
+        let encoded_len = encoded.len();
+        let marker_len = INIT_REFUSED_TENANT.len();
+        let init_body = self.init_body();
+        let process_body = self.process_body();
+        let on_timeout_body = self.on_timeout_body();
+        let dump_state_body = self.dump_state_body();
+        let load_state_body = self.load_state_body();
+        let init_refusal = Self::INIT_REFUSAL;
+        let snapshot_refusal = Self::SNAPSHOT_REFUSAL;
+        let timeout_refusal = Self::TIMEOUT_REFUSAL;
+        let restore_refusal = Self::RESTORE_REFUSAL;
+
+        format!(
+            r#"(module
+          (import "env" "nervix_timeout_after_nanos" (func $timeout (param i64) (result i64)))
           (memory (export "memory") 1)
           (global $emitted (mut i32) (i32.const 0))
           (global $read_ptr (mut i32) (i32.const 0))
+          (global $poisoned (mut i32) (i32.const 0))
+          (global $reason_ptr (mut i32) (i32.const 0))
+          (global $reason_len (mut i32) (i32.const 0))
           (data (i32.const 32768) "{encoded_wat}")
+          (data (i32.const 40000) "{INIT_REFUSED_TENANT}")
+          (data (i32.const 40100) "{init_refusal}")
+          (data (i32.const 40200) "{snapshot_refusal}")
+          (data (i32.const 40300) "{timeout_refusal}")
+          (data (i32.const 40400) "{restore_refusal}")
+          (data (i32.const 40600) "\2a")
+          (func $report (param $ptr i32) (param $len i32)
+            local.get $ptr
+            global.set $reason_ptr
+            local.get $len
+            global.set $reason_len)
+          (func $contains_init_refused_tenant (param $ptr i32) (param $size i32) (result i32)
+            (local $start i32)
+            (local $last i32)
+            (local $offset i32)
+            local.get $size
+            i32.const {marker_len}
+            i32.lt_u
+            if
+              i32.const 0
+              return
+            end
+            local.get $ptr
+            local.get $size
+            i32.add
+            i32.const {marker_len}
+            i32.sub
+            local.set $last
+            local.get $ptr
+            local.set $start
+            block $absent
+              loop $scan
+                local.get $start
+                local.get $last
+                i32.gt_u
+                br_if $absent
+                i32.const 0
+                local.set $offset
+                block $mismatch
+                  loop $compare
+                    local.get $offset
+                    i32.const {marker_len}
+                    i32.eq
+                    if
+                      i32.const 1
+                      return
+                    end
+                    local.get $start
+                    local.get $offset
+                    i32.add
+                    i32.load8_u
+                    local.get $offset
+                    i32.const 40000
+                    i32.add
+                    i32.load8_u
+                    i32.ne
+                    br_if $mismatch
+                    local.get $offset
+                    i32.const 1
+                    i32.add
+                    local.set $offset
+                    br $compare
+                  end
+                end
+                local.get $start
+                i32.const 1
+                i32.add
+                local.set $start
+                br $scan
+              end
+            end
+            i32.const 0)
           (func (export "nervix_buffer_ptr") (result i32) global.get $read_ptr)
           (func (export "nervix_buffer_len") (result i32) (i32.const {encoded_len}))
           (func (export "nervix_buffer_capacity") (result i32) (i32.const 65536))
@@ -4786,19 +5007,22 @@ fn limit_exhausting_wasm_fixture(limit: &str, output_relay: &str) -> Vec<u8> {
             i32.const 0
             global.set $read_ptr
             i32.const 0)
-          (func (export "nervix_init") (param i32 i32) (result i32) (i32.const 0))
+          (func (export "nervix_global_error_ptr") (result i32) global.get $reason_ptr)
+          (func (export "nervix_global_error_len") (result i32) global.get $reason_len)
+          (func (export "nervix_clear_global_error") (result i32)
+            i32.const 0
+            global.set $reason_len
+            i32.const 0)
+          (func (export "nervix_init") (param $ptr i32) (param $size i32) (result i32)
+            {init_body})
           (func (export "nervix_current_domain_time_nanos") (result i64) (i64.const 0))
-          (func (export "nervix_process_batch") (param i32) (param $size i32) (result i32)
-            local.get $size
-            i32.const 2048
-            i32.gt_u
-            if
-              {failure}
-            end
+          (func (export "nervix_process_batch") (param $ptr i32) (param $size i32) (result i32)
+            {process_body}
             i32.const 1
             global.set $emitted
             i32.const 0)
-          (func (export "nervix_on_timeout") (param i64) (result i32) (i32.const 0))
+          (func (export "nervix_on_timeout") (param i64) (result i32)
+            {on_timeout_body})
           (func (export "nervix_flush") (result i32) (i32.const 0))
           (func (export "nervix_read_emit") (result i32)
             global.get $emitted
@@ -4811,15 +5035,18 @@ fn limit_exhausting_wasm_fixture(limit: &str, output_relay: &str) -> Vec<u8> {
             else
               i32.const 0
             end)
-          (func (export "nervix_dump_state") (result i32) (i32.const 0))
-          (func (export "nervix_load_state") (param i32 i32) (result i32) (i32.const 0))
+          (func (export "nervix_dump_state") (result i32)
+            {dump_state_body})
+          (func (export "nervix_load_state") (param i32 i32) (result i32)
+            {load_state_body})
           (func (export "nervix_reset_state") (result i32)
             i32.const 0
             global.set $emitted
             i32.const 0)
         )"#
-    )
-    .into_bytes()
+        )
+        .into_bytes()
+    }
 }
 
 fn ensure_onnx_runtime_loaded() {
