@@ -13,7 +13,9 @@ use std::{collections::BTreeSet, num::NonZeroU64};
 use ahash::{HashMap, HashSet};
 use meticulous::OptionExt as _;
 use nervix_client_core::Client as NervixClient;
-use nervix_consensus::{CommandExecution, ConsensusError, DomainMutationLease};
+use nervix_consensus::{
+    CommandExecution, ConsensusError, DomainMutationLease, DomainPlanningInputs,
+};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, DomainName, IngestSource, IngestorName, KafkaOffsetMode,
     KafkaPartitionSchedule, Model, ModelKind, ModelName, NodeRef, PlacementGroupSchedule,
@@ -33,7 +35,7 @@ use super::{
         mark_complete_ownership_transitions, planned_ownership_moves,
     },
     peer_grpc::{grpc_client_connect_options, grpc_uri_from_advertise_addr},
-    schedule_planning::PreparedDomainSchedule,
+    schedule_planning::{DomainSchedulePlanningSnapshot, PreparedDomainSchedule},
     session_service::SessionServiceImpl,
     shutdown::{ShutdownDeadline, ShutdownPhaseOutcome},
 };
@@ -159,6 +161,8 @@ pub(in crate::application) struct ScheduleTransition {
     pub(in crate::application) expected_schedule: Option<nervix_models::DomainSchedule>,
     pub(in crate::application) prepared_schedule: Option<nervix_models::DomainSchedule>,
     pub(in crate::application) planned_relocations: usize,
+    pub(in crate::application) inputs: Option<DomainPlanningInputs>,
+    pub(in crate::application) planning: Option<DomainSchedulePlanningSnapshot>,
 }
 
 /// One Kafka partition watcher the leader runs: the ingestor it watches for, and the task doing
@@ -195,30 +199,30 @@ impl SessionServiceImpl {
                 domain.as_str()
             ));
         }
-        let default_policy = self
-            .inner
-            .consensus
-            .current_domain(domain)
-            .await
+        let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
+        let default_policy = inputs
+            .state()
             .ok_or_else(|| format!("domain '{}' does not exist", domain.as_str()))?
             .config
             .placement;
-        let expected_schedule = self
-            .inner
-            .consensus
-            .current_schedule()
-            .await
-            .domain(domain)
-            .cloned();
+        let planning = self
+            .capture_domain_schedule_planning_snapshot(&inputs)
+            .await;
         let PreparedDomainSchedule {
             schedule,
             relocations,
-        } = self
-            .prepare_domain_schedule(domain, graph, default_policy)
-            .await?;
+            ..
+        } = planning.prepare(&inputs, domain, graph, default_policy, inputs.schedule());
+        self.validate_domain_planning_inputs(&inputs)
+            .await
+            .map_err(|error| error.to_string())?;
+        planning
+            .validate_eligibility(self)
+            .await
+            .map_err(|error| error.to_string())?;
         self.inner
             .consensus
-            .replace_domain_schedule(domain.clone(), expected_schedule, schedule, mutation)
+            .replace_domain_schedule(inputs, schedule, mutation)
             .await
             .map_err(|error| error.to_string())?;
         self.apply_current_cluster_state().await.map_err(|error| {
@@ -236,9 +240,11 @@ impl SessionServiceImpl {
         graph: Option<ActiveGraph>,
         placement: PlacementPolicy,
     ) -> Result<PreparedDomainSchedule, String> {
-        let snapshot = self.capture_domain_schedule_planning_snapshot().await;
-        let current = self.inner.consensus.current_schedule().await;
-        Ok(snapshot.prepare(domain, graph, placement, current.domain(domain)))
+        let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
+        let snapshot = self
+            .capture_domain_schedule_planning_snapshot(&inputs)
+            .await;
+        Ok(snapshot.prepare(&inputs, domain, graph, placement, inputs.schedule()))
     }
 
     pub(in crate::application) async fn drop_node(
@@ -287,7 +293,6 @@ impl SessionServiceImpl {
             }
         }
 
-        let current_schedule = self.inner.consensus.current_schedule().await;
         if !is_resuming_applied_removal {
             match self
                 .inner
@@ -307,21 +312,18 @@ impl SessionServiceImpl {
             }
         }
 
-        let availability = self.inner.cluster.availability_state().await;
-        let live_node_ids = availability.live_node_ids();
-        let placement_candidate_node_ids = availability.placement_candidate_node_ids();
-        let live_voters = self.inner.consensus.live_voter_ids(live_node_ids).await;
-        let schedulable_nodes = self
-            .inner
-            .consensus
-            .schedulable_live_voter_ids(placement_candidate_node_ids)
-            .await;
-        let (cluster_nodes, preservable_nodes) =
-            Self::drop_node_schedule_node_sets(&live_voters, &schedulable_nodes);
         for (domain, graph) in self.inner.registry.active_graphs() {
-            let Some(domain_state) = self.inner.consensus.current_domain(&domain).await else {
+            let inputs = self.inner.consensus.domain_planning_inputs(&domain).await;
+            let Some(domain_state) = inputs.state() else {
                 continue;
             };
+            let planning = self
+                .capture_domain_schedule_planning_snapshot(&inputs)
+                .await;
+            let (cluster_nodes, preservable_nodes) = Self::drop_node_schedule_node_sets(
+                planning.live_voters(),
+                planning.cluster_nodes(),
+            );
             #[cfg(feature = "testing")]
             let mut schedule = graph.schedule_for_domain_with_mode(
                 &domain,
@@ -337,20 +339,23 @@ impl SessionServiceImpl {
                 self.inner.replica_count,
                 domain_state.config.placement,
             );
-            Self::merge_existing_schedule_data(
-                &mut schedule,
-                current_schedule.domain(&domain),
-                preservable_nodes,
-            );
+            Self::merge_existing_schedule_data(&mut schedule, inputs.schedule(), preservable_nodes);
+            if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {
+                return command_error(format!(
+                    "dropped node '{node_id}', but could not replan domain '{}': {error}",
+                    domain.as_str()
+                ));
+            }
+            if let Err(error) = planning.validate_eligibility(self).await {
+                return command_error(format!(
+                    "dropped node '{node_id}', but could not replan domain '{}': {error}",
+                    domain.as_str()
+                ));
+            }
             if let Err(error) = self
                 .inner
                 .consensus
-                .replace_domain_schedule(
-                    domain.clone(),
-                    current_schedule.domain(&domain).cloned(),
-                    Some(schedule),
-                    None,
-                )
+                .replace_domain_schedule(inputs, Some(schedule), None)
                 .await
             {
                 return command_error(format!(
@@ -484,24 +489,6 @@ impl SessionServiceImpl {
         let mut failed_units = BTreeSet::<(DomainName, String)>::new();
         let mut failed_domains = BTreeSet::<DomainName>::new();
         loop {
-            let availability = self.inner.cluster.availability_state().await;
-            let live_node_ids = availability.live_node_ids();
-            let placement_candidate_node_ids = availability.placement_candidate_node_ids();
-            let live_voters = self.inner.consensus.live_voter_ids(live_node_ids).await;
-            let replacement_nodes = self
-                .inner
-                .consensus
-                .schedulable_live_voter_ids(placement_candidate_node_ids)
-                .await;
-            if replacement_nodes.is_empty() {
-                failed = true;
-                outcomes.push(format!(
-                    "- owner={node_id} failed: no live schedulable raft voters remain"
-                ));
-                break;
-            }
-            let live_voter_set = live_voters.iter().cloned().collect::<BTreeSet<_>>();
-            let replacement_node_set = replacement_nodes.iter().cloned().collect::<BTreeSet<_>>();
             let mut handled_this_iteration = false;
 
             for (domain, graph) in self.inner.registry.active_graphs() {
@@ -553,10 +540,31 @@ impl SessionServiceImpl {
                 } else {
                     None
                 };
-                let Some(domain_state) = self.inner.consensus.current_domain(&domain).await else {
+                let inputs = self.inner.consensus.domain_planning_inputs(&domain).await;
+                let Some(domain_state) = inputs.state() else {
                     continue;
                 };
-                let current_schedule = self.inner.consensus.current_schedule().await;
+                let planning = self
+                    .capture_domain_schedule_planning_snapshot(&inputs)
+                    .await;
+                let replacement_nodes = planning.cluster_nodes().to_vec();
+                let live_voter_set = planning
+                    .live_voters()
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let replacement_node_set =
+                    replacement_nodes.iter().cloned().collect::<BTreeSet<_>>();
+                if replacement_nodes.is_empty() {
+                    failed = true;
+                    failed_domains.insert(domain.clone());
+                    outcomes.push(format!(
+                        "- domain={} owner={node_id} failed: no live schedulable raft voters \
+                         remain",
+                        domain.as_str()
+                    ));
+                    continue;
+                }
                 #[cfg(feature = "testing")]
                 let desired = graph.schedule_for_domain_with_mode(
                     &domain,
@@ -572,16 +580,31 @@ impl SessionServiceImpl {
                     self.inner.replica_count,
                     domain_state.config.placement,
                 );
-                let Some(current_domain) = current_schedule.domain(&domain) else {
+                let Some(current_domain) = inputs.schedule() else {
+                    if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {
+                        failed = true;
+                        failed_domains.insert(domain.clone());
+                        outcomes.push(format!(
+                            "- domain={} owner={node_id} failed: {error}",
+                            domain.as_str()
+                        ));
+                        handled_this_iteration = true;
+                        break;
+                    }
+                    if let Err(error) = planning.validate_eligibility(self).await {
+                        failed = true;
+                        failed_domains.insert(domain.clone());
+                        outcomes.push(format!(
+                            "- domain={} owner={node_id} failed: {error}",
+                            domain.as_str()
+                        ));
+                        handled_this_iteration = true;
+                        break;
+                    }
                     if let Err(error) = self
                         .inner
                         .consensus
-                        .replace_domain_schedule(
-                            domain.clone(),
-                            None,
-                            Some(desired),
-                            domain_mutation.as_ref(),
-                        )
+                        .replace_domain_schedule(inputs, Some(desired), domain_mutation.as_ref())
                         .await
                     {
                         if let ConsensusError::LeadershipLost { .. } = &error {
@@ -638,6 +661,26 @@ impl SessionServiceImpl {
                 let unit_key = (domain.clone(), drain_move.label.clone());
                 mark_complete_ownership_transitions(Some(current_domain), &mut next);
                 let planned_moves = planned_ownership_moves(Some(current_domain), Some(&next));
+                if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {
+                    failed = true;
+                    failed_units.insert(unit_key);
+                    outcomes.push(format!(
+                        "- {} owner={node_id} failed: {error}",
+                        drain_move.label
+                    ));
+                    handled_this_iteration = true;
+                    break;
+                }
+                if let Err(error) = planning.validate_eligibility(self).await {
+                    failed = true;
+                    failed_units.insert(unit_key);
+                    outcomes.push(format!(
+                        "- {} owner={node_id} failed: {error}",
+                        drain_move.label
+                    ));
+                    handled_this_iteration = true;
+                    break;
+                }
                 let mut handoff = match self
                     .begin_planned_ownership_handoff(&domain, Some(current_domain), Some(&next))
                     .await
@@ -668,12 +711,7 @@ impl SessionServiceImpl {
                 if let Err(error) = self
                     .inner
                     .consensus
-                    .replace_domain_schedule(
-                        domain.clone(),
-                        Some(current_domain.clone()),
-                        Some(next),
-                        domain_mutation.as_ref(),
-                    )
+                    .replace_domain_schedule(inputs, Some(next), domain_mutation.as_ref())
                     .await
                 {
                     if let Some(handoff) = handoff.take() {
@@ -1812,8 +1850,8 @@ impl SessionServiceImpl {
             return Ok(());
         }
 
-        let current = self.inner.consensus.current_schedule().await;
-        let Some(existing_domain_schedule) = current.domain(domain) else {
+        let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
+        let Some(existing_domain_schedule) = inputs.schedule() else {
             return Ok(());
         };
         let mut next_domain_schedule = existing_domain_schedule.clone();
@@ -1855,12 +1893,7 @@ impl SessionServiceImpl {
         ingestor_node.kafka_partition_schedule = Some(next_schedule);
         self.inner
             .consensus
-            .replace_domain_schedule(
-                domain.clone(),
-                Some(existing_domain_schedule.clone()),
-                Some(next_domain_schedule),
-                None,
-            )
+            .update_kafka_partition_schedule(inputs, next_domain_schedule)
             .await
             .map_err(|error| error.to_string())
     }

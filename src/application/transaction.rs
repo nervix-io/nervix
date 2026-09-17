@@ -13,10 +13,11 @@ use arch_into::ArchInto;
 use error_stack::{Report, ResultExt};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
-    ConsensusError, ConsensusTransactionError, ReplicatedTransaction, TransactionApplyingStep,
-    TransactionCommandResult, TransactionCommitAdvance, TransactionDiagnostic, TransactionOutcome,
-    TransactionQueueAdmission, TransactionQueueLimits, TransactionState, TransactionStatement,
-    TransactionStatementRequest, TransactionStepEffect, TransactionStepResult,
+    ConsensusError, ConsensusTransactionError, DomainPlanningInputs, ReplicatedTransaction,
+    TransactionApplyingStep, TransactionCommandResult, TransactionCommitAdvance,
+    TransactionDiagnostic, TransactionOutcome, TransactionQueueAdmission, TransactionQueueLimits,
+    TransactionState, TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
+    TransactionStepResult,
 };
 use nervix_models::{
     ActualExecutionStepImpact, CanonicalImpactSet, CommandExecutionReference, DomainName,
@@ -82,6 +83,11 @@ struct TransactionPlanningBasisInput<'a> {
     resources: Vec<&'a ResourceName>,
     completed_resource_versions: Vec<&'a ResourceId>,
     schedule: Option<&'a DomainSchedule>,
+    members: &'a [nervix_models::ClusterNodeName],
+    voters: &'a [nervix_models::ClusterNodeName],
+    cordoned: &'a [nervix_models::ClusterNodeName],
+    live_identities: Vec<&'a nervix_models::ClusterNodeIdentity>,
+    placement_candidate_identities: Vec<&'a nervix_models::ClusterNodeIdentity>,
     live_voters: &'a [nervix_models::ClusterNodeName],
     cluster_nodes: &'a [nervix_models::ClusterNodeName],
     replica_count: usize,
@@ -95,6 +101,7 @@ struct TransactionPlanningBasisSource<'a> {
     resources: &'a BTreeSet<ResourceName>,
     resource_uploads: &'a ResourceUploads,
     schedule: Option<&'a DomainSchedule>,
+    authoritative_inputs: &'a DomainPlanningInputs,
     schedule_inputs: &'a DomainSchedulePlanningSnapshot,
 }
 
@@ -107,6 +114,7 @@ fn transaction_planning_basis(
         resources,
         resource_uploads,
         schedule,
+        authoritative_inputs,
         schedule_inputs,
     } = source;
     let mut ordered_models = models.models().collect::<Vec<_>>();
@@ -118,6 +126,14 @@ fn transaction_planning_basis(
         resources,
         completed_resource_versions: resource_uploads.completed_versions().collect(),
         schedule,
+        members: authoritative_inputs.topology().members(),
+        voters: authoritative_inputs.topology().voters(),
+        cordoned: authoritative_inputs.topology().cordoned(),
+        live_identities: schedule_inputs.live_identities().iter().collect(),
+        placement_candidate_identities: schedule_inputs
+            .placement_candidate_identities()
+            .iter()
+            .collect(),
         live_voters: schedule_inputs.live_voters(),
         cluster_nodes: schedule_inputs.cluster_nodes(),
         replica_count: schedule_inputs.replica_count(),
@@ -173,8 +189,16 @@ pub(in crate::application) struct TransactionModelStepContext<'a> {
     pub(in crate::application) transaction: &'a ReplicatedTransaction,
     pub(in crate::application) first_statement: usize,
     pub(in crate::application) planned_step: PlannedTransactionStep,
+    pub(in crate::application) inputs: DomainPlanningInputs,
+    pub(in crate::application) schedule_inputs: DomainSchedulePlanningSnapshot,
     pub(in crate::application) outcome:
         &'a ParkingMutex<Option<Result<ReplicatedTransaction, Report<TransactionCommitError>>>>,
+}
+
+struct CapturedTransactionPlan {
+    plan: PlannedTransaction,
+    inputs: DomainPlanningInputs,
+    schedule_inputs: DomainSchedulePlanningSnapshot,
 }
 
 enum TransactionApplicationAttempt {
@@ -1010,7 +1034,7 @@ impl SessionServiceImpl {
         statements: &[Statement],
         first_operation_index: usize,
         allow_incomplete_final_model_run: bool,
-    ) -> Result<PlannedTransaction, Report<TransactionPlanningError>> {
+    ) -> Result<CapturedTransactionPlan, Report<TransactionPlanningError>> {
         let mutates_domain = statements
             .iter()
             .any(Statement::requires_domain_mutation_ownership);
@@ -1022,11 +1046,15 @@ impl SessionServiceImpl {
             ));
         }
         let models = self.inner.registry.transaction_planning_models(domain);
-        let (control, schedule_inputs) = tokio::join!(
-            self.inner.consensus.transaction_control_snapshot(domain),
-            self.capture_domain_schedule_planning_snapshot(),
-        );
-        let domain_state = control.domain.ok_or_else(|| {
+        let control = self
+            .inner
+            .consensus
+            .transaction_control_snapshot(domain)
+            .await;
+        let schedule_inputs = self
+            .capture_domain_schedule_planning_snapshot(&control.planning_inputs)
+            .await;
+        let domain_state = control.planning_inputs.state().cloned().ok_or_else(|| {
             Report::new(TransactionPlanningError::DomainNotFound {
                 domain: domain.clone(),
             })
@@ -1044,7 +1072,8 @@ impl SessionServiceImpl {
             models: &models,
             resources: &resources,
             resource_uploads: &resource_uploads,
-            schedule: control.schedule.as_ref(),
+            schedule: control.planning_inputs.schedule(),
+            authoritative_inputs: &control.planning_inputs,
             schedule_inputs: &schedule_inputs,
         })?;
         let snapshot = TransactionPlanningSnapshot {
@@ -1052,7 +1081,7 @@ impl SessionServiceImpl {
             models,
             resources,
             resource_uploads,
-            schedule: control.schedule,
+            schedule: control.planning_inputs.schedule().cloned(),
             basis,
         };
         let planning_domain = domain.clone();
@@ -1062,7 +1091,13 @@ impl SessionServiceImpl {
             first_operation_index,
             allow_incomplete_final_model_run,
             |graph, placement, current, attribution| {
-                let prepared = schedule_inputs.prepare(&planning_domain, graph, placement, current);
+                let prepared = schedule_inputs.prepare(
+                    &control.planning_inputs,
+                    &planning_domain,
+                    graph,
+                    placement,
+                    current,
+                );
                 let ownership_moves = planned_ownership_moves(current, prepared.schedule.as_ref())
                     .into_iter()
                     .map(|moved| OwnershipMoveImpact {
@@ -1102,7 +1137,11 @@ impl SessionServiceImpl {
                     .attach(message)
                 })?;
         }
-        Ok(plan)
+        Ok(CapturedTransactionPlan {
+            plan,
+            inputs: control.planning_inputs,
+            schedule_inputs,
+        })
     }
 
     fn transaction_admission_result(
@@ -1126,7 +1165,7 @@ impl SessionServiceImpl {
             } => *already_existed,
             PlannedTransactionStepKind::AlterDomain { .. }
             | PlannedTransactionStepKind::StartDomain { .. }
-            | PlannedTransactionStepKind::StopDomain { .. } => false,
+            | PlannedTransactionStepKind::StopDomain => false,
         };
         let mut result = if already_existed {
             let target = match candidate {
@@ -1172,7 +1211,7 @@ impl SessionServiceImpl {
             .map(|queued| queued.statement.clone())
             .collect::<Vec<_>>();
         statements.push(candidate.statement.clone());
-        let plan = self
+        let captured = self
             .plan_transaction_statements(&transaction.domain, &statements, 0, true)
             .await
             .map_err(|error| {
@@ -1181,11 +1220,13 @@ impl SessionServiceImpl {
                     transaction_planning_error_message(&error)
                 )
             })?;
-        plan.report()
+        captured
+            .plan
+            .report()
             .map_err(|error| format!("transaction statement failed preflight: {error}"))?;
         Ok(Self::transaction_admission_result(
             &candidate.statement,
-            &plan,
+            &captured.plan,
             candidate.expected_position,
         ))
     }
@@ -1430,15 +1471,15 @@ impl SessionServiceImpl {
                 .iter()
                 .map(|queued| queued.statement.clone())
                 .collect::<Vec<_>>();
-            let plan = Box::pin(self.plan_transaction_statements(
+            let captured = Box::pin(self.plan_transaction_statements(
                 &transaction.domain,
                 &remaining,
                 first_statement,
                 false,
             ))
             .await;
-            let plan = match plan {
-                Ok(plan) => plan,
+            let captured = match captured {
+                Ok(captured) => captured,
                 Err(error) => {
                     let planning_error = transaction_planning_error_message(&error);
                     let message =
@@ -1461,7 +1502,7 @@ impl SessionServiceImpl {
                     .await;
                 }
             };
-            let planned_step = plan.first_step().cloned().ok_or_else(|| {
+            let planned_step = captured.plan.first_step().cloned().ok_or_else(|| {
                 Report::new(TransactionCommitError::InvalidProgress {
                     id: transaction.id.clone(),
                 })
@@ -1497,6 +1538,8 @@ impl SessionServiceImpl {
                         transaction: &transaction,
                         first_statement,
                         planned_step,
+                        inputs: captured.inputs,
+                        schedule_inputs: captured.schedule_inputs,
                         outcome: &outcome,
                     }),
                 ))
@@ -1537,6 +1580,8 @@ impl SessionServiceImpl {
                 &transaction,
                 first_statement,
                 planned_step,
+                captured.inputs,
+                captured.schedule_inputs,
             ))
             .await?;
             if matches!(advanced.state, TransactionState::Finished(_)) {
@@ -1803,6 +1848,8 @@ impl SessionServiceImpl {
         transaction: &ReplicatedTransaction,
         statement_index: usize,
         planned_step: PlannedTransactionStep,
+        inputs: DomainPlanningInputs,
+        schedule_inputs: DomainSchedulePlanningSnapshot,
     ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
         let queued = transaction.statements.get(statement_index).verified(
             "the caller checked this index against the same statement list before dispatching the \
@@ -1832,6 +1879,22 @@ impl SessionServiceImpl {
         } else {
             None
         };
+        if matches!(planned_kind, PlannedTransactionStepKind::AlterDomain { .. }) {
+            if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {
+                return Err(Report::new(TransactionCommitError::Proposal(
+                    ConsensusTransactionError::Consensus(ConsensusError::Conflict(
+                        error.to_string(),
+                    )),
+                )));
+            }
+            if let Err(error) = schedule_inputs.validate_eligibility(self).await {
+                return Err(Report::new(TransactionCommitError::Proposal(
+                    ConsensusTransactionError::Consensus(ConsensusError::Conflict(
+                        error.to_string(),
+                    )),
+                )));
+            }
+        }
         let (result, effect) = match planned_kind {
             PlannedTransactionStepKind::AlterDomain { plan } => {
                 let placement = plan.next.config.placement;
@@ -1879,8 +1942,7 @@ impl SessionServiceImpl {
                                     quiesce_level_message(quiesce_level)
                                 )),
                                 Some(TransactionStepEffect::PutDomainAndSchedule {
-                                    expected_domain: Box::new(plan.previous),
-                                    expected_schedule: plan.expected_schedule.map(Box::new),
+                                    inputs: Box::new(inputs),
                                     domain: Box::new(plan.next),
                                     schedule: schedule.map(Box::new),
                                 }),
@@ -1906,6 +1968,7 @@ impl SessionServiceImpl {
                     (
                         command_ok(format!("created resource '{}'", resource.as_str())),
                         Some(TransactionStepEffect::CreateResourceCatalog {
+                            inputs: Box::new(inputs),
                             identifier: resource,
                         }),
                     )
@@ -1937,8 +2000,7 @@ impl SessionServiceImpl {
                             Ok(resolved_start) => (
                                 command_ok(format!("starting domain '{}'", domain_id.as_str())),
                                 Some(TransactionStepEffect::StartDomain {
-                                    domain_id: domain_id.clone(),
-                                    expected_start_version: previous.start_version,
+                                    inputs: Box::new(inputs),
                                     start: resolved_start.concrete_start,
                                     clock: previous
                                         .config
@@ -1960,11 +2022,10 @@ impl SessionServiceImpl {
                     Err(message) => (command_error(message), None),
                 }
             }
-            PlannedTransactionStepKind::StopDomain { previous } => (
+            PlannedTransactionStepKind::StopDomain => (
                 command_ok(format!("stopped domain '{}'", domain_id.as_str())),
                 Some(TransactionStepEffect::StopDomain {
-                    domain_id: domain_id.clone(),
-                    expected_start_version: previous.start_version,
+                    inputs: Box::new(inputs),
                 }),
             ),
             PlannedTransactionStepKind::Models { .. } => {

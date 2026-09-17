@@ -216,12 +216,18 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
         let mut harness = Harness::new().await?;
         let domain = Harness::domain("tenant");
         let schedule = DomainSchedule::new(domain.id.clone(), [], vec![]);
+        let inputs = Box::new(
+            harness
+                .store
+                .inner
+                .state()
+                .domain_planning_inputs(&domain.id),
+        );
         harness
             .apply(
                 1,
                 ConsensusCommand::PutDomainAndSchedule {
-                    expected_domain: None,
-                    expected_schedule: None,
+                    inputs,
                     domain: Box::new(domain.clone()),
                     schedule: Some(Box::new(schedule.clone())),
                     mutation: None,
@@ -233,9 +239,15 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
         let schedule_watch = harness.store.inner.schedule_tx.subscribe();
         let mut changed_domain = domain.clone();
         changed_domain.status = DomainStatus::Running;
+        let inputs = Box::new(
+            harness
+                .store
+                .inner
+                .state()
+                .domain_planning_inputs(&domain.id),
+        );
         let command = ConsensusCommand::PutDomainAndSchedule {
-            expected_domain: Some(Box::new(domain)),
-            expected_schedule: Some(Box::new(schedule)),
+            inputs,
             domain: Box::new(changed_domain.clone()),
             schedule: None,
             mutation: None,
@@ -1501,6 +1513,13 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
             .ok_or("committing transaction mutation lease missing")?;
         assert_eq!(mutation.recovery_fence().revision(), 4);
         assert_eq!(preceding.domain_mutations.get(&domain.id), Some(&mutation));
+        let inputs = Box::new(
+            harness
+                .store
+                .inner
+                .state()
+                .domain_planning_inputs(&domain.id),
+        );
         let command = ConsensusCommand::AdvanceTransactionCommit {
             id: "transaction".into(),
             expected_next_statement: 0,
@@ -1516,8 +1535,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                 },
             }),
             effect: Some(Box::new(TransactionStepEffect::StartDomain {
-                domain_id: domain.id.clone(),
-                expected_start_version: 0,
+                inputs,
                 start: DomainStartPoint::Resume,
                 clock: None,
                 authority: None,
