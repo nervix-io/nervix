@@ -852,6 +852,17 @@ mod tests {
             Arc::ptr_eq(first.batch(), second.batch()),
             "row views from one relay batch must retain the same batch allocation"
         );
+
+        let missing = batch
+            .runtime_row(2)
+            .expect_err("a row view cannot address metadata beyond the batch");
+        assert!(matches!(
+            missing.current_context(),
+            RelayRecordBatchError::MetadataRowOutOfBounds {
+                row: 2,
+                metadata_rows: 2,
+            }
+        ));
     }
 
     #[test]

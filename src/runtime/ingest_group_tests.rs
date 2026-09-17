@@ -757,6 +757,80 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
     assert_eq!(collector.pending.undispatched_payloads(), 0);
 }
 
+#[tokio::test]
+async fn ingest_collector_flush_reports_missing_route_dependencies() {
+    let runtime = Runtime::default();
+    let test_domain = domain("default");
+    install_unpaced_test_domain(&runtime, &test_domain);
+    let ingestor: IngestorName = named("grouped_event_source");
+    let relay: RelayName = named("grouped_events");
+    let senders = HashMap::default();
+    let message = || RelayMessage {
+        key: None,
+        record: test_runtime_row([("user_id".to_string(), RuntimeValue::I64(1))]),
+        acks: AckSet::empty(),
+    };
+
+    let mut missing_schema_collector = IngestRouteCollector::new(
+        IngestMetadataKind::Headers,
+        1,
+        grouped_event_ingestor_metrics(),
+    );
+    missing_schema_collector.push(&relay, message());
+    let missing_schema = expect_failure(
+        runtime
+            .flush_ingest_collector(
+                &test_domain,
+                &ingestor,
+                &senders,
+                &mut missing_schema_collector,
+            )
+            .await,
+        "a routed ingest batch requires its relay schema",
+    );
+    assert!(matches!(
+        missing_schema.current_context(),
+        IngestGroupError::RelaySchemaMissing { domain, relay: missing }
+            if domain == &test_domain && missing == &relay
+    ));
+
+    runtime
+        .inner
+        .domain_routings
+        .get(&test_domain)
+        .expect("the test domain routing must remain installed")
+        .store(StdArc::new(DomainRoutingSnapshot {
+            relay_schemas: [(relay.clone(), grouped_event_schema())]
+                .into_iter()
+                .collect(),
+            ..DomainRoutingSnapshot::default()
+        }));
+    let mut missing_entrypoint_collector = IngestRouteCollector::new(
+        IngestMetadataKind::Headers,
+        1,
+        grouped_event_ingestor_metrics(),
+    );
+    missing_entrypoint_collector.push(&relay, message());
+    let missing_entrypoint = expect_failure(
+        runtime
+            .flush_ingest_collector(
+                &test_domain,
+                &ingestor,
+                &senders,
+                &mut missing_entrypoint_collector,
+            )
+            .await,
+        "a routed ingest batch requires its branch entrypoint",
+    );
+    assert!(matches!(
+        missing_entrypoint.current_context(),
+        IngestGroupError::BranchEntrypointMissing {
+            ingestor: missing_ingestor,
+            relay: missing_relay,
+        } if missing_ingestor == &ingestor && missing_relay == &relay
+    ));
+}
+
 #[test]
 fn branched_entrypoint_batch_reports_structural_input_errors() {
     let empty = expect_failure(
