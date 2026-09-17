@@ -58,6 +58,10 @@ does not change any value. How a function traverses its column, whether through 
 kernel, one pass over the column's value buffer, or a loop over its rows, is internal to the
 function and does not change its results.
 
+A pass over a value buffer is written so the compiler can turn it into the vector instructions of
+the CPU a Nervix binary is built for. Builtins contain no hand-written SIMD code, and the vector
+instructions a node's CPU offers never change a builtin's result.
+
 The compiler applies two optimizations that preserve results in the same way:
 
 - A deterministic call that cannot fail and whose arguments are all literals may be computed once
@@ -153,7 +157,8 @@ result never depends on the other messages in its batch.
   every value, including zero, NaN, and the infinities.
 
 The error's message names the failure, such as `integer addition overflowed`, `integer remainder by
-zero`, or `floating-point operation produced a non-finite result`.
+zero`, `integer left shift by a negative count`, or `floating-point operation produced a non-finite
+result`.
 
 ## Header Functions
 
@@ -258,11 +263,11 @@ not compile reports a per-message error.
 
 ## Numeric Functions
 
-Numeric functions accept every integer and floating-point type. A function that returns `F64` reads
-an integer argument as the nearest `F64`, which is exact for every type up to 32 bits and rounds
-`I64` and `U64` values beyond 2^53. A result that is not finite, such as `sqrt(-1.0)`, `ln(0.0)`, or
-`exp(1000.0)`, reports a per-message `invalid_argument` error and yields null instead of producing
-NaN or an infinity.
+Numeric functions accept every integer and floating-point type unless a description below narrows
+it. A function that returns `F64` reads an integer argument as the nearest `F64`, which is exact for
+every type up to 32 bits and rounds `I64` and `U64` values beyond 2^53. A floating-point result that
+is not finite, such as `sqrt(-1.0)`, `ln(0.0)`, or `exp(1000.0)`, reports a per-message
+`invalid_argument` error and yields null instead of producing NaN or an infinity.
 
 | Function | Returns | Notes |
 | --- | --- | --- |
@@ -270,40 +275,126 @@ NaN or an infinity.
 | `acos(x)` | `F64` | Arc cosine in radians |
 | `asin(x)` | `F64` | Arc sine in radians |
 | `atan(x)` | `F64` | Arc tangent in radians |
+| `atan2(y, x)` | `F64` | The angle in radians, from `-π` to `π`, of the point `(x, y)`. The signs of both arguments select the quadrant, so `atan2(0.0, -1.0)` is `π`. `y` comes first, and the two arguments may have different numeric types |
 | `ceil(x)` | same numeric type as input | Rounds up. Integer input is returned unchanged |
 | `ceiling(x)` | same numeric type as input | Alias for `ceil` |
 | `cos(x)` | `F64` | Cosine of an angle in radians |
+| `degrees(x)` | `F64` | Converts an angle from radians to degrees |
 | `exp(x)` | `F64` | `e` raised to `x` |
 | `floor(x)` | same numeric type as input | Rounds down. Integer input is returned unchanged |
 | `ln(x)` | `F64` | Natural logarithm |
 | `log(x)` | `F64` | Base-10 logarithm |
 | `log(base, x)` | `F64` | Logarithm with explicit base |
+| `log2(x)` | `F64` | Base-2 logarithm |
 | `pow(x, y)` | `F64` | `x` raised to `y` |
 | `power(x, y)` | `F64` | Alias for `pow` |
+| `radians(x)` | `F64` | Converts an angle from degrees to radians |
 | `round(x)` | same numeric type as input | Rounds to the nearest integer, with halves rounded away from zero. Integer input is returned unchanged |
+| `round(x, digits)` | same numeric type as `x` | Rounds to `digits` decimal places, or for a negative `digits` to a multiple of `10^-digits`. See [Precision Rounding](#precision-rounding) |
+| `sign(x)` | same numeric type as input | `-1` for a negative value, `1` for a positive one, and `0` for zero. A float zero keeps its sign, an infinity has the sign `-1.0` or `1.0`, and NaN has no sign and reports an error |
+| `sin(x)` | `F64` | Sine of an angle in radians |
 | `sqrt(x)` | `F64` | Square root |
 | `tan(x)` | `F64` | Tangent of an angle in radians |
+| `trunc(x)` | same numeric type as input | Rounds toward zero. Integer input is returned unchanged |
 
-`abs`, `ceil`, `floor`, `round`, and `sqrt` are exact: each returns the correctly rounded result,
-which is the same on every node. `acos`, `asin`, `atan`, `cos`, `exp`, `ln`, `log`, `pow`, and `tan`
-evaluate in IEEE 754 double precision and return a result within two units in the last place of the
-exact value. Nodes on different platforms may differ in that last place.
+`abs`, `ceil`, `floor`, `round`, `sign`, `sqrt`, and `trunc` are exact: each returns the correctly
+rounded result, which is the same on every node. `radians` and `degrees` multiply by the `F64`
+nearest to `π/180` and to `180/π`, so their result is the same on every node and within two units
+in the last place of the exact conversion. `acos`, `asin`, `atan`, `atan2`, `cos`, `exp`, `ln`,
+`log`, `log2`, `pow`, `sin`, and `tan` evaluate in IEEE 754 double precision and return a result
+within two units in the last place of the exact value. Nodes on different platforms may differ in
+that last place.
 
-A function reports an error exactly where its result is not finite. For finite arguments, that is:
+A function reports an error exactly where its result does not exist in its type. For finite
+arguments, that is:
 
 | Function | Arguments that report an error |
 | --- | --- |
-| `abs`, `ceil`, `floor`, `round` | None. `abs` over the minimum value of a signed integer type reports an `overflow` error instead |
+| `abs`, `ceil`, `floor`, `round(x)`, `sign`, `trunc` | None. `abs` over the minimum value of a signed integer type reports an `overflow` error instead |
+| `round(x, digits)` | A negative `digits` whose rounded multiple exceeds the range of `x`'s type. A float reports an `invalid_argument` error and an integer an `overflow` error |
 | `sqrt(x)` | `x < 0` |
-| `ln(x)`, `log(x)` | `x <= 0` |
+| `ln(x)`, `log(x)`, `log2(x)` | `x <= 0` |
 | `log(base, x)` | `x <= 0`, `base < 0`, and `base = 1`; the result is `ln(x) / ln(base)` |
 | `acos(x)`, `asin(x)` | `x < -1` and `x > 1` |
 | `exp(x)` | `x` above about `709.78`, where the result overflows. A result too small to represent is `0.0` |
+| `degrees(x)` | `x` beyond about `±3.14e306`, where the result overflows |
 | `pow(x, y)` | A result that overflows, `x < 0` with a `y` that is not an integer, and `x = 0` with `y < 0` |
-| `atan(x)`, `cos(x)`, `tan(x)` | None |
+| `atan(x)`, `atan2(y, x)`, `cos(x)`, `radians(x)`, `sin(x)`, `tan(x)` | None |
 
-A NaN or infinite argument reports an error unless IEEE 754 defines a finite result for it, as it
-does for `atan` of an infinity, `exp` of negative infinity, and `pow(x, 0)`.
+A NaN or infinite argument reports an error unless a finite result is defined for it, as IEEE 754
+defines for `atan` of an infinity, `atan2` of any arguments that are not NaN, `exp` of negative
+infinity, and `pow(x, 0)`, and as `sign` defines for an infinity.
+
+## Precision Rounding
+
+`round(x, digits)` takes any integer type for `digits`, independently of the numeric type of `x`,
+and returns `x`'s type. A positive `digits` counts decimal places after the point, `0` rounds to the
+nearest integer as `round(x)` does, and a negative `digits` rounds to a multiple of a power of ten:
+`round(1250, -2)` is `1300`. Halves round away from zero at every position, so `round(-0.125, 2)` is
+`-0.13`. Every count is accepted. When `10^-digits` is finer than the smallest step between values
+of `x`'s type near `x`, the result is `x` itself, and when `x` is less than half of `10^-digits` in
+magnitude, the result is zero.
+
+A float is rounded exactly. The result is the value of `x`'s type nearest to the stored value of `x`
+rounded to `digits` decimal places, so it is the same on every node. The stored value of a decimal
+literal is the nearest binary float, which can lie on either side of a decimal tie:
+
+- `round(0.125, 2)` is `0.13`, because `0.125` is stored exactly and is a tie.
+- `round(2.675, 2)` is `2.67`, because the `F64` nearest to `2.675` is slightly below it.
+- An `F32` rounds its own stored value: the `F32` nearest to `0.15` is slightly above `0.15`, so
+  `round(x, 1)` of that `F32` is `0.2`.
+
+A float result that is zero keeps the sign of `x`, as `round(-0.004, 2)` is `-0.0`. Rounding to a
+multiple of a power of ten can exceed the largest finite value, as `round(1.7976931348623157e308,
+-308)` does, and reports an `invalid_argument` error.
+
+An integer has no decimal places, so a `digits` of `0` or more returns it unchanged. A negative
+`digits` rounds it to a multiple of `10^-digits`, and a multiple that does not fit its type reports
+an `overflow` error: `round(x, -1)` over the `I32` value `2147483647` would be `2147483650`.
+
+## Floating-Point Classification
+
+Classification functions take an `F32` or `F64` argument. An integer argument is rejected when the
+statement is applied, since no integer is NaN or infinite. A null argument produces a null result,
+and no value makes them fail.
+
+| Function | Returns | Notes |
+| --- | --- | --- |
+| `is_nan(x)` | `BOOL` | True for NaN, whatever its sign or payload |
+| `is_finite(x)` | `BOOL` | True for every value that is neither NaN nor an infinity, including both zeros |
+| `is_infinite(x)` | `BOOL` | True for positive and negative infinity |
+
+A decoded float or a cast from `STRING` can hold NaN or an infinity, so a route can test for them
+before calling a function that would report an error: `IF is_finite(input.reading) THEN
+sqrt(abs(input.reading)) ELSE 0.0 END`.
+
+## Bitwise Functions
+
+Bitwise functions take integer arguments and read each value as its two's complement bits at the
+width of its type, so `bitwise_not` over the `U8` value `0` is `255` and over the `I8` value `0` is
+`-1`. A null argument produces a null result.
+
+| Function | Returns | Notes |
+| --- | --- | --- |
+| `bitwise_and(a, b)` | same integer type as inputs | Both arguments must have the same integer type |
+| `bitwise_or(a, b)` | same integer type as inputs | Both arguments must have the same integer type |
+| `bitwise_xor(a, b)` | same integer type as inputs | Both arguments must have the same integer type |
+| `bitwise_not(a)` | same integer type as input | Inverts every bit |
+| `bit_count(a)` | `I64` | The number of set bits. A negative value counts its sign bits, so `bit_count` of the `I64` value `-1` is `64` |
+| `shift_left(value, count)` | same integer type as `value` | `value` multiplied by `2^count` |
+| `shift_right(value, count)` | same integer type as `value` | `value` divided by `2^count`, rounded toward negative infinity |
+
+`bitwise_and`, `bitwise_or`, `bitwise_xor`, `bitwise_not`, and `bit_count` never fail.
+
+A shift takes `count` from any integer type, independently of the type of `value`, and a negative
+`count` reports an `invalid_argument` error. Shifts are checked like arithmetic:
+
+- `shift_left` reports an `overflow` error when the product does not fit the type of `value`,
+  including a signed value whose sign would change: `shift_left` of the `I8` value `64` by `1` fails,
+  and of the `I8` value `-1` by `7` is `-128`. A `count` at or beyond the type's width moves every
+  bit out, so it returns `0` for a zero `value` and fails for any other.
+- `shift_right` never overflows. A signed value keeps its sign, so `shift_right(-5, 1)` is `-3`, and a
+  `count` at or beyond the type's width returns `-1` for a negative `value` and `0` for any other.
 
 ## Array And Vector Functions
 
@@ -342,6 +433,9 @@ SET normalized = lower(trim(input.raw)),
     prefix = left(trim(input.raw), 5),
     digest = md5(trim(input.raw)),
     magnitude = abs(input.amount),
-    rooted = sqrt(input.score)
+    rooted = sqrt(input.score),
+    price = round(input.price, 2),
+    heading = degrees(atan2(input.north, input.east)),
+    alert_flags = bitwise_and(input.flags, 255 AS U16)
 WHERE output.active AND regexp_like(lower(trim(input.raw)), 'warn|error')
 ```

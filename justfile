@@ -425,6 +425,11 @@ cargo-clippy-all:
         --package nervix-server \
         --package nervix-wasm
 
+# Lint one workspace package and all of its targets with warnings denied, sharing the workspace
+# lint build directory. Extra arguments are forwarded to Cargo.
+cargo-clippy-package package *args:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-all" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --package {{ package }} --all-targets {{ args }}
+
 cargo-clippy-server:
     CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-server" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-server -q
 
