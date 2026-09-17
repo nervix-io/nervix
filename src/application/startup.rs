@@ -18,6 +18,7 @@ use fjall::Database;
 use nervix_consensus::{Consensus, ConsensusSettings, RaftRetentionPolicy};
 use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_interconnect::{HandlerRegistrationError, Transport};
+use nervix_models::NodeEndpoint;
 use nervix_recovery::Discarded as _;
 use thiserror::Error;
 use triomphe::Arc;
@@ -168,7 +169,7 @@ impl TryFrom<Args> for Application {
             })
             .transpose()?;
         let grpc_advertise_addr = match args.grpc_advertise_addr.as_deref() {
-            Some(addr) => addr.parse::<cluster::HostPort>().map_err(|error| {
+            Some(addr) => addr.parse::<NodeEndpoint>().map_err(|error| {
                 Report::new(AppError::ParseGrpcAdvertiseAddress).attach_printable(error)
             })?,
             None => addr.into(),
@@ -177,7 +178,7 @@ impl TryFrom<Args> for Application {
             .grpc_https_advertise_addr
             .as_deref()
             .map(|addr| {
-                addr.parse::<cluster::HostPort>().map_err(|error| {
+                addr.parse::<NodeEndpoint>().map_err(|error| {
                     Report::new(AppError::ParseGrpcHttpsAdvertiseAddress).attach_printable(error)
                 })
             })
@@ -202,7 +203,7 @@ impl TryFrom<Args> for Application {
             .web_console_advertise_addr
             .as_deref()
             .map(|addr| {
-                addr.parse::<cluster::HostPort>().map_err(|error| {
+                addr.parse::<NodeEndpoint>().map_err(|error| {
                     Report::new(AppError::ParseWebConsoleListenAddress).attach_printable(error)
                 })
             })
@@ -223,7 +224,7 @@ impl TryFrom<Args> for Application {
                 .ok_or_else(|| Report::new(AppError::DeriveInterconnectAddress))?,
         };
         let interconnect_advertise_addr = match args.interconnect_advertise_addr.as_deref() {
-            Some(addr) => addr.parse::<cluster::HostPort>().map_err(|error| {
+            Some(addr) => addr.parse::<NodeEndpoint>().map_err(|error| {
                 Report::new(AppError::ParseInterconnectAdvertiseAddress).attach_printable(error)
             })?,
             None => {
