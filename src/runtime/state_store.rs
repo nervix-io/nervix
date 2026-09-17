@@ -1,12 +1,6 @@
-use std::{
-    collections::BTreeSet,
-    fmt,
-    str::FromStr,
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-    },
-};
+#[cfg(not(feature = "shuttle"))]
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::{collections::BTreeSet, fmt, str::FromStr, sync::Arc as StdArc};
 
 use ahash::HashMap;
 use error_stack::{Report, ResultExt as _};
@@ -23,6 +17,8 @@ use nervix_models::{
     WasmStateGenerations,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+#[cfg(feature = "shuttle")]
+use shuttle::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use thiserror::Error;
 use triomphe::Arc;
 
@@ -338,7 +334,9 @@ impl StateAdmissions {
     /// Wait until every operation admitted under `generation` has finished.
     ///
     /// Admitted operations are synchronous and never take the barrier, so the wait lasts only as
-    /// long as the operations already running.
+    /// long as the operations already running. The spin yields through the execution crate, whose
+    /// yield a deterministic scheduler sees, so that scheduler runs the operations this waits for
+    /// instead of the spin.
     fn wait_until_finished(&self, generation: u64) {
         let admitted = self.of_generation(generation);
         let mut spins = 0_u32;
@@ -2627,72 +2625,6 @@ mod tests {
         );
     }
 
-    /// A rebind that returned while an operation admitted under the assignment it replaced was
-    /// still running would let that stale operation land after the new assignment took over.
-    #[test]
-    fn a_rebind_waits_for_an_operation_admitted_under_the_assignment_it_replaces() {
-        use std::sync::atomic::AtomicBool;
-
-        let authority = StdArc::new(StateAssignmentAuthority::default());
-        let replaced = authority.rebind(StateReplicationRoles::owned_by(None), None);
-        let token = replaced
-            .token_for(StateCapability::Originate)
-            .assured("a state without roles is originated locally");
-        let finished = StdArc::new(AtomicBool::new(false));
-        let (running_tx, running_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        let admitted = std::thread::spawn({
-            let authority = authority.clone();
-            let finished = finished.clone();
-            move || {
-                authority
-                    .authorize(token, StateCapability::Originate, || {
-                        running_tx
-                            .send(())
-                            .assured("the test keeps the receiver until the operation runs");
-                        release_rx
-                            .recv()
-                            .assured("the test releases the operation before it finishes");
-                        finished.store(true, Ordering::SeqCst);
-                    })
-                    .assured("the operation is admitted before the rebind publishes");
-            }
-        });
-        running_rx
-            .recv()
-            .assured("the admitted operation reports once it runs");
-
-        let rebinding = std::thread::spawn({
-            let authority = authority.clone();
-            let finished = finished.clone();
-            move || {
-                authority.rebind(StateReplicationRoles::owned_by(None), None);
-                finished.load(Ordering::SeqCst)
-            }
-        });
-        // The rebind has published its binding once the fence advances. From then on it waits for
-        // the admitted operation, which is released only afterwards.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while authority.current_binding().fence() == replaced.fence() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the rebind did not publish its binding within ten seconds"
-            );
-            nervix_execution::sync::yield_now();
-        }
-        release_tx
-            .send(())
-            .assured("the admitted operation waits for its release");
-        admitted.join().assured("the admitted operation completes");
-        let finished_before_rebind_returned = rebinding.join().assured("the rebind completes");
-
-        assert!(
-            finished_before_rebind_returned,
-            "the rebind returned before the operation admitted under the replaced assignment \
-             finished"
-        );
-    }
-
     #[test]
     fn an_operation_under_a_replaced_assignment_is_refused() {
         let authority = StateAssignmentAuthority::default();
@@ -2732,3 +2664,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "state_store_shuttle_tests.rs"]
+mod shuttle_tests;
