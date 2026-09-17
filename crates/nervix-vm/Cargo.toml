@@ -22,6 +22,8 @@ arrow-string = { workspace = true }
 chrono = { workspace = true }
 error-stack = { workspace = true }
 humantime = { workspace = true }
+jiff = { workspace = true }
+jiff-tzdb = { workspace = true }
 md5 = { workspace = true }
 meticulous = { workspace = true }
 nervix-approx-into = { workspace = true }

@@ -214,13 +214,13 @@ Feature: Datetime functions
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY summaries SCHEMA summary UNBRANCHED;
       """
-    When these NSPL commands fail with "function 'date_trunc' does not accept time unit 'month'"
+    When these NSPL commands fail with "function 'date_trunc' does not accept time unit 'fortnight'"
       """
-      CREATE JUNCTION truncate_to_month
+      CREATE JUNCTION truncate_to_fortnight
         FROM events
         UNBRANCHED
         TO summaries
-          SET value = date_trunc('month', input.occurred_at)
+          SET value = date_trunc('fortnight', input.occurred_at)
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """

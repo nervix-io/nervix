@@ -3,13 +3,17 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The batch kernels behind every datetime builtin: date-part extraction, truncation,
-//!   binning, fixed-unit addition and difference, and conversion to and from Unix time. Each
+//!   binning, addition and difference in fixed and calendar units, conversion to and from Unix
+//!   time, and, in its submodules, the time zones local dates and times are read in, the local
+//!   calendar arithmetic over them, and the formats datetimes are written and read as text in. Each
 //!   kernel is one pass over its operands' value buffers that yields the result column and the
-//!   lanes whose result its type cannot hold.
+//!   lanes whose result its type cannot hold, and a kernel that reads text also yields why each such
+//!   lane failed.
 //! - **Depends on.** Arrow arrays and Arrow's date-part kernel, the checked lanes of the numeric
-//!   kernels, and the resolved datetime vocabulary of a VM program.
-//! - **Must not know.** Registers, programs, spans, clocks, or how a failed lane is recorded as a
-//!   row error.
+//!   kernels, Jiff's civil calendar and time zone rules with the IANA Time Zone Database it bundles,
+//!   and the resolved datetime vocabulary of a VM program.
+//! - **Must not know.** Registers, programs, spans, clocks, the host's time zone or locale, or how a
+//!   failed lane is recorded as a row error.
 //!
 //! A DATETIME lane holds signed nanoseconds since the Unix epoch, which is how an Arrow timestamp
 //! array carries a UTC instant. Every kernel computes exactly in nanoseconds. Truncation, binning
@@ -17,6 +21,11 @@
 //! zero, and a result outside its type fails its lane instead of wrapping or saturating. No kernel
 //! reads a clock: a kernel over the current time receives it as an operand, from the execution
 //! context its caller supplies.
+//!
+//! A kernel whose unit has a fixed length in every zone it reads, which is every unit in UTC or at a
+//! fixed offset and an hour or shorter anywhere, computes in one vectorizable pass. A local day,
+//! month or year under the rules of an IANA zone has a length that depends on the lane, so those
+//! kernels compute lane by lane.
 
 use arrow_arith::temporal::{DatePart as ArrowDatePart, date_part as arrow_date_part};
 use arrow_array::{
@@ -26,13 +35,27 @@ use arrow_array::{
     types::{Int32Type, Int64Type, TimestampNanosecondType},
 };
 use arrow_buffer::NullBuffer;
+use jiff::tz::Offset;
 use meticulous::{OptionExt as _, ResultExt as _};
 
 use crate::{
     batch::TypedArray,
     numeric::{Checked, Lanes},
-    program::{DateBinWidth, DatePart, FixedTimeUnit},
+    program::{DateBinWidth, DatePart, DatetimeUnit, FixedTimeUnit},
 };
+
+mod calendar;
+mod format;
+mod zone;
+
+pub use format::{
+    DatetimeField, DatetimeFormat, DatetimeParser, DayPadding, FormatDefect, FormatDirective,
+    FractionDigits, NameLength, Padding, ParseFormat, ParserZoneMismatch, TextExpectation,
+    UnreadableText, ZoneDirective,
+};
+pub(crate) use format::{FormattedColumn, TextFailure, format_datetimes, parse_datetimes};
+pub(crate) use zone::UnresolvedLocalTime;
+pub use zone::{OffsetStyle, Zone};
 
 /// How far the first Monday after the Unix epoch lies past it. Weeks start on Monday, and the
 /// epoch itself was a Thursday.
@@ -43,8 +66,22 @@ const _: () = assert!(
     "a week's start lies less than one week past the Unix epoch"
 );
 
+/// Extracts one date part from every lane, read in `zone`'s local time.
+pub(crate) fn date_part(
+    values: &TimestampNanosecondArray,
+    part: DatePart,
+    zone: &Zone,
+) -> Int64Array {
+    match zone.offsets() {
+        zone::ZoneOffsets::Constant(constant) if constant.offset == Offset::UTC => {
+            utc_date_part(values, part)
+        }
+        offsets => calendar::local_date_part(values, part, offsets),
+    }
+}
+
 /// Extracts one UTC date part from every lane.
-pub(crate) fn date_part(values: &TimestampNanosecondArray, part: DatePart) -> Int64Array {
+fn utc_date_part(values: &TimestampNanosecondArray, part: DatePart) -> Int64Array {
     // Arrow moves every lane into the array's timezone before extracting a part from it. A
     // DATETIME already is a UTC instant, so its nanoseconds read as a zoneless timestamp yield the
     // UTC part without converting each lane through an offset.
@@ -82,14 +119,41 @@ pub(crate) fn date_part(values: &TimestampNanosecondArray, part: DatePart) -> In
     extracted.unary(i64::from)
 }
 
-/// Truncates every lane to the start of the unit that holds it. A day, and every shorter unit,
-/// starts at a whole number of units since the Unix epoch, and a week starts on Monday.
+/// Truncates every lane to the start of the local unit that holds it, in `zone`.
+///
+/// A local unit starts at the first instant of the stretch of time, ending at the lane, during
+/// which `zone`'s clock showed a time inside that unit. A day, and every shorter unit, starts at a
+/// whole number of units, a week starts on Monday, and a month, quarter or year starts on its first
+/// day. A unit whose local start a transition skips starts when the transition ends the gap, and a
+/// unit a transition repeats starts where the clock first showed it.
 pub(crate) fn truncate(
     values: &TimestampNanosecondArray,
+    unit: DatetimeUnit,
+    zone: &Zone,
+) -> Checked<TimestampNanosecondType> {
+    match (unit, zone.offsets()) {
+        (DatetimeUnit::Fixed(unit), zone::ZoneOffsets::Constant(constant)) => {
+            truncate_at_offset(values, unit, constant.offset)
+        }
+        (DatetimeUnit::Calendar(unit), zone::ZoneOffsets::Constant(constant)) => {
+            calendar::truncate_to_calendar_unit_at_offset(values, unit, constant.offset)
+        }
+        (unit, zone::ZoneOffsets::Rules(rules)) => {
+            calendar::truncate_under_rules(values, unit, rules)
+        }
+    }
+}
+
+/// Truncates every lane to the start of a fixed-length unit of a clock that runs `offset` ahead of
+/// UTC. A local unit starts a whole number of units after the local epoch, except that a week
+/// starts on Monday.
+fn truncate_at_offset(
+    values: &TimestampNanosecondArray,
     unit: FixedTimeUnit,
+    offset: Offset,
 ) -> Checked<TimestampNanosecondType> {
     let stride = unit.nanoseconds();
-    let phase = match unit {
+    let local_phase = match unit {
         FixedTimeUnit::Week => FIRST_MONDAY_AFTER_UNIX_EPOCH,
         FixedTimeUnit::Nanosecond
         | FixedTimeUnit::Microsecond
@@ -99,6 +163,16 @@ pub(crate) fn truncate(
         | FixedTimeUnit::Hour
         | FixedTimeUnit::Day => 0,
     };
+    let offset_nanoseconds = i64::from(offset.seconds())
+        .checked_mul(FixedTimeUnit::Second.nanoseconds())
+        .assured("an offset of less than 26 hours in nanoseconds fits i64");
+    // A unit starting `local_phase` past a multiple of the stride on the local clock starts
+    // `local_phase - offset` past a multiple of it in UTC.
+    let phase = local_phase
+        .checked_sub(offset_nanoseconds)
+        .assured("a week and an offset of less than 26 hours in nanoseconds differ inside i64")
+        .checked_rem_euclid(stride)
+        .assured("a stride is a positive number of nanoseconds");
     let lanes = Lanes::unary(values.values(), |value: i64| {
         bin_start(value, phase, stride)
     });
@@ -185,7 +259,43 @@ impl<'a> UnitCounts<'a> {
 
 /// Moves every lane by its amount of units, forward for a positive amount and backward for a
 /// negative one.
+///
+/// An hour and every shorter unit is elapsed time in every zone, and so is a day or a week in a zone
+/// whose offset never changes. Under the rules of an IANA zone a day or week moves the local date
+/// and keeps the local time of day, and in every zone a month, quarter or year moves the local
+/// month, keeping the day of the month unless the new month is shorter, in which case the lane lands
+/// on its last day. A moved local time the zone skips or repeats resolves compatibly: past a skipped
+/// span by its length, and to the earlier of two repeated instants.
 pub(crate) fn add(
+    amounts: &UnitCounts<'_>,
+    values: &TimestampNanosecondArray,
+    unit: DatetimeUnit,
+    zone: &Zone,
+) -> Checked<TimestampNanosecondType> {
+    match (unit, zone.offsets()) {
+        (DatetimeUnit::Fixed(unit), zone::ZoneOffsets::Constant(_)) => {
+            add_elapsed(amounts, values, unit)
+        }
+        (DatetimeUnit::Fixed(unit), zone::ZoneOffsets::Rules(_)) => match unit.local_days() {
+            Some(days) => calendar::add_calendar_steps(
+                amounts,
+                values,
+                calendar::CalendarStep::Days(days),
+                zone,
+            ),
+            None => add_elapsed(amounts, values, unit),
+        },
+        (DatetimeUnit::Calendar(unit), _) => calendar::add_calendar_steps(
+            amounts,
+            values,
+            calendar::CalendarStep::Months(unit.months()),
+            zone,
+        ),
+    }
+}
+
+/// Moves every lane by its amount of a unit of elapsed time.
+fn add_elapsed(
     amounts: &UnitCounts<'_>,
     values: &TimestampNanosecondArray,
     unit: FixedTimeUnit,
@@ -200,6 +310,23 @@ pub(crate) fn add(
         UnitCounts::Int32(amounts) => add_lanes(amounts, values, unit),
         UnitCounts::UInt64(amounts) => add_lanes(amounts, values, unit),
         UnitCounts::Int64(amounts) => add_lanes(amounts, values, unit),
+    }
+}
+
+impl FixedTimeUnit {
+    /// How many local calendar days one unit spans, for a day or a week, which under the rules of an
+    /// IANA zone count local dates rather than elapsed time.
+    const fn local_days(self) -> Option<i64> {
+        match self {
+            Self::Day => Some(1),
+            Self::Week => Some(7),
+            Self::Nanosecond
+            | Self::Microsecond
+            | Self::Millisecond
+            | Self::Second
+            | Self::Minute
+            | Self::Hour => None,
+        }
     }
 }
 
@@ -234,9 +361,43 @@ where
 }
 
 /// Counts the whole units from every start lane to its end lane, rounding toward zero. The count
-/// is negative when the end precedes the start, and a lane fails when the count does not fit
-/// `i64`.
+/// is negative when the end precedes the start.
+///
+/// An hour and every shorter unit counts elapsed time in every zone, and so does a day or a week in
+/// a zone whose offset never changes, where a lane fails when the count does not fit `i64`. Under
+/// the rules of an IANA zone a day or week counts whole local days, and in every zone a month,
+/// quarter or year counts whole local months, the way `date_add` moves by them.
 pub(crate) fn difference(
+    starts: &TimestampNanosecondArray,
+    ends: &TimestampNanosecondArray,
+    unit: DatetimeUnit,
+    zone: &Zone,
+) -> Checked<Int64Type> {
+    match (unit, zone.offsets()) {
+        (DatetimeUnit::Fixed(unit), zone::ZoneOffsets::Constant(_)) => {
+            count_elapsed(starts, ends, unit)
+        }
+        (DatetimeUnit::Fixed(unit), zone::ZoneOffsets::Rules(_)) => match unit.local_days() {
+            Some(days) => calendar::count_calendar_steps(
+                starts,
+                ends,
+                calendar::CalendarStep::Days(days),
+                zone,
+            ),
+            None => count_elapsed(starts, ends, unit),
+        },
+        (DatetimeUnit::Calendar(unit), _) => calendar::count_calendar_steps(
+            starts,
+            ends,
+            calendar::CalendarStep::Months(unit.months()),
+            zone,
+        ),
+    }
+}
+
+/// Counts the whole units of elapsed time from every start lane to its end lane, failing a lane
+/// whose count does not fit `i64`.
+fn count_elapsed(
     starts: &TimestampNanosecondArray,
     ends: &TimestampNanosecondArray,
     unit: FixedTimeUnit,
@@ -299,7 +460,7 @@ where
 }
 
 /// A lane holding `value`, failed when `value` does not fit `i64`.
-fn i64_lane(value: i128) -> (i64, bool) {
+pub(crate) fn i64_lane(value: i128) -> (i64, bool) {
     match i64::try_from(value) {
         Ok(value) => (value, false),
         Err(_) => (0, true),
@@ -307,7 +468,9 @@ fn i64_lane(value: i128) -> (i64, bool) {
 }
 
 /// Marks a computed timestamp column as the UTC instants every DATETIME holds.
-fn datetime_column(checked: Checked<TimestampNanosecondType>) -> Checked<TimestampNanosecondType> {
+pub(crate) fn datetime_column(
+    checked: Checked<TimestampNanosecondType>,
+) -> Checked<TimestampNanosecondType> {
     Checked {
         column: checked.column.with_timezone_utc(),
         failed: checked.failed,
