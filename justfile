@@ -111,36 +111,40 @@ test-execution *args:
 
 # Explore the filtered execution and server invariants under Shuttle. The former Loom recipe is
 # retired: acknowledgement races now exercise production types, while the reduced relay models
-# document their memory-ordering claims in-module. Each test gets its own process so a persisted
-# schedule identifies its package and test.
-test-shuttle: build-web-console wasm-processor-guests download-onnxruntime
+# document their memory-ordering claims in-module.
+test-shuttle: (test-shuttle-package "nervix-execution") (test-shuttle-package "nervix-server")
+
+# Explore one package's Shuttle checks whose names contain `filter`. Each check gets its own process
+# so a persisted schedule identifies its package and test.
+test-shuttle-package package filter="": build-web-console wasm-processor-guests download-onnxruntime
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    shuttle_package={{ quote(package) }}
+    shuttle_filter={{ quote(filter) }}
     trace_root="{{ cargo_target_dir }}/shuttle-failures"
     mkdir -p "${trace_root}"
-    shuttle_packages=(nervix-execution nervix-server)
-    for shuttle_package in "${shuttle_packages[@]}"; do
-        shuttle_test_list="$(
-            cargo test --package "${shuttle_package}" --features shuttle --lib shuttle_ -- \
-                --list --format terse | sed -n 's/: test$//p'
-        )"
-        if [[ -z "${shuttle_test_list}" ]]; then
-            echo "no shuttle_ tests found in ${shuttle_package}" >&2
-            exit 1
-        fi
-        mapfile -t shuttle_tests <<< "${shuttle_test_list}"
-        for shuttle_test in "${shuttle_tests[@]}"; do
-            trace_directory="${trace_root}/${shuttle_package}/${shuttle_test}"
-            mkdir -p "${trace_directory}"
-            SHUTTLE_TRACE_DIR="${trace_directory}" \
-                cargo test --package "${shuttle_package}" --features shuttle --lib \
-                    "${shuttle_test}" -- --exact --test-threads=1
-        done
+    shuttle_test_list="$(
+        cargo test --package "${shuttle_package}" --features shuttle --lib shuttle_ -- \
+            --list --format terse | sed -n 's/: test$//p' \
+            | { grep --fixed-strings -- "${shuttle_filter}" || true; }
+    )"
+    if [[ -z "${shuttle_test_list}" ]]; then
+        echo "no shuttle_ tests matching '${shuttle_filter}' found in ${shuttle_package}" >&2
+        exit 1
+    fi
+    mapfile -t shuttle_tests <<< "${shuttle_test_list}"
+    for shuttle_test in "${shuttle_tests[@]}"; do
+        trace_directory="${trace_root}/${shuttle_package}/${shuttle_test}"
+        mkdir -p "${trace_directory}"
+        SHUTTLE_TRACE_DIR="${trace_directory}" \
+            cargo test --package "${shuttle_package}" --features shuttle --lib \
+                "${shuttle_test}" -- --exact --test-threads=1
     done
 
 # Replay a schedule emitted under target/shuttle-failures. Its parent directory is the exact test
-# name written by `test-shuttle`, so the schedule cannot accidentally run against another invariant.
+# name written by `test-shuttle-package`, so the schedule cannot accidentally run against another
+# invariant.
 test-shuttle-replay schedule: build-web-console wasm-processor-guests download-onnxruntime
     #!/usr/bin/env bash
     set -euo pipefail
