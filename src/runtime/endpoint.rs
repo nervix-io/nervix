@@ -302,15 +302,14 @@ impl Runtime {
                 if let Err(error) = dispatch_result.and(flush_result) {
                     self.inner.events.report_error(format!(
                         "failed to dispatch {protocol} message for ingestor '{}' in domain '{}': \
-                         {}",
+                         {error:?}",
                         binding.ingestor.as_str(),
                         binding.domain.as_str(),
-                        error
                     ));
                     warn!(
                         domain = binding.domain.as_str(),
                         ingestor = binding.ingestor.as_str(),
-                        error = %error,
+                        error = ?error,
                         protocol,
                         "failed to dispatch endpoint message"
                     );
