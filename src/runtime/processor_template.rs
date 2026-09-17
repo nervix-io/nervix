@@ -477,7 +477,7 @@ impl RelayProcessorTemplate {
                     let state = runtime
                         .replicated_deduplicator_state(runtime.state_placement(
                             domain,
-                            RuntimeStateKind::Deduplicator,
+                            RuntimeState::Deduplicator,
                             self.kind,
                             &self.processor,
                             key.clone(),
@@ -507,7 +507,7 @@ impl RelayProcessorTemplate {
                     let replicated_state = runtime
                         .replicated_window_processor_state(runtime.state_placement(
                             domain,
-                            RuntimeStateKind::WindowProcessor,
+                            RuntimeState::WindowProcessor,
                             self.kind,
                             &self.processor,
                             key.clone(),
@@ -625,18 +625,21 @@ impl RelayProcessorTemplate {
                     limits,
                     compiled,
                 } => {
-                    let replicated_state = runtime
-                        .replicated_wasm_processor_state(
-                            runtime.state_placement(
-                                domain,
-                                RuntimeStateKind::WasmProcessor,
-                                self.kind,
-                                &self.processor,
-                                key.clone(),
-                            ),
-                            Vec::new(),
-                            0,
+                    let placement = runtime
+                        .branch_state_placement(
+                            domain,
+                            RuntimeStateKind::WasmProcessor,
+                            self.kind,
+                            &self.processor,
+                            key.clone(),
                         )
+                        .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
+                            kind: self.kind,
+                            processor: self.processor.clone(),
+                            branch: key.clone(),
+                        })?;
+                    let replicated_state = runtime
+                        .replicated_wasm_processor_state(placement, Vec::new(), 0)
                         .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
                             kind: self.kind,
                             processor: self.processor.clone(),

@@ -4393,6 +4393,23 @@ async fn given_node_has_state_rejecting_wasm_processor_fixture_resource_director
 }
 
 #[given(
+    expr = "node {string} has state-counting WASM processor fixture resource directory {string}"
+)]
+async fn given_node_has_state_counting_wasm_processor_fixture_resource_directory(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    placeholder: String,
+) {
+    place_generated_wasm_processor_fixture(
+        world,
+        &node_id,
+        &placeholder,
+        state_counting_wasm_fixture("counted_events"),
+    )
+    .await;
+}
+
+#[given(
     expr = "node {string} has {string} failing WASM processor fixture resource directory {string}"
 )]
 async fn given_node_has_failing_wasm_processor_fixture_resource_directory(
@@ -4656,6 +4673,104 @@ fn trapping_wasm_fixture() -> &'static [u8] {
       (func (export "nervix_load_state") (param i32 i32) (result i32) (i32.const 0))
       (func (export "nervix_reset_state") (result i32) (i32.const 0))
     )"#
+}
+
+/// A guest whose only saved state is how many batches its branch has processed. It emits one row
+/// with uninitialized columns for every even-numbered batch, so whether the next batch produces a
+/// row tells which saved count a recreated instance restored. Written as text, it compiles quickly
+/// enough for a forced ownership recovery to validate its restore within the recovery budget.
+fn state_counting_wasm_fixture(output_relay: &str) -> Vec<u8> {
+    let encoded = WasmEnvelope::output(
+        Vec::new(),
+        vec![WasmRoutedOutput::new(
+            output_relay,
+            vec![
+                WasmOutputColumnRef::uninitialized(),
+                WasmOutputColumnRef::uninitialized(),
+            ],
+            WasmAckSidecar {
+                rows: vec![WasmOutputRow::default()],
+                ..WasmAckSidecar::default()
+            },
+        )],
+    )
+    .encode()
+    .expect("state-counting WASM output fixture must encode");
+    let encoded_wat = encoded
+        .iter()
+        .map(|byte| format!("\\{byte:02x}"))
+        .collect::<String>();
+    let encoded_len = encoded.len();
+
+    format!(
+        r#"(module
+          (memory (export "memory") 1)
+          (global $count (mut i32) (i32.const 0))
+          (global $emitted (mut i32) (i32.const 0))
+          (global $read_ptr (mut i32) (i32.const 0))
+          (data (i32.const 32768) "{encoded_wat}")
+          (func (export "nervix_buffer_ptr") (result i32) global.get $read_ptr)
+          (func (export "nervix_buffer_len") (result i32) (i32.const {encoded_len}))
+          (func (export "nervix_buffer_capacity") (result i32) (i32.const 16384))
+          (func (export "nervix_alloc") (param i32) (result i32)
+            i32.const 0
+            global.set $read_ptr
+            i32.const 0)
+          (func (export "nervix_init") (param i32 i32) (result i32) (i32.const 0))
+          (func (export "nervix_current_domain_time_nanos") (result i64) (i64.const 0))
+          (func (export "nervix_process_batch") (param i32 i32) (result i32)
+            global.get $count
+            i32.const 1
+            i32.add
+            global.set $count
+            global.get $count
+            i32.const 2
+            i32.rem_u
+            i32.eqz
+            global.set $emitted
+            i32.const 0)
+          (func (export "nervix_on_timeout") (param i64) (result i32) (i32.const 0))
+          (func (export "nervix_flush") (result i32) (i32.const 0))
+          (func (export "nervix_read_emit") (result i32)
+            global.get $emitted
+            if (result i32)
+              i32.const 0
+              global.set $emitted
+              i32.const 32768
+              global.set $read_ptr
+              i32.const {encoded_len}
+            else
+              i32.const 0
+            end)
+          (func (export "nervix_dump_state") (result i32)
+            i32.const 16
+            global.get $count
+            i32.store
+            i32.const 16
+            global.set $read_ptr
+            i32.const 4)
+          (func (export "nervix_load_state") (param $ptr i32) (param $len i32) (result i32)
+            local.get $len
+            i32.const 4
+            i32.ne
+            if (result i32)
+              i32.const {rejected}
+            else
+              local.get $ptr
+              i32.load
+              global.set $count
+              i32.const 0
+            end)
+          (func (export "nervix_reset_state") (result i32)
+            i32.const 0
+            global.set $count
+            i32.const 0
+            global.set $emitted
+            i32.const 0)
+        )"#,
+        rejected = nervix_wasm::SavedStateRejection::ApplicationState.code()
+    )
+    .into_bytes()
 }
 
 fn state_rejecting_wasm_fixture(output_relay: &str) -> Vec<u8> {

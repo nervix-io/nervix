@@ -80,7 +80,7 @@ impl Runtime {
         );
         for (placement, snapshot) in checkpoints {
             tokio::task::consume_budget().await;
-            if placement.state != RuntimeStateKind::WasmProcessor {
+            if placement.state.kind() != RuntimeStateKind::WasmProcessor {
                 continue;
             }
             let init = WasmBranchInit {
@@ -141,16 +141,53 @@ impl Runtime {
         }
     }
 
+    /// Refuse a save of guest state whose lifetime or ownership this node no longer holds.
+    ///
+    /// A branch task can outlive the schedule it was built from: an owner replacement or a state
+    /// transition publishes a new generation, or another owner, while its last batch is still
+    /// running. Nothing restores the lifetime such a save describes, so it is neither published nor
+    /// persisted.
+    pub(in crate::runtime) fn authorize_wasm_guest_state_save(
+        &self,
+        state: &ReplicatedWasmProcessorState,
+    ) -> error_stack::Result<(), StateReplicationError> {
+        let placement = &state.placement;
+        let superseded = || {
+            Report::new(StateReplicationError::Superseded {
+                placement: placement.clone(),
+            })
+        };
+        if !self.runtime_state_placement_is_current(placement) {
+            return Err(superseded());
+        }
+        let dispatcher = self.inner.remote_dispatcher.load();
+        // A runtime that has not joined a cluster executes every node it runs.
+        let Some(dispatcher) = dispatcher.as_deref() else {
+            return Ok(());
+        };
+        let Some(execution) = self.inner.executions.get(&placement.domain) else {
+            return Err(superseded());
+        };
+        let node = NodeRef::new(placement.kind, placement.identifier.clone());
+        let Some(scheduled) = execution.schedule.nodes.get(&node) else {
+            return Err(superseded());
+        };
+        if !scheduled.executes_on(dispatcher.local_node_id()) {
+            return Err(superseded());
+        }
+        Ok(())
+    }
+
     /// Persist the guest state a WASM processor branch saved and wait until its replicas hold it.
     pub(in crate::runtime) async fn persist_wasm_processor_snapshot(
         &self,
         state: &ReplicatedWasmProcessorState,
-        saved: &WasmGuestState,
+        saved: &StdArc<WasmGuestState>,
     ) -> error_stack::Result<(), StateReplicationError> {
         if let Some(store) = &self.inner.state_store {
             store
-                .persist_latest_snapshot(&state.placement, saved.revision(), saved.bytes())
-                .map_err(Report::new)
+                .persist_wasm_guest_state(&state.placement, saved.clone())
+                .await
                 .change_context(StateReplicationError::Persist {
                     placement: state.placement.clone(),
                     lsm: saved.revision(),

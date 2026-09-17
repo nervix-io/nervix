@@ -347,6 +347,13 @@ schedule, activation fails and leaves every saved checkpoint unchanged. State is
 the accepted decision either stages a recreated inventory or reports a reset for every state
 component the entity owns.
 
+A forced recovery of a WASM processor starts a new guest-state generation for every branch in the
+same schedule publication, and activation publishes the staged checkpoints in that generation. The
+former owner's saves, and those of any replica that missed the recovery, belong to the generation it
+replaced, so a node that restarts or rejoins with them never restores, serves, or supplies them to a
+later recovery. A later owner loss therefore resets a branch whose only surviving checkpoints are of
+an earlier generation instead of reviving them.
+
 ## Topology Cases
 
 | Case | Behavior |
@@ -506,7 +513,9 @@ name, so interrupted builds and abandoned transfers leave nothing behind.
 A completed forced recovery is recorded durably against the ownership transition itself, not against
 the process or schedule that executed it. Reapplying that retained schedule after a destination
 restart or a later domain rebuild is therefore a no-op rather than a second recovery, and any newer
-checkpoints the destination has published since are preserved.
+checkpoints the destination has published since are preserved. The WASM guest-state generation the
+recovery published is part of that committed schedule, so reapplying it names the same generation
+and starts no further lifetime.
 
 ### Abandoned Preparations And Staging
 

@@ -448,7 +448,7 @@ async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuil
     let operation_id = "forced-recovery";
     let placement = RuntimeStatePlacement {
         domain: domain.clone(),
-        state: RuntimeStateKind::MaterializedRelay,
+        state: RuntimeState::MaterializedRelay,
         kind: ModelKind::Relay,
         identifier: identifier.clone(),
         schema_fingerprint: [7; 32],
@@ -605,7 +605,7 @@ async fn forced_recovery_recreates_state_only_for_a_complete_reset_decision() {
     attach_loopback_cluster(&runtime, &destination).await;
     let placement = RuntimeStatePlacement {
         domain: domain.clone(),
-        state: RuntimeStateKind::MaterializedRelay,
+        state: RuntimeState::MaterializedRelay,
         kind: ModelKind::Relay,
         identifier: identifier.clone(),
         schema_fingerprint: [7; 32],
@@ -695,7 +695,7 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
     let destination = named::<ClusterNodeName>("node-2");
     let kafka_placement = RuntimeStatePlacement {
         domain: domain.clone(),
-        state: RuntimeStateKind::KafkaOffset,
+        state: RuntimeState::KafkaOffset,
         kind: ModelKind::Ingestor,
         identifier: named("orders_source"),
         schema_fingerprint: [0; 32],
@@ -722,7 +722,7 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         .expect("Kafka offset should update");
     let deduplicator_placement = RuntimeStatePlacement {
         domain: domain.clone(),
-        state: RuntimeStateKind::Deduplicator,
+        state: RuntimeState::Deduplicator,
         kind: ModelKind::Deduplicator,
         identifier: named("deduplicate_orders"),
         schema_fingerprint: [7; 32],
@@ -795,7 +795,8 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         let db = Database::builder(dir.path())
             .open()
             .expect("database should open");
-        let store = RuntimeStateStore::from_database(db).expect("state store should open");
+        let store = RuntimeStateStore::from_database(db, Executor::default())
+            .expect("state store should open");
         store
             .persist_forced_recovery_preparation(
                 &kafka_recovery,
@@ -822,6 +823,7 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
                 .activate_forced_recovery(
                     &kafka_recovery,
                     ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+                    None,
                 )
                 .expect("Kafka recovery should activate")
                 .is_some()
@@ -831,6 +833,7 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
                 .activate_forced_recovery(
                     &deduplicator_recovery,
                     ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+                    None,
                 )
                 .expect("branch recovery should activate")
                 .is_some()
@@ -853,7 +856,8 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         let db = Database::builder(dir.path())
             .open()
             .expect("database should reopen");
-        let store = RuntimeStateStore::from_database(db).expect("state store should reopen");
+        let store = RuntimeStateStore::from_database(db, Executor::default())
+            .expect("state store should reopen");
         let replayed_kafka_recovery = ForcedRuntimeStateRecoveryTransition {
             destination_incarnation: ClusterNodeIncarnation::new(43),
             target_schedule_fingerprint: [10; 32],
@@ -881,6 +885,7 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
                 .activate_forced_recovery(
                     &replayed_kafka_recovery,
                     ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+                    None,
                 )
                 .expect("completed Kafka recovery should replay")
                 .is_none()
@@ -890,6 +895,7 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
                 .activate_forced_recovery(
                     &replayed_deduplicator_recovery,
                     ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+                    None,
                 )
                 .expect("completed branch recovery should replay")
                 .is_none()
@@ -948,13 +954,14 @@ fn forced_recovery_refuses_missing_or_stale_preparation_without_changing_state()
     let db = Database::builder(dir.path())
         .open()
         .expect("database should open");
-    let store = RuntimeStateStore::from_database(db).expect("state store should open");
+    let store =
+        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
     let domain = domain("default");
     let source = named::<ClusterNodeName>("node-1");
     let destination = named::<ClusterNodeName>("node-2");
     let placement = RuntimeStatePlacement {
         domain: domain.clone(),
-        state: RuntimeStateKind::Deduplicator,
+        state: RuntimeState::Deduplicator,
         kind: ModelKind::Deduplicator,
         identifier: named("deduplicate_orders"),
         schema_fingerprint: [7; 32],
@@ -1000,6 +1007,7 @@ fn forced_recovery_refuses_missing_or_stale_preparation_without_changing_state()
         .activate_forced_recovery(
             &prepared_recovery,
             ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+            None,
         )
         .expect_err("activation without a preparation should fail");
     assert!(matches!(
@@ -1025,6 +1033,7 @@ fn forced_recovery_refuses_missing_or_stale_preparation_without_changing_state()
         .activate_forced_recovery(
             &changed_incarnation,
             ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+            None,
         )
         .expect_err("a preparation for another process incarnation should fail");
     assert!(matches!(
@@ -1039,6 +1048,7 @@ fn forced_recovery_refuses_missing_or_stale_preparation_without_changing_state()
         .activate_forced_recovery(
             &changed_fingerprint,
             ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+            None,
         )
         .expect_err("a preparation for another schedule should fail");
     assert!(matches!(
@@ -1077,10 +1087,11 @@ fn runtime_state_store_persists_latest_snapshot_with_monotonic_lsm() {
     let db = Database::builder(dir.path())
         .open()
         .expect("db should open");
-    let store = RuntimeStateStore::from_database(db).expect("state store should open");
+    let store =
+        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeStateKind::Deduplicator,
+        state: RuntimeState::Deduplicator,
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
         schema_fingerprint: [0; 32],
@@ -1118,7 +1129,7 @@ async fn deduplicator_snapshot_task_persists_published_keys_on_interval() {
         .expect("runtime should open persisted state");
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeStateKind::Deduplicator,
+        state: RuntimeState::Deduplicator,
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
         schema_fingerprint: [0; 32],
@@ -1178,7 +1189,7 @@ async fn deduplicator_snapshot_task_persists_published_keys_after_the_branch_tas
         .expect("runtime should open persisted state");
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeStateKind::Deduplicator,
+        state: RuntimeState::Deduplicator,
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
         schema_fingerprint: [0; 32],
@@ -1235,7 +1246,7 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
         .expect("runtime should open persisted state");
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeStateKind::MaterializedRelay,
+        state: RuntimeState::MaterializedRelay,
         kind: ModelKind::Relay,
         identifier: named("latest_orders"),
         schema_fingerprint: [0; 32],
@@ -1311,7 +1322,7 @@ async fn kafka_offset_snapshot_task_owns_persistence() {
         .expect("runtime should open persisted state");
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeStateKind::KafkaOffset,
+        state: RuntimeState::KafkaOffset,
         kind: ModelKind::Ingestor,
         identifier: named("orders_source"),
         schema_fingerprint: [0; 32],
@@ -1378,7 +1389,7 @@ async fn window_processor_snapshot_task_persists_published_state_on_interval() {
         .expect("runtime should open persisted state");
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeStateKind::WindowProcessor,
+        state: RuntimeState::WindowProcessor,
         kind: ModelKind::WindowProcessor,
         identifier: named("latency_window"),
         schema_fingerprint: [0; 32],
@@ -1436,7 +1447,7 @@ async fn window_processor_snapshot_task_persists_published_state_on_interval() {
 fn a_window_state_publication_proceeds_while_a_snapshot_reads_the_previous_one() {
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeStateKind::WindowProcessor,
+        state: RuntimeState::WindowProcessor,
         kind: ModelKind::WindowProcessor,
         identifier: named("latency_window"),
         schema_fingerprint: [0; 32],
@@ -1471,10 +1482,11 @@ fn runtime_state_store_purges_only_stale_schema_fingerprints() {
     let db = Database::builder(dir.path())
         .open()
         .expect("db should open");
-    let store = RuntimeStateStore::from_database(db).expect("state store should open");
+    let store =
+        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
     let base = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeStateKind::Deduplicator,
+        state: RuntimeState::Deduplicator,
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
         schema_fingerprint: [1; 32],
@@ -1492,14 +1504,17 @@ fn runtime_state_store_purges_only_stale_schema_fingerprints() {
         .expect("current snapshot should persist");
 
     store
-        .purge_stale_schema_fingerprints(
+        .purge_stale_state_identities(
             &base.domain,
             &HashMap::from_iter([(
                 NodeRef {
                     kind: base.kind,
                     identifier: base.identifier.clone(),
                 },
-                current.schema_fingerprint,
+                ScheduledStateIdentity {
+                    schema_fingerprint: current.schema_fingerprint,
+                    wasm_state_generations: None,
+                },
             )]),
         )
         .expect("stale snapshots should purge");
@@ -1526,10 +1541,11 @@ fn runtime_state_store_purges_only_the_requested_domain() {
     let db = Database::builder(dir.path())
         .open()
         .expect("db should open");
-    let store = RuntimeStateStore::from_database(db).expect("state store should open");
+    let store =
+        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
     let stopped = RuntimeStatePlacement {
         domain: domain("stopped"),
-        state: RuntimeStateKind::Deduplicator,
+        state: RuntimeState::Deduplicator,
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
         schema_fingerprint: [1; 32],
@@ -1572,10 +1588,11 @@ fn runtime_state_store_purges_only_the_requested_entity() {
     let db = Database::builder(dir.path())
         .open()
         .expect("db should open");
-    let store = RuntimeStateStore::from_database(db).expect("state store should open");
+    let store =
+        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
     let removed = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeStateKind::MaterializedRelay,
+        state: RuntimeState::MaterializedRelay,
         kind: ModelKind::Relay,
         identifier: named("events"),
         schema_fingerprint: [1; 32],
@@ -1595,7 +1612,7 @@ fn runtime_state_store_purges_only_the_requested_entity() {
     store
         .purge_entity(
             &removed.domain,
-            removed.state,
+            removed.state.kind(),
             removed.kind,
             &removed.identifier,
         )
@@ -1623,10 +1640,11 @@ fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
     let db = Database::builder(dir.path())
         .open()
         .expect("db should open");
-    let store = RuntimeStateStore::from_database(db).expect("state store should open");
+    let store =
+        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeStateKind::KafkaOffset,
+        state: RuntimeState::KafkaOffset,
         kind: ModelKind::Ingestor,
         identifier: named("kafka_notifications"),
         schema_fingerprint: [0; 32],
@@ -1700,7 +1718,7 @@ fn branch_aggregated_state_snapshot_roundtrips_metrics() {
     let metrics = RuntimeMetrics::default();
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeStateKind::BranchAggregated,
+        state: RuntimeState::BranchAggregated,
         kind: ModelKind::Ingestor,
         identifier: named("redis_notifications"),
         schema_fingerprint: [0; 32],
@@ -1765,7 +1783,7 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
     let runtime = Runtime::default();
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeStateKind::Deduplicator,
+        state: RuntimeState::Deduplicator,
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
         schema_fingerprint: [0; 32],
@@ -1820,7 +1838,7 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
 fn deduplicator_key_reservation_reports_new_and_duplicate_keys() {
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeStateKind::Deduplicator,
+        state: RuntimeState::Deduplicator,
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
         schema_fingerprint: [0; 32],
@@ -1849,7 +1867,7 @@ fn deduplicator_key_reservation_reports_new_and_duplicate_keys() {
 fn runtime_state_placement_storage_key_includes_branch_key() {
     let tenant_beta = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeStateKind::Deduplicator,
+        state: RuntimeState::Deduplicator,
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
         schema_fingerprint: [1; 32],
@@ -1857,7 +1875,7 @@ fn runtime_state_placement_storage_key_includes_branch_key() {
     };
     let tenant = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeStateKind::Deduplicator,
+        state: RuntimeState::Deduplicator,
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
         schema_fingerprint: [1; 32],
@@ -1867,7 +1885,7 @@ fn runtime_state_placement_storage_key_includes_branch_key() {
     assert_ne!(tenant_beta.as_storage_key(), tenant.as_storage_key());
     let branch_aggregated = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeStateKind::BranchAggregated,
+        state: RuntimeState::BranchAggregated,
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
         schema_fingerprint: [0; 32],
@@ -1879,7 +1897,7 @@ fn runtime_state_placement_storage_key_includes_branch_key() {
     );
     let deduplicator_global = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeStateKind::Deduplicator,
+        state: RuntimeState::Deduplicator,
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
         schema_fingerprint: [1; 32],
@@ -1923,13 +1941,13 @@ fn reinstalling_schema_fingerprints_never_exposes_a_node_without_one() {
     let resolve = || {
         runtime.state_placement(
             &domain,
-            RuntimeStateKind::MaterializedRelay,
+            RuntimeState::MaterializedRelay,
             ModelKind::Relay,
             &identifier,
             None,
         )
     };
-    runtime.install_state_schema_fingerprints(&schedule);
+    runtime.install_state_identities(&schedule);
     let installed = resolve();
 
     let reads_stopped = AtomicBool::new(false);
@@ -1943,7 +1961,7 @@ fn reinstalling_schema_fingerprints_never_exposes_a_node_without_one() {
             }
         });
         for _ in 0..2_000 {
-            runtime.install_state_schema_fingerprints(&schedule);
+            runtime.install_state_identities(&schedule);
         }
         reads_stopped.store(true, Ordering::Release);
     });
@@ -1986,10 +2004,10 @@ fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
         )
     };
 
-    runtime.install_state_schema_fingerprints(&schedule([1; 32]));
+    runtime.install_state_identities(&schedule([1; 32]));
     let original_placement = runtime.state_placement(
         &domain,
-        RuntimeStateKind::Deduplicator,
+        RuntimeState::Deduplicator,
         ModelKind::Deduplicator,
         &identifier,
         None,
@@ -1998,11 +2016,11 @@ fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
         .replicated_deduplicator_state(original_placement.clone())
         .expect("state should initialize");
 
-    runtime.install_state_schema_fingerprints(&schedule([1; 32]));
+    runtime.install_state_identities(&schedule([1; 32]));
     let unchanged = runtime
         .replicated_deduplicator_state(runtime.state_placement(
             &domain,
-            RuntimeStateKind::Deduplicator,
+            RuntimeState::Deduplicator,
             ModelKind::Deduplicator,
             &identifier,
             None,
@@ -2010,11 +2028,11 @@ fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
         .expect("unchanged state should initialize");
     assert!(Arc::ptr_eq(&original, &unchanged));
 
-    runtime.install_state_schema_fingerprints(&schedule([2; 32]));
+    runtime.install_state_identities(&schedule([2; 32]));
     let changed = runtime
         .replicated_deduplicator_state(runtime.state_placement(
             &domain,
-            RuntimeStateKind::Deduplicator,
+            RuntimeState::Deduplicator,
             ModelKind::Deduplicator,
             &identifier,
             None,
@@ -2030,4 +2048,177 @@ fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
             .replicated_deduplicator_states
             .contains_key(&original_placement)
     );
+}
+
+fn wasm_processor_node() -> ScheduledNode {
+    ScheduledNode::new(nervix_models::Model::WasmProcessor(
+        nervix_models::CreateWasmProcessor {
+            name: named("counting_guest"),
+            from: nervix_models::ProcessorInputs::single(named("counted_input")),
+            output_routes: nervix_models::ProcessorOutputs::single(named("counted_output")),
+            branched_by: nervix_models::BranchSelection::unbranched(),
+            resource: named("counting_bundle"),
+            resource_version: 1,
+            file: "processors/counting.wasm".to_string(),
+            limits: nervix_models::WasmProcessorLimits {
+                max_fuel: nonzero!(1_000_000u64),
+                max_memory_bytes: nonzero!(67_108_864u64),
+            },
+            global_error_policy: nervix_models::GeneralErrorPolicy::Log,
+            mode: nervix_models::AckMode::Attached,
+            filter_where: None,
+            materialized_state: Vec::new(),
+        },
+    ))
+    .with_schema_fingerprint([5; 32])
+}
+
+fn guest_state_placement(
+    runtime: &Runtime,
+    domain: &DomainName,
+    branch: Option<BranchKey>,
+) -> RuntimeStatePlacement {
+    runtime
+        .branch_state_placement(
+            domain,
+            RuntimeStateKind::WasmProcessor,
+            ModelKind::WasmProcessor,
+            named::<ModelName>("counting_guest"),
+            branch,
+        )
+        .expect("the installed schedule publishes the processor's generations")
+}
+
+/// Only the generation the committed schedule names for a branch is current. A concrete-branch
+/// transition leaves every other branch in its lifetime, a transition of every branch replaces all
+/// of them at once, and installing the same committed schedule again changes nothing.
+#[test]
+fn only_the_committed_generation_of_each_branch_is_current() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let acme = string_branch_key("tenant", "acme");
+    let beta = string_branch_key("tenant", "beta");
+    let mut node = wasm_processor_node();
+    let install = |node: &ScheduledNode| {
+        runtime.install_state_identities(&DomainSchedule::new(
+            domain.clone(),
+            vec![node.clone()],
+            Vec::new(),
+        ));
+    };
+
+    install(&node);
+    let first_acme = guest_state_placement(&runtime, &domain, acme.clone());
+    let first_beta = guest_state_placement(&runtime, &domain, beta.clone());
+    assert!(runtime.runtime_state_placement_is_current(&first_acme));
+    assert!(runtime.runtime_state_placement_is_current(&first_beta));
+
+    let acme_fingerprint = acme
+        .as_ref()
+        .expect("the acme branch is concrete")
+        .fingerprint();
+    node.begin_wasm_branch_state_generation(acme_fingerprint);
+    install(&node);
+    let second_acme = guest_state_placement(&runtime, &domain, acme.clone());
+    assert_ne!(second_acme, first_acme);
+    assert!(!runtime.runtime_state_placement_is_current(&first_acme));
+    assert!(runtime.runtime_state_placement_is_current(&second_acme));
+    assert_eq!(
+        guest_state_placement(&runtime, &domain, beta.clone()),
+        first_beta
+    );
+    assert!(runtime.runtime_state_placement_is_current(&first_beta));
+
+    node.begin_wasm_state_generation();
+    install(&node);
+    install(&node);
+    let third_acme = guest_state_placement(&runtime, &domain, acme);
+    let third_beta = guest_state_placement(&runtime, &domain, beta);
+    for replaced in [&first_acme, &second_acme, &first_beta] {
+        assert!(!runtime.runtime_state_placement_is_current(replaced));
+    }
+    assert_eq!(third_acme.state, third_beta.state);
+    assert!(runtime.runtime_state_placement_is_current(&third_acme));
+    assert!(runtime.runtime_state_placement_is_current(&third_beta));
+}
+
+/// A branch task that outlives a generation transition must not publish or persist its next save:
+/// nothing restores the lifetime that save describes.
+#[test]
+fn a_save_of_a_replaced_generation_is_refused_before_it_is_published() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let mut node = wasm_processor_node();
+    runtime.install_state_identities(&DomainSchedule::new(
+        domain.clone(),
+        vec![node.clone()],
+        Vec::new(),
+    ));
+    let placement = guest_state_placement(&runtime, &domain, string_branch_key("tenant", "acme"));
+    let state = runtime
+        .replicated_wasm_processor_state(placement, Vec::new(), 0)
+        .expect("guest state should initialize");
+    runtime
+        .authorize_wasm_guest_state_save(&state)
+        .expect("a save in the current generation is authorized");
+
+    node.begin_wasm_state_generation();
+    runtime.install_state_identities(&DomainSchedule::new(domain, vec![node], Vec::new()));
+
+    let refused = runtime
+        .authorize_wasm_guest_state_save(&state)
+        .expect_err("a save of a replaced generation must be refused");
+    assert!(matches!(
+        refused.current_context(),
+        StateReplicationError::Superseded { .. }
+    ));
+    assert!(refused.current_context().is_authority_rejection());
+    assert_eq!(state.saved_revision(), 0);
+}
+
+/// Forced recovery selects checkpoints only from the generation it recovers. A snapshot of a replaced
+/// generation stays on disk with a higher revision than anything current, and is still never
+/// selected.
+#[tokio::test]
+async fn forced_recovery_never_selects_a_checkpoint_of_a_replaced_generation() {
+    let dir = tempdir().expect("temporary runtime state directory should open");
+    let db = Database::builder(dir.path())
+        .open()
+        .expect("database should open");
+    let runtime = Runtime::with_persistence(Some(db), Duration::from_secs(60))
+        .expect("runtime with persistence should open");
+    let domain = domain("default");
+    let acme = string_branch_key("tenant", "acme");
+    let mut node = wasm_processor_node();
+    runtime.install_state_identities(&DomainSchedule::new(
+        domain.clone(),
+        vec![node.clone()],
+        Vec::new(),
+    ));
+    let replaced = guest_state_placement(&runtime, &domain, acme.clone());
+    runtime
+        .inner
+        .state_store
+        .as_ref()
+        .expect("the runtime has a state store")
+        .persist_latest_snapshot(&replaced, 9, &[7, 7])
+        .expect("the replaced generation's guest state should persist");
+
+    node.begin_wasm_state_generation();
+    runtime.install_state_identities(&DomainSchedule::new(domain.clone(), vec![node], Vec::new()));
+    let current = guest_state_placement(&runtime, &domain, acme);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+
+    let recovered = runtime
+        .forced_recovery_checkpoint(&current, &[], deadline)
+        .await;
+    assert!(recovered.snapshot.is_none());
+    assert_eq!(
+        recovered.reset_cause,
+        OwnershipStateResetCause::MissingCheckpoint
+    );
+    let stale = runtime
+        .forced_recovery_checkpoint(&replaced, &[], deadline)
+        .await;
+    assert_eq!(stale.snapshot.map(|snapshot| snapshot.lsm), Some(9));
 }

@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 
 use nervix_models::{
     ClusterNodeName, DomainName, DomainSchedule, KafkaPartitionSchedule, ModelKind,
+    WasmStateGenerations,
 };
 use nonzero_ext::nonzero;
 
@@ -836,6 +837,109 @@ fn failover_relocates_a_require_group_to_one_target() {
             .nodes
             .values()
             .all(|node| node.primary_node.as_ref() == Some(group_host))
+    );
+}
+
+#[test]
+fn failover_starts_a_new_guest_state_lifetime_for_every_branch() {
+    let domain = DomainName::parse("payments").expect("valid domain");
+    let mut schedule = DomainSchedule::new(
+        domain,
+        vec![
+            scheduled_node("counting_guest", ModelKind::WasmProcessor).placed_on(
+                Some(node_named("node-2")),
+                vec![node_named("node-2"), node_named("node-3")],
+            ),
+        ],
+        Vec::new(),
+    );
+
+    let moves = SessionServiceImpl::failover_unavailable_scheduled_nodes(
+        &mut schedule,
+        None,
+        &BTreeSet::from([node_named("node-1"), node_named("node-3")]),
+        &BTreeSet::from([node_named("node-1"), node_named("node-3")]),
+    );
+
+    assert!(!moves.is_empty());
+    let mut replaced = WasmStateGenerations::first();
+    replaced.begin_every_branch();
+    let recovered = &schedule.nodes[0];
+    assert_eq!(recovered.primary_node.as_ref(), Some(&node_named("node-3")));
+    assert!(recovered.ownership_transition.is_some());
+    assert_eq!(recovered.wasm_state_generations(), Some(&replaced));
+}
+
+#[test]
+fn a_planned_drain_keeps_the_guest_state_lifetime() {
+    let domain = DomainName::parse("payments").expect("valid domain");
+    let mut schedule = DomainSchedule::new(
+        domain.clone(),
+        vec![scheduled_node_on(
+            "counting_guest",
+            ModelKind::WasmProcessor,
+            "node-2",
+        )],
+        Vec::new(),
+    );
+    let desired = DomainSchedule::new(
+        domain,
+        vec![scheduled_node_on(
+            "counting_guest",
+            ModelKind::WasmProcessor,
+            "node-1",
+        )],
+        Vec::new(),
+    );
+
+    let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
+        &mut schedule,
+        &desired,
+        &node_named("node-2"),
+        &BTreeSet::from([node_named("node-1"), node_named("node-2")]),
+        &BTreeSet::from([node_named("node-1")]),
+    );
+
+    assert!(moved.is_some());
+    let drained = &schedule.nodes[0];
+    assert_eq!(drained.primary_node.as_ref(), Some(&node_named("node-1")));
+    assert!(drained.ownership_transition.is_some());
+    assert_eq!(
+        drained.wasm_state_generations(),
+        Some(&WasmStateGenerations::first())
+    );
+}
+
+#[test]
+fn merge_existing_schedule_data_continues_guest_state_lifetimes() {
+    let domain = DomainName::parse("payments").expect("valid domain");
+    let mut existing_guest =
+        scheduled_node_on("counting_guest", ModelKind::WasmProcessor, "node-1");
+    existing_guest.begin_wasm_state_generation();
+    let existing = DomainSchedule::new(domain.clone(), vec![existing_guest], Vec::new());
+    let mut next = DomainSchedule::new(
+        domain,
+        vec![scheduled_node_on(
+            "counting_guest",
+            ModelKind::WasmProcessor,
+            "node-1",
+        )],
+        Vec::new(),
+    );
+
+    SessionServiceImpl::merge_existing_schedule_data(
+        &mut next,
+        Some(&existing),
+        &[node_named("node-1")],
+    );
+
+    assert_eq!(
+        next.nodes[0].wasm_state_generations(),
+        existing.nodes[0].wasm_state_generations()
+    );
+    assert_ne!(
+        next.nodes[0].wasm_state_generations(),
+        Some(&WasmStateGenerations::first())
     );
 }
 

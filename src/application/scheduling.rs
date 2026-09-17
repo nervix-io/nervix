@@ -1344,6 +1344,9 @@ impl SessionServiceImpl {
             );
             if let Some(ownership_transition) = ownership_transition {
                 node.ownership_transition = Some(ownership_transition);
+                if relocation.replaces_owner_state() {
+                    node.begin_wasm_state_generation();
+                }
             }
             node.primary_node = Some(target.clone());
             node.assigned_nodes = assigned_nodes;
@@ -1472,6 +1475,9 @@ impl SessionServiceImpl {
 
         if let Some(ownership_transition) = ownership_transition {
             node.ownership_transition = Some(ownership_transition);
+            if relocation.replaces_owner_state() {
+                node.begin_wasm_state_generation();
+            }
         }
         node.primary_node = Some(target.clone());
         node.assigned_nodes = assigned_nodes;
@@ -1618,6 +1624,7 @@ impl SessionServiceImpl {
         for node in schedule.nodes.values_mut() {
             if let Some(existing_node) = existing.nodes.get(&node.identity()) {
                 node.kafka_partition_schedule = existing_node.kafka_partition_schedule.clone();
+                node.continue_wasm_state_generations_of(existing_node);
             }
         }
 
