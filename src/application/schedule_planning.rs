@@ -293,11 +293,16 @@ impl SessionServiceImpl {
 mod tests {
     use std::collections::BTreeSet;
 
-    use meticulous::ResultExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_consensus::{GossipNode, GossipState};
-    use nervix_models::{ClusterNodeIncarnation, ClusterNodeName};
+    use nervix_models::{
+        ClusterNodeIncarnation, ClusterNodeName, DomainName, DomainSchedule, DomainStatus,
+        ResourceName,
+    };
+    use nervix_recovery::Discarded as _;
 
-    use super::DomainSchedulePlanningSnapshot;
+    use super::{DomainSchedulePlanningSnapshot, SchedulePlanningStale};
+    use crate::application::test_fixtures::{TestService, build_test_service};
 
     fn gossip_node(name: &str, incarnation: u64, terminating: bool) -> GossipNode {
         GossipNode {
@@ -345,5 +350,133 @@ mod tests {
         assert!(DomainSchedulePlanningSnapshot::same_eligibility(
             &planned, &unrelated, &voters,
         ));
+    }
+
+    #[tokio::test]
+    async fn captured_planning_basis_classifies_each_stale_input() {
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(true).await;
+        let domain = DomainName::parse("default").assured("the test domain name is valid");
+
+        let captured = service
+            .inner
+            .consensus
+            .domain_planning_inputs(&domain)
+            .await;
+        let mut changed_domain = captured
+            .state()
+            .cloned()
+            .assured("the test fixture created the default domain");
+        changed_domain.status = DomainStatus::Running;
+        service
+            .inner
+            .consensus
+            .put_domain(changed_domain, None)
+            .await
+            .assured("the single-node test consensus accepts the domain update");
+        let error = service
+            .validate_domain_planning_inputs(&captured)
+            .await
+            .err()
+            .assured("the domain status changed after the planning inputs were captured");
+        assert!(matches!(
+            error.current_context(),
+            SchedulePlanningStale::Domain { .. }
+        ));
+
+        let captured = service
+            .inner
+            .consensus
+            .domain_planning_inputs(&domain)
+            .await;
+        let resource = ResourceName::parse("weights").assured("the test resource name is valid");
+        service
+            .inner
+            .consensus
+            .create_resource_catalog(&domain, &resource)
+            .await
+            .assured("the single-node test consensus accepts the resource catalog");
+        let error = service
+            .validate_domain_planning_inputs(&captured)
+            .await
+            .err()
+            .assured("a resource catalog was added after the planning inputs were captured");
+        assert!(matches!(
+            error.current_context(),
+            SchedulePlanningStale::Resources { .. }
+        ));
+
+        let captured = service
+            .inner
+            .consensus
+            .domain_planning_inputs(&domain)
+            .await;
+        service
+            .inner
+            .consensus
+            .replace_domain_schedule(
+                captured.clone(),
+                Some(DomainSchedule::new(domain.clone(), [], Vec::new())),
+                None,
+            )
+            .await
+            .assured("the single-node test consensus accepts the schedule");
+        let error = service
+            .validate_domain_planning_inputs(&captured)
+            .await
+            .err()
+            .assured("the schedule was replaced after the planning inputs were captured");
+        assert!(matches!(
+            error.current_context(),
+            SchedulePlanningStale::Schedule { .. }
+        ));
+
+        let captured = service
+            .inner
+            .consensus
+            .domain_planning_inputs(&domain)
+            .await;
+        let local_node = service.inner.consensus.local_node_id().clone();
+        service
+            .inner
+            .consensus
+            .set_node_cordoned(local_node, true)
+            .await
+            .assured("the single-node test consensus accepts the cordon");
+        let error = service
+            .validate_domain_planning_inputs(&captured)
+            .await
+            .err()
+            .assured("the voter was cordoned after the planning inputs were captured");
+        assert!(matches!(
+            error.current_context(),
+            SchedulePlanningStale::Topology { .. }
+        ));
+
+        let inputs = service
+            .inner
+            .consensus
+            .domain_planning_inputs(&domain)
+            .await;
+        let planning = service
+            .capture_domain_schedule_planning_snapshot(&inputs)
+            .await;
+        service.inner.cluster.mark_local_terminating().await;
+        let error = planning
+            .validate_eligibility(&service)
+            .await
+            .err()
+            .assured("the process began terminating after eligibility was captured");
+        assert!(matches!(
+            error.current_context(),
+            SchedulePlanningStale::Eligibility { .. }
+        ));
+
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
     }
 }

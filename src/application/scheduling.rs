@@ -2980,3 +2980,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "scheduling_publication_tests.rs"]
+mod publication_tests;
