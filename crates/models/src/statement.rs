@@ -91,6 +91,19 @@ pub enum Statement {
 }
 
 impl Statement {
+    pub fn requires_domain_mutation_ownership(&self) -> bool {
+        self.is_model_mutation()
+            || matches!(
+                self,
+                Self::CreateDomain(_)
+                    | Self::AlterDomain(_)
+                    | Self::StartDomain(_)
+                    | Self::StopDomain(_)
+                    | Self::DrainNode(_)
+                    | Self::Relocate(_)
+            )
+    }
+
     pub fn is_model_mutation(&self) -> bool {
         match self {
             Self::Create(_)

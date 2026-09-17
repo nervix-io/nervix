@@ -67,6 +67,7 @@ use triomphe::Arc;
 
 mod command_execution;
 mod connectivity_fault;
+mod domain_mutation;
 mod durable_batch;
 mod raft_record;
 mod records;
@@ -78,6 +79,7 @@ pub use command_execution::{
     CommandExecutionEffect, CommandExecutionResult, CommandExecutionResultKind,
     CommandExecutionState, CommandExecutionTransactionStatus,
 };
+pub use domain_mutation::{DomainMutationLease, DomainMutationOwner, DomainMutationRecoveryFence};
 pub use retention::RaftRetentionPolicy;
 pub use snapshot::{SealedSnapshot, SnapshotRetention};
 mod storage;
@@ -91,6 +93,7 @@ use storage::FjallStore;
 mod transaction;
 
 use connectivity_fault::ConnectivityFault;
+use domain_mutation::{DomainMutationAdmission, DomainMutationError};
 #[cfg(any(test, feature = "testing"))]
 pub use storage_fault::{StorageBoundary, StorageFault, StoragePause};
 mod wire;
@@ -119,6 +122,13 @@ pub struct TransactionControlSnapshot {
 pub enum ConsensusCommand {
     AdmitCommandExecution {
         execution: Box<CommandExecution>,
+        mutation_domains: BTreeSet<DomainName>,
+    },
+    AcquireCommandDomainMutation {
+        reference: nervix_models::CommandExecutionReference,
+        owner: UserName,
+        request_digest: [u8; 32],
+        domain: DomainName,
     },
     FinishCommandExecution {
         reference: nervix_models::CommandExecutionReference,
@@ -135,6 +145,7 @@ pub enum ConsensusCommand {
         domain: DomainName,
         expected_schedule: Option<Box<DomainSchedule>>,
         schedule: Option<Box<DomainSchedule>>,
+        mutation: Option<Box<DomainMutationLease>>,
     },
     ApplyAutomaticDomainSchedule {
         fence: AutomaticScheduleFence,
@@ -153,24 +164,30 @@ pub enum ConsensusCommand {
         expected_schedule: Option<Box<DomainSchedule>>,
         domain: Box<DomainState>,
         schedule: Option<Box<DomainSchedule>>,
+        mutation: Option<Box<DomainMutationLease>>,
     },
     PutDomain {
         domain: Box<DomainState>,
+        mutation: Option<Box<DomainMutationLease>>,
     },
     StartDomain {
         domain_id: DomainName,
         start: DomainStartPoint,
         clock: Option<DomainClockState>,
         authority: Option<ClusterNodeIdentity>,
+        mutation: Option<Box<DomainMutationLease>>,
     },
     StopDomain {
         domain_id: DomainName,
+        mutation: Option<Box<DomainMutationLease>>,
     },
     PauseDomain {
         domain_id: DomainName,
+        mutation: Option<Box<DomainMutationLease>>,
     },
     ResumeDomain {
         domain_id: DomainName,
+        mutation: Option<Box<DomainMutationLease>>,
     },
     ReconcileDomainClockAuthority {
         domain_id: DomainName,
@@ -287,9 +304,16 @@ pub struct UserCredentials {
 impl std::fmt::Display for ConsensusCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::AdmitCommandExecution { execution } => {
+            Self::AdmitCommandExecution { execution, .. } => {
                 write!(f, "admit-command-execution:{}", execution.reference)
             }
+            Self::AcquireCommandDomainMutation {
+                reference, domain, ..
+            } => write!(
+                f,
+                "acquire-command-domain-mutation:{reference}:{}",
+                domain.as_str()
+            ),
             Self::FinishCommandExecution { reference, .. } => {
                 write!(f, "finish-command-execution:{reference}")
             }
@@ -318,11 +342,13 @@ impl std::fmt::Display for ConsensusCommand {
             Self::PutDomainAndSchedule { domain, .. } => {
                 write!(f, "put-domain-and-schedule:{}", domain.id.as_str())
             }
-            Self::PutDomain { domain } => write!(f, "put-domain:{}", domain.id.as_str()),
+            Self::PutDomain { domain, .. } => write!(f, "put-domain:{}", domain.id.as_str()),
             Self::StartDomain { domain_id, .. } => write!(f, "start-domain:{}", domain_id.as_str()),
-            Self::StopDomain { domain_id } => write!(f, "stop-domain:{}", domain_id.as_str()),
-            Self::PauseDomain { domain_id } => write!(f, "pause-domain:{}", domain_id.as_str()),
-            Self::ResumeDomain { domain_id } => write!(f, "resume-domain:{}", domain_id.as_str()),
+            Self::StopDomain { domain_id, .. } => write!(f, "stop-domain:{}", domain_id.as_str()),
+            Self::PauseDomain { domain_id, .. } => write!(f, "pause-domain:{}", domain_id.as_str()),
+            Self::ResumeDomain { domain_id, .. } => {
+                write!(f, "resume-domain:{}", domain_id.as_str())
+            }
             Self::ReconcileDomainClockAuthority { domain_id, .. } => {
                 write!(f, "reconcile-domain-clock-authority:{}", domain_id.as_str())
             }
@@ -709,6 +735,7 @@ struct StateMachineData {
     resources: ResourceRecords,
     cordoned_node_ids: Records<ClusterNodeName, ()>,
     node_admission_fences: Records<ClusterNodeName, ClusterNodeIncarnation>,
+    domain_mutations: Records<DomainName, DomainMutationLease>,
     transactions: Records<String, ReplicatedTransaction>,
     command_executions: Records<nervix_models::CommandExecutionReference, CommandExecution>,
 }
@@ -1971,6 +1998,18 @@ impl Observer {
     pub async fn current_transaction(&self, id: &str) -> Option<ReplicatedTransaction> {
         self.inner.store.inner.state().transactions.get(id).cloned()
     }
+    pub async fn current_domain_mutation(
+        &self,
+        domain: &DomainName,
+    ) -> Option<DomainMutationLease> {
+        self.inner
+            .store
+            .inner
+            .state()
+            .domain_mutations
+            .get(domain)
+            .cloned()
+    }
     pub async fn current_command_execution(
         &self,
         reference: &nervix_models::CommandExecutionReference,
@@ -2249,12 +2288,44 @@ impl Proposer {
     pub async fn admit_command_execution(
         &self,
         execution: CommandExecution,
+        mutation_domains: BTreeSet<DomainName>,
     ) -> Result<CommandExecution, Report<ConsensusError>> {
         let reference = execution.reference.clone();
         let response = self
             .inner
             .client_write(ConsensusCommand::AdmitCommandExecution {
                 execution: Box::new(execution),
+                mutation_domains,
+            })
+            .await?;
+        match response.data {
+            ConsensusResponse::Applied => self
+                .current_command_execution(&reference)
+                .await
+                .ok_or_else(|| Report::new(ConsensusError::UnexpectedResponse)),
+            ConsensusResponse::Conflict(reason) => {
+                Err(Report::new(ConsensusError::Conflict(reason)))
+            }
+            ConsensusResponse::Transaction(_) => {
+                Err(Report::new(ConsensusError::UnexpectedResponse))
+            }
+        }
+    }
+
+    pub async fn acquire_command_domain_mutation(
+        &self,
+        reference: nervix_models::CommandExecutionReference,
+        owner: UserName,
+        request_digest: [u8; 32],
+        domain: DomainName,
+    ) -> Result<CommandExecution, Report<ConsensusError>> {
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::AcquireCommandDomainMutation {
+                reference: reference.clone(),
+                owner,
+                request_digest,
+                domain,
             })
             .await?;
         match response.data {
@@ -2391,6 +2462,7 @@ impl Proposer {
         domain: DomainName,
         expected_schedule: Option<DomainSchedule>,
         schedule: Option<DomainSchedule>,
+        mutation: Option<&DomainMutationLease>,
     ) -> Result<(), ConsensusError> {
         let response = self
             .inner
@@ -2398,6 +2470,7 @@ impl Proposer {
                 domain,
                 expected_schedule: expected_schedule.map(Box::new),
                 schedule: schedule.map(Box::new),
+                mutation: mutation.cloned().map(Box::new),
             })
             .await?;
         match response.data {
@@ -2442,13 +2515,23 @@ impl Proposer {
         }
     }
 
-    pub async fn put_domain(&self, domain: DomainState) -> Result<(), ConsensusError> {
-        self.inner
+    pub async fn put_domain(
+        &self,
+        domain: DomainState,
+        mutation: Option<&DomainMutationLease>,
+    ) -> Result<(), ConsensusError> {
+        let response = self
+            .inner
             .client_write(ConsensusCommand::PutDomain {
                 domain: Box::new(domain),
+                mutation: mutation.cloned().map(Box::new),
             })
-            .await
-            .map(|_| ())
+            .await?;
+        match response.data {
+            ConsensusResponse::Applied => Ok(()),
+            ConsensusResponse::Conflict(reason) => Err(ConsensusError::Conflict(reason)),
+            ConsensusResponse::Transaction(_) => Err(ConsensusError::UnexpectedResponse),
+        }
     }
 
     pub async fn put_domain_and_schedule(
@@ -2457,6 +2540,7 @@ impl Proposer {
         expected_schedule: Option<DomainSchedule>,
         domain: DomainState,
         schedule: Option<DomainSchedule>,
+        mutation: Option<&DomainMutationLease>,
     ) -> Result<(), ConsensusError> {
         let response = self
             .inner
@@ -2465,6 +2549,7 @@ impl Proposer {
                 expected_schedule: expected_schedule.map(Box::new),
                 domain: Box::new(domain),
                 schedule: schedule.map(Box::new),
+                mutation: mutation.cloned().map(Box::new),
             })
             .await?;
         match response.data {
@@ -2480,23 +2565,42 @@ impl Proposer {
         start: DomainStartPoint,
         clock: Option<DomainClockState>,
         authority: Option<ClusterNodeIdentity>,
+        mutation: Option<&DomainMutationLease>,
     ) -> Result<(), ConsensusError> {
-        self.inner
+        let response = self
+            .inner
             .client_write(ConsensusCommand::StartDomain {
                 domain_id,
                 start,
                 clock,
                 authority,
+                mutation: mutation.cloned().map(Box::new),
             })
-            .await
-            .map(|_| ())
+            .await?;
+        match response.data {
+            ConsensusResponse::Applied => Ok(()),
+            ConsensusResponse::Conflict(reason) => Err(ConsensusError::Conflict(reason)),
+            ConsensusResponse::Transaction(_) => Err(ConsensusError::UnexpectedResponse),
+        }
     }
 
-    pub async fn stop_domain(&self, domain_id: DomainName) -> Result<(), ConsensusError> {
-        self.inner
-            .client_write(ConsensusCommand::StopDomain { domain_id })
-            .await
-            .map(|_| ())
+    pub async fn stop_domain(
+        &self,
+        domain_id: DomainName,
+        mutation: Option<&DomainMutationLease>,
+    ) -> Result<(), ConsensusError> {
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::StopDomain {
+                domain_id,
+                mutation: mutation.cloned().map(Box::new),
+            })
+            .await?;
+        match response.data {
+            ConsensusResponse::Applied => Ok(()),
+            ConsensusResponse::Conflict(reason) => Err(ConsensusError::Conflict(reason)),
+            ConsensusResponse::Transaction(_) => Err(ConsensusError::UnexpectedResponse),
+        }
     }
 
     pub async fn reconcile_domain_clock_authority(
@@ -2516,23 +2620,55 @@ impl Proposer {
             })
             .await;
         match written {
-            Ok(_) => Ok(()),
+            Ok(response) => match response.data {
+                ConsensusResponse::Applied => Ok(()),
+                ConsensusResponse::Conflict(reason) => {
+                    Err(Report::new(ConsensusError::Conflict(reason)))
+                }
+                ConsensusResponse::Transaction(_) => {
+                    Err(Report::new(ConsensusError::UnexpectedResponse))
+                }
+            },
             Err(error) => Err(Report::new(error)),
         }
     }
 
-    pub async fn pause_domain(&self, domain_id: DomainName) -> Result<(), ConsensusError> {
-        self.inner
-            .client_write(ConsensusCommand::PauseDomain { domain_id })
-            .await
-            .map(|_| ())
+    pub async fn pause_domain(
+        &self,
+        domain_id: DomainName,
+        mutation: Option<&DomainMutationLease>,
+    ) -> Result<(), ConsensusError> {
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::PauseDomain {
+                domain_id,
+                mutation: mutation.cloned().map(Box::new),
+            })
+            .await?;
+        match response.data {
+            ConsensusResponse::Applied => Ok(()),
+            ConsensusResponse::Conflict(reason) => Err(ConsensusError::Conflict(reason)),
+            ConsensusResponse::Transaction(_) => Err(ConsensusError::UnexpectedResponse),
+        }
     }
 
-    pub async fn resume_domain(&self, domain_id: DomainName) -> Result<(), ConsensusError> {
-        self.inner
-            .client_write(ConsensusCommand::ResumeDomain { domain_id })
-            .await
-            .map(|_| ())
+    pub async fn resume_domain(
+        &self,
+        domain_id: DomainName,
+        mutation: Option<&DomainMutationLease>,
+    ) -> Result<(), ConsensusError> {
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::ResumeDomain {
+                domain_id,
+                mutation: mutation.cloned().map(Box::new),
+            })
+            .await?;
+        match response.data {
+            ConsensusResponse::Applied => Ok(()),
+            ConsensusResponse::Conflict(reason) => Err(ConsensusError::Conflict(reason)),
+            ConsensusResponse::Transaction(_) => Err(ConsensusError::UnexpectedResponse),
+        }
     }
 
     pub async fn create_user(&self, user: UserCredentials) -> Result<(), ConsensusError> {
@@ -3698,6 +3834,91 @@ fn apply_consensus_command(
     )
 }
 
+fn domain_mutation_recovery_fence(state: &StateMachineData) -> DomainMutationRecoveryFence {
+    let revision = match &state.last_applied_log_id {
+        Some(log_id) => log_id.index,
+        None => 0,
+    };
+    DomainMutationRecoveryFence::at_revision(revision)
+}
+
+fn admit_domain_mutation(
+    state: &mut StateMachineData,
+    domain: &DomainName,
+    owner: &DomainMutationOwner,
+) -> error_stack::Result<DomainMutationLease, DomainMutationError> {
+    let admission = DomainMutationAdmission::decide(
+        state.domain_mutations.get(domain),
+        owner,
+        domain_mutation_recovery_fence(state),
+    );
+    let Some(lease) = admission.clone().into_admitted() else {
+        return Err(Report::new(DomainMutationError::Conflict {
+            domain: domain.clone(),
+            owner: admission.lease().owner().clone(),
+        }));
+    };
+    state.domain_mutations.insert(domain.clone(), lease.clone());
+    Ok(lease)
+}
+
+fn admit_domain_mutations(
+    state: &mut StateMachineData,
+    domains: &BTreeSet<DomainName>,
+    owner: &DomainMutationOwner,
+) -> error_stack::Result<BTreeMap<DomainName, DomainMutationLease>, DomainMutationError> {
+    let recovery_fence = domain_mutation_recovery_fence(state);
+    let mut admitted = BTreeMap::new();
+    for domain in domains {
+        let admission = DomainMutationAdmission::decide(
+            state.domain_mutations.get(domain),
+            owner,
+            recovery_fence,
+        );
+        let Some(lease) = admission.clone().into_admitted() else {
+            return Err(Report::new(DomainMutationError::Conflict {
+                domain: domain.clone(),
+                owner: admission.lease().owner().clone(),
+            }));
+        };
+        admitted.insert(domain.clone(), lease);
+    }
+    for (domain, lease) in &admitted {
+        state.domain_mutations.insert(domain.clone(), lease.clone());
+    }
+    Ok(admitted)
+}
+
+fn validate_domain_mutation(
+    state: &StateMachineData,
+    domain: &DomainName,
+    requested: Option<&DomainMutationLease>,
+) -> error_stack::Result<(), DomainMutationError> {
+    let current = state.domain_mutations.get(domain);
+    match (current, requested) {
+        (None, None) => Ok(()),
+        (Some(current), Some(requested)) if current == requested => Ok(()),
+        (Some(current), _) => Err(Report::new(DomainMutationError::Conflict {
+            domain: domain.clone(),
+            owner: current.owner().clone(),
+        })),
+        (None, Some(requested)) => Err(Report::new(DomainMutationError::FenceLost {
+            domain: domain.clone(),
+            owner: requested.owner().clone(),
+        })),
+    }
+}
+
+fn release_domain_mutation(
+    state: &mut StateMachineData,
+    domain: &DomainName,
+    lease: &DomainMutationLease,
+) -> error_stack::Result<(), DomainMutationError> {
+    validate_domain_mutation(state, domain, Some(lease))?;
+    state.domain_mutations.remove(domain);
+    Ok(())
+}
+
 fn apply_consensus_command_at(
     state: &mut StateMachineData,
     command: &ConsensusCommand,
@@ -3705,7 +3926,10 @@ fn apply_consensus_command_at(
 ) -> AppliedConsensusCommand {
     let mut changes = StateMachineChanges::default();
     match command {
-        ConsensusCommand::AdmitCommandExecution { execution } => {
+        ConsensusCommand::AdmitCommandExecution {
+            execution,
+            mutation_domains,
+        } => {
             if let Some(existing) = state.command_executions.get(&execution.reference) {
                 if !existing.same_request(execution) {
                     return AppliedConsensusCommand::conflict(format!(
@@ -3715,9 +3939,56 @@ fn apply_consensus_command_at(
                     ));
                 }
             } else {
+                let owner = DomainMutationOwner::command(execution.reference.clone());
+                let admitted = match admit_domain_mutations(state, mutation_domains, &owner) {
+                    Ok(admitted) => admitted,
+                    Err(reason) => return AppliedConsensusCommand::conflict(reason.to_string()),
+                };
+                let mut execution = execution.as_ref().clone();
+                for (domain, lease) in admitted {
+                    execution.bind_domain_mutation(domain, lease);
+                }
                 state
                     .command_executions
-                    .insert(execution.reference.clone(), execution.as_ref().clone());
+                    .insert(execution.reference.clone(), execution);
+            }
+        }
+        ConsensusCommand::AcquireCommandDomainMutation {
+            reference,
+            owner,
+            request_digest,
+            domain,
+        } => {
+            let Some(mut execution) = state.command_executions.get(reference).cloned() else {
+                return AppliedConsensusCommand::conflict(format!(
+                    "command execution reference '{reference}' is unknown"
+                ));
+            };
+            if &execution.owner != owner || execution.request_digest != *request_digest {
+                return AppliedConsensusCommand::conflict(format!(
+                    "command execution reference '{reference}' is bound to a different owner or \
+                     request"
+                ));
+            }
+            if !matches!(execution.state, CommandExecutionState::Applying) {
+                return AppliedConsensusCommand::conflict(format!(
+                    "command execution reference '{reference}' is no longer applying"
+                ));
+            }
+            if let Some(lease) = execution.domain_mutation(domain) {
+                if let Err(reason) = validate_domain_mutation(state, domain, Some(lease)) {
+                    return AppliedConsensusCommand::conflict(reason.to_string());
+                }
+            } else {
+                let mutation_owner = DomainMutationOwner::command(reference.clone());
+                let lease = match admit_domain_mutation(state, domain, &mutation_owner) {
+                    Ok(lease) => lease,
+                    Err(reason) => return AppliedConsensusCommand::conflict(reason.to_string()),
+                };
+                execution.bind_domain_mutation(domain.clone(), lease);
+                state
+                    .command_executions
+                    .insert(reference.clone(), execution);
             }
         }
         ConsensusCommand::FinishCommandExecution {
@@ -3731,7 +4002,7 @@ fn apply_consensus_command_at(
                 Some(log_id) => log_id.index,
                 None => 0,
             };
-            let Some(execution) = state.command_executions.get_mut(reference) else {
+            let Some(mut execution) = state.command_executions.get(reference).cloned() else {
                 return AppliedConsensusCommand::conflict(format!(
                     "command execution reference '{reference}' is unknown"
                 ));
@@ -3749,6 +4020,19 @@ fn apply_consensus_command_at(
                         finished_at: *at,
                         result: result.clone(),
                     };
+                    for (domain, lease) in execution.domain_mutations() {
+                        if let Err(reason) = validate_domain_mutation(state, domain, Some(lease)) {
+                            return AppliedConsensusCommand::conflict(reason.to_string());
+                        }
+                    }
+                    for (domain, lease) in execution.domain_mutations() {
+                        release_domain_mutation(state, domain, lease).verified(
+                            "every command mutation lease was validated against this same state",
+                        );
+                    }
+                    state
+                        .command_executions
+                        .insert(reference.clone(), execution);
                 }
                 CommandExecutionState::Finished {
                     result: existing, ..
@@ -3787,7 +4071,11 @@ fn apply_consensus_command_at(
             domain,
             expected_schedule,
             schedule,
+            mutation,
         } => {
+            if let Err(reason) = validate_domain_mutation(state, domain, mutation.as_deref()) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
             if state.schedule.domain(domain) != expected_schedule.as_deref() {
                 return AppliedConsensusCommand::conflict(format!(
                     "domain '{}' schedule changed",
@@ -3803,6 +4091,9 @@ fn apply_consensus_command_at(
             expected_schedule,
             schedule,
         } => {
+            if let Err(reason) = validate_domain_mutation(state, domain, None) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
             if context.leader_term != fence.leader_tenure.term {
                 return AppliedConsensusCommand::conflict(
                     "automatic schedule decision leader tenure changed".to_string(),
@@ -3828,7 +4119,11 @@ fn apply_consensus_command_at(
             expected_schedule,
             domain,
             schedule,
+            mutation,
         } => {
+            if let Err(reason) = validate_domain_mutation(state, &domain.id, mutation.as_deref()) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
             if state.domains.get(&domain.id) != expected_domain.as_deref() {
                 return AppliedConsensusCommand::conflict(format!(
                     "domain '{}' configuration changed",
@@ -3848,7 +4143,10 @@ fn apply_consensus_command_at(
             changes.domains_changed = true;
             changes.schedule_changed = true;
         }
-        ConsensusCommand::PutDomain { domain } => {
+        ConsensusCommand::PutDomain { domain, mutation } => {
+            if let Err(reason) = validate_domain_mutation(state, &domain.id, mutation.as_deref()) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
             state.domains.insert(domain.id.clone(), (**domain).clone());
             changes.domains_changed = true;
         }
@@ -3857,13 +4155,29 @@ fn apply_consensus_command_at(
             start,
             clock,
             authority,
+            mutation,
         } => {
+            if let Err(reason) = validate_domain_mutation(state, domain_id, mutation.as_deref()) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
             changes.domains_changed = state.commit_domain_start(domain_id, start, clock, authority);
         }
-        ConsensusCommand::StopDomain { domain_id } => {
+        ConsensusCommand::StopDomain {
+            domain_id,
+            mutation,
+        } => {
+            if let Err(reason) = validate_domain_mutation(state, domain_id, mutation.as_deref()) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
             changes.domains_changed = state.commit_domain_stop(domain_id);
         }
-        ConsensusCommand::PauseDomain { domain_id } => {
+        ConsensusCommand::PauseDomain {
+            domain_id,
+            mutation,
+        } => {
+            if let Err(reason) = validate_domain_mutation(state, domain_id, mutation.as_deref()) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
             if let Some(domain) = state.domains.get_mut(domain_id)
                 && let DomainStatus::Running = domain.status
             {
@@ -3871,7 +4185,13 @@ fn apply_consensus_command_at(
                 changes.domains_changed = true;
             }
         }
-        ConsensusCommand::ResumeDomain { domain_id } => {
+        ConsensusCommand::ResumeDomain {
+            domain_id,
+            mutation,
+        } => {
+            if let Err(reason) = validate_domain_mutation(state, domain_id, mutation.as_deref()) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
             if let Some(domain) = state.domains.get_mut(domain_id)
                 && let DomainStatus::Paused = domain.status
             {
@@ -3885,6 +4205,9 @@ fn apply_consensus_command_at(
             expected_authority,
             owner,
         } => {
+            if let Err(reason) = validate_domain_mutation(state, domain_id, None) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
             changes.domains_changed = state.reconcile_domain_clock_authority(
                 domain_id,
                 *expected_start_version,
@@ -4010,11 +4333,43 @@ fn apply_consensus_command_at(
             return AppliedConsensusCommand::transaction(result, changes);
         }
         ConsensusCommand::StartTransactionCommit { id, owner, at } => {
-            let result = mutate_transaction(state, id, |transaction| {
-                transaction.start_commit(owner, *at)
-            });
-            changes.transactions_changed = result.is_ok();
-            return AppliedConsensusCommand::transaction(result, changes);
+            let Some(mut transaction) = state.transactions.get(id).cloned() else {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::Unknown { id: id.clone() }),
+                    changes,
+                );
+            };
+            let domain_mutation = if transaction.requires_domain_mutation() {
+                let admission = DomainMutationAdmission::decide(
+                    state.domain_mutations.get(&transaction.domain),
+                    transaction.mutation_owner(),
+                    domain_mutation_recovery_fence(state),
+                );
+                let Some(lease) = admission.clone().into_admitted() else {
+                    return AppliedConsensusCommand::transaction(
+                        Err(TransactionMutationError::DomainMutationConflict {
+                            id: transaction.id.clone(),
+                            domain: transaction.domain.clone(),
+                            owner: admission.lease().owner().clone(),
+                        }),
+                        changes,
+                    );
+                };
+                Some(lease)
+            } else {
+                None
+            };
+            if let Err(error) = transaction.start_commit(owner, *at, domain_mutation.clone()) {
+                return AppliedConsensusCommand::transaction(Err(error), changes);
+            }
+            if let Some(lease) = domain_mutation {
+                state
+                    .domain_mutations
+                    .insert(transaction.domain.clone(), lease);
+            }
+            state.transactions.insert(id.clone(), transaction.clone());
+            changes.transactions_changed = true;
+            return AppliedConsensusCommand::transaction(Ok(transaction), changes);
         }
         ConsensusCommand::AdvanceTransactionCommit {
             id,
@@ -4034,6 +4389,12 @@ fn apply_consensus_command_at(
                     );
                 }
             };
+            if let Err(error) = validate_transaction_domain_mutation(state, &transaction) {
+                return AppliedConsensusCommand::transaction(
+                    Err(error.current_context().clone()),
+                    changes,
+                );
+            }
             let effect_revision = match &state.last_applied_log_id {
                 Some(log_id) => log_id.index,
                 None => 0,
@@ -4102,16 +4463,38 @@ fn apply_consensus_command_at(
                 Some(log_id) => log_id.index,
                 None => 0,
             };
-            let result = mutate_transaction(state, id, |transaction| {
-                transaction.complete_application(
-                    *expected_next_statement,
-                    *at,
-                    outcome_revision,
-                    application_failure.clone(),
-                )
-            });
-            changes.transactions_changed = result.is_ok();
-            return AppliedConsensusCommand::transaction(result, changes);
+            let Some(mut transaction) = state.transactions.get(id).cloned() else {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::Unknown { id: id.clone() }),
+                    changes,
+                );
+            };
+            if let Err(error) = validate_transaction_domain_mutation(state, &transaction) {
+                return AppliedConsensusCommand::transaction(
+                    Err(error.current_context().clone()),
+                    changes,
+                );
+            }
+            let domain_mutation = transaction.domain_mutation().cloned();
+            if let Err(error) = transaction.complete_application(
+                *expected_next_statement,
+                *at,
+                outcome_revision,
+                application_failure.clone(),
+            ) {
+                return AppliedConsensusCommand::transaction(Err(error), changes);
+            }
+            if matches!(transaction.state, TransactionState::Finished(_))
+                && let Some(lease) = domain_mutation
+                && lease.owner().is_transaction()
+            {
+                release_domain_mutation(state, &transaction.domain, &lease).verified(
+                    "the transaction mutation lease was validated against this same state",
+                );
+            }
+            state.transactions.insert(id.clone(), transaction.clone());
+            changes.transactions_changed = true;
+            return AppliedConsensusCommand::transaction(Ok(transaction), changes);
         }
         ConsensusCommand::FinishEmptyTransactionCommit { id, at } => {
             let outcome_revision = match &state.last_applied_log_id {
@@ -4187,6 +4570,32 @@ fn mutate_transaction(
     };
     mutation(transaction)?;
     Ok(transaction.clone())
+}
+
+fn validate_transaction_domain_mutation(
+    state: &StateMachineData,
+    transaction: &ReplicatedTransaction,
+) -> error_stack::Result<(), TransactionMutationError> {
+    let Some(lease) = transaction.domain_mutation() else {
+        if transaction.requires_domain_mutation() {
+            return Err(Report::new(
+                TransactionMutationError::DomainMutationFenceLost {
+                    id: transaction.id.clone(),
+                    domain: transaction.domain.clone(),
+                },
+            ));
+        }
+        return Ok(());
+    };
+    if state.domain_mutations.get(&transaction.domain) == Some(lease) {
+        return Ok(());
+    }
+    Err(Report::new(
+        TransactionMutationError::DomainMutationFenceLost {
+            id: transaction.id.clone(),
+            domain: transaction.domain.clone(),
+        },
+    ))
 }
 
 fn validate_transaction_step_contract<'a>(
@@ -4880,6 +5289,7 @@ mod tests {
                 },
                 clock: Some(mapping.clone()),
                 authority: Some(first_owner.clone()),
+                mutation: None,
             },
         );
         let first = state
@@ -4941,6 +5351,7 @@ mod tests {
             &mut state,
             &ConsensusCommand::StopDomain {
                 domain_id: domain_id.clone(),
+                mutation: None,
             },
         );
         let stopped = state
@@ -4986,6 +5397,7 @@ mod tests {
                 start: start.clone(),
                 clock: Some(mapping.clone()),
                 authority: Some(owner.clone()),
+                mutation: None,
             },
         );
         let mut changes = StateMachineChanges::default();
@@ -5012,6 +5424,7 @@ mod tests {
             &mut direct,
             &ConsensusCommand::StopDomain {
                 domain_id: domain_id.clone(),
+                mutation: None,
             },
         );
         let mut changes = StateMachineChanges::default();
@@ -5088,11 +5501,13 @@ mod tests {
             domain: domain("tenant"),
             expected_schedule: None,
             schedule: Some(Box::new(domain_schedule("tenant"))),
+            mutation: None,
         };
         let clear = ConsensusCommand::ReplaceDomainSchedule {
             domain: domain("tenant"),
             expected_schedule: Some(Box::new(domain_schedule("tenant"))),
             schedule: None,
+            mutation: None,
         };
 
         assert_eq!(replace.to_string(), "replace-domain-schedule:tenant");
@@ -5106,6 +5521,7 @@ mod tests {
             domain: domain("tenant"),
             expected_schedule: None,
             schedule: Some(Box::new(domain_schedule("tenant"))),
+            mutation: None,
         };
 
         let bytes = crate::durable_batch::DurableBatch::encode(&command, 1024)
@@ -5138,6 +5554,7 @@ mod tests {
                 domain: domain("alpha"),
                 expected_schedule: None,
                 schedule: Some(Box::new(domain_schedule("alpha"))),
+                mutation: None,
             },
         );
         assert_eq!(
@@ -5156,6 +5573,7 @@ mod tests {
                 domain: domain("alpha"),
                 expected_schedule: Some(Box::new(domain_schedule("alpha"))),
                 schedule: Some(Box::new(domain_schedule("alpha"))),
+                mutation: None,
             },
         );
         assert_eq!(state.schedule.domains.len(), 2);
@@ -5166,6 +5584,7 @@ mod tests {
                 domain: domain("zeta"),
                 expected_schedule: Some(Box::new(domain_schedule("zeta"))),
                 schedule: None,
+                mutation: None,
             },
         );
         assert_eq!(
@@ -5193,6 +5612,7 @@ mod tests {
                 expected_schedule: None,
                 domain: Box::new(domain_state.clone()),
                 schedule: Some(Box::new(schedule.clone())),
+                mutation: None,
             },
         );
 
@@ -5214,6 +5634,7 @@ mod tests {
                 domain: domain("tenant"),
                 expected_schedule: None,
                 schedule: None,
+                mutation: None,
             },
         );
 
@@ -5332,6 +5753,7 @@ mod tests {
             &mut state,
             &ConsensusCommand::PutDomain {
                 domain: Box::new(running_domain_state("tenant")),
+                mutation: None,
             },
         );
         state.record_runtime_revision(41, &domain_change);
@@ -5355,6 +5777,7 @@ mod tests {
                 domain: domain("tenant"),
                 expected_schedule: None,
                 schedule: Some(Box::new(domain_schedule("tenant"))),
+                mutation: None,
             },
         );
         state.record_runtime_revision(43, &schedule_change);
@@ -5387,6 +5810,7 @@ mod tests {
                 &mut state,
                 &ConsensusCommand::AdmitCommandExecution {
                     execution: Box::new(admitted),
+                    mutation_domains: BTreeSet::new(),
                 },
             );
             assert!(matches!(response.response, ConsensusResponse::Applied));
@@ -5399,6 +5823,7 @@ mod tests {
             &mut state,
             &ConsensusCommand::AdmitCommandExecution {
                 execution: Box::new(conflicting),
+                mutation_domains: BTreeSet::new(),
             },
         );
         assert!(matches!(conflict.response, ConsensusResponse::Conflict(_)));
@@ -5445,6 +5870,7 @@ mod tests {
             &mut state,
             &ConsensusCommand::AdmitCommandExecution {
                 execution: Box::new(execution),
+                mutation_domains: BTreeSet::new(),
             },
         );
         assert!(matches!(response.response, ConsensusResponse::Applied));
@@ -5456,6 +5882,208 @@ mod tests {
                 .state,
             CommandExecutionState::Expired { .. }
         ));
+    }
+
+    #[test]
+    fn domain_mutation_ownership_joins_conflicts_releases_and_fences() {
+        fn execution(
+            reference: &str,
+            owner: &UserName,
+            domain: &DomainName,
+            request_digest: [u8; 32],
+        ) -> CommandExecution {
+            CommandExecution::applying(
+                nervix_models::CommandExecutionReference::parse(reference)
+                    .assured("the test command reference is an accepted literal"),
+                owner.clone(),
+                Some(domain.clone()),
+                request_digest,
+                Timestamp::from_unix_nanos(1),
+                CommandExecutionEffect::CreateUser {
+                    if_not_exists: false,
+                    name: UserName::parse("created_user")
+                        .assured("the created test user is an accepted literal"),
+                    password_hash: "argon2-hash".to_string(),
+                },
+            )
+        }
+
+        let tenant = domain("tenant");
+        let independent = domain("independent");
+        let owner = UserName::parse("app_user").assured("the test owner is an accepted literal");
+        let first = execution("request-1", &owner, &tenant, [1; 32]);
+        let second = execution("request-2", &owner, &tenant, [2; 32]);
+        let mutation_domains = BTreeSet::from([tenant.clone()]);
+        let mut state = StateMachineData {
+            last_applied_log_id: Some(LogIdOf::new(committed_leader(1), 11)),
+            ..Default::default()
+        };
+
+        for admitted in [first.clone(), first.clone()] {
+            let response = apply_consensus_command(
+                &mut state,
+                &ConsensusCommand::AdmitCommandExecution {
+                    execution: Box::new(admitted),
+                    mutation_domains: mutation_domains.clone(),
+                },
+            );
+            assert_eq!(response.response, ConsensusResponse::Applied);
+        }
+        let first_lease = state
+            .command_executions
+            .get(&first.reference)
+            .and_then(|execution| execution.domain_mutation(&tenant))
+            .cloned()
+            .verified("the admitted execution owns its requested domain mutation");
+        assert_eq!(first_lease.recovery_fence().revision(), 11);
+        assert_eq!(state.domain_mutations.get(&tenant), Some(&first_lease));
+
+        let conflict = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::AdmitCommandExecution {
+                execution: Box::new(second.clone()),
+                mutation_domains: mutation_domains.clone(),
+            },
+        );
+        assert!(matches!(
+            conflict.response,
+            ConsensusResponse::Conflict(reason)
+                if reason.contains("mutation is owned by command 'request-1'")
+        ));
+        assert!(!state.command_executions.contains_key(&second.reference));
+
+        let blocked = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::PutDomain {
+                domain: Box::new(running_domain_state("tenant")),
+                mutation: None,
+            },
+        );
+        assert!(matches!(blocked.response, ConsensusResponse::Conflict(_)));
+        let blocked_lifecycle = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::StartDomain {
+                domain_id: tenant.clone(),
+                start: DomainStartPoint::Resume,
+                clock: None,
+                authority: None,
+                mutation: None,
+            },
+        );
+        assert!(matches!(
+            blocked_lifecycle.response,
+            ConsensusResponse::Conflict(_)
+        ));
+        let blocked_schedule = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::ReplaceDomainSchedule {
+                domain: tenant.clone(),
+                expected_schedule: None,
+                schedule: Some(Box::new(domain_schedule("tenant"))),
+                mutation: None,
+            },
+        );
+        assert!(matches!(
+            blocked_schedule.response,
+            ConsensusResponse::Conflict(_)
+        ));
+
+        let dynamic = execution("request-drain", &owner, &tenant, [3; 32]);
+        let admitted_dynamic = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::AdmitCommandExecution {
+                execution: Box::new(dynamic.clone()),
+                mutation_domains: BTreeSet::new(),
+            },
+        );
+        assert_eq!(admitted_dynamic.response, ConsensusResponse::Applied);
+        let blocked_dynamic = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::AcquireCommandDomainMutation {
+                reference: dynamic.reference,
+                owner: owner.clone(),
+                request_digest: [3; 32],
+                domain: tenant.clone(),
+            },
+        );
+        assert!(matches!(
+            blocked_dynamic.response,
+            ConsensusResponse::Conflict(_)
+        ));
+
+        let authorized = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::PutDomain {
+                domain: Box::new(running_domain_state("tenant")),
+                mutation: Some(Box::new(first_lease.clone())),
+            },
+        );
+        assert_eq!(authorized.response, ConsensusResponse::Applied);
+        let independent_write = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::PutDomain {
+                domain: Box::new(running_domain_state("independent")),
+                mutation: None,
+            },
+        );
+        assert_eq!(independent_write.response, ConsensusResponse::Applied);
+        assert!(state.domains.contains_key(&independent));
+        let resource_write = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::CreateResourceCatalog {
+                domain: tenant.clone(),
+                identifier: ResourceName::parse("bundle")
+                    .assured("the resource name is an accepted literal"),
+            },
+        );
+        assert_eq!(resource_write.response, ConsensusResponse::Applied);
+
+        let finished = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::FinishCommandExecution {
+                reference: first.reference.clone(),
+                owner: owner.clone(),
+                request_digest: [1; 32],
+                at: Timestamp::from_unix_nanos(2),
+                result: Box::new(CommandExecutionResult {
+                    success: true,
+                    kind: CommandExecutionResultKind::Ok,
+                    message: "finished".to_string(),
+                    diagnostics: Vec::new(),
+                    already_existed: false,
+                    results: Vec::new(),
+                    transaction: None,
+                }),
+            },
+        );
+        assert_eq!(finished.response, ConsensusResponse::Applied);
+        assert!(!state.domain_mutations.contains_key(&tenant));
+
+        state.last_applied_log_id = Some(LogIdOf::new(committed_leader(2), 20));
+        let acquired = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::AdmitCommandExecution {
+                execution: Box::new(second.clone()),
+                mutation_domains,
+            },
+        );
+        assert_eq!(acquired.response, ConsensusResponse::Applied);
+        let second_lease = state
+            .command_executions
+            .get(&second.reference)
+            .and_then(|execution| execution.domain_mutation(&tenant))
+            .verified("the succeeding execution owns the released domain mutation");
+        assert_eq!(second_lease.recovery_fence().revision(), 20);
+        assert_ne!(second_lease, &first_lease);
+
+        let stale = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::PutDomain {
+                domain: Box::new(running_domain_state("tenant")),
+                mutation: Some(Box::new(first_lease)),
+            },
+        );
+        assert!(matches!(stale.response, ConsensusResponse::Conflict(_)));
     }
 
     #[test]
@@ -5759,6 +6387,7 @@ mod tests {
             &mut state,
             &ConsensusCommand::PauseDomain {
                 domain_id: domain.clone(),
+                mutation: None,
             },
         );
         let paused = state.domains.get(&domain).expect("domain should remain");
@@ -5770,6 +6399,7 @@ mod tests {
             &mut state,
             &ConsensusCommand::ResumeDomain {
                 domain_id: domain.clone(),
+                mutation: None,
             },
         );
         let resumed = state.domains.get(&domain).expect("domain should remain");

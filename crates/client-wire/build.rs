@@ -28,6 +28,10 @@ const GENERATED_MODULE_HEADER: &str = "\
     clippy::extra_unused_lifetimes,
     reason = \"flatc declares a lifetime on verifier impls that do not use it\"
 )]
+#[expect(
+    unused_imports,
+    reason = \"flatc emits imports at the generated root that only nested modules use\"
+)]
 mod generated {
 ";
 

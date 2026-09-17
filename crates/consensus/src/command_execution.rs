@@ -5,12 +5,16 @@
 //! - **Depends on.** Vocabulary identities and timestamps.
 //! - **Must not know.** NSPL parsing, sessions, runtime activation, or transport responses.
 
+use std::collections::BTreeMap;
+
 use nervix_models::{
     ClusterNodeIdentity, CommandExecutionReference, DomainName, DomainState, Statement, Timestamp,
     UserName,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
+
+use crate::DomainMutationLease;
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -131,6 +135,7 @@ pub struct CommandExecution {
     pub admitted_at: Timestamp,
     pub effect: CommandExecutionEffect,
     pub state: CommandExecutionState,
+    domain_mutations: BTreeMap<DomainName, DomainMutationLease>,
 }
 
 impl CommandExecution {
@@ -150,7 +155,20 @@ impl CommandExecution {
             admitted_at,
             effect,
             state: CommandExecutionState::Applying,
+            domain_mutations: BTreeMap::new(),
         }
+    }
+
+    pub fn domain_mutation(&self, domain: &DomainName) -> Option<&DomainMutationLease> {
+        self.domain_mutations.get(domain)
+    }
+
+    pub fn domain_mutations(&self) -> impl Iterator<Item = (&DomainName, &DomainMutationLease)> {
+        self.domain_mutations.iter()
+    }
+
+    pub(crate) fn bind_domain_mutation(&mut self, domain: DomainName, lease: DomainMutationLease) {
+        self.domain_mutations.insert(domain, lease);
     }
 
     pub(crate) fn same_request(&self, requested: &Self) -> bool {
