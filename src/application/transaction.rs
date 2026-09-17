@@ -47,6 +47,7 @@ use super::{
     model_mutation::{
         LatestResolutionReport, RequestDomainError, append_command_output, command_error,
         command_ok, command_ok_already_existed, parse_request_domain, quiesce_level_message,
+        rebind_resource_message,
     },
     ownership_handoff::{mark_complete_ownership_transitions, planned_ownership_moves},
     schedule_planning::DomainSchedulePlanningSnapshot,
@@ -176,7 +177,9 @@ fn transaction_planning_basis(
     Ok(ImpactPlanningBasis::new(*blake3::hash(&encoded).as_bytes()))
 }
 
-fn transaction_planning_error_message(error: &Report<TransactionPlanningError>) -> String {
+pub(in crate::application) fn transaction_planning_error_message(
+    error: &Report<TransactionPlanningError>,
+) -> String {
     let context = error.to_string();
     match error.downcast_ref::<String>() {
         Some(message) => format!("{context}: {message}"),
@@ -219,6 +222,7 @@ pub(in crate::application) struct TransactionModelStepContext<'a> {
     pub(in crate::application) transaction: &'a ReplicatedTransaction,
     pub(in crate::application) first_statement: usize,
     pub(in crate::application) planned_step: PlannedTransactionStep,
+    pub(in crate::application) operations: Vec<nervix_models::OperationImpactReport>,
     pub(in crate::application) outcome:
         &'a ParkingMutex<Option<Result<ReplicatedTransaction, Report<TransactionCommitError>>>>,
 }
@@ -629,9 +633,11 @@ impl SessionServiceImpl {
             .map(|queued_statement| &queued_statement.statement)
         {
             if statement.is_model_mutation() {
-                queued
-                    .models
-                    .push(Self::transaction_registry_mutation(statement));
+                if !matches!(statement, Statement::RebindResource(_)) {
+                    queued
+                        .models
+                        .push(Self::transaction_registry_mutation(statement));
+                }
             } else if let Statement::CreateResource(create) = statement {
                 queued.resources.insert(create.identifier.clone());
             }
@@ -1082,7 +1088,7 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn plan_transaction_statements(
+    pub(in crate::application) async fn plan_transaction_statements(
         &self,
         domain: &DomainName,
         statements: &[Statement],
@@ -1206,7 +1212,18 @@ impl SessionServiceImpl {
             | PlannedTransactionStepKind::StartDomain { .. }
             | PlannedTransactionStepKind::StopDomain { .. } => false,
         };
-        let mut result = if already_existed {
+        let impact = plan
+            .operations()
+            .iter()
+            .find(|impact| impact.number == number)
+            .verified("the planned prefix includes its candidate operation");
+        let is_rebind = matches!(candidate, Statement::RebindResource(_));
+        let mut result = if is_rebind {
+            command_ok(
+                rebind_resource_message(impact)
+                    .verified("a REBIND candidate's planned impact carries its rebind operation"),
+            )
+        } else if already_existed {
             let target = match candidate {
                 Statement::Create(create) => format!("model '{}'", create.body.name().as_str()),
                 Statement::CreateResource(create) => {
@@ -1218,10 +1235,25 @@ impl SessionServiceImpl {
         } else {
             command_ok(String::new())
         };
-        append_command_output(
-            &mut result.message,
-            &quiesce_level_message(step.impact.planned().pause.level()),
-        );
+        let rebind_details = if is_rebind {
+            result
+                .message
+                .find('\n')
+                .map(|index| result.message.split_off(index))
+        } else {
+            None
+        };
+        if is_rebind {
+            result.message.push('\n');
+            result
+                .message
+                .push_str(&quiesce_level_message(step.impact.planned().pause.level()));
+        } else {
+            append_command_output(
+                &mut result.message,
+                &quiesce_level_message(step.impact.planned().pause.level()),
+            );
+        }
         let mut candidate_bindings = Vec::new();
         for binding in step.impact.planned().effects.resource_bindings.as_slice() {
             if binding
@@ -1234,7 +1266,15 @@ impl SessionServiceImpl {
             }
         }
         for message in LatestResolutionReport::Provisional.messages(candidate_bindings) {
-            append_command_output(&mut result.message, &message);
+            if is_rebind {
+                result.message.push('\n');
+                result.message.push_str(&message);
+            } else {
+                append_command_output(&mut result.message, &message);
+            }
+        }
+        if let Some(details) = rebind_details {
+            result.message.push_str(&details);
         }
         result
     }
@@ -1568,6 +1608,12 @@ impl SessionServiceImpl {
                 })
             })?;
             let planned_range = planned_step.impact.operations();
+            let operation_impacts = plan
+                .operations()
+                .iter()
+                .filter(|operation| planned_range.contains(operation.number))
+                .cloned()
+                .collect::<Vec<_>>();
             if planned_range.first_index() != first_statement {
                 return Err(Report::new(TransactionCommitError::InvalidProgress {
                     id: transaction.id.clone(),
@@ -1598,6 +1644,7 @@ impl SessionServiceImpl {
                         transaction: &transaction,
                         first_statement,
                         planned_step,
+                        operations: operation_impacts,
                         outcome: &outcome,
                     }),
                 ))

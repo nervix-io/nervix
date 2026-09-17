@@ -965,6 +965,27 @@ pub(in crate::application) fn word_start(input: &str, cursor: usize) -> usize {
     }
 }
 
+fn rebind_resource_before_for(input: &str, cursor: usize) -> Option<ResourceName> {
+    let prefix = input.get(..cursor.min(input.len()))?;
+    let words = prefix.split_whitespace().collect::<Vec<_>>();
+    let rebind_index = words.windows(2).rposition(|pair| {
+        pair[0].eq_ignore_ascii_case("REBIND") && pair[1].eq_ignore_ascii_case("RESOURCE")
+    })?;
+    let rebind_words = words.get(rebind_index..)?;
+    let resource = rebind_words.get(2)?;
+    let version_index = rebind_words.windows(2).position(|pair| {
+        pair[0].eq_ignore_ascii_case("TO") && pair[1].eq_ignore_ascii_case("VERSION")
+    })?;
+    let after_version = rebind_words.get(version_index.checked_add(2)?..)?;
+    let for_index = after_version
+        .iter()
+        .position(|word| word.eq_ignore_ascii_case("FOR"))?;
+    if for_index == 0 {
+        return None;
+    }
+    ResourceName::parse(resource).ok()
+}
+
 impl SessionServiceImpl {
     pub(in crate::application) async fn apply_current_cluster_state(
         &self,
@@ -1038,18 +1059,34 @@ impl SessionServiceImpl {
             }
         }
         let expects_version = expects_resource_version || expects_completed_resource_version;
+        let rebind_resource = rebind_resource_before_for(&grammar_input, grammar_cursor);
 
         for kind in &semantic_kinds {
             if let Some(domain) = &domain
                 && self.inner.consensus.current_domain(domain).await.is_some()
-                && let Ok(ids) = self.inner.registry.resulting_identifiers(
+            {
+                if let Some(resource) = &rebind_resource {
+                    if let Ok(models) = self.inner.registry.resulting_models(domain, &queued.models)
+                    {
+                        suggestions.extend(models.into_iter().filter_map(|model| {
+                            if model.kind() == *kind
+                                && model.binds_resource(resource)
+                                && model.name().as_str().starts_with(&prefix)
+                            {
+                                Some(model.name().to_string())
+                            } else {
+                                None
+                            }
+                        }));
+                    }
+                } else if let Ok(ids) = self.inner.registry.resulting_identifiers(
                     domain,
                     *kind,
                     &prefix,
                     &queued.models,
-                )
-            {
-                suggestions.extend(ids.into_iter().map(|id| id.to_string()));
+                ) {
+                    suggestions.extend(ids.into_iter().map(|id| id.to_string()));
+                }
             }
         }
 
@@ -1077,7 +1114,7 @@ impl SessionServiceImpl {
                 suggestions.extend(resource_ref_suggestions(&resources, domain, &prefix));
                 suggestions.extend(queued.resource_suggestions(&prefix));
             }
-            if let Some(resource) = resource_named_before_version(&req.input, cursor) {
+            if let Some(resource) = resource_named_before_version(&grammar_input, grammar_cursor) {
                 if expects_resource_version {
                     suggestions.extend(resource_version_suggestions(
                         &resources, domain, &resource, &prefix,
@@ -1399,6 +1436,25 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(filtered, vec!["SCHEMA".to_string()]);
+    }
+
+    #[test]
+    fn rebind_member_completion_finds_the_resource_across_whitespace() {
+        for input in [
+            "REBIND RESOURCE bundle TO VERSION 2 FOR HASH MAP ",
+            "REBIND\nRESOURCE\tbundle\nTO\tVERSION 2\nFOR\tHASH MAP ",
+        ] {
+            assert_eq!(
+                rebind_resource_before_for(input, input.len())
+                    .as_ref()
+                    .map(ResourceName::as_str),
+                Some("bundle")
+            );
+        }
+        assert_eq!(
+            rebind_resource_before_for("REBIND RESOURCE bundle TO VERSION 2 ", 36),
+            None
+        );
     }
 
     #[test]

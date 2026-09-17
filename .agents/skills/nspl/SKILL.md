@@ -50,6 +50,10 @@ Build configuration in dependency order:
    require `VERSION <n>` or `VERSION LATEST`. `LATEST` resolves to the highest completed version
    when the statement is applied (at `COMMIT` for queued statements) and the model stores that
    number; a later upload never moves a binding.
+   Use `REBIND RESOURCE <name> TO VERSION <n>|LATEST` to move every existing usage atomically, or
+   add `FOR <kind> <name>, ...` to select exact kind-qualified usages. Every selected member must
+   already bind the resource. The target and all replacements validate together; `LATEST` is
+   provisional at queue admission and resolved again at `COMMIT`.
 3. Define internal schemas, branch-key schemas, branches, wire schemas, and codecs.
 4. Define clients, signaling protocols, virtual hosts/endpoints, lookup models, and trusted Roto
    UDFs as needed.

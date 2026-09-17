@@ -577,13 +577,13 @@ pub(crate) fn impact_report() -> TransactionImpactReport {
         operation_report(
             5,
             TransactionOperation::StartDomain { domain: tenant() },
-            range(5, 7),
+            range(5, 8),
             vec![OperationImpactReason::DomainStart],
         ),
         operation_report(
             6,
             TransactionOperation::StopDomain { domain: tenant() },
-            range(5, 7),
+            range(5, 8),
             vec![OperationImpactReason::DomainStop],
         ),
         operation_report(
@@ -592,9 +592,25 @@ pub(crate) fn impact_report() -> TransactionImpactReport {
                 domain: tenant(),
                 resource: name("model"),
             },
-            range(5, 7),
+            range(5, 8),
             vec![OperationImpactReason::ResourceCatalog {
                 resource: name("model"),
+            }],
+        ),
+        operation_report(
+            8,
+            TransactionOperation::RebindResource {
+                domain: tenant(),
+                resource: name("model"),
+                requested: RequestedResourceVersion::Latest,
+                version: 3,
+            },
+            range(5, 8),
+            vec![OperationImpactReason::ResourceRebinding {
+                node: node(ModelKind::Inferencer, "score"),
+                resource: name("model"),
+                from_version: 2,
+                to_version: 3,
             }],
         ),
     ];
@@ -659,7 +675,7 @@ pub(crate) fn impact_report() -> TransactionImpactReport {
             ActualExecutionStepImpact::applying(),
         ),
         ExecutionStepImpactReport::new(
-            range(5, 7),
+            range(5, 8),
             PlannedExecutionStepImpact {
                 completeness: ImpactReportCompleteness::incomplete(vec![
                     diagnostic(ImpactDiagnosticKind::Topology, None),
@@ -675,7 +691,7 @@ pub(crate) fn impact_report() -> TransactionImpactReport {
     ];
     TransactionImpactReport::new(
         tenant(),
-        TransactionPosition::new(7),
+        TransactionPosition::new(8),
         ImpactPlanningBasis::new([0x5A; 32]),
         ImpactReportCompleteness::incomplete(vec![failure])
             .assured("one diagnostic makes an incomplete report"),

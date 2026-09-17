@@ -2002,6 +2002,7 @@ impl SessionServiceImpl {
                     lines.extend(self.resource_version_entry_lines(resource).await);
                 }
             }
+            lines.extend(self.resource_usage_lines(domain, &describe.identifier, None));
             return command_ok(lines.join("\n"));
         }
 
@@ -2144,7 +2145,45 @@ impl SessionServiceImpl {
             }
         }
 
+        lines.extend(self.resource_usage_lines(domain, &describe.identifier, Some(version)));
+
         command_ok(lines.join("\n"))
+    }
+
+    fn resource_usage_lines(
+        &self,
+        domain: &DomainName,
+        resource: &nervix_models::ResourceName,
+        version: Option<u64>,
+    ) -> Vec<String> {
+        let models = self.inner.registry.transaction_planning_models(domain);
+        let mut usages = models
+            .iter()
+            .filter_map(|(node, model)| {
+                let bound_version = model.resource_version(resource)?;
+                if version.is_some_and(|version| version != bound_version) {
+                    return None;
+                }
+                Some((node.clone(), bound_version))
+            })
+            .collect::<Vec<_>>();
+        usages.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut lines = vec!["usages:".to_string()];
+        if usages.is_empty() {
+            lines.push("- none".to_string());
+            return lines;
+        }
+        lines.extend(usages.into_iter().map(|(node, version)| {
+            let kind = match node.kind {
+                ModelKind::Lookup => "hash_map",
+                _ => node.kind.as_str(),
+            };
+            format!(
+                "- kind={kind} name={} version={version}",
+                node.identifier.as_str()
+            )
+        }));
+        lines
     }
 
     fn format_resource_version_summary(resource: &nervix_models::ResourceVersion) -> String {

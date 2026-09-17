@@ -122,6 +122,7 @@ pub fn statement_parser<'src>()
         crate::node_control::uncordon_node_parser().map(Statement::UncordonNode),
         crate::node_control::drain_node_parser().map(Statement::DrainNode),
         crate::relocation::relocate_parser().map(Statement::Relocate),
+        crate::rebind_resource::rebind_resource_parser().map(Statement::RebindResource),
         crate::relocation::describe_relocation_parser().map(Statement::DescribeRelocation),
         crate::drop_stmt::drop_node_parser().map(Statement::DropNode),
         crate::drop_stmt::drop_parser().map(Statement::Drop),
@@ -170,6 +171,9 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
         .then_ignore(end())
         .parse(tokens.as_slice());
     if !out.has_errors() {
+        let statement = out
+            .into_output()
+            .verified("has_errors returned false above, so this parse produced output");
         // A statement that already parses has no expectations left to derive suggestions from,
         // because end of input is not representable as one. These few continuations are optional
         // tails of an otherwise complete statement, so they are named here.
@@ -187,6 +191,15 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
             && !normalized.contains(" VERSION ")
         {
             vec!["VERSION".to_string()]
+        } else if open && let Statement::RebindResource(rebind) = &statement {
+            if matches!(
+                rebind.selection,
+                nervix_models::RebindResourceSelection::Members(_)
+            ) {
+                vec![",".to_string(), ";".to_string()]
+            } else {
+                vec![";".to_string(), "FOR".to_string()]
+            }
         } else if open
             && normalized.starts_with("CREATE ")
             && normalized.contains(" DOMAIN ")
@@ -2318,6 +2331,11 @@ mod tests {
         "#,
         None,
         &[]
+    )]
+    #[case::rebind_resource(
+        "REBIND RESOURCE bundle TO VERSION LATEST FOR CLIENT mounted, HASH MAP countries;",
+        None,
+        &["REBIND RESOURCE bundle TO VERSION LATEST FOR"]
     )]
     #[case::wire_schema(
         r#"

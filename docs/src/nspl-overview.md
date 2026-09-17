@@ -259,7 +259,7 @@ COMMIT;
 and every queued statement must select that same domain. `BEGIN` inside an
 active transaction is an error. `COMMIT` and `REVERT` also require an active
 transaction. Queueable content is limited to that domain's model mutations,
-domain configuration and lifecycle, and `CREATE RESOURCE`. `CREATE DOMAIN`,
+including `REBIND RESOURCE`, domain configuration and lifecycle, and `CREATE RESOURCE`. `CREATE DOMAIN`,
 `CREATE USER`, read-only statements, subscriptions, resource uploads, and node
 administration are not valid inside a transaction and must be sent separately.
 Use `SHOW TRANSACTIONS;` to inspect live transactions and retained outcomes. See
@@ -641,6 +641,8 @@ CREATE [IF NOT EXISTS] RESOURCE <name>;
 UPLOAD RESOURCE <name> VERSION '<local_directory>';
 DESCRIBE RESOURCE <name>;
 DESCRIBE RESOURCE <name> VERSION <n>;
+REBIND RESOURCE <name> TO VERSION <n> | LATEST
+  [FOR <kind> <name> [, <kind> <name> ...]];
 ```
 
 TLS-capable VHOSTs:
@@ -655,6 +657,11 @@ codec, a protobuf signaling protocol, an inferencer, and a WASM processor. `VERS
 completed version. `VERSION LATEST` binds the highest completed version when the statement is
 applied, and the stored model keeps that number, so a later upload never moves the binding. See
 [Versioning](resources.md#versioning).
+
+`REBIND RESOURCE` atomically moves all current usages, or an exact kind-qualified `FOR` selection,
+to one completed version. The resource itself is unchanged. Every selected replacement validates
+before any model is written; a no-op selection succeeds without a write. Resource descriptions
+list all bound usages, while a version-qualified description lists only usages pinned there.
 
 Session-only commands:
 

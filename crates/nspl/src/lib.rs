@@ -48,6 +48,7 @@ mod parser_support;
 pub mod placement;
 mod semantic_program;
 pub use semantic_program::{parse_expression, parse_expression_list, parse_route_construction};
+pub mod rebind_resource;
 pub mod reingestor;
 pub mod relay;
 pub mod relocation;
