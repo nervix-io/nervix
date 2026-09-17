@@ -181,11 +181,11 @@ Feature: Domain-owned resources
       """
     Then the last command error contains
       """
-      lookup file
+      resource file 'alpha.jsonl' in 'lookup_bundle@1'
       """
     And the last command error contains
       """
-      alpha.jsonl' does not exist
+      is unavailable
       """
     When client "beta" executes these NSPL commands
       """
@@ -205,9 +205,9 @@ Feature: Domain-owned resources
       """
     Then the last command error contains
       """
-      lookup file
+      resource file 'beta.jsonl' in 'lookup_bundle@1'
       """
     And the last command error contains
       """
-      beta.jsonl' does not exist
+      is unavailable
       """
