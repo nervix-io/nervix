@@ -79,7 +79,7 @@ impl PublishedBranchState {
                 placement.identifier.as_str()
             ))
         })?;
-        response.map_err(RuntimeStateOperationError::checkpoint)
+        response.map_err(|error| RuntimeStateOperationError::checkpoint(format!("{error:#}")))
     }
 
     /// Persist what the branch task published last when it is newer than the persisted snapshot.

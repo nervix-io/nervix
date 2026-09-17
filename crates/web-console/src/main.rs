@@ -1305,9 +1305,7 @@ fn handle_session_response(
             {
                 active_domain.set(next_domains.first().map(|domain| domain.id.clone()));
             }
-            if response.response_to_request
-                && let Some(PendingRequest::Command(_)) = pending_requests.pop_front()
-            {
+            if take_domain_list_command(pending_requests, response.response_to_request).is_some() {
                 terminal_lines.update(|lines| {
                     lines.extend(domain_list_lines(&next_domains));
                 });
@@ -1346,6 +1344,24 @@ fn handle_session_response(
         None => {}
     }
     SessionResponseAction::Continue
+}
+
+fn take_domain_list_command(
+    pending_requests: &mut VecDeque<PendingRequest>,
+    response_to_request: bool,
+) -> Option<QueuedCommand> {
+    if !response_to_request {
+        return None;
+    }
+    let pending = pending_requests.pop_front();
+    match pending {
+        Some(PendingRequest::Command(command)) => Some(command),
+        Some(PendingRequest::AttachTransaction { .. })
+        | Some(PendingRequest::SubscriptionStart { .. })
+        | Some(PendingRequest::SubscriptionStop { .. })
+        | Some(PendingRequest::ResourceDescribe { .. })
+        | None => None,
+    }
 }
 
 fn result_is_set_active_domain_ack(result: &nervix_proto::CommandResult) -> bool {
@@ -5476,6 +5492,29 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    #[ignore = "CLIENT-WIRE-13 correlates websocket replies by typed request identity"]
+    fn untracked_domain_push_cannot_discard_a_pending_websocket_request() {
+        let mut pending = VecDeque::from([PendingRequest::AttachTransaction {
+            request: nervix_proto::SessionRequest {
+                request: Some(nervix_proto::session_request::Request::AttachTransaction(
+                    nervix_proto::AttachTransactionRequest {
+                        id: "transaction".to_string(),
+                    },
+                )),
+            },
+        }]);
+
+        let command = take_domain_list_command(&mut pending, true);
+
+        assert!(command.is_none());
+        assert_eq!(
+            pending.len(),
+            1,
+            "an untracked websocket domain response discarded the pending attach"
+        );
+    }
 
     #[test]
     fn successful_commands_without_output_add_no_terminal_line() {

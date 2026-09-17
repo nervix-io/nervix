@@ -6613,6 +6613,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-connector"
+version = "0.1.0-dev"
+
+[[package]]
 name = "nervix-consensus"
 version = "0.1.0-dev"
 dependencies = [

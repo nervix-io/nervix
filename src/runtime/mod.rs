@@ -2,18 +2,20 @@
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** Relay boundaries and their fan-out, branch-local processor tasks, ingestor and
-//!   emitter connectors, compiled programs, materialized state, deduplication, reordering, windows,
-//!   correlation, generators, in-flight acknowledgement tracking, node-owned state persistence and
-//!   replication, and the entities that bind listening ports.
-//! - **Depends on.** The engines — the VM, the UDF and WASM hosts, codecs, the interconnect, the
-//!   state and resource stores — the vocabulary, and the registry's `ActiveGraph` as its input.
+//! - **Owns.** Relay boundaries and their fan-out, branch-local processor tasks, the host that
+//!   drives ingestor and emitter connectors, compiled programs, materialized state, deduplication,
+//!   reordering, windows, correlation, generators, in-flight acknowledgement tracking, node-owned
+//!   state persistence and replication, and the entities that bind listening ports.
+//! - **Depends on.** The engines — the VM, the UDF and WASM hosts, codecs, the connector crates,
+//!   the interconnect, the state and resource stores — the vocabulary, and the registry's
+//!   `ActiveGraph` as its input.
 //! - **Must not know.** NSPL text, transactions, the gRPC surface or consensus. It is told what to
 //!   run and runs it.
 //!
-//! This module breaks its own contract: it reads Models directly rather than consuming a planned
-//! execution. A planner between the control state and the runtime closes that boundary;
-//! `just ratchet` counts what is left.
+//! This module breaks its own contract twice. It reads Models directly rather than consuming a
+//! planned execution; a planner between the control state and the runtime closes that boundary, and
+//! `just ratchet` counts what is left. It also holds the connectors themselves rather than hosting
+//! them; moving each integration into its connector crate closes that one.
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -307,13 +309,13 @@ use entity_gate::{
     NodeQuiesceCounters, NodeQuiesceWorkGuard, OutputBufferQuiesceGauge,
 };
 pub(in crate::runtime) use events::RuntimeEvents;
-pub(in crate::runtime) use filter_map::evaluate_sqs_fifo_group_program;
 use filter_map::{
     FilterMapBatchInputs, FilterMapOutcomeInputs, InferencerFilterMapTensors, VmUninitializedInput,
     append_filter_map_nested_value, evaluate_filter_map_on_batch, evaluate_output_branch_program,
     execute_filter_map_program_on_batch, expression_reads_sensitive_source,
     plan_emitter_filter_map_batch, plan_filter_map_messages,
 };
+pub(in crate::runtime) use filter_map::{SqsMessageGroupError, evaluate_sqs_fifo_group_program};
 use force_flush::{
     DomainForceFlush, DomainForceFlushCompletion, DomainForceFlushParticipant,
     IngestorAckRootTrackers,
@@ -402,8 +404,8 @@ use processor_output::{
     flush_due_processor_outputs, pending_output_batches_by_key, processor_output_input_sensitivity,
 };
 use processor_template::{
-    MaterializedDependencyResolution, ProcessorInputFilterKind, wasm_guest_call_schemas,
-    wasm_instance_next_deadline,
+    MaterializedDependencyResolution, ProcessorInputFilterKind, ProcessorTemplateError,
+    wasm_guest_call_schemas, wasm_instance_next_deadline,
 };
 use processors::{
     BranchInstanceAckBoundary, BranchInstanceTemplate, BranchedIngestorSpec, BranchedNodeSpecs,
@@ -413,7 +415,8 @@ use processors::{
     CompiledWindowAggregateExpr, CompiledWindowAggregateProgram, CorrelatorBranchState,
     CorrelatorPendingMessage, FilterMapPlan, InferencerFlushContext, InferencerOutputBuffer,
     IngestorRouteTemplate, JunctionFlushContext, PlannedGeneralError, PlannedGeneralResult,
-    PlannedMessageError, RelayProcessorNode, RelayProcessorOperationNode,
+    PlannedMessageError, ProcessorCompileError, ProcessorLiveStateError,
+    ProcessorMaterializedError, RelayProcessorNode, RelayProcessorOperationNode,
     RelayProcessorOperationTemplate, RelayProcessorOutputNode, RelayProcessorOutputTemplate,
     RelayProcessorOutputsNode, RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate,
     RelayProcessorTemplate, ReorderKeyPart, ReordererOutputBuffer, ReordererRowOrder,
@@ -507,13 +510,13 @@ use wasm_output::{
     WasmOutputContext, checkpoint_wasm_guest_state, dispatch_wasm_output_envelopes,
     persist_wasm_guest_state,
 };
-use wasm_processor::flush_branch_wasm_processor;
+use wasm_processor::{WasmInstanceError, flush_branch_wasm_processor};
 use wasm_state::{ReplicatedWasmProcessorState, WasmGuestState};
 pub(in crate::runtime) use websocket_signaling::SignalingProtobufDescriptors;
 use window_processor::{
-    WindowAggregateInput, WindowProcessorState, evaluate_window_aggregate_inputs,
-    flush_ready_window_processor, message_timestamp, snapshot_window_processor_live_state,
-    window_next_deadline,
+    WindowAggregateInput, WindowProcessorError, WindowProcessorState, WindowPushFailure,
+    evaluate_window_aggregate_inputs, flush_ready_window_processor, message_timestamp,
+    snapshot_window_processor_live_state, window_next_deadline,
 };
 use window_state::{
     LinearHistogramDelayedRemovalSnapshot, ReplicatedWindowProcessorState,

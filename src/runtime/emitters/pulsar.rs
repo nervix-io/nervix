@@ -55,9 +55,7 @@ impl PulsarEmitter {
     async fn client_from_config(
         config: &[nervix_models::ClientConfigEntry],
     ) -> EmitterRuntimeResult<Pulsar<TokioExecutor>> {
-        let addr = emitter_config_value(config, "addr", || {
-            "missing Pulsar client config key 'addr'".to_string()
-        })?;
+        let addr = emitter_config_value(config, "addr", "Pulsar")?;
         let (connection_retry_options, operation_retry_options) = Self::retry_options();
         let mut builder = Pulsar::builder(addr, TokioExecutor)
             .with_connection_retry_options(connection_retry_options)

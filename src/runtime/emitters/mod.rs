@@ -189,11 +189,6 @@ enum CompiledSqsFifoGroup {
     Expression(CompiledProgramWithMaterializedInterest),
 }
 
-/// Why a row publishes under no `FIFO GROUP FROM BRANCH` group: it arrived unbranched, so there is
-/// no branch key to take the group from. The reason travels with that row alone and the send turns
-/// it into that row's message error.
-const UNBRANCHED_FIFO_GROUP: &str = "SQS FIFO GROUP FROM BRANCH received an unbranched record";
-
 /// The publishing behavior of the one transport family a sink belongs to.
 ///
 /// `MODE` is checked against the sink before anything else, so the family and the settings it
@@ -455,7 +450,7 @@ struct EmitterPublishBatch {
     batch: RelayRecordBatch,
     execution_now: Timestamp,
     headers: Option<Vec<EmitterHeaders>>,
-    sqs_message_groups: Vec<Result<Option<String>, String>>,
+    sqs_message_groups: Vec<Result<Option<String>, SqsMessageGroupError>>,
     delivered: Vec<bool>,
 }
 
@@ -487,16 +482,15 @@ impl EmitterPublishBatch {
         batch: RelayRecordBatch,
         headers: Option<Vec<EmitterHeaders>>,
         execution_now: Timestamp,
-    ) -> Result<Self, String> {
+    ) -> EmitterRuntimeResult<Self> {
         let row_count = batch.batch.batch().num_rows();
         if let Some(headers) = &headers
             && row_count != headers.len()
         {
-            return Err(format!(
-                "emitter header count {} does not match row count {}",
-                headers.len(),
-                row_count
-            ));
+            return Err(Report::new(EmitterRuntimeError::HeaderCountMismatch {
+                header_count: headers.len(),
+                row_count,
+            }));
         }
         Ok(Self {
             batch,
@@ -509,14 +503,14 @@ impl EmitterPublishBatch {
 
     fn with_sqs_message_groups(
         mut self,
-        groups: Vec<Result<Option<String>, String>>,
-    ) -> Result<Self, String> {
+        groups: Vec<Result<Option<String>, SqsMessageGroupError>>,
+    ) -> EmitterRuntimeResult<Self> {
         let row_count = self.batch.batch.batch().num_rows();
         if groups.len() != row_count {
-            return Err(format!(
-                "SQS FIFO group count {} does not match emitter row count {row_count}",
-                groups.len()
-            ));
+            return Err(Report::new(EmitterRuntimeError::SqsGroupCountMismatch {
+                group_count: groups.len(),
+                row_count,
+            }));
         }
         self.sqs_message_groups = groups;
         Ok(self)
@@ -543,8 +537,8 @@ impl EmitterPublishBatch {
                 self.sqs_message_groups
                     .iter()
                     .map(|group| match group {
-                        Ok(Some(group)) | Err(group) => group.len().arch_into(),
-                        Ok(None) => 0,
+                        Ok(Some(group)) => group.len().arch_into(),
+                        Ok(None) | Err(_) => 0,
                     })
                     .try_fold(0_u64, u64::checked_add)
                     .assured(BYTES_IN_MEMORY),
@@ -578,20 +572,21 @@ impl EmitterPublishBatch {
         self.delivered.get(row).copied().unwrap_or(false)
     }
 
-    fn mark_delivered(&mut self, row: usize) -> Result<(), String> {
+    fn mark_delivered(&mut self, row: usize) -> EmitterRuntimeResult<()> {
         let delivered_rows = self.delivered.len();
         let delivered = self.delivered.get_mut(row).ok_or_else(|| {
-            format!(
-                "emitter delivered row {row} is outside batch with {} rows",
-                delivered_rows
-            )
+            Report::new(EmitterRuntimeError::DeliveryRowOutOfBounds {
+                row,
+                row_count: delivered_rows,
+            })
         })?;
         if !*delivered {
+            let ack_rows = self.batch.acks.len();
             let acks = self.batch.acks.get(row).ok_or_else(|| {
-                format!(
-                    "emitter delivered row {row} is outside ack set with {} rows",
-                    self.batch.acks.len()
-                )
+                Report::new(EmitterRuntimeError::AcknowledgementRowOutOfBounds {
+                    row,
+                    row_count: ack_rows,
+                })
             })?;
             acks.ack_success();
             *delivered = true;
@@ -599,10 +594,13 @@ impl EmitterPublishBatch {
         Ok(())
     }
 
-    fn mark_rejected(&mut self, row: usize) -> Result<(), String> {
+    fn mark_rejected(&mut self, row: usize) -> EmitterRuntimeResult<()> {
         let delivered_rows = self.delivered.len();
         let delivered = self.delivered.get_mut(row).ok_or_else(|| {
-            format!("emitter rejected row {row} is outside batch with {delivered_rows} rows")
+            Report::new(EmitterRuntimeError::RejectionRowOutOfBounds {
+                row,
+                row_count: delivered_rows,
+            })
         })?;
         *delivered = true;
         Ok(())
@@ -614,9 +612,7 @@ impl EmitterPublishBatch {
         delivery: impl std::future::Future<Output = ()>,
     ) -> EmitterRuntimeResult<()> {
         delivery.await;
-        self.mark_rejected(row).map_err(|reason| {
-            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(reason)
-        })
+        self.mark_rejected(row)
     }
 
     fn pending_record_chunks(&self, max_batch: NonZeroU64) -> Vec<Vec<usize>> {
@@ -640,7 +636,7 @@ struct EncodedBrokerRecord {
     key: Option<String>,
     payload: Vec<u8>,
     headers: EmitterHeaders,
-    sqs_message_group: Result<Option<String>, String>,
+    sqs_message_group: Result<Option<String>, SqsMessageGroupError>,
     acks: AckSet,
     execution_now: Timestamp,
 }
@@ -849,16 +845,34 @@ impl EmitterPublishFailure {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(in crate::runtime) enum EmitterRuntimeError {
     #[error("invalid emitter sink configuration")]
     InvalidSinkConfig,
     #[error("failed to initialize emitter sink")]
     InitializeSink,
+    #[error("{kind} '{name}' does not exist")]
+    MissingExternalEntity { kind: &'static str, name: String },
     #[error("emitter sink client is not initialized")]
     SinkNotInitialized,
     #[error("emitter flush policy is not initialized")]
     FlushPolicyNotInitialized,
+    #[error("emitter header count {header_count} does not match row count {row_count}")]
+    HeaderCountMismatch {
+        header_count: usize,
+        row_count: usize,
+    },
+    #[error("SQS FIFO group count {group_count} does not match emitter row count {row_count}")]
+    SqsGroupCountMismatch {
+        group_count: usize,
+        row_count: usize,
+    },
+    #[error("emitter delivered row {row} is outside batch with {row_count} rows")]
+    DeliveryRowOutOfBounds { row: usize, row_count: usize },
+    #[error("emitter delivered row {row} is outside ack set with {row_count} rows")]
+    AcknowledgementRowOutOfBounds { row: usize, row_count: usize },
+    #[error("emitter rejected row {row} is outside batch with {row_count} rows")]
+    RejectionRowOutOfBounds { row: usize, row_count: usize },
     #[error("fault injector failed emitter publish")]
     FaultInjected,
     #[error("emitter shutdown while stalled")]
@@ -869,6 +883,8 @@ pub(in crate::runtime) enum EmitterRuntimeError {
     RetryTiming,
     #[error("emitter stop deadline elapsed")]
     StopDeadlineElapsed,
+    #[error("emitter final flush failed")]
+    FinalFlush,
     #[error("failed to encode emitter batch")]
     EncodeBatch,
     #[error("failed to publish emitter batch")]
@@ -878,15 +894,22 @@ pub(in crate::runtime) enum EmitterRuntimeError {
 }
 
 impl EmitterRuntimeError {
-    fn is_retryable_publish_failure(self) -> bool {
+    fn is_retryable_publish_failure(&self) -> bool {
         match self {
             Self::SinkNotInitialized | Self::PublishBatch | Self::PublishStalled => true,
             Self::FlushPolicyNotInitialized
+            | Self::HeaderCountMismatch { .. }
+            | Self::SqsGroupCountMismatch { .. }
+            | Self::DeliveryRowOutOfBounds { .. }
+            | Self::AcknowledgementRowOutOfBounds { .. }
+            | Self::RejectionRowOutOfBounds { .. }
             | Self::InvalidSinkConfig
             | Self::InitializeSink
+            | Self::MissingExternalEntity { .. }
             | Self::FaultInjected
             | Self::ShutdownWhileStalled
             | Self::StopDeadlineElapsed
+            | Self::FinalFlush
             | Self::FlushTiming
             | Self::RetryTiming
             | Self::EncodeBatch => false,
@@ -1280,25 +1303,16 @@ fn compile_sql_values_program(
             ),
         });
     }
-    let assignments = values
-        .iter()
-        .enumerate()
-        .map(|(index, mapping)| {
-            Ok(nervix_models::Assignment {
-                target: nervix_models::AssignmentTarget::bare(
-                    FieldName::parse(&format!("c{index}")).map_err(|error| error.to_string())?,
-                ),
-                value: mapping.expression.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()
-        .map_err(|reason| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "{label} VALUES for '{}' is invalid: {reason}",
-                emitter.as_str()
-            ),
-        })?;
+    let mut assignments = Vec::with_capacity(values.len());
+    for (index, mapping) in values.iter().enumerate() {
+        let field = FieldName::parse(&format!("c{index}")).assured(
+            "a generated name containing c followed by decimal digits is a valid field name",
+        );
+        assignments.push(nervix_models::Assignment {
+            target: nervix_models::AssignmentTarget::bare(field),
+            value: mapping.expression.clone(),
+        });
+    }
     let parsed = lower_route_construction(
         &nervix_models::RouteConstruction {
             assignments,
@@ -1694,20 +1708,35 @@ where
 fn emitter_config_value(
     config: &[nervix_models::ClientConfigEntry],
     key: &str,
-    missing_message: impl FnOnce() -> String,
+    connector: &'static str,
 ) -> EmitterRuntimeResult<String> {
-    client_config_value(config, key, missing_message).map_err(emitter_config_error)
+    client_config_value(config, key, connector).map_err(|error| {
+        let message = error.current_context().to_string();
+        error
+            .change_context(EmitterRuntimeError::InvalidSinkConfig)
+            .attach_printable(message)
+    })
 }
 
 fn emitter_optional_bool_client_config_value(
     config: &[nervix_models::ClientConfigEntry],
     key: &str,
 ) -> EmitterRuntimeResult<Option<bool>> {
-    optional_bool_client_config_value(config, key).map_err(emitter_config_error)
+    optional_bool_client_config_value(config, key).map_err(|error| {
+        let message = error.current_context().to_string();
+        error
+            .change_context(EmitterRuntimeError::InvalidSinkConfig)
+            .attach_printable(message)
+    })
 }
 
 fn emitter_read_tls_file(path: &PathBuf, label: &str) -> EmitterRuntimeResult<Vec<u8>> {
-    read_tls_file(path, label).map_err(emitter_config_error)
+    read_tls_file(path, label).map_err(|error| {
+        let message = error.current_context().to_string();
+        error
+            .change_context(EmitterRuntimeError::InvalidSinkConfig)
+            .attach_printable(message)
+    })
 }
 
 fn emitter_service_url_has_scheme(
@@ -1717,7 +1746,12 @@ fn emitter_service_url_has_scheme(
 ) -> EmitterRuntimeResult<bool> {
     ServiceUrl::new(raw, label)
         .has_scheme(expected_scheme)
-        .map_err(emitter_config_error)
+        .map_err(|error| {
+            let message = error.current_context().to_string();
+            error
+                .change_context(EmitterRuntimeError::InvalidSinkConfig)
+                .attach_printable(message)
+        })
 }
 
 impl EmitterSinkContext {
@@ -2979,7 +3013,7 @@ fn iceberg_error_message(error: &Report<IcebergEmitterError>) -> String {
     format!("{error:?}")
 }
 
-fn emitter_error_message(error: &Report<EmitterRuntimeError>) -> String {
+pub(super) fn emitter_error_message(error: &Report<EmitterRuntimeError>) -> String {
     error
         .frames()
         .find_map(|frame| match frame.kind() {
@@ -3184,9 +3218,7 @@ async fn finish_per_record_publish(
                 "broker confirmation references missing emitter batch {batch_index}"
             ))
         })?;
-        batch.mark_delivered(row_index).map_err(|reason| {
-            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(reason)
-        })?;
+        batch.mark_delivered(row_index)?;
     }
     finish_rejected_records(context, batches, rejected, MessageErrorOperation::Publish).await?;
     match infrastructure_error {
@@ -3746,7 +3778,10 @@ impl EmitterTask {
                             context.report_flush_error(task_sink.label(), &reason);
                             clear_emitter_stop_signal(&task_stop_signal, deadline);
                             response
-                                .send(Err(format!("emitter final flush failed: {reason}")))
+                                .send(Err(Report::new(EmitterRuntimeError::FinalFlush)
+                                    .attach_printable(format!(
+                                        "emitter final flush failed: {reason}"
+                                    ))))
                                 .means_peer_left("emitter stop requester");
                             continue;
                         }
@@ -3788,7 +3823,11 @@ impl EmitterTask {
                                     reason.clone(),
                                 );
                                 context.report_flush_error(task_sink.label(), &reason);
-                                Err(format!("emitter final flush failed: {reason}"))
+                                Err(
+                                    Report::new(EmitterRuntimeError::FinalFlush).attach_printable(
+                                        format!("emitter final flush failed: {reason}"),
+                                    ),
+                                )
                             }
                             Err(_) => {
                                 let reason = format!(
@@ -3796,7 +3835,8 @@ impl EmitterTask {
                                     task_emitter.as_str()
                                 );
                                 context.report_flush_error(task_sink.label(), &reason);
-                                Err(reason)
+                                Err(Report::new(EmitterRuntimeError::StopDeadlineElapsed)
+                                    .attach_printable(reason))
                             }
                         };
                         let should_stop = result.is_ok();
@@ -3873,8 +3913,8 @@ impl EmitterTask {
                                     EmitterRetryDeferral {
                                         wait: emitter_retry_delay(&mut publish_backoff, &error),
                                         acks: sink.pending_acks(&emitter_buffer),
-                                        waiting_for_stall_clear: *error.current_context()
-                                            == EmitterRuntimeError::PublishStalled,
+                                        waiting_for_stall_clear: error.current_context()
+                                            == &EmitterRuntimeError::PublishStalled,
                                         reason: Some(&reason),
                                     },
                                 );
@@ -4040,8 +4080,8 @@ impl EmitterTask {
                                     EmitterRetryDeferral {
                                         wait: emitter_retry_delay(&mut publish_backoff, &error),
                                         acks: sink.pending_acks(&emitter_buffer),
-                                        waiting_for_stall_clear: *error.current_context()
-                                            == EmitterRuntimeError::PublishStalled,
+                                        waiting_for_stall_clear: error.current_context()
+                                            == &EmitterRuntimeError::PublishStalled,
                                         reason: Some(&reason),
                                     },
                                 );
@@ -4221,8 +4261,8 @@ impl EmitterTask {
                                     EmitterRetryDeferral {
                                         wait,
                                         acks: sink.pending_acks(&emitter_buffer),
-                                        waiting_for_stall_clear: *error.current_context()
-                                            == EmitterRuntimeError::PublishStalled,
+                                        waiting_for_stall_clear: error.current_context()
+                                            == &EmitterRuntimeError::PublishStalled,
                                         reason: Some(&reason),
                                     },
                                 );
@@ -4582,7 +4622,7 @@ impl EmitterBatchContext<'_> {
                 for key in &batch.keys {
                     let group = match key.as_ref() {
                         Some(key) => Ok(Some(key.as_str().to_string())),
-                        None => Err(UNBRANCHED_FIFO_GROUP.to_string()),
+                        None => Err(SqsMessageGroupError::UnbranchedRecord),
                     };
                     groups.push(group);
                 }
@@ -4598,10 +4638,7 @@ impl EmitterBatchContext<'_> {
                 )
                 .await;
                 match evaluated {
-                    Ok(groups) => groups
-                        .into_iter()
-                        .map(|group| group.map_err(|error| error.to_string()))
-                        .collect(),
+                    Ok(groups) => groups,
                     Err(error) => {
                         let error = error.current_context();
                         self.report_general_error(error.acks.iter(), error.reason.clone());
@@ -4653,9 +4690,7 @@ impl EmitterBatchContext<'_> {
         for source_row in &plan.source_rows {
             let group = match source_sqs_message_groups.get(*source_row) {
                 Some(group) => group.clone(),
-                None => Err(format!(
-                    "SQS FIFO group source row {source_row} is outside the source batch"
-                )),
+                None => Err(SqsMessageGroupError::SourceRowOutOfBounds { row: *source_row }),
             };
             selected_sqs_message_groups.push(group);
         }
@@ -4685,7 +4720,7 @@ impl EmitterBatchContext<'_> {
     /// Report a filtered batch whose rows, headers, and FIFO groups stopped agreeing in count.
     /// Both counts are checked while building the same batch, so either one failing is the same
     /// failure to report.
-    fn report_filtered_batch_error(&self, error: String) {
+    fn report_filtered_batch_error(&self, error: Report<EmitterRuntimeError>) {
         self.report_general_error(
             std::iter::empty::<&AckSet>(),
             format!(
@@ -4934,9 +4969,8 @@ mod publishing_mode_tests {
                 panic!("the stop command must remain queued while retrying");
             };
             task_stop_signal.send_replace(None);
-            let _ = response.send(Err(
-                "infrastructure retry exceeded drain deadline".to_string()
-            ));
+            let _ = response.send(Err(Report::new(EmitterRuntimeError::StopDeadlineElapsed)
+                .attach_printable("infrastructure retry exceeded drain deadline")));
         });
         let scheduled = ScheduledEmitterTask {
             commands,
@@ -5158,7 +5192,89 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("missing row headers must be rejected"),
         };
-        assert!(error.contains("header count 0 does not match row count 1"));
+        assert_eq!(
+            *error.current_context(),
+            EmitterRuntimeError::HeaderCountMismatch {
+                header_count: 0,
+                row_count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn publish_batch_rejects_misaligned_groups_and_row_updates() {
+        let groups =
+            match EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100))
+                .with_sqs_message_groups(Vec::new())
+            {
+                Ok(_) => panic!("SQS groups must stay aligned with source rows"),
+                Err(error) => error,
+            };
+        assert_eq!(
+            *groups.current_context(),
+            EmitterRuntimeError::SqsGroupCountMismatch {
+                group_count: 0,
+                row_count: 1,
+            }
+        );
+
+        let mut delivered =
+            EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100));
+        let error = delivered
+            .mark_delivered(1)
+            .expect_err("delivery cannot address a missing row");
+        assert_eq!(
+            *error.current_context(),
+            EmitterRuntimeError::DeliveryRowOutOfBounds {
+                row: 1,
+                row_count: 1,
+            }
+        );
+
+        delivered.batch.acks.clear();
+        let error = delivered
+            .mark_delivered(0)
+            .expect_err("delivery requires the row's acknowledgement set");
+        assert_eq!(
+            *error.current_context(),
+            EmitterRuntimeError::AcknowledgementRowOutOfBounds {
+                row: 0,
+                row_count: 0,
+            }
+        );
+
+        let mut rejected =
+            EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100));
+        let error = rejected
+            .mark_rejected(1)
+            .expect_err("rejection cannot address a missing row");
+        assert_eq!(
+            *error.current_context(),
+            EmitterRuntimeError::RejectionRowOutOfBounds {
+                row: 1,
+                row_count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn emitter_config_adapters_preserve_typed_context() {
+        let missing = emitter_read_tls_file(
+            &PathBuf::from("/definitely/missing/nervix-emitter-ca.pem"),
+            "TLS CA certificate",
+        )
+        .expect_err("a missing TLS file must fail");
+        assert_eq!(
+            missing.current_context(),
+            &EmitterRuntimeError::InvalidSinkConfig
+        );
+
+        let invalid_url = emitter_service_url_has_scheme("not a URL", "test addr", "https")
+            .expect_err("an invalid service URL must fail");
+        assert_eq!(
+            invalid_url.current_context(),
+            &EmitterRuntimeError::InvalidSinkConfig
+        );
     }
 
     #[tokio::test]
@@ -5730,9 +5846,8 @@ mod tests {
             let Some(EmitterTaskCommand::Stop { response, .. }) = command_rx.recv().await else {
                 panic!("scheduled emitter must receive its stop command")
             };
-            let _ = response.send(Err(
-                "emitter final flush failed: broker unavailable".to_string()
-            ));
+            let _ = response.send(Err(Report::new(EmitterRuntimeError::FinalFlush)
+                .attach_printable("emitter final flush failed: broker unavailable")));
             task_finished.store(true, Ordering::Release);
         });
         let scheduled = ScheduledEmitterTask {

@@ -47,6 +47,24 @@ test-scenarios-reuse *args: tests-deps
     export NERVIX_TESTCONTAINERS_MODE=reusable
     cargo test --features testing --test scenarios -- {{ args }}
 
+# Measure the current protobuf public client protocol against a release nervix-server process.
+# The JSON report and raw Prometheus scrape record the workload, toolchain, hardware and limits.
+client-wire-baseline samples="100" upload_samples="5" payload_bytes="1024" output="target/client-wire-baseline": build-web-console download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo build --release --package nervix-server --bin nervix-server
+    export NERVIX_CLIENT_WIRE_BASELINE_SERVER={{ quote(cargo_target_dir + "/release/nervix-server") }}
+    export NERVIX_CLIENT_WIRE_BASELINE_SERVER_PROFILE=release
+    export NERVIX_CLIENT_WIRE_BASELINE_SAMPLES={{ quote(samples) }}
+    export NERVIX_CLIENT_WIRE_BASELINE_UPLOAD_SAMPLES={{ quote(upload_samples) }}
+    export NERVIX_CLIENT_WIRE_BASELINE_PAYLOAD_BYTES={{ quote(payload_bytes) }}
+    export NERVIX_CLIENT_WIRE_BASELINE_OUTPUT={{ quote(output) }}
+    RUSTC_WRAPPER= cargo test --features testing --test scenarios -- \
+        --input tests/features/runtime/client_wire_baseline.feature \
+        --tags @client_wire_baseline \
+        --concurrency 1
+
 # Capture the web console images the book publishes. The capture tool starts a real nervix-server,
 # seeds it with nervix-cli, and drives the console in a browser, so the images are build output
 # rather than repository content and the book stages them from target/.
@@ -124,6 +142,11 @@ test-consensus *args:
 # server lib.
 test-interconnect *args:
     cargo test --package nervix-interconnect --lib -- {{ args }}
+
+# Run the connector unit tests, which live in the nervix-connector contract crate and in every
+# nervix-connector-* integration crate rather than the server lib.
+test-connectors *args:
+    cargo test --package 'nervix-connector*' --lib -- {{ args }}
 
 test-runtime-state-capabilities: tests-deps
     #!/usr/bin/env bash

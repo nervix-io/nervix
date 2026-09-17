@@ -5,9 +5,27 @@
 //! - **Depends on.** Validated generator plans, bound domain clocks and Arrow construction.
 //! - **Must not know.** NSPL parsing, connector transports or placement selection.
 
+use error_stack::{Report, ResultExt as _};
 use tokio_util::sync::CancellationToken;
 
 use super::*;
+
+/// Every way a generator task fails to prepare or run one route for its branch.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum GeneratorError {
+    #[error("failed to project the generator context")]
+    ProjectContext,
+    #[error("failed to read generator materialized field '{field}'")]
+    MaterializedField { field: String },
+    #[error("failed to project the generator route input")]
+    ProjectRouteInput,
+    #[error("GENERATOR execution failed")]
+    Execution,
+    #[error("GENERATOR produced {rows} rows for a single input key")]
+    RowCount { rows: usize },
+    #[error("failed to build the GENERATOR output row")]
+    OutputRow,
+}
 
 pub(super) struct GeneratorTaskSpec {
     pub(super) generator: CreateGenerator,
@@ -85,7 +103,7 @@ impl GeneratorContextProjection {
         &self,
         source: &RuntimeRecordBatch,
         branch_key: &Option<BranchKey>,
-    ) -> Result<RuntimeRecordBatch, String> {
+    ) -> error_stack::Result<RuntimeRecordBatch, GeneratorError> {
         let namespace_batches = [(self.source_namespace.as_str(), source)];
         let strict_namespaces = [self.source_namespace.as_str()];
         let side_inputs = HashMap::default();
@@ -104,21 +122,23 @@ impl GeneratorContextProjection {
             },
             None,
         )
-        .map_err(|error| error.to_string())?;
-        vm_typed_batch_to_runtime_batch(&input).map_err(|error| error.to_string())
+        .change_context(GeneratorError::ProjectContext)?;
+        vm_typed_batch_to_runtime_batch(&input).change_context(GeneratorError::ProjectContext)
     }
 
     pub(super) fn materialized_state_snapshot(
         &self,
         source: &RuntimeRecordBatch,
-    ) -> Result<HashMap<String, RuntimeValue>, String> {
+    ) -> error_stack::Result<HashMap<String, RuntimeValue>, GeneratorError> {
         let schema = source.schema();
         let mut snapshot = HashMap::with_capacity(schema.fields().len());
         for field in schema.fields() {
-            if let Some(value) = source
-                .value(0, field.name())
-                .map_err(|error| error.to_string())?
-            {
+            let value = source.value(0, field.name()).change_context_lazy(|| {
+                GeneratorError::MaterializedField {
+                    field: field.name().clone(),
+                }
+            })?;
+            if let Some(value) = value {
                 snapshot.insert(format!("{}.{}", self.source_namespace, field.name()), value);
             }
         }
@@ -158,7 +178,7 @@ impl GeneratorTaskRouteSpec {
         &self,
         context: &RuntimeRecordBatch,
         branch_key: &Option<BranchKey>,
-    ) -> Result<VmTypedBatch, String> {
+    ) -> error_stack::Result<VmTypedBatch, GeneratorError> {
         self.input_projection
             .project(&self.program.compiled.input_schema, context, branch_key)
     }
@@ -187,7 +207,7 @@ impl GeneratorRouteInputProjection {
         schema: &StdArc<arrow_schema::Schema>,
         context: &RuntimeRecordBatch,
         branch_key: &Option<BranchKey>,
-    ) -> Result<VmTypedBatch, String> {
+    ) -> error_stack::Result<VmTypedBatch, GeneratorError> {
         let side_inputs = HashMap::default();
         let lookup_columns = HashMap::default();
         project_vm_input_batch(
@@ -204,7 +224,7 @@ impl GeneratorRouteInputProjection {
             },
             None,
         )
-        .map_err(|error| error.to_string())
+        .change_context(GeneratorError::ProjectRouteInput)
     }
 }
 
@@ -257,7 +277,7 @@ pub(super) async fn execute_generator_program_on_context(
     program: &CompiledProgramWithMaterializedInterest,
     input: &VmTypedBatch,
     execution_now: Timestamp,
-) -> Result<GeneratorProgramOutcome, String> {
+) -> error_stack::Result<GeneratorProgramOutcome, GeneratorError> {
     let result = execute_program_with_selection_in_context(
         &program.compiled,
         input,
@@ -267,15 +287,14 @@ pub(super) async fn execute_generator_program_on_context(
         },
     )
     .await
-    .map_err(|error| format!("GENERATOR execution failed: {error}"))?;
+    .change_context(GeneratorError::Execution)?;
     if result.batch.row_count() == 0 {
         return Ok(GeneratorProgramOutcome::Filtered);
     }
     if result.batch.row_count() != 1 {
-        return Err(format!(
-            "GENERATOR produced {} rows for a single input key",
-            result.batch.row_count()
-        ));
+        return Err(Report::new(GeneratorError::RowCount {
+            rows: result.batch.row_count(),
+        }));
     }
     if let Some(side_error) = result.batch.errors().first() {
         return Ok(GeneratorProgramOutcome::MessageError {
@@ -294,14 +313,14 @@ pub(super) async fn execute_generator_program_on_context(
         });
     }
     let batch = vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &[0])
-        .map_err(|error| error.to_string())?;
-    RuntimeRow::new(
+        .change_context(GeneratorError::OutputRow)?;
+    let row = RuntimeRow::new(
         Arc::new(batch),
         0,
         RuntimeRecordMetadata::from_ingested_at_watermarks(execution_now, execution_now),
     )
-    .map_err(|error| error.to_string())
-    .map(GeneratorProgramOutcome::Output)
+    .change_context(GeneratorError::OutputRow)?;
+    Ok(GeneratorProgramOutcome::Output(row))
 }
 
 pub(super) struct GeneratorFlushContext<'a> {
@@ -708,11 +727,10 @@ impl Runtime {
                                     Err(error) => {
                                         task_events.report_error(format!(
                                             "failed to prepare generator '{}' context in domain \
-                                             '{}' branch '{}': {}",
+                                             '{}' branch '{}': {error:#}",
                                             task_generator.as_str(),
                                             task_domain.as_str(),
                                             branch_key_display(&branch_key),
-                                            error
                                         ));
                                         continue;
                                     }
@@ -728,12 +746,11 @@ impl Runtime {
                                         Err(error) => {
                                             task_events.report_error(format!(
                                                 "failed to prepare generator '{}' route '{}' \
-                                                 input in domain '{}' branch '{}': {}",
+                                                 input in domain '{}' branch '{}': {error:#}",
                                                 task_generator.as_str(),
                                                 route.output.relay.as_str(),
                                                 task_domain.as_str(),
                                                 branch_key_display(&branch_key),
-                                                error
                                             ));
                                             continue;
                                         }
@@ -827,11 +844,10 @@ impl Runtime {
                                                             task_events.report_error(format!(
                                                                 "failed to capture generator '{}' \
                                                                  materialized state in domain \
-                                                                 '{}' branch '{}': {}",
+                                                                 '{}' branch '{}': {error:#}",
                                                                 task_generator.as_str(),
                                                                 task_domain.as_str(),
                                                                 branch_key_display(&branch_key),
-                                                                error
                                                             ));
                                                             continue;
                                                         }
@@ -879,12 +895,11 @@ impl Runtime {
                                         Err(error) => {
                                             task_events.report_error(format!(
                                                 "failed to execute generator '{}' route '{}' in \
-                                                 domain '{}' branch '{}': {}",
+                                                 domain '{}' branch '{}': {error:#}",
                                                 task_generator.as_str(),
                                                 route.output.relay.as_str(),
                                                 task_domain.as_str(),
                                                 branch_key_display(&branch_key),
-                                                error
                                             ));
                                         }
                                     }

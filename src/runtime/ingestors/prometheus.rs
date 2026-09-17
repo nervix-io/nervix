@@ -11,9 +11,35 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::super::*;
-use crate::runtime::physical_time::actual_utc_now;
+#[cfg(test)]
+use crate::runtime::http_client::HttpClientConfigError;
+use crate::runtime::{client_config::ClientConfigResult, physical_time::actual_utc_now};
 
 pub(in crate::runtime) struct PrometheusIngestor;
+
+#[derive(Debug, Error)]
+pub(in crate::runtime) enum PrometheusIngestorError {
+    #[error("invalid Prometheus service address")]
+    InvalidAddress,
+    #[error("failed to send Prometheus query")]
+    QueryRequest,
+    #[error("Prometheus query failed with HTTP status {status}")]
+    QueryStatus { status: reqwest::StatusCode },
+    #[error("failed to decode Prometheus query response")]
+    DecodeResponse,
+    #[error("Prometheus query returned status '{status}'")]
+    QueryRejected { status: String },
+    #[error("Prometheus query returned unsupported result type '{result_type}'")]
+    UnsupportedResultType { result_type: String },
+    #[error("invalid Prometheus sample value")]
+    InvalidSampleValue,
+    #[error("non-finite Prometheus sample value")]
+    NonFiniteSampleValue,
+    #[error("failed to encode Prometheus sample")]
+    EncodeSample,
+    #[error("invalid Prometheus timestamp")]
+    InvalidTimestamp,
+}
 
 #[derive(Debug, Deserialize)]
 pub(in crate::runtime) struct PrometheusQueryResponse {
@@ -66,16 +92,16 @@ impl PrometheusIngestor {
             })?;
         let http_client = HttpClientConfig::new(&resolved_client.entries, "Prometheus")
             .build()
-            .map_err(|reason| RuntimeError::StartIngestor {
+            .map_err(|error| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-                reason,
+                reason: error.to_string(),
             })?;
-        let addr = Self::addr_from_config(&resolved_client.entries).map_err(|reason| {
+        let addr = Self::addr_from_config(&resolved_client.entries).map_err(|error| {
             RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-                reason,
+                reason: error.to_string(),
             }
         })?;
         let cadence = runtime
@@ -344,16 +370,14 @@ impl PrometheusIngestor {
     #[cfg(test)]
     pub(in crate::runtime) fn client_from_config_for_test(
         config: &[ClientConfigEntry],
-    ) -> Result<HttpClient, String> {
+    ) -> Result<HttpClient, Report<HttpClientConfigError>> {
         HttpClientConfig::new(config, "Prometheus").build()
     }
 
     pub(in crate::runtime) fn addr_from_config(
         config: &[nervix_models::ClientConfigEntry],
-    ) -> Result<String, String> {
-        client_config_value(config, "addr", || {
-            "missing Prometheus client config key 'addr'".to_string()
-        })
+    ) -> ClientConfigResult<String> {
+        client_config_value(config, "addr", "Prometheus")
     }
 
     async fn query_vector(
@@ -361,36 +385,36 @@ impl PrometheusIngestor {
         addr: &str,
         query: &str,
         query_time: Option<Timestamp>,
-    ) -> Result<Vec<PrometheusVectorResult>, String> {
+    ) -> Result<Vec<PrometheusVectorResult>, Report<PrometheusIngestorError>> {
         let mut params = vec![("query".to_string(), query.to_string())];
         if let Some(query_time) = query_time {
             params.push(("time".to_string(), Self::query_time_seconds(query_time)));
         }
         let url = Self::query_url(addr, params)?;
-        let response = client
-            .get(url)
-            .send()
-            .await
-            .map_err(|source| source.to_string())?;
+        let response = client.get(url).send().await.map_err(|source| {
+            Report::new(PrometheusIngestorError::QueryRequest).attach_printable(source.to_string())
+        })?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(format!("prometheus query failed with {status}: {body}"));
+            return Err(Report::new(PrometheusIngestorError::QueryStatus { status }));
         }
         let payload = response
             .json::<PrometheusQueryResponse>()
             .await
-            .map_err(|source| source.to_string())?;
+            .map_err(|source| {
+                Report::new(PrometheusIngestorError::DecodeResponse)
+                    .attach_printable(source.to_string())
+            })?;
         if payload.status != "success" {
-            return Err(format!(
-                "prometheus query returned status '{}'",
-                payload.status
-            ));
+            return Err(Report::new(PrometheusIngestorError::QueryRejected {
+                status: payload.status,
+            }));
         }
         if payload.data.result_type != "vector" {
-            return Err(format!(
-                "prometheus query returned unsupported resultType '{}'",
-                payload.data.result_type
+            return Err(Report::new(
+                PrometheusIngestorError::UnsupportedResultType {
+                    result_type: payload.data.result_type,
+                },
             ));
         }
         Ok(payload.data.result)
@@ -416,8 +440,11 @@ impl PrometheusIngestor {
     pub(in crate::runtime) fn query_url(
         addr: &str,
         params: Vec<(String, String)>,
-    ) -> Result<Url, String> {
-        let mut url = Url::parse(addr).map_err(|source| source.to_string())?;
+    ) -> Result<Url, Report<PrometheusIngestorError>> {
+        let mut url = Url::parse(addr).map_err(|source| {
+            Report::new(PrometheusIngestorError::InvalidAddress)
+                .attach_printable(source.to_string())
+        })?;
         let mut path = url.path().trim_end_matches('/').to_string();
         path.push_str("/api/v1/query");
         url.set_path(&path);
@@ -428,36 +455,39 @@ impl PrometheusIngestor {
 
     pub(in crate::runtime) fn sample_payload(
         sample: &PrometheusVectorResult,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, Report<PrometheusIngestorError>> {
         let mut object = serde_json::Map::new();
         for (key, value) in &sample.metric {
             object.insert(key.clone(), serde_json::Value::String(value.clone()));
         }
 
-        let value = sample
-            .value
-            .1
-            .parse::<f64>()
-            .map_err(|_| format!("invalid prometheus sample value '{}'", sample.value.1))?;
+        let value = sample.value.1.parse::<f64>().map_err(|source| {
+            Report::new(PrometheusIngestorError::InvalidSampleValue)
+                .attach_printable(source.to_string())
+        })?;
         let value = serde_json::Number::from_f64(value)
-            .ok_or_else(|| format!("non-finite prometheus sample value '{}'", sample.value.1))?;
+            .ok_or_else(|| Report::new(PrometheusIngestorError::NonFiniteSampleValue))?;
         object.insert("value".to_string(), serde_json::Value::Number(value));
         object.insert(
             "timestamp".to_string(),
             serde_json::Value::String(Self::timestamp_to_rfc3339(sample.value.0)?),
         );
 
-        serde_json::to_vec(&serde_json::Value::Object(object)).map_err(|source| source.to_string())
+        serde_json::to_vec(&serde_json::Value::Object(object)).map_err(|source| {
+            Report::new(PrometheusIngestorError::EncodeSample).attach_printable(source.to_string())
+        })
     }
 
-    pub(in crate::runtime) fn timestamp_to_rfc3339(timestamp: f64) -> Result<String, String> {
+    pub(in crate::runtime) fn timestamp_to_rfc3339(
+        timestamp: f64,
+    ) -> Result<String, Report<PrometheusIngestorError>> {
         if !timestamp.is_finite() {
-            return Err(format!("invalid prometheus timestamp '{timestamp}'"));
+            return Err(Report::new(PrometheusIngestorError::InvalidTimestamp));
         }
         let secs: i64 = timestamp
             .trunc()
             .checked_approx_into()
-            .ok_or_else(|| format!("invalid prometheus timestamp '{timestamp}'"))?;
+            .ok_or_else(|| Report::new(PrometheusIngestorError::InvalidTimestamp))?;
         let nanos: u32 = (timestamp.fract().abs() * 1_000_000_000.0)
             .round()
             .checked_approx_into()
@@ -465,7 +495,7 @@ impl PrometheusIngestor {
         let datetime = Utc
             .timestamp_opt(secs, nanos.min(999_999_999))
             .single()
-            .ok_or_else(|| format!("invalid prometheus timestamp '{timestamp}'"))?;
+            .ok_or_else(|| Report::new(PrometheusIngestorError::InvalidTimestamp))?;
         Ok(datetime.to_rfc3339())
     }
 }
@@ -475,6 +505,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use nervix_models::Timestamp;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
 
@@ -536,5 +567,121 @@ mod tests {
             url.as_str(),
             "http://prometheus:9090/base/api/v1/query?query=vector%281%29"
         );
+    }
+
+    async fn query_response(
+        status: &str,
+        body: &str,
+    ) -> Result<Vec<PrometheusVectorResult>, Report<PrometheusIngestorError>> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test Prometheus listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test Prometheus listener should have an address");
+        let status = status.to_string();
+        let body = body.to_string();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("test Prometheus listener should accept");
+            let mut request = [0_u8; 2048];
+            let _ = stream
+                .read(&mut request)
+                .await
+                .expect("test Prometheus request should be readable");
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: \
+                 {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("test Prometheus response should be writable");
+        });
+        let result = PrometheusIngestor::query_vector(
+            &HttpClient::new(),
+            &format!("http://{address}"),
+            "up",
+            None,
+        )
+        .await;
+        server
+            .await
+            .expect("test Prometheus response task should finish");
+        result
+    }
+
+    #[tokio::test]
+    async fn prometheus_query_failures_have_distinct_typed_contexts() {
+        let unavailable =
+            PrometheusIngestor::query_vector(&HttpClient::new(), "http://127.0.0.1:1", "up", None)
+                .await
+                .expect_err("an unavailable endpoint must fail the request");
+        assert!(matches!(
+            unavailable.current_context(),
+            PrometheusIngestorError::QueryRequest
+        ));
+
+        let status = query_response("503 Service Unavailable", "{}")
+            .await
+            .expect_err("a non-success status must fail");
+        assert!(matches!(
+            status.current_context(),
+            PrometheusIngestorError::QueryStatus { .. }
+        ));
+
+        let decode = query_response("200 OK", "not-json")
+            .await
+            .expect_err("a malformed response must fail decoding");
+        assert!(matches!(
+            decode.current_context(),
+            PrometheusIngestorError::DecodeResponse
+        ));
+
+        let rejected = query_response(
+            "200 OK",
+            r#"{"status":"error","data":{"resultType":"vector","result":[]}}"#,
+        )
+        .await
+        .expect_err("an unsuccessful Prometheus payload must fail");
+        assert!(matches!(
+            rejected.current_context(),
+            PrometheusIngestorError::QueryRejected { .. }
+        ));
+
+        let result_type = query_response(
+            "200 OK",
+            r#"{"status":"success","data":{"resultType":"matrix","result":[]}}"#,
+        )
+        .await
+        .expect_err("a non-vector Prometheus payload must fail");
+        assert!(matches!(
+            result_type.current_context(),
+            PrometheusIngestorError::UnsupportedResultType { .. }
+        ));
+    }
+
+    #[test]
+    fn prometheus_helpers_classify_parse_failures() {
+        let address = PrometheusIngestor::query_url("not a URL", Vec::new())
+            .expect_err("an invalid address must fail");
+        assert!(matches!(
+            address.current_context(),
+            PrometheusIngestorError::InvalidAddress
+        ));
+
+        let sample = PrometheusVectorResult {
+            metric: BTreeMap::new(),
+            value: (1.0, "not-a-number".to_string()),
+        };
+        let value = PrometheusIngestor::sample_payload(&sample)
+            .expect_err("an invalid sample value must fail");
+        assert!(matches!(
+            value.current_context(),
+            PrometheusIngestorError::InvalidSampleValue
+        ));
     }
 }

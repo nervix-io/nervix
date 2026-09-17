@@ -7,6 +7,24 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# The module that owns actual-UTC observation and physical deadlines for the data plane. Every rule
+# names it through this path, so relocating the module moves every rule that concerns it.
+PHYSICAL_TIME_OWNER = Path("src/runtime/physical_time.rs")
+
+# The data plane the physical-time rules govern: the server's runtime, the connector contract crate,
+# and every integration crate under `crates/connectors`.
+PHYSICAL_TIME_ROOTS = ("src/runtime", "crates/connector/src", "crates/connectors/*/src")
+
+
+def physical_time_sources() -> list[Path]:
+    """Return every Rust source under the roots the physical-time rules govern."""
+
+    sources: list[Path] = []
+    for pattern in PHYSICAL_TIME_ROOTS:
+        for source_root in sorted(ROOT.glob(pattern)):
+            sources.extend(sorted(source_root.rglob("*.rs")))
+    return sources
+
 
 def product_source(path: Path) -> str:
     source = path.read_text(encoding="utf-8")
@@ -34,7 +52,7 @@ def main() -> int:
         ROOT / "src/application/domain_clock.rs",
         ROOT / "src/cluster.rs",
         ROOT / "src/metrics.rs",
-        ROOT / "src/runtime/physical_time.rs",
+        ROOT / PHYSICAL_TIME_OWNER,
         ROOT / "src/runtime_schema/syslog.rs",
     }
     product_roots = [ROOT / "src", ROOT / "crates"]
@@ -82,7 +100,7 @@ def main() -> int:
             )
 
     runtime_root = ROOT / "src/runtime"
-    actual_utc_owner = runtime_root / "physical_time.rs"
+    actual_utc_owner = ROOT / PHYSICAL_TIME_OWNER
     actual_utc_consumers = {
         runtime_root / "domain_clock.rs",
         runtime_root / "endpoint.rs",
@@ -112,7 +130,7 @@ def main() -> int:
     physical_time_source = product_source(actual_utc_owner)
     if "pub(super) const fn new() -> Self" not in physical_time_source:
         violations.append(
-            "src/runtime/physical_time.rs: physical deadline construction must remain private "
+            f"{PHYSICAL_TIME_OWNER.as_posix()}: physical deadline construction must remain private "
             "to its declared runtime owners"
         )
 
@@ -131,7 +149,7 @@ def main() -> int:
         ROOT / "src/runtime/domain_clock.rs",
         ROOT / "src/runtime/ingestion_time.rs",
         ROOT / "src/runtime/ingestor_quiesce.rs",
-        ROOT / "src/runtime/physical_time.rs",
+        actual_utc_owner,
         ROOT / "src/runtime/relay_interaction.rs",
         ROOT / "src/runtime_schema/syslog.rs",
         *actual_utc_consumers,
@@ -143,7 +161,7 @@ def main() -> int:
             relative = path.relative_to(ROOT)
             violations.append(f"{relative}: missing the required layer ownership contract")
 
-    for path in sorted(runtime_root.rglob("*.rs")):
+    for path in physical_time_sources():
         source = product_source(path)
         if path != actual_utc_owner:
             for needle in ("Timestamp::now(", "Utc::now(", "SystemTime::now("):
@@ -152,7 +170,7 @@ def main() -> int:
                     path,
                     source,
                     needle,
-                    "actual UTC is owned by runtime/physical_time.rs",
+                    f"actual UTC is owned by {PHYSICAL_TIME_OWNER.as_posix()}",
                 )
         reject(
             violations,
