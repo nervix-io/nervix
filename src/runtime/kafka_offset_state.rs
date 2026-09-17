@@ -686,72 +686,6 @@ mod tests {
         assert_eq!(originator.read().next_offset(topic, partition), Some(9));
     }
 
-    /// Encoding a snapshot holds the assignment barrier. A commit, or the replica quorum check that
-    /// follows it, that queued behind the barrier would hold the acknowledged partition for the
-    /// whole encode.
-    #[test]
-    fn a_committed_offset_proceeds_while_the_assignment_barrier_is_held() {
-        let node_1 = ClusterNodeName::parse("node-1")
-            .assured("the test node name satisfies the cluster-node grammar");
-        let node_2 = ClusterNodeName::parse("node-2")
-            .assured("the test node name satisfies the cluster-node grammar");
-        let state = Arc::new(
-            ReplicatedKafkaOffsetState::new(offset_placement(), None)
-                .assured("the empty Kafka offset state is valid"),
-        );
-        let mut assignment = ReplicatedKafkaOffsetState::bind(
-            &state,
-            StateReplicationRoles::new(Some(node_1.clone()), vec![node_2], 1),
-            Some(&node_1),
-        );
-        let originator = assignment
-            .originator
-            .take()
-            .assured("node-1 is assigned as the owner");
-        // A partition's first commit records the partition itself; the commits after it only move
-        // that partition's offset.
-        originator
-            .apply_committed_offset("events", 0, 1)
-            .assured("the owner assignment is current");
-        let (held_tx, held_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        let barrier_state = state.clone();
-        let barrier = std::thread::spawn(move || {
-            barrier_state.assignment.serialize(|| {
-                held_tx
-                    .send(())
-                    .assured("the test keeps the receiver until the barrier is held");
-                release_rx
-                    .recv()
-                    .assured("the test releases the barrier before it finishes");
-            });
-        });
-        held_rx
-            .recv()
-            .assured("the barrier thread reports once it holds the barrier");
-
-        let (committed_tx, committed_rx) = std::sync::mpsc::channel();
-        let committer = std::thread::spawn(move || {
-            let committed = originator.apply_committed_offset("events", 0, 2).is_ok();
-            let quorum_satisfied = originator.read().replica_quorum_satisfied(1);
-            committed_tx
-                .send((committed, quorum_satisfied))
-                .assured("the test keeps the receiver until the commit is reported");
-        });
-        let committed = committed_rx.recv_timeout(std::time::Duration::from_secs(10));
-        release_tx
-            .send(())
-            .assured("the barrier thread waits for its release");
-        barrier.join().assured("the barrier thread completes");
-        committer.join().assured("the committing thread completes");
-
-        assert_eq!(
-            committed,
-            Ok((true, false)),
-            "the commit or its replica quorum check waited for the assignment barrier"
-        );
-    }
-
     fn offset_placement() -> RuntimeStatePlacement {
         RuntimeStatePlacement {
             domain: DomainName::parse("default")
@@ -762,6 +696,90 @@ mod tests {
                 .assured("the test model name satisfies the model-name grammar"),
             schema_fingerprint: [0; 32],
             branch_key: None,
+        }
+    }
+
+    #[cfg(feature = "shuttle")]
+    mod shuttle_checks {
+        use shuttle::{sync::mpsc, thread};
+
+        use super::*;
+        use crate::shuttle_test::check_interleavings;
+
+        /// The owner commits a recorded partition's offset and checks its replica quorum while
+        /// another thread holds the assignment barrier, which that thread releases only after both
+        /// have returned.
+        fn commit_under_a_held_barrier() {
+            let node_1 = ClusterNodeName::parse("node-1")
+                .assured("the test node name satisfies the cluster-node grammar");
+            let node_2 = ClusterNodeName::parse("node-2")
+                .assured("the test node name satisfies the cluster-node grammar");
+            let state = Arc::new(
+                ReplicatedKafkaOffsetState::new(offset_placement(), None)
+                    .assured("the empty Kafka offset state is valid"),
+            );
+            let mut assignment = ReplicatedKafkaOffsetState::bind(
+                &state,
+                StateReplicationRoles::new(Some(node_1.clone()), vec![node_2], 1),
+                Some(&node_1),
+            );
+            let originator = assignment
+                .originator
+                .take()
+                .assured("node-1 is assigned as the owner");
+            // A partition's first commit records the partition itself; the commit after it only
+            // moves that partition's offset.
+            originator
+                .apply_committed_offset("events", 0, 1)
+                .assured("the owner assignment is current");
+            let (held_tx, held_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            let barrier = thread::spawn({
+                let state = state.clone();
+                move || {
+                    state.assignment.serialize(|| {
+                        held_tx
+                            .send(())
+                            .assured("the model keeps the receiver until the barrier is held");
+                        release_rx.recv().assured(
+                            "the model releases the barrier once the commit and its quorum check \
+                             returned",
+                        );
+                    });
+                }
+            });
+            held_rx
+                .recv()
+                .assured("the barrier thread reports once it holds the barrier");
+
+            // The barrier stays held until the commit and its quorum check return, so either one
+            // waiting for it would leave every thread blocked, which Shuttle reports as a deadlock.
+            let committed = originator.apply_committed_offset("events", 0, 2);
+            let quorum_satisfied = originator.read().replica_quorum_satisfied(1);
+            release_tx
+                .send(())
+                .assured("the barrier thread waits for its release");
+            barrier.join().assured(
+                "Shuttle fails the whole execution when a model thread panics, so no join \
+                 observes one",
+            );
+
+            assert!(
+                committed.is_ok(),
+                "the commit was refused while the assignment barrier was held"
+            );
+            assert!(
+                !quorum_satisfied,
+                "no replica has acknowledged the committed revision"
+            );
+        }
+
+        /// Encoding a snapshot holds the assignment barrier. A commit, or the replica quorum check
+        /// that follows it, that queued behind the barrier would hold the acknowledged partition
+        /// for the whole encode.
+        #[test]
+        fn shuttle_a_committed_offset_proceeds_while_the_assignment_barrier_is_held() {
+            check_interleavings(commit_under_a_held_barrier);
         }
     }
 }
