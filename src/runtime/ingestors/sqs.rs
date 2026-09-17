@@ -13,11 +13,38 @@ use aws_sdk_sqs::{
     Client as SqsClient,
     types::{Message as SqsMessage, MessageAttributeValue},
 };
+use error_stack::{AttachmentKind, FrameKind, ResultExt as _};
 
 use super::super::*;
 use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct SqsIngestor;
+
+#[derive(Debug, Error)]
+pub(in crate::runtime) enum SqsIngestorError {
+    #[error("invalid SQS client configuration")]
+    ClientConfig,
+    #[error("failed to build SQS TLS context")]
+    BuildTlsContext,
+    #[error("failed to resolve SQS queue '{queue}'")]
+    ResolveQueue { queue: String },
+    #[error("SQS queue '{queue}' does not exist")]
+    MissingQueue { queue: String },
+    #[error("SQS queue '{queue}' has no URL")]
+    MissingQueueUrl { queue: String },
+}
+
+fn sqs_ingestor_error_message(error: &Report<SqsIngestorError>) -> String {
+    error
+        .frames()
+        .find_map(|frame| match frame.kind() {
+            FrameKind::Attachment(AttachmentKind::Printable(attachment)) => {
+                Some(attachment.to_string())
+            }
+            FrameKind::Context(_) | FrameKind::Attachment(_) => None,
+        })
+        .unwrap_or_else(|| error.current_context().to_string())
+}
 
 /// The message attributes of one borrowed SQS message.
 ///
@@ -88,17 +115,17 @@ impl SqsIngestor {
             })?;
         let client = Self::client_from_config(&resolved_client.entries)
             .await
-            .map_err(|reason| RuntimeError::StartIngestor {
+            .map_err(|error| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-                reason,
+                reason: sqs_ingestor_error_message(&error),
             })?;
         let queue_url = Self::queue_url(&client, queue.as_str())
             .await
-            .map_err(|reason| RuntimeError::StartIngestor {
+            .map_err(|error| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-                reason,
+                reason: sqs_ingestor_error_message(&error),
             })?;
 
         let (shutdown_tx, _) = watch::channel(false);
@@ -372,10 +399,9 @@ impl SqsIngestor {
 
     async fn client_from_config(
         config: &[nervix_models::ClientConfigEntry],
-    ) -> Result<SqsClient, String> {
-        let endpoint = client_config_value(config, "endpoint", || {
-            "missing SQS client config key 'endpoint'".to_string()
-        })?;
+    ) -> Result<SqsClient, Report<SqsIngestorError>> {
+        let endpoint = client_config_value(config, "endpoint", "SQS")
+            .change_context(SqsIngestorError::ClientConfig)?;
         let region = optional_client_config_value(config, "region")
             .unwrap_or("us-east-1")
             .to_string();
@@ -397,13 +423,17 @@ impl SqsIngestor {
                 "nervix-sqs",
             ));
         if let Some(ca_file) = client_tls_paths(config).ca_file.as_ref() {
-            let ca_pem = read_tls_file(ca_file, "TLS CA certificate")?;
+            let ca_pem = read_tls_file(ca_file, "TLS CA certificate")
+                .change_context(SqsIngestorError::ClientConfig)?;
             let tls_context = aws_smithy_http_client::tls::TlsContext::builder()
                 .with_trust_store(
                     aws_smithy_http_client::tls::TrustStore::empty().with_pem_certificate(ca_pem),
                 )
                 .build()
-                .map_err(|source| source.to_string())?;
+                .map_err(|source| {
+                    Report::new(SqsIngestorError::BuildTlsContext)
+                        .attach_printable(source.to_string())
+                })?;
             let http_client = aws_smithy_http_client::Builder::new()
                 .tls_provider(aws_smithy_http_client::tls::Provider::Rustls(
                     aws_smithy_http_client::tls::rustls_provider::CryptoMode::AwsLc,
@@ -416,18 +446,48 @@ impl SqsIngestor {
         Ok(SqsClient::new(&sdk_config))
     }
 
-    async fn queue_url(client: &SqsClient, queue: &str) -> Result<String, String> {
+    async fn queue_url(
+        client: &SqsClient,
+        queue: &str,
+    ) -> Result<String, Report<SqsIngestorError>> {
         let queue_url = client
             .get_queue_url()
             .queue_name(queue)
             .send()
             .await
-            .map_err(|source| source.to_string())?
+            .map_err(|source| {
+                let missing = source
+                    .as_service_error()
+                    .is_some_and(|error| error.is_queue_does_not_exist());
+                Self::queue_lookup_error(queue, missing, source.to_string())
+            })?
             .queue_url()
             .map(ToOwned::to_owned);
+        Self::require_queue_url(queue, queue_url)
+    }
+
+    fn queue_lookup_error(queue: &str, missing: bool, reason: String) -> Report<SqsIngestorError> {
+        let report = if missing {
+            Report::new(SqsIngestorError::MissingQueue {
+                queue: queue.to_string(),
+            })
+        } else {
+            Report::new(SqsIngestorError::ResolveQueue {
+                queue: queue.to_string(),
+            })
+        };
+        report.attach_printable(reason)
+    }
+
+    fn require_queue_url(
+        queue: &str,
+        queue_url: Option<String>,
+    ) -> Result<String, Report<SqsIngestorError>> {
         match queue_url {
             Some(queue_url) => Ok(queue_url),
-            None => Err(format!("SQS queue '{queue}' has no URL")),
+            None => Err(Report::new(SqsIngestorError::MissingQueueUrl {
+                queue: queue.to_string(),
+            })),
         }
     }
 
@@ -452,5 +512,50 @@ impl SqsIngestor {
             );
         }
         Cow::Borrowed("")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqs_queue_lookup_failures_are_distinct_and_keep_their_source_message() {
+        let missing = SqsIngestor::queue_lookup_error(
+            "missing-queue",
+            true,
+            "service reported a missing queue".to_string(),
+        );
+        assert!(matches!(
+            missing.current_context(),
+            SqsIngestorError::MissingQueue { queue } if queue == "missing-queue"
+        ));
+        assert_eq!(
+            sqs_ingestor_error_message(&missing),
+            "service reported a missing queue"
+        );
+
+        let connection =
+            SqsIngestor::queue_lookup_error("orders", false, "connection refused".to_string());
+        assert!(matches!(
+            connection.current_context(),
+            SqsIngestorError::ResolveQueue { queue } if queue == "orders"
+        ));
+        assert_eq!(
+            sqs_ingestor_error_message(&connection),
+            "connection refused"
+        );
+
+        assert_eq!(
+            SqsIngestor::require_queue_url("orders", Some("queue-url".to_string()))
+                .expect("a returned queue URL should be accepted"),
+            "queue-url"
+        );
+        let no_url = SqsIngestor::require_queue_url("orders", None)
+            .expect_err("a successful response without a queue URL must fail");
+        assert!(matches!(
+            no_url.current_context(),
+            SqsIngestorError::MissingQueueUrl { queue } if queue == "orders"
+        ));
     }
 }

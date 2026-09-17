@@ -169,6 +169,11 @@ impl SessionServiceImpl {
             ));
         };
 
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_relocation_publication_if_armed(domain)
+            .await;
         let current_schedule = self.inner.consensus.current_schedule().await;
         let current_domain_schedule = current_schedule.domain(domain).cloned();
         mark_complete_ownership_transitions(

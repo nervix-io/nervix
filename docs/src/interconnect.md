@@ -397,8 +397,8 @@ success. A withdrawal disappears from fan-out when the next gossip state snapsho
 
 Consensus separates traffic according to the progress it protects:
 
-- heartbeats, votes, leadership notifications, linearizable runtime-admission reads, and other
-  small control exchanges use management capacity
+- heartbeats, pre-votes, votes, leadership notifications, linearizable runtime-admission reads,
+  and other small control exchanges use management capacity
 - each leader-to-follower log uses one ordered duplex stream on the replication pool
 - runtime-state replication and ownership handoff use the remaining replication capacity
 - consensus snapshots use the snapshot reservation on the bulk pool
@@ -407,6 +407,12 @@ The ordered append stream can keep multiple batches in flight while preserving f
 consensus-level window bounds a follower to 16 outstanding batches and 16 MiB of unacknowledged log
 data. Heartbeats and elections remain on management capacity, so a full append window does not block
 leadership traffic.
+
+Elections begin with a pre-vote exchange. A voter asks whether a quorum would accept its next term
+before it persists that term or becomes a candidate. A restarted voter whose log is stale, or whose
+discovery connections are not ready yet, therefore cannot advance the term and tear down the healthy
+leader's replication streams. Pre-vote requests use their own typed management operation and apply
+the same authenticated-origin check as vote requests.
 
 A follower bounds the same stream from its own side. It keeps at most four decoded batches resident
 at once, each charged to the commands and replication budget from the moment it is decoded until its

@@ -470,7 +470,7 @@ mod tests {
         assert_eq!(cast.to_string(), "cannot cast value to Int64");
         assert_eq!(cast.code(), ErrorCode::CastFailed);
 
-        let pattern_error = regex::Regex::new("(").expect_err("an unclosed group does not compile");
+        let pattern_error = regex::Error::CompiledTooBig(1024);
         let expected = format!("invalid regular expression: {pattern_error}");
         let invalid_pattern = SideErrorReason::InvalidRegularExpression(pattern_error);
         assert_eq!(invalid_pattern.to_string(), expected);

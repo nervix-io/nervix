@@ -7,6 +7,7 @@
 
 use std::borrow::Cow;
 
+use error_stack::ResultExt as _;
 use nervix_models::{DomainName, IngestorName};
 use pulsar::{
     Consumer as PulsarConsumer, ConsumerOptions as PulsarConsumerOptions, Pulsar,
@@ -18,6 +19,22 @@ use super::super::*;
 use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct PulsarIngestor;
+
+#[derive(Debug, Error)]
+pub(in crate::runtime) enum PulsarIngestorError {
+    #[error("invalid Pulsar client configuration")]
+    ClientConfig,
+    #[error(
+        "Pulsar TLS supports 'tls_ca_file' but does not support client certificate authentication"
+    )]
+    UnsupportedTlsIdentity,
+    #[error("failed to connect Pulsar client")]
+    Connect,
+    #[error("failed to flush Pulsar ingest group")]
+    Flush,
+    #[error("failed to acknowledge Pulsar ingest group")]
+    Acknowledge,
+}
 
 /// The properties of one borrowed Pulsar message.
 ///
@@ -105,10 +122,10 @@ impl PulsarIngestor {
             })?;
         let pulsar = Self::client_from_config(&resolved_client.entries)
             .await
-            .map_err(|reason| RuntimeError::StartIngestor {
+            .map_err(|error| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-                reason,
+                reason: error.to_string(),
             })?;
         let topic_name = Self::topic_from_config(&resolved_client.entries, topic.as_str());
 
@@ -869,10 +886,9 @@ impl PulsarIngestor {
 
     async fn client_from_config(
         config: &[nervix_models::ClientConfigEntry],
-    ) -> Result<Pulsar<TokioExecutor>, String> {
-        let addr = client_config_value(config, "addr", || {
-            "missing Pulsar client config key 'addr'".to_string()
-        })?;
+    ) -> Result<Pulsar<TokioExecutor>, Report<PulsarIngestorError>> {
+        let addr = client_config_value(config, "addr", "Pulsar")
+            .change_context(PulsarIngestorError::ClientConfig)?;
         let mut builder = Pulsar::builder(addr, TokioExecutor);
         if let Some(tls_options) = Self::tls_options_from_config(config)? {
             if let Some(certificate_chain) = tls_options.certificate_chain {
@@ -884,7 +900,9 @@ impl PulsarIngestor {
                     tls_options.tls_hostname_verification_enabled,
                 );
         }
-        builder.build().await.map_err(|source| source.to_string())
+        builder.build().await.map_err(|source| {
+            Report::new(PulsarIngestorError::Connect).attach_printable(source.to_string())
+        })
     }
 
     fn topic_from_config(config: &[nervix_models::ClientConfigEntry], topic: &str) -> String {
@@ -899,20 +917,18 @@ impl PulsarIngestor {
 
     fn tls_options_from_config(
         config: &[nervix_models::ClientConfigEntry],
-    ) -> Result<Option<PulsarTlsOptions>, String> {
+    ) -> Result<Option<PulsarTlsOptions>, Report<PulsarIngestorError>> {
         let tls = client_tls_paths(config);
         if tls.cert_file.is_some() || tls.key_file.is_some() {
-            return Err(
-                "Pulsar TLS currently supports only 'tls_ca_file'; client authentication via \
-                 'tls_cert_file' and 'tls_key_file' is not supported"
-                    .to_string(),
-            );
+            return Err(Report::new(PulsarIngestorError::UnsupportedTlsIdentity));
         }
 
         let allow_insecure_connection =
-            optional_bool_client_config_value(config, "tls_allow_insecure_connection")?;
+            optional_bool_client_config_value(config, "tls_allow_insecure_connection")
+                .change_context(PulsarIngestorError::ClientConfig)?;
         let tls_hostname_verification_enabled =
-            optional_bool_client_config_value(config, "tls_hostname_verification_enabled")?;
+            optional_bool_client_config_value(config, "tls_hostname_verification_enabled")
+                .change_context(PulsarIngestorError::ClientConfig)?;
 
         if tls.ca_file.is_none()
             && allow_insecure_connection.is_none()
@@ -923,7 +939,10 @@ impl PulsarIngestor {
 
         let mut tls_options = PulsarTlsOptions::default();
         if let Some(ca_file) = tls.ca_file.as_ref() {
-            tls_options.certificate_chain = Some(read_tls_file(ca_file, "TLS CA certificate")?);
+            tls_options.certificate_chain = Some(
+                read_tls_file(ca_file, "TLS CA certificate")
+                    .change_context(PulsarIngestorError::ClientConfig)?,
+            );
         }
         if let Some(allow_insecure_connection) = allow_insecure_connection {
             tls_options.allow_insecure_connection = allow_insecure_connection;
@@ -966,7 +985,7 @@ impl PulsarIngestor {
         consumer: &mut PulsarConsumer<Vec<u8>, TokioExecutor>,
         collector: &mut IngestRouteCollector,
         messages: &mut Vec<PulsarMessage<Vec<u8>>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Report<PulsarIngestorError>> {
         if let Err(error) = runtime
             .flush_ingest_collector(domain, ingestor, branched_senders, collector)
             .await
@@ -978,7 +997,7 @@ impl PulsarIngestor {
                     .await
                     .reported("nacking a pulsar message whose flush failed");
             }
-            return Err(error);
+            return Err(Report::new(PulsarIngestorError::Flush).attach_printable(error));
         }
 
         let mut first_error = None;
@@ -987,11 +1006,14 @@ impl PulsarIngestor {
             if let Err(error) = consumer.ack(&message).await
                 && first_error.is_none()
             {
-                first_error = Some(error.to_string());
+                first_error = Some(error);
             }
         }
         match first_error {
-            Some(reason) => Err(reason),
+            Some(error) => {
+                Err(Report::new(PulsarIngestorError::Acknowledge)
+                    .attach_printable(error.to_string()))
+            }
             None => Ok(()),
         }
     }

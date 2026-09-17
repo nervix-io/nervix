@@ -5,7 +5,130 @@
 //! - **Depends on.** Validated window plans, Arrow batches and bound domain time.
 //! - **Must not know.** NSPL parsing, placement decisions or connector transports.
 
+use error_stack::{Report, ResultExt as _};
+
 use super::*;
+
+/// Every way a window processor fails, from accumulating one aggregate input to publishing the
+/// branch-local window it owns.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum WindowProcessorError {
+    #[error("window aggregate requires a non-empty window")]
+    EmptyWindow,
+    #[error("window processor '{}' failed to snapshot branch state", .processor.as_str())]
+    Snapshot { processor: ModelName },
+    #[error("linear histogram delayed removal bucket is out of range")]
+    DelayedRemovalBucketOutOfRange,
+    #[error("linear histogram accumulator is missing delayed removed value")]
+    MissingDelayedRemovedValue,
+    #[error("linear histogram bucket is out of range")]
+    BucketOutOfRange,
+    #[error("linear histogram accumulator is missing removed value")]
+    MissingRemovedValue,
+    #[error("sequence aggregate structure requires a value")]
+    SequenceRequiresValue,
+    #[error("ordered aggregate structure requires a value")]
+    OrderedRequiresValue,
+    #[error("PERCENTILE_LINEAR_HISTOGRAM requires a value")]
+    HistogramRequiresValue,
+    #[error("SUM requires a value")]
+    SumRequiresValue,
+    #[error("sequence accumulator is missing removed window entry")]
+    MissingSequenceEntry,
+    #[error("sorted accumulator is missing removed window value")]
+    MissingSortedValue,
+    #[error("FIRST requires a non-empty window")]
+    FirstRequiresWindow,
+    #[error("LAST requires a non-empty window")]
+    LastRequiresWindow,
+    #[error("MAX requires a non-empty window")]
+    MaxRequiresWindow,
+    #[error("MIN requires a non-empty window")]
+    MinRequiresWindow,
+    #[error("SUM requires a non-empty window")]
+    SumRequiresWindow,
+    #[error("PERCENTILE_LINEAR_HISTOGRAM requires a constant percentile")]
+    HistogramRequiresPercentile,
+    #[error("{function:?} aggregate is backed by an incompatible accumulator")]
+    IncompatibleAccumulator { function: WindowAggregateFunction },
+    #[error(
+        "window snapshot accumulator count {accumulators} does not match aggregate demand count \
+         {demands}"
+    )]
+    SnapshotDemandCount { accumulators: usize, demands: usize },
+    #[error("failed to encode a window entry for the branch snapshot")]
+    EncodeSnapshotEntry,
+    #[error("failed to restore a window entry from the branch snapshot")]
+    RestoreSnapshotEntry,
+    #[error("failed to restore a window entry branch key: {reason}")]
+    RestoreSnapshotBranchKey { reason: String },
+    #[error(
+        "window aggregate input count {inputs} does not match accumulator count {accumulators}"
+    )]
+    AggregateInputCount { inputs: usize, accumulators: usize },
+    #[error("failed to project the window aggregate input batch")]
+    ProjectAggregateInput,
+    #[error("window aggregate input VM execution failed")]
+    AggregateInputExecution,
+    #[error("window aggregate input VM produced {rows} rows for {expected} input rows")]
+    AggregateInputRowCount { rows: usize, expected: usize },
+    #[error("window aggregate input VM did not preserve all {expected} input rows")]
+    AggregateInputRowsDropped { expected: usize },
+    #[error("window aggregate input VM produced no '{field}' field")]
+    AggregateInputFieldMissing { field: String },
+    #[error("failed to read the window aggregate input column '{field}'")]
+    AggregateInputColumn { field: String },
+    #[error("window aggregate input VM failed with {}: {reason}", .reason.code().as_str())]
+    AggregateInputRow { reason: nervix_vm::SideErrorReason },
+    #[error("PERCENTILE_LINEAR_HISTOGRAM requires finite numeric values")]
+    HistogramRequiresFinite,
+    #[error("PERCENTILE_LINEAR_HISTOGRAM requires at least one bucket")]
+    HistogramRequiresBucket,
+    #[error("PERCENTILE_LINEAR_HISTOGRAM value {value} falls outside the bucket range")]
+    HistogramValueOutOfRange { value: f64 },
+    #[error("PERCENTILE_LINEAR_HISTOGRAM requires a non-empty window")]
+    HistogramRequiresWindow,
+    #[error(
+        "PERCENTILE_LINEAR_HISTOGRAM percentile {percentile} has no rank in a window of {total} \
+         samples"
+    )]
+    HistogramPercentileRank { percentile: f64, total: usize },
+    #[error("PERCENTILE_LINEAR_HISTOGRAM histogram is empty")]
+    HistogramEmpty,
+    #[error("window aggregate did not initialize required output field '{field}'")]
+    UninitializedOutputField { field: String },
+    #[error("failed to build the window aggregate output batch")]
+    BuildAggregateOutput,
+    #[error("window aggregate VM compile input is invalid")]
+    AggregateExprInput,
+    #[error("window aggregate VM execution failed")]
+    AggregateExprExecution,
+    #[error("window aggregate VM produced no '{field}' output field")]
+    AggregateExprFieldMissing { field: String },
+    #[error("failed to read the window aggregate VM output '{field}'")]
+    AggregateExprOutput { field: String },
+    #[error("window aggregate VM produced null '{field}' output")]
+    AggregateExprNullOutput { field: String },
+    #[error("expected numeric value, found {type_name}")]
+    NotNumeric { type_name: &'static str },
+    #[error("SUM cannot combine {left} and {right}")]
+    SumIncompatible {
+        left: &'static str,
+        right: &'static str,
+    },
+    #[error("SUM cannot remove {right} from {left}")]
+    SumRemoveIncompatible {
+        left: &'static str,
+        right: &'static str,
+    },
+}
+
+/// The window entry a failed accumulation belongs to, handed back so its ACKs stay resolvable.
+#[derive(Debug)]
+pub(super) struct WindowPushFailure {
+    pub(super) error: Report<WindowProcessorError>,
+    pub(super) message: RelayMessage,
+}
 
 #[derive(Debug)]
 pub(super) struct WindowEntry {
@@ -84,13 +207,13 @@ pub(super) fn message_timestamp(message: &RelayMessage) -> Timestamp {
 pub(super) fn window_output_metadata(
     state: &WindowProcessorState,
     emit_high_watermark: Timestamp,
-) -> Result<RuntimeRecordMetadata, String> {
+) -> error_stack::Result<RuntimeRecordMetadata, WindowProcessorError> {
     let low = state
         .entries
         .iter()
         .map(|entry| entry.timestamp)
         .min()
-        .ok_or_else(|| "window aggregate requires a non-empty window".to_string())?;
+        .ok_or_else(|| Report::new(WindowProcessorError::EmptyWindow))?;
     Ok(RuntimeRecordMetadata::from_ingested_at_watermarks(
         low,
         emit_high_watermark,
@@ -149,9 +272,8 @@ pub(super) async fn flush_ready_window_processor(
                 error_policies,
                 state.entries.iter().map(|entry| &entry.message.acks),
                 format!(
-                    "window processor '{}' failed to purge timed aggregate state: {}",
+                    "window processor '{}' failed to purge timed aggregate state: {error:#}",
                     processor.as_str(),
-                    error
                 ),
             );
             state.clear(aggregate);
@@ -172,9 +294,8 @@ pub(super) async fn flush_ready_window_processor(
                     error_policies,
                     state.entries.iter().map(|entry| &entry.message.acks),
                     format!(
-                        "window processor '{}' cannot emit aggregate: {}",
+                        "window processor '{}' cannot emit aggregate: {error:#}",
                         processor.as_str(),
-                        error
                     ),
                 );
                 state.clear(aggregate);
@@ -217,10 +338,9 @@ pub(super) async fn flush_ready_window_processor(
                         error_policies,
                         state.entries.iter().map(|entry| &entry.message.acks),
                         format!(
-                            "window processor '{}' output route '{}' aggregate failed: {}",
+                            "window processor '{}' output route '{}' aggregate failed: {error:#}",
                             processor.as_str(),
                             output_relay.as_str(),
-                            error
                         ),
                     );
                     route_failed = true;
@@ -323,9 +443,8 @@ pub(super) async fn flush_ready_window_processor(
                 error_policies,
                 state.entries.iter().map(|entry| &entry.message.acks),
                 format!(
-                    "window processor '{}' failed to advance window: {}",
+                    "window processor '{}' failed to advance window: {error:#}",
                     processor.as_str(),
-                    error
                 ),
             );
             state.clear(aggregate);
@@ -344,15 +463,12 @@ pub(super) fn snapshot_window_processor_live_state(
     processor: &ModelName,
     replicated_state: &ReplicatedWindowProcessorState,
     state: &WindowProcessorState,
-) -> Result<(), String> {
-    replicated_state.replace_state(state).map_err(|error| {
-        format!(
-            "window processor '{}' failed to snapshot branch state: {}",
-            processor.as_str(),
-            error
-        )
-    })?;
-    Ok(())
+) -> error_stack::Result<(), WindowProcessorError> {
+    replicated_state
+        .replace_state(state)
+        .change_context_lazy(|| WindowProcessorError::Snapshot {
+            processor: processor.clone(),
+        })
 }
 
 impl WindowAggregateAccumulator {
@@ -492,7 +608,10 @@ impl WindowAggregateAccumulator {
         }
     }
 
-    pub(super) fn purge_expired(&mut self, now: Timestamp) -> Result<(), String> {
+    pub(super) fn purge_expired(
+        &mut self,
+        now: Timestamp,
+    ) -> error_stack::Result<(), WindowProcessorError> {
         let Self::LinearHistogram {
             buckets,
             total,
@@ -510,12 +629,14 @@ impl WindowAggregateAccumulator {
                 "the loop condition just observed a front entry and nothing else pops the queue",
             );
             let Some(count) = buckets.get_mut(removal.bucket) else {
-                return Err("linear histogram delayed removal bucket is out of range".to_string());
+                return Err(Report::new(
+                    WindowProcessorError::DelayedRemovalBucketOutOfRange,
+                ));
             };
             if *count == 0 {
-                return Err(
-                    "linear histogram accumulator is missing delayed removed value".to_string(),
-                );
+                return Err(Report::new(
+                    WindowProcessorError::MissingDelayedRemovedValue,
+                ));
             }
             *count = count
                 .checked_sub(1)
@@ -543,7 +664,7 @@ impl WindowAggregateAccumulator {
         timestamp: Timestamp,
         sequence: u64,
         value: Option<RuntimeValue>,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), WindowProcessorError> {
         self.purge_expired(timestamp)?;
         match self {
             Self::Counter { count } => {
@@ -554,7 +675,7 @@ impl WindowAggregateAccumulator {
             }
             Self::Sequence { values } => {
                 let value = value
-                    .ok_or_else(|| "sequence aggregate structure requires a value".to_string())?;
+                    .ok_or_else(|| Report::new(WindowProcessorError::SequenceRequiresValue))?;
                 values.push_back(WindowSequenceValue {
                     timestamp,
                     sequence,
@@ -563,8 +684,8 @@ impl WindowAggregateAccumulator {
                 Ok(())
             }
             Self::SortedMap { counts } => {
-                let value = value
-                    .ok_or_else(|| "ordered aggregate structure requires a value".to_string())?;
+                let value =
+                    value.ok_or_else(|| Report::new(WindowProcessorError::OrderedRequiresValue))?;
                 *counts.entry(RuntimeValueSortKey(value)).or_insert(0) += 1;
                 Ok(())
             }
@@ -578,7 +699,7 @@ impl WindowAggregateAccumulator {
                 delayed_removals: _,
             } => {
                 let value = value
-                    .ok_or_else(|| "PERCENTILE_LINEAR_HISTOGRAM requires a value".to_string())?;
+                    .ok_or_else(|| Report::new(WindowProcessorError::HistogramRequiresValue))?;
                 let value = runtime_value_to_f64(&value)?;
                 let bucket = linear_histogram_bucket(value, *min, *max, *width, buckets.len())?;
                 buckets[bucket] = buckets[bucket]
@@ -590,7 +711,8 @@ impl WindowAggregateAccumulator {
                 Ok(())
             }
             Self::Sum { total } => {
-                let value = value.ok_or_else(|| "SUM requires a value".to_string())?;
+                let value =
+                    value.ok_or_else(|| Report::new(WindowProcessorError::SumRequiresValue))?;
                 *total = Some(match total.take() {
                     Some(current) => sum_runtime_values(current, value)?,
                     None => value,
@@ -607,7 +729,7 @@ impl WindowAggregateAccumulator {
         timestamp: Timestamp,
         sequence: u64,
         value: Option<RuntimeValue>,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), WindowProcessorError> {
         self.purge_expired(removal_time)?;
         match self {
             Self::Counter { count } => {
@@ -621,14 +743,14 @@ impl WindowAggregateAccumulator {
                     .iter()
                     .position(|entry| entry.timestamp == timestamp && entry.sequence == sequence)
                 else {
-                    return Err("sequence accumulator is missing removed window entry".to_string());
+                    return Err(Report::new(WindowProcessorError::MissingSequenceEntry));
                 };
                 values.remove(index);
                 Ok(())
             }
             Self::SortedMap { counts } => {
-                let value = value
-                    .ok_or_else(|| "ordered aggregate structure requires a value".to_string())?;
+                let value =
+                    value.ok_or_else(|| Report::new(WindowProcessorError::OrderedRequiresValue))?;
                 decrement_runtime_value_count(counts, value)
             }
             Self::LinearHistogram {
@@ -641,17 +763,15 @@ impl WindowAggregateAccumulator {
                 delayed_removals,
             } => {
                 let value = value
-                    .ok_or_else(|| "PERCENTILE_LINEAR_HISTOGRAM requires a value".to_string())?;
+                    .ok_or_else(|| Report::new(WindowProcessorError::HistogramRequiresValue))?;
                 let value = runtime_value_to_f64(&value)?;
                 let bucket = linear_histogram_bucket(value, *min, *max, *width, buckets.len())?;
                 if delay.is_zero() {
                     let Some(count) = buckets.get_mut(bucket) else {
-                        return Err("linear histogram bucket is out of range".to_string());
+                        return Err(Report::new(WindowProcessorError::BucketOutOfRange));
                     };
                     if *count == 0 {
-                        return Err(
-                            "linear histogram accumulator is missing removed value".to_string()
-                        );
+                        return Err(Report::new(WindowProcessorError::MissingRemovedValue));
                     }
                     *count = count
                         .checked_sub(1)
@@ -669,7 +789,8 @@ impl WindowAggregateAccumulator {
                 Ok(())
             }
             Self::Sum { total } => {
-                let value = value.ok_or_else(|| "SUM requires a value".to_string())?;
+                let value =
+                    value.ok_or_else(|| Report::new(WindowProcessorError::SumRequiresValue))?;
                 *total = match total.take() {
                     Some(current) => subtract_runtime_values(current, value)?,
                     None => None,
@@ -683,7 +804,7 @@ impl WindowAggregateAccumulator {
         &self,
         function: WindowAggregateFunction,
         percentile: Option<f64>,
-    ) -> Result<RuntimeValue, String> {
+    ) -> error_stack::Result<RuntimeValue, WindowProcessorError> {
         match (function, self) {
             (WindowAggregateFunction::Count, Self::Counter { count }) => {
                 Ok(RuntimeValue::I64(i64::try_from(*count).assured(
@@ -696,7 +817,7 @@ impl WindowAggregateAccumulator {
                     .min_by_key(|entry| (entry.timestamp, entry.sequence))
                 {
                     Some(entry) => Ok(entry.value.clone()),
-                    None => Err("FIRST requires a non-empty window".to_string()),
+                    None => Err(Report::new(WindowProcessorError::FirstRequiresWindow)),
                 }
             }
             (WindowAggregateFunction::Last, Self::Sequence { values }) => {
@@ -705,19 +826,19 @@ impl WindowAggregateAccumulator {
                     .max_by_key(|entry| (entry.timestamp, entry.sequence))
                 {
                     Some(entry) => Ok(entry.value.clone()),
-                    None => Err("LAST requires a non-empty window".to_string()),
+                    None => Err(Report::new(WindowProcessorError::LastRequiresWindow)),
                 }
             }
             (WindowAggregateFunction::Max, Self::SortedMap { counts }) => {
                 match counts.last_key_value() {
                     Some((value, _)) => Ok(value.0.clone()),
-                    None => Err("MAX requires a non-empty window".to_string()),
+                    None => Err(Report::new(WindowProcessorError::MaxRequiresWindow)),
                 }
             }
             (WindowAggregateFunction::Min, Self::SortedMap { counts }) => {
                 match counts.first_key_value() {
                     Some((value, _)) => Ok(value.0.clone()),
-                    None => Err("MIN requires a non-empty window".to_string()),
+                    None => Err(Report::new(WindowProcessorError::MinRequiresWindow)),
                 }
             }
             (
@@ -732,16 +853,16 @@ impl WindowAggregateAccumulator {
                 },
             ) => {
                 let percentile = percentile.ok_or_else(|| {
-                    "PERCENTILE_LINEAR_HISTOGRAM requires a constant percentile".to_string()
+                    Report::new(WindowProcessorError::HistogramRequiresPercentile)
                 })?;
                 percentile_from_linear_histogram(buckets, *total, *min, *max, *width, percentile)
             }
             (WindowAggregateFunction::Sum, Self::Sum { total }) => total
                 .clone()
-                .ok_or_else(|| "SUM requires a non-empty window".to_string()),
-            _ => Err(format!(
-                "{function:?} aggregate is backed by an incompatible accumulator"
-            )),
+                .ok_or_else(|| Report::new(WindowProcessorError::SumRequiresWindow)),
+            _ => Err(Report::new(WindowProcessorError::IncompatibleAccumulator {
+                function,
+            })),
         }
     }
 }
@@ -760,29 +881,30 @@ impl WindowProcessorState {
         }
     }
 
-    pub(super) fn to_snapshot(&self) -> Result<WindowProcessorStateSnapshot, String> {
+    pub(super) fn to_snapshot(
+        &self,
+    ) -> error_stack::Result<WindowProcessorStateSnapshot, WindowProcessorError> {
+        let mut entries = Vec::with_capacity(self.entries.len());
+        for entry in &self.entries {
+            let record = entry
+                .message
+                .record
+                .to_remote()
+                .change_context(WindowProcessorError::EncodeSnapshotEntry)?;
+            entries.push(WindowEntrySnapshot {
+                sequence: entry.sequence,
+                timestamp: entry.timestamp,
+                key: BranchKey::to_remote_key(&entry.message.key),
+                record,
+                aggregate_inputs: entry
+                    .aggregate_inputs
+                    .iter()
+                    .map(|input| input.value.as_ref().map(RuntimeValue::to_remote))
+                    .collect(),
+            });
+        }
         Ok(WindowProcessorStateSnapshot {
-            entries: self
-                .entries
-                .iter()
-                .map(|entry| {
-                    Ok(WindowEntrySnapshot {
-                        sequence: entry.sequence,
-                        timestamp: entry.timestamp,
-                        key: BranchKey::to_remote_key(&entry.message.key),
-                        record: entry
-                            .message
-                            .record
-                            .to_remote()
-                            .map_err(|error| error.to_string())?,
-                        aggregate_inputs: entry
-                            .aggregate_inputs
-                            .iter()
-                            .map(|input| input.value.as_ref().map(RuntimeValue::to_remote))
-                            .collect(),
-                    })
-                })
-                .collect::<Result<Vec<_>, String>>()?,
+            entries,
             next_sequence: self.next_sequence,
             accumulators: self
                 .accumulators
@@ -798,39 +920,40 @@ impl WindowProcessorState {
         program: &WindowAggregateProgram,
         input_schema: &CompiledSchema,
         snapshot: &WindowProcessorStateSnapshot,
-    ) -> Result<Self, String> {
+    ) -> error_stack::Result<Self, WindowProcessorError> {
         if snapshot.accumulators.len() != program.demands().len() {
-            return Err(format!(
-                "window snapshot accumulator count {} does not match aggregate demand count {}",
-                snapshot.accumulators.len(),
-                program.demands().len()
-            ));
+            return Err(Report::new(WindowProcessorError::SnapshotDemandCount {
+                accumulators: snapshot.accumulators.len(),
+                demands: program.demands().len(),
+            }));
+        }
+        let mut entries = VecDeque::with_capacity(snapshot.entries.len());
+        for entry in &snapshot.entries {
+            let key = BranchKey::from_remote_key(entry.key.clone()).map_err(|reason| {
+                Report::new(WindowProcessorError::RestoreSnapshotBranchKey { reason })
+            })?;
+            let record = input_schema
+                .runtime_row_from_remote(&entry.record)
+                .change_context(WindowProcessorError::RestoreSnapshotEntry)?;
+            entries.push_back(WindowEntry {
+                sequence: entry.sequence,
+                timestamp: entry.timestamp,
+                message: RelayMessage {
+                    key,
+                    record,
+                    acks: AckSet::empty(),
+                },
+                aggregate_inputs: entry
+                    .aggregate_inputs
+                    .iter()
+                    .map(|value| WindowAggregateInput {
+                        value: value.clone().map(RuntimeValue::from_remote),
+                    })
+                    .collect(),
+            });
         }
         Ok(Self {
-            entries: snapshot
-                .entries
-                .iter()
-                .map(|entry| {
-                    Ok(WindowEntry {
-                        sequence: entry.sequence,
-                        timestamp: entry.timestamp,
-                        message: RelayMessage {
-                            key: BranchKey::from_remote_key(entry.key.clone())?,
-                            record: input_schema
-                                .runtime_row_from_remote(&entry.record)
-                                .map_err(|error| error.to_string())?,
-                            acks: AckSet::empty(),
-                        },
-                        aggregate_inputs: entry
-                            .aggregate_inputs
-                            .iter()
-                            .map(|value| WindowAggregateInput {
-                                value: value.clone().map(RuntimeValue::from_remote),
-                            })
-                            .collect(),
-                    })
-                })
-                .collect::<Result<VecDeque<_>, String>>()?,
+            entries,
             next_sequence: snapshot.next_sequence,
             accumulators: snapshot
                 .accumulators
@@ -846,16 +969,17 @@ impl WindowProcessorState {
         timestamp: Timestamp,
         message: RelayMessage,
         inputs: Vec<WindowAggregateInput>,
-    ) -> Result<(), Box<(String, RelayMessage)>> {
+    ) -> Result<(), Box<WindowPushFailure>> {
         let sequence = self.next_sequence;
-        self.apply_aggregate_inputs(
+        if let Err(error) = self.apply_aggregate_inputs(
             program.demands(),
             timestamp,
             sequence,
             &inputs,
             WindowAccumulatorAction::Add,
-        )
-        .map_err(|error| Box::new((error, message.clone())))?;
+        ) {
+            return Err(Box::new(WindowPushFailure { error, message }));
+        }
         self.entries.push_back(WindowEntry {
             sequence,
             timestamp,
@@ -878,7 +1002,10 @@ impl WindowProcessorState {
             .collect();
     }
 
-    pub(super) fn purge_timeouts(&mut self, now: Timestamp) -> Result<bool, String> {
+    pub(super) fn purge_timeouts(
+        &mut self,
+        now: Timestamp,
+    ) -> error_stack::Result<bool, WindowProcessorError> {
         let mut changed = false;
         for accumulator in &mut self.accumulators {
             if accumulator
@@ -903,7 +1030,7 @@ impl WindowProcessorState {
         &mut self,
         program: &WindowAggregateProgram,
         removal_time: Timestamp,
-    ) -> Result<Option<WindowEntry>, String> {
+    ) -> error_stack::Result<Option<WindowEntry>, WindowProcessorError> {
         let Some(entry) = self.entries.pop_front() else {
             return Ok(None);
         };
@@ -924,13 +1051,12 @@ impl WindowProcessorState {
         sequence: u64,
         inputs: &[WindowAggregateInput],
         action: WindowAccumulatorAction,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), WindowProcessorError> {
         if inputs.len() != self.accumulators.len() {
-            return Err(format!(
-                "window aggregate input count {} does not match accumulator count {}",
-                inputs.len(),
-                self.accumulators.len()
-            ));
+            return Err(Report::new(WindowProcessorError::AggregateInputCount {
+                inputs: inputs.len(),
+                accumulators: self.accumulators.len(),
+            }));
         }
         for ((input, accumulator), demand) in inputs.iter().zip(&mut self.accumulators).zip(demands)
         {
@@ -959,7 +1085,10 @@ pub(super) async fn evaluate_window_aggregate_inputs(
     program: &CompiledWindowAggregateProgram,
     carrier: &RuntimeRecordBatch,
     execution_now: Timestamp,
-) -> Result<Vec<Result<Vec<WindowAggregateInput>, String>>, String> {
+) -> error_stack::Result<
+    Vec<error_stack::Result<Vec<WindowAggregateInput>, WindowProcessorError>>,
+    WindowProcessorError,
+> {
     let row_count = carrier.batch().num_rows();
     let keys = vec![None; row_count];
     let side_inputs = HashMap::new();
@@ -988,7 +1117,7 @@ pub(super) async fn evaluate_window_aggregate_inputs(
         },
         None,
     )
-    .map_err(|error| error.to_string())?;
+    .change_context(WindowProcessorError::ProjectAggregateInput)?;
     #[cfg(test)]
     WINDOW_AGGREGATE_INPUT_VM_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
     let result = execute_program_with_selection_in_context(
@@ -1000,57 +1129,73 @@ pub(super) async fn evaluate_window_aggregate_inputs(
         },
     )
     .await
-    .map_err(|error| error.to_string())?;
+    .change_context(WindowProcessorError::AggregateInputExecution)?;
     if result.batch.row_count() != row_count {
-        return Err(format!(
-            "window aggregate input VM produced {} rows for {row_count} input rows",
-            result.batch.row_count()
-        ));
+        return Err(Report::new(WindowProcessorError::AggregateInputRowCount {
+            rows: result.batch.row_count(),
+            expected: row_count,
+        }));
     }
     if result.selected_rows.len() != row_count || !result.selected_rows.iter().eq(0..row_count) {
-        return Err(format!(
-            "window aggregate input VM did not preserve all {row_count} input rows"
+        return Err(Report::new(
+            WindowProcessorError::AggregateInputRowsDropped {
+                expected: row_count,
+            },
         ));
     }
-    let input_columns = program
-        .input_fields
-        .iter()
-        .map(|field_name| {
-            let Some(field_name) = field_name else {
-                return Ok(None);
-            };
-            let column_index = result.batch.schema().index_of(field_name).map_err(|_| {
-                format!("window aggregate input VM produced no '{field_name}' field")
+    let mut input_columns = Vec::with_capacity(program.input_fields.len());
+    for field_name in &program.input_fields {
+        let Some(field_name) = field_name else {
+            input_columns.push(None);
+            continue;
+        };
+        let column_index = result.batch.schema().index_of(field_name).map_err(|_| {
+            Report::new(WindowProcessorError::AggregateInputFieldMissing {
+                field: field_name.clone(),
+            })
+        })?;
+        let array = result.batch.column(column_index).to_array_ref();
+        let column =
+            RuntimeValueColumn::new(field_name.as_str(), array).change_context_lazy(|| {
+                WindowProcessorError::AggregateInputColumn {
+                    field: field_name.clone(),
+                }
             })?;
-            let array = result.batch.column(column_index).to_array_ref();
-            RuntimeValueColumn::new(field_name.as_str(), array)
-                .map(Some)
-                .map_err(|error| error.to_string())
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    Ok((0..row_count)
-        .map(|row| {
-            if let Some(error) = result.batch.errors().row(row).first() {
-                return Err(format!(
-                    "window aggregate input VM failed with {}: {}",
-                    error.code().as_str(),
-                    error.reason
-                ));
+        input_columns.push(Some(column));
+    }
+    let mut rows = Vec::with_capacity(row_count);
+    for row in 0..row_count {
+        if let Some(error) = result.batch.errors().row(row).first() {
+            rows.push(Err(Report::new(WindowProcessorError::AggregateInputRow {
+                reason: error.reason.clone(),
+            })));
+            continue;
+        }
+        let mut inputs = Vec::with_capacity(input_columns.len());
+        let mut row_failure = None;
+        for (field_name, column) in program.input_fields.iter().zip(&input_columns) {
+            let (Some(field_name), Some(column)) = (field_name, column) else {
+                inputs.push(WindowAggregateInput { value: None });
+                continue;
+            };
+            match column.nullable_value_at(row) {
+                Ok(value) => inputs.push(WindowAggregateInput { value }),
+                Err(error) => {
+                    row_failure = Some(error.change_context(
+                        WindowProcessorError::AggregateInputColumn {
+                            field: field_name.clone(),
+                        },
+                    ));
+                    break;
+                }
             }
-            input_columns
-                .iter()
-                .map(|column| {
-                    let Some(column) = column else {
-                        return Ok(WindowAggregateInput { value: None });
-                    };
-                    column
-                        .nullable_value_at(row)
-                        .map_err(|error| error.to_string())
-                        .map(|value| WindowAggregateInput { value })
-                })
-                .collect()
-        })
-        .collect())
+        }
+        match row_failure {
+            Some(failure) => rows.push(Err(failure)),
+            None => rows.push(Ok(inputs)),
+        }
+    }
+    Ok(rows)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1062,10 +1207,10 @@ pub(super) enum WindowAccumulatorAction {
 pub(super) fn decrement_runtime_value_count(
     counts: &mut BTreeMap<RuntimeValueSortKey, usize>,
     value: RuntimeValue,
-) -> Result<(), String> {
+) -> error_stack::Result<(), WindowProcessorError> {
     let key = RuntimeValueSortKey(value);
     let Some(count) = counts.get_mut(&key) else {
-        return Err("sorted accumulator is missing removed window value".to_string());
+        return Err(Report::new(WindowProcessorError::MissingSortedValue));
     };
     *count = count
         .checked_sub(1)
@@ -1082,12 +1227,12 @@ pub(super) fn linear_histogram_bucket(
     max: f64,
     width: f64,
     bucket_count: usize,
-) -> Result<usize, String> {
+) -> error_stack::Result<usize, WindowProcessorError> {
     if !value.is_finite() {
-        return Err("PERCENTILE_LINEAR_HISTOGRAM requires finite numeric values".to_string());
+        return Err(Report::new(WindowProcessorError::HistogramRequiresFinite));
     }
     if bucket_count == 0 {
-        return Err("PERCENTILE_LINEAR_HISTOGRAM requires at least one bucket".to_string());
+        return Err(Report::new(WindowProcessorError::HistogramRequiresBucket));
     }
     if value <= min {
         return Ok(0);
@@ -1098,9 +1243,7 @@ pub(super) fn linear_histogram_bucket(
     ((value - min) / width)
         .floor()
         .checked_approx_into()
-        .ok_or_else(|| {
-            format!("PERCENTILE_LINEAR_HISTOGRAM value {value} falls outside the bucket range")
-        })
+        .ok_or_else(|| Report::new(WindowProcessorError::HistogramValueOutOfRange { value }))
 }
 
 pub(super) fn percentile_from_linear_histogram(
@@ -1110,18 +1253,15 @@ pub(super) fn percentile_from_linear_histogram(
     max: f64,
     width: f64,
     percentile: f64,
-) -> Result<RuntimeValue, String> {
+) -> error_stack::Result<RuntimeValue, WindowProcessorError> {
     if total == 0 {
-        return Err("PERCENTILE_LINEAR_HISTOGRAM requires a non-empty window".to_string());
+        return Err(Report::new(WindowProcessorError::HistogramRequiresWindow));
     }
     let rank: usize = ((percentile / 100.0) * (total - 1).approx_into::<f64>())
         .round()
         .checked_approx_into()
         .ok_or_else(|| {
-            format!(
-                "PERCENTILE_LINEAR_HISTOGRAM percentile {percentile} has no rank in a window of \
-                 {total} samples"
-            )
+            Report::new(WindowProcessorError::HistogramPercentileRank { percentile, total })
         })?;
     let mut seen = 0usize;
     for (index, count) in buckets.iter().enumerate() {
@@ -1131,7 +1271,7 @@ pub(super) fn percentile_from_linear_histogram(
             return Ok(RuntimeValue::F64(OrderedFloat(midpoint.clamp(min, max))));
         }
     }
-    Err("PERCENTILE_LINEAR_HISTOGRAM histogram is empty".to_string())
+    Err(Report::new(WindowProcessorError::HistogramEmpty))
 }
 
 pub(super) fn window_width_met(
@@ -1191,7 +1331,7 @@ pub(super) fn advance_window(
     step_messages: Option<usize>,
     step_duration: Option<Duration>,
     removal_time: Timestamp,
-) -> Result<(), String> {
+) -> error_stack::Result<(), WindowProcessorError> {
     let remove_messages = step_messages.unwrap_or(0).min(state.entries.len());
     for _ in 0..remove_messages {
         if let Some(entry) = state.pop_front_entry(program, removal_time)? {
@@ -1252,7 +1392,9 @@ impl VmFunctionInjector for WindowAggregateFunctionInjector {
         })?;
         let value = accumulator
             .evaluate(invocation.function, invocation.percentile)
-            .map_err(|message| nervix_vm::RuntimeError::InvalidBatch { message })?;
+            .map_err(|error| nervix_vm::RuntimeError::InvalidBatch {
+                message: format!("{error:#}"),
+            })?;
         let data_type = self.demand_types.get(invocation.demand_id).ok_or_else(|| {
             nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
@@ -1281,7 +1423,7 @@ pub(super) async fn evaluate_window_aggregate(
     state: &WindowProcessorState,
     output_schema: &CompiledSchema,
     execution_now: Timestamp,
-) -> Result<RuntimeRecordBatch, String> {
+) -> error_stack::Result<RuntimeRecordBatch, WindowProcessorError> {
     let injector: Arc<Box<dyn VmFunctionInjector>> =
         Arc::new(Box::new(WindowAggregateFunctionInjector {
             accumulators: state.accumulators.clone(),
@@ -1307,20 +1449,21 @@ pub(super) async fn evaluate_window_aggregate(
         } else if field.is_nullable() {
             None
         } else {
-            return Err(format!(
-                "window aggregate did not initialize required output field '{}'",
-                field.name()
+            return Err(Report::new(
+                WindowProcessorError::UninitializedOutputField {
+                    field: field.name().clone(),
+                },
             ));
         };
         columns.push(
             runtime_value_arrow_array(field.data_type(), value.as_ref(), 1)
-                .map_err(|error| error.to_string())?,
+                .change_context(WindowProcessorError::BuildAggregateOutput)?,
         );
     }
     let batch = RecordBatch::try_new(output_schema.arrow_schema(), columns)
-        .map_err(|error| error.to_string())?;
+        .change_context(WindowProcessorError::BuildAggregateOutput)?;
     RuntimeRecordBatch::from_record_batch(output_schema.arrow_schema(), batch)
-        .map_err(|error| error.to_string())
+        .change_context(WindowProcessorError::BuildAggregateOutput)
 }
 
 pub(super) fn evaluate_window_aggregate_expr<'a>(
@@ -1328,8 +1471,13 @@ pub(super) fn evaluate_window_aggregate_expr<'a>(
     target_field: &'a str,
     injector: Arc<Box<dyn VmFunctionInjector>>,
     execution_now: Timestamp,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RuntimeValue, String>> + Send + 'a>>
-{
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = error_stack::Result<RuntimeValue, WindowProcessorError>>
+            + Send
+            + 'a,
+    >,
+> {
     Box::pin(async move {
         match expr {
             CompiledWindowAggregateExpr::Scalar(program) => {
@@ -1342,7 +1490,7 @@ pub(super) fn evaluate_window_aggregate_expr<'a>(
                         .map(|field| VmTypedArray::uninitialized(field.data_type().clone(), 1))
                         .collect(),
                 )
-                .map_err(|error| error.to_string())?;
+                .change_context(WindowProcessorError::AggregateExprInput)?;
                 let result = execute_program_with_selection_in_context(
                     program,
                     &input,
@@ -1352,22 +1500,37 @@ pub(super) fn evaluate_window_aggregate_expr<'a>(
                     },
                 )
                 .await
-                .map_err(|error| error.to_string())?;
+                .change_context(WindowProcessorError::AggregateExprExecution)?;
                 let column_index = result.batch.schema().index_of(target_field).map_err(|_| {
-                    format!("window aggregate VM produced no '{target_field}' output field")
+                    Report::new(WindowProcessorError::AggregateExprFieldMissing {
+                        field: target_field.to_string(),
+                    })
                 })?;
                 let field = result.batch.schema().field(column_index);
                 let array = result.batch.column(column_index).to_array_ref();
-                runtime_value_from_arrow_array(
+                let output_type =
+                    parse_as_type_from_arrow(field.data_type()).change_context_lazy(|| {
+                        WindowProcessorError::AggregateExprOutput {
+                            field: target_field.to_string(),
+                        }
+                    })?;
+                let value = runtime_value_from_arrow_array(
                     array.as_ref(),
-                    &parse_as_type_from_arrow(field.data_type())
-                        .map_err(|error| error.to_string())?,
+                    &output_type,
                     false,
                     0,
                     target_field,
                 )
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| format!("window aggregate VM produced null '{target_field}' output"))
+                .change_context_lazy(|| {
+                    WindowProcessorError::AggregateExprOutput {
+                        field: target_field.to_string(),
+                    }
+                })?;
+                value.ok_or_else(|| {
+                    Report::new(WindowProcessorError::AggregateExprNullOutput {
+                        field: target_field.to_string(),
+                    })
+                })
             }
             CompiledWindowAggregateExpr::Array { items, fixed_size } => {
                 let mut values = Vec::with_capacity(items.len());
@@ -1392,7 +1555,9 @@ pub(super) fn evaluate_window_aggregate_expr<'a>(
     })
 }
 
-pub(super) fn runtime_value_to_f64(value: &RuntimeValue) -> Result<f64, String> {
+pub(super) fn runtime_value_to_f64(
+    value: &RuntimeValue,
+) -> error_stack::Result<f64, WindowProcessorError> {
     match value {
         RuntimeValue::U8(value) => Ok(f64::from(*value)),
         RuntimeValue::I8(value) => Ok(f64::from(*value)),
@@ -1404,17 +1569,16 @@ pub(super) fn runtime_value_to_f64(value: &RuntimeValue) -> Result<f64, String> 
         RuntimeValue::I64(value) => Ok((*value).approx_into()),
         RuntimeValue::F32(value) => Ok(f64::from(value.0)),
         RuntimeValue::F64(value) => Ok(value.0),
-        other => Err(format!(
-            "expected numeric value, found {}",
-            runtime_value_type_name(other)
-        )),
+        other => Err(Report::new(WindowProcessorError::NotNumeric {
+            type_name: runtime_value_type_name(other),
+        })),
     }
 }
 
 pub(super) fn sum_runtime_values(
     left: RuntimeValue,
     right: RuntimeValue,
-) -> Result<RuntimeValue, String> {
+) -> error_stack::Result<RuntimeValue, WindowProcessorError> {
     match (left, right) {
         (RuntimeValue::U8(left), RuntimeValue::U8(right)) => Ok(RuntimeValue::U8(left + right)),
         (RuntimeValue::I8(left), RuntimeValue::I8(right)) => Ok(RuntimeValue::I8(left + right)),
@@ -1430,18 +1594,17 @@ pub(super) fn sum_runtime_values(
         (RuntimeValue::F64(left), RuntimeValue::F64(right)) => {
             Ok(RuntimeValue::F64(OrderedFloat(left.0 + right.0)))
         }
-        (left, right) => Err(format!(
-            "SUM cannot combine {} and {}",
-            runtime_value_type_name(&left),
-            runtime_value_type_name(&right)
-        )),
+        (left, right) => Err(Report::new(WindowProcessorError::SumIncompatible {
+            left: runtime_value_type_name(&left),
+            right: runtime_value_type_name(&right),
+        })),
     }
 }
 
 pub(super) fn subtract_runtime_values(
     left: RuntimeValue,
     right: RuntimeValue,
-) -> Result<Option<RuntimeValue>, String> {
+) -> error_stack::Result<Option<RuntimeValue>, WindowProcessorError> {
     let value = match (left, right) {
         (RuntimeValue::U8(left), RuntimeValue::U8(right)) => RuntimeValue::U8(left - right),
         (RuntimeValue::I8(left), RuntimeValue::I8(right)) => RuntimeValue::I8(left - right),
@@ -1458,11 +1621,10 @@ pub(super) fn subtract_runtime_values(
             RuntimeValue::F64(OrderedFloat(left.0 - right.0))
         }
         (left, right) => {
-            return Err(format!(
-                "SUM cannot remove {} from {}",
-                runtime_value_type_name(&right),
-                runtime_value_type_name(&left)
-            ));
+            return Err(Report::new(WindowProcessorError::SumRemoveIncompatible {
+                left: runtime_value_type_name(&left),
+                right: runtime_value_type_name(&right),
+            }));
         }
     };
     if runtime_value_is_zero(&value) {
@@ -1653,11 +1815,16 @@ mod tests {
             .expect("the first window input row should evaluate");
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].value, Some(RuntimeValue::I64(12)));
+        let row_error = evaluated[1]
+            .as_ref()
+            .expect_err("division by zero should fail only its input row");
         assert!(
-            evaluated[1]
-                .as_ref()
-                .expect_err("division by zero should fail only its input row")
-                .contains("division_by_zero")
+            matches!(
+                row_error.current_context(),
+                WindowProcessorError::AggregateInputRow { reason }
+                    if reason.code().as_str() == "division_by_zero"
+            ),
+            "the failed row should carry the division_by_zero side error, got {row_error:?}"
         );
         let third = evaluated[2]
             .as_ref()
@@ -2303,6 +2470,308 @@ mod tests {
         assert_eq!(
             batch_value(&record, "p50"),
             Some(RuntimeValue::F64(OrderedFloat(35.0)))
+        );
+    }
+
+    /// The message a failed operation reports to the processor that called it.
+    fn failure<T, C: error_stack::Context>(result: error_stack::Result<T, C>) -> String {
+        let Err(error) = result else {
+            panic!("the operation must fail");
+        };
+        error.current_context().to_string()
+    }
+
+    fn empty_histogram(
+        delay: Duration,
+        delayed_removals: VecDeque<LinearHistogramDelayedRemoval>,
+    ) -> WindowAggregateAccumulator {
+        WindowAggregateAccumulator::LinearHistogram {
+            buckets: vec![0; 2],
+            total: 0,
+            min: 0.0,
+            max: 100.0,
+            width: 50.0,
+            delay,
+            delayed_removals,
+        }
+    }
+
+    #[test]
+    fn window_accumulators_reject_removals_they_never_admitted() {
+        let aggregate = window_aggregate("SET latest = LAST(input.latency)");
+        let demand = &aggregate.demands()[0];
+        let at = Timestamp::from_unix_nanos(10);
+        let value = Some(RuntimeValue::I64(15));
+
+        let mut sequence = WindowAggregateAccumulator::Sequence {
+            values: VecDeque::new(),
+        };
+        assert_eq!(
+            failure(sequence.remove(demand, at, at, 0, value.clone())),
+            "sequence accumulator is missing removed window entry"
+        );
+        let mut sorted = WindowAggregateAccumulator::SortedMap {
+            counts: BTreeMap::new(),
+        };
+        assert_eq!(
+            failure(sorted.remove(demand, at, at, 0, value.clone())),
+            "sorted accumulator is missing removed window value"
+        );
+        let mut histogram = empty_histogram(Duration::ZERO, VecDeque::new());
+        assert_eq!(
+            failure(histogram.remove(demand, at, at, 0, value)),
+            "linear histogram accumulator is missing removed value"
+        );
+
+        let removal = |bucket| {
+            VecDeque::from([LinearHistogramDelayedRemoval {
+                expires_at: at,
+                bucket,
+            }])
+        };
+        let mut out_of_range = empty_histogram(Duration::from_secs(1), removal(5));
+        assert_eq!(
+            failure(out_of_range.purge_expired(at)),
+            "linear histogram delayed removal bucket is out of range"
+        );
+        let mut never_admitted = empty_histogram(Duration::from_secs(1), removal(1));
+        assert_eq!(
+            failure(never_admitted.purge_expired(at)),
+            "linear histogram accumulator is missing delayed removed value"
+        );
+    }
+
+    #[test]
+    fn window_accumulators_reject_empty_windows_and_incompatible_functions() {
+        let sequence = WindowAggregateAccumulator::Sequence {
+            values: VecDeque::new(),
+        };
+        let sorted = WindowAggregateAccumulator::SortedMap {
+            counts: BTreeMap::new(),
+        };
+        assert_eq!(
+            failure(sequence.evaluate(WindowAggregateFunction::First, None)),
+            "FIRST requires a non-empty window"
+        );
+        assert_eq!(
+            failure(sequence.evaluate(WindowAggregateFunction::Last, None)),
+            "LAST requires a non-empty window"
+        );
+        assert_eq!(
+            failure(sorted.evaluate(WindowAggregateFunction::Max, None)),
+            "MAX requires a non-empty window"
+        );
+        assert_eq!(
+            failure(sorted.evaluate(WindowAggregateFunction::Min, None)),
+            "MIN requires a non-empty window"
+        );
+        let histogram = empty_histogram(Duration::ZERO, VecDeque::new());
+        assert_eq!(
+            failure(histogram.evaluate(WindowAggregateFunction::PercentileLinearHistogram, None)),
+            "PERCENTILE_LINEAR_HISTOGRAM requires a constant percentile"
+        );
+        let counter = WindowAggregateAccumulator::Counter { count: 0 };
+        assert_eq!(
+            failure(counter.evaluate(WindowAggregateFunction::First, None)),
+            "First aggregate is backed by an incompatible accumulator"
+        );
+    }
+
+    #[test]
+    fn linear_histogram_helpers_reject_values_they_cannot_place() {
+        assert_eq!(
+            failure(linear_histogram_bucket(f64::NAN, 0.0, 100.0, 50.0, 2)),
+            "PERCENTILE_LINEAR_HISTOGRAM requires finite numeric values"
+        );
+        assert_eq!(
+            failure(linear_histogram_bucket(5.0, 0.0, 100.0, 50.0, 0)),
+            "PERCENTILE_LINEAR_HISTOGRAM requires at least one bucket"
+        );
+        assert_eq!(
+            failure(percentile_from_linear_histogram(
+                &[0, 0],
+                0,
+                0.0,
+                100.0,
+                50.0,
+                50.0
+            )),
+            "PERCENTILE_LINEAR_HISTOGRAM requires a non-empty window"
+        );
+        assert_eq!(
+            failure(percentile_from_linear_histogram(
+                &[1, 0],
+                1,
+                0.0,
+                100.0,
+                50.0,
+                f64::NAN
+            )),
+            "PERCENTILE_LINEAR_HISTOGRAM percentile NaN has no rank in a window of 1 samples"
+        );
+        assert_eq!(
+            failure(percentile_from_linear_histogram(
+                &[0, 0],
+                2,
+                0.0,
+                100.0,
+                50.0,
+                50.0
+            )),
+            "PERCENTILE_LINEAR_HISTOGRAM histogram is empty"
+        );
+    }
+
+    #[test]
+    fn window_arithmetic_rejects_incompatible_runtime_values() {
+        assert_eq!(
+            failure(runtime_value_to_f64(&RuntimeValue::String(
+                "fast".to_string()
+            ))),
+            "expected numeric value, found STRING"
+        );
+        assert_eq!(
+            failure(sum_runtime_values(
+                RuntimeValue::I64(1),
+                RuntimeValue::F64(OrderedFloat(1.0))
+            )),
+            "SUM cannot combine I64 and F64"
+        );
+        assert_eq!(
+            failure(subtract_runtime_values(
+                RuntimeValue::I64(1),
+                RuntimeValue::F64(OrderedFloat(1.0))
+            )),
+            "SUM cannot remove F64 from I64"
+        );
+    }
+
+    #[test]
+    fn window_state_rejects_mismatched_inputs_and_snapshots() {
+        let aggregate = window_aggregate("SET count = COUNT(input.latency)");
+        let at = Timestamp::from_unix_nanos(10);
+        let message = || RelayMessage {
+            key: string_branch_key("tenant", "acme"),
+            record: test_runtime_row([("latency".to_string(), RuntimeValue::I64(10))]),
+            acks: AckSet::empty(),
+        };
+        let mut state = WindowProcessorState::new(&aggregate);
+        let rejected = state
+            .push_message(&aggregate, at, message(), Vec::new())
+            .expect_err("inputs that disagree with the accumulators must be rejected");
+        assert_eq!(
+            rejected.error.current_context().to_string(),
+            "window aggregate input count 0 does not match accumulator count 1"
+        );
+        assert_eq!(key_label(&rejected.message.key), r#"{"tenant":"acme"}"#);
+
+        state
+            .push_message(
+                &aggregate,
+                at,
+                message(),
+                window_inputs(&aggregate, RuntimeValue::I64(10)),
+            )
+            .expect("matching inputs should be admitted");
+        let input_schema = test_schema(&[("latency", ParseAsType::I64)]);
+        let mut snapshot = state.to_snapshot().expect("the window should encode");
+        let wider =
+            window_aggregate("SET count = COUNT(input.latency), total = SUM(input.latency)");
+        assert_eq!(
+            failure(WindowProcessorState::from_snapshot(
+                &wider,
+                input_schema.as_ref(),
+                &snapshot
+            )),
+            "window snapshot accumulator count 1 does not match aggregate demand count 2"
+        );
+
+        snapshot.entries[0].key = Some(Vec::new());
+        assert_eq!(
+            failure(WindowProcessorState::from_snapshot(
+                &aggregate,
+                input_schema.as_ref(),
+                &snapshot
+            )),
+            "failed to restore a window entry branch key: branch key must contain at least one \
+             field"
+        );
+    }
+
+    #[tokio::test]
+    async fn window_aggregate_reports_uninitialized_outputs_and_empty_windows() {
+        let now = Timestamp::from_unix_nanos(42);
+        let aggregate = window_aggregate("SET count = COUNT(input.latency)");
+        let output_schema =
+            test_schema(&[("count", ParseAsType::I64), ("extra", ParseAsType::I64)]);
+        let compiled =
+            compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
+        let state = WindowProcessorState::new(&aggregate);
+        assert_eq!(
+            failure(evaluate_window_aggregate(&compiled, &state, &output_schema, now).await),
+            "window aggregate did not initialize required output field 'extra'"
+        );
+
+        let first = window_aggregate("SET first_latency = FIRST(input.latency)");
+        let first_schema = test_schema(&[("first_latency", ParseAsType::I64)]);
+        let compiled_first =
+            compile_window_aggregate_for_test(&first, ParseAsType::I64, &first_schema);
+        let empty = WindowProcessorState::new(&first);
+        assert_eq!(
+            failure(evaluate_window_aggregate(&compiled_first, &empty, &first_schema, now).await),
+            "window aggregate VM execution failed"
+        );
+    }
+
+    #[test]
+    fn window_aggregate_compilation_reports_missing_schemas_and_targets() {
+        let input = named::<RelayName>("latencies");
+        let output = named::<RelayName>("summaries");
+        let input_schema = test_schema(&[("latency", ParseAsType::I64)]);
+        let aggregate = window_aggregate("SET count = COUNT(input.latency)");
+
+        let output_only =
+            HashMap::from_iter([(output.clone(), test_schema(&[("count", ParseAsType::I64)]))]);
+        assert_eq!(
+            failure(CompiledWindowAggregateProgram::compile(
+                &aggregate,
+                std::slice::from_ref(&input),
+                &output,
+                &output_only,
+                None,
+            )),
+            "window aggregate input relay 'latencies' has no runtime schema"
+        );
+
+        let unrelated_output = HashMap::from_iter([
+            (input.clone(), input_schema.clone()),
+            (output.clone(), test_schema(&[("total", ParseAsType::I64)])),
+        ]);
+        assert_eq!(
+            failure(CompiledWindowAggregateProgram::compile(
+                &aggregate,
+                std::slice::from_ref(&input),
+                &output,
+                &unrelated_output,
+                None,
+            )),
+            "window aggregate output schema is missing field 'count'"
+        );
+
+        let array = window_aggregate("SET count = [COUNT(input.latency), COUNT(input.latency)]");
+        let scalar_output = HashMap::from_iter([
+            (input.clone(), input_schema),
+            (output.clone(), test_schema(&[("count", ParseAsType::I64)])),
+        ]);
+        assert_eq!(
+            failure(CompiledWindowAggregateProgram::compile(
+                &array,
+                std::slice::from_ref(&input),
+                &output,
+                &scalar_output,
+                None,
+            )),
+            "window aggregate array cannot be assigned to Int64 field 'count'"
         );
     }
 }

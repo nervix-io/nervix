@@ -523,9 +523,9 @@ impl Runtime {
                     if let Some(task) = previous {
                         task.stop(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
                             .await
-                            .map_err(|reason| RuntimeError::BuildDomainExecution {
+                            .map_err(|error| RuntimeError::BuildDomainExecution {
                                 domain: domain.as_str().to_string(),
-                                reason,
+                                reason: error.to_string(),
                             })?;
                     }
                     if let Some(services) = services.as_ref() {
@@ -1533,7 +1533,7 @@ impl Runtime {
                 .await
                 .map_err(|reason| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
-                    reason,
+                    reason: format!("{reason:#}"),
                 })?;
             let had_old_task = old_task.is_some();
             let handoffs = if let Some(old_task) = old_task {
@@ -1681,9 +1681,9 @@ impl Runtime {
                     if let Some(commands) = commands {
                         ScheduledEmitterTask::reconfigure_via(&commands, config.clone())
                             .await
-                            .map_err(|reason| RuntimeError::BuildDomainExecution {
+                            .map_err(|error| RuntimeError::BuildDomainExecution {
                                 domain: domain.as_str().to_string(),
-                                reason,
+                                reason: error.to_string(),
                             })?;
                     }
                 }

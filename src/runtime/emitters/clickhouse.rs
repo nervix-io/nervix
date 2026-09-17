@@ -107,9 +107,7 @@ impl ClickHouseEmitter {
     pub(in crate::runtime) fn client_from_config(
         config: &[nervix_models::ClientConfigEntry],
     ) -> EmitterRuntimeResult<(ClickHouseClient, Option<Duration>)> {
-        let addr = emitter_config_value(config, "addr", || {
-            "missing ClickHouse client config key 'addr'".to_string()
-        })?;
+        let addr = emitter_config_value(config, "addr", "ClickHouse")?;
         let request_timeout = optional_client_config_value(config, "timeout_ms")
             .map(|timeout_ms| {
                 timeout_ms

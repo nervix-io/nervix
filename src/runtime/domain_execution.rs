@@ -579,9 +579,9 @@ impl Runtime {
                     let runtime = self
                         .load_lookup_runtime(domain, lookup.clone(), codec)
                         .await
-                        .map_err(|reason| RuntimeError::BuildDomainExecution {
+                        .map_err(|error| RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
-                            reason,
+                            reason: error.to_string(),
                         })?;
                     lookup_specs.push((lookup.name.clone(), Arc::new(runtime)));
                 }
@@ -784,7 +784,7 @@ impl Runtime {
                 .await
                 .map_err(|reason| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
-                    reason,
+                    reason: format!("{reason:#}"),
                 })?;
             let entity = NodeRef {
                 kind: node_spec.spec.kind,

@@ -9,9 +9,18 @@ use reqwest::Client as HttpClient;
 use tokio_util::sync::CancellationToken;
 
 use super::super::*;
-use crate::runtime::physical_time::actual_utc_now;
+use crate::runtime::{
+    client_config::ClientConfigResult, http_client::HttpClientConfigError,
+    physical_time::actual_utc_now,
+};
 
 pub(in crate::runtime) struct HttpIngestor;
+
+#[derive(Debug, Error)]
+pub(in crate::runtime) enum HttpIngestorError {
+    #[error("invalid HTTP method")]
+    InvalidMethod,
+}
 
 /// The headers of one borrowed HTTP response, skipping values that are not UTF-8.
 struct HttpResponseHeaders<'a>(&'a reqwest::header::HeaderMap);
@@ -55,25 +64,25 @@ impl HttpIngestor {
                 ingestor: ingestor.name.as_str().to_string(),
                 reason: reason.to_string(),
             })?;
-        let endpoint = Self::endpoint_from_config(&resolved_client.entries).map_err(|reason| {
+        let endpoint = Self::endpoint_from_config(&resolved_client.entries).map_err(|error| {
             RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-                reason,
+                reason: error.to_string(),
             }
         })?;
-        let method = Self::method_from_config(&resolved_client.entries).map_err(|reason| {
+        let method = Self::method_from_config(&resolved_client.entries).map_err(|error| {
             RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-                reason,
+                reason: error.to_string(),
             }
         })?;
-        let http_client = Self::client_from_config(&resolved_client.entries).map_err(|reason| {
+        let http_client = Self::client_from_config(&resolved_client.entries).map_err(|error| {
             RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-                reason,
+                reason: error.to_string(),
             }
         })?;
         let cadence = runtime
@@ -353,23 +362,21 @@ impl HttpIngestor {
 
     pub(in crate::runtime) fn endpoint_from_config(
         config: &[nervix_models::ClientConfigEntry],
-    ) -> Result<String, String> {
-        client_config_value(config, "endpoint", || {
-            "missing HTTP client config key 'endpoint'".to_string()
-        })
+    ) -> ClientConfigResult<String> {
+        client_config_value(config, "endpoint", "HTTP")
     }
 
     pub(in crate::runtime) fn method_from_config(
         config: &[nervix_models::ClientConfigEntry],
-    ) -> Result<reqwest::Method, String> {
+    ) -> Result<reqwest::Method, Report<HttpIngestorError>> {
         let method = optional_client_config_value(config, "method").unwrap_or("GET");
         reqwest::Method::from_bytes(method.as_bytes())
-            .map_err(|_| format!("invalid HTTP method '{method}'"))
+            .map_err(|_| Report::new(HttpIngestorError::InvalidMethod))
     }
 
     fn client_from_config(
         config: &[nervix_models::ClientConfigEntry],
-    ) -> Result<HttpClient, String> {
+    ) -> Result<HttpClient, Report<HttpClientConfigError>> {
         HttpClientConfig::new(config, "HTTP").build()
     }
 }
