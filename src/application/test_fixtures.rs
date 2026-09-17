@@ -235,7 +235,6 @@ fn test_session_service(
             transaction_bindings: DashMap::with_hasher(RandomState::new()),
             command_executions: DashMap::with_hasher(RandomState::new()),
             transaction_executions: DashMap::with_hasher(RandomState::new()),
-            transaction_domain_executions: DashMap::with_hasher(RandomState::new()),
             ownership_handoff_operations: tokio::sync::Mutex::new(()),
             resource_upload_executions: DashMap::with_hasher(RandomState::new()),
             resource_replication_executions: DashMap::with_hasher(RandomState::new()),
@@ -404,7 +403,7 @@ pub(in crate::application) async fn create_test_domain(consensus: &Proposer, raw
     };
 
     for attempt in 0..50 {
-        if consensus.put_domain(state.clone()).await.is_ok() {
+        if consensus.put_domain(state.clone(), None).await.is_ok() {
             return;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

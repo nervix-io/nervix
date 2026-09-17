@@ -143,6 +143,11 @@ test-shuttle-replay schedule:
 test-vm *args:
     cargo test --package nervix-vm --lib -- {{ args }}
 
+# Run the WASM host, guest SDK and ABI protocol unit tests, which live in their own crates rather
+# than the server lib. The host tests drive the bundled Rust and Go reference guests.
+test-wasm *args: wasm-processor-guests
+    cargo test --package nervix-wasm --package nervix-wasm-sdk --package nervix-wasm-protocol --lib -- {{ args }}
+
 # Run the consensus unit tests, which live in the nervix-consensus crate rather than the server lib.
 test-consensus *args:
     cargo test --package nervix-consensus --lib -- {{ args }}
@@ -156,6 +161,10 @@ test-interconnect *args:
 # nervix-connector-* integration crate rather than the server lib.
 test-connectors *args:
     cargo test --package 'nervix-connector*' --lib -- {{ args }}
+
+# Run the session wire codec tests and the gRPC and WebSocket sessions that carry its frames.
+test-client-wire *args:
+    cargo test --package nervix-client-wire --all-features --all-targets -- {{ args }}
 
 test-runtime-state-capabilities: tests-deps
     #!/usr/bin/env bash
@@ -202,6 +211,11 @@ test-coverage: tests-deps
 # `just bench --test` to execute each benchmark body once without recording runner timings.
 bench *args:
     cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
+    cargo bench --package nervix-vm --bench vm -- {{ args }}
+
+# Run only the expression VM Criterion suite. Extra arguments are forwarded to Criterion, so a
+# group filter and `--save-baseline` or `--baseline` compare VM kernels without the relay suite.
+bench-vm *args:
     cargo bench --package nervix-vm --bench vm -- {{ args }}
 
 # Build the reusable harness and forward its CLI arguments. This is enough for container subjects
@@ -350,8 +364,12 @@ cargo-clippy-nspl-format:
 cargo-clippy-web-console:
     CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-web-console" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-web-console -q
 
+# The browser console decodes session frames, so the wire crate must build for the browser target.
+cargo-clippy-client-wire-wasm:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-client-wire-wasm" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-client-wire --target wasm32-unknown-unknown -q
+
 [parallel]
-cargo-clippy: cargo-clippy-all cargo-clippy-client cargo-clippy-server cargo-clippy-nspl-format cargo-clippy-web-console
+cargo-clippy: cargo-clippy-all cargo-clippy-client cargo-clippy-server cargo-clippy-nspl-format cargo-clippy-web-console cargo-clippy-client-wire-wasm
 
 [parallel]
 lint-inner: cargo-clippy proto-lint

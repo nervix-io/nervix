@@ -101,17 +101,21 @@ Feature: NSPL transactions
       | 1            |
       | 3            |
 
-  Scenario: A commit interrupted between steps is completed by the new leader
+  @domain_mutation_ownership
+  Scenario: An interrupted commit retains domain mutation ownership on the new leader
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
+      CREATE UNPACED DOMAIN independent_{{test_id}};
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
     Given client "owner" is connected to node "{{old_leader}}"
-    And client "observer" is connected to node "{{new_leader}}"
+    And client "contender" is connected to node "{{new_leader}}"
+    And client "independent" is connected to node "{{new_leader}}"
+    When client "independent" selects domain "independent_{{test_id}}"
     When client "owner" executes these NSPL commands
       """
       BEGIN;
@@ -122,6 +126,7 @@ Feature: NSPL transactions
       """
     Then client "owner" transaction id is saved as placeholder "transaction_id"
     Given transaction commit on node "{{old_leader}}" pauses after 1 statement
+    And transaction commit on node "{{new_leader}}" pauses after 2 statement
     When client "owner" begins executing these NSPL commands in the background
       """
       COMMIT;
@@ -129,23 +134,78 @@ Feature: NSPL transactions
     Then the transaction commit pause on node "{{old_leader}}" after 1 statement is reached
     When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then node "{{new_leader}}" eventually reports leader "{{new_leader}}"
-    And transaction "{{transaction_id}}" eventually has state "COMMITTED"
-    When client "observer" fails to attach to transaction "{{transaction_id}}"
+    And the transaction commit pause on node "{{new_leader}}" after 2 statement is reached
+    When client "contender" fails to execute these NSPL commands
+      """
+      CREATE SCHEMA competing_commit (value STRING);
+      """
     Then the last command error contains
       """
-      finished with outcome COMMITTED
+      mutation is owned by transaction
       """
-    And the last command output contains
+    When client "contender" fails to execute these NSPL commands
       """
-      quiesce level: DYNAMIC
+      START;
       """
-    When these NSPL commands are executed on the leader node
+    Then the last command error contains
       """
+      mutation is owned by transaction
+      """
+    When client "contender" fails to execute these NSPL commands
+      """
+      ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
+      """
+    Then the last command error contains
+      """
+      mutation is owned by transaction
+      """
+    When client "contender" fails to execute these NSPL commands
+      """
+      RELOCATE JUNCTION absent_route ONTO NODE node-2 FOLLOW PREFERENCES;
+      """
+    Then the last command error contains
+      """
+      mutation is owned by transaction
+      """
+    When client "contender" executes these NSPL commands
+      """
+      CREATE RESOURCE concurrent_bundle;
+      """
+    Then the last command output contains
+      """
+      created resource 'concurrent_bundle'
+      """
+    When client "independent" executes these NSPL commands
+      """
+      CREATE SCHEMA independent_commit (value STRING);
+      SHOW CREATE SCHEMA independent_commit;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA independent_commit (
+        value STRING
+      );
+      """
+    When the transaction commit pause on node "{{new_leader}}" after 2 statement is released
+    Then transaction "{{transaction_id}}" eventually has state "COMMITTED"
+    When client "contender" executes these NSPL commands
+      """
+      CREATE SCHEMA competing_commit (value STRING);
       SHOW CREATE SCHEMA resumed_commit;
       """
     Then the last command output contains
       """
       CREATE SCHEMA resumed_commit (
+        value STRING
+      );
+      """
+    When client "contender" executes these NSPL commands
+      """
+      SHOW CREATE SCHEMA competing_commit;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA competing_commit (
         value STRING
       );
       """

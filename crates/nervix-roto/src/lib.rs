@@ -35,7 +35,8 @@ use nervix_models::{CreateUdf, ParseAsType, Timestamp};
 use nervix_recovery::Discarded as _;
 use nervix_vm::{
     ErrorCode, FunctionExecutionPolicy, FunctionInjector, InjectedResult, RowErrorMask,
-    RuntimeError, SideError, TypedArray, UdfParameter, UdfSignature, UdfSignatures,
+    RuntimeError, SideError, SideErrorReason, TypedArray, UdfParameter, UdfSignature,
+    UdfSignatures,
     program::{FunctionName, Span},
 };
 use parking_lot::Mutex;
@@ -200,8 +201,10 @@ fn side_error(row: usize, code: ErrorCode, operation: &str, detail: &str) {
         state.side_errors.push((
             row,
             SideError {
-                code,
-                message: format!("UDF '{}': {operation} failed: {detail}", state.udf_name),
+                reason: SideErrorReason::Injected {
+                    code,
+                    message: format!("UDF '{}': {operation} failed: {detail}", state.udf_name),
+                },
                 span: state.span,
             },
         ));

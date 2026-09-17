@@ -1281,7 +1281,7 @@ impl Runtime {
             return Err(MessageErrorHandlingError::record_construction(
                 error,
                 MessageErrorRecordConstructionError::SideError {
-                    code: side_error.code,
+                    code: side_error.code(),
                     span: side_error.span,
                 },
             ));

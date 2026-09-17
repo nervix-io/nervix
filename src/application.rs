@@ -1130,7 +1130,10 @@ impl Application {
                             && !orphaned_alter_committing_domains.contains(&domain)
                             && !runtime_for_reconcile.domain_alter_is_active(&domain)
                         {
-                            match consensus_for_reconcile.resume_domain(domain.clone()).await {
+                            match consensus_for_reconcile
+                                .resume_domain(domain.clone(), None)
+                                .await
+                            {
                                 Ok(()) => {
                                     info!(
                                         domain = domain.as_str(),
@@ -1705,7 +1708,6 @@ impl Application {
                 transaction_bindings: DashMap::with_hasher(RandomState::new()),
                 command_executions: DashMap::with_hasher(RandomState::new()),
                 transaction_executions: DashMap::with_hasher(RandomState::new()),
-                transaction_domain_executions: DashMap::with_hasher(RandomState::new()),
                 ownership_handoff_operations: tokio::sync::Mutex::new(()),
                 resource_upload_executions: DashMap::with_hasher(RandomState::new()),
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),
@@ -2124,7 +2126,7 @@ impl Application {
                         .await;
                         match result {
                             Ok(checkpoints) => Ok(checkpoints),
-                            Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                            Err(error) => Err(OwnershipHandoffError::remote_rejection(&error)),
                         }
                     }
                 },
@@ -2169,7 +2171,7 @@ impl Application {
                         .await;
                         match result {
                             Ok(preparation) => Ok(preparation),
-                            Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                            Err(error) => Err(OwnershipHandoffError::remote_rejection(&error)),
                         }
                     }
                 },
@@ -2184,7 +2186,7 @@ impl Application {
                     async move {
                         match service.confirm_local_ownership_handoff_state(request).await {
                             Ok(()) => Ok(()),
-                            Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                            Err(error) => Err(OwnershipHandoffError::remote_rejection(&error)),
                         }
                     }
                 },
@@ -2202,7 +2204,7 @@ impl Application {
                             .await;
                         match result {
                             Ok(()) => Ok(()),
-                            Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                            Err(error) => Err(OwnershipHandoffError::remote_rejection(&error)),
                         }
                     }
                 },

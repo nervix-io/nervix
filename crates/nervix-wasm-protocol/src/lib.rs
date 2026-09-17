@@ -5,8 +5,8 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The FlatBuffers schema of the ABI, its encoders, its verified decoders, and the
-//!   borrowed views decoding produces.
+//! - **Owns.** The FlatBuffers schema of the ABI, its encoders, its verified decoders, the borrowed
+//!   views decoding produces, and the return codes that classify a rejected saved state.
 //! - **Depends on.** `flatbuffers`.
 //! - **Must not know.** Anything in Nervix, deliberately. Guests link this crate, so a Model or a
 //!   name type named here would pull the server's vocabulary into every guest.
@@ -31,6 +31,43 @@ use generated::nervix_wasm as wire;
 
 pub const FILE_IDENTIFIER: &str = wire::MESSAGE_IDENTIFIER;
 pub const SERIALIZATION_NAME: &str = "FlatBuffers";
+
+const SNAPSHOT_ENVELOPE_REJECTED: i32 = -7;
+const APPLICATION_STATE_REJECTED: i32 = -8;
+
+/// A guest's verdict that the saved state `nervix_load_state` handed it cannot be restored.
+///
+/// Each verdict has its own `nervix_load_state` return code, and those two codes are the only
+/// restore outcome that says anything about the saved bytes. A trap, an exhausted execution limit,
+/// or any other negative code while restoring is a failure of the restore itself, so the host keeps
+/// the saved state exactly as it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SavedStateRejection {
+    /// The saved bytes are not a snapshot envelope this guest can decode.
+    SnapshotEnvelope,
+    /// The guest decoded the snapshot envelope and refuses the application state it carries.
+    ApplicationState,
+}
+
+impl SavedStateRejection {
+    /// The `nervix_load_state` return code that reports this verdict.
+    pub const fn code(self) -> i32 {
+        match self {
+            Self::SnapshotEnvelope => SNAPSHOT_ENVELOPE_REJECTED,
+            Self::ApplicationState => APPLICATION_STATE_REJECTED,
+        }
+    }
+
+    /// The verdict a `nervix_load_state` return code reports, or `None` for every code that is not
+    /// one.
+    pub const fn from_code(code: i32) -> Option<Self> {
+        match code {
+            SNAPSHOT_ENVELOPE_REJECTED => Some(Self::SnapshotEnvelope),
+            APPLICATION_STATE_REJECTED => Some(Self::ApplicationState),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum ProtocolError {
@@ -944,6 +981,28 @@ mod tests {
             Envelope::decode(&encoded),
             Err(ProtocolError::InvalidUninitializedColumnIndex { column_index: 1 })
         ));
+    }
+
+    #[test]
+    fn every_saved_state_rejection_is_read_back_from_its_own_code() {
+        let rejections = [
+            SavedStateRejection::SnapshotEnvelope,
+            SavedStateRejection::ApplicationState,
+        ];
+
+        for rejection in rejections {
+            assert_eq!(
+                SavedStateRejection::from_code(rejection.code()),
+                Some(rejection)
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_restore_code_is_not_a_saved_state_rejection() {
+        for code in [0, -1, -2, -3, -4, -5, -6] {
+            assert_eq!(SavedStateRejection::from_code(code), None);
+        }
     }
 
     #[test]

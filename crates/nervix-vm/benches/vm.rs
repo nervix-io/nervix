@@ -2,7 +2,7 @@ use std::sync::Arc as StdArc;
 
 use arch_into::ArchInto as _;
 use arrow_array::{
-    BooleanArray, Float64Array, Int64Array, ListArray, StringArray, types::Int64Type,
+    BooleanArray, Float64Array, Int32Array, Int64Array, ListArray, StringArray, types::Int64Type,
 };
 use arrow_schema::{DataType, Field, Schema};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
@@ -12,8 +12,9 @@ use nervix_approx_into::ApproxInto as _;
 use nervix_models::Timestamp;
 use nervix_vm::{
     CompileBinding, CompileOptions, CompiledProgram, ExecutionContext, OutputMode, RuntimeError,
-    SemanticNamespaces, TypedArray, TypedBatch, compile_program_with_options_for_bindings,
-    execute_program_in_context, lower_route_construction,
+    SPAWN_BLOCKING_ROW_THRESHOLD, SemanticNamespaces, TypedArray, TypedBatch,
+    compile_program_with_options_for_bindings, execute_program_in_context,
+    lower_route_construction,
     program::{Program, SpannedNode},
 };
 use thiserror::Error;
@@ -705,6 +706,550 @@ fn compile_correlate_output() -> Arc<CompiledProgram> {
     .expect("correlate output benchmark program must compile")
 }
 
+/// Rows in a numeric kernel batch. The batch stays at the inline execution threshold, so a
+/// measurement is the kernels themselves rather than the blocking-pool hop a larger batch takes.
+const NUMERIC_KERNEL_ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+
+/// How many rows of a numeric kernel batch hold operands that make every checked operation in the
+/// program fail, which is what separates the kernel's clean path from its error reporting.
+#[derive(Debug, Clone, Copy)]
+enum FailureDensity {
+    None,
+    /// One row in 256.
+    Sparse,
+    /// Every other row.
+    Dense,
+}
+
+impl FailureDensity {
+    const ALL: [Self; 3] = [Self::None, Self::Sparse, Self::Dense];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "no_failures",
+            Self::Sparse => "sparse_failures",
+            Self::Dense => "dense_failures",
+        }
+    }
+
+    fn fails(self, row: usize) -> bool {
+        match self {
+            Self::None => false,
+            Self::Sparse => row % 256 == 255,
+            Self::Dense => row % 2 == 1,
+        }
+    }
+}
+
+/// How many rows of a numeric kernel batch are null in every operand column.
+#[derive(Debug, Clone, Copy)]
+enum NullDensity {
+    None,
+    /// One row in sixteen.
+    Sparse,
+    /// Every other row.
+    Half,
+    /// Nine rows in ten.
+    Most,
+}
+
+impl NullDensity {
+    const ALL: [Self; 4] = [Self::None, Self::Sparse, Self::Half, Self::Most];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "no_nulls",
+            Self::Sparse => "sparse_nulls",
+            Self::Half => "half_nulls",
+            Self::Most => "most_nulls",
+        }
+    }
+
+    fn is_null(self, row: usize) -> bool {
+        match self {
+            Self::None => false,
+            Self::Sparse => row % 16 == 15,
+            Self::Half => row % 2 == 1,
+            Self::Most => !row.is_multiple_of(10),
+        }
+    }
+}
+
+fn with_output_fields(input: &StdArc<Schema>, outputs: &[(&str, DataType)]) -> StdArc<Schema> {
+    let mut fields = input
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    for (name, data_type) in outputs {
+        fields.push(Field::new(*name, data_type.clone(), true));
+    }
+    StdArc::new(Schema::new(fields))
+}
+
+fn compile_numeric_program(
+    source: &str,
+    input: StdArc<Schema>,
+    outputs: &[(&str, DataType)],
+) -> Arc<CompiledProgram> {
+    let program = parse_program(source).expect("numeric kernel benchmark program must parse");
+    compile_program_with_options_for_bindings(
+        &program,
+        with_output_fields(&input, outputs),
+        [CompileBinding::writable("input", input)],
+        CompileOptions::default(),
+    )
+    .map(Arc::new)
+    .expect("numeric kernel benchmark program must compile")
+}
+
+fn numeric_arithmetic_schema(data_type: &DataType) -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new("left", data_type.clone(), true),
+        Field::new("right", data_type.clone(), true),
+        Field::new("divisor", data_type.clone(), true),
+    ]))
+}
+
+const NUMERIC_ARITHMETIC_SOURCE: &str = "SET sum = input.left + input.right, difference = \
+                                         input.left - input.right, product = input.left * \
+                                         input.right, quotient = input.left / input.divisor, \
+                                         remainder = input.left % input.divisor";
+
+fn numeric_arithmetic_outputs(data_type: &DataType) -> [(&'static str, DataType); 5] {
+    [
+        ("sum", data_type.clone()),
+        ("difference", data_type.clone()),
+        ("product", data_type.clone()),
+        ("quotient", data_type.clone()),
+        ("remainder", data_type.clone()),
+    ]
+}
+
+/// A failing row pairs the maximum value with a negative operand, which overflows the difference
+/// and the product, and divides by zero, which fails the quotient and the remainder. No pair of
+/// operands overflows both a sum and a difference, so the sum of a failing row succeeds.
+fn i64_arithmetic_batch(program: &CompiledProgram, failures: FailureDensity) -> TypedBatch {
+    let rows = 0..NUMERIC_KERNEL_ROWS;
+    let left = Int64Array::from_iter_values(rows.clone().map(|row| {
+        if failures.fails(row) {
+            i64::MAX
+        } else {
+            benchmark_row_i64(row % 1_000) - 500
+        }
+    }));
+    let right = Int64Array::from_iter_values(rows.clone().map(|row| {
+        if failures.fails(row) {
+            -2
+        } else {
+            benchmark_row_i64(row % 17) - 8
+        }
+    }));
+    let divisor = Int64Array::from_iter_values(rows.map(|row| {
+        if failures.fails(row) {
+            0
+        } else {
+            benchmark_row_i64(row % 13) + 1
+        }
+    }));
+    TypedBatch::try_new(
+        program.input_schema.clone(),
+        vec![
+            TypedArray::Int64(left),
+            TypedArray::Int64(right),
+            TypedArray::Int64(divisor),
+        ],
+    )
+    .expect("i64 arithmetic benchmark batch must build")
+}
+
+fn benchmark_row_i32(row: usize) -> i32 {
+    i32::try_from(row).assured("benchmark row counts are fixed below i32::MAX")
+}
+
+fn i32_arithmetic_batch(program: &CompiledProgram, failures: FailureDensity) -> TypedBatch {
+    let rows = 0..NUMERIC_KERNEL_ROWS;
+    let left = Int32Array::from_iter_values(rows.clone().map(|row| {
+        if failures.fails(row) {
+            i32::MAX
+        } else {
+            benchmark_row_i32(row % 1_000) - 500
+        }
+    }));
+    let right = Int32Array::from_iter_values(rows.clone().map(|row| {
+        if failures.fails(row) {
+            -2
+        } else {
+            benchmark_row_i32(row % 17) - 8
+        }
+    }));
+    let divisor = Int32Array::from_iter_values(rows.map(|row| {
+        if failures.fails(row) {
+            0
+        } else {
+            benchmark_row_i32(row % 13) + 1
+        }
+    }));
+    TypedBatch::try_new(
+        program.input_schema.clone(),
+        vec![
+            TypedArray::Int32(left),
+            TypedArray::Int32(right),
+            TypedArray::Int32(divisor),
+        ],
+    )
+    .expect("i32 arithmetic benchmark batch must build")
+}
+
+fn benchmark_row_f64(row: usize) -> f64 {
+    row.approx_into()
+}
+
+/// A failing row adds and multiplies the maximum finite value by itself and divides by zero, so
+/// every floating-point operation but the difference produces a non-finite result.
+fn f64_arithmetic_batch(program: &CompiledProgram, failures: FailureDensity) -> TypedBatch {
+    let rows = 0..NUMERIC_KERNEL_ROWS;
+    let left = Float64Array::from_iter_values(rows.clone().map(|row| {
+        if failures.fails(row) {
+            f64::MAX
+        } else {
+            benchmark_row_f64(row % 1_000) - 499.5
+        }
+    }));
+    let right = Float64Array::from_iter_values(rows.clone().map(|row| {
+        if failures.fails(row) {
+            f64::MAX
+        } else {
+            benchmark_row_f64(row % 17) * 0.25 + 1.5
+        }
+    }));
+    let divisor = Float64Array::from_iter_values(rows.map(|row| {
+        if failures.fails(row) {
+            0.0
+        } else {
+            benchmark_row_f64(row % 13) + 0.5
+        }
+    }));
+    TypedBatch::try_new(
+        program.input_schema.clone(),
+        vec![
+            TypedArray::Float64(left),
+            TypedArray::Float64(right),
+            TypedArray::Float64(divisor),
+        ],
+    )
+    .expect("f64 arithmetic benchmark batch must build")
+}
+
+fn comparison_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new("int_left", DataType::Int64, true),
+        Field::new("int_right", DataType::Int64, true),
+        Field::new("float_left", DataType::Float64, true),
+        Field::new("float_right", DataType::Float64, true),
+    ]))
+}
+
+const COMPARISON_SOURCE: &str =
+    "SET int_less = input.int_left < input.int_right, int_equal = input.int_left = \
+     input.int_right, float_less = input.float_left < input.float_right, float_equal = \
+     input.float_left = input.float_right, float_at_least = input.float_left >= input.float_right";
+
+fn comparison_outputs() -> [(&'static str, DataType); 5] {
+    [
+        ("int_less", DataType::Boolean),
+        ("int_equal", DataType::Boolean),
+        ("float_less", DataType::Boolean),
+        ("float_equal", DataType::Boolean),
+        ("float_at_least", DataType::Boolean),
+    ]
+}
+
+/// Every eighth float lane compares NaN, and every tenth is null, so the IEEE comparison and null
+/// propagation are both on the measured path.
+fn comparison_batch(program: &CompiledProgram) -> TypedBatch {
+    let rows = 0..NUMERIC_KERNEL_ROWS;
+    let int_left =
+        Int64Array::from_iter_values(rows.clone().map(|row| benchmark_row_i64(row % 97)));
+    let int_right =
+        Int64Array::from_iter_values(rows.clone().map(|row| benchmark_row_i64(row % 89)));
+    let float_left = Float64Array::from_iter(rows.clone().map(|row| {
+        if row % 10 == 9 {
+            None
+        } else if row % 8 == 7 {
+            Some(f64::NAN)
+        } else {
+            Some(benchmark_row_f64(row % 97))
+        }
+    }));
+    let float_right = Float64Array::from_iter_values(rows.map(|row| benchmark_row_f64(row % 89)));
+    TypedBatch::try_new(
+        program.input_schema.clone(),
+        vec![
+            TypedArray::Int64(int_left),
+            TypedArray::Int64(int_right),
+            TypedArray::Float64(float_left),
+            TypedArray::Float64(float_right),
+        ],
+    )
+    .expect("comparison benchmark batch must build")
+}
+
+fn numeric_unary_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new("int_value", DataType::Int64, true),
+        Field::new("float_value", DataType::Float64, true),
+        Field::new("positive", DataType::Float64, true),
+    ]))
+}
+
+const NUMERIC_UNARY_SOURCE: &str =
+    "SET negated = -input.int_value, magnitude = abs(input.int_value), float_negated = \
+     -input.float_value, float_magnitude = abs(input.float_value), ceiling = \
+     ceil(input.float_value), floored = floor(input.float_value), rounded = \
+     round(input.float_value), root = sqrt(input.positive)";
+
+fn numeric_unary_outputs() -> [(&'static str, DataType); 8] {
+    [
+        ("negated", DataType::Int64),
+        ("magnitude", DataType::Int64),
+        ("float_negated", DataType::Float64),
+        ("float_magnitude", DataType::Float64),
+        ("ceiling", DataType::Float64),
+        ("floored", DataType::Float64),
+        ("rounded", DataType::Float64),
+        ("root", DataType::Float64),
+    ]
+}
+
+/// A failing row holds the minimum integer, which has no negation or absolute value, an infinity,
+/// which no rounding function maps to a finite value, and a negative square root operand.
+fn numeric_unary_batch(program: &CompiledProgram, failures: FailureDensity) -> TypedBatch {
+    let rows = 0..NUMERIC_KERNEL_ROWS;
+    let int_value = Int64Array::from_iter_values(rows.clone().map(|row| {
+        if failures.fails(row) {
+            i64::MIN
+        } else {
+            benchmark_row_i64(row % 1_000) - 500
+        }
+    }));
+    let float_value = Float64Array::from_iter_values(rows.clone().map(|row| {
+        if failures.fails(row) {
+            f64::INFINITY
+        } else {
+            benchmark_row_f64(row % 1_000) * 0.37 - 185.0
+        }
+    }));
+    let positive = Float64Array::from_iter_values(rows.map(|row| {
+        if failures.fails(row) {
+            -1.0
+        } else {
+            benchmark_row_f64(row % 1_000) + 0.5
+        }
+    }));
+    TypedBatch::try_new(
+        program.input_schema.clone(),
+        vec![
+            TypedArray::Int64(int_value),
+            TypedArray::Float64(float_value),
+            TypedArray::Float64(positive),
+        ],
+    )
+    .expect("numeric unary benchmark batch must build")
+}
+
+fn transcendental_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new("angle", DataType::Float64, true),
+        Field::new("positive", DataType::Float64, true),
+        Field::new("base", DataType::Float64, true),
+        Field::new("unit", DataType::Float64, true),
+        Field::new("count", DataType::Int64, true),
+    ]))
+}
+
+const TRANSCENDENTAL_SOURCE: &str =
+    "SET exponential = exp(input.angle), natural = ln(input.positive), decimal = \
+     log(input.positive), based = log(input.base, input.positive), power = pow(input.base, \
+     input.angle), cosine = cos(input.angle), tangent = tan(input.angle), arc_cosine = \
+     acos(input.unit), arc_sine = asin(input.unit), arc_tangent = atan(input.angle), count_root = \
+     sqrt(input.count)";
+
+fn transcendental_outputs() -> [(&'static str, DataType); 11] {
+    [
+        ("exponential", DataType::Float64),
+        ("natural", DataType::Float64),
+        ("decimal", DataType::Float64),
+        ("based", DataType::Float64),
+        ("power", DataType::Float64),
+        ("cosine", DataType::Float64),
+        ("tangent", DataType::Float64),
+        ("arc_cosine", DataType::Float64),
+        ("arc_sine", DataType::Float64),
+        ("arc_tangent", DataType::Float64),
+        ("count_root", DataType::Float64),
+    ]
+}
+
+/// Every operand stays inside its function's domain, so the batch measures evaluation and null
+/// propagation without error reporting.
+fn transcendental_batch(program: &CompiledProgram, nulls: NullDensity) -> TypedBatch {
+    let rows = 0..NUMERIC_KERNEL_ROWS;
+    let angle = Float64Array::from_iter(
+        rows.clone()
+            .map(|row| (!nulls.is_null(row)).then(|| benchmark_row_f64(row % 400) * 0.05 - 10.0)),
+    );
+    let positive = Float64Array::from_iter(
+        rows.clone()
+            .map(|row| (!nulls.is_null(row)).then(|| benchmark_row_f64(row % 1_000) * 3.5 + 0.25)),
+    );
+    let base = Float64Array::from_iter(
+        rows.clone()
+            .map(|row| (!nulls.is_null(row)).then(|| benchmark_row_f64(row % 7) + 2.0)),
+    );
+    let unit =
+        Float64Array::from_iter(rows.clone().map(|row| {
+            (!nulls.is_null(row)).then(|| benchmark_row_f64(row % 2_001) * 0.001 - 1.0)
+        }));
+    let count = Int64Array::from_iter(
+        rows.map(|row| (!nulls.is_null(row)).then(|| benchmark_row_i64(row) * 31)),
+    );
+    TypedBatch::try_new(
+        program.input_schema.clone(),
+        vec![
+            TypedArray::Float64(angle),
+            TypedArray::Float64(positive),
+            TypedArray::Float64(base),
+            TypedArray::Float64(unit),
+            TypedArray::Int64(count),
+        ],
+    )
+    .expect("transcendental benchmark batch must build")
+}
+
+/// Numeric operators and builtins over one inline batch. Arithmetic and unary programs vary how
+/// many rows fail, which exercises error reporting, and the transcendental program varies how many
+/// rows are null, which is what separates evaluating every lane from evaluating only valid ones.
+fn numeric_kernel_benches(c: &mut Criterion) {
+    let i64_arithmetic_compiled = compile_numeric_program(
+        NUMERIC_ARITHMETIC_SOURCE,
+        numeric_arithmetic_schema(&DataType::Int64),
+        &numeric_arithmetic_outputs(&DataType::Int64),
+    );
+    let i32_arithmetic_compiled = compile_numeric_program(
+        NUMERIC_ARITHMETIC_SOURCE,
+        numeric_arithmetic_schema(&DataType::Int32),
+        &numeric_arithmetic_outputs(&DataType::Int32),
+    );
+    let f64_arithmetic_compiled = compile_numeric_program(
+        NUMERIC_ARITHMETIC_SOURCE,
+        numeric_arithmetic_schema(&DataType::Float64),
+        &numeric_arithmetic_outputs(&DataType::Float64),
+    );
+    let comparison_compiled = compile_numeric_program(
+        COMPARISON_SOURCE,
+        comparison_schema(),
+        &comparison_outputs(),
+    );
+    let numeric_unary_compiled = compile_numeric_program(
+        NUMERIC_UNARY_SOURCE,
+        numeric_unary_schema(),
+        &numeric_unary_outputs(),
+    );
+    let transcendental_compiled = compile_numeric_program(
+        TRANSCENDENTAL_SOURCE,
+        transcendental_schema(),
+        &transcendental_outputs(),
+    );
+    let runtime = benchmark_runtime();
+
+    let mut group = c.benchmark_group("numeric_kernels");
+    group.throughput(Throughput::Elements(NUMERIC_KERNEL_ROWS.arch_into()));
+    for failures in FailureDensity::ALL {
+        let batch = i64_arithmetic_batch(&i64_arithmetic_compiled, failures);
+        group.bench_with_input(
+            BenchmarkId::new("i64_arithmetic", failures.label()),
+            &batch,
+            |b, batch| {
+                b.iter(|| {
+                    runtime.block_on(execute_benchmark_program(
+                        black_box(&i64_arithmetic_compiled),
+                        black_box(batch),
+                    ))
+                })
+            },
+        );
+        let batch = i32_arithmetic_batch(&i32_arithmetic_compiled, failures);
+        group.bench_with_input(
+            BenchmarkId::new("i32_arithmetic", failures.label()),
+            &batch,
+            |b, batch| {
+                b.iter(|| {
+                    runtime.block_on(execute_benchmark_program(
+                        black_box(&i32_arithmetic_compiled),
+                        black_box(batch),
+                    ))
+                })
+            },
+        );
+        let batch = f64_arithmetic_batch(&f64_arithmetic_compiled, failures);
+        group.bench_with_input(
+            BenchmarkId::new("f64_arithmetic", failures.label()),
+            &batch,
+            |b, batch| {
+                b.iter(|| {
+                    runtime.block_on(execute_benchmark_program(
+                        black_box(&f64_arithmetic_compiled),
+                        black_box(batch),
+                    ))
+                })
+            },
+        );
+        let batch = numeric_unary_batch(&numeric_unary_compiled, failures);
+        group.bench_with_input(
+            BenchmarkId::new("numeric_unary", failures.label()),
+            &batch,
+            |b, batch| {
+                b.iter(|| {
+                    runtime.block_on(execute_benchmark_program(
+                        black_box(&numeric_unary_compiled),
+                        black_box(batch),
+                    ))
+                })
+            },
+        );
+    }
+    let batch = comparison_batch(&comparison_compiled);
+    group.bench_with_input(
+        BenchmarkId::new("comparison", "nan_and_nulls"),
+        &batch,
+        |b, batch| {
+            b.iter(|| {
+                runtime.block_on(execute_benchmark_program(
+                    black_box(&comparison_compiled),
+                    black_box(batch),
+                ))
+            })
+        },
+    );
+    for nulls in NullDensity::ALL {
+        let batch = transcendental_batch(&transcendental_compiled, nulls);
+        group.bench_with_input(
+            BenchmarkId::new("transcendental", nulls.label()),
+            &batch,
+            |b, batch| {
+                b.iter(|| {
+                    runtime.block_on(execute_benchmark_program(
+                        black_box(&transcendental_compiled),
+                        black_box(batch),
+                    ))
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
 fn benchmark_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .build()
@@ -914,5 +1459,10 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, execute_benches, batch_size_sweep_benches);
+criterion_group!(
+    benches,
+    execute_benches,
+    batch_size_sweep_benches,
+    numeric_kernel_benches
+);
 criterion_main!(benches);

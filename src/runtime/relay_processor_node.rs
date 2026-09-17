@@ -2113,10 +2113,10 @@ impl RelayProcessorNode {
                     ack_map,
                     ..
                 } => {
-                    let Some(branch_instance) = instance.as_mut() else {
+                    let Some(live) = instance.as_mut() else {
                         return;
                     };
-                    let due_timeouts = branch_instance.take_due_timeout_requests(now);
+                    let due_timeouts = live.guest.take_due_timeout_requests(now);
                     if due_timeouts.is_empty() {
                         return;
                     }
@@ -2145,6 +2145,7 @@ impl RelayProcessorNode {
                             .verified(
                                 "the let-else above returned unless this branch holds an instance",
                             )
+                            .guest
                             .on_timeout_in_context(
                                 timeout.handle,
                                 nervix_wasm::WasmExecutionContext::new(now),
@@ -2155,18 +2156,21 @@ impl RelayProcessorNode {
                             Err(error) => {
                                 let resource_limit_exceeded =
                                     error.current_context().is_resource_limit_exceeded();
-                                let reason = format!(
-                                    "wasm processor '{}' failed timeout callback: {}",
-                                    self.processor.as_str(),
-                                    error
-                                );
+                                let failure = instance
+                                    .as_ref()
+                                    .verified(
+                                        "the let-else above returned unless this branch holds an \
+                                         instance",
+                                    )
+                                    .module
+                                    .guest_failure(error, None);
                                 branch.runtime.handle_general_error_for_acks(
                                     &branch.domain,
                                     self.kind,
                                     &self.processor,
                                     &self.error_policies,
                                     ack_map.values().map(|context| &context.acks),
-                                    reason,
+                                    format!("{failure:#}"),
                                 );
                                 ack_map.clear();
                                 if resource_limit_exceeded {
@@ -2175,7 +2179,7 @@ impl RelayProcessorNode {
                                 return;
                             }
                         };
-                        if dispatch_wasm_output_envelopes(
+                        let dispatch = dispatch_wasm_output_envelopes(
                             WasmOutputContext {
                                 graph,
                                 branch,
@@ -2187,15 +2191,29 @@ impl RelayProcessorNode {
                                 input_schema: &schemas.input,
                                 output_schemas: &schemas.outputs,
                                 key: &output_key,
+                                module: &instance
+                                    .as_ref()
+                                    .verified(
+                                        "the let-else above returned unless this branch holds an \
+                                         instance",
+                                    )
+                                    .module,
                                 dispatch_error: "failed to forward timeout output",
                                 execution_now: now,
                             },
                             outputs,
                             ack_map,
                         )
-                        .await
-                        .is_err()
-                        {
+                        .await;
+                        if let Err(error) = dispatch {
+                            branch.runtime.handle_internal_processor_error_for_acks(
+                                &branch.domain,
+                                self.kind,
+                                &self.processor,
+                                &self.error_policies,
+                                std::iter::empty::<&AckSet>(),
+                                format!("{error:#}"),
+                            );
                             return;
                         }
                     }
@@ -2294,7 +2312,8 @@ impl RelayProcessorNode {
             };
             let flush_result = instance
                 .as_mut()
-                .verified("the let-else above returned unless this branch holds an instance")
+                .verified("the is_none check above returned unless this branch holds an instance")
+                .guest
                 .flush_in_context(nervix_wasm::WasmExecutionContext::new(execution_now))
                 .await;
             let outputs = match flush_result {
@@ -2302,18 +2321,20 @@ impl RelayProcessorNode {
                 Err(error) => {
                     let resource_limit_exceeded =
                         error.current_context().is_resource_limit_exceeded();
-                    let reason = format!(
-                        "wasm processor '{}' failed quiesce flush: {}",
-                        self.processor.as_str(),
-                        error
-                    );
+                    let failure = instance
+                        .as_ref()
+                        .verified(
+                            "the is_none check above returned unless this branch holds an instance",
+                        )
+                        .module
+                        .guest_failure(error, None);
                     branch.runtime.handle_general_error_for_acks(
                         &branch.domain,
                         self.kind,
                         &self.processor,
                         &self.error_policies,
                         ack_map.values().map(|context| &context.acks),
-                        reason,
+                        format!("{failure:#}"),
                     );
                     ack_map.clear();
                     if resource_limit_exceeded {
@@ -2326,7 +2347,7 @@ impl RelayProcessorNode {
                 return;
             }
             let output_key = branch.key.clone();
-            dispatch_wasm_output_envelopes(
+            let dispatch = dispatch_wasm_output_envelopes(
                 WasmOutputContext {
                     graph,
                     branch,
@@ -2338,16 +2359,29 @@ impl RelayProcessorNode {
                     input_schema: &schemas.input,
                     output_schemas: &schemas.outputs,
                     key: &output_key,
+                    module: &instance
+                        .as_ref()
+                        .verified(
+                            "the is_none check above returned unless this branch holds an instance",
+                        )
+                        .module,
                     dispatch_error: "failed to forward quiesce flush output",
                     execution_now,
                 },
                 outputs,
                 ack_map,
             )
-            .await
-            .discarded(
-                "the processor error policy already handled every failure this dispatch produced",
-            );
+            .await;
+            if let Err(error) = dispatch {
+                branch.runtime.handle_internal_processor_error_for_acks(
+                    &branch.domain,
+                    self.kind,
+                    &self.processor,
+                    &self.error_policies,
+                    std::iter::empty::<&AckSet>(),
+                    format!("{error:#}"),
+                );
+            }
         })
     }
 
