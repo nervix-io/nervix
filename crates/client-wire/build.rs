@@ -17,10 +17,6 @@ const ROOT_SCHEMAS: [&str; 4] = [
 /// produced it.
 const GENERATED_MODULE_HEADER: &str = "\
 #[expect(
-    unused_imports,
-    reason = \"flatc writes unused imports at the generated module root\"
-)]
-#[expect(
     clippy::as_conversions,
     reason = \"flatc copies fixed-layout structs through pointer casts\"
 )]
