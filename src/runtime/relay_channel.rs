@@ -572,13 +572,14 @@ mod gate_tests {
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_gate_memory_ordering_tests {
     use shuttle::{
-        check_dfs,
         sync::{
             Arc,
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         thread,
     };
+
+    use crate::shuttle_test::check_dfs;
 
     // These reduced checks make only the memory-ordering claim of the production gate: its
     // sequentially consistent close flag and in-flight count cannot both miss each other.
@@ -1405,13 +1406,14 @@ mod tests {
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_fanout_memory_ordering_tests {
     use shuttle::{
-        check_dfs,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
         thread,
     };
+
+    use crate::shuttle_test::check_dfs;
 
     // This reduced check makes only the memory-ordering claim of fan-out admission: the
     // sequentially consistent backlog and waiter counters cannot both miss each other.

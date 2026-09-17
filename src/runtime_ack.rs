@@ -845,10 +845,11 @@ mod tests {
 
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
-    use shuttle::{check_dfs, thread};
+    use shuttle::thread;
     use triomphe::Arc;
 
     use super::{AckRequiredWaitGuard, AckRootTracker, AckSet, HANDOFF_TRACKING_COMPLETE};
+    use crate::shuttle_test::check_dfs;
 
     fn assert_tracker_matches_root(root: &AckSet, tracker: &AckRootTracker) {
         let handle = &root.handles[0];
