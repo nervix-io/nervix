@@ -44,6 +44,18 @@ message CommandResult {
   repeated CommandResult results = 9;
   TransactionStatus transaction = 10;
   string execution_reference = 11;
+  TransactionOperationAdmission transaction_admission = 12;
+}
+
+message TransactionPreviewIdentity {
+  string transaction_id = 1;
+  uint64 position = 2;
+  bytes planning_basis = 3;
+}
+
+message TransactionOperationAdmission {
+  uint64 operation = 1;
+  TransactionPreviewIdentity preview = 2;
 }
 
 enum TransactionState {

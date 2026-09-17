@@ -6313,6 +6313,53 @@ async fn when_transaction_commit_pause_is_released(
     );
 }
 
+#[given("transaction commit admission on the leader node pauses before execution")]
+async fn given_transaction_commit_admission_pause(world: &mut ScenarioWorld) {
+    let leader = current_leader_node(world).await;
+    world.placeholders.insert(
+        "transaction_commit_admission_node".to_string(),
+        leader.clone(),
+    );
+    world.fault_injection.pause_transaction_commit_after(
+        crate::common::cluster::node_name(&leader),
+        world.domain.clone(),
+        0,
+    );
+}
+
+#[then("the transaction commit admission pause on the leader node is reached")]
+async fn then_transaction_commit_admission_pause_is_reached(world: &mut ScenarioWorld) {
+    let leader = world
+        .placeholders
+        .get("transaction_commit_admission_node")
+        .cloned()
+        .verified("the preceding admission-pause step saved its leader");
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        world.fault_injection.wait_for_transaction_commit_pause(
+            &crate::common::cluster::node_name(&leader),
+            &world.domain,
+            0,
+        ),
+    )
+    .await
+    .expect("transaction commit did not reach the admission pause");
+}
+
+#[when("the transaction commit admission pause on the leader node is released")]
+async fn when_transaction_commit_admission_pause_is_released(world: &mut ScenarioWorld) {
+    let leader = world
+        .placeholders
+        .get("transaction_commit_admission_node")
+        .cloned()
+        .verified("the preceding admission-pause step saved its leader");
+    world.fault_injection.release_transaction_commit_pause(
+        &crate::common::cluster::node_name(&leader),
+        &world.domain,
+        0,
+    );
+}
+
 #[given(expr = "consensus storage on the leader fails {word} committing domain {string}")]
 async fn given_consensus_storage_failure(
     world: &mut ScenarioWorld,

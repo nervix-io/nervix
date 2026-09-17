@@ -239,12 +239,16 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
         materialized_state: Vec::new(),
     }));
     let created = DomainSchedule::new(domain.id.clone(), [processor.clone()], vec![]);
+    let create_inputs = harness
+        .store
+        .inner
+        .state()
+        .domain_planning_inputs(&domain.id);
     harness
         .apply(
             1,
             ConsensusCommand::PutDomainAndSchedule {
-                expected_domain: None,
-                expected_schedule: None,
+                inputs: Box::new(create_inputs),
                 domain: Box::new(domain.clone()),
                 schedule: Some(Box::new(created.clone())),
                 mutation: None,
@@ -291,23 +295,31 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
     transitioned.begin_wasm_state_generation();
     let every_branch_schedule =
         DomainSchedule::new(domain.id.clone(), [transitioned.clone()], vec![]);
+    let branch_transition_inputs = harness
+        .store
+        .inner
+        .state()
+        .domain_planning_inputs(&domain.id);
     harness
         .apply(
             3,
             ConsensusCommand::ReplaceDomainSchedule {
-                domain: domain.id.clone(),
-                expected_schedule: Some(Box::new(created)),
+                inputs: Box::new(branch_transition_inputs),
                 schedule: Some(Box::new(branch_schedule.clone())),
                 mutation: Some(Box::new(lease.clone())),
             },
         )
         .await?;
+    let rejected_transition_inputs = harness
+        .store
+        .inner
+        .state()
+        .domain_planning_inputs(&domain.id);
     harness
         .apply(
             4,
             ConsensusCommand::ReplaceDomainSchedule {
-                domain: domain.id.clone(),
-                expected_schedule: Some(Box::new(branch_schedule.clone())),
+                inputs: Box::new(rejected_transition_inputs),
                 schedule: Some(Box::new(every_branch_schedule.clone())),
                 mutation: None,
             },
@@ -318,12 +330,16 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
         Some(&branch_schedule),
         "a generation transition published without the domain mutation lease must not apply"
     );
+    let every_branch_transition_inputs = harness
+        .store
+        .inner
+        .state()
+        .domain_planning_inputs(&domain.id);
     harness
         .apply(
             5,
             ConsensusCommand::ReplaceDomainSchedule {
-                domain: domain.id.clone(),
-                expected_schedule: Some(Box::new(branch_schedule)),
+                inputs: Box::new(every_branch_transition_inputs),
                 schedule: Some(Box::new(every_branch_schedule.clone())),
                 mutation: Some(Box::new(lease)),
             },
@@ -1570,6 +1586,233 @@ async fn replica_update_writes_one_record_and_metadata_amid_unrelated_graphs() -
 }
 
 #[tokio::test]
+async fn transaction_append_and_preview_recover_as_one_revision() -> TestResult {
+    use nervix_models::{StartDomain, Statement, Timestamp, UserName};
+
+    use crate::{
+        ReplicatedTransaction, TransactionActivity, TransactionQueueLimits, TransactionStatement,
+        TransactionStatementRequest,
+    };
+
+    for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
+        tokio::task::consume_budget().await;
+        let mut harness = Harness::new().await?;
+        let domain = Harness::domain("tenant");
+        let owner = UserName::parse("operator")?;
+        let at = Timestamp::from_unix_nanos(1);
+        let activity = TransactionActivity::from_timeout(at, Duration::from_secs(60));
+        harness
+            .apply(
+                1,
+                ConsensusCommand::PutDomain {
+                    domain: Box::new(domain.clone()),
+                    mutation: None,
+                },
+            )
+            .await?;
+        harness
+            .apply(
+                2,
+                ConsensusCommand::OpenTransaction {
+                    transaction: Box::new(ReplicatedTransaction::open(
+                        "transaction".into(),
+                        domain.id.clone(),
+                        owner.clone(),
+                        activity,
+                    )),
+                    max_open_transactions: 10,
+                },
+            )
+            .await?;
+        let report = crate::transaction_report::test_report_archive("transaction", &domain.id, 1);
+        let preview = report.identity().clone();
+        let command = ConsensusCommand::QueueTransactionStatement {
+            id: "transaction".into(),
+            owner,
+            domain: domain.id.clone(),
+            activity,
+            statement: Box::new(TransactionStatement::test_admitted(
+                TransactionStatementRequest {
+                    request_reference: nervix_models::CommandExecutionReference::parse(
+                        "request-0",
+                    )?,
+                    expected_position: 0,
+                    source: "START;".into(),
+                    statement: Statement::StartDomain(StartDomain {
+                        start: DomainStartPoint::Resume,
+                    }),
+                },
+            )),
+            report: Box::new(report),
+            limits: TransactionQueueLimits {
+                max_statements: 10,
+                max_source_bytes: 1024,
+            },
+        };
+        let preceding = harness.store.inner.state();
+        harness
+            .store
+            .inner
+            .faults
+            .fail_next(command.to_string(), boundary);
+
+        assert!(harness.apply(3, command).await.is_err());
+        assert_eq!(harness.store.inner.state(), preceding);
+
+        let harness = harness.reopen().await?;
+        let recovered = harness.store.inner.state();
+        let transaction = recovered
+            .transactions
+            .get("transaction")
+            .ok_or("transaction missing after reopen")?;
+        match boundary {
+            StorageBoundary::BeforeCommit => {
+                assert!(transaction.statements.is_empty());
+                assert!(transaction.latest_preview().is_none());
+                assert!(recovered.transaction_reports.report(&preview).is_err());
+            }
+            StorageBoundary::AfterSync => {
+                assert_eq!(transaction.statements.len(), 1);
+                assert_eq!(transaction.latest_preview(), Some(&preview));
+                let retained = recovered.transaction_reports.report(&preview)?;
+                assert_eq!(retained.position(), preview.position);
+                assert_eq!(retained.planning_basis(), preview.planning_basis);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn transaction_report_and_frozen_plan_survive_snapshot_installation() -> TestResult {
+    use nervix_models::{StartDomain, Statement, Timestamp, UserName};
+
+    use crate::{
+        ReplicatedTransaction, TransactionActivity, TransactionQueueLimits, TransactionState,
+        TransactionStatement, TransactionStatementRequest,
+    };
+
+    let mut source = Harness::new().await?;
+    let domain = Harness::domain("tenant");
+    let owner = UserName::parse("operator")?;
+    let at = Timestamp::from_unix_nanos(1);
+    let activity = TransactionActivity::from_timeout(at, Duration::from_secs(60));
+    source
+        .apply(
+            1,
+            ConsensusCommand::PutDomain {
+                domain: Box::new(domain.clone()),
+                mutation: None,
+            },
+        )
+        .await?;
+    source
+        .apply(
+            2,
+            ConsensusCommand::OpenTransaction {
+                transaction: Box::new(ReplicatedTransaction::open(
+                    "transaction".into(),
+                    domain.id.clone(),
+                    owner.clone(),
+                    activity,
+                )),
+                max_open_transactions: 10,
+            },
+        )
+        .await?;
+    source
+        .apply(
+            3,
+            ConsensusCommand::QueueTransactionStatement {
+                id: "transaction".into(),
+                owner: owner.clone(),
+                domain: domain.id.clone(),
+                activity,
+                statement: Box::new(TransactionStatement::test_admitted(
+                    TransactionStatementRequest {
+                        request_reference: nervix_models::CommandExecutionReference::parse(
+                            "request-0",
+                        )?,
+                        expected_position: 0,
+                        source: "START;".into(),
+                        statement: Statement::StartDomain(StartDomain {
+                            start: DomainStartPoint::Resume,
+                        }),
+                    },
+                )),
+                report: Box::new(crate::transaction_report::test_report_archive(
+                    "transaction",
+                    &domain.id,
+                    1,
+                )),
+                limits: TransactionQueueLimits {
+                    max_statements: 10,
+                    max_source_bytes: 1024,
+                },
+            },
+        )
+        .await?;
+    let plan = crate::transaction::test_commit_plan("transaction", 1);
+    let preview = plan.preview.clone();
+    let expected_step = plan.steps[0].clone();
+    let plan =
+        crate::transaction_plan::test_admission_plan(&source.store.inner.state(), &domain.id, plan);
+    source
+        .apply(
+            4,
+            ConsensusCommand::StartTransactionCommit {
+                id: "transaction".into(),
+                owner,
+                activity,
+                expected_preview: preview.clone(),
+                report: Box::new(crate::transaction_report::test_report_archive(
+                    "transaction",
+                    &domain.id,
+                    1,
+                )),
+                plan: Box::new(plan),
+            },
+        )
+        .await?;
+    let expected_report = source
+        .store
+        .inner
+        .state()
+        .transaction_reports
+        .report(&preview)?;
+
+    let snapshot = source.store.build_snapshot().await?;
+    let mut target = Harness::new().await?;
+    let staged = target.receive(&snapshot.snapshot).await?;
+    target
+        .store
+        .install_snapshot(&snapshot.meta, staged)
+        .await?;
+    let restored = target.store.inner.state();
+    assert!(matches!(
+        restored
+            .transactions
+            .get("transaction")
+            .ok_or("transaction missing from installed snapshot")?
+            .state,
+        TransactionState::Committing(_)
+    ));
+    assert_eq!(
+        restored.transaction_reports.report(&preview)?,
+        expected_report
+    );
+    assert_eq!(
+        restored
+            .transaction_commit_plans
+            .step("transaction", 0)?
+            .decision,
+        expected_step
+    );
+    drop(snapshot);
+    Ok(())
+}
+
+#[tokio::test]
 async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_position() -> TestResult {
     use nervix_models::{StartDomain, Statement, Timestamp, UserName};
 
@@ -1628,6 +1871,11 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                             }),
                         },
                     )),
+                    report: Box::new(crate::transaction_report::test_report_archive(
+                        "transaction",
+                        &domain.id,
+                        1,
+                    )),
                     limits: TransactionQueueLimits {
                         max_statements: 10,
                         max_source_bytes: 1024,
@@ -1635,6 +1883,21 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                 },
             )
             .await?;
+        let mut commit_plan = crate::transaction::test_commit_plan("transaction", 1);
+        commit_plan.steps[0].kind = nervix_models::TransactionCommitStepKind::StartDomain {
+            resolved: nervix_models::TransactionResolvedDomainStart {
+                start: DomainStartPoint::Resume,
+                clock: None,
+                authority: None,
+            },
+        };
+        let preview = commit_plan.preview.clone();
+        let planned_step = commit_plan.steps[0].clone();
+        let commit_plan = crate::transaction_plan::test_admission_plan(
+            &harness.store.inner.state(),
+            &domain.id,
+            commit_plan,
+        );
         harness
             .apply(
                 4,
@@ -1642,10 +1905,26 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                     id: "transaction".into(),
                     owner,
                     activity,
+                    expected_preview: commit_plan.decision().preview.clone(),
+                    report: Box::new(crate::transaction_report::test_report_archive(
+                        "transaction",
+                        &domain.id,
+                        1,
+                    )),
+                    plan: Box::new(commit_plan),
                 },
             )
             .await?;
         let preceding = harness.store.inner.state();
+        let admitted_report = preceding.transaction_reports.report(&preview)?;
+        assert_eq!(admitted_report.execution_steps().len(), 1);
+        assert_eq!(
+            preceding
+                .transaction_commit_plans
+                .step("transaction", 0)?
+                .decision,
+            planned_step
+        );
         let mutation = preceding
             .transactions
             .get("transaction")
@@ -1661,18 +1940,21 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                 .state()
                 .domain_planning_inputs(&domain.id),
         );
+        let mut applying_impact = planned_step.impact.clone();
+        *applying_impact.actual_mut() = nervix_models::ActualExecutionStepImpact::applying();
         let command = ConsensusCommand::AdvanceTransactionCommit {
             id: "transaction".into(),
             expected_next_statement: 0,
             next_statement: 1,
             at,
             result: Box::new(TransactionStepResult {
-                impact: crate::transaction::test_step_impact(0, 1),
+                impact: applying_impact,
                 result: TransactionCommandResult {
                     success: true,
                     message: "started".into(),
                     diagnostics: vec![],
                     already_existed: false,
+                    admission: None,
                 },
             }),
             effect: Some(Box::new(TransactionStepEffect::StartDomain {
@@ -1691,8 +1973,36 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
         assert!(harness.apply(5, command).await.is_err());
         assert_eq!(harness.store.inner.state(), preceding);
         let mut harness = harness.reopen().await?;
+        let recovered = harness.store.inner.state();
+        let recovered_report = recovered.transaction_reports.report(&preview)?;
+        assert_eq!(recovered_report.domain(), admitted_report.domain());
+        assert_eq!(recovered_report.position(), admitted_report.position());
+        assert_eq!(recovered_report.operations(), admitted_report.operations());
+        let expected_planned = match boundary {
+            StorageBoundary::BeforeCommit => admitted_report.execution_steps()[0].planned(),
+            StorageBoundary::AfterSync => planned_step.impact.planned(),
+        };
         assert_eq!(
-            harness.store.inner.state().domain_mutations.get(&domain.id),
+            recovered_report.execution_steps()[0].planned(),
+            expected_planned
+        );
+        let expected_outcome = match boundary {
+            StorageBoundary::BeforeCommit => nervix_models::ExecutionStepOutcome::Unattempted,
+            StorageBoundary::AfterSync => nervix_models::ExecutionStepOutcome::Applying,
+        };
+        assert_eq!(
+            recovered_report.execution_steps()[0].actual().outcome,
+            expected_outcome
+        );
+        assert_eq!(
+            recovered
+                .transaction_commit_plans
+                .step("transaction", 0)?
+                .decision,
+            planned_step
+        );
+        assert_eq!(
+            recovered.domain_mutations.get(&domain.id),
             Some(&mutation),
             "reopening retains the committing transaction's domain mutation fence"
         );
@@ -1748,6 +2058,11 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                     transaction.finished_outcome(),
                     Some(&TransactionOutcome::Committed)
                 );
+                let completed_report = completed.transaction_reports.report(&preview)?;
+                assert!(matches!(
+                    completed_report.execution_steps()[0].actual().outcome,
+                    nervix_models::ExecutionStepOutcome::Applied
+                ));
                 assert!(
                     !completed.domain_mutations.contains_key(&domain.id),
                     "the terminal explicit transaction releases its domain mutation"
@@ -1763,6 +2078,13 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                 let harness = harness.reopen().await?;
                 let state = harness.store.inner.state();
                 assert_eq!(state.transactions.len(), 0);
+                assert!(state.transaction_reports.report(&preview).is_err());
+                assert!(
+                    state
+                        .transaction_commit_plans
+                        .step("transaction", 0)
+                        .is_err()
+                );
                 assert_eq!(state.runtime_revision, 5);
                 assert_eq!(state.last_applied_log_id, Some(Harness::log_id(7)));
             }

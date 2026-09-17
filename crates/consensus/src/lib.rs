@@ -31,7 +31,8 @@ use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule,
     CoordinationIdentity, DomainClockAuthority, DomainClockState, DomainName, DomainSchedule,
     DomainStartPoint, DomainState, DomainStatus, ResourceId, ResourceName, ResourceNodeStatus,
-    ResourceUpload, ResourceUploadKey, ResourceVersion, ResourceVersionStatus, Statement, UserName,
+    ResourceUpload, ResourceUploadKey, ResourceVersion, ResourceVersionStatus, Statement,
+    TransactionImpactReport, UserName,
 };
 use nervix_recovery::Discarded as _;
 pub use openraft::raft::{
@@ -91,6 +92,8 @@ pub use retention::RaftRetentionPolicy;
 pub use snapshot::{SealedSnapshot, SnapshotRetention};
 mod storage;
 mod storage_fault;
+mod transaction_plan;
+mod transaction_report;
 
 use records::{Records, ResourceRecords, ScheduleRecords};
 use replication::AppendPath;
@@ -98,20 +101,31 @@ use replication::AppendPath;
 use storage::FjallLogReader;
 use storage::FjallStore;
 mod transaction;
-
 use connectivity_fault::ConnectivityFault;
 use domain_mutation::{DomainMutationAdmission, DomainMutationError};
 #[cfg(any(test, feature = "testing"))]
 pub use storage_fault::{StorageBoundary, StorageFault, StoragePause};
+use transaction_report::TransactionReportRecords;
 mod wire;
 
 pub use transaction::{
     FinishedTransaction, ReplicatedTransaction, TransactionActivity, TransactionApplyingStep,
-    TransactionCommandResult, TransactionCommitAdvance, TransactionCommitProgress,
-    TransactionDiagnostic, TransactionMutationError, TransactionMutationResponse,
-    TransactionOutcome, TransactionQueueAdmission, TransactionQueueLimits, TransactionState,
-    TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
+    TransactionCommandResult, TransactionCommitAdvance, TransactionCommitPlan,
+    TransactionCommitPlanHeader, TransactionCommitPlanStep, TransactionCommitProgress,
+    TransactionCommitStepKind, TransactionDiagnostic, TransactionEntityGatePlan,
+    TransactionModelTransition, TransactionMutationError, TransactionMutationResponse,
+    TransactionOutcome, TransactionQueueAdmission, TransactionQueueLimits, TransactionQueueRequest,
+    TransactionState, TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
     TransactionStepResult,
+};
+pub use transaction_plan::{
+    FrozenTransactionCommitStep, TransactionCommitAdmissionPlan, TransactionCommitPlanBuildError,
+    TransactionCommitPlanReadError, TransactionCommitPlanStoreError,
+    TransactionScheduleEligibility,
+};
+pub use transaction_report::{
+    TransactionReportArchive, TransactionReportArchiveError, TransactionReportReadError,
+    TransactionReportStoreError,
 };
 
 /// A sorted set archived as a vector so vocabulary types need no second archived ordering.
@@ -281,6 +295,29 @@ impl DomainPlanningInputs {
         }
         self
     }
+
+    /// Derive the authoritative inputs expected after this plan publishes a schedule.
+    pub fn after_schedule(mut self, schedule: Option<DomainSchedule>) -> Self {
+        self.schedule = schedule.map(Box::new);
+        self
+    }
+
+    /// Derive the authoritative inputs expected after this plan replaces domain state and schedule.
+    pub fn after_domain_update(
+        mut self,
+        state: DomainState,
+        schedule: Option<DomainSchedule>,
+    ) -> Self {
+        self.state = Some(Box::new(state));
+        self.schedule = schedule.map(Box::new);
+        self
+    }
+
+    /// Derive the authoritative inputs expected after this plan creates a resource catalog entry.
+    pub fn after_resource_catalog(mut self, resource: ResourceName) -> Self {
+        self.resources.resources.0.find_or_insert(resource);
+        self
+    }
 }
 
 /// Domain-owned authoritative inputs and the detailed resource state captured from one
@@ -414,6 +451,7 @@ pub enum ConsensusCommand {
         domain: DomainName,
         activity: TransactionActivity,
         statement: Box<TransactionStatement>,
+        report: Box<TransactionReportArchive>,
         limits: TransactionQueueLimits,
     },
     TouchTransaction {
@@ -425,6 +463,9 @@ pub enum ConsensusCommand {
         id: String,
         owner: UserName,
         activity: TransactionActivity,
+        expected_preview: nervix_models::TransactionPreviewIdentity,
+        report: Box<TransactionReportArchive>,
+        plan: Box<TransactionCommitAdmissionPlan>,
     },
     AdvanceTransactionCommit {
         id: String,
@@ -932,6 +973,8 @@ struct StateMachineData {
     node_admission_fences: Records<ClusterNodeName, ClusterNodeIncarnation>,
     domain_mutations: Records<DomainName, DomainMutationLease>,
     transactions: Records<String, ReplicatedTransaction>,
+    transaction_commit_plans: transaction_plan::TransactionCommitPlanRecords,
+    transaction_reports: TransactionReportRecords,
     command_executions: Records<nervix_models::CommandExecutionReference, CommandExecution>,
 }
 
@@ -2250,6 +2293,29 @@ impl Observer {
     pub async fn current_transaction(&self, id: &str) -> Option<ReplicatedTransaction> {
         self.inner.store.inner.state().transactions.get(id).cloned()
     }
+    pub async fn current_transaction_report(
+        &self,
+        identity: &nervix_models::TransactionPreviewIdentity,
+    ) -> error_stack::Result<TransactionImpactReport, TransactionReportReadError> {
+        self.inner
+            .store
+            .inner
+            .state()
+            .transaction_reports
+            .report(identity)
+    }
+    pub async fn current_transaction_commit_step(
+        &self,
+        transaction_id: &str,
+        index: usize,
+    ) -> error_stack::Result<FrozenTransactionCommitStep, TransactionCommitPlanReadError> {
+        self.inner
+            .store
+            .inner
+            .state()
+            .transaction_commit_plans
+            .step(transaction_id, index)
+    }
     pub async fn current_domain_mutation(
         &self,
         domain: &DomainName,
@@ -3127,19 +3193,24 @@ impl Proposer {
 
     pub async fn queue_transaction_statement(
         &self,
-        id: String,
-        owner: UserName,
-        domain: DomainName,
-        activity: TransactionActivity,
-        statement: TransactionStatement,
-        limits: TransactionQueueLimits,
+        request: TransactionQueueRequest,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+        let TransactionQueueRequest {
+            id,
+            owner,
+            domain,
+            activity,
+            statement,
+            report,
+            limits,
+        } = request;
         self.write_transaction(ConsensusCommand::QueueTransactionStatement {
             id,
             owner,
             domain,
             activity,
             statement: Box::new(statement),
+            report: Box::new(report),
             limits,
         })
         .await
@@ -3164,11 +3235,17 @@ impl Proposer {
         id: String,
         owner: UserName,
         activity: TransactionActivity,
+        expected_preview: nervix_models::TransactionPreviewIdentity,
+        report: TransactionReportArchive,
+        plan: TransactionCommitAdmissionPlan,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
         self.write_transaction(ConsensusCommand::StartTransactionCommit {
             id,
             owner,
             activity,
+            expected_preview,
+            report: Box::new(report),
+            plan: Box::new(plan),
         })
         .await
     }
@@ -4204,26 +4281,28 @@ enum DomainPlanningInputConflict {
 fn validate_domain_planning_inputs(
     state: &StateMachineData,
     expected: &DomainPlanningInputs,
-) -> Result<(), DomainPlanningInputConflict> {
+) -> error_stack::Result<(), DomainPlanningInputConflict> {
     let current = state.domain_planning_inputs(expected.domain());
     let domain = expected.domain().clone();
     if current.state != expected.state {
-        return Err(DomainPlanningInputConflict::Domain(domain));
+        return Err(Report::new(DomainPlanningInputConflict::Domain(domain)));
     }
     if current.resources != expected.resources {
-        return Err(DomainPlanningInputConflict::Resources(domain));
+        return Err(Report::new(DomainPlanningInputConflict::Resources(domain)));
     }
     if current.schedule != expected.schedule {
-        return Err(DomainPlanningInputConflict::Schedule(domain));
+        return Err(Report::new(DomainPlanningInputConflict::Schedule(domain)));
     }
     if current.topology.members != expected.topology.members {
-        return Err(DomainPlanningInputConflict::Membership(domain));
+        return Err(Report::new(DomainPlanningInputConflict::Membership(domain)));
     }
     if current.topology.voters != expected.topology.voters {
-        return Err(DomainPlanningInputConflict::Voters(domain));
+        return Err(Report::new(DomainPlanningInputConflict::Voters(domain)));
     }
     if current.topology.cordoned != expected.topology.cordoned {
-        return Err(DomainPlanningInputConflict::Eligibility(domain));
+        return Err(Report::new(DomainPlanningInputConflict::Eligibility(
+            domain,
+        )));
     }
     Ok(())
 }
@@ -4629,22 +4708,55 @@ fn apply_consensus_command_at(
             domain,
             activity,
             statement,
+            report,
             limits,
         } => {
             let outcome_revision = match &state.last_applied_log_id {
                 Some(log_id) => log_id.index,
                 None => 0,
             };
-            let result = mutate_transaction(state, id, |transaction| {
-                transaction.queue(
-                    owner,
-                    domain,
-                    *activity,
-                    outcome_revision,
-                    statement.as_ref().clone(),
-                    *limits,
-                )
-            });
+            let Some(mut transaction) = state.transactions.get(id).cloned() else {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::Unknown { id: id.clone() }),
+                    changes,
+                );
+            };
+            let result = match transaction.queue(
+                owner,
+                domain,
+                *activity,
+                outcome_revision,
+                statement.as_ref().clone(),
+                *limits,
+            ) {
+                Err(error) => Err(error),
+                Ok(()) if matches!(transaction.state, TransactionState::Finished(_)) => {
+                    if let Some(preview) = transaction.latest_preview() {
+                        state.transaction_reports.retain_revision(preview);
+                    }
+                    state.transactions.insert(id.clone(), transaction.clone());
+                    Ok(transaction)
+                }
+                Ok(()) => {
+                    let identity = report.identity();
+                    if identity.transaction_id != *id
+                        || report.domain() != domain
+                        || identity.position.accepted_operations() != transaction.statements.len()
+                    {
+                        Err(TransactionMutationError::ReportMismatch { id: id.clone() })
+                    } else if state
+                        .transaction_reports
+                        .insert(report.as_ref().clone())
+                        .is_err()
+                    {
+                        Err(TransactionMutationError::ReportConflict { id: id.clone() })
+                    } else {
+                        transaction.set_latest_preview(identity.clone());
+                        state.transactions.insert(id.clone(), transaction.clone());
+                        Ok(transaction)
+                    }
+                }
+            };
             changes.transactions_changed = result.is_ok();
             return AppliedConsensusCommand::transaction(result, changes);
         }
@@ -4667,6 +4779,9 @@ fn apply_consensus_command_at(
             id,
             owner,
             activity,
+            expected_preview,
+            report,
+            plan,
         } => {
             let outcome_revision = match &state.last_applied_log_id {
                 Some(log_id) => log_id.index,
@@ -4683,6 +4798,9 @@ fn apply_consensus_command_at(
             }
             match transaction.expire(activity.last_activity_at(), outcome_revision) {
                 Ok(true) => {
+                    if let Some(preview) = transaction.latest_preview() {
+                        state.transaction_reports.retain_revision(preview);
+                    }
                     state.transactions.insert(id.clone(), transaction.clone());
                     changes.transactions_changed = true;
                     return AppliedConsensusCommand::transaction(Ok(transaction), changes);
@@ -4691,6 +4809,53 @@ fn apply_consensus_command_at(
                 Err(error) => {
                     return AppliedConsensusCommand::transaction(Err(error), changes);
                 }
+            }
+            let current_preview = report.identity();
+            let decision = plan.decision();
+            if expected_preview != current_preview {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::PreviewStale {
+                        expected: Box::new(expected_preview.clone()),
+                        current: Box::new(current_preview.clone()),
+                    }),
+                    changes,
+                );
+            }
+            if current_preview.transaction_id != *id
+                || report.domain() != &transaction.domain
+                || current_preview.position.accepted_operations() != transaction.statements.len()
+                || decision.preview != *current_preview
+                || plan.eligibility().domain() != &transaction.domain
+                || !report.is_complete()
+                || !report.matches_commit_plan(decision)
+            {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::InvalidCommitPlan { id: id.clone() }),
+                    changes,
+                );
+            }
+            if decision.steps.len() != plan.inputs().len() {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::InvalidCommitPlan { id: id.clone() }),
+                    changes,
+                );
+            }
+            if !plan.is_consistent() {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::InvalidCommitPlan { id: id.clone() }),
+                    changes,
+                );
+            }
+            if let Some(inputs) = plan.inputs().first()
+                && let Err(reason) = validate_domain_planning_inputs(state, inputs)
+            {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::PlanningInputsChanged {
+                        id: id.clone(),
+                        reason: reason.to_string(),
+                    }),
+                    changes,
+                );
             }
             let domain_mutation = if transaction.requires_domain_mutation() {
                 let admission = DomainMutationAdmission::decide(
@@ -4712,14 +4877,32 @@ fn apply_consensus_command_at(
             } else {
                 None
             };
+            let plan_header = TransactionCommitPlanHeader {
+                preview: current_preview.clone(),
+                step_count: decision.steps.len(),
+            };
             if let Err(error) = transaction.start_commit(
                 owner,
                 *activity,
                 outcome_revision,
                 domain_mutation.clone(),
+                plan_header,
             ) {
                 return AppliedConsensusCommand::transaction(Err(error), changes);
             }
+            let mut transaction_reports = state.transaction_reports.clone();
+            let mut transaction_commit_plans = state.transaction_commit_plans.clone();
+            if transaction_reports.insert(report.as_ref().clone()).is_err()
+                || transaction_commit_plans.insert(plan).is_err()
+            {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::ReportConflict { id: id.clone() }),
+                    changes,
+                );
+            }
+            transaction_reports.retain_revision(current_preview);
+            state.transaction_reports = transaction_reports;
+            state.transaction_commit_plans = transaction_commit_plans;
             if let Some(lease) = domain_mutation {
                 state
                     .domain_mutations
@@ -4773,6 +4956,36 @@ fn apply_consensus_command_at(
             {
                 return AppliedConsensusCommand::transaction(Ok(transaction), changes);
             }
+            let plan_step_index = match &transaction.state {
+                TransactionState::Committing(progress) => progress.results.len(),
+                TransactionState::Open(_) | TransactionState::Finished(_) => {
+                    return AppliedConsensusCommand::transaction(
+                        Err(TransactionMutationError::NotCommitting {
+                            id: id.clone(),
+                            state: transaction.state.as_str().to_string(),
+                        }),
+                        changes,
+                    );
+                }
+            };
+            let admitted_step = match state.transaction_commit_plans.step(id, plan_step_index) {
+                Ok(step) => step,
+                Err(_) => {
+                    return AppliedConsensusCommand::transaction(
+                        Err(TransactionMutationError::InvalidCommitPlan { id: id.clone() }),
+                        changes,
+                    );
+                }
+            };
+            if admitted_step.decision.impact.operations() != result.impact.operations()
+                || admitted_step.decision.impact.planned() != result.impact.planned()
+                || !admitted_step.matches_effect(result.result.success, effect.as_deref())
+            {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::InvalidStepResult { id: id.clone() }),
+                    changes,
+                );
+            }
             if let Some(effect) = effect {
                 if let Err(error) = validate_transaction_step_effect(
                     state,
@@ -4803,6 +5016,22 @@ fn apply_consensus_command_at(
                 transaction.begin_application(*expected_next_statement, *at, requested_application)
             {
                 return AppliedConsensusCommand::transaction(Err(error), changes);
+            }
+            let Some(preview) = transaction.latest_preview().cloned() else {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::ReportMismatch { id: id.clone() }),
+                    changes,
+                );
+            };
+            if state
+                .transaction_reports
+                .replace_execution_step(&preview, result.impact.clone())
+                .is_err()
+            {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::ReportConflict { id: id.clone() }),
+                    changes,
+                );
             }
             if let Some(effect) = effect {
                 apply_transaction_step_effect(state, &transaction.domain, effect, &mut changes);
@@ -4842,6 +5071,27 @@ fn apply_consensus_command_at(
             ) {
                 return AppliedConsensusCommand::transaction(Err(error), changes);
             }
+            let Some(preview) = transaction.latest_preview().cloned() else {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::ReportMismatch { id: id.clone() }),
+                    changes,
+                );
+            };
+            let completed_impact = transaction
+                .commit_results()
+                .last()
+                .map(|result| result.impact.clone())
+                .verified("application completion appends the applying step to commit results");
+            if state
+                .transaction_reports
+                .replace_execution_step(&preview, completed_impact)
+                .is_err()
+            {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::ReportConflict { id: id.clone() }),
+                    changes,
+                );
+            }
             if matches!(transaction.state, TransactionState::Finished(_))
                 && let Some(lease) = domain_mutation
                 && lease.owner().is_transaction()
@@ -4849,6 +5099,9 @@ fn apply_consensus_command_at(
                 release_domain_mutation(state, &transaction.domain, &lease).verified(
                     "the transaction mutation lease was validated against this same state",
                 );
+            }
+            if matches!(transaction.state, TransactionState::Finished(_)) {
+                state.transaction_reports.retain_revision(&preview);
             }
             state.transactions.insert(id.clone(), transaction.clone());
             changes.transactions_changed = true;
@@ -4862,6 +5115,11 @@ fn apply_consensus_command_at(
             let result = mutate_transaction(state, id, |transaction| {
                 transaction.finish_empty_commit(*at, outcome_revision)
             });
+            if let Ok(transaction) = &result
+                && let Some(preview) = transaction.latest_preview()
+            {
+                state.transaction_reports.retain_revision(preview);
+            }
             changes.transactions_changed = result.is_ok();
             return AppliedConsensusCommand::transaction(result, changes);
         }
@@ -4877,6 +5135,11 @@ fn apply_consensus_command_at(
             let result = mutate_transaction(state, id, |transaction| {
                 transaction.revert(owner, *activity, outcome_revision)
             });
+            if let Ok(transaction) = &result
+                && let Some(preview) = transaction.latest_preview()
+            {
+                state.transaction_reports.retain_revision(preview);
+            }
             changes.transactions_changed = result.is_ok();
             return AppliedConsensusCommand::transaction(result, changes);
         }
@@ -4894,6 +5157,9 @@ fn apply_consensus_command_at(
             match transaction.expire(*at, outcome_revision) {
                 Ok(expired) => {
                     if expired {
+                        if let Some(preview) = transaction.latest_preview() {
+                            state.transaction_reports.retain_revision(preview);
+                        }
                         state.transactions.insert(id.clone(), transaction.clone());
                         changes.transactions_changed = true;
                     }
@@ -4905,6 +5171,16 @@ fn apply_consensus_command_at(
             }
         }
         ConsensusCommand::RemoveFinishedTransactions { finished_before } => {
+            let removed_ids = state
+                .transactions
+                .iter()
+                .filter_map(|(id, transaction)| {
+                    let TransactionState::Finished(finished) = &transaction.state else {
+                        return None;
+                    };
+                    (finished.finished_at <= *finished_before).then(|| id.clone())
+                })
+                .collect::<Vec<_>>();
             let before = state.transactions.len();
             state.transactions.retain(|_, transaction| {
                 let TransactionState::Finished(finished) = &transaction.state else {
@@ -4912,6 +5188,10 @@ fn apply_consensus_command_at(
                 };
                 finished.finished_at > *finished_before
             });
+            for id in removed_ids {
+                state.transaction_commit_plans.remove(&id);
+                state.transaction_reports.remove_transaction(&id);
+            }
             changes.transactions_changed = state.transactions.len() != before;
         }
     }
@@ -6272,6 +6552,7 @@ mod tests {
             already_existed: false,
             results: Vec::new(),
             transaction: None,
+            transaction_admission: None,
         };
         for terminal in [result.clone(), result.clone()] {
             let response = apply_consensus_command(
@@ -6489,6 +6770,7 @@ mod tests {
                     already_existed: false,
                     results: Vec::new(),
                     transaction: None,
+                    transaction_admission: None,
                 }),
             },
         );
@@ -6673,6 +6955,196 @@ mod tests {
     }
 
     #[test]
+    fn replicated_append_retry_and_commit_preview_validation_are_exact() {
+        let owner =
+            UserName::parse("app_user").assured("the test owner is an identifier-shaped literal");
+        let domain_id = domain("tenant");
+        let mut state = StateMachineData::default();
+        let transaction = ReplicatedTransaction::open(
+            "tx-preview".to_string(),
+            domain_id.clone(),
+            owner.clone(),
+            transaction_activity(1),
+        );
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::OpenTransaction {
+                transaction: Box::new(transaction),
+                max_open_transactions: 4,
+            },
+        );
+        let report = crate::transaction_report::test_report_archive("tx-preview", &domain_id, 1);
+        let preview = report.identity().clone();
+        let admission = nervix_models::TransactionOperationAdmission {
+            operation: nervix_models::TransactionOperationNumber::from_index(0)
+                .assured("the first test operation is addressable"),
+            preview: preview.clone(),
+        };
+        let command = ConsensusCommand::QueueTransactionStatement {
+            id: "tx-preview".to_string(),
+            owner: owner.clone(),
+            domain: domain_id.clone(),
+            activity: transaction_activity(2),
+            statement: Box::new(TransactionStatement::admitted(
+                TransactionStatementRequest {
+                    request_reference: nervix_models::CommandExecutionReference::parse(
+                        "append-preview",
+                    )
+                    .assured("the test request reference is an accepted literal"),
+                    expected_position: 0,
+                    source: "START".to_string(),
+                    statement: Statement::StartDomain(nervix_models::StartDomain {
+                        start: DomainStartPoint::Resume,
+                    }),
+                },
+                TransactionCommandResult {
+                    success: true,
+                    message: "queued".to_string(),
+                    diagnostics: Vec::new(),
+                    already_existed: false,
+                    admission: Some(admission.clone()),
+                },
+            )),
+            report: Box::new(report.clone()),
+            limits: TransactionQueueLimits {
+                max_statements: 4,
+                max_source_bytes: 1024,
+            },
+        };
+        let first = apply_consensus_command(&mut state, &command);
+        let ConsensusResponse::Transaction(first) = first.response else {
+            panic!("transaction append must return its replicated transaction");
+        };
+        let first = first
+            .result
+            .assured("the first append has a matching report revision");
+        let retained_after_first = state.clone();
+        let retried = apply_consensus_command(&mut state, &command);
+        let ConsensusResponse::Transaction(retried) = retried.response else {
+            panic!("transaction append retry must return its replicated transaction");
+        };
+        let retried = retried
+            .result
+            .assured("the exact append retry joins its retained revision");
+        assert_eq!(retried, first);
+        assert_eq!(retried.latest_preview(), Some(&preview));
+        assert_eq!(retried.statements[0].admission.admission, Some(admission));
+        assert_eq!(state, retained_after_first);
+
+        let plan = crate::transaction::test_commit_plan("tx-preview", 1);
+        let mut stale = plan.preview.clone();
+        stale.planning_basis = nervix_models::ImpactPlanningBasis::new([9; 32]);
+        let stale_admission_plan =
+            crate::transaction_plan::test_admission_plan(&state, &domain_id, plan.clone());
+        let rejected = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::StartTransactionCommit {
+                id: "tx-preview".to_string(),
+                owner: owner.clone(),
+                activity: transaction_activity(3),
+                expected_preview: stale.clone(),
+                report: Box::new(report.clone()),
+                plan: Box::new(stale_admission_plan),
+            },
+        );
+        let ConsensusResponse::Transaction(rejected) = rejected.response else {
+            panic!("stale commit admission must return a transaction error");
+        };
+        assert!(matches!(
+            rejected.result,
+            Err(TransactionMutationError::PreviewStale {
+                expected,
+                current,
+            }) if *expected == stale && *current == preview
+        ));
+        assert!(matches!(
+            state
+                .transactions
+                .get("tx-preview")
+                .verified("the rejected transaction remains retained")
+                .state,
+            TransactionState::Open(_)
+        ));
+        assert!(
+            state
+                .transaction_commit_plans
+                .step("tx-preview", 0)
+                .is_err()
+        );
+
+        let changed_inputs_plan =
+            crate::transaction_plan::test_admission_plan(&state, &domain_id, plan.clone());
+        state.resources.ensure_catalog(
+            &domain_id,
+            &ResourceName::parse("changed_input")
+                .assured("the test resource is an identifier-shaped literal"),
+        );
+        let rejected = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::StartTransactionCommit {
+                id: "tx-preview".to_string(),
+                owner: owner.clone(),
+                activity: transaction_activity(4),
+                expected_preview: preview.clone(),
+                report: Box::new(report.clone()),
+                plan: Box::new(changed_inputs_plan),
+            },
+        );
+        let ConsensusResponse::Transaction(rejected) = rejected.response else {
+            panic!("changed planning inputs must return a transaction error");
+        };
+        assert!(matches!(
+            rejected.result,
+            Err(TransactionMutationError::PlanningInputsChanged { .. })
+        ));
+        assert!(matches!(
+            state
+                .transactions
+                .get("tx-preview")
+                .verified("the rejected transaction remains retained")
+                .state,
+            TransactionState::Open(_)
+        ));
+        assert!(
+            state
+                .transaction_commit_plans
+                .step("tx-preview", 0)
+                .is_err()
+        );
+
+        let incomplete =
+            crate::transaction_report::test_incomplete_report_archive("tx-preview", &domain_id, 1);
+        let incomplete_admission_plan =
+            crate::transaction_plan::test_admission_plan(&state, &domain_id, plan);
+        let rejected = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::StartTransactionCommit {
+                id: "tx-preview".to_string(),
+                owner,
+                activity: transaction_activity(5),
+                expected_preview: incomplete.identity().clone(),
+                report: Box::new(incomplete),
+                plan: Box::new(incomplete_admission_plan),
+            },
+        );
+        let ConsensusResponse::Transaction(rejected) = rejected.response else {
+            panic!("incomplete commit admission must return a transaction error");
+        };
+        assert!(matches!(
+            rejected.result,
+            Err(TransactionMutationError::InvalidCommitPlan { .. })
+        ));
+        assert!(matches!(
+            state
+                .transactions
+                .get("tx-preview")
+                .verified("the rejected transaction remains retained")
+                .state,
+            TransactionState::Open(_)
+        ));
+    }
+
+    #[test]
     fn transaction_step_effect_and_progress_are_applied_once() {
         let owner =
             UserName::parse("app_user").assured("the test owner is an identifier-shaped literal");
@@ -6728,6 +7200,12 @@ mod tests {
                             statement,
                         },
                     )),
+                    report: Box::new(crate::transaction_report::test_report_archive(
+                        "tx-1",
+                        &domain_id,
+                        at.checked_add(1)
+                            .assured("the test queues two addressable operations"),
+                    )),
                     limits: TransactionQueueLimits {
                         max_statements: 4,
                         max_source_bytes: 1024,
@@ -6735,12 +7213,32 @@ mod tests {
                 },
             );
         }
+        let mut commit_plan = crate::transaction::test_commit_plan("tx-1", 2);
+        commit_plan.steps[0].kind = nervix_models::TransactionCommitStepKind::StartDomain {
+            resolved: nervix_models::TransactionResolvedDomainStart {
+                start: DomainStartPoint::Resume,
+                clock: None,
+                authority: None,
+            },
+        };
+        let preview = commit_plan.preview.clone();
+        let mut first_impact = commit_plan.steps[0].impact.clone();
+        *first_impact.actual_mut() = nervix_models::ActualExecutionStepImpact::applying();
+        let mut second_impact = commit_plan.steps[1].impact.clone();
+        *second_impact.actual_mut() = nervix_models::ActualExecutionStepImpact::applying();
+        let commit_plan =
+            crate::transaction_plan::test_admission_plan(&state, &domain_id, commit_plan);
         apply_consensus_command(
             &mut state,
             &ConsensusCommand::StartTransactionCommit {
                 id: "tx-1".to_string(),
                 owner,
                 activity: transaction_activity(4),
+                expected_preview: commit_plan.decision().preview.clone(),
+                report: Box::new(crate::transaction_report::test_report_archive(
+                    "tx-1", &domain_id, 2,
+                )),
+                plan: Box::new(commit_plan),
             },
         );
 
@@ -6751,12 +7249,13 @@ mod tests {
             next_statement: 1,
             at: nervix_models::Timestamp::from_unix_nanos(5),
             result: Box::new(TransactionStepResult {
-                impact: crate::transaction::test_step_impact(0, 1),
+                impact: first_impact,
                 result: TransactionCommandResult {
                     success: true,
                     message: "started".to_string(),
                     diagnostics: Vec::new(),
                     already_existed: false,
+                    admission: None,
                 },
             }),
             effect: Some(Box::new(TransactionStepEffect::StartDomain {
@@ -6780,6 +7279,18 @@ mod tests {
             panic!("transaction should remain committing during application");
         };
         assert!(progress.applying.is_some());
+        let applying_report = state
+            .transaction_reports
+            .report(&preview)
+            .assured("the applying transaction retains its admitted report");
+        assert!(matches!(
+            applying_report.execution_steps()[0].actual().outcome,
+            nervix_models::ExecutionStepOutcome::Applying
+        ));
+        assert!(matches!(
+            applying_report.execution_steps()[1].actual().outcome,
+            nervix_models::ExecutionStepOutcome::Unattempted
+        ));
 
         let duplicate = apply_consensus_command(&mut state, &first_step);
         let ConsensusResponse::Transaction(response) = duplicate.response else {
@@ -6812,6 +7323,22 @@ mod tests {
             transaction.commit_results()[0].impact.actual().outcome,
             nervix_models::ExecutionStepOutcome::Applied
         ));
+        let completed_prefix_report = state
+            .transaction_reports
+            .report(&preview)
+            .assured("the completed prefix remains in the retained report");
+        assert!(matches!(
+            completed_prefix_report.execution_steps()[0]
+                .actual()
+                .outcome,
+            nervix_models::ExecutionStepOutcome::Applied
+        ));
+        assert!(matches!(
+            completed_prefix_report.execution_steps()[1]
+                .actual()
+                .outcome,
+            nervix_models::ExecutionStepOutcome::Unattempted
+        ));
 
         apply_consensus_command(
             &mut state,
@@ -6821,12 +7348,13 @@ mod tests {
                 next_statement: 2,
                 at: nervix_models::Timestamp::from_unix_nanos(7),
                 result: Box::new(TransactionStepResult {
-                    impact: crate::transaction::test_step_impact(1, 1),
+                    impact: second_impact,
                     result: TransactionCommandResult {
                         success: false,
                         message: "validation failed".to_string(),
                         diagnostics: Vec::new(),
                         already_existed: false,
+                        admission: None,
                     },
                 }),
                 effect: None,
@@ -6862,6 +7390,30 @@ mod tests {
             transaction.commit_results()[1].impact.actual().outcome,
             nervix_models::ExecutionStepOutcome::Failed { .. }
         ));
+        assert!(transaction.statements.is_empty());
+        let terminal_report = state
+            .transaction_reports
+            .report(&preview)
+            .assured("the failed tombstone retains its final report");
+        assert_eq!(terminal_report.operations().len(), 2);
+        assert!(matches!(
+            terminal_report.execution_steps()[0].actual().outcome,
+            nervix_models::ExecutionStepOutcome::Applied
+        ));
+        assert!(matches!(
+            terminal_report.execution_steps()[1].actual().outcome,
+            nervix_models::ExecutionStepOutcome::Failed { .. }
+        ));
+        assert_eq!(
+            terminal_report.execution_steps()[0]
+                .planned()
+                .effects
+                .topology
+                .before
+                .nodes
+                .len(),
+            1
+        );
     }
 
     #[test]

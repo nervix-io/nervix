@@ -19,9 +19,11 @@ use crate::{
     ProcessorOutputs, RelayName,
 };
 
+mod commit;
 mod impact;
 mod inspection;
 
+pub use commit::*;
 pub use impact::*;
 pub use inspection::*;
 

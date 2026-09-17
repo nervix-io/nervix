@@ -873,6 +873,7 @@ impl SessionServiceImpl {
                 planned_relocations,
                 mut inputs,
                 planning,
+                transaction_eligibility,
             } = if let Some(decision) = &transaction_decision {
                 if is_noop {
                     ScheduleTransition::default()
@@ -882,9 +883,10 @@ impl SessionServiceImpl {
                         prepared_schedule: decision.schedule.clone(),
                         planned_relocations: decision.planned_relocations,
                         inputs: transaction_step.as_ref().map(|step| step.inputs.clone()),
-                        planning: transaction_step
+                        planning: None,
+                        transaction_eligibility: transaction_step
                             .as_ref()
-                            .map(|step| step.schedule_inputs.clone()),
+                            .map(|step| step.eligibility.clone()),
                     }
                 }
             } else if !is_noop {
@@ -901,6 +903,7 @@ impl SessionServiceImpl {
                         planned_relocations: prepared.relocations,
                         inputs: Some(prepared.inputs),
                         planning: Some(prepared.planning),
+                        transaction_eligibility: None,
                     },
                     Err(error) => return command_error(error),
                 }
@@ -916,6 +919,14 @@ impl SessionServiceImpl {
             if !is_noop
                 && let Some(planning) = planning.as_ref()
                 && let Err(error) = planning.validate_eligibility(self).await
+            {
+                return command_error(error.to_string());
+            }
+            if !is_noop
+                && let Some(eligibility) = transaction_eligibility.as_ref()
+                && let Err(error) = self
+                    .validate_transaction_schedule_eligibility(eligibility)
+                    .await
             {
                 return command_error(error.to_string());
             }

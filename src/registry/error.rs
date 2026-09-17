@@ -116,6 +116,8 @@ pub(crate) enum RegistryError {
     AlreadyExists { domain: String, identifier: String },
     #[error("domain '{domain}' changed after the mutation batch was planned")]
     ConcurrentMutation { domain: String },
+    #[error("domain '{domain}' has an invalid admitted transaction Model transition")]
+    InvalidTransactionPlan { domain: String },
     #[error("model '{identifier}' does not exist in domain '{domain}'")]
     NotFound { domain: String, identifier: String },
     /// Stored bytes that decode to a model of a kind other than the one their key names.

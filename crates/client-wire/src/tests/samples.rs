@@ -17,7 +17,8 @@ use nervix_models::{
     RebuildImpact, RebuildReason, RequestedResourceVersion, ResourceBindingImpact,
     ResourceCatalogAction, ResourceCatalogImpact, SchemaField, StatePurge, StateResetImpact,
     Timestamp, TransactionImpactReport, TransactionInspectionTarget, TransactionOperation,
-    TransactionOperationRange, TransactionPosition, TransactionPreviewIdentity,
+    TransactionOperationAdmission, TransactionOperationRange, TransactionPosition,
+    TransactionPreviewIdentity,
 };
 use url::Url;
 
@@ -186,6 +187,10 @@ pub(crate) fn command_outcome(disposition: CommandDisposition) -> CommandOutcome
             failing_operation: operation(usize::MAX),
             error: "relay 'orders' references a missing schema".to_string(),
         })),
+        transaction_admission: Some(TransactionOperationAdmission {
+            operation: operation(1),
+            preview: preview(1),
+        }),
     }
 }
 

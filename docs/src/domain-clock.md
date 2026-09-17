@@ -74,7 +74,11 @@ classified as physical policy.
 
 ## Establishing A Generation
 
-A direct or transactional `START` reaches the same replicated lifecycle transition:
+A direct or transactional `START` reaches the same replicated lifecycle transition. A transaction
+resolves the concrete start, paced mapping, and initial authority while its complete commit plan is
+admitted, then persists that decision with the frozen step. Restart and leadership recovery execute
+that stored decision against its captured control-plane inputs instead of sampling a new anchor or
+selecting a different authority.
 
 1. The command handler reads the current domain and samples UTC once for the physical anchor.
 2. It resolves the requested start into a concrete logical origin and rate. `START AT NOW` becomes

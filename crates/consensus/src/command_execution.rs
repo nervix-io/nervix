@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use nervix_models::{
     ClusterNodeIdentity, CommandExecutionReference, DomainName, DomainState, Statement, Timestamp,
-    UserName,
+    TransactionOperationAdmission, UserName,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -65,6 +65,7 @@ pub struct CommandExecutionChildResult {
     pub message: String,
     pub diagnostics: Vec<CommandExecutionDiagnostic>,
     pub already_existed: bool,
+    pub transaction_admission: Option<TransactionOperationAdmission>,
 }
 
 #[derive(
@@ -78,6 +79,7 @@ pub struct CommandExecutionResult {
     pub already_existed: bool,
     pub results: Vec<CommandExecutionChildResult>,
     pub transaction: Option<CommandExecutionTransactionStatus>,
+    pub transaction_admission: Option<TransactionOperationAdmission>,
 }
 
 #[derive(

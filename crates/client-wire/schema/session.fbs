@@ -137,6 +137,14 @@ table TransactionPreviewIdentity {
   planning_basis: Fingerprint (required);
 }
 
+/// Stable metadata returned when an operation is accepted into a transaction.
+table TransactionOperationAdmission {
+  /// The accepted one-based operation number. Non-zero.
+  operation: ulong;
+  /// The whole-transaction preview after accepting the operation.
+  preview: TransactionPreviewIdentity (required);
+}
+
 table TransactionOpen {}
 
 table TransactionCommitting {}
@@ -1096,6 +1104,8 @@ table CommandOutcome {
   statements: [StatementOutcome] (required);
   /// The transaction this session was bound to while serving the command.
   transaction: TransactionStatus;
+  /// Present when this result accepted one operation into the transaction.
+  transaction_admission: TransactionOperationAdmission;
 }
 
 table TransactionAttached {

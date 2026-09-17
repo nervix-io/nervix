@@ -1,4 +1,73 @@
 Feature: NSPL transactions
+  @transaction_frozen_plan
+  Scenario Outline: Commit admission freezes a plan before later authoritative state changes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Given client "owner" is connected to the leader node
+    And client "contender" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE IF NOT EXISTS RESOURCE frozen_plan_resource;
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    Given transaction commit admission on the leader node pauses before execution
+    When client "owner" begins executing these NSPL commands in the background
+      """
+      COMMIT;
+      """
+    Then the transaction commit admission pause on the leader node is reached
+    When client "contender" executes these NSPL commands
+      """
+      CREATE RESOURCE frozen_plan_resource;
+      """
+    And the transaction commit admission pause on the leader node is released
+    Then the background NSPL execution fails with "planning inputs changed"
+    And transaction "{{transaction_id}}" eventually has state "FAILED"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @transaction_report_restart
+  Scenario: A queued transaction preview survives a full cluster restart
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA retained_before_restart (value STRING);
+      """
+    Given client "owner" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      ALTER SCHEMA retained_before_restart
+        ADD FIELD retained STRING OPTIONAL;
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    When the cluster is restarted
+    Given client "resumed" is connected to the leader node
+    When client "resumed" attaches to transaction "{{transaction_id}}"
+    And client "resumed" executes these NSPL commands
+      """
+      COMMIT;
+      """
+    Then transaction "{{transaction_id}}" eventually has state "COMMITTED"
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE SCHEMA retained_before_restart;
+      """
+    Then the last command output contains
+      """
+      retained STRING OPTIONAL
+      """
+
   Scenario: An open transaction survives leader failover and the client resumes it
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"

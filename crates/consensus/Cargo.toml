@@ -21,6 +21,7 @@ testing = []
 
 [dependencies]
 arch-into = { workspace = true }
+blake3 = { workspace = true }
 error-stack = { workspace = true }
 fjall = { workspace = true }
 futures-util = { workspace = true }

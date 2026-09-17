@@ -23,8 +23,10 @@ use nervix_models::{
     QuiesceLevel, QuiesceSubgraph, RebuildImpact, RebuildReason, RequestedResourceVersion,
     ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact, ResourceName,
     ResourceUploads, ResourceVersionResolutionError, StateResetImpact, Statement,
-    TransactionImpactReport, TransactionOperation, TransactionOperationNumber,
-    TransactionOperationRange, TransactionPosition,
+    TransactionCommitPlan, TransactionCommitPlanStep, TransactionCommitStepKind,
+    TransactionEntityGatePlan, TransactionImpactReport, TransactionModelTransition,
+    TransactionOperation, TransactionOperationNumber, TransactionOperationRange,
+    TransactionPosition, TransactionPreviewIdentity, TransactionResolvedDomainStart,
 };
 use thiserror::Error;
 
@@ -119,6 +121,7 @@ impl PlannedTransaction {
         &self.steps
     }
 
+    #[cfg(test)]
     pub(crate) fn first_step(&self) -> Option<&PlannedTransactionStep> {
         self.steps.first()
     }
@@ -146,6 +149,116 @@ impl PlannedTransaction {
             execution_steps,
         )
         .map_err(|error| Report::new(TransactionPlanningError::InvalidImpactReport { error }))
+    }
+
+    pub(crate) fn commit_plan(
+        &self,
+        transaction_id: String,
+        resolved_starts: &BTreeMap<TransactionOperationNumber, TransactionResolvedDomainStart>,
+    ) -> TransactionCommitPlan {
+        let steps = self
+            .steps
+            .iter()
+            .map(|step| TransactionCommitPlanStep {
+                impact: step.impact.clone(),
+                kind: step
+                    .kind
+                    .commit_step_kind(step.impact.operations().first(), resolved_starts),
+            })
+            .collect();
+        TransactionCommitPlan {
+            preview: TransactionPreviewIdentity {
+                transaction_id,
+                position: self.position,
+                planning_basis: self.basis,
+            },
+            steps,
+        }
+    }
+}
+
+impl PlannedTransactionStepKind {
+    fn commit_step_kind(
+        &self,
+        operation: TransactionOperationNumber,
+        resolved_starts: &BTreeMap<TransactionOperationNumber, TransactionResolvedDomainStart>,
+    ) -> TransactionCommitStepKind {
+        match self {
+            Self::Models { plan } => {
+                let planned = plan
+                    .planned
+                    .as_ref()
+                    .verified("a complete commit plan cannot contain an incomplete model run");
+                TransactionCommitStepKind::Models {
+                    transitions: planned.model_transitions(),
+                    schedule: plan.schedule.clone().map(Box::new),
+                    no_op_operations: plan.no_op_operations.iter().copied().collect(),
+                    model_gate: plan.model_gate.commit_gate_plan(),
+                    ownership_gate: plan.ownership_gate.commit_gate_plan(),
+                }
+            }
+            Self::AlterDomain { plan } => TransactionCommitStepKind::AlterDomain {
+                next: Box::new(plan.next.clone()),
+                schedule: plan.schedule.clone().map(Box::new),
+                ownership_gate: plan.ownership_gate.commit_gate_plan(),
+            },
+            Self::StartDomain { .. } => {
+                let resolved = resolved_starts.get(&operation).cloned().verified(
+                    "commit preparation resolves every start step in this same complete plan",
+                );
+                TransactionCommitStepKind::StartDomain { resolved }
+            }
+            Self::StopDomain => TransactionCommitStepKind::StopDomain,
+            Self::CreateResource {
+                resource,
+                already_existed,
+            } => TransactionCommitStepKind::CreateResource {
+                resource: resource.clone(),
+                already_existed: *already_existed,
+            },
+        }
+    }
+}
+
+impl PlannedMutations {
+    fn model_transitions(&self) -> Vec<TransactionModelTransition> {
+        let nodes = self
+            .base_models
+            .nodes()
+            .chain(self.domain_state.models.nodes())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut transitions = Vec::new();
+        for node in nodes {
+            match (
+                self.base_models.get(&node),
+                self.domain_state.models.get(&node),
+            ) {
+                (None, Some(after)) => transitions.push(TransactionModelTransition::Create {
+                    model: Box::new(after.clone()),
+                }),
+                (Some(before), Some(after)) if before != after => {
+                    transitions.push(TransactionModelTransition::Replace {
+                        before: Box::new(before.clone()),
+                        after: Box::new(after.clone()),
+                    });
+                }
+                (Some(before), None) => transitions.push(TransactionModelTransition::Drop {
+                    model: Box::new(before.clone()),
+                }),
+                (Some(_), Some(_)) | (None, None) => {}
+            }
+        }
+        transitions
+    }
+}
+
+impl EntityGatePlan {
+    fn commit_gate_plan(&self) -> TransactionEntityGatePlan {
+        TransactionEntityGatePlan {
+            affected_entities: self.affected_entities().to_vec(),
+            relays: self.relays().to_vec(),
+        }
     }
 }
 
@@ -294,6 +407,74 @@ struct ModelImpactInput<'a> {
 }
 
 impl Registry {
+    pub(crate) fn restore_transaction_commit_step(
+        domain: &DomainName,
+        current_models: ModelIndex,
+        previous: ControlDomainState,
+        expected_schedule: Option<DomainSchedule>,
+        step: TransactionCommitPlanStep,
+    ) -> Result<PlannedTransactionStep, Report<TransactionPlanningError>> {
+        let operation = step.impact.operations().first();
+        let kind = match step.kind {
+            TransactionCommitStepKind::Models {
+                transitions,
+                schedule,
+                no_op_operations,
+                model_gate,
+                ownership_gate,
+            } => {
+                let operation_count = step.impact.operations().operation_count().get();
+                let planned = Self::restore_transaction_model_plan(
+                    domain,
+                    current_models,
+                    &transitions,
+                    operation_count,
+                )
+                .map_err(|error| {
+                    Report::new(TransactionPlanningError::ModelPreflight { operation, error })
+                })?;
+                PlannedTransactionStepKind::Models {
+                    plan: Box::new(PlannedModelTransactionStep {
+                        planned: Some(planned),
+                        expected_schedule,
+                        schedule: schedule.map(|schedule| *schedule),
+                        no_op_operations: no_op_operations.into_iter().collect(),
+                        model_gate: EntityGatePlan::from_commit_plan(model_gate),
+                        ownership_gate: EntityGatePlan::from_commit_plan(ownership_gate),
+                    }),
+                }
+            }
+            TransactionCommitStepKind::AlterDomain {
+                next,
+                schedule,
+                ownership_gate,
+            } => PlannedTransactionStepKind::AlterDomain {
+                plan: Box::new(PlannedAlterDomainTransactionStep {
+                    previous,
+                    next: *next,
+                    expected_schedule,
+                    schedule: schedule.map(|schedule| *schedule),
+                    ownership_gate: EntityGatePlan::from_commit_plan(ownership_gate),
+                }),
+            },
+            TransactionCommitStepKind::StartDomain { .. } => {
+                PlannedTransactionStepKind::StartDomain { previous }
+            }
+            TransactionCommitStepKind::StopDomain => PlannedTransactionStepKind::StopDomain,
+            TransactionCommitStepKind::CreateResource {
+                resource,
+                already_existed,
+            } => PlannedTransactionStepKind::CreateResource {
+                resource,
+                already_existed,
+            },
+        };
+        Ok(PlannedTransactionStep {
+            impact: step.impact,
+            kind,
+        })
+    }
+
     /// Plans `statements` from `first_operation_index` in their written order. The callback is a
     /// synchronous schedule decision over topology inputs captured beside `snapshot`.
     pub(crate) fn plan_transaction<F>(
