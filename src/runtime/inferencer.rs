@@ -869,14 +869,21 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
 #[cfg(test)]
 mod tests {
     use nervix_models::{
-        InferencerTensorDimension, InferencerTensorElementType, InferencerTensorRepresentation,
-        InferencerTensorSchema,
+        InferencerExecutionMode, InferencerTensorDimension, InferencerTensorElementType,
+        InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
+        ParseAsType,
     };
     use nonzero_ext::nonzero;
     use ordered_float::OrderedFloat;
 
-    use super::{RuntimeTensorSchema, RuntimeTensorSlice};
-    use crate::runtime_schema::RuntimeValue;
+    use super::{PreparedExecution, PreparedInvocation, RuntimeTensorSchema, RuntimeTensorSlice};
+    use crate::{
+        runtime::{
+            CompiledInferencerInputProgram,
+            test_fixtures::{expression, named, test_schema},
+        },
+        runtime_schema::{RuntimeRecordBatch, RuntimeRow, RuntimeValue, test_runtime_row},
+    };
 
     #[test]
     fn multidimensional_tensor_conversion_preserves_nested_array_shape() {
@@ -970,6 +977,202 @@ mod tests {
                 .into_iter()
                 .map(|slice| slice.values)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    fn dense(dimensions: Vec<InferencerTensorDimension>) -> InferencerTensorSchema {
+        InferencerTensorSchema {
+            representation: InferencerTensorRepresentation::Dense,
+            element_type: InferencerTensorElementType::F32,
+            dimensions,
+        }
+    }
+
+    /// The message a failed operation reports to the processor that called it.
+    fn failure<T, C: error_stack::Context>(result: error_stack::Result<T, C>) -> String {
+        let Err(error) = result else {
+            panic!("the operation must fail");
+        };
+        error.current_context().to_string()
+    }
+
+    #[test]
+    fn tensor_elements_and_axes_reject_values_the_schema_does_not_describe() {
+        let scalar = dense(Vec::new());
+        assert_eq!(
+            failure(scalar.tensor_from_runtime_value(&RuntimeValue::I64(1))),
+            "tensor element requires F32, got I64(1)"
+        );
+
+        let pair = dense(vec![InferencerTensorDimension::Fixed(nonzero!(2u32))]);
+        let three = RuntimeValue::Array(vec![RuntimeValue::F32(OrderedFloat(1.0)); 3]);
+        assert_eq!(
+            failure(pair.tensor_from_runtime_value(&three)),
+            "tensor ARRAY axis contains 3 values, expected 2"
+        );
+        assert_eq!(
+            failure(pair.tensor_from_runtime_value(&RuntimeValue::I64(1))),
+            "fixed tensor axis requires ARRAY, got I64(1)"
+        );
+
+        let dynamic = dense(vec![InferencerTensorDimension::Dynamic]);
+        assert_eq!(
+            failure(dynamic.tensor_from_runtime_value(&RuntimeValue::I64(1))),
+            "dynamic tensor axis requires VEC, got I64(1)"
+        );
+
+        let nested = dense(vec![
+            InferencerTensorDimension::Dynamic,
+            InferencerTensorDimension::Dynamic,
+        ]);
+        assert_eq!(
+            failure(nested.tensor_from_runtime_value(&RuntimeValue::Vec(Vec::new()))),
+            "cannot infer an inner DYNAMIC axis from an empty outer vector"
+        );
+    }
+
+    #[test]
+    fn tensor_values_reject_shapes_the_schema_does_not_describe() {
+        let scalar = dense(Vec::new());
+        assert_eq!(
+            failure(scalar.runtime_value_from_tensor(&[1.0], &[1])),
+            "scalar tensor has unexpected remaining shape [1]"
+        );
+        assert_eq!(
+            failure(scalar.runtime_value_from_tensor(&[1.0, 2.0], &[])),
+            "scalar tensor contains 2 values, expected 1"
+        );
+
+        let pair = dense(vec![InferencerTensorDimension::Fixed(nonzero!(2u32))]);
+        assert_eq!(
+            failure(pair.runtime_value_from_tensor(&[1.0, 2.0], &[])),
+            "tensor value has fewer axes than its schema"
+        );
+        assert_eq!(
+            failure(pair.runtime_value_from_tensor(&[1.0, 2.0, 3.0], &[3])),
+            "tensor axis has length 3, expected 2"
+        );
+
+        let dynamic = dense(vec![InferencerTensorDimension::Dynamic]);
+        assert_eq!(
+            failure(dynamic.runtime_value_from_tensor(&[1.0], &[2])),
+            "tensor contains 1 values, expected 2 for shape [2]"
+        );
+
+        let rows_of_pairs = dense(vec![
+            InferencerTensorDimension::Dynamic,
+            InferencerTensorDimension::Fixed(nonzero!(2u32)),
+        ]);
+        assert_eq!(
+            failure(rows_of_pairs.runtime_value_from_tensor(&[1.0, 2.0, 3.0], &[1, 3])),
+            "tensor axis has length 3, expected 2"
+        );
+    }
+
+    #[test]
+    fn batched_tensor_shapes_reject_mismatched_ranks_and_dimensions() {
+        let schema = dense(vec![
+            InferencerTensorDimension::Batch,
+            InferencerTensorDimension::Fixed(nonzero!(2u32)),
+        ]);
+        assert_eq!(
+            failure(schema.batch_shape(&[2, 1], 3)),
+            "tensor slice rank 2 does not match declared rank 1"
+        );
+        assert_eq!(
+            failure(schema.shape_without_batch(&[3])),
+            "batched tensor rank 1 does not match declared rank 2"
+        );
+        assert_eq!(
+            failure(schema.validate_concrete_shape(&[3], 3, true)),
+            "tensor shape [3] does not match declared dimensions [Batch, Fixed(2)]"
+        );
+        assert_eq!(
+            failure(schema.validate_concrete_shape(&[3, 4], 3, true)),
+            "tensor shape [3, 4] has dimension 4, expected 2"
+        );
+        assert_eq!(
+            failure(schema.validate_concrete_shape(&[4, 2], 3, true)),
+            "tensor shape [4, 2] has batch dimension 4, expected 3"
+        );
+    }
+
+    #[test]
+    fn batched_tensor_values_reject_ragged_and_missized_slices() {
+        let schema = dense(vec![
+            InferencerTensorDimension::Batch,
+            InferencerTensorDimension::Dynamic,
+        ]);
+        let slice = |shape: Vec<usize>, values: Vec<f32>| RuntimeTensorSlice { shape, values };
+        assert_eq!(
+            failure(schema.join_batch_values(&[
+                slice(vec![2], vec![1.0, 2.0]),
+                slice(vec![3], vec![1.0, 2.0, 3.0]),
+            ])),
+            "batched DYNAMIC tensor slices must have one concrete shape; got [2] and [3]"
+        );
+        assert_eq!(
+            failure(schema.join_batch_values(&[
+                slice(vec![2], vec![1.0, 2.0]),
+                slice(vec![2], vec![1.0, 2.0, 3.0]),
+            ])),
+            "batched tensor slice contains 3 values, expected 2"
+        );
+        assert_eq!(
+            failure(schema.split_batch_values(&[1.0, 2.0, 3.0], 2, &[2, 2])),
+            "batched output contains 3 values, expected 4"
+        );
+    }
+
+    #[test]
+    fn prepared_executions_reject_empty_batches_and_missing_inputs() {
+        let row = test_runtime_row([("score".to_string(), RuntimeValue::F32(OrderedFloat(1.0)))]);
+        let batch = RuntimeRecordBatch::from_rows(row.batch().schema(), std::iter::once(&row))
+            .expect("one test row should form a batch");
+        let mapping = InferencerTensorMapping {
+            tensor: "missing".to_string(),
+            schema: dense(Vec::new()),
+            expression: expression("input.score"),
+        };
+        assert_eq!(
+            failure(PreparedInvocation::for_row(
+                0,
+                &batch,
+                std::slice::from_ref(&mapping)
+            )),
+            "ONNX input tensor 'missing' mapped value is missing"
+        );
+
+        let empty =
+            RuntimeRecordBatch::from_rows(row.batch().schema(), std::iter::empty::<&RuntimeRow>())
+                .expect("no test rows should form an empty batch");
+        assert_eq!(
+            failure(PreparedExecution::from_batch(
+                &empty,
+                &[],
+                &[],
+                InferencerExecutionMode::PerMessage,
+            )),
+            "cannot execute ONNX inference for an empty message batch"
+        );
+    }
+
+    #[test]
+    fn inferencer_inputs_reject_tensor_names_that_are_not_fields() {
+        let mapping = InferencerTensorMapping {
+            tensor: "not a field".to_string(),
+            schema: dense(Vec::new()),
+            expression: expression("input.score"),
+        };
+        let input_schema = test_schema(&[("score", ParseAsType::F32)]);
+        assert_eq!(
+            failure(CompiledInferencerInputProgram::compile(
+                &named("score_events"),
+                std::slice::from_ref(&mapping),
+                &input_schema,
+                None,
+            )),
+            "inferencer 'score_events' tensor name 'not a field' is not a valid field"
         );
     }
 }

@@ -469,4 +469,21 @@ mod tests {
         assert!(!next.reserve_new_key(key("txn-1"), Timestamp::from_unix_nanos(3), MAX_TIME));
         assert!(next.reserve_new_key(key("txn-2"), Timestamp::from_unix_nanos(3), MAX_TIME));
     }
+
+    #[test]
+    fn deduplicator_key_program_requires_deduplicate_on_expressions() {
+        let Err(error) = super::compile_deduplicator_key_program(
+            &ModelName::parse("dedup_orders").assured("the identifier is well formed"),
+            &[],
+            &[],
+            std::sync::Arc::new(arrow_schema::Schema::empty()),
+            None,
+        ) else {
+            panic!("a deduplicator without DEDUPLICATE ON expressions must not compile");
+        };
+        assert_eq!(
+            error.current_context().to_string(),
+            "deduplicator 'dedup_orders' requires at least one DEDUPLICATE ON expression"
+        );
+    }
 }

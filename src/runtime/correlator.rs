@@ -1600,4 +1600,110 @@ mod tests {
             "relay batching must preserve the correlator's shared output allocation"
         );
     }
+
+    /// The message a failed operation reports to the processor that called it.
+    fn failure<T, C: error_stack::Context>(result: error_stack::Result<T, C>) -> String {
+        let Err(error) = result else {
+            panic!("the operation must fail");
+        };
+        error.current_context().to_string()
+    }
+
+    #[test]
+    fn correlator_compilation_rejects_missing_sides_and_setless_outputs() {
+        let schema = test_schema(&[("id", ParseAsType::U32)]);
+        let processor = named("join_profiles");
+        assert_eq!(
+            failure(compile_correlator_where_program(
+                &processor,
+                &expression("left.id = right.id"),
+                &[],
+                schema.arrow_schema(),
+                &[named("right_profiles")],
+                schema.arrow_schema(),
+                None,
+            )),
+            "correlator 'join_profiles' requires both LEFT and RIGHT inputs"
+        );
+
+        let output_relay = named("joined_profiles");
+        let where_only = construction("WHERE left.id = right.id");
+        let lookups = HashMap::default();
+        let materialized_streams = HashMap::default();
+        let setless = CorrelatorOutputCompileContext {
+            processor: &processor,
+            left_schema: schema.arrow_schema(),
+            left_sensitivity: VmSchemaSensitivity::default(),
+            right_schema: schema.arrow_schema(),
+            right_sensitivity: VmSchemaSensitivity::default(),
+            output_relay: &output_relay,
+            output_schema: schema.arrow_schema(),
+            output_sensitivity: VmSchemaSensitivity::default(),
+            construction: &where_only,
+            runtime: RuntimeVmCompileContext {
+                available_materialized_streams: &materialized_streams,
+                available_lookups: &lookups,
+                current_branching: &[],
+                current_branch_schema: None,
+                current_branch_sensitivity: None,
+                udfs: None,
+            },
+        };
+        assert_eq!(
+            failure(setless.compile()),
+            "correlator 'join_profiles' TO output 'joined_profiles' must contain SET assignments \
+             and may contain WHERE"
+        );
+    }
+
+    #[test]
+    fn correlator_batches_reject_empty_mixed_and_misaligned_matches() {
+        assert_eq!(
+            failure(CorrelatorMatchedBatch::from_correlations(&[], &[])),
+            "cannot batch zero correlator matches"
+        );
+
+        let now = Timestamp::now();
+        let pending = |tenant: &str| CorrelatorPendingMessage {
+            received_at: now,
+            message: RelayMessage {
+                key: string_branch_key("tenant", tenant),
+                record: test_runtime_row([("id".to_string(), RuntimeValue::U32(7))]),
+                acks: AckSet::empty(),
+            },
+            materialized_state: Arc::new(HashMap::default()),
+        };
+        assert_eq!(
+            failure(CorrelatorMatchedBatch::from_correlations(
+                &[(pending("acme"), pending("globex"))],
+                &[],
+            )),
+            r#"correlator match cannot combine branch '{"tenant":"acme"}' with branch '{"tenant":"globex"}'"#
+        );
+
+        let row = test_runtime_row([("id".to_string(), RuntimeValue::U32(1))]);
+        let one = RuntimeRecordBatch::from_rows(row.batch().schema(), std::iter::once(&row))
+            .expect("one row should form a batch");
+        let two = RuntimeRecordBatch::from_rows(row.batch().schema(), [&row, &row].into_iter())
+            .expect("two rows should form a batch");
+        assert_eq!(
+            failure(correlator_input_batch(&one, &two, &[], &[])),
+            "correlator input has 1 left rows, 2 right rows, and 0 materialized-state rows"
+        );
+
+        let matched = CorrelatorMatchedBatch {
+            carrier: Arc::new(one),
+            keys: Vec::new(),
+            metadata: vec![RuntimeRecordMetadata::test()],
+            materialized_state: Vec::new(),
+        };
+        assert_eq!(
+            failure(matched.source_message(1, AckSet::empty())),
+            "correlator output row 1 is outside 1 metadata rows"
+        );
+        assert_eq!(
+            failure(matched.source_message(0, AckSet::empty())),
+            "correlator output row 0 is outside 0 branch keys"
+        );
+    }
 }

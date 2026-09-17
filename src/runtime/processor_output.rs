@@ -941,3 +941,24 @@ async fn flush_processor_outputs(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use nervix_models::ParseAsType;
+
+    use super::*;
+
+    #[test]
+    fn pending_output_batches_reject_rows_keys_and_metadata_that_disagree() {
+        let batch = test_schema(&[("id", ParseAsType::U32)])
+            .batch_from_test_rows([[("id".to_string(), RuntimeValue::U32(7))]])
+            .expect("one test row should form a batch");
+        let Err(error) = pending_output_batches_by_key(0, &[0, 1], vec![None], batch, &[]) else {
+            panic!("rows, keys and metadata that disagree must not form pending batches");
+        };
+        assert_eq!(
+            error.current_context().to_string(),
+            "pending output has 2 input rows, 1 keys, 1 Arrow rows, and 0 metadata rows"
+        );
+    }
+}

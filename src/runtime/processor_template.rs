@@ -916,12 +916,90 @@ mod tests {
         let error = node
             .apply_node_template(incompatible)
             .expect_err("a keyspace change must not hot-refresh");
-        assert!(
-            matches!(
-                error.current_context(),
-                ProcessorTemplateError::DeduplicatorKeyspace
-            ),
-            "a keyspace change must report the changed keyspace, got {error:?}"
+        assert_eq!(
+            error.current_context().to_string(),
+            "dynamic deduplicator update changed its state keyspace"
+        );
+    }
+
+    #[test]
+    fn processor_template_refresh_rejects_other_targets_topologies_and_kinds() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let input = named::<RelayName>("events");
+        let template = RelayProcessorTemplate {
+            kind: ModelKind::Deduplicator,
+            processor: named("deduplicate_events"),
+            input_relays: vec![input.clone()],
+            input_collect_policies: [(
+                input.clone(),
+                RuntimeInputCollectPolicy {
+                    interval: Duration::from_secs(1),
+                    max_batch_size: Some(1024),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            error_policies: ErrorPolicies::handled_by_log(),
+            from_where: HashMap::default(),
+            filter_where: None,
+            materialized_state: Vec::new(),
+            operation: RelayProcessorOperationTemplate::Deduplicator {
+                output_routes: RelayProcessorOutputsTemplate {
+                    routes: vec![RelayProcessorOutputTemplate {
+                        output_relay: named("unique_events"),
+                        construction: nervix_models::RouteConstruction::default(),
+                        flush_policy: Some(RuntimeFlushPolicy::Immediate),
+                        message_error_policy: MessageErrorPolicy::Log,
+                    }],
+                },
+                deduplicate_on: vec![expression("input.event_id")],
+                max_time: Duration::from_secs(600),
+            },
+        };
+        let mut node = template
+            .instantiate(&runtime, &domain, &None)
+            .expect("deduplicator template must instantiate");
+        let refusal = |node: &mut RelayProcessorNode, desired: RelayProcessorTemplate| {
+            node.apply_node_template(desired)
+                .expect_err("an incompatible template must not hot-refresh")
+                .current_context()
+                .to_string()
+        };
+
+        let mut other_target = template.clone();
+        other_target.processor = named("other_events");
+        assert_eq!(
+            refusal(&mut node, other_target),
+            "processor template targets deduplicator 'other_events', not deduplicator \
+             'deduplicate_events'"
+        );
+
+        let mut other_input = template.clone();
+        other_input.input_relays = vec![named("other_events")];
+        assert_eq!(
+            refusal(&mut node, other_input),
+            "dynamic deduplicator update changed processor input topology"
+        );
+
+        let mut other_routes = template.clone();
+        if let RelayProcessorOperationTemplate::Deduplicator { output_routes, .. } =
+            &mut other_routes.operation
+        {
+            output_routes.routes.clear();
+        }
+        assert_eq!(
+            refusal(&mut node, other_routes),
+            "dynamic processor update changed its route topology"
+        );
+
+        let mut other_kind = template;
+        other_kind.operation = RelayProcessorOperationTemplate::Junction {
+            output_routes: RelayProcessorOutputsTemplate { routes: Vec::new() },
+        };
+        assert_eq!(
+            refusal(&mut node, other_kind),
+            "dynamic processor update changed its operation kind"
         );
     }
 }

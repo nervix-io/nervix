@@ -2476,4 +2476,306 @@ mod tests {
             Some(RuntimeValue::F64(OrderedFloat(35.0)))
         );
     }
+
+    /// The message a failed operation reports to the processor that called it.
+    fn failure<T, C: error_stack::Context>(result: error_stack::Result<T, C>) -> String {
+        let Err(error) = result else {
+            panic!("the operation must fail");
+        };
+        error.current_context().to_string()
+    }
+
+    fn empty_histogram(
+        delay: Duration,
+        delayed_removals: VecDeque<LinearHistogramDelayedRemoval>,
+    ) -> WindowAggregateAccumulator {
+        WindowAggregateAccumulator::LinearHistogram {
+            buckets: vec![0; 2],
+            total: 0,
+            min: 0.0,
+            max: 100.0,
+            width: 50.0,
+            delay,
+            delayed_removals,
+        }
+    }
+
+    #[test]
+    fn window_accumulators_reject_removals_they_never_admitted() {
+        let aggregate = window_aggregate("SET latest = LAST(input.latency)");
+        let demand = &aggregate.demands()[0];
+        let at = Timestamp::from_unix_nanos(10);
+        let value = Some(RuntimeValue::I64(15));
+
+        let mut sequence = WindowAggregateAccumulator::Sequence {
+            values: VecDeque::new(),
+        };
+        assert_eq!(
+            failure(sequence.remove(demand, at, at, 0, value.clone())),
+            "sequence accumulator is missing removed window entry"
+        );
+        let mut sorted = WindowAggregateAccumulator::SortedMap {
+            counts: BTreeMap::new(),
+        };
+        assert_eq!(
+            failure(sorted.remove(demand, at, at, 0, value.clone())),
+            "sorted accumulator is missing removed window value"
+        );
+        let mut histogram = empty_histogram(Duration::ZERO, VecDeque::new());
+        assert_eq!(
+            failure(histogram.remove(demand, at, at, 0, value)),
+            "linear histogram accumulator is missing removed value"
+        );
+
+        let removal = |bucket| {
+            VecDeque::from([LinearHistogramDelayedRemoval {
+                expires_at: at,
+                bucket,
+            }])
+        };
+        let mut out_of_range = empty_histogram(Duration::from_secs(1), removal(5));
+        assert_eq!(
+            failure(out_of_range.purge_expired(at)),
+            "linear histogram delayed removal bucket is out of range"
+        );
+        let mut never_admitted = empty_histogram(Duration::from_secs(1), removal(1));
+        assert_eq!(
+            failure(never_admitted.purge_expired(at)),
+            "linear histogram accumulator is missing delayed removed value"
+        );
+    }
+
+    #[test]
+    fn window_accumulators_reject_empty_windows_and_incompatible_functions() {
+        let sequence = WindowAggregateAccumulator::Sequence {
+            values: VecDeque::new(),
+        };
+        let sorted = WindowAggregateAccumulator::SortedMap {
+            counts: BTreeMap::new(),
+        };
+        assert_eq!(
+            failure(sequence.evaluate(WindowAggregateFunction::First, None)),
+            "FIRST requires a non-empty window"
+        );
+        assert_eq!(
+            failure(sequence.evaluate(WindowAggregateFunction::Last, None)),
+            "LAST requires a non-empty window"
+        );
+        assert_eq!(
+            failure(sorted.evaluate(WindowAggregateFunction::Max, None)),
+            "MAX requires a non-empty window"
+        );
+        assert_eq!(
+            failure(sorted.evaluate(WindowAggregateFunction::Min, None)),
+            "MIN requires a non-empty window"
+        );
+        let histogram = empty_histogram(Duration::ZERO, VecDeque::new());
+        assert_eq!(
+            failure(histogram.evaluate(WindowAggregateFunction::PercentileLinearHistogram, None)),
+            "PERCENTILE_LINEAR_HISTOGRAM requires a constant percentile"
+        );
+        let counter = WindowAggregateAccumulator::Counter { count: 0 };
+        assert_eq!(
+            failure(counter.evaluate(WindowAggregateFunction::First, None)),
+            "First aggregate is backed by an incompatible accumulator"
+        );
+    }
+
+    #[test]
+    fn linear_histogram_helpers_reject_values_they_cannot_place() {
+        assert_eq!(
+            failure(linear_histogram_bucket(f64::NAN, 0.0, 100.0, 50.0, 2)),
+            "PERCENTILE_LINEAR_HISTOGRAM requires finite numeric values"
+        );
+        assert_eq!(
+            failure(linear_histogram_bucket(5.0, 0.0, 100.0, 50.0, 0)),
+            "PERCENTILE_LINEAR_HISTOGRAM requires at least one bucket"
+        );
+        assert_eq!(
+            failure(percentile_from_linear_histogram(
+                &[0, 0],
+                0,
+                0.0,
+                100.0,
+                50.0,
+                50.0
+            )),
+            "PERCENTILE_LINEAR_HISTOGRAM requires a non-empty window"
+        );
+        assert_eq!(
+            failure(percentile_from_linear_histogram(
+                &[1, 0],
+                1,
+                0.0,
+                100.0,
+                50.0,
+                f64::NAN
+            )),
+            "PERCENTILE_LINEAR_HISTOGRAM percentile NaN has no rank in a window of 1 samples"
+        );
+        assert_eq!(
+            failure(percentile_from_linear_histogram(
+                &[0, 0],
+                2,
+                0.0,
+                100.0,
+                50.0,
+                50.0
+            )),
+            "PERCENTILE_LINEAR_HISTOGRAM histogram is empty"
+        );
+    }
+
+    #[test]
+    fn window_arithmetic_rejects_incompatible_runtime_values() {
+        assert_eq!(
+            failure(runtime_value_to_f64(&RuntimeValue::String(
+                "fast".to_string()
+            ))),
+            "expected numeric value, found STRING"
+        );
+        assert_eq!(
+            failure(sum_runtime_values(
+                RuntimeValue::I64(1),
+                RuntimeValue::F64(OrderedFloat(1.0))
+            )),
+            "SUM cannot combine I64 and F64"
+        );
+        assert_eq!(
+            failure(subtract_runtime_values(
+                RuntimeValue::I64(1),
+                RuntimeValue::F64(OrderedFloat(1.0))
+            )),
+            "SUM cannot remove F64 from I64"
+        );
+    }
+
+    #[test]
+    fn window_state_rejects_mismatched_inputs_and_snapshots() {
+        let aggregate = window_aggregate("SET count = COUNT(input.latency)");
+        let at = Timestamp::from_unix_nanos(10);
+        let message = || RelayMessage {
+            key: string_branch_key("tenant", "acme"),
+            record: test_runtime_row([("latency".to_string(), RuntimeValue::I64(10))]),
+            acks: AckSet::empty(),
+        };
+        let mut state = WindowProcessorState::new(&aggregate);
+        let rejected = state
+            .push_message(&aggregate, at, message(), Vec::new())
+            .expect_err("inputs that disagree with the accumulators must be rejected");
+        assert_eq!(
+            rejected.error.current_context().to_string(),
+            "window aggregate input count 0 does not match accumulator count 1"
+        );
+        assert_eq!(key_label(&rejected.message.key), r#"{"tenant":"acme"}"#);
+
+        state
+            .push_message(
+                &aggregate,
+                at,
+                message(),
+                window_inputs(&aggregate, RuntimeValue::I64(10)),
+            )
+            .expect("matching inputs should be admitted");
+        let input_schema = test_schema(&[("latency", ParseAsType::I64)]);
+        let mut snapshot = state.to_snapshot().expect("the window should encode");
+        let wider =
+            window_aggregate("SET count = COUNT(input.latency), total = SUM(input.latency)");
+        assert_eq!(
+            failure(WindowProcessorState::from_snapshot(
+                &wider,
+                input_schema.as_ref(),
+                &snapshot
+            )),
+            "window snapshot accumulator count 1 does not match aggregate demand count 2"
+        );
+
+        snapshot.entries[0].key = Some(Vec::new());
+        assert_eq!(
+            failure(WindowProcessorState::from_snapshot(
+                &aggregate,
+                input_schema.as_ref(),
+                &snapshot
+            )),
+            "failed to restore a window entry branch key: branch key must contain at least one \
+             field"
+        );
+    }
+
+    #[tokio::test]
+    async fn window_aggregate_reports_uninitialized_outputs_and_empty_windows() {
+        let now = Timestamp::from_unix_nanos(42);
+        let aggregate = window_aggregate("SET count = COUNT(input.latency)");
+        let output_schema =
+            test_schema(&[("count", ParseAsType::I64), ("extra", ParseAsType::I64)]);
+        let compiled =
+            compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
+        let state = WindowProcessorState::new(&aggregate);
+        assert_eq!(
+            failure(evaluate_window_aggregate(&compiled, &state, &output_schema, now).await),
+            "window aggregate did not initialize required output field 'extra'"
+        );
+
+        let first = window_aggregate("SET first_latency = FIRST(input.latency)");
+        let first_schema = test_schema(&[("first_latency", ParseAsType::I64)]);
+        let compiled_first =
+            compile_window_aggregate_for_test(&first, ParseAsType::I64, &first_schema);
+        let empty = WindowProcessorState::new(&first);
+        assert_eq!(
+            failure(evaluate_window_aggregate(&compiled_first, &empty, &first_schema, now).await),
+            "window aggregate VM execution failed"
+        );
+    }
+
+    #[test]
+    fn window_aggregate_compilation_reports_missing_schemas_and_targets() {
+        let input = named::<RelayName>("latencies");
+        let output = named::<RelayName>("summaries");
+        let input_schema = test_schema(&[("latency", ParseAsType::I64)]);
+        let aggregate = window_aggregate("SET count = COUNT(input.latency)");
+
+        let output_only =
+            HashMap::from_iter([(output.clone(), test_schema(&[("count", ParseAsType::I64)]))]);
+        assert_eq!(
+            failure(CompiledWindowAggregateProgram::compile(
+                &aggregate,
+                std::slice::from_ref(&input),
+                &output,
+                &output_only,
+                None,
+            )),
+            "window aggregate input relay 'latencies' has no runtime schema"
+        );
+
+        let unrelated_output = HashMap::from_iter([
+            (input.clone(), input_schema.clone()),
+            (output.clone(), test_schema(&[("total", ParseAsType::I64)])),
+        ]);
+        assert_eq!(
+            failure(CompiledWindowAggregateProgram::compile(
+                &aggregate,
+                std::slice::from_ref(&input),
+                &output,
+                &unrelated_output,
+                None,
+            )),
+            "window aggregate output schema is missing field 'count'"
+        );
+
+        let array = window_aggregate("SET count = [COUNT(input.latency), COUNT(input.latency)]");
+        let scalar_output = HashMap::from_iter([
+            (input.clone(), input_schema),
+            (output.clone(), test_schema(&[("count", ParseAsType::I64)])),
+        ]);
+        assert_eq!(
+            failure(CompiledWindowAggregateProgram::compile(
+                &array,
+                std::slice::from_ref(&input),
+                &output,
+                &scalar_output,
+                None,
+            )),
+            "window aggregate array cannot be assigned to Int64 field 'count'"
+        );
+    }
 }
