@@ -137,7 +137,7 @@ impl Runtime {
         if let RuntimeStateKind::Deduplicator
         | RuntimeStateKind::WasmProcessor
         | RuntimeStateKind::WindowProcessor
-        | RuntimeStateKind::BranchLru = placement.state
+        | RuntimeStateKind::BranchLru = placement.state.kind()
         {
             self.schedule_passive_state_replica_sync(placement, source.clone(), checkpoint.lsm);
         }
@@ -228,11 +228,14 @@ impl Runtime {
                 .await;
             match result {
                 Ok(Some(snapshot)) => {
-                    if let Err(error) = self.install_passive_state_replica_snapshot(
-                        &pending.source,
-                        &placement,
-                        snapshot,
-                    ) {
+                    if let Err(error) = self
+                        .install_passive_state_replica_snapshot(
+                            &pending.source,
+                            &placement,
+                            snapshot,
+                        )
+                        .await
+                    {
                         warn!(
                             domain = placement.domain.as_str(),
                             kind = placement.kind.as_str(),
@@ -289,7 +292,7 @@ impl Runtime {
         &self,
         placement: &RuntimeStatePlacement,
     ) -> Result<Option<u64>, Report<RuntimePersistenceError>> {
-        if placement.state == RuntimeStateKind::BranchLru
+        if placement.state.kind() == RuntimeStateKind::BranchLru
             && let Some(snapshot) = self.inner.replicated_branch_lru_snapshots.get(placement)
         {
             return Ok(Some(snapshot.lsm));
@@ -301,7 +304,7 @@ impl Runtime {
             return Ok(None);
         };
         let snapshot = store.latest_snapshot(placement)?;
-        if placement.state == RuntimeStateKind::BranchLru
+        if placement.state.kind() == RuntimeStateKind::BranchLru
             && let Some(snapshot) = snapshot.as_ref()
         {
             self.inner
@@ -311,7 +314,7 @@ impl Runtime {
         Ok(snapshot.map(|snapshot| snapshot.lsm))
     }
 
-    fn install_passive_state_replica_snapshot(
+    async fn install_passive_state_replica_snapshot(
         &self,
         source: &ClusterNodeName,
         placement: &RuntimeStatePlacement,
@@ -343,16 +346,22 @@ impl Runtime {
         {
             return Ok(());
         }
-        if let Some(store) = self.inner.state_store.as_ref()
-            && !store
-                .persist_replica_snapshot_if_newer(placement, &snapshot)
-                .map_err(|error| {
-                    RuntimeStateOperationError::persistence(error.current_context().clone())
-                })?
-        {
-            return Ok(());
-        }
-        if placement.state == RuntimeStateKind::BranchLru {
+        let snapshot = match self.inner.state_store.as_ref() {
+            Some(store) => {
+                let installed = store
+                    .persist_replica_snapshot_if_newer(placement, snapshot)
+                    .await
+                    .map_err(|error| {
+                        RuntimeStateOperationError::persistence(error.current_context().clone())
+                    })?;
+                let Some(installed) = installed else {
+                    return Ok(());
+                };
+                installed
+            }
+            None => snapshot,
+        };
+        if placement.state.kind() == RuntimeStateKind::BranchLru {
             self.install_replica_branch_lru_snapshot(placement, &snapshot)?;
         } else {
             match self
@@ -380,7 +389,7 @@ impl Runtime {
     ) -> RuntimeStateResult<bool> {
         let branch_lru = self.state_placement(
             &placement.domain,
-            RuntimeStateKind::BranchLru,
+            RuntimeState::BranchLru,
             placement.kind,
             placement.identifier.clone(),
             None,
@@ -776,7 +785,7 @@ impl Runtime {
         if Self::node_has_branch_lifecycle(entity.kind) {
             let branch_lru = self.state_placement(
                 domain,
-                RuntimeStateKind::BranchLru,
+                RuntimeState::BranchLru,
                 entity.kind,
                 entity.identifier.clone(),
                 None,
@@ -847,8 +856,8 @@ impl Runtime {
             checkpoints.push((placement.clone(), snapshot));
         }
         checkpoints.sort_by(|(left, _), (right, _)| {
-            u8::from(left.state)
-                .cmp(&u8::from(right.state))
+            u8::from(left.state.kind())
+                .cmp(&u8::from(right.state.kind()))
                 .then_with(|| {
                     left.branch_key
                         .as_ref()
@@ -857,7 +866,7 @@ impl Runtime {
                 })
         });
         for (placement, snapshot) in &checkpoints {
-            if placement.state == RuntimeStateKind::BranchLru {
+            if placement.state.kind() == RuntimeStateKind::BranchLru {
                 self.persist_branch_lru_snapshot(placement.clone(), snapshot.clone())
                     .map_err(|error| {
                         OwnershipHandoffError::persistence(error.current_context().clone())
@@ -888,7 +897,7 @@ impl Runtime {
         &self,
         placement: &RuntimeStatePlacement,
     ) -> OwnershipHandoffResult<PersistedRuntimeStateEntry> {
-        let payload = match placement.state {
+        let payload = match placement.state.kind() {
             RuntimeStateKind::BranchAggregated => {
                 encode_branch_aggregated_snapshot(&BranchAggregatedRuntimeStateSnapshot {
                     metrics: RuntimeMetricsSnapshot::default(),
@@ -973,7 +982,7 @@ impl Runtime {
         let branch_entries = if Self::node_has_branch_lifecycle(scheduled.kind()) {
             let placement = self.state_placement(
                 domain,
-                RuntimeStateKind::BranchLru,
+                RuntimeState::BranchLru,
                 scheduled.kind(),
                 scheduled.identifier.clone(),
                 None,
@@ -1036,13 +1045,18 @@ impl Runtime {
         {
             for (branch_key, _) in entries {
                 tokio::task::consume_budget().await;
-                let placement = self.state_placement(
-                    domain,
-                    state,
-                    scheduled.kind(),
-                    scheduled.identifier.clone(),
-                    branch_key,
-                );
+                let placement = self
+                    .branch_state_placement(
+                        domain,
+                        state,
+                        scheduled.kind(),
+                        scheduled.identifier.clone(),
+                        branch_key,
+                    )
+                    .change_context_lazy(|| OwnershipHandoffError::StatePlacement {
+                        kind: scheduled.kind(),
+                        identifier: scheduled.identifier.clone(),
+                    })?;
                 let recovered = self
                     .forced_recovery_checkpoint(&placement, &recovery_sources, deadline)
                     .await;
@@ -1062,8 +1076,8 @@ impl Runtime {
         self.prepare_ownership_handoff_wasm_guests(domain, &scheduled, &checkpoints)
             .await?;
         checkpoints.sort_by(|(left, _), (right, _)| {
-            u8::from(left.state)
-                .cmp(&u8::from(right.state))
+            u8::from(left.state.kind())
+                .cmp(&u8::from(right.state.kind()))
                 .then_with(|| {
                     left.branch_key
                         .as_ref()
@@ -1113,13 +1127,13 @@ impl Runtime {
 
     fn global_recovery_state_components(
         scheduled: &ScheduledNode,
-    ) -> Vec<(OwnershipStateComponent, RuntimeStateKind)> {
+    ) -> Vec<(OwnershipStateComponent, RuntimeState)> {
         let mut components = Vec::new();
         for component in scheduled.ownership_state_components() {
             let state = match component {
-                OwnershipStateComponent::BranchAggregated => RuntimeStateKind::BranchAggregated,
-                OwnershipStateComponent::KafkaOffsets => RuntimeStateKind::KafkaOffset,
-                OwnershipStateComponent::MaterializedRelay => RuntimeStateKind::MaterializedRelay,
+                OwnershipStateComponent::BranchAggregated => RuntimeState::BranchAggregated,
+                OwnershipStateComponent::KafkaOffsets => RuntimeState::KafkaOffset,
+                OwnershipStateComponent::MaterializedRelay => RuntimeState::MaterializedRelay,
                 OwnershipStateComponent::BranchLifecycle
                 | OwnershipStateComponent::Deduplicator
                 | OwnershipStateComponent::WasmProcessor
@@ -1164,7 +1178,7 @@ impl Runtime {
         &self,
         placement: &RuntimeStatePlacement,
     ) -> OwnershipHandoffResult<PersistedRuntimeStateEntry> {
-        match placement.state {
+        match placement.state.kind() {
             RuntimeStateKind::Deduplicator => {
                 ReplicatedDeduplicatorState::new(placement.clone(), None)
                     .map_err(OwnershipHandoffError::persistence)?
@@ -1378,7 +1392,7 @@ impl Runtime {
         });
         let placement = self.state_placement(
             domain,
-            RuntimeStateKind::BranchLru,
+            RuntimeState::BranchLru,
             entity.kind,
             entity.identifier.clone(),
             None,
@@ -1467,7 +1481,7 @@ impl Runtime {
         }
         let branch_lru = self.state_placement(
             domain,
-            RuntimeStateKind::BranchLru,
+            RuntimeState::BranchLru,
             node.kind(),
             node.identifier.clone(),
             None,
@@ -1493,13 +1507,19 @@ impl Runtime {
             for (branch_key, _) in decode_branch_lru_snapshot(&snapshot.payload)
                 .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?
             {
-                expected.insert(self.state_placement(
-                    domain,
-                    state_kind,
-                    node.kind(),
-                    node.identifier.clone(),
-                    branch_key,
-                ));
+                let placement = self
+                    .branch_state_placement(
+                        domain,
+                        state_kind,
+                        node.kind(),
+                        node.identifier.clone(),
+                        branch_key,
+                    )
+                    .change_context_lazy(|| OwnershipHandoffError::StatePlacement {
+                        kind: node.kind(),
+                        identifier: node.identifier.clone(),
+                    })?;
+                expected.insert(placement);
             }
         }
         Ok(expected)
@@ -1611,8 +1631,8 @@ impl Runtime {
         self.prepare_ownership_handoff_wasm_guests(domain, &scheduled, &decoded)
             .await?;
         decoded.sort_by(|(left, _), (right, _)| {
-            u8::from(left.state)
-                .cmp(&u8::from(right.state))
+            u8::from(left.state.kind())
+                .cmp(&u8::from(right.state.kind()))
                 .then_with(|| {
                     left.branch_key
                         .as_ref()
@@ -1731,117 +1751,12 @@ impl Runtime {
         Ok(())
     }
 
-    async fn prepare_ownership_handoff_wasm_guests(
-        &self,
-        domain: &DomainName,
-        scheduled: &ScheduledNode,
-        checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
-    ) -> OwnershipHandoffResult<()> {
-        let Some(processor) = scheduled.wasm_processor() else {
-            return Ok(());
-        };
-        let input_relay = processor.from.first().ok_or_else(|| {
-            OwnershipHandoffError::state(format!(
-                "wasm processor '{}' has no input relay while preparing ownership handoff",
-                processor.name.as_str()
-            ))
-        })?;
-        let (input_schema, output_schemas) = {
-            let execution = self.inner.executions.get(domain).ok_or_else(|| {
-                OwnershipHandoffError::state(format!(
-                    "domain '{}' has no execution while preparing wasm ownership handoff",
-                    domain.as_str()
-                ))
-            })?;
-            let input_schema = execution
-                .relay_schemas
-                .get(input_relay)
-                .cloned()
-                .ok_or_else(|| {
-                    OwnershipHandoffError::state(format!(
-                        "wasm processor '{}' input relay '{}' has no runtime schema",
-                        processor.name.as_str(),
-                        input_relay.as_str()
-                    ))
-                })?;
-            let output_schemas = processor
-                .output_routes
-                .outputs()
-                .map(|output| {
-                    let schema = execution.relay_schemas.get(&output.relay).cloned();
-                    let Some(schema) = schema else {
-                        return Err(OwnershipHandoffError::state(format!(
-                            "wasm processor '{}' output relay '{}' has no runtime schema",
-                            processor.name.as_str(),
-                            output.relay.as_str()
-                        )));
-                    };
-                    Ok((output.relay.clone(), schema))
-                })
-                .collect::<OwnershipHandoffResult<Vec<_>>>()?;
-            (input_schema, output_schemas)
-        };
-        let restore = || OwnershipHandoffError::WasmRestore {
-            processor: processor.name.clone().into(),
-        };
-        let compiled = self
-            .compile_wasm_processor_module(
-                domain,
-                &processor.name,
-                &processor.resource,
-                processor.resource_version,
-                &processor.file,
-            )
-            .await
-            .change_context_lazy(restore)?;
-        let domain_clock = self
-            .bind_domain_clock(domain)
-            .change_context_lazy(restore)?;
-        let pinned = ResourceId::new(
-            domain.clone(),
-            processor.resource.clone(),
-            processor.resource_version,
-        );
-        for (placement, snapshot) in checkpoints {
-            tokio::task::consume_budget().await;
-            if placement.state != RuntimeStateKind::WasmProcessor {
-                continue;
-            }
-            let init = WasmBranchInit {
-                domain_name: domain.as_str().to_string(),
-                domain_type: "runtime".to_string(),
-                branch_key: placement
-                    .branch_key
-                    .as_ref()
-                    .map(|key| key.as_str().as_bytes().to_vec()),
-                input_schema: input_schema.wasm_processor_schema(input_relay.as_str().to_string()),
-                output_schemas: output_schemas
-                    .iter()
-                    .map(|(relay, schema)| schema.wasm_processor_schema(relay.as_str().to_string()))
-                    .collect(),
-            };
-            let execution_now = domain_clock.snapshot().change_context_lazy(restore)?.now();
-            let module = WasmBranchModule {
-                processor: processor.name.clone().into(),
-                branch: placement.branch_key.clone(),
-                resource: pinned.clone(),
-                file: processor.file.clone(),
-            };
-            let saved = RestorableGuestState::of_snapshot(snapshot);
-            compiled
-                .instantiate_branch(module, processor.limits, init, execution_now, saved)
-                .await
-                .change_context_lazy(restore)?;
-        }
-        Ok(())
-    }
-
     fn validate_ownership_handoff_snapshot(
         &self,
         placement: &RuntimeStatePlacement,
         snapshot: &PersistedRuntimeStateEntry,
     ) -> OwnershipHandoffResult<()> {
-        match placement.state {
+        match placement.state.kind() {
             RuntimeStateKind::BranchAggregated => {
                 decode_branch_aggregated_snapshot(&snapshot.payload)
                     .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
@@ -1937,7 +1852,7 @@ impl Runtime {
                         snapshot: snapshot.clone(),
                     },
                 );
-            } else if placement.state == RuntimeStateKind::BranchLru {
+            } else if placement.state.kind() == RuntimeStateKind::BranchLru {
                 self.inner
                     .replicated_branch_lru_snapshots
                     .insert(placement.clone(), snapshot.clone());
@@ -2017,8 +1932,10 @@ impl Runtime {
             .prepared_forced_runtime_state_recoveries
             .get(&entity)
             .map(|prepared| prepared.clone());
+        let generations = node.wasm_state_generations();
         let checkpoints = if let Some(store) = self.inner.state_store.as_ref() {
-            let Some(checkpoints) = store.activate_forced_recovery(&recovery, authorization)?
+            let Some(checkpoints) =
+                store.activate_forced_recovery(&recovery, authorization, generations)?
             else {
                 self.inner
                     .prepared_forced_runtime_state_recoveries
@@ -2033,7 +1950,16 @@ impl Runtime {
                         && prepared.destination_incarnation == local_incarnation
                         && prepared.target_schedule_fingerprint == schedule_fingerprint =>
                 {
-                    prepared.checkpoints.clone()
+                    prepared
+                        .checkpoints
+                        .iter()
+                        .map(|(placement, snapshot)| {
+                            (
+                                placement.clone().published_in(generations),
+                                snapshot.clone(),
+                            )
+                        })
+                        .collect()
                 }
                 Some(_) if authorization.recreates_without_preparation() => Vec::new(),
                 Some(_) => {
@@ -2059,7 +1985,7 @@ impl Runtime {
                         snapshot: snapshot.clone(),
                     },
                 );
-            } else if placement.state == RuntimeStateKind::BranchLru {
+            } else if placement.state.kind() == RuntimeStateKind::BranchLru {
                 self.inner
                     .replicated_branch_lru_snapshots
                     .insert(placement.clone(), snapshot.clone());
@@ -2569,35 +2495,6 @@ impl Runtime {
         }
     }
 
-    pub(in crate::runtime) async fn wait_for_wasm_processor_replica_quorum(
-        &self,
-        state: &ReplicatedWasmProcessorState,
-        lsm: u64,
-    ) -> error_stack::Result<(), StateReplicationError> {
-        if state.required_replica_acks == 0 {
-            return Ok(());
-        }
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            tokio::task::consume_budget().await;
-            if state.replica_quorum_satisfied(lsm) {
-                return Ok(());
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return Err(Report::new(StateReplicationError::ReplicaQuorum {
-                    placement: state.placement.clone(),
-                    lsm,
-                    required_acks: state.required_replica_acks,
-                }));
-            }
-            tokio::select! {
-                _ = state.replication_notify.notified() => {}
-                _ = sleep_until(deadline) => {}
-            }
-        }
-    }
-
     pub(in crate::runtime) async fn persist_kafka_offset_snapshot(
         &self,
         state: &KafkaOffsetStatePersistence,
@@ -2661,27 +2558,6 @@ impl Runtime {
                 placement: state.placement().clone(),
             })?;
         self.persist_kafka_offset_snapshot(&state.persistence(), lsm, &payload)
-            .await
-    }
-
-    /// Persist the guest state a WASM processor branch saved and wait until its replicas hold it.
-    pub(in crate::runtime) async fn persist_wasm_processor_snapshot(
-        &self,
-        state: &ReplicatedWasmProcessorState,
-        saved: &WasmGuestState,
-    ) -> error_stack::Result<(), StateReplicationError> {
-        if let Some(store) = &self.inner.state_store {
-            store
-                .persist_latest_snapshot(&state.placement, saved.revision(), saved.bytes())
-                .map_err(Report::new)
-                .change_context(StateReplicationError::Persist {
-                    placement: state.placement.clone(),
-                    lsm: saved.revision(),
-                })?;
-            state.record_persisted(saved.revision());
-            self.notify_runtime_state_replicas(&state.placement, saved.revision());
-        }
-        self.wait_for_wasm_processor_replica_quorum(state, saved.revision())
             .await
     }
 
@@ -2902,36 +2778,6 @@ impl Runtime {
         Ok(state)
     }
 
-    pub(in crate::runtime) fn replicated_wasm_processor_state(
-        &self,
-        placement: RuntimeStatePlacement,
-        replica_nodes: Vec<ClusterNodeName>,
-        required_replica_acks: usize,
-    ) -> Result<Arc<ReplicatedWasmProcessorState>, RuntimePersistenceError> {
-        let transferred = self.take_transferred_runtime_state_snapshot(&placement);
-        if transferred.is_none()
-            && let Some(existing) = self.inner.replicated_wasm_processor_states.get(&placement)
-        {
-            return Ok(existing.clone());
-        }
-        let initial = match transferred {
-            Some(snapshot) => Some(snapshot),
-            None => self
-                .stored_runtime_state_snapshot(&placement)
-                .map_err(|error| error.current_context().clone())?,
-        };
-        let state = Arc::new(ReplicatedWasmProcessorState::new(
-            placement.clone(),
-            replica_nodes,
-            required_replica_acks,
-            initial,
-        )?);
-        self.inner
-            .replicated_wasm_processor_states
-            .insert(placement, state.clone());
-        Ok(state)
-    }
-
     pub(in crate::runtime) fn replicated_branch_aggregated_state(
         &self,
         placement: RuntimeStatePlacement,
@@ -2985,6 +2831,7 @@ impl Runtime {
 mod lifecycle;
 mod ownership_handoff_fingerprint;
 mod tasks;
+mod wasm_processor_state;
 
 #[cfg(test)]
 mod tests;

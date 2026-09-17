@@ -1114,6 +1114,157 @@ Feature: WASM processor runtime behavior
       | 3            | 0             |
       | 3            | 1             |
 
+  Scenario: WASM guest state reset by owner loss is not resurrected when the former owner returns
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then node "node-1" eventually observes a stable leader
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-1;
+      CORDON NODE node-3;
+      """
+    And these NSPL commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE wasm_counting_guest;
+      UPLOAD RESOURCE wasm_counting_guest VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA counted_input_event ( tenant STRING, sequence I32 );
+      CREATE SCHEMA counted_output_event ( tenant STRING OPTIONAL, note STRING OPTIONAL );
+      CREATE WIRE JSON SCHEMA counted_input_wire MODE STRICT ( tenant string, sequence integer );
+      CREATE CODEC counted_input_codec FROM WIRE JSON SCHEMA counted_input_wire TO SCHEMA counted_input_event;
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE RELAY counted_input_events SCHEMA counted_input_event BRANCHED BY by_tenant;
+      CREATE RELAY counted_events SCHEMA counted_output_event BRANCHED BY by_tenant;
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR counted_source
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING counted_input_codec
+        TO counted_input_events
+        INHERIT ALL
+        BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR counting_guest FROM counted_input_events
+        USING RESOURCE wasm_counting_guest VERSION 1
+        FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
+        BRANCHED BY by_tenant
+        TO counted_events
+        SET tenant = branch.tenant,
+            note = coalesce(note, "even")
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
+      START;
+      """
+    And these NSPL commands are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-1;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=wasm_processor name=counting_guest owner=node-2
+      """
+    And the last cluster status owner for scheduled "wasm_processor" "counting_guest" is saved as placeholder "former_owner"
+    When these NSPL commands are executed on node "node-1"
+      """
+      CREATE SUBSCRIPTION counted_events_subscription TO counted_events;
+      """
+    Then node "node-1" eventually accepts http traffic for host "http-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"acme","sequence":1}
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":1}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When node "node-2" is stopped
+    Then node "node-1" eventually observes a stable leader
+    And within "60s" node "node-1" eventually reports scheduled "wasm_processor" "counting_guest" owner different from placeholder "former_owner"
+    And the last command output contains
+      """
+      - domain={{domain}} kind=wasm_processor name=counting_guest owner=node-1
+      """
+    And the last command output contains
+      """
+      transition_from=node-2 state_recovery=reset
+      """
+    And the last cluster status owner for scheduled "wasm_processor" "counting_guest" is saved as placeholder "reset_owner"
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"acme","sequence":2}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":2}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"acme","sequence":3}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":3}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"acme"} | "tenant":"acme" | "note":"even"
+      key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
+      """
+    When node "node-2" is started
+    And these NSPL commands are executed on node "node-2"
+      """
+      CREATE SUBSCRIPTION counted_events_subscription TO counted_events;
+      """
+    And node "node-1" is stopped
+    Then node "node-2" eventually observes a stable leader
+    And within "60s" node "node-2" eventually reports scheduled "wasm_processor" "counting_guest" owner different from placeholder "reset_owner"
+    And the last command output contains
+      """
+      - domain={{domain}} kind=wasm_processor name=counting_guest owner=node-2
+      """
+    And the last command output contains
+      """
+      transition_from=node-1 state_recovery=reset
+      """
+    When http payload is posted to node "node-2" with host "http-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"acme","sequence":4}
+      """
+    And http payload is posted to node "node-2" with host "http-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":4}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When http payload is posted to node "node-2" with host "http-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"acme","sequence":5}
+      """
+    And http payload is posted to node "node-2" with host "http-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":5}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"acme"} | "tenant":"acme" | "note":"even"
+      key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
+      """
+
   Scenario Outline: WASM processor restarts each branch from its last saved guest state after a failed save and a guest error
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And the production sticky scheduler is configured

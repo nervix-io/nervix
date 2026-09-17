@@ -183,18 +183,20 @@ impl ReplicatedWasmProcessorState {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{DomainName, FieldName, ModelKind, ModelName};
+    use nervix_models::{DomainName, FieldName, ModelKind, ModelName, WasmStateGeneration};
 
     use super::*;
     use crate::{
-        runtime::{BranchKey, RuntimeStateKind},
+        runtime::{BranchKey, RuntimeState},
         runtime_schema::RuntimeValue,
     };
 
     fn placement() -> RuntimeStatePlacement {
         RuntimeStatePlacement {
             domain: DomainName::parse("test").expect("valid domain"),
-            state: RuntimeStateKind::WasmProcessor,
+            state: RuntimeState::WasmProcessor {
+                generation: WasmStateGeneration::FIRST,
+            },
             kind: ModelKind::WasmProcessor,
             identifier: ModelName::parse("filter").expect("valid identifier"),
             schema_fingerprint: [0; 32],

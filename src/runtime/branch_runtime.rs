@@ -296,7 +296,7 @@ impl BranchRuntime {
             };
             let placement = self.runtime.state_placement(
                 &self.domain,
-                RuntimeStateKind::MaterializedRelay,
+                RuntimeState::MaterializedRelay,
                 ModelKind::Relay,
                 relay,
                 self.key.clone(),
@@ -1985,7 +1985,7 @@ pub(super) fn branch_lru_placement(
 ) -> RuntimeStatePlacement {
     runtime.state_placement(
         domain,
-        RuntimeStateKind::BranchLru,
+        RuntimeState::BranchLru,
         template.source_kind,
         &template.source,
         None,

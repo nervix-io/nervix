@@ -29,7 +29,7 @@ impl Runtime {
         let events = RuntimeEvents::new();
         let (domain_status_changed, _) = watch::channel(0);
         let state_store = db
-            .map(RuntimeStateStore::from_database)
+            .map(|db| RuntimeStateStore::from_database(db, executor.clone()))
             .transpose()?
             .map(Arc::new);
         let prepared_runtime_state_handoffs = DashMap::default();
@@ -108,7 +108,7 @@ impl Runtime {
                 frozen_ownership_handoff_entities: Arc::new(DashMap::default()),
                 ownership_handoff_freeze_changed: Arc::new(Notify::new()),
                 active_domain_alters: Arc::new(DashMap::default()),
-                state_schema_fingerprints: DashMap::default(),
+                state_identities: DashMap::default(),
                 domain_graphs: DashMap::default(),
                 endpoint_bindings: DashMap::default(),
                 routed_endpoints: DashMap::default(),

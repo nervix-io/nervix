@@ -606,7 +606,7 @@ mod tests {
     use triomphe::Arc;
 
     use super::*;
-    use crate::runtime::{RuntimeStateKind, StateReplicationRoles};
+    use crate::runtime::{RuntimeState, StateReplicationRoles};
 
     #[tokio::test]
     async fn delayed_replica_snapshot_cannot_overwrite_promoted_state() {
@@ -756,7 +756,7 @@ mod tests {
         RuntimeStatePlacement {
             domain: DomainName::parse("default")
                 .assured("the test domain name satisfies the domain grammar"),
-            state: RuntimeStateKind::KafkaOffset,
+            state: RuntimeState::KafkaOffset,
             kind: ModelKind::Ingestor,
             identifier: ModelName::parse("source")
                 .assured("the test model name satisfies the model-name grammar"),

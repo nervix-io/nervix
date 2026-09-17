@@ -161,18 +161,32 @@ Feature: Client wire failure regressions
       | 1            |
       | 3            |
 
-  @client_wire_expected_failure @client_wire_stalled_commit
-  Scenario: A stalled commit cannot block expiry of another orphaned transaction
-    Given the transaction idle timeout is configured as "250ms"
+  @client_wire_stalled_commit
+  Scenario: A stalled commit cannot block expiry, another domain, or tombstone cleanup
+    Given the transaction idle timeout is configured as "1s"
+    And the transaction tombstone retention is configured as "1s"
     And a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
+      CREATE UNPACED DOMAIN runnable_{{test_id}};
       """
     Given client "blocked" is connected to node "node-1"
     And client "expiring" is connected to node "node-1"
+    And client "cleanup" is connected to node "node-1"
+    And client "runnable" is connected to node "node-1"
     And client "observer" is connected to node "node-1"
+    When client "runnable" selects domain "runnable_{{test_id}}"
+    And client "cleanup" executes these NSPL commands
+      """
+      BEGIN;
+      """
+    Then client "cleanup" transaction id is saved as placeholder "cleanup_transaction"
+    When client "cleanup" executes these NSPL commands
+      """
+      REVERT;
+      """
     When client "blocked" executes these NSPL commands
       """
       BEGIN;
@@ -192,13 +206,27 @@ Feature: Client wire failure regressions
       COMMIT;
       """
     Then the transaction commit pause on node "node-1" after 1 statement is reached
-    Given the leader node forgets its transaction session bindings
     When client "observer" executes these NSPL commands
       """
       SHOW TRANSACTIONS;
       """
-    And physical time passes for "1s"
+    When client "runnable" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE SCHEMA runnable_record (value STRING);
+      COMMIT;
+      SHOW CREATE SCHEMA runnable_record;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA runnable_record (
+        value STRING
+      );
+      """
     Then transaction "{{expiring_transaction}}" eventually has state "EXPIRED"
+    And transaction "{{cleanup_transaction}}" is eventually removed
+    When the transaction commit pause on node "node-1" after 1 statement is released
+    Then the background NSPL execution succeeds
 
   @client_wire_expected_failure @client_wire_stale_relocation
   Scenario: A relocation planned before a schedule revision cannot overwrite that revision
