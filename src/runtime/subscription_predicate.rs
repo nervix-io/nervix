@@ -45,10 +45,9 @@ pub(crate) enum SubscriptionPredicateExecutionError {
     InputProjection { reason: String },
     #[error("predicate VM execution failed: {reason}")]
     VmExecution { reason: String },
-    #[error("predicate evaluation error {code}: {message} at {span}")]
+    #[error("predicate evaluation error {}: {reason} at {span}", reason.code().as_str())]
     Evaluation {
-        code: &'static str,
-        message: String,
+        reason: nervix_vm::SideErrorReason,
         span: nervix_vm::program::Span,
     },
 }
@@ -133,8 +132,7 @@ pub(crate) async fn execute_subscription_predicate_on_record(
     if let Some(error) = result.errors().first() {
         return Err(Report::new(
             SubscriptionPredicateExecutionError::Evaluation {
-                code: error.code.as_str(),
-                message: error.message.clone(),
+                reason: error.reason.clone(),
                 span: error.span,
             },
         ));

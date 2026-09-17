@@ -302,8 +302,8 @@ pub(super) async fn execute_generator_program_on_context(
                 execution_now,
                 format!(
                     "GENERATOR side error {}: {} at {}",
-                    side_error.code.as_str(),
-                    side_error.message,
+                    side_error.code().as_str(),
+                    side_error.reason,
                     side_error.span
                 ),
                 side_error.span,

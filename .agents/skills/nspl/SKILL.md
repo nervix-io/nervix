@@ -159,6 +159,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   from 0. Outside window processors, `count`, `sum`, `first`, `last`, and `nth` take one `ARRAY` or
   `VEC` value; inside a window processor route, `count`, `sum`, `first`, and `last` are window
   aggregates over retained input rows.
+- Treat arithmetic and numeric functions as checked at the operands' exact type: integer overflow,
+  a zero divisor, and a float or math result that is NaN or infinite fail only that message with a
+  per-message error. Give a route whose operands can reach those values an `ON MESSAGE ERROR`
+  policy, and cast to a wider type before arithmetic that can exceed the narrower one.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Declare datetime encoding explicitly when required.
 - For every JAQ-backed codec, use `WITH JAQ TRANSFORMATIONS` and declare `ON INGESTION`,

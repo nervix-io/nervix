@@ -18,24 +18,19 @@ use arch_into::ArchInto as _;
 use arrow_arith::{
     aggregate::sum_checked as arrow_sum_checked,
     boolean::{and_kleene, is_null, not, or_kleene},
-    numeric::{add, div, mul, neg, rem, sub},
 };
 use arrow_array::{
     Array, ArrayRef, ArrowNumericType, BooleanArray, Datum, FixedSizeListArray, Float32Array,
     Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, ListArray, PrimitiveArray,
     StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
-    builder::{
-        BooleanBuilder, Float32Builder, Float64Builder, Int8Builder, Int16Builder, Int32Builder,
-        Int64Builder, PrimitiveBuilder, StringBuilder, UInt8Builder, UInt16Builder, UInt32Builder,
-        UInt64Builder,
-    },
+    builder::{BooleanBuilder, Int64Builder, PrimitiveBuilder, StringBuilder},
     new_null_array,
     types::{
         ArrowPrimitiveType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type,
         UInt8Type, UInt16Type, UInt32Type, UInt64Type,
     },
 };
-use arrow_buffer::{NullBuffer, NullBufferBuilder, OffsetBuffer};
+use arrow_buffer::{NullBuffer, OffsetBuffer};
 use arrow_cast::{
     cast::{CastOptions, cast_with_options},
     display::FormatOptions,
@@ -54,7 +49,6 @@ use arrow_string::like::{
 use chrono::DateTime;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_approx_into::ApproxInto as _;
 use nervix_models::Timestamp;
 use regex::Regex;
 use tokio::task;
@@ -62,10 +56,17 @@ use uuid::{NoContext, Timestamp as UuidTimestamp, Uuid};
 
 use crate::{
     batch::{TypedArray, TypedBatch},
-    error::{ErrorCode, RowErrorMask, RowErrors, RuntimeError, SideError},
+    error::{
+        FloatOperation, IntegerOperation, RowErrorMask, RowErrors, RuntimeError, SideError,
+        SideErrorReason,
+    },
     ir::{
         CompiledPredicate, CompiledProgram, InputBinding, Instruction, InstructionKind,
         RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace, RegisterType, ScalarValue,
+    },
+    numeric::{
+        self, Arithmetic, BinaryMathFunction, CheckedFloat, CheckedInteger, Comparison, F64Operand,
+        MathFunction, Rounding, SignedInteger,
     },
     program::{BinaryOp, FunctionName, Span, UnaryOp},
     semantics::{BuiltinLowering, CaseMapping},
@@ -623,45 +624,35 @@ impl Instruction {
                 fallback,
             } => {
                 let input = registers.read_array(*input)?;
-                if row_errors.is_error_free() {
+                let Some(failed) = row_errors.rows_failed_within(self.span) else {
                     return registers.set_array(*dst, input);
-                }
-                let has_assignment_error = row_errors.iter().flatten().any(|error| {
-                    error.span.start >= self.span.start && error.span.end <= self.span.end
-                });
-                if !has_assignment_error {
-                    return registers.set_array(*dst, input);
-                }
-                let failed = row_errors
-                    .iter()
-                    .map(|errors| {
-                        errors.iter().any(|error| {
-                            error.span.start >= self.span.start && error.span.end <= self.span.end
-                        })
-                    })
-                    .collect::<BooleanArray>();
-                if failed.true_count() == 0 {
-                    return registers.set_array(*dst, input);
-                }
-                let success = not(&failed)
-                    .map_err(|error| arrow_kernel_error("assignment mask failed", error))?;
-                let previous = match fallback {
-                    crate::ir::AssignmentFallback::Uninitialized(data_type) => {
-                        TypedArray::uninitialized(data_type.clone(), row_count)
+                };
+                match fallback {
+                    // The destination held no value before this assignment, so a failed row is
+                    // null. Marking those rows null reuses the input's values instead of copying
+                    // them into a new array.
+                    crate::ir::AssignmentFallback::Uninitialized(_) => {
+                        let failed = BooleanArray::new(failed, None);
+                        let output = nullif(input.as_array(), &failed).map_err(|error| {
+                            arrow_kernel_error("assignment fallback failed", error)
+                        })?;
+                        registers.set_array(*dst, array_ref_to_typed_array(output)?)
                     }
                     crate::ir::AssignmentFallback::Register(previous) => {
-                        registers.read_array(*previous)?
+                        let success = BooleanArray::new(!&failed, None);
+                        let previous = registers.read_array(*previous)?.into_array_ref();
+                        let input = input.into_array_ref();
+                        let input = input.as_ref();
+                        let previous = previous.as_ref();
+                        let success_input: &dyn Datum = &input;
+                        let success_previous: &dyn Datum = &previous;
+                        let output =
+                            zip(&success, success_input, success_previous).map_err(|error| {
+                                arrow_kernel_error("assignment fallback failed", error)
+                            })?;
+                        registers.set_array(*dst, array_ref_to_typed_array(output)?)
                     }
-                };
-                let input = input.into_array_ref();
-                let previous = previous.into_array_ref();
-                let input = input.as_ref();
-                let previous = previous.as_ref();
-                let success_input: &dyn Datum = &input;
-                let success_previous: &dyn Datum = &previous;
-                let output = zip(&success, success_input, success_previous)
-                    .map_err(|error| arrow_kernel_error("assignment fallback failed", error))?;
-                registers.set_array(*dst, array_ref_to_typed_array(output)?)
+                }
             }
             InstructionKind::Literal { dst, value } => {
                 write_literal(registers, *dst, value, row_count)
@@ -792,30 +783,30 @@ impl Instruction {
     ) -> Result<TypedArray, RuntimeError> {
         match op {
             UnaryOp::Neg => match input.ty {
-                RegisterType::Int8 => Ok(TypedArray::Int8(execute_neg_i8(
+                RegisterType::Int8 => Ok(TypedArray::Int8(execute_integer_negation(
                     registers.int8(input)?,
                     row_errors,
                     self.span,
                 ))),
-                RegisterType::Int16 => Ok(TypedArray::Int16(execute_neg_i16(
+                RegisterType::Int16 => Ok(TypedArray::Int16(execute_integer_negation(
                     registers.int16(input)?,
                     row_errors,
                     self.span,
                 ))),
-                RegisterType::Int32 => Ok(TypedArray::Int32(execute_neg_i32(
+                RegisterType::Int32 => Ok(TypedArray::Int32(execute_integer_negation(
                     registers.int32(input)?,
                     row_errors,
                     self.span,
                 ))),
-                RegisterType::Int64 => Ok(TypedArray::Int64(execute_neg_i64(
+                RegisterType::Int64 => Ok(TypedArray::Int64(execute_integer_negation(
                     registers.int64(input)?,
                     row_errors,
                     self.span,
                 ))),
-                RegisterType::Float32 => Ok(TypedArray::Float32(execute_neg_f32(
+                RegisterType::Float32 => Ok(TypedArray::Float32(numeric::float_negation(
                     registers.float32(input)?,
                 ))),
-                RegisterType::Float64 => Ok(TypedArray::Float64(execute_neg_f64(
+                RegisterType::Float64 => Ok(TypedArray::Float64(numeric::float_negation(
                     registers.float64(input)?,
                 ))),
                 _ => Err(RuntimeError::InvalidRegisterType {
@@ -835,92 +826,204 @@ impl Instruction {
         op: BinaryOp,
         row_errors: &mut RowErrors,
     ) -> Result<TypedArray, RuntimeError> {
-        match left.ty {
-            RegisterType::UInt8 => execute_binary_u8(
+        let operator = NumericBinary::of(op);
+        match (left.ty, operator) {
+            (RegisterType::UInt8, Some(operator)) => Ok(execute_integer_binary(
                 registers.uint8(left)?,
                 registers.uint8(right)?,
-                op,
+                operator,
                 row_errors,
                 self.span,
-            ),
-            RegisterType::Int8 => execute_binary_i8(
+            )),
+            (RegisterType::Int8, Some(operator)) => Ok(execute_integer_binary(
                 registers.int8(left)?,
                 registers.int8(right)?,
-                op,
+                operator,
                 row_errors,
                 self.span,
-            ),
-            RegisterType::UInt16 => execute_binary_u16(
+            )),
+            (RegisterType::UInt16, Some(operator)) => Ok(execute_integer_binary(
                 registers.uint16(left)?,
                 registers.uint16(right)?,
-                op,
+                operator,
                 row_errors,
                 self.span,
-            ),
-            RegisterType::Int16 => execute_binary_i16(
+            )),
+            (RegisterType::Int16, Some(operator)) => Ok(execute_integer_binary(
                 registers.int16(left)?,
                 registers.int16(right)?,
-                op,
+                operator,
                 row_errors,
                 self.span,
-            ),
-            RegisterType::UInt32 => execute_binary_u32(
+            )),
+            (RegisterType::UInt32, Some(operator)) => Ok(execute_integer_binary(
                 registers.uint32(left)?,
                 registers.uint32(right)?,
-                op,
+                operator,
                 row_errors,
                 self.span,
-            ),
-            RegisterType::Int32 => execute_binary_i32(
+            )),
+            (RegisterType::Int32, Some(operator)) => Ok(execute_integer_binary(
                 registers.int32(left)?,
                 registers.int32(right)?,
-                op,
+                operator,
                 row_errors,
                 self.span,
-            ),
-            RegisterType::UInt64 => execute_binary_u64(
+            )),
+            (RegisterType::UInt64, Some(operator)) => Ok(execute_integer_binary(
                 registers.uint64(left)?,
                 registers.uint64(right)?,
-                op,
+                operator,
                 row_errors,
                 self.span,
-            ),
-            RegisterType::Int64 => execute_binary_i64(
+            )),
+            (RegisterType::Int64, Some(operator)) => Ok(execute_integer_binary(
                 registers.int64(left)?,
                 registers.int64(right)?,
-                op,
+                operator,
                 row_errors,
                 self.span,
-            ),
-            RegisterType::Float32 => execute_binary_f32(
+            )),
+            (RegisterType::Float32, Some(operator)) => Ok(execute_float_binary(
                 registers.float32(left)?,
                 registers.float32(right)?,
-                op,
+                operator,
                 row_errors,
                 self.span,
-            ),
-            RegisterType::Float64 => execute_binary_f64(
+            )),
+            (RegisterType::Float64, Some(operator)) => Ok(execute_float_binary(
                 registers.float64(left)?,
                 registers.float64(right)?,
-                op,
+                operator,
                 row_errors,
                 self.span,
-            ),
-            RegisterType::Boolean => {
+            )),
+            (
+                RegisterType::UInt8
+                | RegisterType::Int8
+                | RegisterType::UInt16
+                | RegisterType::Int16
+                | RegisterType::UInt32
+                | RegisterType::Int32
+                | RegisterType::UInt64
+                | RegisterType::Int64
+                | RegisterType::Float32
+                | RegisterType::Float64,
+                None,
+            ) => Err(RuntimeError::InvalidRegisterType {
+                reg: left,
+                expected: "BooleanArray",
+            }),
+            (RegisterType::Boolean, _) => {
                 execute_binary_bool(registers.boolean(left)?, registers.boolean(right)?, op)
             }
-            RegisterType::Utf8 => {
+            (RegisterType::Utf8, _) => {
                 execute_compare_utf8(registers.utf8(left)?, registers.utf8(right)?, op)
             }
-            RegisterType::Datetime => {
+            (RegisterType::Datetime, _) => {
                 execute_compare_datetime(registers.datetime(left)?, registers.datetime(right)?, op)
             }
-            RegisterType::Generic => Err(RuntimeError::InvalidRegisterType {
+            (RegisterType::Generic, _) => Err(RuntimeError::InvalidRegisterType {
                 reg: left,
                 expected: "scalar array",
             }),
         }
     }
+}
+
+/// How a binary operator applies to numeric operands.
+#[derive(Debug, Clone, Copy)]
+enum NumericBinary {
+    Arithmetic(Arithmetic),
+    Comparison(Comparison),
+}
+
+impl NumericBinary {
+    /// The numeric form of `op`, or `None` for a logical operator, which applies to booleans only.
+    fn of(op: BinaryOp) -> Option<Self> {
+        match op {
+            BinaryOp::Add => Some(Self::Arithmetic(Arithmetic::Add)),
+            BinaryOp::Sub => Some(Self::Arithmetic(Arithmetic::Sub)),
+            BinaryOp::Mul => Some(Self::Arithmetic(Arithmetic::Mul)),
+            BinaryOp::Div => Some(Self::Arithmetic(Arithmetic::Div)),
+            BinaryOp::Rem => Some(Self::Arithmetic(Arithmetic::Rem)),
+            BinaryOp::Eq => Some(Self::Comparison(Comparison::Eq)),
+            BinaryOp::NotEq => Some(Self::Comparison(Comparison::NotEq)),
+            BinaryOp::Lt => Some(Self::Comparison(Comparison::Lt)),
+            BinaryOp::LtEq => Some(Self::Comparison(Comparison::LtEq)),
+            BinaryOp::Gt => Some(Self::Comparison(Comparison::Gt)),
+            BinaryOp::GtEq => Some(Self::Comparison(Comparison::GtEq)),
+            BinaryOp::And | BinaryOp::Or => None,
+        }
+    }
+}
+
+fn execute_integer_binary<T>(
+    left: &PrimitiveArray<T>,
+    right: &PrimitiveArray<T>,
+    operator: NumericBinary,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> TypedArray
+where
+    T: ArrowPrimitiveType,
+    T::Native: CheckedInteger,
+    TypedArray: From<PrimitiveArray<T>>,
+{
+    match operator {
+        NumericBinary::Arithmetic(arithmetic) => {
+            let checked = arithmetic.evaluate_integers(left, right);
+            row_errors.push_failures(checked.failed.lanes(), span, |row| {
+                arithmetic.integer_failure(right.value(row))
+            });
+            TypedArray::from(checked.column)
+        }
+        NumericBinary::Comparison(comparison) => {
+            TypedArray::Boolean(comparison.evaluate(left, right))
+        }
+    }
+}
+
+fn execute_float_binary<T>(
+    left: &PrimitiveArray<T>,
+    right: &PrimitiveArray<T>,
+    operator: NumericBinary,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> TypedArray
+where
+    T: ArrowPrimitiveType,
+    T::Native: CheckedFloat,
+    TypedArray: From<PrimitiveArray<T>>,
+{
+    match operator {
+        NumericBinary::Arithmetic(arithmetic) => {
+            let checked = arithmetic.evaluate_floats(left, right);
+            row_errors.push_failures(checked.failed.lanes(), span, |_| {
+                SideErrorReason::NonFiniteResult(FloatOperation::Arithmetic)
+            });
+            TypedArray::from(checked.column)
+        }
+        NumericBinary::Comparison(comparison) => {
+            TypedArray::Boolean(comparison.evaluate(left, right))
+        }
+    }
+}
+
+fn execute_integer_negation<T>(
+    input: &PrimitiveArray<T>,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> PrimitiveArray<T>
+where
+    T: ArrowPrimitiveType,
+    T::Native: SignedInteger,
+{
+    let checked = numeric::integer_negation(input);
+    row_errors.push_failures(checked.failed.lanes(), span, |_| {
+        SideErrorReason::IntegerOverflow(IntegerOperation::Negation)
+    });
+    checked.column
 }
 
 fn arrow_kernel_error(context: &str, error: ArrowError) -> RuntimeError {
@@ -964,80 +1067,6 @@ macro_rules! define_array_ref_to_typed_array {
 }
 
 with_typed_registers!(define_array_ref_to_typed_array);
-
-fn try_execute_numeric_kernel(
-    left: &dyn Array,
-    right: &dyn Array,
-    op: BinaryOp,
-) -> Option<ArrayRef> {
-    let left: &dyn Datum = &left;
-    let right: &dyn Datum = &right;
-    match op {
-        BinaryOp::Add => add(left, right).ok(),
-        BinaryOp::Sub => sub(left, right).ok(),
-        BinaryOp::Mul => mul(left, right).ok(),
-        BinaryOp::Div => div(left, right).ok(),
-        BinaryOp::Rem => rem(left, right).ok(),
-        BinaryOp::Eq
-        | BinaryOp::NotEq
-        | BinaryOp::Gt
-        | BinaryOp::Lt
-        | BinaryOp::GtEq
-        | BinaryOp::LtEq
-        | BinaryOp::And
-        | BinaryOp::Or => None,
-    }
-}
-
-fn try_execute_neg_kernel(input: &dyn Array) -> Option<ArrayRef> {
-    neg(input).ok()
-}
-
-fn sanitize_float32_non_finite(
-    input: &Float32Array,
-    row_errors: &mut RowErrors,
-    span: Span,
-    message: &str,
-) -> Float32Array {
-    let mut builder = Float32Builder::new();
-    for row in 0..input.len() {
-        if input.is_null(row) {
-            builder.append_null();
-            continue;
-        }
-        let value = input.value(row);
-        if value.is_finite() {
-            builder.append_value(value);
-        } else {
-            builder.append_null();
-            push_error(row_errors, row, ErrorCode::InvalidArgument, message, span);
-        }
-    }
-    builder.finish()
-}
-
-fn sanitize_float64_non_finite(
-    input: &Float64Array,
-    row_errors: &mut RowErrors,
-    span: Span,
-    message: &str,
-) -> Float64Array {
-    let mut builder = Float64Builder::new();
-    for row in 0..input.len() {
-        if input.is_null(row) {
-            builder.append_null();
-            continue;
-        }
-        let value = input.value(row);
-        if value.is_finite() {
-            builder.append_value(value);
-        } else {
-            builder.append_null();
-            push_error(row_errors, row, ErrorCode::InvalidArgument, message, span);
-        }
-    }
-    builder.finish()
-}
 
 fn execute_coalesce_arrow(inputs: &[TypedArray]) -> Result<TypedArray, RuntimeError> {
     let mut result = inputs
@@ -1115,321 +1144,10 @@ fn write_null_literal(
     registers.set_array(dst, typed)
 }
 
-fn execute_neg_i64(input: &Int64Array, row_errors: &mut RowErrors, span: Span) -> Int64Array {
-    if let Some(output) = try_execute_neg_kernel(input) {
-        let TypedArray::Int64(output) = array_ref_to_typed_array(output).verified(
-            "the kernel returns an array of the operand's own type, which this mapping covers",
-        ) else {
-            unreachable!("int64 neg kernel must produce Int64Array");
-        };
-        return output;
-    }
-    let mut builder = Int64Builder::new();
-    for row in 0..input.len() {
-        if input.is_null(row) {
-            builder.append_null();
-            continue;
-        }
-        match input.value(row).checked_neg() {
-            Some(value) => builder.append_value(value),
-            None => {
-                builder.append_null();
-                push_error(
-                    row_errors,
-                    row,
-                    ErrorCode::Overflow,
-                    "integer negation overflowed",
-                    span,
-                );
-            }
-        }
-    }
-    builder.finish()
-}
-
-fn execute_neg_f64(input: &Float64Array) -> Float64Array {
-    let output = try_execute_neg_kernel(input).verified(
-        "the kernel returns an array of the operand's own type, which this mapping covers",
-    );
-    let TypedArray::Float64(output) = array_ref_to_typed_array(output).verified(
-        "the kernel returns an array of the operand's own type, which this mapping covers",
-    ) else {
-        unreachable!("float64 neg kernel must produce Float64Array");
-    };
-    output
-}
-
-macro_rules! define_checked_neg {
-    ($(($fn_name:ident, $array:ty, $builder:ty, $prim:ty, $typed_variant:ident));+ $(;)?) => {
-        $(
-            fn $fn_name(
-                input: &$array,
-                row_errors: &mut RowErrors,
-                span: Span,
-            ) -> $array {
-                if let Some(output) = try_execute_neg_kernel(input) {
-                    let TypedArray::$typed_variant(output) = array_ref_to_typed_array(output)
-                        .verified("the kernel returns an array of the operand's own type, which this mapping covers")
-                    else {
-                        unreachable!("integer neg kernel must produce matching integer array");
-                    };
-                    return output;
-                }
-                let mut builder = <$builder>::new();
-                for row in 0..input.len() {
-                    if input.is_null(row) {
-                        builder.append_null();
-                        continue;
-                    }
-                    match input.value(row).checked_neg() {
-                        Some(value) => builder.append_value(value),
-                        None => {
-                            builder.append_null();
-                            push_error(
-                                row_errors,
-                                row,
-                                ErrorCode::Overflow,
-                                "integer negation overflowed",
-                                span,
-                            );
-                        }
-                    }
-                }
-                builder.finish()
-            }
-        )+
-    };
-}
-
-define_checked_neg!(
-    (execute_neg_i8, Int8Array, Int8Builder, i8, Int8);
-    (execute_neg_i16, Int16Array, Int16Builder, i16, Int16);
-    (execute_neg_i32, Int32Array, Int32Builder, i32, Int32)
-);
-
-fn execute_neg_f32(input: &Float32Array) -> Float32Array {
-    let output = try_execute_neg_kernel(input).verified(
-        "the kernel returns an array of the operand's own type, which this mapping covers",
-    );
-    let TypedArray::Float32(output) = array_ref_to_typed_array(output).verified(
-        "the kernel returns an array of the operand's own type, which this mapping covers",
-    ) else {
-        unreachable!("float32 neg kernel must produce Float32Array");
-    };
-    output
-}
-
 fn execute_not(input: &BooleanArray) -> BooleanArray {
     not(input).assured(
         "arrow's not kernel is defined for BooleanArray, and this signature accepts nothing else",
     )
-}
-
-macro_rules! define_integer_binary {
-    ($(($fn_name:ident, $array:ty, $builder:ty, $prim:ty, $typed_variant:ident, $reg_ty:ident));+ $(;)?) => {
-        $(
-            fn $fn_name(
-                left: &$array,
-                right: &$array,
-                op: BinaryOp,
-                row_errors: &mut RowErrors,
-                span: Span,
-            ) -> Result<TypedArray, RuntimeError> {
-                match op {
-                    BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
-                        if let Some(output) = try_execute_numeric_kernel(left, right, op) {
-                            let typed = array_ref_to_typed_array(output)
-                                .verified("the kernel returns an array of the operand's own type, which this mapping covers");
-                            return Ok(typed);
-                        }
-                        let mut builder = <$builder>::new();
-                        for row in 0..left.len() {
-                            if left.is_null(row) || right.is_null(row) {
-                                builder.append_null();
-                                continue;
-                            }
-                            let lhs = left.value(row);
-                            let rhs = right.value(row);
-                            let value = match op {
-                                BinaryOp::Add => lhs
-                                    .checked_add(rhs)
-                                    .ok_or((ErrorCode::Overflow, "integer addition overflowed")),
-                                BinaryOp::Sub => lhs
-                                    .checked_sub(rhs)
-                                    .ok_or((ErrorCode::Overflow, "integer subtraction overflowed")),
-                                BinaryOp::Mul => lhs
-                                    .checked_mul(rhs)
-                                    .ok_or((ErrorCode::Overflow, "integer multiplication overflowed")),
-                                BinaryOp::Div => {
-                                    if rhs == 0 {
-                                        Err((ErrorCode::DivisionByZero, "integer division by zero"))
-                                    } else {
-                                        lhs.checked_div(rhs)
-                                            .ok_or((ErrorCode::Overflow, "integer division overflowed"))
-                                    }
-                                }
-                                BinaryOp::Rem => {
-                                    if rhs == 0 {
-                                        Err((ErrorCode::DivisionByZero, "integer remainder by zero"))
-                                    } else {
-                                        lhs.checked_rem(rhs)
-                                            .ok_or((ErrorCode::Overflow, "integer remainder overflowed"))
-                                    }
-                                }
-                                _ => unreachable!(),
-                            };
-                            match value {
-                                Ok(value) => builder.append_value(value),
-                                Err((code, message)) => {
-                                    builder.append_null();
-                                    push_error(row_errors, row, code, message, span);
-                                }
-                            }
-                        }
-                        Ok(TypedArray::$typed_variant(builder.finish()))
-                    }
-                    BinaryOp::Eq
-                    | BinaryOp::NotEq
-                    | BinaryOp::Gt
-                    | BinaryOp::Lt
-                    | BinaryOp::GtEq
-                    | BinaryOp::LtEq => Ok(TypedArray::Boolean(compare_with_arrow_ord(
-                        left, right, op, "numeric",
-                    )?)),
-                    BinaryOp::And | BinaryOp::Or => Err(RuntimeError::InvalidRegisterType {
-                        reg: RegisterRef::new(RegisterSpace::Temp, RegisterType::$reg_ty, 0),
-                        expected: "BooleanArray",
-                    }),
-                }
-            }
-        )+
-    };
-}
-
-define_integer_binary!(
-    (execute_binary_u8, UInt8Array, UInt8Builder, u8, UInt8, UInt8);
-    (execute_binary_i8, Int8Array, Int8Builder, i8, Int8, Int8);
-    (execute_binary_u16, UInt16Array, UInt16Builder, u16, UInt16, UInt16);
-    (execute_binary_i16, Int16Array, Int16Builder, i16, Int16, Int16);
-    (execute_binary_u32, UInt32Array, UInt32Builder, u32, UInt32, UInt32);
-    (execute_binary_i32, Int32Array, Int32Builder, i32, Int32, Int32);
-    (execute_binary_u64, UInt64Array, UInt64Builder, u64, UInt64, UInt64);
-    (execute_binary_i64, Int64Array, Int64Builder, i64, Int64, Int64)
-);
-
-macro_rules! execute_float_arithmetic {
-    ($left:expr, $right:expr, $array:ty, $typed_variant:ident, $row_errors:expr, $span:expr, $op:expr) => {{
-        // Reuse the input validity and build values once. A new validity buffer is only needed
-        // on the exceptional path where a valid input row produces a non-finite result.
-        let input_nulls = NullBuffer::union($left.nulls(), $right.nulls());
-        let mut values = Vec::with_capacity($left.len());
-        let mut failure_nulls = None;
-        for (row, (left, right)) in $left.values().iter().zip($right.values()).enumerate() {
-            let value = $op(*left, *right);
-            if !value.is_finite() && input_nulls.as_ref().is_none_or(|nulls| nulls.is_valid(row)) {
-                let output_nulls = failure_nulls.get_or_insert_with(|| {
-                    let mut output_nulls = NullBufferBuilder::new($left.len());
-                    if let Some(input_nulls) = &input_nulls {
-                        output_nulls.append_buffer(input_nulls);
-                    } else {
-                        output_nulls.append_n_non_nulls($left.len());
-                    }
-                    output_nulls
-                });
-                output_nulls.set_bit(row, false);
-                push_error(
-                    $row_errors,
-                    row,
-                    ErrorCode::InvalidArgument,
-                    "floating-point operation produced a non-finite result",
-                    $span,
-                );
-            }
-            values.push(value);
-        }
-        let output_nulls = match failure_nulls {
-            Some(mut output_nulls) => output_nulls.finish(),
-            None => input_nulls,
-        };
-        Ok(TypedArray::$typed_variant(<$array>::new(
-            values.into(),
-            output_nulls,
-        )))
-    }};
-}
-
-macro_rules! define_float_binary {
-    ($(($fn_name:ident, $array:ty, $typed_variant:ident, $reg_ty:ident));+ $(;)?) => {
-        $(
-            fn $fn_name(
-                left: &$array,
-                right: &$array,
-                op: BinaryOp,
-                row_errors: &mut RowErrors,
-                span: Span,
-            ) -> Result<TypedArray, RuntimeError> {
-                match op {
-                    BinaryOp::Add => execute_float_arithmetic!(
-                        left, right, $array, $typed_variant, row_errors, span, |lhs, rhs| lhs + rhs
-                    ),
-                    BinaryOp::Sub => execute_float_arithmetic!(
-                        left, right, $array, $typed_variant, row_errors, span, |lhs, rhs| lhs - rhs
-                    ),
-                    BinaryOp::Mul => execute_float_arithmetic!(
-                        left, right, $array, $typed_variant, row_errors, span, |lhs, rhs| lhs * rhs
-                    ),
-                    BinaryOp::Div => execute_float_arithmetic!(
-                        left, right, $array, $typed_variant, row_errors, span, |lhs, rhs| lhs / rhs
-                    ),
-                    BinaryOp::Rem => execute_float_arithmetic!(
-                        left, right, $array, $typed_variant, row_errors, span, |lhs, rhs| lhs % rhs
-                    ),
-                    BinaryOp::Eq
-                    | BinaryOp::NotEq
-                    | BinaryOp::Gt
-                    | BinaryOp::Lt
-                    | BinaryOp::GtEq
-                    | BinaryOp::LtEq => {
-                        Ok(TypedArray::Boolean(compare_float_columns(left, right, op)))
-                    }
-                    BinaryOp::And | BinaryOp::Or => Err(RuntimeError::InvalidRegisterType {
-                        reg: RegisterRef::new(RegisterSpace::Temp, RegisterType::$reg_ty, 0),
-                        expected: "BooleanArray",
-                    }),
-                }
-            }
-        )+
-    };
-}
-
-define_float_binary!(
-    (execute_binary_f32, Float32Array, Float32, Float32);
-    (execute_binary_f64, Float64Array, Float64, Float64)
-);
-
-/// Compares two float columns row by row with IEEE 754 semantics: NaN is unequal to every value
-/// including itself, every ordering comparison against NaN is false, and `0.0` equals `-0.0`. The
-/// arrow comparison kernels order floats by the IEEE 754 total order instead, which makes NaN equal
-/// to itself and greater than every other value and separates `0.0` from `-0.0`, so neither a float
-/// comparison nor a function that decides float equality uses them.
-fn compare_float_columns<T>(
-    left: &PrimitiveArray<T>,
-    right: &PrimitiveArray<T>,
-    op: BinaryOp,
-) -> BooleanArray
-where
-    T: ArrowPrimitiveType,
-    T::Native: PartialOrd,
-{
-    let mut builder = BooleanBuilder::with_capacity(left.len());
-    for row in 0..left.len() {
-        if left.is_null(row) || right.is_null(row) {
-            builder.append_null();
-        } else {
-            builder.append_value(compare_floats(left.value(row), right.value(row), op));
-        }
-    }
-    builder.finish()
 }
 
 fn execute_binary_bool(
@@ -1520,10 +1238,10 @@ fn compare_with_arrow_ord(
 fn execute_nullif(left: &TypedArray, right: &TypedArray) -> Result<TypedArray, RuntimeError> {
     let predicate = match (left, right) {
         (TypedArray::Float32(left), TypedArray::Float32(right)) => {
-            compare_float_columns(left, right, BinaryOp::Eq)
+            Comparison::Eq.evaluate(left, right)
         }
         (TypedArray::Float64(left), TypedArray::Float64(right)) => {
-            compare_float_columns(left, right, BinaryOp::Eq)
+            Comparison::Eq.evaluate(left, right)
         }
         _ => {
             let left = left.as_array();
@@ -1590,16 +1308,10 @@ fn execute_builtin(
         BuiltinLowering::IsNull => Ok(TypedArray::Boolean(execute_is_null_typed(&values[0]))),
         BuiltinLowering::NullIf => execute_nullif(&values[0], &values[1]),
         BuiltinLowering::Abs => execute_abs_typed(&values[0], row_errors, span),
-        BuiltinLowering::Acos => {
-            execute_unary_math_f64(&values[0], row_errors, span, "acos", |v| v.acos())
-        }
-        BuiltinLowering::Asin => {
-            execute_unary_math_f64(&values[0], row_errors, span, "asin", |v| v.asin())
-        }
-        BuiltinLowering::Atan => {
-            execute_unary_math_f64(&values[0], row_errors, span, "atan", |v| v.atan())
-        }
-        BuiltinLowering::Ceil => execute_ceil(&values[0], row_errors, span),
+        BuiltinLowering::Acos => execute_math(&values[0], MathFunction::Acos, row_errors, span),
+        BuiltinLowering::Asin => execute_math(&values[0], MathFunction::Asin, row_errors, span),
+        BuiltinLowering::Atan => execute_math(&values[0], MathFunction::Atan, row_errors, span),
+        BuiltinLowering::Ceil => execute_rounding(&values[0], Rounding::Ceil, row_errors, span),
         BuiltinLowering::Concat => Ok(TypedArray::Utf8(execute_concat(&values)?)),
         BuiltinLowering::Sum => execute_list_sum(&values[0], row_errors, span),
         BuiltinLowering::First => execute_list_item(&values[0], ListItem::First, None),
@@ -1610,9 +1322,7 @@ fn execute_builtin(
             as_utf8(&values[0])?,
             as_utf8(&values[1])?,
         ))),
-        BuiltinLowering::Cos => {
-            execute_unary_math_f64(&values[0], row_errors, span, "cos", |v| v.cos())
-        }
+        BuiltinLowering::Cos => execute_math(&values[0], MathFunction::Cos, row_errors, span),
         BuiltinLowering::StartsWith => Ok(TypedArray::Boolean(execute_starts_with(
             as_utf8(&values[0])?,
             as_utf8(&values[1])?,
@@ -1621,18 +1331,14 @@ fn execute_builtin(
             as_utf8(&values[0])?,
             as_utf8(&values[1])?,
         ))),
-        BuiltinLowering::Exp => {
-            execute_unary_math_f64(&values[0], row_errors, span, "exp", |v| v.exp())
-        }
-        BuiltinLowering::Floor => execute_floor(&values[0], row_errors, span),
+        BuiltinLowering::Exp => execute_math(&values[0], MathFunction::Exp, row_errors, span),
+        BuiltinLowering::Floor => execute_rounding(&values[0], Rounding::Floor, row_errors, span),
         BuiltinLowering::Initcap => Ok(TypedArray::Utf8(execute_initcap(as_utf8(&values[0])?))),
         BuiltinLowering::Left => Ok(TypedArray::Utf8(execute_left(
             as_utf8(&values[0])?,
             &values[1],
         )?)),
-        BuiltinLowering::Ln => {
-            execute_unary_math_f64(&values[0], row_errors, span, "ln", |v| v.ln())
-        }
+        BuiltinLowering::Ln => execute_math(&values[0], MathFunction::Ln, row_errors, span),
         BuiltinLowering::Log => execute_log(&values, row_errors, span),
         BuiltinLowering::Lpad => Ok(TypedArray::Utf8(execute_lpad(
             as_utf8(&values[0])?,
@@ -1640,7 +1346,13 @@ fn execute_builtin(
             as_utf8(&values[2])?,
         )?)),
         BuiltinLowering::Md5 => Ok(TypedArray::Utf8(execute_md5(as_utf8(&values[0])?))),
-        BuiltinLowering::Pow => execute_pow(&values[0], &values[1], row_errors, span),
+        BuiltinLowering::Pow => execute_binary_math(
+            &values[0],
+            &values[1],
+            BinaryMathFunction::Pow,
+            row_errors,
+            span,
+        ),
         BuiltinLowering::RegexpLike => Ok(TypedArray::Boolean(execute_regexp_like(
             as_utf8(&values[0])?,
             as_utf8(&values[1])?,
@@ -1674,7 +1386,7 @@ fn execute_builtin(
             as_utf8(&values[0])?,
             &values[1],
         )?)),
-        BuiltinLowering::Round => execute_round(&values[0], row_errors, span),
+        BuiltinLowering::Round => execute_rounding(&values[0], Rounding::Round, row_errors, span),
         BuiltinLowering::Rpad => Ok(TypedArray::Utf8(execute_rpad(
             as_utf8(&values[0])?,
             &values[1],
@@ -1685,9 +1397,7 @@ fn execute_builtin(
             as_utf8(&values[1])?,
             &values[2],
         )?)),
-        BuiltinLowering::Sqrt => {
-            execute_unary_math_f64(&values[0], row_errors, span, "sqrt", |v| v.sqrt())
-        }
+        BuiltinLowering::Sqrt => execute_math(&values[0], MathFunction::Sqrt, row_errors, span),
         BuiltinLowering::Strpos => Ok(TypedArray::Int64(execute_strpos(
             as_utf8(&values[0])?,
             as_utf8(&values[1])?,
@@ -1697,9 +1407,7 @@ fn execute_builtin(
             &values[1],
             values.get(2),
         )?)),
-        BuiltinLowering::Tan => {
-            execute_unary_math_f64(&values[0], row_errors, span, "tan", |v| v.tan())
-        }
+        BuiltinLowering::Tan => execute_math(&values[0], MathFunction::Tan, row_errors, span),
         BuiltinLowering::ToHex => Ok(TypedArray::Utf8(execute_to_hex(&values[0])?)),
         BuiltinLowering::Translate => Ok(TypedArray::Utf8(execute_translate(
             as_utf8(&values[0])?,
@@ -1851,24 +1559,24 @@ where
                     builder.append_value(total);
                 } else {
                     builder.append_null();
-                    push_error(
-                        row_errors,
+                    row_errors.push(
                         row,
-                        ErrorCode::InvalidArgument,
-                        "floating-point sum produced a non-finite result",
-                        span,
+                        SideError {
+                            reason: SideErrorReason::NonFiniteResult(FloatOperation::Sum),
+                            span,
+                        },
                     );
                 }
             }
             Ok(None) => builder.append_null(),
             Err(ArrowError::ArithmeticOverflow(_)) => {
                 builder.append_null();
-                push_error(
-                    row_errors,
+                row_errors.push(
                     row,
-                    ErrorCode::Overflow,
-                    "integer sum overflowed",
-                    span,
+                    SideError {
+                        reason: SideErrorReason::IntegerOverflow(IntegerOperation::Sum),
+                        span,
+                    },
                 );
             }
             Err(error) => return Err(arrow_kernel_error("list sum kernel failed", error)),
@@ -2161,128 +1869,6 @@ fn execute_length(input: &StringArray) -> Int64Array {
     Int64Array::new(lengths.into(), input.nulls().cloned())
 }
 
-macro_rules! define_identity_abs {
-    ($(($fn_name:ident, $array:ty, $builder:ty));+ $(;)?) => {
-        $(
-            fn $fn_name(input: &$array) -> $array {
-                let mut builder = <$builder>::new();
-                for row in 0..input.len() {
-                    if input.is_null(row) {
-                        builder.append_null();
-                    } else {
-                        builder.append_value(input.value(row));
-                    }
-                }
-                builder.finish()
-            }
-        )+
-    };
-}
-
-define_identity_abs!(
-    (execute_abs_u8, UInt8Array, UInt8Builder);
-    (execute_abs_u16, UInt16Array, UInt16Builder);
-    (execute_abs_u32, UInt32Array, UInt32Builder);
-    (execute_abs_u64, UInt64Array, UInt64Builder)
-);
-
-macro_rules! define_checked_abs {
-    ($(($fn_name:ident, $array:ty, $builder:ty));+ $(;)?) => {
-        $(
-            fn $fn_name(input: &$array, row_errors: &mut RowErrors, span: Span) -> $array {
-                let mut builder = <$builder>::new();
-                for row in 0..input.len() {
-                    if input.is_null(row) {
-                        builder.append_null();
-                        continue;
-                    }
-                    match input.value(row).checked_abs() {
-                        Some(value) => builder.append_value(value),
-                        None => {
-                            builder.append_null();
-                            push_error(
-                                row_errors,
-                                row,
-                                ErrorCode::Overflow,
-                                "integer absolute value overflowed",
-                                span,
-                            );
-                        }
-                    }
-                }
-                builder.finish()
-            }
-        )+
-    };
-}
-
-define_checked_abs!(
-    (execute_abs_i8, Int8Array, Int8Builder);
-    (execute_abs_i16, Int16Array, Int16Builder);
-    (execute_abs_i32, Int32Array, Int32Builder);
-    (execute_abs_i64, Int64Array, Int64Builder)
-);
-
-fn execute_abs_f32(input: &Float32Array, row_errors: &mut RowErrors, span: Span) -> Float32Array {
-    let zero = Float32Array::new_scalar(0.0);
-    let input_datum: &dyn Datum = input;
-    let zero_datum: &dyn Datum = &zero;
-    let negative = lt(input_datum, zero_datum).assured(
-        "arrow's neg kernel is defined for every float array, and this signature accepts nothing \
-         else",
-    );
-    let negated = try_execute_neg_kernel(input).assured(
-        "arrow's neg kernel is defined for every float array, and this signature accepts nothing \
-         else",
-    );
-    let negated = negated.as_ref();
-    let negated_datum: &dyn Datum = &negated;
-    let zipped = zip(&negative, negated_datum, input_datum).verified(
-        "the kernel returns an array of the operand's own type, which this mapping covers",
-    );
-    let TypedArray::Float32(output) = array_ref_to_typed_array(zipped).verified(
-        "the kernel returns an array of the operand's own type, which this mapping covers",
-    ) else {
-        unreachable!("float32 abs kernel must produce Float32Array");
-    };
-    sanitize_float32_non_finite(
-        &output,
-        row_errors,
-        span,
-        "floating-point absolute value produced a non-finite result",
-    )
-}
-
-fn execute_abs_f64(input: &Float64Array, row_errors: &mut RowErrors, span: Span) -> Float64Array {
-    let zero = Float64Array::new_scalar(0.0);
-    let input_datum: &dyn Datum = input;
-    let zero_datum: &dyn Datum = &zero;
-    let negative = lt(input_datum, zero_datum).assured(
-        "arrow's neg kernel is defined for every float array, and this signature accepts nothing \
-         else",
-    );
-    let negated = try_execute_neg_kernel(input).assured(
-        "arrow's neg kernel is defined for every float array, and this signature accepts nothing \
-         else",
-    );
-    let negated = negated.as_ref();
-    let negated_datum: &dyn Datum = &negated;
-    let zipped = zip(&negative, negated_datum, input_datum).verified(
-        "the kernel returns an array of the operand's own type, which this mapping covers",
-    );
-    let TypedArray::Float64(output) = array_ref_to_typed_array(zipped).verified(
-        "the kernel returns an array of the operand's own type, which this mapping covers",
-    ) else {
-        unreachable!("float64 abs kernel must produce Float64Array");
-    };
-    sanitize_float64_non_finite(
-        &output,
-        row_errors,
-        span,
-        "floating-point absolute value produced a non-finite result",
-    )
-}
-
 fn execute_contains(string: &StringArray, substring: &StringArray) -> BooleanArray {
     string_contains(string, substring)
         .assured("this kernel is defined for Utf8 arrays, and this signature accepts nothing else")
@@ -2399,18 +1985,27 @@ fn execute_abs_typed(
     span: Span,
 ) -> Result<TypedArray, RuntimeError> {
     match input {
-        TypedArray::UInt8(array) => Ok(TypedArray::UInt8(execute_abs_u8(array))),
-        TypedArray::Int8(array) => Ok(TypedArray::Int8(execute_abs_i8(array, row_errors, span))),
-        TypedArray::UInt16(array) => Ok(TypedArray::UInt16(execute_abs_u16(array))),
-        TypedArray::Int16(array) => Ok(TypedArray::Int16(execute_abs_i16(array, row_errors, span))),
-        TypedArray::UInt32(array) => Ok(TypedArray::UInt32(execute_abs_u32(array))),
-        TypedArray::Int32(array) => Ok(TypedArray::Int32(execute_abs_i32(array, row_errors, span))),
-        TypedArray::UInt64(array) => Ok(TypedArray::UInt64(execute_abs_u64(array))),
-        TypedArray::Int64(array) => Ok(TypedArray::Int64(execute_abs_i64(array, row_errors, span))),
-        TypedArray::Float32(array) => Ok(TypedArray::Float32(execute_abs_f32(
+        // An unsigned integer is its own absolute value.
+        TypedArray::UInt8(_)
+        | TypedArray::UInt16(_)
+        | TypedArray::UInt32(_)
+        | TypedArray::UInt64(_) => Ok(input.clone()),
+        TypedArray::Int8(array) => Ok(TypedArray::Int8(execute_integer_absolute_value(
             array, row_errors, span,
         ))),
-        TypedArray::Float64(array) => Ok(TypedArray::Float64(execute_abs_f64(
+        TypedArray::Int16(array) => Ok(TypedArray::Int16(execute_integer_absolute_value(
+            array, row_errors, span,
+        ))),
+        TypedArray::Int32(array) => Ok(TypedArray::Int32(execute_integer_absolute_value(
+            array, row_errors, span,
+        ))),
+        TypedArray::Int64(array) => Ok(TypedArray::Int64(execute_integer_absolute_value(
+            array, row_errors, span,
+        ))),
+        TypedArray::Float32(array) => Ok(TypedArray::Float32(execute_float_absolute_value(
+            array, row_errors, span,
+        ))),
+        TypedArray::Float64(array) => Ok(TypedArray::Float64(execute_float_absolute_value(
             array, row_errors, span,
         ))),
         TypedArray::Boolean(_)
@@ -2423,289 +2018,128 @@ fn execute_abs_typed(
     }
 }
 
-fn execute_unary_math_f64(
-    input: &TypedArray,
+fn execute_integer_absolute_value<T>(
+    input: &PrimitiveArray<T>,
     row_errors: &mut RowErrors,
     span: Span,
-    function: &str,
-    op: impl Fn(f64) -> f64,
+) -> PrimitiveArray<T>
+where
+    T: ArrowPrimitiveType,
+    T::Native: SignedInteger,
+{
+    let checked = numeric::integer_absolute_value(input);
+    row_errors.push_failures(checked.failed.lanes(), span, |_| {
+        SideErrorReason::IntegerOverflow(IntegerOperation::AbsoluteValue)
+    });
+    checked.column
+}
+
+fn execute_float_absolute_value<T>(
+    input: &PrimitiveArray<T>,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> PrimitiveArray<T>
+where
+    T: ArrowPrimitiveType,
+    T::Native: CheckedFloat,
+{
+    let checked = numeric::float_absolute_value(input);
+    row_errors.push_failures(checked.failed.lanes(), span, |_| {
+        SideErrorReason::NonFiniteResult(FloatOperation::AbsoluteValue)
+    });
+    checked.column
+}
+
+fn execute_math(
+    input: &TypedArray,
+    function: MathFunction,
+    row_errors: &mut RowErrors,
+    span: Span,
 ) -> Result<TypedArray, RuntimeError> {
-    let error_message = format!("{function} produced a non-finite result");
-    macro_rules! execute {
-        ($array:expr, $convert:expr) => {
-            execute_unary_math_primitive($array, row_errors, span, &error_message, $convert, &op)
-        };
-    }
-    match input {
-        TypedArray::UInt8(array) => execute!(array, f64::from),
-        TypedArray::Int8(array) => execute!(array, f64::from),
-        TypedArray::UInt16(array) => execute!(array, f64::from),
-        TypedArray::Int16(array) => execute!(array, f64::from),
-        TypedArray::UInt32(array) => execute!(array, f64::from),
-        TypedArray::Int32(array) => execute!(array, f64::from),
-        TypedArray::UInt64(array) => execute!(array, |value| value.approx_into()),
-        TypedArray::Int64(array) => execute!(array, |value| value.approx_into()),
-        TypedArray::Float32(array) => execute!(array, f64::from),
-        TypedArray::Float64(array) => execute!(array, |value| value),
-        TypedArray::Boolean(_)
-        | TypedArray::Utf8(_)
-        | TypedArray::Datetime(_)
-        | TypedArray::Generic(_)
-        | TypedArray::Uninitialized { .. } => Err(RuntimeError::InvalidBatch {
+    let Some(operand) = F64Operand::from_typed(input) else {
+        return Err(RuntimeError::InvalidBatch {
             message: format!(
                 "numeric builtin requires numeric input, found {:?}",
                 input.data_type()
             ),
+        });
+    };
+    let checked = function.evaluate(&operand);
+    row_errors.push_failures(checked.failed.lanes(), span, |_| function.failure());
+    Ok(TypedArray::Float64(checked.column))
+}
+
+fn execute_binary_math(
+    left: &TypedArray,
+    right: &TypedArray,
+    function: BinaryMathFunction,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> Result<TypedArray, RuntimeError> {
+    let (Some(left_operand), Some(right_operand)) =
+        (F64Operand::from_typed(left), F64Operand::from_typed(right))
+    else {
+        return Err(RuntimeError::InvalidBatch {
+            message: format!(
+                "numeric builtin requires numeric inputs, found {:?} and {:?}",
+                left.data_type(),
+                right.data_type()
+            ),
+        });
+    };
+    let checked = function.evaluate(&left_operand, &right_operand);
+    row_errors.push_failures(checked.failed.lanes(), span, |_| function.failure());
+    Ok(TypedArray::Float64(checked.column))
+}
+
+fn execute_rounding(
+    input: &TypedArray,
+    rounding: Rounding,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> Result<TypedArray, RuntimeError> {
+    match input {
+        // An integer is already integral, so every rounding returns it unchanged.
+        TypedArray::UInt8(_)
+        | TypedArray::Int8(_)
+        | TypedArray::UInt16(_)
+        | TypedArray::Int16(_)
+        | TypedArray::UInt32(_)
+        | TypedArray::Int32(_)
+        | TypedArray::UInt64(_)
+        | TypedArray::Int64(_) => Ok(input.clone()),
+        TypedArray::Float32(array) => Ok(TypedArray::Float32(execute_float_rounding(
+            array, rounding, row_errors, span,
+        ))),
+        TypedArray::Float64(array) => Ok(TypedArray::Float64(execute_float_rounding(
+            array, rounding, row_errors, span,
+        ))),
+        TypedArray::Boolean(_)
+        | TypedArray::Utf8(_)
+        | TypedArray::Datetime(_)
+        | TypedArray::Generic(_)
+        | TypedArray::Uninitialized { .. } => Err(RuntimeError::InvalidBatch {
+            message: format!(
+                "rounding builtin requires numeric input, found {:?}",
+                input.data_type()
+            ),
         }),
     }
 }
 
-fn execute_unary_math_primitive<T: ArrowPrimitiveType>(
+fn execute_float_rounding<T>(
     input: &PrimitiveArray<T>,
+    rounding: Rounding,
     row_errors: &mut RowErrors,
     span: Span,
-    error_message: &str,
-    value_as_f64: impl Fn(T::Native) -> f64,
-    op: &impl Fn(f64) -> f64,
-) -> Result<TypedArray, RuntimeError> {
-    let mut builder = Float64Builder::with_capacity(input.len());
-    for row in 0..input.len() {
-        if input.is_null(row) {
-            builder.append_null();
-            continue;
-        }
-        let value = value_as_f64(input.value(row));
-        let output = op(value);
-        if output.is_finite() {
-            builder.append_value(output);
-        } else {
-            builder.append_null();
-            push_error(
-                row_errors,
-                row,
-                ErrorCode::InvalidArgument,
-                error_message,
-                span,
-            );
-        }
-    }
-    Ok(TypedArray::Float64(builder.finish()))
-}
-
-fn execute_ceil(
-    input: &TypedArray,
-    row_errors: &mut RowErrors,
-    span: Span,
-) -> Result<TypedArray, RuntimeError> {
-    match input {
-        TypedArray::UInt8(_)
-        | TypedArray::Int8(_)
-        | TypedArray::UInt16(_)
-        | TypedArray::Int16(_)
-        | TypedArray::UInt32(_)
-        | TypedArray::Int32(_)
-        | TypedArray::UInt64(_)
-        | TypedArray::Int64(_) => Ok(input.clone()),
-        TypedArray::Float32(array) => {
-            let mut builder = Float32Builder::new();
-            for row in 0..array.len() {
-                if array.is_null(row) {
-                    builder.append_null();
-                    continue;
-                }
-                let value = array.value(row).ceil();
-                if value.is_finite() {
-                    builder.append_value(value);
-                } else {
-                    builder.append_null();
-                    push_error(
-                        row_errors,
-                        row,
-                        ErrorCode::InvalidArgument,
-                        "ceil produced a non-finite result",
-                        span,
-                    );
-                }
-            }
-            Ok(TypedArray::Float32(builder.finish()))
-        }
-        TypedArray::Float64(array) => {
-            let mut builder = Float64Builder::new();
-            for row in 0..array.len() {
-                if array.is_null(row) {
-                    builder.append_null();
-                    continue;
-                }
-                let value = array.value(row).ceil();
-                if value.is_finite() {
-                    builder.append_value(value);
-                } else {
-                    builder.append_null();
-                    push_error(
-                        row_errors,
-                        row,
-                        ErrorCode::InvalidArgument,
-                        "ceil produced a non-finite result",
-                        span,
-                    );
-                }
-            }
-            Ok(TypedArray::Float64(builder.finish()))
-        }
-        TypedArray::Boolean(_)
-        | TypedArray::Utf8(_)
-        | TypedArray::Datetime(_)
-        | TypedArray::Generic(_)
-        | TypedArray::Uninitialized { .. } => Err(RuntimeError::InvalidBatch {
-            message: format!("ceil requires numeric input, found {:?}", input.data_type()),
-        }),
-    }
-}
-
-fn execute_floor(
-    input: &TypedArray,
-    row_errors: &mut RowErrors,
-    span: Span,
-) -> Result<TypedArray, RuntimeError> {
-    match input {
-        TypedArray::UInt8(_)
-        | TypedArray::Int8(_)
-        | TypedArray::UInt16(_)
-        | TypedArray::Int16(_)
-        | TypedArray::UInt32(_)
-        | TypedArray::Int32(_)
-        | TypedArray::UInt64(_)
-        | TypedArray::Int64(_) => Ok(input.clone()),
-        TypedArray::Float32(array) => {
-            let mut builder = Float32Builder::new();
-            for row in 0..array.len() {
-                if array.is_null(row) {
-                    builder.append_null();
-                    continue;
-                }
-                let value = array.value(row).floor();
-                if value.is_finite() {
-                    builder.append_value(value);
-                } else {
-                    builder.append_null();
-                    push_error(
-                        row_errors,
-                        row,
-                        ErrorCode::InvalidArgument,
-                        "floor produced a non-finite result",
-                        span,
-                    );
-                }
-            }
-            Ok(TypedArray::Float32(builder.finish()))
-        }
-        TypedArray::Float64(array) => {
-            let mut builder = Float64Builder::new();
-            for row in 0..array.len() {
-                if array.is_null(row) {
-                    builder.append_null();
-                    continue;
-                }
-                let value = array.value(row).floor();
-                if value.is_finite() {
-                    builder.append_value(value);
-                } else {
-                    builder.append_null();
-                    push_error(
-                        row_errors,
-                        row,
-                        ErrorCode::InvalidArgument,
-                        "floor produced a non-finite result",
-                        span,
-                    );
-                }
-            }
-            Ok(TypedArray::Float64(builder.finish()))
-        }
-        TypedArray::Boolean(_)
-        | TypedArray::Utf8(_)
-        | TypedArray::Datetime(_)
-        | TypedArray::Generic(_)
-        | TypedArray::Uninitialized { .. } => Err(RuntimeError::InvalidBatch {
-            message: format!(
-                "floor requires numeric input, found {:?}",
-                input.data_type()
-            ),
-        }),
-    }
-}
-
-fn execute_round(
-    input: &TypedArray,
-    row_errors: &mut RowErrors,
-    span: Span,
-) -> Result<TypedArray, RuntimeError> {
-    match input {
-        TypedArray::UInt8(_)
-        | TypedArray::Int8(_)
-        | TypedArray::UInt16(_)
-        | TypedArray::Int16(_)
-        | TypedArray::UInt32(_)
-        | TypedArray::Int32(_)
-        | TypedArray::UInt64(_)
-        | TypedArray::Int64(_) => Ok(input.clone()),
-        TypedArray::Float32(array) => {
-            let mut builder = Float32Builder::new();
-            for row in 0..array.len() {
-                if array.is_null(row) {
-                    builder.append_null();
-                    continue;
-                }
-                let value = array.value(row).round();
-                if value.is_finite() {
-                    builder.append_value(value);
-                } else {
-                    builder.append_null();
-                    push_error(
-                        row_errors,
-                        row,
-                        ErrorCode::InvalidArgument,
-                        "round produced a non-finite result",
-                        span,
-                    );
-                }
-            }
-            Ok(TypedArray::Float32(builder.finish()))
-        }
-        TypedArray::Float64(array) => {
-            let mut builder = Float64Builder::new();
-            for row in 0..array.len() {
-                if array.is_null(row) {
-                    builder.append_null();
-                    continue;
-                }
-                let value = array.value(row).round();
-                if value.is_finite() {
-                    builder.append_value(value);
-                } else {
-                    builder.append_null();
-                    push_error(
-                        row_errors,
-                        row,
-                        ErrorCode::InvalidArgument,
-                        "round produced a non-finite result",
-                        span,
-                    );
-                }
-            }
-            Ok(TypedArray::Float64(builder.finish()))
-        }
-        TypedArray::Boolean(_)
-        | TypedArray::Utf8(_)
-        | TypedArray::Datetime(_)
-        | TypedArray::Generic(_)
-        | TypedArray::Uninitialized { .. } => Err(RuntimeError::InvalidBatch {
-            message: format!(
-                "round requires numeric input, found {:?}",
-                input.data_type()
-            ),
-        }),
-    }
+) -> PrimitiveArray<T>
+where
+    T: ArrowPrimitiveType,
+    T::Native: CheckedFloat,
+{
+    let checked = rounding.evaluate_floats(input);
+    row_errors.push_failures(checked.failed.lanes(), span, |_| rounding.float_failure());
+    checked.column
 }
 
 fn execute_concat(values: &[TypedArray]) -> Result<StringArray, RuntimeError> {
@@ -2872,70 +2306,15 @@ fn execute_log(
     row_errors: &mut RowErrors,
     span: Span,
 ) -> Result<TypedArray, RuntimeError> {
-    let mut builder = Float64Builder::new();
-    for row in 0..values[0].len() {
-        let value = numeric_value_as_f64(&values[values.len() - 1], row)?;
-        let base = if values.len() == 2 {
-            numeric_value_as_f64(&values[0], row)?
-        } else {
-            Some(10.0)
-        };
-        let (Some(value), Some(base)) = (value, base) else {
-            builder.append_null();
-            continue;
-        };
-        let output = if values.len() == 2 {
-            value.log(base)
-        } else {
-            value.log10()
-        };
-        if output.is_finite() {
-            builder.append_value(output);
-        } else {
-            builder.append_null();
-            push_error(
-                row_errors,
-                row,
-                ErrorCode::InvalidArgument,
-                "log produced a non-finite result",
-                span,
-            );
+    match values {
+        [value] => execute_math(value, MathFunction::Log10, row_errors, span),
+        [base, value] => {
+            execute_binary_math(base, value, BinaryMathFunction::Log, row_errors, span)
         }
+        _ => Err(RuntimeError::InvalidBatch {
+            message: format!("log requires one or two arguments, found {}", values.len()),
+        }),
     }
-    Ok(TypedArray::Float64(builder.finish()))
-}
-
-fn execute_pow(
-    left: &TypedArray,
-    right: &TypedArray,
-    row_errors: &mut RowErrors,
-    span: Span,
-) -> Result<TypedArray, RuntimeError> {
-    let mut builder = Float64Builder::new();
-    for row in 0..left.len() {
-        let Some(left) = numeric_value_as_f64(left, row)? else {
-            builder.append_null();
-            continue;
-        };
-        let Some(right) = numeric_value_as_f64(right, row)? else {
-            builder.append_null();
-            continue;
-        };
-        let output = left.powf(right);
-        if output.is_finite() {
-            builder.append_value(output);
-        } else {
-            builder.append_null();
-            push_error(
-                row_errors,
-                row,
-                ErrorCode::InvalidArgument,
-                "pow produced a non-finite result",
-                span,
-            );
-        }
-    }
-    Ok(TypedArray::Float64(builder.finish()))
 }
 
 /// Compiles regex patterns for a batch, reusing the previous compilation while the pattern
@@ -2983,12 +2362,12 @@ fn execute_regexp_like(
             Ok(regex) => builder.append_value(regex.is_match(input.value(row))),
             Err(error) => {
                 builder.append_null();
-                push_error(
-                    row_errors,
+                row_errors.push(
                     row,
-                    ErrorCode::InvalidArgument,
-                    &format!("invalid regular expression: {error}"),
-                    span,
+                    SideError {
+                        reason: SideErrorReason::InvalidRegularExpression(error.clone()),
+                        span,
+                    },
                 );
             }
         }
@@ -3019,12 +2398,12 @@ fn execute_regexp_replace(
             }
             Err(error) => {
                 builder.append_null();
-                push_error(
-                    row_errors,
+                row_errors.push(
                     row,
-                    ErrorCode::InvalidArgument,
-                    &format!("invalid regular expression: {error}"),
-                    span,
+                    SideError {
+                        reason: SideErrorReason::InvalidRegularExpression(error.clone()),
+                        span,
+                    },
                 );
             }
         }
@@ -3052,12 +2431,12 @@ fn execute_regexp_substr(
             },
             Err(error) => {
                 builder.append_null();
-                push_error(
-                    row_errors,
+                row_errors.push(
                     row,
-                    ErrorCode::InvalidArgument,
-                    &format!("invalid regular expression: {error}"),
-                    span,
+                    SideError {
+                        reason: SideErrorReason::InvalidRegularExpression(error.clone()),
+                        span,
+                    },
                 );
             }
         }
@@ -3314,37 +2693,6 @@ impl TranslateTable {
     }
 }
 
-fn numeric_value_as_f64(input: &TypedArray, row: usize) -> Result<Option<f64>, RuntimeError> {
-    match input {
-        TypedArray::UInt8(array) => Ok((!array.is_null(row)).then(|| f64::from(array.value(row)))),
-        TypedArray::Int8(array) => Ok((!array.is_null(row)).then(|| f64::from(array.value(row)))),
-        TypedArray::UInt16(array) => Ok((!array.is_null(row)).then(|| f64::from(array.value(row)))),
-        TypedArray::Int16(array) => Ok((!array.is_null(row)).then(|| f64::from(array.value(row)))),
-        TypedArray::UInt32(array) => Ok((!array.is_null(row)).then(|| f64::from(array.value(row)))),
-        TypedArray::Int32(array) => Ok((!array.is_null(row)).then(|| f64::from(array.value(row)))),
-        TypedArray::UInt64(array) => {
-            Ok((!array.is_null(row)).then(|| array.value(row).approx_into()))
-        }
-        TypedArray::Int64(array) => {
-            Ok((!array.is_null(row)).then(|| array.value(row).approx_into()))
-        }
-        TypedArray::Float32(array) => {
-            Ok((!array.is_null(row)).then(|| f64::from(array.value(row))))
-        }
-        TypedArray::Float64(array) => Ok((!array.is_null(row)).then(|| array.value(row))),
-        TypedArray::Boolean(_)
-        | TypedArray::Utf8(_)
-        | TypedArray::Datetime(_)
-        | TypedArray::Generic(_)
-        | TypedArray::Uninitialized { .. } => Err(RuntimeError::InvalidBatch {
-            message: format!(
-                "numeric builtin requires numeric input, found {:?}",
-                input.data_type()
-            ),
-        }),
-    }
-}
-
 fn integral_value_at(input: &TypedArray, row: usize) -> Result<Option<i64>, RuntimeError> {
     match input {
         TypedArray::UInt8(array) => Ok((!array.is_null(row)).then(|| i64::from(array.value(row)))),
@@ -3527,10 +2875,9 @@ fn annotate_cast_failures(
         Some(input_nulls) => input_nulls.inner() & &invalid_output,
         None => invalid_output,
     };
-    let message = format!("cannot cast value to {target}");
-    for row in failures.set_indices() {
-        push_error(row_errors, row, ErrorCode::CastFailed, &message, span);
-    }
+    row_errors.push_failures(failures.set_indices(), span, |_| {
+        SideErrorReason::CastFailed { target }
+    });
 }
 
 fn filter_columns(
@@ -3568,29 +2915,6 @@ fn row_selected(predicate: &BooleanArray, row: usize) -> bool {
     !predicate.is_null(row) && predicate.value(row)
 }
 
-fn compare_floats<T: PartialOrd + PartialEq>(left: T, right: T, op: BinaryOp) -> bool {
-    match op {
-        BinaryOp::Eq => left == right,
-        BinaryOp::NotEq => left != right,
-        BinaryOp::Gt => left > right,
-        BinaryOp::Lt => left < right,
-        BinaryOp::GtEq => left >= right,
-        BinaryOp::LtEq => left <= right,
-        _ => unreachable!("comparison helper only handles comparison operators"),
-    }
-}
-
-fn push_error(row_errors: &mut RowErrors, row: usize, code: ErrorCode, message: &str, span: Span) {
-    row_errors.push(
-        row,
-        SideError {
-            code,
-            message: message.to_string(),
-            span,
-        },
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -3609,7 +2933,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        CompileBinding, CompileOptions, OutputBinding, compile_program_for_bindings,
+        CompileBinding, CompileOptions, ErrorCode, OutputBinding, compile_program_for_bindings,
         compile_program_with_options_for_bindings,
         program::{Program, SpannedNode},
         test_support::parse_program,
@@ -3834,7 +3158,7 @@ mod tests {
         assert_eq!(result.value(3), 0);
         assert!(output.errors().row(0).is_empty());
         assert_eq!(output.errors().row(1).len(), 1);
-        assert_eq!(output.errors().row(1)[0].code, ErrorCode::DivisionByZero);
+        assert_eq!(output.errors().row(1)[0].code(), ErrorCode::DivisionByZero);
         assert!(output.errors().row(2).is_empty());
         assert!(output.errors().row(3).is_empty());
     }
@@ -4231,7 +3555,7 @@ mod tests {
             .errors()
             .row(1)
             .iter()
-            .map(|error| error.code)
+            .map(|error| error.code())
             .collect::<Vec<_>>();
         assert_eq!(
             row_codes,
@@ -4379,7 +3703,7 @@ mod tests {
         assert!(lt.value(0));
         assert!(!lt.value(1));
         assert_eq!(output.errors().row(1).len(), 1);
-        assert_eq!(output.errors().row(1)[0].code, ErrorCode::Overflow);
+        assert_eq!(output.errors().row(1)[0].code(), ErrorCode::Overflow);
     }
 
     #[test]
@@ -4608,7 +3932,7 @@ mod tests {
                 .row(1)
                 .iter()
                 .chain(output.errors().row(2))
-                .all(|error| error.code == ErrorCode::InvalidArgument)
+                .all(|error| error.code() == ErrorCode::InvalidArgument)
         );
     }
 
@@ -4764,7 +4088,7 @@ mod tests {
                 .errors()
                 .row(2)
                 .iter()
-                .all(|error| error.code == ErrorCode::CastFailed)
+                .all(|error| error.code() == ErrorCode::CastFailed)
         );
         assert!(output.errors().row(3).is_empty());
     }
@@ -4827,7 +4151,7 @@ mod tests {
                 .errors()
                 .row(0)
                 .iter()
-                .all(|error| error.code == ErrorCode::CastFailed)
+                .all(|error| error.code() == ErrorCode::CastFailed)
         );
         assert!(output.errors().row(1).is_empty());
     }
@@ -4976,7 +4300,7 @@ mod tests {
         assert!(float_abs.is_null(2));
         assert_eq!(output.errors().row(0).len(), 0);
         assert_eq!(output.errors().row(1).len(), 1);
-        assert_eq!(output.errors().row(1)[0].code, ErrorCode::Overflow);
+        assert_eq!(output.errors().row(1)[0].code(), ErrorCode::Overflow);
         assert_eq!(output.errors().row(1)[0].span, int_abs_span);
     }
 
@@ -6203,3 +5527,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_numeric_tests.rs"]
+mod numeric_tests;

@@ -317,8 +317,8 @@ pub(super) async fn evaluate_processor_output_events(
                         "{} '{}' FILTER-MAP side error {}: {} at {}",
                         context.node_kind.as_str(),
                         context.processor.as_str(),
-                        side_error.code.as_str(),
-                        side_error.message,
+                        side_error.code().as_str(),
+                        side_error.reason,
                         side_error.span
                     ),
                     side_error.span,

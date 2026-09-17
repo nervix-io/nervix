@@ -889,8 +889,8 @@ pub(super) async fn evaluate_correlator_output_batch(
                     format!(
                         "correlator '{}' TO output side error {}: {} at {}",
                         processor.as_str(),
-                        side_error.code.as_str(),
-                        side_error.message,
+                        side_error.code().as_str(),
+                        side_error.reason,
                         side_error.span
                     ),
                     side_error.span,
