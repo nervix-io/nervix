@@ -112,11 +112,13 @@ test-execution *args:
 # Explore the filtered execution and server invariants under Shuttle. The former Loom recipe is
 # retired: acknowledgement races now exercise production types, while the reduced relay models
 # document their memory-ordering claims in-module. Each test gets its own process so a persisted
-# schedule identifies its package and test.
-test-shuttle: build-web-console wasm-processor-guests download-onnxruntime
+# schedule identifies its package and test. A non-empty `filter` runs only the tests whose full
+# names contain it.
+test-shuttle filter="": build-web-console wasm-processor-guests download-onnxruntime
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    filter={{ quote(filter) }}
     trace_root="{{ cargo_target_dir }}/shuttle-failures"
     mkdir -p "${trace_root}"
     shuttle_packages=(nervix-execution nervix-server)
@@ -131,6 +133,9 @@ test-shuttle: build-web-console wasm-processor-guests download-onnxruntime
         fi
         mapfile -t shuttle_tests <<< "${shuttle_test_list}"
         for shuttle_test in "${shuttle_tests[@]}"; do
+            if [[ "${shuttle_test}" != *"${filter}"* ]]; then
+                continue
+            fi
             trace_directory="${trace_root}/${shuttle_package}/${shuttle_test}"
             mkdir -p "${trace_directory}"
             SHUTTLE_TRACE_DIR="${trace_directory}" \

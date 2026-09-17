@@ -846,67 +846,79 @@ mod tests {
         assert!(installer.install(restored).is_err());
     }
 
-    /// A capture holds the assignment barrier while it reads every record. An originator update
-    /// that queued behind that barrier would stall the relay-state task for the whole capture.
-    #[test]
-    fn an_originator_update_proceeds_while_the_assignment_barrier_is_held() {
-        let record = test_runtime_row([(
-            "value".to_string(),
-            RuntimeValue::String("ready".to_string()),
-        )]);
-        let state = Arc::new(ReplicatedMaterializedRelayState::new(
-            test_placement("tenant_state"),
-            record.arrow_schema(),
-        ));
-        let mut assignment = ReplicatedMaterializedRelayState::bind(
-            &state,
-            StateReplicationRoles::owned_by(None),
-            None,
-        );
-        let originator = assignment
-            .originator
-            .take()
-            .assured("branch-local state is authoritative in this process");
-        // A branch's first record adds the branch itself; the updates after it only replace that
-        // branch's record.
-        originator
-            .update_last_by_timestamp(&None, record.clone())
-            .assured("the assignment remains authoritative");
-        let (held_tx, held_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        let barrier_state = state.clone();
-        let barrier = std::thread::spawn(move || {
-            barrier_state.assignment.serialize(|| {
-                held_tx
-                    .send(())
-                    .assured("the test keeps the receiver until the barrier is held");
-                release_rx
-                    .recv()
-                    .assured("the test releases the barrier before it finishes");
+    #[cfg(feature = "shuttle")]
+    mod shuttle_checks {
+        use shuttle::{sync::mpsc, thread};
+
+        use super::*;
+        use crate::shuttle_test::check_interleavings;
+
+        /// An originator replaces a branch's record while another thread holds the assignment
+        /// barrier, which that thread releases only after the update has returned.
+        fn originator_update_under_a_held_barrier() {
+            let record = test_runtime_row([(
+                "value".to_string(),
+                RuntimeValue::String("ready".to_string()),
+            )]);
+            let state = Arc::new(ReplicatedMaterializedRelayState::new(
+                test_placement("tenant_state"),
+                record.arrow_schema(),
+            ));
+            let mut assignment = ReplicatedMaterializedRelayState::bind(
+                &state,
+                StateReplicationRoles::owned_by(None),
+                None,
+            );
+            let originator = assignment
+                .originator
+                .take()
+                .assured("branch-local state is authoritative in this process");
+            // A branch's first record adds the branch itself; the update after it only replaces
+            // that branch's record.
+            originator
+                .update_last_by_timestamp(&None, record.clone())
+                .assured("the assignment remains authoritative");
+            let (held_tx, held_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            let barrier = thread::spawn({
+                let state = state.clone();
+                move || {
+                    state.assignment.serialize(|| {
+                        held_tx
+                            .send(())
+                            .assured("the model keeps the receiver until the barrier is held");
+                        release_rx
+                            .recv()
+                            .assured("the model releases the barrier once the update returned");
+                    });
+                }
             });
-        });
-        held_rx
-            .recv()
-            .assured("the barrier thread reports once it holds the barrier");
+            held_rx
+                .recv()
+                .assured("the barrier thread reports once it holds the barrier");
 
-        let (updated_tx, updated_rx) = std::sync::mpsc::channel();
-        let updater = std::thread::spawn(move || {
-            let updated = originator.update_last_by_timestamp(&None, record).is_ok();
-            updated_tx
-                .send(updated)
-                .assured("the test keeps the receiver until the update is reported");
-        });
-        let updated = updated_rx.recv_timeout(std::time::Duration::from_secs(10));
-        release_tx
-            .send(())
-            .assured("the barrier thread waits for its release");
-        barrier.join().assured("the barrier thread completes");
-        updater.join().assured("the updating thread completes");
+            // The barrier stays held until the update returns, so an update that waited for it
+            // would leave every thread blocked, which Shuttle reports as a deadlock.
+            let updated = originator.update_last_by_timestamp(&None, record);
+            release_tx
+                .send(())
+                .assured("the barrier thread waits for its release");
+            barrier.join().assured(
+                "Shuttle fails the whole execution when a model thread panics, so no join \
+                 observes one",
+            );
 
-        assert_eq!(
-            updated,
-            Ok(true),
-            "the originator update waited for the assignment barrier"
-        );
+            assert!(
+                updated.is_ok(),
+                "the originator update was refused while the assignment barrier was held"
+            );
+        }
+
+        /// A capture holds the assignment barrier while it reads every record. An originator update
+        /// that queued behind that barrier would stall the relay-state task for the whole capture.
+        #[test]
+        fn shuttle_an_originator_update_proceeds_while_the_assignment_barrier_is_held() {
+            check_interleavings(originator_update_under_a_held_barrier);
+        }
     }
 }
