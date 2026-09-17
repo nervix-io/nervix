@@ -420,7 +420,6 @@ use processors::{
     WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds,
     WindowFlushContext,
 };
-use rdkafka::consumer::StreamConsumer;
 pub(in crate::runtime) use reconnect_backoff::RuntimeReconnectBackoff;
 use reingestor::ReingestorInputSpec;
 pub(in crate::runtime) use relay_batch::RelayDispatchResult;
