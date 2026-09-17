@@ -20,7 +20,7 @@ pub(super) enum ScheduledNodeHandoffError {
 pub(super) struct ExecutionBuildDeps<'a> {
     pub(super) domain: &'a DomainName,
     pub(super) relay_schemas: &'a HashMap<RelayName, Arc<CompiledSchema>>,
-    pub(super) relay_branchings: &'a HashMap<RelayName, Vec<FieldName>>,
+    pub(super) relay_branchings: &'a HashMap<RelayName, ResolvedBranching>,
     pub(super) materialized_relay_specs: &'a HashMap<RelayName, RuntimeMaterializedRelaySpec>,
     pub(super) lookups: &'a HashMap<LookupName, Arc<LookupRuntime>>,
 }
@@ -28,7 +28,7 @@ pub(super) struct ExecutionBuildDeps<'a> {
 #[derive(Debug, Clone)]
 pub(super) struct EmitterTaskDeps {
     pub(super) input_schema: Arc<CompiledSchema>,
-    pub(super) input_branching: Vec<FieldName>,
+    pub(super) input_branching: ResolvedBranching,
     pub(super) materialized_relay_specs: HashMap<RelayName, RuntimeMaterializedRelaySpec>,
     pub(super) lookups: HashMap<LookupName, Arc<LookupRuntime>>,
 }

@@ -55,8 +55,8 @@ pub(in crate::runtime) enum RuntimeVmCompileError {
     )]
     MaterializedBranchMismatch {
         relay: RelayName,
-        materialized_branching: Vec<FieldName>,
-        current_branching: Vec<FieldName>,
+        materialized_branching: ResolvedBranching,
+        current_branching: ResolvedBranching,
     },
     #[error("materialized relay '{relay}' has no field '{field}'")]
     MissingMaterializedField { relay: RelayName, field: String },
@@ -173,7 +173,7 @@ pub(crate) struct MaterializedProgramInterest {
 pub(crate) struct RuntimeMaterializedRelaySpec {
     pub(in crate::runtime) schema: StdArc<arrow_schema::Schema>,
     pub(in crate::runtime) sensitivity: VmSchemaSensitivity,
-    pub(in crate::runtime) branching: Vec<FieldName>,
+    pub(in crate::runtime) branching: ResolvedBranching,
     pub(super) fields: Arc<Vec<MaterializedFieldInterest>>,
 }
 
@@ -181,7 +181,7 @@ impl RuntimeMaterializedRelaySpec {
     pub(crate) fn new(
         schema: StdArc<arrow_schema::Schema>,
         sensitivity: VmSchemaSensitivity,
-        branching: Vec<FieldName>,
+        branching: ResolvedBranching,
     ) -> Self {
         let fields = Arc::new(
             schema
@@ -283,9 +283,7 @@ pub(in crate::runtime) struct CompiledEmitterFilterMapProgram {
 pub(crate) struct RuntimeVmCompileContext<'a> {
     pub(crate) available_materialized_streams: &'a HashMap<RelayName, RuntimeMaterializedRelaySpec>,
     pub(crate) available_lookups: &'a HashMap<LookupName, Arc<LookupRuntime>>,
-    pub(crate) current_branching: &'a [FieldName],
-    pub(crate) current_branch_schema: Option<&'a StdArc<arrow_schema::Schema>>,
-    pub(crate) current_branch_sensitivity: Option<&'a VmSchemaSensitivity>,
+    pub(crate) current_branching: &'a ResolvedBranching,
     pub(crate) udfs: Option<&'a UdfExecutor>,
 }
 
@@ -301,13 +299,24 @@ pub(super) struct RuntimeVmSchema {
     pub(super) sensitivity: VmSchemaSensitivity,
 }
 
+impl RuntimeVmSchema {
+    pub(super) fn from_branching(branching: &ResolvedBranching) -> Option<Self> {
+        let schema = compile_schema(branching.schema()?);
+        Some(Self {
+            schema: schema.arrow_schema(),
+            sensitivity: schema.vm_sensitivity(),
+        })
+    }
+}
+
 impl RuntimeVmCompileContext<'_> {
     pub(super) fn branch_binding(&self) -> Option<VmCompileBinding> {
-        self.current_branch_schema.map(|schema| {
-            let sensitivity = self.current_branch_sensitivity.cloned().unwrap_or_default();
-            VmCompileBinding::readonly(BRANCH_NAMESPACE, schema.clone())
-                .with_sensitivity(sensitivity)
-        })
+        let schema = self.current_branching.schema()?;
+        let schema = compile_schema(schema);
+        Some(
+            VmCompileBinding::readonly(BRANCH_NAMESPACE, schema.arrow_schema())
+                .with_sensitivity(schema.vm_sensitivity()),
+        )
     }
 
     pub(super) fn compile_options(&self, options: VmCompileOptions) -> VmCompileOptions {
@@ -353,7 +362,7 @@ pub(super) fn referenced_materialized_stream_bindings(
     parsed: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     writable_namespaces: &HashSet<String>,
     available_materialized_streams: &HashMap<RelayName, RuntimeMaterializedRelaySpec>,
-    current_branching: &[FieldName],
+    current_branching: &ResolvedBranching,
 ) -> RuntimeVmCompileResult<(Vec<VmCompileBinding>, MaterializedProgramInterest)> {
     let mut fields_by_relay = HashMap::<RelayName, BTreeSet<String>>::default();
     for (relay, field) in collect_program_field_refs(&parsed.inner) {
@@ -372,12 +381,12 @@ pub(super) fn referenced_materialized_stream_bindings(
         let Some(spec) = available_materialized_streams.get(&relay) else {
             continue;
         };
-        if !spec.branching.is_empty() && spec.branching != current_branching {
+        if !spec.branching.is_unbranched() && spec.branching != *current_branching {
             return Err(Report::new(
                 RuntimeVmCompileError::MaterializedBranchMismatch {
                     relay,
                     materialized_branching: spec.branching.clone(),
-                    current_branching: current_branching.to_vec(),
+                    current_branching: current_branching.clone(),
                 },
             ));
         }
@@ -434,7 +443,7 @@ pub(super) fn referenced_materialized_stream_bindings(
             relay,
             schema: spec.schema.clone(),
             fields: field_interests,
-            key_mode: if spec.branching.is_empty() {
+            key_mode: if spec.branching.is_unbranched() {
                 MaterializedLookupKeyMode::Root
             } else {
                 MaterializedLookupKeyMode::CurrentBranch
@@ -1069,7 +1078,7 @@ pub(super) fn compile_output_branch_program(
     branch: Option<&OutputBranch>,
     input: RuntimeVmSchema,
     output: RuntimeVmSchema,
-    branch_schema: Option<StdArc<arrow_schema::Schema>>,
+    branch_schema: Option<RuntimeVmSchema>,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledBranchProgram>, RuntimeError> {
     let RuntimeCompileTarget { domain, identifier } = target;
@@ -1088,7 +1097,7 @@ pub(super) fn compile_output_branch_program(
     })?;
     let parsed = lower_branch_construction(
         assignments,
-        branch_schema.as_ref(),
+        branch_schema.schema.as_ref(),
         output.schema.as_ref(),
         input.schema.as_ref(),
     )
@@ -1116,7 +1125,8 @@ pub(super) fn compile_output_branch_program(
         VmCompileBinding::readonly("output", output.schema.clone())
             .with_sensitivity(output.sensitivity.clone()),
         VmCompileBinding::readonly("message", output.schema).with_sensitivity(output.sensitivity),
-        VmCompileBinding::writable(BRANCH_NAMESPACE, branch_schema.clone()),
+        VmCompileBinding::writable(BRANCH_NAMESPACE, branch_schema.schema.clone())
+            .with_sensitivity(branch_schema.sensitivity.clone()),
     ];
     let local_namespaces = HashSet::from_iter([
         "input".to_string(),
@@ -1163,11 +1173,10 @@ pub(super) fn compile_output_branch_program(
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
     }
-    let sensitivity = VmSchemaSensitivity::default();
     let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
         &parsed,
-        branch_schema,
-        sensitivity.clone(),
+        branch_schema.schema,
+        branch_schema.sensitivity,
         bindings,
         context.compile_options(VmCompileOptions {
             output_mode: VmOutputMode::ExplicitOnly,
@@ -1928,10 +1937,9 @@ pub(super) fn compile_ingestor_filter_map_program(
 /// The schema surface a generator's set-only route compiles against: the output it constructs, that
 /// output's sensitivity, the materialized source it reads, and the branch it preserves.
 pub(super) struct GeneratorSetProgramSchemas {
-    pub(super) output: StdArc<arrow_schema::Schema>,
-    pub(super) output_sensitivity: VmSchemaSensitivity,
-    pub(super) source: StdArc<arrow_schema::Schema>,
-    pub(super) branch: Option<StdArc<arrow_schema::Schema>>,
+    pub(super) output: RuntimeVmSchema,
+    pub(super) source: RuntimeVmSchema,
+    pub(super) branch: Option<RuntimeVmSchema>,
 }
 
 pub(super) fn compile_generator_set_program(
@@ -1943,19 +1951,16 @@ pub(super) fn compile_generator_set_program(
 ) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
     let GeneratorSetProgramSchemas {
         output: output_schema,
-        output_sensitivity,
         source: source_schema,
         branch: branch_schema,
     } = schemas;
-    let parsed =
-        lower_set_only_route(&output.construction, output_schema.as_ref()).map_err(|reason| {
-            RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "generator '{}' output '{}' is invalid: {reason}",
-                    generator.name, output.relay
-                ),
-            }
+    let parsed = lower_set_only_route(&output.construction, output_schema.schema.as_ref())
+        .map_err(|reason| RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason: format!(
+                "generator '{}' output '{}' is invalid: {reason}",
+                generator.name, output.relay
+            ),
         })?;
     let error_sites = compiled_message_error_sites(
         &parsed,
@@ -1967,20 +1972,24 @@ pub(super) fn compile_generator_set_program(
         reason: format!("{reason:#}"),
     })?;
     let mut bindings = vec![
-        VmCompileBinding::writable("output", output_schema.clone())
-            .with_sensitivity(output_sensitivity.clone()),
+        VmCompileBinding::writable("output", output_schema.schema.clone())
+            .with_sensitivity(output_schema.sensitivity.clone()),
         VmCompileBinding::readonly(
             format!("relay_state.{}", generator.materialized_relay),
-            source_schema,
-        ),
+            source_schema.schema,
+        )
+        .with_sensitivity(source_schema.sensitivity),
     ];
     if let Some(branch_schema) = branch_schema {
-        bindings.push(VmCompileBinding::readonly("branch", branch_schema));
+        bindings.push(
+            VmCompileBinding::readonly("branch", branch_schema.schema)
+                .with_sensitivity(branch_schema.sensitivity),
+        );
     }
     let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
         &parsed,
-        output_schema,
-        output_sensitivity.clone(),
+        output_schema.schema,
+        output_schema.sensitivity.clone(),
         bindings,
         runtime_udf_compile_options(
             udfs,
@@ -2028,25 +2037,32 @@ pub(super) fn compile_processor_output_program(
         })?;
     let input_relays = context.filter_source.relays(context.input_relays);
     let materialized_stream_specs = routing.materialized_stream_specs.clone();
-    let current_branching = if let Some(relay) = input_relays.first()
-        && let Some(branching) = routing.relay_branchings.get(relay)
-    {
-        branching.clone()
-    } else {
-        Default::default()
+    let Some(input_relay) = input_relays.first() else {
+        return Err(PlannedGeneralError {
+            acks: batch.acks.clone(),
+            reason: format!(
+                "{} '{}' has no input relay for branch-aware output compilation",
+                context.node_kind.as_str(),
+                context.processor.as_str(),
+            ),
+        });
     };
-    let current_branch_schema = if let Some(relay) = input_relays.first() {
-        relay_branch_schema_for_routing(routing, relay)
-    } else {
-        None
+    let Some(current_branching) = routing.relay_branchings.get(input_relay).cloned() else {
+        return Err(PlannedGeneralError {
+            acks: batch.acks.clone(),
+            reason: format!(
+                "{} '{}' input relay '{}' has no resolved branch declaration",
+                context.node_kind.as_str(),
+                context.processor.as_str(),
+                input_relay.as_str(),
+            ),
+        });
     };
     let input_sensitivity = processor_output_input_sensitivity(context.branch, &input_relays);
     let compile_context = RuntimeVmCompileContext {
         available_materialized_streams: &materialized_stream_specs,
         available_lookups: &routing.lookups,
         current_branching: &current_branching,
-        current_branch_schema: current_branch_schema.as_ref(),
-        current_branch_sensitivity: None,
         udfs: Some(&routing.udfs),
     };
     let compiled = match context.filter_source {
@@ -2120,12 +2136,11 @@ pub(super) fn relay_schema_for_routing(
 pub(super) fn relay_branch_schema_for_routing(
     routing: &DomainRoutingSnapshot,
     relay: &RelayName,
-) -> Option<StdArc<arrow_schema::Schema>> {
+) -> Option<RuntimeVmSchema> {
     routing
-        .relay_branching_schemas
+        .relay_branchings
         .get(relay)
-        .cloned()
-        .flatten()
+        .and_then(RuntimeVmSchema::from_branching)
 }
 
 #[cfg(test)]
@@ -2191,8 +2206,10 @@ mod tests {
     fn materialized_binding_errors_carry_relay_fields_and_branches() {
         let relay = named::<RelayName>("state");
         let value = named::<FieldName>("value");
-        let tenant = named::<FieldName>("tenant");
-        let region = named::<FieldName>("region");
+        let expected_materialized_branching =
+            test_named_branching("state_branch", &[("tenant", ParseAsType::String)]);
+        let expected_current_branching =
+            test_named_branching("input_branch", &[("tenant", ParseAsType::String)]);
         let schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
             value.as_str(),
             ArrowDataType::Int64,
@@ -2204,7 +2221,7 @@ mod tests {
             RuntimeMaterializedRelaySpec::new(
                 schema.clone(),
                 VmSchemaSensitivity::default(),
-                vec![tenant.clone()],
+                expected_materialized_branching.clone(),
             ),
         );
 
@@ -2213,7 +2230,7 @@ mod tests {
             &program,
             &HashSet::default(),
             &available,
-            std::slice::from_ref(&region),
+            &expected_current_branching,
         )
         .expect_err("different branch contracts must be rejected");
         let RuntimeVmCompileError::MaterializedBranchMismatch {
@@ -2225,18 +2242,26 @@ mod tests {
             panic!("unexpected VM compile error: {error:#}");
         };
         assert_eq!(actual_relay, &relay);
-        assert_eq!(materialized_branching, std::slice::from_ref(&tenant));
-        assert_eq!(current_branching, std::slice::from_ref(&region));
+        assert_eq!(materialized_branching, &expected_materialized_branching);
+        assert_eq!(current_branching, &expected_current_branching);
 
         available.insert(
             relay.clone(),
-            RuntimeMaterializedRelaySpec::new(schema, VmSchemaSensitivity::default(), Vec::new()),
+            RuntimeMaterializedRelaySpec::new(
+                schema,
+                VmSchemaSensitivity::default(),
+                ResolvedBranching::unbranched(),
+            ),
         );
         let missing = "missing";
         let program = materialized_reference_program(&relay, missing);
-        let error =
-            referenced_materialized_stream_bindings(&program, &HashSet::default(), &available, &[])
-                .expect_err("an unknown materialized field must be rejected");
+        let error = referenced_materialized_stream_bindings(
+            &program,
+            &HashSet::default(),
+            &available,
+            &ResolvedBranching::unbranched(),
+        )
+        .expect_err("an unknown materialized field must be rejected");
         let RuntimeVmCompileError::MissingMaterializedField {
             relay: actual_relay,
             field,
@@ -2349,9 +2374,7 @@ mod tests {
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
-                current_branching: &[],
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
+                current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
             },
         )
@@ -2420,9 +2443,7 @@ mod tests {
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
-                current_branching: &[],
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
+                current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
             },
         )
@@ -2464,9 +2485,7 @@ mod tests {
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
-                current_branching: &[],
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
+                current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
             },
         )

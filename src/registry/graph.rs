@@ -13,13 +13,14 @@ use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use error_stack::Report;
 use meticulous::{OptionExt, ResultExt};
 use nervix_dataflow_graph::{
-    DataflowBranch, DataflowEdge, DataflowEdgeKind, DataflowGraph, DataflowInputSide,
-    DataflowMetricRef, DataflowNode, DataflowNodeRole, DataflowProcessorKind, DataflowSchemaField,
+    DataflowBranch, DataflowEdge, DataflowEdgeKind, DataflowGraph, DataflowGraphProjection,
+    DataflowInputSide, DataflowMetricRef, DataflowNode, DataflowNodeRole, DataflowProcessorKind,
+    DataflowSchemaField,
 };
 use nervix_models::{
-    ConcreteBranchCoverage, CreateSchema, DomainName, DomainSchedule, FieldName, ImpactEdgeKind,
+    ConcreteBranchCoverage, CreateSchema, DomainName, DomainSchedule, ImpactEdgeKind,
     ImpactNodeCoverage, IngestSource, Model, ModelIndex, ModelKind, ModelName, NodeRef,
-    ParseAsType, PlacementPolicy, RelayName, SchemaField, SchemaName,
+    ParseAsType, PlacementPolicy, RelayName, ResolvedBranching, SchemaField,
 };
 use petgraph::{
     Direction, algo::is_cyclic_directed, graph::DiGraph, prelude::NodeIndex, visit::EdgeRef,
@@ -331,12 +332,16 @@ impl ActiveGraph {
     }
 
     pub(in crate::registry) fn describe(&self) -> String {
-        self.to_dataflow_graph("").render_ascii()
+        self.dataflow_projection().render_ascii()
     }
 
     /// The graph the console draws: every dataflow node, the record flow between them, the
     /// external clients at either end, and the materialized state they read.
     pub(crate) fn to_dataflow_graph(&self, domain: impl Into<String>) -> DataflowGraph {
+        self.dataflow_projection().into_graph(domain)
+    }
+
+    fn dataflow_projection(&self) -> DataflowGraphProjection {
         let mut schemas = HashMap::default();
         for index in self.graph.node_indices() {
             let node = self
@@ -413,8 +418,7 @@ impl ActiveGraph {
             left.source == right.source && left.target == right.target && left.kind == right.kind
         });
 
-        DataflowGraph {
-            domain: domain.into(),
+        DataflowGraphProjection {
             statistics: Default::default(),
             nodes,
             edges,
@@ -505,8 +509,7 @@ pub(crate) struct ActiveNode {
     pub(crate) identifier: ModelName,
     pub(crate) kind: ModelKind,
     pub(crate) config: Arc<Model>,
-    pub(crate) effective_branching: Option<Vec<FieldName>>,
-    pub(crate) effective_branching_schema: Option<SchemaName>,
+    pub(crate) resolved_branching: Option<ResolvedBranching>,
 }
 
 impl ActiveNode {
@@ -529,7 +532,7 @@ impl ActiveNode {
             Some(branch) => ConcreteBranchCoverage::AllOfBranch {
                 branch: branch.clone(),
             },
-            None if self.effective_branching.is_some()
+            None if self.resolved_branching.is_some()
                 && matches!(self.kind, ModelKind::Emitter | ModelKind::Reingestor) =>
             {
                 ConcreteBranchCoverage::All
@@ -751,21 +754,16 @@ impl ActiveNode {
     /// The branch this node runs under, named as declared. Nodes that run once, outside any
     /// branch, resolve to no branch at all.
     fn dataflow_branch(&self) -> Option<DataflowBranch> {
-        let name = match self.config.as_ref() {
-            Model::Relay(relay) => relay.branching.branch()?,
-            model => model_branch_selection(model)?.branch_ref()?,
-        };
+        let branching = self.resolved_branching.as_ref()?;
+        let name = branching.branch()?;
+        let schema = branching
+            .schema()
+            .verified("a resolved branch name always carries its resolved schema");
         Some(DataflowBranch {
             name: name.as_str().to_string(),
-            key_schema: self
-                .effective_branching_schema
-                .as_ref()?
-                .as_str()
-                .to_string(),
-            key_fields: self
-                .effective_branching
-                .iter()
-                .flatten()
+            key_schema: schema.name.as_str().to_string(),
+            key_fields: branching
+                .field_names()
                 .map(|field| field.as_str().to_string())
                 .collect(),
         })

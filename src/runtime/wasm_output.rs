@@ -820,8 +820,7 @@ pub(super) async fn dispatch_wasm_output_route(
             .relay_branchings
             .get(primary_input_relay)
             .cloned()
-            .unwrap_or_default();
-        let current_branch_schema = relay_branch_schema_for_routing(routing, primary_input_relay);
+            .assured("the validated WASM source relay has branch routing");
         let output_schema =
             match relay_schema_for_routing(routing, &context.branch.domain, &output.relay) {
                 Ok(schema) => schema,
@@ -850,8 +849,6 @@ pub(super) async fn dispatch_wasm_output_route(
                 available_materialized_streams: &routing.materialized_stream_specs,
                 available_lookups: &routing.lookups,
                 current_branching: &current_branching,
-                current_branch_schema: current_branch_schema.as_ref(),
-                current_branch_sensitivity: None,
                 udfs: Some(&routing.udfs),
             },
         ) {

@@ -482,13 +482,18 @@ mod tests {
         };
         let no_sensitive_fields = nervix_vm::SchemaSensitivity::default();
         assert_eq!(
-            format_stream_message(&message, &no_sensitive_fields),
+            format_stream_message(&message, &no_sensitive_fields, &no_sensitive_fields),
             r#"key={"tenant":"acme"} payload={"user_id":42}"#
         );
         let sensitive_user_id = nervix_vm::SchemaSensitivity::from_sensitive_fields(["user_id"]);
         assert_eq!(
-            format_stream_message(&message, &sensitive_user_id),
+            format_stream_message(&message, &sensitive_user_id, &no_sensitive_fields),
             r#"key={"tenant":"acme"} payload={"user_id":"<masked>"}"#
+        );
+        let sensitive_tenant = nervix_vm::SchemaSensitivity::from_sensitive_fields(["tenant"]);
+        assert_eq!(
+            format_stream_message(&message, &no_sensitive_fields, &sensitive_tenant),
+            r#"key={"tenant":"<masked>"} payload={"user_id":42}"#
         );
 
         let no_key = RelayMessage {
@@ -500,7 +505,7 @@ mod tests {
             acks: crate::runtime_ack::AckSet::empty(),
         };
         assert_eq!(
-            format_stream_message(&no_key, &no_sensitive_fields),
+            format_stream_message(&no_key, &no_sensitive_fields, &no_sensitive_fields),
             r#"{"user_id":42}"#
         );
     }

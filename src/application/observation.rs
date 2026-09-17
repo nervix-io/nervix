@@ -107,8 +107,8 @@ impl SessionServiceImpl {
     ) -> CommandResult {
         let SubscriptionTarget {
             relay: ack_model,
-            schema,
             branching,
+            ..
         } = match self
             .subscription_target_from_schedule(domain, &describe.relay)
             .await
@@ -174,27 +174,23 @@ impl SessionServiceImpl {
             ));
         }
 
-        let filter = match validate_subscription_bindings(
-            &ack_model.name,
-            &branching,
-            &schema,
-            &describe.bindings,
-        ) {
-            Ok(filter) => filter,
-            Err(message) => {
-                return CommandResult {
-                    success: false,
-                    diagnostics: vec![Diagnostic {
-                        message: message.clone(),
-                        span_start: 0,
-                        span_end: 0,
-                    }],
-                    message,
-                    kind: i32::from(CommandResultKind::Error),
-                    ..Default::default()
-                };
-            }
-        };
+        let filter =
+            match validate_subscription_bindings(&ack_model.name, &branching, &describe.bindings) {
+                Ok(filter) => filter,
+                Err(message) => {
+                    return CommandResult {
+                        success: false,
+                        diagnostics: vec![Diagnostic {
+                            message: message.clone(),
+                            span_start: 0,
+                            span_end: 0,
+                        }],
+                        message,
+                        kind: i32::from(CommandResultKind::Error),
+                        ..Default::default()
+                    };
+                }
+            };
         let key = match branch_key_from_filter(&branching, &filter) {
             Ok(key) => key,
             Err(message) => {
@@ -362,19 +358,18 @@ impl SessionServiceImpl {
             })?;
         let Some(SubscriptionTarget {
             relay: ack_model,
-            schema,
             branching,
+            ..
         }) = target
         else {
             return Err(RemoteOperationFailure::Unavailable { subject });
         };
 
-        let filter =
-            validate_subscription_bindings(&ack_model.name, &branching, &schema, &request.bindings)
-                .map_err(|reason| RemoteOperationFailure::Failed {
-                    subject: subject.clone(),
-                    reason,
-                })?;
+        let filter = validate_subscription_bindings(&ack_model.name, &branching, &request.bindings)
+            .map_err(|reason| RemoteOperationFailure::Failed {
+                subject: subject.clone(),
+                reason,
+            })?;
         let key = branch_key_from_filter(&branching, &filter).map_err(|reason| {
             RemoteOperationFailure::Failed {
                 subject: subject.clone(),
@@ -1842,10 +1837,9 @@ impl SessionServiceImpl {
                 .map(|record| {
                     format!(
                         "key={} payload={} low={} high={}",
-                        if record.branch.is_empty() {
-                            "(root)"
-                        } else {
-                            record.branch.as_str()
+                        match record.branch.as_ref() {
+                            Some(branch) => branch.as_str(),
+                            None => "(root)",
                         },
                         record.payload,
                         record.ingested_at_low_watermark,

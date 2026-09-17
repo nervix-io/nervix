@@ -73,6 +73,19 @@ impl BranchKey {
     pub(crate) fn as_str(&self) -> &str {
         self.0.json.as_str()
     }
+
+    pub(crate) fn to_json_string_masking(&self, sensitivity: &VmSchemaSensitivity) -> String {
+        let mut object = serde_json::Map::new();
+        for (field, value) in &self.0.fields {
+            let value = if sensitivity.is_sensitive(field.as_str()) {
+                serde_json::Value::String("<masked>".to_string())
+            } else {
+                value.to_json_value()
+            };
+            object.insert(field.as_str().to_string(), value);
+        }
+        serde_json::Value::Object(object).to_string()
+    }
 }
 
 pub(super) fn branch_key_display(key: &Option<BranchKey>) -> &str {

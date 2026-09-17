@@ -491,7 +491,7 @@ impl ActiveGraph {
                 }
             }
             let scheduled_node = ScheduledNode::new((*node.config).clone())
-                .with_effective_branching(node.effective_branching, node.effective_branching_schema)
+                .with_resolved_branching(node.resolved_branching)
                 .with_schema_fingerprint(self.schema_fingerprint_for_index(index))
                 .placed_on(primary_node, assigned_nodes);
             scheduled_nodes.insert(scheduled_node.identity(), scheduled_node);

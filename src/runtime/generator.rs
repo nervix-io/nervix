@@ -30,7 +30,7 @@ pub(super) enum GeneratorError {
 pub(super) struct GeneratorTaskSpec {
     pub(super) generator: CreateGenerator,
     pub(super) source_relay: RelayName,
-    pub(super) source_branching: Vec<FieldName>,
+    pub(super) source_branching: ResolvedBranching,
     pub(super) context_projection: GeneratorContextProjection,
     pub(super) routes: Vec<GeneratorTaskRouteSpec>,
 }
@@ -39,15 +39,17 @@ impl GeneratorTaskSpec {
     pub(super) fn new(
         generator: CreateGenerator,
         source_schema: Arc<CompiledSchema>,
-        source_branching: Vec<FieldName>,
-        source_branch_schema: Option<StdArc<arrow_schema::Schema>>,
+        source_branching: ResolvedBranching,
         routes: Vec<GeneratorTaskRouteSpec>,
     ) -> Self {
         let source_relay = generator.materialized_relay.clone();
+        let source_branch_schema = RuntimeVmSchema::from_branching(&source_branching);
         let context_projection = GeneratorContextProjection::new(
             &source_relay,
             source_schema.arrow_schema().as_ref(),
-            source_branch_schema.as_deref(),
+            source_branch_schema
+                .as_ref()
+                .map(|schema| schema.schema.as_ref()),
         );
         Self {
             generator,
@@ -660,7 +662,7 @@ impl Runtime {
                             }
                         }
                         for (branch_key, row) in latest_state {
-                            let branch_key = if source_branching.is_empty() {
+                            let branch_key = if source_branching.is_unbranched() {
                                 None
                             } else {
                                 branch_key
@@ -1045,8 +1047,8 @@ mod tests {
     use std::sync::Arc as StdArc;
 
     use nervix_models::{
-        CreateGenerator, MessageErrorPolicy, ParseAsType, ProcessorOutput, ProcessorOutputs,
-        Timestamp,
+        CreateGenerator, CreateSchema, MessageErrorPolicy, ParseAsType, ProcessorOutput,
+        ProcessorOutputs, SchemaField, Timestamp,
     };
     use nonzero_ext::nonzero;
     use ordered_float::OrderedFloat;
@@ -1149,10 +1151,18 @@ mod tests {
             &generator,
             &output,
             GeneratorSetProgramSchemas {
-                output: output_schema.arrow_schema(),
-                output_sensitivity: VmSchemaSensitivity::default(),
-                source: source_schema.arrow_schema(),
-                branch: Some(branch_schema.arrow_schema()),
+                output: RuntimeVmSchema {
+                    schema: output_schema.arrow_schema(),
+                    sensitivity: VmSchemaSensitivity::default(),
+                },
+                source: RuntimeVmSchema {
+                    schema: source_schema.arrow_schema(),
+                    sensitivity: VmSchemaSensitivity::default(),
+                },
+                branch: Some(RuntimeVmSchema {
+                    schema: branch_schema.arrow_schema(),
+                    sensitivity: VmSchemaSensitivity::default(),
+                }),
             },
             None,
         )
@@ -1226,5 +1236,60 @@ mod tests {
         assert_eq!(row_value(&output, "amount"), Some(RuntimeValue::I64(8)));
         assert_eq!(row_value(&output, "samples"), Some(samples));
         assert_eq!(row_value(&output, "labels"), Some(labels));
+    }
+
+    #[test]
+    fn generator_branch_binding_retains_sensitivity() {
+        let source_schema = test_schema(&[("value", ParseAsType::String)]);
+        let output_schema = test_schema(&[("tenant", ParseAsType::String)]);
+        let branch_schema = compile_schema(&CreateSchema {
+            name: named("tenant_branch"),
+            fields: vec![SchemaField {
+                name: named("tenant"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: true,
+            }],
+        });
+        let output = ProcessorOutput {
+            relay: named("generated_notifications"),
+            construction: construction("SET tenant = branch.tenant"),
+            flush_policy: Some(FlushPolicy::Immediate),
+            message_error_policy: MessageErrorPolicy::Log,
+            branch: None,
+        };
+        let generator = CreateGenerator {
+            name: named("synth_notifications"),
+            materialized_relay: named("notifications"),
+            branched_by: processor_branched_by("generated_notifications", &["tenant"]),
+            each: "100ms"
+                .parse()
+                .assured("the fixture cadence is a positive duration"),
+            output_routes: ProcessorOutputs::new(vec![output.clone()]),
+        };
+
+        let error = compile_generator_set_program(
+            &domain("default"),
+            &generator,
+            &output,
+            GeneratorSetProgramSchemas {
+                output: RuntimeVmSchema {
+                    schema: output_schema.arrow_schema(),
+                    sensitivity: output_schema.vm_sensitivity(),
+                },
+                source: RuntimeVmSchema {
+                    schema: source_schema.arrow_schema(),
+                    sensitivity: source_schema.vm_sensitivity(),
+                },
+                branch: Some(RuntimeVmSchema {
+                    schema: branch_schema.arrow_schema(),
+                    sensitivity: branch_schema.vm_sensitivity(),
+                }),
+            },
+            None,
+        )
+        .expect_err("a sensitive branch value cannot initialize a non-sensitive output");
+
+        assert!(error.to_string().contains("sensitive"), "{error}");
     }
 }

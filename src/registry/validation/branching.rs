@@ -15,7 +15,7 @@ use meticulous::OptionExt;
 use nervix_models::{
     BranchName, BranchSelection, CorrelationTimeoutAction, CreateBranch, CreateSchema, DomainName,
     FieldName, Model, ModelIndex, ModelKind, ModelName, NodeRef, OutputBranch, ProcessorOutput,
-    ProcessorOutputs, RelayName, SchemaName,
+    ProcessorOutputs, RelayBranching, RelayName, ResolvedBranching, SchemaName,
 };
 use nervix_vm::{
     CompileOptions, OutputMode, compile_program_with_options_for_bindings_with_sensitivity,
@@ -701,10 +701,11 @@ impl ProcessorBranchingCheck<'_> {
     ) -> Result<(), Report<RegistryError>> {
         let declared =
             resolved_branch_selection(self.domain, self.identifier, self.models, branched_by)?;
+        let declared_fields = declared.field_names().cloned().collect::<Vec<_>>();
         let relay_branching =
             if let Some(relay_branching) = relay_branching(self.indices, self.graph, relay) {
                 relay_branching
-            } else if declared.is_empty() {
+            } else if declared.is_unbranched() {
                 return Ok(());
             } else {
                 return Err(Report::new(RegistryError::IncompatibleSchema {
@@ -715,12 +716,13 @@ impl ProcessorBranchingCheck<'_> {
                         self.model_kind,
                         self.identifier.as_str(),
                         relay.as_str(),
-                        format_branched_by(&declared.fields),
+                        format_branched_by(&declared_fields),
                     ),
                 }));
             };
+        let relay_fields = relay_branching.field_names().cloned().collect::<Vec<_>>();
 
-        if relay_branching.fields.is_empty() && !declared.fields.is_empty() {
+        if relay_branching.is_unbranched() && !declared.is_unbranched() {
             return Err(Report::new(RegistryError::IncompatibleSchema {
                 domain: self.domain.as_str().to_string(),
                 identifier: self.identifier.as_str().to_string(),
@@ -729,12 +731,12 @@ impl ProcessorBranchingCheck<'_> {
                     self.model_kind,
                     self.identifier.as_str(),
                     relay.as_str(),
-                    format_branched_by(&declared.fields),
+                    format_branched_by(&declared_fields),
                 ),
             }));
         }
 
-        if relay_branching.fields != declared.fields {
+        if relay_fields != declared_fields {
             return Err(Report::new(RegistryError::IncompatibleSchema {
                 domain: self.domain.as_str().to_string(),
                 identifier: self.identifier.as_str().to_string(),
@@ -742,14 +744,29 @@ impl ProcessorBranchingCheck<'_> {
                     "{} '{}' branch fields ({}) do not match relay '{}' branch fields ({})",
                     self.model_kind,
                     self.identifier.as_str(),
-                    format_branched_by(&declared.fields),
+                    format_branched_by(&declared_fields),
                     relay.as_str(),
-                    format_branched_by(&relay_branching.fields),
+                    format_branched_by(&relay_fields),
                 ),
             }));
         }
 
-        if relay_branching.branch == declared.branch {
+        if relay_branching.branch() != declared.branch() {
+            return Err(Report::new(RegistryError::IncompatibleSchema {
+                domain: self.domain.as_str().to_string(),
+                identifier: self.identifier.as_str().to_string(),
+                reason: format!(
+                    "{} '{}' branch name '{}' does not match relay '{}' branch name '{}'",
+                    self.model_kind,
+                    self.identifier.as_str(),
+                    format_branch_name(declared.branch()),
+                    relay.as_str(),
+                    format_branch_name(relay_branching.branch()),
+                ),
+            }));
+        }
+
+        if relay_branching == declared {
             return Ok(());
         }
 
@@ -757,12 +774,10 @@ impl ProcessorBranchingCheck<'_> {
             domain: self.domain.as_str().to_string(),
             identifier: self.identifier.as_str().to_string(),
             reason: format!(
-                "{} '{}' branch name '{}' does not match relay '{}' branch name '{}'",
+                "{} '{}' branch schema does not match relay '{}' branch schema",
                 self.model_kind,
                 self.identifier.as_str(),
-                format_branch_name(declared.branch.as_ref()),
                 relay.as_str(),
-                format_branch_name(relay_branching.branch.as_ref()),
             ),
         }))
     }
@@ -792,7 +807,7 @@ fn ensure_processing_source_branching(
             reference: relay.as_str().to_string(),
         }));
     };
-    if node.effective_branching.is_some() {
+    if node.resolved_branching.is_some() {
         return Ok(());
     }
 
@@ -819,11 +834,7 @@ fn ensure_relays_have_same_branch(
 ) -> Result<(), Report<RegistryError>> {
     let left_branching = relay_branching(indices, graph, left);
     let right_branching = relay_branching(indices, graph, right);
-    let compatible = match (&left_branching, &right_branching) {
-        (None, None) => true,
-        (Some(left), Some(right)) => left.branch == right.branch && left.fields == right.fields,
-        _ => false,
-    };
+    let compatible = left_branching == right_branching;
     if compatible {
         return Ok(());
     }
@@ -845,27 +856,10 @@ fn relay_branching(
 ) -> Option<ResolvedBranching> {
     let index = indices.get(&NodeRef::new(ModelKind::Relay, relay.clone()))?;
     let node = graph.node_weight(*index)?;
-    let Model::Relay(relay) = node.config.as_ref() else {
+    let Model::Relay(_) = node.config.as_ref() else {
         return None;
     };
-    Some(ResolvedBranching {
-        branch: relay.branching.branch().cloned(),
-        schema: node.effective_branching_schema.clone(),
-        fields: node.effective_branching.clone()?,
-    })
-}
-
-#[derive(Clone)]
-pub(in crate::registry) struct ResolvedBranching {
-    branch: Option<BranchName>,
-    pub(in crate::registry) schema: Option<SchemaName>,
-    pub(in crate::registry) fields: Vec<FieldName>,
-}
-
-impl ResolvedBranching {
-    fn is_empty(&self) -> bool {
-        self.fields.is_empty()
-    }
+    node.resolved_branching.clone()
 }
 
 pub(in crate::registry) trait BranchReference {
@@ -873,6 +867,12 @@ pub(in crate::registry) trait BranchReference {
 }
 
 impl BranchReference for BranchSelection {
+    fn branch_ref(&self) -> Option<&BranchName> {
+        self.branch()
+    }
+}
+
+impl BranchReference for RelayBranching {
     fn branch_ref(&self) -> Option<&BranchName> {
         self.branch()
     }
@@ -918,18 +918,11 @@ pub(in crate::registry) fn resolved_branch_selection(
     branched_by: &dyn BranchReference,
 ) -> Result<ResolvedBranching, Report<RegistryError>> {
     let Some(branch_ref) = branched_by.branch_ref() else {
-        return Ok(ResolvedBranching {
-            branch: None,
-            schema: None,
-            fields: Vec::new(),
-        });
+        return Ok(ResolvedBranching::unbranched());
     };
     let branch = branch_model(domain, identifier, models, branch_ref)?;
-    Ok(ResolvedBranching {
-        branch: Some(branch_ref.clone()),
-        schema: Some(branch.schema.clone()),
-        fields: branching_schema_fields(domain, identifier, models, &branch.schema)?,
-    })
+    let schema = schema_model(domain, identifier, models, &branch.schema)?.clone();
+    Ok(ResolvedBranching::branched(branch_ref.clone(), schema))
 }
 
 pub(in crate::registry) fn branch_model<'a>(
@@ -984,29 +977,6 @@ pub(in crate::registry) fn model_branch_selection(model: &Model) -> Option<&dyn 
     }
 }
 
-pub(in crate::registry) fn branching_schema_fields(
-    domain: &DomainName,
-    identifier: &ModelName,
-    models: &ModelIndex,
-    branch_schema: &SchemaName,
-) -> Result<Vec<FieldName>, Report<RegistryError>> {
-    let Some(Model::Schema(schema)) =
-        models.get(&NodeRef::new(ModelKind::Schema, branch_schema.clone()))
-    else {
-        return Err(Report::new(RegistryError::MissingReference {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            expected_kind: ModelKind::Schema.as_str(),
-            reference: branch_schema.as_str().to_string(),
-        }));
-    };
-    Ok(schema
-        .fields
-        .iter()
-        .map(|field| field.name.clone())
-        .collect())
-}
-
 fn assign_stream_branching(
     domain: &DomainName,
     producer: &ModelName,
@@ -1024,17 +994,14 @@ fn assign_stream_branching(
         "the relay reference was validated above, and every validated relay has a graph node",
     );
 
-    match &node.effective_branching {
+    match &node.resolved_branching {
         None => {
-            node.effective_branching = Some(branching.fields);
-            node.effective_branching_schema = branching.schema;
+            node.resolved_branching = Some(branching);
             Ok(true)
         }
-        Some(existing) if *existing == branching.fields => {
-            let Model::Relay(relay_model) = node.config.as_ref() else {
-                unreachable!("stream branching may only be assigned to a relay")
-            };
-            if relay_model.branching.branch() != branching.branch.as_ref() {
+        Some(existing) if existing == &branching => Ok(false),
+        Some(existing) if existing.field_names().eq(branching.field_names()) => {
+            if existing.branch() != branching.branch() {
                 return Err(Report::new(RegistryError::IncompatibleSchema {
                     domain: domain.as_str().to_string(),
                     identifier: producer.as_str().to_string(),
@@ -1042,17 +1009,21 @@ fn assign_stream_branching(
                         "stream '{}' receives conflicting branch names: existing '{}' vs producer \
                          '{}' with '{}'",
                         relay.as_str(),
-                        format_branch_name(relay_model.branching.branch()),
+                        format_branch_name(existing.branch()),
                         producer.as_str(),
-                        format_branch_name(branching.branch.as_ref()),
+                        format_branch_name(branching.branch()),
                     ),
                 }));
             }
-            if node.effective_branching_schema.is_none() && branching.schema.is_some() {
-                node.effective_branching_schema = branching.schema;
-                return Ok(true);
-            }
-            Ok(false)
+            Err(Report::new(RegistryError::IncompatibleSchema {
+                domain: domain.as_str().to_string(),
+                identifier: producer.as_str().to_string(),
+                reason: format!(
+                    "stream '{}' receives conflicting branch schemas from producer '{}'",
+                    relay.as_str(),
+                    producer.as_str(),
+                ),
+            }))
         }
         Some(existing) => Err(Report::new(RegistryError::IncompatibleSchema {
             domain: domain.as_str().to_string(),
@@ -1061,9 +1032,9 @@ fn assign_stream_branching(
                 "stream '{}' receives conflicting branch fields: existing ({}) vs producer '{}' \
                  with ({})",
                 relay.as_str(),
-                format_branched_by(existing),
+                format_branched_by(&existing.field_names().cloned().collect::<Vec<_>>()),
                 producer.as_str(),
-                format_branched_by(&branching.fields),
+                format_branched_by(&branching.field_names().cloned().collect::<Vec<_>>()),
             ),
         })),
     }
@@ -1167,8 +1138,10 @@ mod tests {
         let relay = graph
             .node(ModelKind::Relay, &named("notifications"))
             .expect("relay should exist");
-        assert_eq!(relay.effective_branching, Some(Vec::new()));
-        assert_eq!(relay.effective_branching_schema, None);
+        assert_eq!(
+            relay.resolved_branching,
+            Some(ResolvedBranching::unbranched())
+        );
 
         let _ = fs::remove_dir_all(path);
     }
@@ -1641,10 +1614,10 @@ mod tests {
 
         assert_eq!(
             projected
-                .effective_branching
+                .resolved_branching
                 .as_ref()
                 .expect("projected relay should be branched")
-                .iter()
+                .field_names()
                 .map(|name| name.as_str())
                 .collect::<Vec<_>>(),
             vec!["tenant", "user_id"]
@@ -1788,10 +1761,10 @@ mod tests {
 
             assert_eq!(
                 relay
-                    .effective_branching
+                    .resolved_branching
                     .as_ref()
                     .expect("routed relay should be branched")
-                    .iter()
+                    .field_names()
                     .map(|name| name.as_str())
                     .collect::<Vec<_>>(),
                 vec!["tenant", "user_id"]
@@ -1913,8 +1886,14 @@ mod tests {
             );
         let deduped = scheduled_node(&schedule, ModelKind::Relay, "deduped");
         assert_eq!(
-            deduped.effective_branching,
-            Some(vec![FieldName::parse("tenant").expect("valid field name")])
+            deduped
+                .resolved_branching
+                .as_ref()
+                .expect("scheduled relay should have resolved branching")
+                .field_names()
+                .map(FieldName::as_str)
+                .collect::<Vec<_>>(),
+            vec!["tenant"]
         );
 
         let _ = fs::remove_dir_all(path);
@@ -2059,19 +2038,20 @@ mod tests {
 
         assert_eq!(
             target
-                .effective_branching
+                .resolved_branching
                 .as_ref()
                 .expect("target relay should be branched")
-                .iter()
+                .field_names()
                 .map(|name| name.as_str())
                 .collect::<Vec<_>>(),
             vec!["tenant"]
         );
         assert_eq!(
             target
-                .effective_branching_schema
+                .resolved_branching
                 .as_ref()
-                .map(|name| name.as_str()),
+                .and_then(ResolvedBranching::schema)
+                .map(|schema| schema.name.as_str()),
             Some("tenant_branch")
         );
 
@@ -2145,27 +2125,30 @@ mod tests {
         let source = graph
             .node(ModelKind::Relay, &named("notifications"))
             .expect("source relay should exist");
-        assert_eq!(source.effective_branching, Some(Vec::new()));
-        assert_eq!(source.effective_branching_schema, None);
+        assert_eq!(
+            source.resolved_branching,
+            Some(ResolvedBranching::unbranched())
+        );
 
         let target = graph
             .node(ModelKind::Relay, &named("tenant_notifications"))
             .expect("target relay should exist");
         assert_eq!(
             target
-                .effective_branching
+                .resolved_branching
                 .as_ref()
                 .expect("target relay should be branched")
-                .iter()
+                .field_names()
                 .map(|name| name.as_str())
                 .collect::<Vec<_>>(),
             vec!["tenant"]
         );
         assert_eq!(
             target
-                .effective_branching_schema
+                .resolved_branching
                 .as_ref()
-                .map(|name| name.as_str()),
+                .and_then(ResolvedBranching::schema)
+                .map(|schema| schema.name.as_str()),
             Some("tenant_branch")
         );
 

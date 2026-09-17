@@ -3391,8 +3391,6 @@ impl EmitterTask {
                 available_materialized_streams: &materialized_stream_specs,
                 available_lookups: &lookups,
                 current_branching: &input_branching,
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
                 udfs: udfs.as_ref(),
             },
         )?;
@@ -3413,8 +3411,6 @@ impl EmitterTask {
                     available_materialized_streams: &materialized_stream_specs,
                     available_lookups: &lookups,
                     current_branching: &input_branching,
-                    current_branch_schema: None,
-                    current_branch_sensitivity: None,
                     udfs: udfs.as_ref(),
                 },
             )?
@@ -3438,8 +3434,6 @@ impl EmitterTask {
                     available_materialized_streams: &materialized_stream_specs,
                     available_lookups: &lookups,
                     current_branching: &input_branching,
-                    current_branch_schema: None,
-                    current_branch_sensitivity: None,
                     udfs: udfs.as_ref(),
                 },
                 RuntimeFilterScope::Source {

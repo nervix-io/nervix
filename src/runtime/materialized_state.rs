@@ -84,7 +84,7 @@ pub(super) struct MaterializedRelayStateAssignment {
 /// columns of that record rendered for display, and the watermarks it was materialized with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MaterializedRecordReport {
-    pub(crate) branch: String,
+    pub(crate) branch: Option<BranchKey>,
     pub(crate) payload: String,
     pub(crate) ingested_at_low_watermark: nervix_models::Timestamp,
     pub(crate) ingested_at_high_watermark: nervix_models::Timestamp,

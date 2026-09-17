@@ -160,7 +160,9 @@ impl Runtime {
                 }
             }
         }
-        reports.sort_by(|left, right| left.branch.cmp(&right.branch));
+        reports.sort_by(|left, right| {
+            branch_key_display(&left.branch).cmp(branch_key_display(&right.branch))
+        });
         Ok(reports)
     }
 
@@ -506,7 +508,9 @@ impl Runtime {
                 })
             })
             .collect::<error_stack::Result<Vec<_>, MaterializedReadError>>()?;
-        reports.sort_by(|left, right| left.branch.cmp(&right.branch));
+        reports.sort_by(|left, right| {
+            branch_key_display(&left.branch).cmp(branch_key_display(&right.branch))
+        });
         Ok(reports)
     }
 
@@ -704,7 +708,7 @@ impl Runtime {
             }));
         };
 
-        let key_mode = if spec.branching.is_empty() {
+        let key_mode = if spec.branching.is_unbranched() {
             MaterializedLookupKeyMode::Root
         } else {
             MaterializedLookupKeyMode::CurrentBranch
@@ -942,7 +946,7 @@ fn materialized_record_report(
     record: &MaterializedGenerationRecord,
 ) -> error_stack::Result<MaterializedRecordReport, MaterializedReadError> {
     Ok(MaterializedRecordReport {
-        branch: branch_key_display(&record.branch).to_string(),
+        branch: record.branch.clone(),
         payload: record.row.to_json_string().change_context(
             MaterializedReadError::RecordReport {
                 branch: record.branch.clone(),
@@ -1066,7 +1070,7 @@ mod tests {
                     RuntimeMaterializedRelaySpec::new(
                         state_schema.arrow_schema(),
                         VmSchemaSensitivity::default(),
-                        Vec::new(),
+                        ResolvedBranching::unbranched(),
                     ),
                 )
             })

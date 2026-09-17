@@ -166,16 +166,14 @@ impl ScheduleDelta {
     ) -> bool {
         let ScheduledNode {
             identifier: existing_identifier,
-            effective_branching: existing_effective_branching,
-            effective_branching_schema: existing_effective_branching_schema,
+            resolved_branching: existing_resolved_branching,
             schema_fingerprint: existing_schema_fingerprint,
             kafka_partition_schedule: existing_kafka_partition_schedule,
             ..
         } = existing;
         let ScheduledNode {
             identifier: desired_identifier,
-            effective_branching: desired_effective_branching,
-            effective_branching_schema: desired_effective_branching_schema,
+            resolved_branching: desired_resolved_branching,
             schema_fingerprint: desired_schema_fingerprint,
             kafka_partition_schedule: desired_kafka_partition_schedule,
             ..
@@ -189,15 +187,9 @@ impl ScheduleDelta {
         }
 
         if !allow_model_derived_residue_change {
-            let effective_branching_matches =
-                existing_effective_branching == desired_effective_branching;
-            if !effective_branching_matches {
-                return false;
-            }
-
-            let effective_branching_schema_matches =
-                existing_effective_branching_schema == desired_effective_branching_schema;
-            if !effective_branching_schema_matches {
+            let resolved_branching_matches =
+                existing_resolved_branching == desired_resolved_branching;
+            if !resolved_branching_matches {
                 return false;
             }
 
@@ -230,7 +222,7 @@ mod tests {
         EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, Expression, FlushPolicy,
         GeneralErrorPolicy, IngestSource, Literal, Model, ModelKind, NodeRef, OutputBranch,
         PlacementPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
-        RetryPolicy, RouteConstruction, ScheduledNode,
+        ResolvedBranching, RetryPolicy, RouteConstruction, ScheduledNode,
     };
     use nonzero_ext::nonzero;
 
@@ -281,7 +273,7 @@ mod tests {
                     branching: RelayBranching::unbranched(),
                     materialized_state: None,
                 }))
-                .with_effective_branching(Some(Vec::new()), None)
+                .with_resolved_branching(Some(ResolvedBranching::unbranched()))
                 .with_schema_fingerprint([1; 32])
                 .placed_on(
                     Some(ClusterNodeName::parse("node-1").expect("valid name")),
@@ -423,7 +415,7 @@ mod tests {
             DomainName::parse("testing").expect("valid domain"),
             vec![
                 ScheduledNode::new(Model::Junction(junction.clone()))
-                    .with_effective_branching(Some(Vec::new()), None)
+                    .with_resolved_branching(Some(ResolvedBranching::unbranched()))
                     .with_schema_fingerprint([1; 32])
                     .placed_on(
                         Some(ClusterNodeName::parse("node-1").expect("valid name")),
@@ -514,7 +506,7 @@ mod tests {
             DomainName::parse("testing").expect("valid domain"),
             vec![
                 ScheduledNode::new(Model::Emitter(emitter.clone()))
-                    .with_effective_branching(Some(Vec::new()), None)
+                    .with_resolved_branching(Some(ResolvedBranching::unbranched()))
                     .with_schema_fingerprint([1; 32])
                     .placed_on(
                         Some(ClusterNodeName::parse("node-1").expect("valid name")),

@@ -1574,9 +1574,7 @@ mod tests {
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
-                current_branching: &[],
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
+                current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
             },
         )
@@ -1907,7 +1905,7 @@ mod tests {
             ("amount", ParseAsType::I64),
             ("branch_tenant", ParseAsType::String),
         ]);
-        let branch_schema = test_schema(&[("tenant", ParseAsType::String)]).arrow_schema();
+        let branching = test_branching(&[("tenant", ParseAsType::String)]);
         let program = compile_processor_output_filter_map_program(
             RuntimeCompileTarget {
                 domain: &domain("default"),
@@ -1929,9 +1927,7 @@ mod tests {
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
-                current_branching: &[named("tenant")],
-                current_branch_schema: Some(&branch_schema),
-                current_branch_sensitivity: None,
+                current_branching: &branching,
                 udfs: None,
             },
         )
@@ -2009,7 +2005,7 @@ mod tests {
             ("amount", ParseAsType::I64),
             ("branch_tenant", ParseAsType::String),
         ]);
-        let branch_schema = test_schema(&[("tenant", ParseAsType::String)]).arrow_schema();
+        let branching = test_branching(&[("tenant", ParseAsType::String)]);
         let program = compile_processor_output_filter_map_program(
             RuntimeCompileTarget {
                 domain: &domain("default"),
@@ -2031,9 +2027,7 @@ mod tests {
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
-                current_branching: &[named("tenant")],
-                current_branch_schema: Some(&branch_schema),
-                current_branch_sensitivity: None,
+                current_branching: &branching,
                 udfs: None,
             },
         )
@@ -2127,9 +2121,7 @@ mod tests {
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
-                current_branching: &[],
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
+                current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
             },
         )
@@ -2194,9 +2186,7 @@ mod tests {
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
-                current_branching: &[],
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
+                current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
             },
         )
@@ -2278,7 +2268,7 @@ mod tests {
     #[test]
     fn filter_map_rejects_missing_branch_key() {
         let schema = test_schema(&[("tenant", ParseAsType::String)]);
-        let branch_schema = test_schema(&[("region", ParseAsType::String)]).arrow_schema();
+        let branching = test_branching(&[("region", ParseAsType::String)]);
         let error = compile_processor_output_filter_map_program(
             RuntimeCompileTarget {
                 domain: &domain("default"),
@@ -2297,9 +2287,7 @@ mod tests {
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
-                current_branching: &[named("region")],
-                current_branch_schema: Some(&branch_schema),
-                current_branch_sensitivity: None,
+                current_branching: &branching,
                 udfs: None,
             },
         )
@@ -2361,9 +2349,7 @@ mod tests {
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
-                current_branching: &[],
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
+                current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
             },
         )
@@ -2383,9 +2369,7 @@ mod tests {
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
-                current_branching: &[],
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
+                current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
             },
         )
@@ -2486,9 +2470,7 @@ mod tests {
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
-                current_branching: &[],
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
+                current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
             },
         )
@@ -2822,9 +2804,7 @@ mod tests {
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
-                current_branching: &[],
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
+                current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
             },
         )

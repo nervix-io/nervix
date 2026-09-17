@@ -1303,7 +1303,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use ahash::HashMap;
-    use nervix_models::{FieldName, ParseAsType};
+    use nervix_models::ParseAsType;
     use triomphe::Arc;
 
     use super::*;
@@ -1458,15 +1458,14 @@ mod tests {
             ("status", ParseAsType::String),
             ("score", ParseAsType::I64),
         ]);
-        let branch_schema = test_schema(&[("tenant", ParseAsType::String)]).arrow_schema();
+        let branching = test_branching(&[("tenant", ParseAsType::String)]);
         let state_schema = test_schema(&[("status", ParseAsType::String)]);
-        let branch = named::<FieldName>("by_tenant");
         let materialized_specs = HashMap::from_iter([(
             named("profiles"),
             RuntimeMaterializedRelaySpec::new(
                 state_schema.arrow_schema(),
                 VmSchemaSensitivity::default(),
-                vec![branch.clone()],
+                branching.clone(),
             ),
         )]);
         let program = CorrelatorOutputCompileContext {
@@ -1485,9 +1484,7 @@ mod tests {
             runtime: RuntimeVmCompileContext {
                 available_materialized_streams: &materialized_specs,
                 available_lookups: &HashMap::default(),
-                current_branching: std::slice::from_ref(&branch),
-                current_branch_schema: Some(&branch_schema),
-                current_branch_sensitivity: None,
+                current_branching: &branching,
                 udfs: None,
             },
         }
@@ -1643,9 +1640,7 @@ mod tests {
             runtime: RuntimeVmCompileContext {
                 available_materialized_streams: &materialized_streams,
                 available_lookups: &lookups,
-                current_branching: &[],
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
+                current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
             },
         };

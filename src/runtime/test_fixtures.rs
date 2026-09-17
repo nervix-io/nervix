@@ -19,8 +19,8 @@ use nervix_models::{
     ClusterNodeIncarnation, ClusterNodeName, CreateBranch, CreateSchema, DomainConfig, DomainName,
     DomainPace, DomainState, DomainStatus, ErrorPolicies, Expression, FieldName, FieldReference,
     FieldScope, IngestQuiesceMode, IngestorName, MessageErrorPolicy, ModelKind, ModelName,
-    OutputBranch, ParseAsType, ProcessorOutput, ProcessorOutputs, RelayName, ScheduledNode,
-    SchemaField, SchemaName, Timestamp,
+    OutputBranch, ParseAsType, ProcessorOutput, ProcessorOutputs, RelayName, ResolvedBranching,
+    ScheduledNode, SchemaField, SchemaName, Timestamp,
 };
 use nervix_vm::window::lower_window_assignments;
 use nervix_wasm::{
@@ -432,6 +432,31 @@ pub(super) fn test_schema(fields: &[(&str, ParseAsType)]) -> Arc<super::Compiled
             })
             .collect(),
     }))
+}
+
+pub(super) fn test_branching(fields: &[(&str, ParseAsType)]) -> ResolvedBranching {
+    test_named_branching("test_branch", fields)
+}
+
+pub(super) fn test_named_branching(
+    branch: &str,
+    fields: &[(&str, ParseAsType)],
+) -> ResolvedBranching {
+    ResolvedBranching::branched(
+        named(branch),
+        CreateSchema {
+            name: named("test_branch_schema"),
+            fields: fields
+                .iter()
+                .map(|(name, ty)| SchemaField {
+                    name: named(name),
+                    ty: ty.clone(),
+                    optional: false,
+                    sensitive: false,
+                })
+                .collect(),
+        },
+    )
 }
 
 /// One field of a test schema whose optionality varies per field.

@@ -37,8 +37,7 @@ pub(crate) struct DomainRoutingSnapshot {
     pub(super) relay_services: HashMap<RelayName, Arc<RelayBoundaryServices>>,
     pub(super) lookups: HashMap<LookupName, Arc<LookupRuntime>>,
     pub(super) udfs: UdfExecutor,
-    pub(super) relay_branchings: HashMap<RelayName, Vec<FieldName>>,
-    pub(super) relay_branching_schemas: HashMap<RelayName, Option<StdArc<arrow_schema::Schema>>>,
+    pub(super) relay_branchings: HashMap<RelayName, ResolvedBranching>,
     pub(super) materialized_stream_specs: HashMap<RelayName, RuntimeMaterializedRelaySpec>,
     pub(super) materialized_stream_owner_nodes: HashMap<RelayName, Option<ClusterNodeName>>,
     pub(super) codecs: HashMap<CodecName, Arc<CompiledCodec>>,
@@ -352,7 +351,6 @@ impl Runtime {
         let (shutdown_tx, _) = watch::channel(false);
         let mut relay_builders = HashMap::new();
         let mut relay_branchings = HashMap::new();
-        let mut relay_branching_schemas = HashMap::new();
         let mut relay_schemas = HashMap::new();
         let mut materialized_stream_specs = HashMap::new();
         let mut materialized_stream_owner_nodes = HashMap::new();
@@ -524,18 +522,11 @@ impl Runtime {
                         remote_runtime_consumers: Vec::new(),
                     },
                 );
-                relay_branchings.insert(
-                    relay.name.clone(),
-                    node.effective_branching.clone().unwrap_or_default(),
-                );
-                let branching_schema = relay_branching_schema_for_runtime(
-                    domain,
-                    &relay.name,
-                    relay,
-                    node.effective_branching_schema.as_ref(),
-                    &schemas,
-                )?;
-                relay_branching_schemas.insert(relay.name.clone(), branching_schema);
+                let branching = node
+                    .resolved_branching
+                    .clone()
+                    .assured("the registry resolves every relay branch declaration");
+                relay_branchings.insert(relay.name.clone(), branching.clone());
                 relay_schemas.insert(relay.name.clone(), schema);
                 if relay.materialized_state.is_some() {
                     materialized_stream_specs.insert(
@@ -555,7 +546,7 @@ impl Runtime {
                                      above",
                                 )
                                 .vm_sensitivity(),
-                            node.effective_branching.clone().unwrap_or_default(),
+                            branching,
                         ),
                     );
                     materialized_stream_owner_nodes.insert(relay.name.clone(), None);
@@ -596,14 +587,11 @@ impl Runtime {
                             ),
                         });
                     };
-                    let source_branch_schema = relay_branching_schemas
-                        .get(&generator.materialized_relay)
-                        .cloned()
-                        .flatten();
                     let source_branching = relay_branchings
                         .get(&generator.materialized_relay)
                         .cloned()
-                        .unwrap_or_default();
+                        .assured("the generator's validated source relay has branch routing");
+                    let source_branch_schema = RuntimeVmSchema::from_branching(&source_branching);
                     let mut routes = Vec::new();
                     for output in generator.output_routes.outputs() {
                         let Some(output_schema) = relay_schemas.get(&output.relay).cloned() else {
@@ -620,9 +608,14 @@ impl Runtime {
                             generator,
                             output,
                             GeneratorSetProgramSchemas {
-                                output: output_schema.arrow_schema(),
-                                output_sensitivity: output_schema.vm_sensitivity(),
-                                source: source_schema.arrow_schema(),
+                                output: RuntimeVmSchema {
+                                    schema: output_schema.arrow_schema(),
+                                    sensitivity: output_schema.vm_sensitivity(),
+                                },
+                                source: RuntimeVmSchema {
+                                    schema: source_schema.arrow_schema(),
+                                    sensitivity: source_schema.vm_sensitivity(),
+                                },
                                 branch: source_branch_schema.clone(),
                             },
                             Some(&udf_executor),
@@ -825,10 +818,6 @@ impl Runtime {
                         generator.materialized_relay
                     ),
                 })?;
-            let source_branch_schema = relay_branching_schemas
-                .get(&generator.materialized_relay)
-                .cloned()
-                .flatten();
             let mut routes = Vec::with_capacity(route_specs.len());
             for (output, program, output_schema) in route_specs {
                 let Some(output_registry) = relay_registries.get(&output.relay).cloned() else {
@@ -863,13 +852,7 @@ impl Runtime {
                 self.spawn_generator_task(
                     domain,
                     &shutdown_tx,
-                    GeneratorTaskSpec::new(
-                        generator,
-                        source_schema,
-                        source_branching,
-                        source_branch_schema,
-                        routes,
-                    ),
+                    GeneratorTaskSpec::new(generator, source_schema, source_branching, routes),
                 )?,
             );
         }
@@ -930,10 +913,7 @@ impl Runtime {
                                 .schema_fingerprint(node.kind, &node.identifier)
                                 .unwrap_or([0; 32]);
                             ScheduledNode::new((*node.config).clone())
-                                .with_effective_branching(
-                                    node.effective_branching,
-                                    node.effective_branching_schema,
-                                )
+                                .with_resolved_branching(node.resolved_branching)
                                 .with_schema_fingerprint(fingerprint)
                         })
                         .collect::<Vec<_>>(),
@@ -953,7 +933,6 @@ impl Runtime {
                         lookups: lookup_runtimes,
                         udfs: udf_executor,
                         relay_branchings,
-                        relay_branching_schemas,
                         materialized_stream_specs,
                         materialized_stream_owner_nodes,
                         codecs,

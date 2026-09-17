@@ -235,17 +235,8 @@ impl Runtime {
                 .relay_branchings
                 .get(from_relay)
                 .cloned()
-                .unwrap_or_default();
-            let current_branch_schema = routing
-                .relay_branching_schemas
-                .get(from_relay)
-                .cloned()
-                .flatten();
-            let target_branch_schema = routing
-                .relay_branching_schemas
-                .get(&output.relay)
-                .cloned()
-                .flatten();
+                .assured("the validated reingestor source relay has branch routing");
+            let target_branch_schema = relay_branch_schema_for_routing(routing, &output.relay);
             match compile_processor_output_filter_map_program(
                 RuntimeCompileTarget {
                     domain,
@@ -265,8 +256,6 @@ impl Runtime {
                     available_materialized_streams: &routing.materialized_stream_specs,
                     available_lookups: &routing.lookups,
                     current_branching: &current_branching,
-                    current_branch_schema: current_branch_schema.as_ref(),
-                    current_branch_sensitivity: None,
                     udfs: Some(&routing.udfs),
                 },
             ) {
@@ -297,8 +286,6 @@ impl Runtime {
                     available_materialized_streams: &routing.materialized_stream_specs,
                     available_lookups: &routing.lookups,
                     current_branching: &current_branching,
-                    current_branch_schema: current_branch_schema.as_ref(),
-                    current_branch_sensitivity: None,
                     udfs: Some(&routing.udfs),
                 },
             )
@@ -1042,12 +1029,7 @@ impl Runtime {
                 .relay_branchings
                 .get(from_relay)
                 .cloned()
-                .unwrap_or_default();
-            let current_branch_schema = routing
-                .relay_branching_schemas
-                .get(from_relay)
-                .cloned()
-                .flatten();
+                .assured("the validated reingestor source relay has branch routing");
             match compile_expression_filter_program(
                 RuntimeCompileTarget {
                     domain,
@@ -1064,8 +1046,6 @@ impl Runtime {
                     available_materialized_streams: &routing.materialized_stream_specs,
                     available_lookups: &routing.lookups,
                     current_branching: &current_branching,
-                    current_branch_schema: current_branch_schema.as_ref(),
-                    current_branch_sensitivity: None,
                     udfs: Some(&routing.udfs),
                 },
             ) {
@@ -1782,7 +1762,7 @@ mod tests {
             ("tenant", ParseAsType::String),
             ("user_id", ParseAsType::U32),
         ]);
-        let branch_schema = test_schema(&[("tenant", ParseAsType::String)]).arrow_schema();
+        let branching = test_branching(&[("tenant", ParseAsType::String)]);
         let (execution_shutdown, _) = watch::channel(false);
         runtime.install_domain_execution(
             &domain,
@@ -1801,12 +1781,12 @@ mod tests {
                         ]
                         .into_iter()
                         .collect(),
-                        relay_branchings: [(relay.clone(), vec![named("tenant")])]
-                            .into_iter()
-                            .collect(),
-                        relay_branching_schemas: [(relay.clone(), Some(branch_schema))]
-                            .into_iter()
-                            .collect(),
+                        relay_branchings: [
+                            (named("orders"), branching.clone()),
+                            (relay.clone(), branching),
+                        ]
+                        .into_iter()
+                        .collect(),
                         ..DomainRoutingSnapshot::default()
                     },
                 ),
