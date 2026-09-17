@@ -25,8 +25,8 @@ use nervix_models::{
     AckMode, BranchSelection, ClusterNodeName, CreateDeduplicator, CreateEmitter, CreateIngestor,
     CreateJunction, CreateSchema, CreateWasmProcessor, DomainConfig, DomainName, DomainPace,
     DomainStartPoint, DomainState, DomainStatus, EmitSink, IngestSource, KafkaOffsetMode, Model,
-    ModelKind, ModelName, NodeRef, PlacementGroupSchedule, ProcessorInputs, ProcessorOutputs,
-    ScheduledNode, WasmProcessorLimits,
+    ModelKind, ModelName, NodeEndpoint, NodeRef, NodeServiceUrl, PlacementGroupSchedule,
+    ProcessorInputs, ProcessorOutputs, ScheduledNode, WasmProcessorLimits,
 };
 use nonzero_ext::nonzero;
 use parking_lot::RwLock;
@@ -130,6 +130,12 @@ pub(in crate::application) fn test_addr(base_port: u16) -> std::net::SocketAddr 
     format!("127.0.0.1:{base_port}")
         .parse()
         .expect("valid socket addr")
+}
+
+/// The url a test node advertises for a service it serves at `addr`.
+pub(crate) fn test_service_url(addr: std::net::SocketAddr) -> NodeServiceUrl {
+    NodeServiceUrl::new("http", &NodeEndpoint::from(addr))
+        .expect("a loopback address and port form a url")
 }
 
 pub(in crate::application) fn test_args(extra: &[&str]) -> Args {
@@ -465,7 +471,7 @@ pub(in crate::application) async fn build_test_service(
         ConsensusSettings {
             cluster_name: "test".to_string(),
             node_id: expected_leader.clone(),
-            interconnect_advertise_addr: interconnect.local_addr().to_string(),
+            interconnect_advertise_addr: interconnect.local_addr().into(),
             interconnect: interconnect.clone(),
             executor: executor.clone(),
             raft_heartbeat_interval: Duration::from_millis(50),
@@ -496,8 +502,8 @@ pub(in crate::application) async fn build_test_service(
             cluster_id: "test".to_string(),
             node_id: expected_leader,
             grpc_listen_addr: grpc_addr,
-            grpc_advertise_addr: grpc_addr.to_string(),
-            web_console_advertise_addr: format!("http://{}", grpc_addr),
+            client_advertise_url: test_service_url(grpc_addr),
+            console_advertise_url: test_service_url(grpc_addr),
             interconnect_advertise_addr: interconnect_addr.into(),
             bootstrap_host: None,
             interconnect: interconnect.clone(),

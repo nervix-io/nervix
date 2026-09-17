@@ -34,6 +34,7 @@ mod connection;
 mod identity;
 mod observation;
 mod operation;
+mod peer_target;
 mod pool;
 mod request;
 mod runtime_state;
@@ -51,6 +52,7 @@ pub use observation::{
     StreamResetReason, TransferDirection, TransportCounters, TransportSnapshot,
 };
 pub use operation::{RemoteOperationFailure, RemoteOperationSubject};
+pub use peer_target::PeerTarget;
 pub use pool::PoolClass;
 pub use request::{
     ApplicationHealthProbe, ApplicationRevisionRequest, ApplicationRevisionResponse,
@@ -182,22 +184,6 @@ impl TransportOptions {
             });
         }
         Ok(())
-    }
-}
-
-/// One advertised address and the certificate name expected there.
-#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PeerTarget {
-    pub addr: SocketAddr,
-    pub server_name: String,
-}
-
-impl PeerTarget {
-    pub fn new(addr: SocketAddr, server_name: impl Into<String>) -> Self {
-        Self {
-            addr,
-            server_name: server_name.into(),
-        }
     }
 }
 
