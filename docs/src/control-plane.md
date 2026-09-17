@@ -504,6 +504,16 @@ newer checkpoints the destination has published. A state reset occurs only when 
 decision either stages the recreated checkpoint inventory or reports a reset outcome for every state
 component owned by the entity.
 
+A forced recovery of a WASM processor also starts a new guest-state generation for every branch, in
+the schedule publication that names the new owner, and that schedule is the one the recovery
+preparation is fingerprinted against. The destination stages the checkpoints of the generation being
+replaced and activation publishes them in the new generation. A snapshot of any earlier generation,
+whether it is held by the lost owner, a replica that was offline, or an older preparation, is never
+selected, installed, or restored again, even when its revision is higher than every current one. A
+planned handoff keeps the generation. Generation transitions are published only by a committed
+schedule, so they are serialized with every other mutation of the domain through the same lease or
+automatic-decision fence as the schedule itself.
+
 For a planned handoff, each prepare destination becomes a tracked participant before the
 side-effecting request is sent. A lost response and cancellation of the coordinating future are
 therefore cleaned up like acknowledged preparations. Cleanup retries an exact discard and never
