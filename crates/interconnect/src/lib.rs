@@ -36,6 +36,8 @@ mod observation;
 mod operation;
 mod pool;
 mod request;
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_test;
 mod wire;
 
 pub use connection::{

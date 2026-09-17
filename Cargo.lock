@@ -6711,6 +6711,7 @@ dependencies = [
  "rkyv",
  "rustls",
  "rustls-pki-types",
+ "shuttle",
  "shuttle-dashmap",
  "shuttle-parking_lot",
  "shuttle-tokio",
