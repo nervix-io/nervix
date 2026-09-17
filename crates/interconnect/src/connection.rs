@@ -1482,13 +1482,8 @@ impl TransportState {
             let Some(connection) = self.connections.get(key).map(|item| item.clone()) else {
                 continue;
             };
-            let stream_slots = connection
-                .stream_slots
-                .for_subquota(subquota)
-                .assured("reserved stream subquotas are assigned to their configured pool");
-            let permit = match StdArc::clone(stream_slots).try_acquire_owned() {
-                Ok(permit) => permit,
-                Err(_) => continue,
+            let Some(permit) = connection.stream_slots.try_lease(subquota) else {
+                continue;
             };
             if connection.closed.is_cancelled() || connection.retiring.is_cancelled() {
                 continue;

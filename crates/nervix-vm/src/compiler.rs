@@ -2618,7 +2618,8 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         | FunctionName::Sign
         | FunctionName::Trunc
         | FunctionName::ShiftLeft
-        | FunctionName::ShiftRight => None,
+        | FunctionName::ShiftRight
+        | FunctionName::Datetime(_) => None,
     }
 }
 

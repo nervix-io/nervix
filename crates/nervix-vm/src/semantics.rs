@@ -16,7 +16,7 @@ use arrow_schema::{DataType, TimeUnit};
 
 use crate::{
     CompileError, RegisterType,
-    program::{BinaryOp, Expr, FunctionName, SpannedExpr, UnaryOp},
+    program::{BinaryOp, DatetimeFunction, Expr, FunctionName, SpannedExpr, UnaryOp},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -345,6 +345,41 @@ pub enum BuiltinLowering {
     ShiftLeft,
     ShiftRight,
     BitCount,
+    Datetime(DatetimeFunction),
+}
+
+/// A row-valued argument of a datetime builtin, after the constants that select what it computes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DatetimeOperand {
+    /// A `DATETIME` value.
+    Datetime,
+    /// A count of units, at any integer type.
+    UnitCount,
+}
+
+impl DatetimeFunction {
+    /// The row-valued arguments the builtin takes, in written order.
+    const fn operands(self) -> &'static [DatetimeOperand] {
+        match self {
+            Self::DatePart(_) | Self::DateTrunc(_) | Self::ToUnix(_) => {
+                &[DatetimeOperand::Datetime]
+            }
+            Self::DateBin(_) | Self::DateDiff(_) => {
+                &[DatetimeOperand::Datetime, DatetimeOperand::Datetime]
+            }
+            Self::DateAdd(_) => &[DatetimeOperand::UnitCount, DatetimeOperand::Datetime],
+            Self::FromUnix(_) => &[DatetimeOperand::UnitCount],
+        }
+    }
+
+    fn output_type(self) -> DataType {
+        match self {
+            Self::DatePart(_) | Self::DateDiff(_) | Self::ToUnix(_) => DataType::Int64,
+            Self::DateTrunc(_) | Self::DateBin(_) | Self::DateAdd(_) | Self::FromUnix(_) => {
+                RegisterType::Datetime.data_type()
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -604,6 +639,7 @@ pub const fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescri
         FunctionName::ShiftLeft => BuiltinLowering::ShiftLeft,
         FunctionName::ShiftRight => BuiltinLowering::ShiftRight,
         FunctionName::BitCount => BuiltinLowering::BitCount,
+        FunctionName::Datetime(function) => BuiltinLowering::Datetime(*function),
         FunctionName::LeakSensitive
         | FunctionName::LookupHashMap
         | FunctionName::ReadHeader
@@ -673,13 +709,18 @@ pub const fn builtin_semantics_for_lowering(lowering: BuiltinLowering) -> Operat
         | BuiltinLowering::BitwiseOr
         | BuiltinLowering::BitwiseXor
         | BuiltinLowering::BitwiseNot
-        | BuiltinLowering::BitCount => OperationSemantics {
-            volatility: Volatility::Immutable,
-            dependency_scope: DependencyScope::Constant,
-            has_side_effects: false,
-            can_error: false,
-            null_propagation: NullPropagation::Strict,
-        },
+        | BuiltinLowering::BitCount
+        // Every DATETIME has every date part, and a count of whole units since the epoch is never
+        // larger than the nanoseconds it counts.
+        | BuiltinLowering::Datetime(DatetimeFunction::DatePart(_) | DatetimeFunction::ToUnix(_)) => {
+            OperationSemantics {
+                volatility: Volatility::Immutable,
+                dependency_scope: DependencyScope::Constant,
+                has_side_effects: false,
+                can_error: false,
+                null_propagation: NullPropagation::Strict,
+            }
+        }
         BuiltinLowering::Coalesce | BuiltinLowering::NullIf | BuiltinLowering::Concat => {
             OperationSemantics {
                 volatility: Volatility::Immutable,
@@ -722,7 +763,16 @@ pub const fn builtin_semantics_for_lowering(lowering: BuiltinLowering) -> Operat
         | BuiltinLowering::Sign
         | BuiltinLowering::Trunc
         | BuiltinLowering::ShiftLeft
-        | BuiltinLowering::ShiftRight => OperationSemantics {
+        | BuiltinLowering::ShiftRight
+        // A truncated, binned, moved or converted instant can fall outside the DATETIME range, and
+        // a difference in nanoseconds can exceed I64.
+        | BuiltinLowering::Datetime(
+            DatetimeFunction::DateTrunc(_)
+            | DatetimeFunction::DateBin(_)
+            | DatetimeFunction::DateAdd(_)
+            | DatetimeFunction::DateDiff(_)
+            | DatetimeFunction::FromUnix(_),
+        ) => OperationSemantics {
             volatility: Volatility::Immutable,
             dependency_scope: DependencyScope::Constant,
             has_side_effects: false,
@@ -1090,6 +1140,31 @@ fn builtin_output_type(
             let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
             require_integral_arg(function, input, span)?;
             Ok(DataType::Utf8)
+        }
+        BuiltinLowering::Datetime(datetime) => {
+            let operands = datetime.operands();
+            require_builtin_arity_exact(function, arg_types, operands.len(), span.clone())?;
+            for (operand, arg_type) in operands.iter().zip(arg_types) {
+                let input = require_supported_register_type(function, arg_type, span.clone())?;
+                match operand {
+                    DatetimeOperand::Datetime => {
+                        if input != RegisterType::Datetime {
+                            return Err(CompileError {
+                                code: "unsupported_function",
+                                message: format!(
+                                    "function '{}' requires Datetime input, found {input}",
+                                    function.as_str()
+                                ),
+                                span: span.into(),
+                            });
+                        }
+                    }
+                    DatetimeOperand::UnitCount => {
+                        require_integral_arg(function, input, span.clone())?;
+                    }
+                }
+            }
+            Ok(datetime.output_type())
         }
     }
 }

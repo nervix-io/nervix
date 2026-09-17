@@ -2137,10 +2137,34 @@ mod shuttle_tests {
         first: StateAssignmentToken,
         /// The generation published by the latest rebind that has returned.
         returned_generation: AtomicU64,
-        /// For each operation thread, the generation its running operation was admitted under, or
-        /// zero while it runs none. Generation zero is the unassigned binding, which grants no
-        /// operation.
-        running_generations: Vec<AtomicU64>,
+        /// One slot per operation thread, holding the generation of the operation it is running.
+        running_generations: Vec<RunningGeneration>,
+    }
+
+    /// The generation one operation thread runs its admitted operation under, as the single atomic
+    /// a rebinding thread reads while that operation runs.
+    ///
+    /// No operation runs under generation zero, which is the unassigned binding and grants none, so
+    /// the slot spends zero on running nothing and answers with the generation only while one runs.
+    #[derive(Default)]
+    struct RunningGeneration(AtomicU64);
+
+    impl RunningGeneration {
+        fn enter(&self, generation: u64) {
+            self.0.store(generation, Ordering::SeqCst);
+        }
+
+        fn leave(&self) {
+            self.0.store(0, Ordering::SeqCst);
+        }
+
+        /// The generation of the operation running in this slot, while one runs.
+        fn running(&self) -> Option<u64> {
+            match self.0.load(Ordering::SeqCst) {
+                0 => None,
+                generation => Some(generation),
+            }
+        }
     }
 
     impl FenceModel {
@@ -2152,7 +2176,7 @@ mod shuttle_tests {
                 .assured("a state without roles is originated locally");
             let mut running_generations = Vec::with_capacity(operation_threads);
             for _ in 0..operation_threads {
-                running_generations.push(AtomicU64::new(0));
+                running_generations.push(RunningGeneration::default());
             }
             Self {
                 authority,
@@ -2190,14 +2214,14 @@ mod shuttle_tests {
             let generation = token.binding.fence();
             self.authority
                 .authorize(token, StateCapability::Originate, || {
-                    running_generation.store(generation, Ordering::SeqCst);
+                    running_generation.enter(generation);
                     let returned = self.returned_generation.load(Ordering::SeqCst);
                     assert!(
                         returned <= generation,
                         "an operation admitted under generation {generation} was still running \
                          after the rebind publishing generation {returned} returned"
                     );
-                    running_generation.store(0, Ordering::SeqCst);
+                    running_generation.leave();
                 })
                 .discarded("a refused operation observed a superseding binding and never ran");
         }
@@ -2211,9 +2235,11 @@ mod shuttle_tests {
                 .fence();
             self.returned_generation.store(published, Ordering::SeqCst);
             for running_generation in &self.running_generations {
-                let running = running_generation.load(Ordering::SeqCst);
+                let Some(running) = running_generation.running() else {
+                    continue;
+                };
                 assert!(
-                    running == 0 || running >= published,
+                    running >= published,
                     "the rebind publishing generation {published} returned while an operation \
                      admitted under generation {running} was still running"
                 );
