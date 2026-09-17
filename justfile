@@ -109,10 +109,10 @@ test-package-lib package *args:
 test-execution *args:
     cargo test --package nervix-execution --lib -- {{ args }}
 
-# Explore the filtered execution and server invariants under Shuttle. The former Loom recipe is
-# retired: acknowledgement races now exercise production types, while the reduced relay models
-# document their memory-ordering claims in-module.
-test-shuttle: (test-shuttle-package "nervix-execution") (test-shuttle-package "nervix-server")
+# Explore the filtered execution, interconnect and server invariants under Shuttle. The former Loom
+# recipe is retired: acknowledgement races now exercise production types, while the reduced relay
+# models document their memory-ordering claims in-module.
+test-shuttle: (test-shuttle-package "nervix-execution") (test-shuttle-package "nervix-interconnect") (test-shuttle-package "nervix-server")
 
 # Explore one package's Shuttle checks whose names contain `filter`. Each check gets its own process
 # so a persisted schedule identifies its package and test.

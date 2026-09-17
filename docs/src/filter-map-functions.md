@@ -396,6 +396,100 @@ A shift takes `count` from any integer type, independently of the type of `value
 - `shift_right` never overflows. A signed value keeps its sign, so `shift_right(-5, 1)` is `-3`, and a
   `count` at or beyond the type's width returns `-1` for a negative `value` and `0` for any other.
 
+## Datetime Functions
+
+A `DATETIME` is a UTC instant with nanosecond precision. Its range is the signed Unix-nanosecond
+range, `1677-09-21T00:12:43.145224192Z` through `2262-04-11T23:47:16.854775807Z`. Datetime functions
+compute exactly from the values they are given and never read a clock, so a call gives the same
+result for the same arguments whenever it runs. The current time enters an expression as a value only
+through `now()`, which returns the execution-local domain time: `date_trunc('day', now())` follows a
+paced domain's logical clock at any `TIME RATE`.
+
+| Function | Returns | Notes |
+| --- | --- | --- |
+| `date_part(part, value)` | `I64` | One part of `value` in UTC, named by `part` from the table of date parts below |
+| `date_trunc(unit, value)` | `DATETIME` | The start of the `unit` that holds `value`. A day starts at midnight UTC and a week on Monday |
+| `date_bin(unit, width, value, origin)` | `DATETIME` | The start of the bin that holds `value`, for bins `width` units wide that start at `origin` and at every whole number of widths before and after it |
+| `date_add(unit, amount, value)` | `DATETIME` | `value` moved by `amount` units, backward when `amount` is negative. `amount` may be any integer type |
+| `date_diff(unit, start, end)` | `I64` | The whole units from `start` to `end`, rounded toward zero. Negative when `end` is before `start` |
+| `to_unix(unit, value)` | `I64` | The whole units from `1970-01-01T00:00:00Z` to `value`, rounded down |
+| `from_unix(unit, count)` | `DATETIME` | The instant `count` units after `1970-01-01T00:00:00Z`, or before it when `count` is negative. `count` may be any integer type |
+
+`unit`, `part`, and `width` are literals written in the call, not expressions, and they are checked
+when the statement is applied. `unit` and `part` are `STRING` literals whose names are
+case-insensitive. `width` is a positive integer literal, and `width` units must not exceed
+9,223,372,036,854,775,807 nanoseconds, about 292 years. A call with an unknown name, a non-literal
+argument, or a width that is not positive is rejected, and its message names what the call accepts.
+
+Every unit has a fixed length. A `DATETIME` has no leap seconds, so every UTC day is exactly 86,400
+seconds long. A calendar month or year has no fixed length and is not a unit.
+
+| Unit | Length |
+| --- | --- |
+| `nanosecond` | 1 nanosecond |
+| `microsecond` | 1,000 nanoseconds |
+| `millisecond` | 1,000 microseconds |
+| `second` | 1,000 milliseconds |
+| `minute` | 60 seconds |
+| `hour` | 60 minutes |
+| `day` | 24 hours |
+| `week` | 7 days |
+
+| Part | Range | Meaning |
+| --- | --- | --- |
+| `year` | 1677–2262 | The proleptic Gregorian year |
+| `quarter` | 1–4 | The quarter of the year |
+| `month` | 1–12 | The month |
+| `day` | 1–31 | The day of the month |
+| `hour` | 0–23 | The hour of the day |
+| `minute` | 0–59 | The minute of the hour |
+| `second` | 0–59 | The whole seconds of the minute |
+| `millisecond` | 0–999 | The whole milliseconds past the second |
+| `microsecond` | 0–999,999 | The whole microseconds past the second |
+| `nanosecond` | 0–999,999,999 | The nanoseconds past the second |
+| `day_of_week` | 0–6 | The day of the week, from Sunday as `0` |
+| `day_of_year` | 1–366 | The day of the year |
+| `iso_year` | 1677–2262 | The ISO 8601 week-numbering year that `iso_week` belongs to |
+| `iso_week` | 1–53 | The ISO 8601 week, whose week 1 holds the year's first Thursday |
+| `iso_day_of_week` | 1–7 | The ISO 8601 day of the week, from Monday as `1` |
+
+Results are exact to the nanosecond, and each function rounds in one fixed direction:
+
+- `date_trunc`, `date_bin`, and `to_unix` round toward negative infinity, including before the Unix
+  epoch and before an origin, so a value belongs to the unit or bin that starts at or before it.
+  `date_trunc('day', ...)` of `1969-12-31T23:59:59.999999999Z` is `1969-12-31T00:00:00Z`, and
+  `to_unix('millisecond', ...)` of the same value is `-1`.
+- A day, and every shorter unit, starts a whole number of units after the Unix epoch. A week starts
+  on Monday in `date_trunc`, while `to_unix('week', ...)` counts whole weeks from the epoch itself,
+  which was a Thursday.
+- `date_bin` accepts an `origin` before or after `value`. A value exactly on a bin boundary starts
+  its own bin.
+- `date_diff` rounds toward zero, so exchanging `start` and `end` only changes the sign of its result.
+  `date_diff('second', start, end)` is `0` when the two values are less than a second apart in either
+  direction.
+
+A null argument produces a null result. `date_part` and `to_unix` never fail. Another function
+reports a per-message `overflow` error and yields null exactly where its result cannot be
+represented:
+
+| Function | Fails when |
+| --- | --- |
+| `date_trunc`, `date_bin` | The unit or bin that holds `value` starts before the `DATETIME` range |
+| `date_add` | The moved instant is outside the `DATETIME` range, even when `amount` units alone would be longer than the range |
+| `from_unix` | The instant is outside the `DATETIME` range |
+| `date_diff` | The whole units do not fit `I64`, which only a count of nanoseconds between values more than about 292 years apart can reach |
+
+The error's message names the function, such as `date_add result is outside the DATETIME range` or
+`date_diff result does not fit I64`.
+
+```nspl,ignore
+SET hour = date_part('hour', input.occurred_at),
+    quarter_hour = date_bin('minute', 15, input.occurred_at, from_unix('second', 0)),
+    deadline = date_add('millisecond', input.timeout_ms, input.occurred_at),
+    age_seconds = date_diff('second', input.occurred_at, now()),
+    received_at = from_unix('millisecond', input.epoch_ms)
+```
+
 ## Array And Vector Functions
 
 These functions take one `ARRAY` or `VEC` value, described in
