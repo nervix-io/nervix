@@ -1,71 +1,46 @@
 //! Branch-local window processor execution.
 //!
 //! Layer: data plane.
-//! - **Owns.** Window state, aggregate accumulation, due-window emission and eviction.
-//! - **Depends on.** Validated window plans, Arrow batches and bound domain time.
+//! - **Owns.** The rows a branch's window retains, admitting evaluated batches into the window's
+//!   accumulators, due-window emission, stepping, and eviction.
+//! - **Depends on.** Validated window plans, Arrow batches, the window accumulators, and bound
+//!   domain time.
 //! - **Must not know.** NSPL parsing, placement decisions or connector transports.
 
 use error_stack::{Report, ResultExt as _};
 
 use super::*;
 
-/// Every way a window processor fails, from accumulating one aggregate input to publishing the
-/// branch-local window it owns.
+/// Every way a window processor fails, from evaluating one batch's aggregate arguments to
+/// publishing the branch-local window it owns.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum WindowProcessorError {
     #[error("window aggregate requires a non-empty window")]
     EmptyWindow,
     #[error("window processor '{}' failed to snapshot branch state", .processor.as_str())]
     Snapshot { processor: ModelName },
-    #[error("linear histogram delayed removal bucket is out of range")]
-    DelayedRemovalBucketOutOfRange,
-    #[error("linear histogram accumulator is missing delayed removed value")]
-    MissingDelayedRemovedValue,
-    #[error("linear histogram bucket is out of range")]
-    BucketOutOfRange,
-    #[error("linear histogram accumulator is missing removed value")]
-    MissingRemovedValue,
-    #[error("sequence aggregate structure requires a value")]
-    SequenceRequiresValue,
-    #[error("ordered aggregate structure requires a value")]
-    OrderedRequiresValue,
-    #[error("PERCENTILE_LINEAR_HISTOGRAM requires a value")]
-    HistogramRequiresValue,
-    #[error("SUM requires a value")]
-    SumRequiresValue,
-    #[error("sequence accumulator is missing removed window entry")]
-    MissingSequenceEntry,
-    #[error("sorted accumulator is missing removed window value")]
-    MissingSortedValue,
-    #[error("FIRST requires a non-empty window")]
-    FirstRequiresWindow,
-    #[error("LAST requires a non-empty window")]
-    LastRequiresWindow,
-    #[error("MAX requires a non-empty window")]
-    MaxRequiresWindow,
-    #[error("MIN requires a non-empty window")]
-    MinRequiresWindow,
-    #[error("SUM requires a non-empty window")]
-    SumRequiresWindow,
-    #[error("PERCENTILE_LINEAR_HISTOGRAM requires a constant percentile")]
-    HistogramRequiresPercentile,
-    #[error("{function:?} aggregate is backed by an incompatible accumulator")]
-    IncompatibleAccumulator { function: WindowAggregateFunction },
     #[error(
         "window snapshot accumulator count {accumulators} does not match aggregate demand count \
          {demands}"
     )]
     SnapshotDemandCount { accumulators: usize, demands: usize },
+    #[error("window snapshot does not carry the {storage:?} state of aggregate structure {demand}")]
+    SnapshotAccumulator {
+        demand: usize,
+        storage: WindowAggregateStorageKind,
+    },
+    #[error("window snapshot row carries {values} argument values for {arguments} arguments")]
+    SnapshotArgumentCount { values: usize, arguments: usize },
+    #[error("window snapshot row sequence {found} does not follow sequence {previous}")]
+    SnapshotSequence { previous: u64, found: u64 },
+    #[error("window snapshot delays a removal from bucket {bucket} of {buckets} buckets")]
+    SnapshotHistogramBucket { bucket: usize, buckets: usize },
     #[error("failed to encode a window entry for the branch snapshot")]
     EncodeSnapshotEntry,
     #[error("failed to restore a window entry from the branch snapshot")]
     RestoreSnapshotEntry,
     #[error("failed to restore a window entry branch key: {reason}")]
     RestoreSnapshotBranchKey { reason: String },
-    #[error(
-        "window aggregate input count {inputs} does not match accumulator count {accumulators}"
-    )]
-    AggregateInputCount { inputs: usize, accumulators: usize },
     #[error("failed to project the window aggregate input batch")]
     ProjectAggregateInput,
     #[error("window aggregate input VM execution failed")]
@@ -76,25 +51,30 @@ pub(super) enum WindowProcessorError {
     AggregateInputRowsDropped { expected: usize },
     #[error("window aggregate input VM produced no '{field}' field")]
     AggregateInputFieldMissing { field: String },
-    #[error("failed to read the window aggregate input column '{field}'")]
-    AggregateInputColumn { field: String },
     #[error("window aggregate input VM failed with {}: {reason}", .reason.code().as_str())]
     AggregateInputRow { reason: nervix_vm::SideErrorReason },
-    #[error("PERCENTILE_LINEAR_HISTOGRAM requires finite numeric values")]
-    HistogramRequiresFinite,
-    #[error("PERCENTILE_LINEAR_HISTOGRAM requires at least one bucket")]
-    HistogramRequiresBucket,
-    #[error("PERCENTILE_LINEAR_HISTOGRAM value {value} falls outside the bucket range")]
-    HistogramValueOutOfRange { value: f64 },
-    #[error("PERCENTILE_LINEAR_HISTOGRAM requires a non-empty window")]
-    HistogramRequiresWindow,
     #[error(
-        "PERCENTILE_LINEAR_HISTOGRAM percentile {percentile} has no rank in a window of {total} \
-         samples"
+        "window aggregate arguments evaluated for {evaluated} structures, the window has {demands}"
     )]
-    HistogramPercentileRank { percentile: f64, total: usize },
-    #[error("PERCENTILE_LINEAR_HISTOGRAM histogram is empty")]
-    HistogramEmpty,
+    ArgumentDemandCount { evaluated: usize, demands: usize },
+    #[error("window aggregate structure {demand} was evaluated with the wrong number of arguments")]
+    ArgumentShape { demand: usize },
+    #[error(
+        "window aggregate argument '{field}' of structure {demand} evaluated to {found:?}, \
+         expected {expected:?}"
+    )]
+    ArgumentColumnType {
+        demand: usize,
+        field: String,
+        expected: ArrowDataType,
+        found: ArrowDataType,
+    },
+    #[error("{} requires finite floating-point arguments", .function.nspl_name())]
+    NonFiniteArgument { function: WindowAggregateFunction },
+    #[error("SUM of the window does not fit {data_type:?}")]
+    SumOverflow { data_type: ArrowDataType },
+    #[error("{} of the window is not finite", .function.nspl_name())]
+    StatisticNotFinite { function: WindowAggregateFunction },
     #[error("window aggregate did not initialize required output field '{field}'")]
     UninitializedOutputField { field: String },
     #[error("failed to build the window aggregate output batch")]
@@ -105,99 +85,43 @@ pub(super) enum WindowProcessorError {
     AggregateExprExecution,
     #[error("window aggregate VM produced no '{field}' output field")]
     AggregateExprFieldMissing { field: String },
-    #[error("failed to read the window aggregate VM output '{field}'")]
-    AggregateExprOutput { field: String },
     #[error("window aggregate VM produced null '{field}' output")]
     AggregateExprNullOutput { field: String },
-    #[error("expected numeric value, found {type_name}")]
-    NotNumeric { type_name: &'static str },
-    #[error("SUM cannot combine {left} and {right}")]
-    SumIncompatible {
-        left: &'static str,
-        right: &'static str,
-    },
-    #[error("SUM cannot remove {right} from {left}")]
-    SumRemoveIncompatible {
-        left: &'static str,
-        right: &'static str,
-    },
 }
 
-/// The window entry a failed accumulation belongs to, handed back so its ACKs stay resolvable.
-#[derive(Debug)]
-pub(super) struct WindowPushFailure {
-    pub(super) error: Report<WindowProcessorError>,
-    pub(super) message: RelayMessage,
-}
-
+/// One row the window retains, with the message it arrived in.
 #[derive(Debug)]
 pub(super) struct WindowEntry {
-    pub(super) sequence: u64,
-    pub(super) timestamp: Timestamp,
+    pub(super) row: WindowRow,
     pub(super) message: RelayMessage,
-    pub(super) aggregate_inputs: Vec<WindowAggregateInput>,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct LinearHistogramDelayedRemoval {
-    pub(super) expires_at: Timestamp,
-    pub(super) bucket: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct RuntimeValueSortKey(pub(super) RuntimeValue);
-
-impl PartialOrd for RuntimeValueSortKey {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for RuntimeValueSortKey {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        compare_runtime_values(&self.0, &other.0)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(super) enum WindowAggregateAccumulator {
-    Counter {
-        count: usize,
-    },
-    Sequence {
-        values: VecDeque<WindowSequenceValue>,
-    },
-    SortedMap {
-        counts: BTreeMap<RuntimeValueSortKey, usize>,
-    },
-    LinearHistogram {
-        buckets: Vec<usize>,
-        total: usize,
-        min: f64,
-        max: f64,
-        width: f64,
-        delay: Duration,
-        delayed_removals: VecDeque<LinearHistogramDelayedRemoval>,
-    },
-    Sum {
-        total: Option<RuntimeValue>,
-    },
-}
-
-/// One value held in a sequence accumulator, kept with the window entry it arrived from so
-/// `FIRST` and `LAST` can order by arrival and `remove` can find the entry that left the window.
-#[derive(Debug, Clone)]
-pub(super) struct WindowSequenceValue {
-    pub(super) timestamp: Timestamp,
-    pub(super) sequence: u64,
-    pub(super) value: RuntimeValue,
+/// A row of an evaluated batch that the window admits.
+#[derive(Debug)]
+pub(super) struct WindowAdmission {
+    pub(super) message: RelayMessage,
+    /// The row's index within the batch's evaluated argument columns.
+    pub(super) row: usize,
 }
 
 #[derive(Debug)]
 pub(super) struct WindowProcessorState {
     pub(super) entries: VecDeque<WindowEntry>,
     pub(super) next_sequence: u64,
-    pub(super) accumulators: Vec<WindowAggregateAccumulator>,
+    pub(super) accumulators: Vec<WindowAccumulator>,
+}
+
+impl RetainedWindowRows for VecDeque<WindowEntry> {
+    fn retained(&self) -> usize {
+        self.len()
+    }
+
+    fn retained_row(&self, position: usize) -> &WindowRow {
+        &self
+            .get(position)
+            .verified("accumulators address only positions of rows the window retains")
+            .row
+    }
 }
 
 pub(super) fn message_timestamp(message: &RelayMessage) -> Timestamp {
@@ -211,7 +135,7 @@ pub(super) fn window_output_metadata(
     let low = state
         .entries
         .iter()
-        .map(|entry| entry.timestamp)
+        .map(|entry| entry.row.timestamp)
         .min()
         .ok_or_else(|| Report::new(WindowProcessorError::EmptyWindow))?;
     Ok(RuntimeRecordMetadata::from_ingested_at_watermarks(
@@ -223,7 +147,7 @@ pub(super) fn window_output_metadata(
 pub(super) async fn flush_ready_window_processor(
     context: WindowFlushContext<'_>,
     state: &mut WindowProcessorState,
-    aggregate: &WindowAggregateProgram,
+    plan: &WindowAccumulatorPlan,
     compiled_aggregates: &[CompiledWindowAggregateProgram],
     bounds: WindowBounds,
     now: Timestamp,
@@ -239,7 +163,7 @@ pub(super) async fn flush_ready_window_processor(
         execution_now,
     } = context;
     if output_routes.routes.is_empty() {
-        state.clear(aggregate);
+        state.clear(plan);
         return true;
     }
     if output_routes.routes.len() != compiled_aggregates.len() {
@@ -256,30 +180,10 @@ pub(super) async fn flush_ready_window_processor(
                 compiled_aggregates.len()
             ),
         );
-        state.clear(aggregate);
+        state.clear(plan);
         return true;
     }
-    let mut changed = false;
-    match state.purge_timeouts(now) {
-        Ok(purged) => {
-            changed |= purged;
-        }
-        Err(error) => {
-            branch.runtime.handle_internal_processor_error_for_acks(
-                &branch.domain,
-                node_kind,
-                processor,
-                error_policies,
-                state.entries.iter().map(|entry| &entry.message.acks),
-                format!(
-                    "window processor '{}' failed to purge timed aggregate state: {error:#}",
-                    processor.as_str(),
-                ),
-            );
-            state.clear(aggregate);
-            return true;
-        }
-    }
+    let mut changed = state.purge_timeouts(now);
     while window_width_met(state, bounds.width_messages, bounds.width_duration, now) {
         let Some(first_entry) = state.entries.front() else {
             break;
@@ -298,7 +202,7 @@ pub(super) async fn flush_ready_window_processor(
                         processor.as_str(),
                     ),
                 );
-                state.clear(aggregate);
+                state.clear(plan);
                 changed = true;
                 break;
             }
@@ -425,32 +329,11 @@ pub(super) async fn flush_ready_window_processor(
             }
         }
         if route_failed {
-            state.clear(aggregate);
+            state.clear(plan);
             changed = true;
             break;
         }
-        if let Err(error) = advance_window(
-            state,
-            aggregate,
-            bounds.step_messages,
-            bounds.step_duration,
-            now,
-        ) {
-            branch.runtime.handle_internal_processor_error_for_acks(
-                &branch.domain,
-                node_kind,
-                processor,
-                error_policies,
-                state.entries.iter().map(|entry| &entry.message.acks),
-                format!(
-                    "window processor '{}' failed to advance window: {error:#}",
-                    processor.as_str(),
-                ),
-            );
-            state.clear(aggregate);
-            changed = true;
-            break;
-        }
+        advance_window(state, bounds.step_messages, bounds.step_duration, now);
         changed = true;
         if state.entries.is_empty() {
             break;
@@ -471,413 +354,12 @@ pub(super) fn snapshot_window_processor_live_state(
         })
 }
 
-impl WindowAggregateAccumulator {
-    pub(super) fn new(demand: &WindowAggregateDemand) -> Self {
-        match demand.storage {
-            WindowAggregateStorageKind::Counter => Self::Counter { count: 0 },
-            WindowAggregateStorageKind::Sequence => Self::Sequence {
-                values: VecDeque::new(),
-            },
-            WindowAggregateStorageKind::SortedMap => Self::SortedMap {
-                counts: BTreeMap::new(),
-            },
-            WindowAggregateStorageKind::Histogram => {
-                let config = demand.linear_histogram.as_ref().verified(
-                    "the histogram storage kind is only chosen for a demand that carries the \
-                     histogram config",
-                );
-                Self::LinearHistogram {
-                    buckets: vec![0; config.buckets.get()],
-                    total: 0,
-                    min: config.min,
-                    max: config.max,
-                    width: (config.max - config.min) / config.buckets.get().approx_into::<f64>(),
-                    delay: config.delay,
-                    delayed_removals: VecDeque::new(),
-                }
-            }
-            WindowAggregateStorageKind::Sum => Self::Sum { total: None },
-        }
-    }
-
-    pub(super) fn to_snapshot(&self) -> WindowAggregateAccumulatorSnapshot {
-        match self {
-            Self::Counter { count } => {
-                WindowAggregateAccumulatorSnapshot::Counter { count: *count }
-            }
-            Self::Sequence { values } => WindowAggregateAccumulatorSnapshot::Sequence {
-                values: values
-                    .iter()
-                    .map(|entry| WindowSequenceValueSnapshot {
-                        timestamp: entry.timestamp,
-                        sequence: entry.sequence,
-                        value: entry.value.to_remote(),
-                    })
-                    .collect(),
-            },
-            Self::SortedMap { counts } => WindowAggregateAccumulatorSnapshot::SortedMap {
-                counts: counts
-                    .iter()
-                    .map(|(value, count)| WindowSortedCountSnapshot {
-                        value: value.0.to_remote(),
-                        count: *count,
-                    })
-                    .collect(),
-            },
-            Self::LinearHistogram {
-                buckets,
-                total,
-                min,
-                max,
-                width,
-                delay,
-                delayed_removals,
-            } => WindowAggregateAccumulatorSnapshot::LinearHistogram {
-                buckets: buckets.clone(),
-                total: *total,
-                min: *min,
-                max: *max,
-                width: *width,
-                delay_nanos: u64::try_from(delay.as_nanos()).unwrap_or(u64::MAX),
-                delayed_removals: delayed_removals
-                    .iter()
-                    .map(|removal| LinearHistogramDelayedRemovalSnapshot {
-                        expires_at: removal.expires_at,
-                        bucket: removal.bucket,
-                    })
-                    .collect(),
-            },
-            Self::Sum { total } => WindowAggregateAccumulatorSnapshot::Sum {
-                total: total.as_ref().map(RuntimeValue::to_remote),
-            },
-        }
-    }
-
-    pub(super) fn from_snapshot(snapshot: &WindowAggregateAccumulatorSnapshot) -> Self {
-        match snapshot {
-            WindowAggregateAccumulatorSnapshot::Counter { count } => {
-                Self::Counter { count: *count }
-            }
-            WindowAggregateAccumulatorSnapshot::Sequence { values } => Self::Sequence {
-                values: values
-                    .iter()
-                    .map(|snapshot| WindowSequenceValue {
-                        timestamp: snapshot.timestamp,
-                        sequence: snapshot.sequence,
-                        value: RuntimeValue::from_remote(snapshot.value.clone()),
-                    })
-                    .collect(),
-            },
-            WindowAggregateAccumulatorSnapshot::SortedMap { counts } => Self::SortedMap {
-                counts: counts
-                    .iter()
-                    .map(|entry| {
-                        (
-                            RuntimeValueSortKey(RuntimeValue::from_remote(entry.value.clone())),
-                            entry.count,
-                        )
-                    })
-                    .collect(),
-            },
-            WindowAggregateAccumulatorSnapshot::LinearHistogram {
-                buckets,
-                total,
-                min,
-                max,
-                width,
-                delay_nanos,
-                delayed_removals,
-            } => Self::LinearHistogram {
-                buckets: buckets.clone(),
-                total: *total,
-                min: *min,
-                max: *max,
-                width: *width,
-                delay: Duration::from_nanos(*delay_nanos),
-                delayed_removals: delayed_removals
-                    .iter()
-                    .map(|removal| LinearHistogramDelayedRemoval {
-                        expires_at: removal.expires_at,
-                        bucket: removal.bucket,
-                    })
-                    .collect(),
-            },
-            WindowAggregateAccumulatorSnapshot::Sum { total } => Self::Sum {
-                total: total.clone().map(RuntimeValue::from_remote),
-            },
-        }
-    }
-
-    pub(super) fn purge_expired(
-        &mut self,
-        now: Timestamp,
-    ) -> error_stack::Result<(), WindowProcessorError> {
-        let Self::LinearHistogram {
-            buckets,
-            total,
-            delayed_removals,
-            ..
-        } = self
-        else {
-            return Ok(());
-        };
-        while delayed_removals
-            .front()
-            .is_some_and(|removal| removal.expires_at <= now)
-        {
-            let removal = delayed_removals.pop_front().verified(
-                "the loop condition just observed a front entry and nothing else pops the queue",
-            );
-            let Some(count) = buckets.get_mut(removal.bucket) else {
-                return Err(Report::new(
-                    WindowProcessorError::DelayedRemovalBucketOutOfRange,
-                ));
-            };
-            if *count == 0 {
-                return Err(Report::new(
-                    WindowProcessorError::MissingDelayedRemovedValue,
-                ));
-            }
-            *count = count
-                .checked_sub(1)
-                .verified("the check above returned for a bucket that holds no value");
-            *total = total.checked_sub(1).verified(
-                "the bucket count checked above is non-zero, and the total sums every bucket",
-            );
-        }
-        Ok(())
-    }
-
-    pub(super) fn next_deadline(&self) -> Option<Timestamp> {
-        let Self::LinearHistogram {
-            delayed_removals, ..
-        } = self
-        else {
-            return None;
-        };
-        delayed_removals.front().map(|removal| removal.expires_at)
-    }
-
-    pub(super) fn add(
-        &mut self,
-        _demand: &WindowAggregateDemand,
-        timestamp: Timestamp,
-        sequence: u64,
-        value: Option<RuntimeValue>,
-    ) -> error_stack::Result<(), WindowProcessorError> {
-        self.purge_expired(timestamp)?;
-        match self {
-            Self::Counter { count } => {
-                *count = count
-                    .checked_add(1)
-                    .assured("a window cannot admit 2^64 rows before they expire");
-                Ok(())
-            }
-            Self::Sequence { values } => {
-                let value = value
-                    .ok_or_else(|| Report::new(WindowProcessorError::SequenceRequiresValue))?;
-                values.push_back(WindowSequenceValue {
-                    timestamp,
-                    sequence,
-                    value,
-                });
-                Ok(())
-            }
-            Self::SortedMap { counts } => {
-                let value =
-                    value.ok_or_else(|| Report::new(WindowProcessorError::OrderedRequiresValue))?;
-                *counts.entry(RuntimeValueSortKey(value)).or_insert(0) += 1;
-                Ok(())
-            }
-            Self::LinearHistogram {
-                buckets,
-                total,
-                min,
-                max,
-                width,
-                delay: _,
-                delayed_removals: _,
-            } => {
-                let value = value
-                    .ok_or_else(|| Report::new(WindowProcessorError::HistogramRequiresValue))?;
-                let value = runtime_value_to_f64(&value)?;
-                let bucket = linear_histogram_bucket(value, *min, *max, *width, buckets.len())?;
-                buckets[bucket] = buckets[bucket]
-                    .checked_add(1)
-                    .assured("a window cannot admit 2^64 rows before they expire");
-                *total = total
-                    .checked_add(1)
-                    .assured("a window cannot admit 2^64 rows before they expire");
-                Ok(())
-            }
-            Self::Sum { total } => {
-                let value =
-                    value.ok_or_else(|| Report::new(WindowProcessorError::SumRequiresValue))?;
-                *total = Some(match total.take() {
-                    Some(current) => sum_runtime_values(current, value)?,
-                    None => value,
-                });
-                Ok(())
-            }
-        }
-    }
-
-    pub(super) fn remove(
-        &mut self,
-        _demand: &WindowAggregateDemand,
-        removal_time: Timestamp,
-        timestamp: Timestamp,
-        sequence: u64,
-        value: Option<RuntimeValue>,
-    ) -> error_stack::Result<(), WindowProcessorError> {
-        self.purge_expired(removal_time)?;
-        match self {
-            Self::Counter { count } => {
-                *count = count
-                    .checked_sub(1)
-                    .verified("a row is only removed from the window that admitted it");
-                Ok(())
-            }
-            Self::Sequence { values } => {
-                let Some(index) = values
-                    .iter()
-                    .position(|entry| entry.timestamp == timestamp && entry.sequence == sequence)
-                else {
-                    return Err(Report::new(WindowProcessorError::MissingSequenceEntry));
-                };
-                values.remove(index);
-                Ok(())
-            }
-            Self::SortedMap { counts } => {
-                let value =
-                    value.ok_or_else(|| Report::new(WindowProcessorError::OrderedRequiresValue))?;
-                decrement_runtime_value_count(counts, value)
-            }
-            Self::LinearHistogram {
-                buckets,
-                total,
-                min,
-                max,
-                width,
-                delay,
-                delayed_removals,
-            } => {
-                let value = value
-                    .ok_or_else(|| Report::new(WindowProcessorError::HistogramRequiresValue))?;
-                let value = runtime_value_to_f64(&value)?;
-                let bucket = linear_histogram_bucket(value, *min, *max, *width, buckets.len())?;
-                if delay.is_zero() {
-                    let Some(count) = buckets.get_mut(bucket) else {
-                        return Err(Report::new(WindowProcessorError::BucketOutOfRange));
-                    };
-                    if *count == 0 {
-                        return Err(Report::new(WindowProcessorError::MissingRemovedValue));
-                    }
-                    *count = count
-                        .checked_sub(1)
-                        .verified("the check above returned for a bucket that holds no value");
-                    *total = total.checked_sub(1).verified(
-                        "the bucket count checked above is non-zero, and the total sums every \
-                         bucket",
-                    );
-                    return Ok(());
-                }
-                delayed_removals.push_back(LinearHistogramDelayedRemoval {
-                    expires_at: checked_add_duration_to_timestamp(removal_time, *delay),
-                    bucket,
-                });
-                Ok(())
-            }
-            Self::Sum { total } => {
-                let value =
-                    value.ok_or_else(|| Report::new(WindowProcessorError::SumRequiresValue))?;
-                *total = match total.take() {
-                    Some(current) => subtract_runtime_values(current, value)?,
-                    None => None,
-                };
-                Ok(())
-            }
-        }
-    }
-
-    pub(super) fn evaluate(
-        &self,
-        function: WindowAggregateFunction,
-        percentile: Option<f64>,
-    ) -> error_stack::Result<RuntimeValue, WindowProcessorError> {
-        match (function, self) {
-            (WindowAggregateFunction::Count, Self::Counter { count }) => {
-                Ok(RuntimeValue::I64(i64::try_from(*count).assured(
-                    "a window counter cannot exceed the allocation limit of its retained entries",
-                )))
-            }
-            (WindowAggregateFunction::First, Self::Sequence { values }) => {
-                match values
-                    .iter()
-                    .min_by_key(|entry| (entry.timestamp, entry.sequence))
-                {
-                    Some(entry) => Ok(entry.value.clone()),
-                    None => Err(Report::new(WindowProcessorError::FirstRequiresWindow)),
-                }
-            }
-            (WindowAggregateFunction::Last, Self::Sequence { values }) => {
-                match values
-                    .iter()
-                    .max_by_key(|entry| (entry.timestamp, entry.sequence))
-                {
-                    Some(entry) => Ok(entry.value.clone()),
-                    None => Err(Report::new(WindowProcessorError::LastRequiresWindow)),
-                }
-            }
-            (WindowAggregateFunction::Max, Self::SortedMap { counts }) => {
-                match counts.last_key_value() {
-                    Some((value, _)) => Ok(value.0.clone()),
-                    None => Err(Report::new(WindowProcessorError::MaxRequiresWindow)),
-                }
-            }
-            (WindowAggregateFunction::Min, Self::SortedMap { counts }) => {
-                match counts.first_key_value() {
-                    Some((value, _)) => Ok(value.0.clone()),
-                    None => Err(Report::new(WindowProcessorError::MinRequiresWindow)),
-                }
-            }
-            (
-                WindowAggregateFunction::PercentileLinearHistogram,
-                Self::LinearHistogram {
-                    buckets,
-                    total,
-                    min,
-                    max,
-                    width,
-                    ..
-                },
-            ) => {
-                let percentile = percentile.ok_or_else(|| {
-                    Report::new(WindowProcessorError::HistogramRequiresPercentile)
-                })?;
-                percentile_from_linear_histogram(buckets, *total, *min, *max, *width, percentile)
-            }
-            (WindowAggregateFunction::Sum, Self::Sum { total }) => total
-                .clone()
-                .ok_or_else(|| Report::new(WindowProcessorError::SumRequiresWindow)),
-            _ => Err(Report::new(WindowProcessorError::IncompatibleAccumulator {
-                function,
-            })),
-        }
-    }
-}
-
 impl WindowProcessorState {
-    pub(super) fn new(program: &WindowAggregateProgram) -> Self {
-        let accumulators = program
-            .demands()
-            .iter()
-            .map(WindowAggregateAccumulator::new)
-            .collect();
+    pub(super) fn new(plan: &WindowAccumulatorPlan) -> Self {
         Self {
             entries: VecDeque::new(),
             next_sequence: 0,
-            accumulators,
+            accumulators: plan.empty_accumulators(),
         }
     }
 
@@ -891,16 +373,13 @@ impl WindowProcessorState {
                 .record
                 .to_remote()
                 .change_context(WindowProcessorError::EncodeSnapshotEntry)?;
+            let arguments = entry.row.arguments.published_values(entry.row.row)?;
             entries.push(WindowEntrySnapshot {
-                sequence: entry.sequence,
-                timestamp: entry.timestamp,
+                sequence: entry.row.sequence,
+                timestamp: entry.row.timestamp,
                 key: BranchKey::to_remote_key(&entry.message.key),
                 record,
-                aggregate_inputs: entry
-                    .aggregate_inputs
-                    .iter()
-                    .map(|input| input.value.as_ref().map(RuntimeValue::to_remote))
-                    .collect(),
+                arguments,
             });
         }
         Ok(WindowProcessorStateSnapshot {
@@ -909,7 +388,7 @@ impl WindowProcessorState {
             accumulators: self
                 .accumulators
                 .iter()
-                .map(WindowAggregateAccumulator::to_snapshot)
+                .map(WindowAccumulator::to_snapshot)
                 .collect(),
         })
     }
@@ -917,18 +396,34 @@ impl WindowProcessorState {
     /// Rebuild a branch's live window from a published snapshot, which stays shared with every
     /// other reader and is only read here.
     pub(super) fn from_snapshot(
-        program: &WindowAggregateProgram,
+        plan: &WindowAccumulatorPlan,
         input_schema: &CompiledSchema,
         snapshot: &WindowProcessorStateSnapshot,
     ) -> error_stack::Result<Self, WindowProcessorError> {
-        if snapshot.accumulators.len() != program.demands().len() {
+        if snapshot.accumulators.len() != plan.demands().len() {
             return Err(Report::new(WindowProcessorError::SnapshotDemandCount {
                 accumulators: snapshot.accumulators.len(),
-                demands: program.demands().len(),
+                demands: plan.demands().len(),
             }));
         }
+        let published_arguments = snapshot
+            .entries
+            .iter()
+            .map(|entry| entry.arguments.as_slice())
+            .collect::<Vec<_>>();
+        let arguments = Arc::new(WindowArgumentColumns::restored(plan, &published_arguments)?);
         let mut entries = VecDeque::with_capacity(snapshot.entries.len());
-        for entry in &snapshot.entries {
+        let mut previous_sequence: Option<u64> = None;
+        for (row, entry) in snapshot.entries.iter().enumerate() {
+            if let Some(previous) = previous_sequence
+                && previous.checked_add(1) != Some(entry.sequence)
+            {
+                return Err(Report::new(WindowProcessorError::SnapshotSequence {
+                    previous,
+                    found: entry.sequence,
+                }));
+            }
+            previous_sequence = Some(entry.sequence);
             let key = BranchKey::from_remote_key(entry.key.clone()).map_err(|reason| {
                 Report::new(WindowProcessorError::RestoreSnapshotBranchKey { reason })
             })?;
@@ -936,175 +431,285 @@ impl WindowProcessorState {
                 .runtime_row_from_remote(&entry.record)
                 .change_context(WindowProcessorError::RestoreSnapshotEntry)?;
             entries.push_back(WindowEntry {
-                sequence: entry.sequence,
-                timestamp: entry.timestamp,
+                row: WindowRow {
+                    sequence: entry.sequence,
+                    timestamp: entry.timestamp,
+                    arguments: arguments.clone(),
+                    row,
+                },
                 message: RelayMessage {
                     key,
                     record,
                     acks: AckSet::empty(),
                 },
-                aggregate_inputs: entry
-                    .aggregate_inputs
-                    .iter()
-                    .map(|value| WindowAggregateInput {
-                        value: value.clone().map(RuntimeValue::from_remote),
-                    })
-                    .collect(),
             });
+        }
+        if let Some(last) = previous_sequence
+            && last >= snapshot.next_sequence
+        {
+            return Err(Report::new(WindowProcessorError::SnapshotSequence {
+                previous: last,
+                found: snapshot.next_sequence,
+            }));
+        }
+        let mut accumulators = Vec::with_capacity(plan.demands().len());
+        for (demand, (compiled, published)) in plan
+            .demands()
+            .iter()
+            .zip(&snapshot.accumulators)
+            .enumerate()
+        {
+            accumulators.push(WindowAccumulator::restore(
+                compiled, demand, &entries, published,
+            )?);
         }
         Ok(Self {
             entries,
             next_sequence: snapshot.next_sequence,
-            accumulators: snapshot
-                .accumulators
-                .iter()
-                .map(WindowAggregateAccumulator::from_snapshot)
-                .collect(),
+            accumulators,
         })
     }
 
-    pub(super) fn push_message(
+    /// Admit `run`, consecutive rows of one evaluated batch in arrival order, into the window and
+    /// every accumulator.
+    pub(super) fn admit(
         &mut self,
-        program: &WindowAggregateProgram,
-        timestamp: Timestamp,
-        message: RelayMessage,
-        inputs: Vec<WindowAggregateInput>,
-    ) -> Result<(), Box<WindowPushFailure>> {
-        let sequence = self.next_sequence;
-        if let Err(error) = self.apply_aggregate_inputs(
-            program.demands(),
-            timestamp,
-            sequence,
-            &inputs,
-            WindowAccumulatorAction::Add,
-        ) {
-            return Err(Box::new(WindowPushFailure { error, message }));
+        arguments: &Arc<WindowArgumentColumns>,
+        run: Vec<WindowAdmission>,
+    ) {
+        let start = self.entries.len();
+        let mut latest: Option<Timestamp> = None;
+        for admission in run {
+            let timestamp = message_timestamp(&admission.message);
+            latest = match latest {
+                Some(latest) => Some(latest.max(timestamp)),
+                None => Some(timestamp),
+            };
+            self.entries.push_back(WindowEntry {
+                row: WindowRow {
+                    sequence: self.next_sequence,
+                    timestamp,
+                    arguments: arguments.clone(),
+                    row: admission.row,
+                },
+                message: admission.message,
+            });
+            self.next_sequence = self
+                .next_sequence
+                .checked_add(1)
+                .assured("a window cannot admit 2^64 rows in one branch");
         }
-        self.entries.push_back(WindowEntry {
-            sequence,
-            timestamp,
-            message,
-            aggregate_inputs: inputs,
-        });
-        self.next_sequence = self
-            .next_sequence
-            .checked_add(1)
-            .assured("a window cannot admit 2^64 rows in one branch");
-        Ok(())
+        let Some(admitted_at) = latest else {
+            return;
+        };
+        let end = self.entries.len();
+        for (demand, accumulator) in self.accumulators.iter_mut().enumerate() {
+            accumulator.admit(demand, &self.entries, start..end, admitted_at);
+        }
     }
 
-    pub(super) fn clear(&mut self, program: &WindowAggregateProgram) {
-        self.entries.clear();
-        self.accumulators = program
-            .demands()
-            .iter()
-            .map(WindowAggregateAccumulator::new)
-            .collect();
-    }
-
-    pub(super) fn purge_timeouts(
-        &mut self,
-        now: Timestamp,
-    ) -> error_stack::Result<bool, WindowProcessorError> {
-        let mut changed = false;
-        for accumulator in &mut self.accumulators {
-            if accumulator
-                .next_deadline()
-                .is_some_and(|deadline| deadline <= now)
-            {
-                accumulator.purge_expired(now)?;
-                changed = true;
+    /// How many of `pending`, admitted in order, fill the window: the rows up to and including the
+    /// first one whose admission meets the width, or every pending row when none does.
+    pub(super) fn admission_run_len(
+        &self,
+        pending: &VecDeque<WindowAdmission>,
+        width_messages: Option<usize>,
+        width_duration: Option<Duration>,
+    ) -> usize {
+        let mut window_start = self.entries.front().map(|entry| entry.row.timestamp);
+        let mut rows = self.entries.len();
+        for (index, admission) in pending.iter().enumerate() {
+            let timestamp = message_timestamp(&admission.message);
+            let start = *window_start.get_or_insert(timestamp);
+            rows = rows
+                .checked_add(1)
+                .assured("pending rows are already held in memory");
+            let messages_met = width_messages.is_some_and(|width| rows >= width);
+            let duration_met =
+                width_duration.is_some_and(|width| timestamp_elapsed(start, timestamp) >= width);
+            if messages_met || duration_met {
+                return index
+                    .checked_add(1)
+                    .assured("pending rows are already held in memory");
             }
         }
-        Ok(changed)
+        pending.len()
+    }
+
+    pub(super) fn clear(&mut self, plan: &WindowAccumulatorPlan) {
+        self.entries.clear();
+        self.accumulators = plan.empty_accumulators();
+    }
+
+    pub(super) fn purge_timeouts(&mut self, now: Timestamp) -> bool {
+        let mut changed = false;
+        for accumulator in &mut self.accumulators {
+            changed |= accumulator.purge_expired(now);
+        }
+        changed
     }
 
     pub(super) fn next_timeout_deadline(&self) -> Option<Timestamp> {
         self.accumulators
             .iter()
-            .filter_map(WindowAggregateAccumulator::next_deadline)
+            .filter_map(WindowAccumulator::next_deadline)
             .min()
     }
 
-    pub(super) fn pop_front_entry(
+    /// Remove the `count` oldest rows from every accumulator and from the window, answering the
+    /// removed entries oldest first. `removed_at` is the watermark the window stepped at.
+    pub(super) fn retract_oldest(
         &mut self,
-        program: &WindowAggregateProgram,
-        removal_time: Timestamp,
-    ) -> error_stack::Result<Option<WindowEntry>, WindowProcessorError> {
-        let Some(entry) = self.entries.pop_front() else {
-            return Ok(None);
-        };
-        self.apply_aggregate_inputs(
-            program.demands(),
-            entry.timestamp,
-            entry.sequence,
-            &entry.aggregate_inputs,
-            WindowAccumulatorAction::Remove { at: removal_time },
-        )?;
-        Ok(Some(entry))
+        count: usize,
+        removed_at: Timestamp,
+    ) -> Vec<WindowEntry> {
+        let count = count.min(self.entries.len());
+        for (demand, accumulator) in self.accumulators.iter_mut().enumerate() {
+            accumulator.retract_oldest(demand, &self.entries, count, removed_at);
+        }
+        self.entries.drain(..count).collect()
+    }
+}
+
+/// The aggregate arguments one input batch evaluated to, and why rows that cannot be admitted are
+/// refused.
+#[derive(Debug)]
+pub(super) struct EvaluatedWindowArguments {
+    pub(super) columns: Arc<WindowArgumentColumns>,
+    /// One entry per row once any row is refused; empty while every row is admissible.
+    refusals: Vec<Option<Report<WindowProcessorError>>>,
+}
+
+impl EvaluatedWindowArguments {
+    fn refuse(&mut self, rows: usize, row: usize, refusal: Report<WindowProcessorError>) {
+        if self.refusals.is_empty() {
+            self.refusals.resize_with(rows, || None);
+        }
+        let slot = self
+            .refusals
+            .get_mut(row)
+            .verified("refusals hold one slot for every row of the evaluated batch");
+        if slot.is_none() {
+            *slot = Some(refusal);
+        }
     }
 
-    pub(super) fn apply_aggregate_inputs(
-        &mut self,
-        demands: &[WindowAggregateDemand],
-        timestamp: Timestamp,
-        sequence: u64,
-        inputs: &[WindowAggregateInput],
-        action: WindowAccumulatorAction,
-    ) -> error_stack::Result<(), WindowProcessorError> {
-        if inputs.len() != self.accumulators.len() {
-            return Err(Report::new(WindowProcessorError::AggregateInputCount {
-                inputs: inputs.len(),
-                accumulators: self.accumulators.len(),
-            }));
+    /// Why the row at `row` cannot be admitted, if it cannot.
+    pub(super) fn take_refusal(&mut self, row: usize) -> Option<Report<WindowProcessorError>> {
+        self.refusals.get_mut(row)?.take()
+    }
+}
+
+// Counted per thread so a test observes only the argument programs it ran itself, while the rest
+// of the suite evaluates windows in parallel.
+#[cfg(test)]
+thread_local! {
+    pub(super) static WINDOW_ARGUMENT_VM_EXECUTIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Evaluate every aggregate argument of the window's routes over `carrier` once, and find the rows
+/// whose arguments cannot be admitted.
+pub(super) async fn evaluate_window_arguments(
+    plan: &WindowAccumulatorPlan,
+    programs: &[CompiledWindowAggregateProgram],
+    carrier: &RuntimeRecordBatch,
+    execution_now: Timestamp,
+) -> error_stack::Result<EvaluatedWindowArguments, WindowProcessorError> {
+    let row_count = carrier.batch().num_rows();
+    let mut arrays = Vec::with_capacity(plan.demands().len());
+    let mut row_failures: Vec<Option<Report<WindowProcessorError>>> = Vec::new();
+    for program in programs {
+        tokio::task::consume_budget().await;
+        let result = evaluate_route_arguments(program, carrier, execution_now).await?;
+        for demand in &program.route.demands {
+            let columns = demand
+                .arguments
+                .try_convert(|column| route_argument_array(&result, column))?;
+            arrays.push(columns);
         }
-        for ((input, accumulator), demand) in inputs.iter().zip(&mut self.accumulators).zip(demands)
-        {
-            match action {
-                WindowAccumulatorAction::Add => {
-                    accumulator.add(demand, timestamp, sequence, input.value.clone())?
-                }
-                WindowAccumulatorAction::Remove { at } => {
-                    accumulator.remove(demand, at, timestamp, sequence, input.value.clone())?
-                }
+        if result.batch.errors().is_error_free() {
+            continue;
+        }
+        if row_failures.is_empty() {
+            row_failures.resize_with(row_count, || None);
+        }
+        for (row, failure) in row_failures.iter_mut().enumerate() {
+            if failure.is_some() {
+                continue;
+            }
+            if let Some(error) = result.batch.errors().row(row).first() {
+                *failure = Some(Report::new(WindowProcessorError::AggregateInputRow {
+                    reason: error.reason.clone(),
+                }));
             }
         }
-        Ok(())
+    }
+    let columns = WindowArgumentColumns::new(plan, arrays, row_count)?;
+    let mut evaluated = EvaluatedWindowArguments {
+        columns: Arc::new(columns),
+        refusals: Vec::new(),
+    };
+    for (row, failure) in row_failures.into_iter().enumerate() {
+        if let Some(failure) = failure {
+            evaluated.refuse(row_count, row, failure);
+        }
+    }
+    for row in 0..row_count {
+        if let Some(function) = evaluated.columns.refused_function(plan, row) {
+            evaluated.refuse(
+                row_count,
+                row,
+                Report::new(WindowProcessorError::NonFiniteArgument { function }),
+            );
+        }
+    }
+    Ok(evaluated)
+}
+
+/// The evaluated array of one argument column in a route's argument program result.
+fn route_argument_array(
+    result: &nervix_vm::ExecutionResult,
+    column: &WindowArgumentColumn,
+) -> error_stack::Result<ArrayRef, WindowProcessorError> {
+    let index = result.batch.schema().index_of(&column.field).map_err(|_| {
+        Report::new(WindowProcessorError::AggregateInputFieldMissing {
+            field: column.field.clone(),
+        })
+    })?;
+    Ok(result.batch.column(index).to_array_ref())
+}
+
+/// Whether `field` is a column the argument program writes, which enters its input uninitialized.
+fn is_argument_output_field(field: &str) -> bool {
+    match field.strip_prefix(WINDOW_ARGUMENT_NAMESPACE) {
+        Some(rest) => rest.starts_with('.'),
+        None => false,
     }
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct WindowAggregateInput {
-    pub(super) value: Option<RuntimeValue>,
-}
-
-#[cfg(test)]
-pub(super) static WINDOW_AGGREGATE_INPUT_VM_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
-
-pub(super) async fn evaluate_window_aggregate_inputs(
+/// Run one route's argument program over every row of `carrier`.
+async fn evaluate_route_arguments(
     program: &CompiledWindowAggregateProgram,
     carrier: &RuntimeRecordBatch,
     execution_now: Timestamp,
-) -> error_stack::Result<
-    Vec<error_stack::Result<Vec<WindowAggregateInput>, WindowProcessorError>>,
-    WindowProcessorError,
-> {
+) -> error_stack::Result<nervix_vm::ExecutionResult, WindowProcessorError> {
+    let argument_program = &program.route.argument_program;
     let row_count = carrier.batch().num_rows();
     let keys = vec![None; row_count];
     let side_inputs = HashMap::new();
     let lookup_columns = HashMap::new();
     let uninitialized = VmUninitializedInput {
-        fields: program
-            .input_program
+        fields: argument_program
             .input_schema
             .fields()
             .iter()
-            .filter(|field| field.name().starts_with("window_input."))
+            .filter(|field| is_argument_output_field(field.name()))
             .map(|field| field.name().clone())
             .collect(),
     };
     let input = project_vm_input_batch(
-        &program.input_program.input_schema,
+        &argument_program.input_schema,
         &VmInputProjectionSources {
             carrier,
             namespace_batches: &[],
@@ -1119,9 +724,9 @@ pub(super) async fn evaluate_window_aggregate_inputs(
     )
     .change_context(WindowProcessorError::ProjectAggregateInput)?;
     #[cfg(test)]
-    WINDOW_AGGREGATE_INPUT_VM_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
+    WINDOW_ARGUMENT_VM_EXECUTIONS.with(|executions| executions.set(executions.get() + 1));
     let result = execute_program_with_selection_in_context(
-        &program.input_program,
+        argument_program,
         &input,
         &VmExecutionContext {
             now: execution_now,
@@ -1143,135 +748,7 @@ pub(super) async fn evaluate_window_aggregate_inputs(
             },
         ));
     }
-    let mut input_columns = Vec::with_capacity(program.input_fields.len());
-    for field_name in &program.input_fields {
-        let Some(field_name) = field_name else {
-            input_columns.push(None);
-            continue;
-        };
-        let column_index = result.batch.schema().index_of(field_name).map_err(|_| {
-            Report::new(WindowProcessorError::AggregateInputFieldMissing {
-                field: field_name.clone(),
-            })
-        })?;
-        let array = result.batch.column(column_index).to_array_ref();
-        let column =
-            RuntimeValueColumn::new(field_name.as_str(), array).change_context_lazy(|| {
-                WindowProcessorError::AggregateInputColumn {
-                    field: field_name.clone(),
-                }
-            })?;
-        input_columns.push(Some(column));
-    }
-    let mut rows = Vec::with_capacity(row_count);
-    for row in 0..row_count {
-        if let Some(error) = result.batch.errors().row(row).first() {
-            rows.push(Err(Report::new(WindowProcessorError::AggregateInputRow {
-                reason: error.reason.clone(),
-            })));
-            continue;
-        }
-        let mut inputs = Vec::with_capacity(input_columns.len());
-        let mut row_failure = None;
-        for (field_name, column) in program.input_fields.iter().zip(&input_columns) {
-            let (Some(field_name), Some(column)) = (field_name, column) else {
-                inputs.push(WindowAggregateInput { value: None });
-                continue;
-            };
-            match column.nullable_value_at(row) {
-                Ok(value) => inputs.push(WindowAggregateInput { value }),
-                Err(error) => {
-                    row_failure = Some(error.change_context(
-                        WindowProcessorError::AggregateInputColumn {
-                            field: field_name.clone(),
-                        },
-                    ));
-                    break;
-                }
-            }
-        }
-        match row_failure {
-            Some(failure) => rows.push(Err(failure)),
-            None => rows.push(Ok(inputs)),
-        }
-    }
-    Ok(rows)
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(super) enum WindowAccumulatorAction {
-    Add,
-    Remove { at: Timestamp },
-}
-
-pub(super) fn decrement_runtime_value_count(
-    counts: &mut BTreeMap<RuntimeValueSortKey, usize>,
-    value: RuntimeValue,
-) -> error_stack::Result<(), WindowProcessorError> {
-    let key = RuntimeValueSortKey(value);
-    let Some(count) = counts.get_mut(&key) else {
-        return Err(Report::new(WindowProcessorError::MissingSortedValue));
-    };
-    *count = count
-        .checked_sub(1)
-        .verified("the map drops an entry when its count reaches zero");
-    if *count == 0 {
-        counts.remove(&key);
-    }
-    Ok(())
-}
-
-pub(super) fn linear_histogram_bucket(
-    value: f64,
-    min: f64,
-    max: f64,
-    width: f64,
-    bucket_count: usize,
-) -> error_stack::Result<usize, WindowProcessorError> {
-    if !value.is_finite() {
-        return Err(Report::new(WindowProcessorError::HistogramRequiresFinite));
-    }
-    if bucket_count == 0 {
-        return Err(Report::new(WindowProcessorError::HistogramRequiresBucket));
-    }
-    if value <= min {
-        return Ok(0);
-    }
-    if value >= max {
-        return Ok(bucket_count - 1);
-    }
-    ((value - min) / width)
-        .floor()
-        .checked_approx_into()
-        .ok_or_else(|| Report::new(WindowProcessorError::HistogramValueOutOfRange { value }))
-}
-
-pub(super) fn percentile_from_linear_histogram(
-    buckets: &[usize],
-    total: usize,
-    min: f64,
-    max: f64,
-    width: f64,
-    percentile: f64,
-) -> error_stack::Result<RuntimeValue, WindowProcessorError> {
-    if total == 0 {
-        return Err(Report::new(WindowProcessorError::HistogramRequiresWindow));
-    }
-    let rank: usize = ((percentile / 100.0) * (total - 1).approx_into::<f64>())
-        .round()
-        .checked_approx_into()
-        .ok_or_else(|| {
-            Report::new(WindowProcessorError::HistogramPercentileRank { percentile, total })
-        })?;
-    let mut seen = 0usize;
-    for (index, count) in buckets.iter().enumerate() {
-        seen += *count;
-        if seen > rank {
-            let midpoint = min + (index.approx_into::<f64>() + 0.5) * width;
-            return Ok(RuntimeValue::F64(OrderedFloat(midpoint.clamp(min, max))));
-        }
-    }
-    Err(Report::new(WindowProcessorError::HistogramEmpty))
+    Ok(result)
 }
 
 pub(super) fn window_width_met(
@@ -1290,7 +767,7 @@ pub(super) fn window_width_met(
     }
     if let Some(width_duration) = width_duration
         && let Some(first) = state.entries.front()
-        && timestamp_elapsed(first.timestamp, now) >= width_duration
+        && timestamp_elapsed(first.row.timestamp, now) >= width_duration
     {
         return true;
     }
@@ -1305,7 +782,7 @@ pub(super) fn window_next_deadline(
         && let Some(first) = state.entries.front()
     {
         Some(checked_add_duration_to_timestamp(
-            first.timestamp,
+            first.row.timestamp,
             width_duration,
         ))
     } else {
@@ -1325,44 +802,42 @@ pub(super) fn timestamp_elapsed(start: Timestamp, end: Timestamp) -> Duration {
         .unwrap_or(Duration::ZERO)
 }
 
+/// Step the window: first by `step_messages` rows, then past every row older than `step_duration`
+/// after the new first row. Stepped rows are acknowledged.
 pub(super) fn advance_window(
     state: &mut WindowProcessorState,
-    program: &WindowAggregateProgram,
     step_messages: Option<usize>,
     step_duration: Option<Duration>,
-    removal_time: Timestamp,
-) -> error_stack::Result<(), WindowProcessorError> {
-    let remove_messages = step_messages.unwrap_or(0).min(state.entries.len());
-    for _ in 0..remove_messages {
-        if let Some(entry) = state.pop_front_entry(program, removal_time)? {
-            entry.message.acks.ack_success();
-        }
+    removed_at: Timestamp,
+) {
+    let by_messages = step_messages.unwrap_or(0);
+    for entry in state.retract_oldest(by_messages, removed_at) {
+        entry.message.acks.ack_success();
     }
-    if let Some(step_duration) = step_duration
-        && let Some(first) = state.entries.front()
-    {
-        let cutoff = checked_add_duration_to_timestamp(first.timestamp, step_duration);
-        while state
-            .entries
-            .front()
-            .is_some_and(|entry| entry.timestamp < cutoff)
-        {
-            if let Some(entry) = state.pop_front_entry(program, removal_time)? {
-                entry.message.acks.ack_success();
-            }
-        }
+    let Some(step_duration) = step_duration else {
+        return;
+    };
+    let Some(first) = state.entries.front() else {
+        return;
+    };
+    let cutoff = checked_add_duration_to_timestamp(first.row.timestamp, step_duration);
+    let by_duration = state
+        .entries
+        .iter()
+        .take_while(|entry| entry.row.timestamp < cutoff)
+        .count();
+    for entry in state.retract_oldest(by_duration, removed_at) {
+        entry.message.acks.ack_success();
     }
-    Ok(())
 }
 
+/// The results of one emission's aggregate invocations, which the route's output programs read.
 #[derive(Debug)]
-pub(super) struct WindowAggregateFunctionInjector {
-    pub(super) accumulators: Vec<WindowAggregateAccumulator>,
-    pub(super) demand_types: Vec<ArrowDataType>,
-    pub(super) demand_offset: usize,
+pub(super) struct WindowAggregateResults {
+    results: BTreeMap<WindowAggregateInvocation, ArrayRef>,
 }
 
-impl VmFunctionInjector for WindowAggregateFunctionInjector {
+impl VmFunctionInjector for WindowAggregateResults {
     fn inject_with_context(
         &self,
         function: &FunctionName,
@@ -1377,110 +852,109 @@ impl VmFunctionInjector for WindowAggregateFunctionInjector {
                 message: format!("function '{}' is not a window aggregate", function.as_str()),
             });
         };
-        let accumulator_id = self
-            .demand_offset
-            .checked_add(invocation.demand_id)
-            .assured("both index into the accumulators this program already holds in memory");
-        let accumulator = self.accumulators.get(accumulator_id).ok_or_else(|| {
-            nervix_vm::RuntimeError::InvalidBatch {
+        let Some(result) = self.results.get(invocation) else {
+            return Err(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
-                    "window aggregate is missing accumulator for route demand {} (shared demand \
-                     {})",
-                    invocation.demand_id, accumulator_id
-                ),
-            }
-        })?;
-        let value = accumulator
-            .evaluate(invocation.function, invocation.percentile)
-            .map_err(|error| nervix_vm::RuntimeError::InvalidBatch {
-                message: format!("{error:#}"),
-            })?;
-        let data_type = self.demand_types.get(invocation.demand_id).ok_or_else(|| {
-            nervix_vm::RuntimeError::InvalidBatch {
-                message: format!(
-                    "window aggregate is missing output type for demand {}",
+                    "window aggregate {} of structure {} was not evaluated for this emission",
+                    invocation.function.nspl_name(),
                     invocation.demand_id
                 ),
-            }
-        })?;
-        let array =
-            runtime_value_arrow_array(data_type, Some(&value), row_count).map_err(|message| {
-                nervix_vm::RuntimeError::InvalidBatch {
-                    message: message.to_string(),
-                }
-            })?;
-        let output = VmTypedArray::try_from_array_ref(array).map_err(|error| {
-            nervix_vm::RuntimeError::InvalidBatch {
-                message: error.to_string(),
-            }
-        })?;
+            });
+        };
+        if result.len() != row_count {
+            return Err(nervix_vm::RuntimeError::InvalidBatch {
+                message: format!(
+                    "window aggregate {} evaluated {} rows for {row_count} output rows",
+                    invocation.function.nspl_name(),
+                    result.len()
+                ),
+            });
+        }
+        let output = VmTypedArray::try_from_array_ref(result.clone())?;
         Ok(nervix_vm::InjectedResult::success(output))
     }
 }
 
+/// Build the one-row output batch of one route from the window's accumulators.
 pub(super) async fn evaluate_window_aggregate(
     program: &CompiledWindowAggregateProgram,
     state: &WindowProcessorState,
     output_schema: &CompiledSchema,
     execution_now: Timestamp,
 ) -> error_stack::Result<RuntimeRecordBatch, WindowProcessorError> {
+    let mut results = BTreeMap::new();
+    for compiled in &program.route.invocations {
+        let demand = program
+            .demand_offset
+            .checked_add(compiled.invocation.demand_id)
+            .assured("both index into the accumulators this program already holds in memory");
+        let accumulator = state
+            .accumulators
+            .get(demand)
+            .verified("a route's demands follow the demands of every route written before it");
+        let result = accumulator.evaluate(
+            demand,
+            &compiled.invocation,
+            &compiled.output_type,
+            &state.entries,
+        )?;
+        results.insert(compiled.invocation.clone(), result);
+    }
     let injector: Arc<Box<dyn VmFunctionInjector>> =
-        Arc::new(Box::new(WindowAggregateFunctionInjector {
-            accumulators: state.accumulators.clone(),
-            demand_types: program.demand_types.clone(),
-            demand_offset: program.demand_offset,
-        }));
-    let mut columns = Vec::with_capacity(output_schema.arrow_schema().fields().len());
-    for field in output_schema.arrow_schema().fields() {
-        let value = if let Some(assignment) = program
-            .assignments
-            .iter()
-            .find(|assignment| assignment.target.field == *field.name())
-        {
-            Some(
-                evaluate_window_aggregate_expr(
+        Arc::new(Box::new(WindowAggregateResults { results }));
+    let schema = output_schema.arrow_schema();
+    let mut columns = Vec::with_capacity(schema.fields().len());
+    for (field, assignment) in schema.fields().iter().zip(&program.field_assignments) {
+        let column = match assignment {
+            Some(index) => {
+                let assignment = program
+                    .route
+                    .assignments
+                    .get(*index)
+                    .verified("field assignments index the route's own assignments");
+                let column = evaluate_window_value(
                     &assignment.value,
-                    &assignment.target.field,
+                    &assignment.field,
+                    field.data_type(),
                     injector.clone(),
                     execution_now,
                 )
-                .await?,
-            )
-        } else if field.is_nullable() {
-            None
-        } else {
-            return Err(Report::new(
-                WindowProcessorError::UninitializedOutputField {
-                    field: field.name().clone(),
-                },
-            ));
+                .await?;
+                if column.is_null(0) && !field.is_nullable() {
+                    return Err(Report::new(WindowProcessorError::AggregateExprNullOutput {
+                        field: field.name().clone(),
+                    }));
+                }
+                column
+            }
+            None if field.is_nullable() => new_null_array(field.data_type(), 1),
+            None => {
+                return Err(Report::new(
+                    WindowProcessorError::UninitializedOutputField {
+                        field: field.name().clone(),
+                    },
+                ));
+            }
         };
-        columns.push(
-            runtime_value_arrow_array(field.data_type(), value.as_ref(), 1)
-                .change_context(WindowProcessorError::BuildAggregateOutput)?,
-        );
+        columns.push(column);
     }
-    let batch = RecordBatch::try_new(output_schema.arrow_schema(), columns)
+    let batch = RecordBatch::try_new(StdArc::clone(&schema), columns)
         .change_context(WindowProcessorError::BuildAggregateOutput)?;
-    RuntimeRecordBatch::from_record_batch(output_schema.arrow_schema(), batch)
+    RuntimeRecordBatch::from_record_batch(schema, batch)
         .change_context(WindowProcessorError::BuildAggregateOutput)
 }
 
-pub(super) fn evaluate_window_aggregate_expr<'a>(
-    expr: &'a CompiledWindowAggregateExpr,
+/// Evaluate one assigned value as a one-row array of `data_type`.
+fn evaluate_window_value<'a>(
+    value: &'a CompiledWindowExpr,
     target_field: &'a str,
+    data_type: &'a ArrowDataType,
     injector: Arc<Box<dyn VmFunctionInjector>>,
     execution_now: Timestamp,
-) -> std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = error_stack::Result<RuntimeValue, WindowProcessorError>>
-            + Send
-            + 'a,
-    >,
-> {
+) -> BoxFuture<'a, error_stack::Result<ArrayRef, WindowProcessorError>> {
     Box::pin(async move {
-        match expr {
-            CompiledWindowAggregateExpr::Scalar(program) => {
+        match value {
+            CompiledWindowExpr::Scalar(program) => {
                 let input = VmTypedBatch::try_new(
                     program.input_schema.clone(),
                     program
@@ -1506,270 +980,805 @@ pub(super) fn evaluate_window_aggregate_expr<'a>(
                         field: target_field.to_string(),
                     })
                 })?;
-                let field = result.batch.schema().field(column_index);
-                let array = result.batch.column(column_index).to_array_ref();
-                let output_type =
-                    parse_as_type_from_arrow(field.data_type()).change_context_lazy(|| {
-                        WindowProcessorError::AggregateExprOutput {
-                            field: target_field.to_string(),
-                        }
-                    })?;
-                let value = runtime_value_from_arrow_array(
-                    array.as_ref(),
-                    &output_type,
-                    false,
-                    0,
-                    target_field,
-                )
-                .change_context_lazy(|| {
-                    WindowProcessorError::AggregateExprOutput {
-                        field: target_field.to_string(),
-                    }
-                })?;
-                value.ok_or_else(|| {
-                    Report::new(WindowProcessorError::AggregateExprNullOutput {
-                        field: target_field.to_string(),
-                    })
-                })
+                Ok(result.batch.column(column_index).to_array_ref())
             }
-            CompiledWindowAggregateExpr::Array { items, fixed_size } => {
+            CompiledWindowExpr::Array { items, fixed_size } => {
+                let element = match data_type {
+                    ArrowDataType::FixedSizeList(element, _) | ArrowDataType::List(element) => {
+                        Some(element)
+                    }
+                    _ => None,
+                };
+                let element = element.verified(
+                    "an array value compiles only against a fixed-size or variable list field",
+                );
                 let mut values = Vec::with_capacity(items.len());
                 for item in items {
                     values.push(
-                        evaluate_window_aggregate_expr(
+                        evaluate_window_value(
                             item,
                             target_field,
+                            element.data_type(),
                             injector.clone(),
                             execution_now,
                         )
                         .await?,
                     );
                 }
-                if *fixed_size {
-                    Ok(RuntimeValue::Array(values))
+                let value_refs = values
+                    .iter()
+                    .map(AsRef::as_ref)
+                    .collect::<Vec<&dyn Array>>();
+                let values = concat_arrow_arrays(&value_refs)
+                    .change_context(WindowProcessorError::BuildAggregateOutput)?;
+                let array: ArrayRef = if *fixed_size {
+                    let length = i32::try_from(items.len())
+                        .change_context(WindowProcessorError::BuildAggregateOutput)?;
+                    StdArc::new(
+                        arrow_array::FixedSizeListArray::try_new(
+                            StdArc::clone(element),
+                            length,
+                            values,
+                            None,
+                        )
+                        .change_context(WindowProcessorError::BuildAggregateOutput)?,
+                    )
                 } else {
-                    Ok(RuntimeValue::Vec(values))
-                }
+                    StdArc::new(
+                        ListArray::try_new(
+                            StdArc::clone(element),
+                            arrow_buffer::OffsetBuffer::from_lengths([items.len()]),
+                            values,
+                            None,
+                        )
+                        .change_context(WindowProcessorError::BuildAggregateOutput)?,
+                    )
+                };
+                Ok(array)
             }
         }
     })
 }
 
-pub(super) fn runtime_value_to_f64(
-    value: &RuntimeValue,
-) -> error_stack::Result<f64, WindowProcessorError> {
-    match value {
-        RuntimeValue::U8(value) => Ok(f64::from(*value)),
-        RuntimeValue::I8(value) => Ok(f64::from(*value)),
-        RuntimeValue::U16(value) => Ok(f64::from(*value)),
-        RuntimeValue::I16(value) => Ok(f64::from(*value)),
-        RuntimeValue::U32(value) => Ok(f64::from(*value)),
-        RuntimeValue::I32(value) => Ok(f64::from(*value)),
-        RuntimeValue::U64(value) => Ok((*value).approx_into()),
-        RuntimeValue::I64(value) => Ok((*value).approx_into()),
-        RuntimeValue::F32(value) => Ok(f64::from(value.0)),
-        RuntimeValue::F64(value) => Ok(value.0),
-        other => Err(Report::new(WindowProcessorError::NotNumeric {
-            type_name: runtime_value_type_name(other),
-        })),
-    }
-}
-
-pub(super) fn sum_runtime_values(
-    left: RuntimeValue,
-    right: RuntimeValue,
-) -> error_stack::Result<RuntimeValue, WindowProcessorError> {
-    match (left, right) {
-        (RuntimeValue::U8(left), RuntimeValue::U8(right)) => Ok(RuntimeValue::U8(left + right)),
-        (RuntimeValue::I8(left), RuntimeValue::I8(right)) => Ok(RuntimeValue::I8(left + right)),
-        (RuntimeValue::U16(left), RuntimeValue::U16(right)) => Ok(RuntimeValue::U16(left + right)),
-        (RuntimeValue::I16(left), RuntimeValue::I16(right)) => Ok(RuntimeValue::I16(left + right)),
-        (RuntimeValue::U32(left), RuntimeValue::U32(right)) => Ok(RuntimeValue::U32(left + right)),
-        (RuntimeValue::I32(left), RuntimeValue::I32(right)) => Ok(RuntimeValue::I32(left + right)),
-        (RuntimeValue::U64(left), RuntimeValue::U64(right)) => Ok(RuntimeValue::U64(left + right)),
-        (RuntimeValue::I64(left), RuntimeValue::I64(right)) => Ok(RuntimeValue::I64(left + right)),
-        (RuntimeValue::F32(left), RuntimeValue::F32(right)) => {
-            Ok(RuntimeValue::F32(OrderedFloat(left.0 + right.0)))
-        }
-        (RuntimeValue::F64(left), RuntimeValue::F64(right)) => {
-            Ok(RuntimeValue::F64(OrderedFloat(left.0 + right.0)))
-        }
-        (left, right) => Err(Report::new(WindowProcessorError::SumIncompatible {
-            left: runtime_value_type_name(&left),
-            right: runtime_value_type_name(&right),
-        })),
-    }
-}
-
-pub(super) fn subtract_runtime_values(
-    left: RuntimeValue,
-    right: RuntimeValue,
-) -> error_stack::Result<Option<RuntimeValue>, WindowProcessorError> {
-    let value = match (left, right) {
-        (RuntimeValue::U8(left), RuntimeValue::U8(right)) => RuntimeValue::U8(left - right),
-        (RuntimeValue::I8(left), RuntimeValue::I8(right)) => RuntimeValue::I8(left - right),
-        (RuntimeValue::U16(left), RuntimeValue::U16(right)) => RuntimeValue::U16(left - right),
-        (RuntimeValue::I16(left), RuntimeValue::I16(right)) => RuntimeValue::I16(left - right),
-        (RuntimeValue::U32(left), RuntimeValue::U32(right)) => RuntimeValue::U32(left - right),
-        (RuntimeValue::I32(left), RuntimeValue::I32(right)) => RuntimeValue::I32(left - right),
-        (RuntimeValue::U64(left), RuntimeValue::U64(right)) => RuntimeValue::U64(left - right),
-        (RuntimeValue::I64(left), RuntimeValue::I64(right)) => RuntimeValue::I64(left - right),
-        (RuntimeValue::F32(left), RuntimeValue::F32(right)) => {
-            RuntimeValue::F32(OrderedFloat(left.0 - right.0))
-        }
-        (RuntimeValue::F64(left), RuntimeValue::F64(right)) => {
-            RuntimeValue::F64(OrderedFloat(left.0 - right.0))
-        }
-        (left, right) => {
-            return Err(Report::new(WindowProcessorError::SumRemoveIncompatible {
-                left: runtime_value_type_name(&left),
-                right: runtime_value_type_name(&right),
-            }));
-        }
-    };
-    if runtime_value_is_zero(&value) {
-        Ok(None)
-    } else {
-        Ok(Some(value))
-    }
-}
-
-pub(super) fn runtime_value_is_zero(value: &RuntimeValue) -> bool {
-    match value {
-        RuntimeValue::U8(value) => *value == 0,
-        RuntimeValue::I8(value) => *value == 0,
-        RuntimeValue::U16(value) => *value == 0,
-        RuntimeValue::I16(value) => *value == 0,
-        RuntimeValue::U32(value) => *value == 0,
-        RuntimeValue::I32(value) => *value == 0,
-        RuntimeValue::U64(value) => *value == 0,
-        RuntimeValue::I64(value) => *value == 0,
-        RuntimeValue::F32(value) => value.0 == 0.0,
-        RuntimeValue::F64(value) => value.0 == 0.0,
-        _ => false,
-    }
-}
-
-pub(super) fn compare_runtime_values(
-    left: &RuntimeValue,
-    right: &RuntimeValue,
-) -> std::cmp::Ordering {
-    match (left, right) {
-        (RuntimeValue::U8(left), RuntimeValue::U8(right)) => left.cmp(right),
-        (RuntimeValue::I8(left), RuntimeValue::I8(right)) => left.cmp(right),
-        (RuntimeValue::U16(left), RuntimeValue::U16(right)) => left.cmp(right),
-        (RuntimeValue::I16(left), RuntimeValue::I16(right)) => left.cmp(right),
-        (RuntimeValue::U32(left), RuntimeValue::U32(right)) => left.cmp(right),
-        (RuntimeValue::I32(left), RuntimeValue::I32(right)) => left.cmp(right),
-        (RuntimeValue::U64(left), RuntimeValue::U64(right)) => left.cmp(right),
-        (RuntimeValue::I64(left), RuntimeValue::I64(right)) => left.cmp(right),
-        (RuntimeValue::F32(left), RuntimeValue::F32(right)) => left.cmp(right),
-        (RuntimeValue::F64(left), RuntimeValue::F64(right)) => left.cmp(right),
-        (RuntimeValue::String(left), RuntimeValue::String(right)) => left.cmp(right),
-        (RuntimeValue::Datetime(left), RuntimeValue::Datetime(right)) => left.cmp(right),
-        (RuntimeValue::Bool(left), RuntimeValue::Bool(right)) => left.cmp(right),
-        _ => left.to_key_fragment().cmp(&right.to_key_fragment()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
-
-    use nervix_models::{CreateSchema, ParseAsType, Timestamp};
+    use arrow_array::{Float64Array, Int64Array, TimestampNanosecondArray};
+    use nervix_models::{ParseAsType, Timestamp};
     use nonzero_ext::nonzero;
     use ordered_float::OrderedFloat;
 
     use super::*;
     use crate::{
         runtime_ack::AckSet,
-        runtime_schema::{
-            RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue, compile_schema,
-            test_runtime_row,
-        },
+        runtime_schema::{RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue},
     };
+
+    fn field(name: &'static str, ty: ParseAsType) -> OptionalTestField {
+        OptionalTestField {
+            name,
+            ty,
+            optional: false,
+        }
+    }
+
+    fn optional(name: &'static str, ty: ParseAsType) -> OptionalTestField {
+        OptionalTestField {
+            name,
+            ty,
+            optional: true,
+        }
+    }
+
+    fn at(nanos: i64) -> Timestamp {
+        Timestamp::from_unix_nanos(nanos)
+    }
+
+    /// One compiled single-route window processor state, driven the way its branch task drives it.
+    struct TestWindow {
+        plan: WindowAccumulatorPlan,
+        compiled: CompiledWindowAggregateProgram,
+        input_schema: Arc<CompiledSchema>,
+        output_schema: Arc<CompiledSchema>,
+        state: WindowProcessorState,
+    }
+
+    impl TestWindow {
+        fn new(set: &str, input: &[OptionalTestField], output: &[OptionalTestField]) -> Self {
+            let input_schema = test_optional_schema(input);
+            let output_schema = test_optional_schema(output);
+            let input_relay = named::<RelayName>("events");
+            let output_relay = named::<RelayName>("summary");
+            let relay_schemas = HashMap::from_iter([
+                (input_relay.clone(), input_schema.clone()),
+                (output_relay.clone(), output_schema.clone()),
+            ]);
+            let compiled = CompiledWindowAggregateProgram::compile(
+                &window_aggregate(set),
+                &[input_relay],
+                &output_relay,
+                &relay_schemas,
+                None,
+            )
+            .expect("the test window route should compile");
+            let plan = WindowAccumulatorPlan::new([&compiled.route]);
+            let state = WindowProcessorState::new(&plan);
+            Self {
+                plan,
+                compiled,
+                input_schema,
+                output_schema,
+                state,
+            }
+        }
+
+        /// Evaluate one batch of `columns`, in input schema order, whose rows carry `timestamps`
+        /// as watermarks, admit every admissible row, and answer why the others were refused.
+        async fn admit(&mut self, columns: Vec<ArrayRef>, timestamps: &[i64]) -> Vec<String> {
+            let schema = self.input_schema.arrow_schema();
+            let batch = RecordBatch::try_new(StdArc::clone(&schema), columns)
+                .expect("the test columns should match the input schema");
+            let carrier = Arc::new(
+                RuntimeRecordBatch::from_record_batch(schema, batch)
+                    .expect("the test batch should be a valid relay batch"),
+            );
+            let mut evaluated = evaluate_window_arguments(
+                &self.plan,
+                std::slice::from_ref(&self.compiled),
+                &carrier,
+                at(1),
+            )
+            .await
+            .expect("the test batch's arguments should evaluate");
+            let mut refused = Vec::new();
+            let mut run = Vec::new();
+            for (row, timestamp) in timestamps.iter().enumerate() {
+                if let Some(refusal) = evaluated.take_refusal(row) {
+                    refused.push(refusal.current_context().to_string());
+                    continue;
+                }
+                let metadata = RuntimeRecordMetadata::from_ingested_at_watermarks(
+                    at(*timestamp),
+                    at(*timestamp),
+                );
+                let record = RuntimeRow::new(carrier.clone(), row, metadata)
+                    .expect("every test row is inside its batch");
+                let message = RelayMessage {
+                    key: None,
+                    record,
+                    acks: AckSet::empty(),
+                };
+                run.push(WindowAdmission { message, row });
+            }
+            self.state.admit(&evaluated.columns, run);
+            refused
+        }
+
+        fn step(&mut self, count: usize, removed_at: i64) {
+            let removed = self.state.retract_oldest(count, at(removed_at));
+            assert_eq!(removed.len(), count, "a test steps only over retained rows");
+        }
+
+        async fn emit(&self) -> error_stack::Result<RuntimeRecordBatch, WindowProcessorError> {
+            evaluate_window_aggregate(&self.compiled, &self.state, &self.output_schema, at(42))
+                .await
+        }
+
+        async fn emitted(&self) -> RuntimeRecordBatch {
+            self.emit()
+                .await
+                .expect("the window aggregate should evaluate")
+        }
+    }
+
+    fn int64(values: impl IntoIterator<Item = Option<i64>>) -> ArrayRef {
+        StdArc::new(Int64Array::from_iter(values))
+    }
+
+    fn float64(values: impl IntoIterator<Item = Option<f64>>) -> ArrayRef {
+        StdArc::new(Float64Array::from_iter(values))
+    }
+
+    fn booleans(values: impl IntoIterator<Item = Option<bool>>) -> ArrayRef {
+        StdArc::new(BooleanArray::from_iter(values))
+    }
+
+    fn strings(values: impl IntoIterator<Item = Option<&'static str>>) -> ArrayRef {
+        StdArc::new(StringArray::from_iter(values))
+    }
+
+    fn f64_value(value: f64) -> Option<RuntimeValue> {
+        Some(RuntimeValue::F64(OrderedFloat(value)))
+    }
+
+    #[tokio::test]
+    async fn statistics_follow_sliding_admission_and_retraction() {
+        let mut window = TestWindow::new(
+            "SET healthy_samples = COUNT_IF(input.healthy), all_healthy = \
+             BOOL_AND(input.healthy), any_healthy = BOOL_OR(input.healthy), mean_value = \
+             AVG(input.value), value_var_samp = VAR_SAMP(input.value), value_var_pop = \
+             VAR_POP(input.value), value_stddev_samp = STDDEV_SAMP(input.value), load_covar_pop = \
+             COVAR_POP(input.value, input.load), load_covar_samp = COVAR_SAMP(input.value, \
+             input.load), load_corr = CORR(input.value, input.load), lowest_sensor = \
+             ARG_MIN(input.sensor, input.value), highest_sensor = ARG_MAX(input.sensor, \
+             input.value)",
+            &[
+                field("sensor", ParseAsType::String),
+                field("value", ParseAsType::I64),
+                field("load", ParseAsType::F64),
+                field("healthy", ParseAsType::Bool),
+            ],
+            &[
+                field("healthy_samples", ParseAsType::I64),
+                field("all_healthy", ParseAsType::Bool),
+                field("any_healthy", ParseAsType::Bool),
+                field("mean_value", ParseAsType::F64),
+                optional("value_var_samp", ParseAsType::F64),
+                field("value_var_pop", ParseAsType::F64),
+                optional("value_stddev_samp", ParseAsType::F64),
+                field("load_covar_pop", ParseAsType::F64),
+                optional("load_covar_samp", ParseAsType::F64),
+                optional("load_corr", ParseAsType::F64),
+                field("lowest_sensor", ParseAsType::String),
+                field("highest_sensor", ParseAsType::String),
+            ],
+        );
+        let rows = [
+            ("north", 2, 10.0, true),
+            ("south", 8, 40.0, true),
+            ("east", 5, 25.0, false),
+            ("west", 8, 40.0, true),
+            ("center", 5, 25.0, true),
+            ("top", 2, 10.0, true),
+        ];
+        struct Expected {
+            healthy_samples: i64,
+            all_healthy: bool,
+            mean: f64,
+            var_samp: f64,
+            var_pop: f64,
+            covar_pop: f64,
+            covar_samp: f64,
+            lowest: &'static str,
+            highest: &'static str,
+        }
+        let windows = [
+            Expected {
+                healthy_samples: 2,
+                all_healthy: false,
+                mean: 5.0,
+                var_samp: 9.0,
+                var_pop: 6.0,
+                covar_pop: 30.0,
+                covar_samp: 45.0,
+                lowest: "north",
+                highest: "south",
+            },
+            Expected {
+                healthy_samples: 2,
+                all_healthy: false,
+                mean: 7.0,
+                var_samp: 3.0,
+                var_pop: 2.0,
+                covar_pop: 10.0,
+                covar_samp: 15.0,
+                lowest: "east",
+                highest: "south",
+            },
+            Expected {
+                healthy_samples: 2,
+                all_healthy: false,
+                mean: 6.0,
+                var_samp: 3.0,
+                var_pop: 2.0,
+                covar_pop: 10.0,
+                covar_samp: 15.0,
+                lowest: "east",
+                highest: "west",
+            },
+            Expected {
+                healthy_samples: 3,
+                all_healthy: true,
+                mean: 5.0,
+                var_samp: 9.0,
+                var_pop: 6.0,
+                covar_pop: 30.0,
+                covar_samp: 45.0,
+                lowest: "top",
+                highest: "west",
+            },
+        ];
+        let mut emitted = 0;
+        for (index, (sensor, value, load, healthy)) in rows.into_iter().enumerate() {
+            let timestamp = i64::try_from(index).expect("few test rows");
+            let refused = window
+                .admit(
+                    vec![
+                        strings([Some(sensor)]),
+                        int64([Some(value)]),
+                        float64([Some(load)]),
+                        booleans([Some(healthy)]),
+                    ],
+                    &[timestamp],
+                )
+                .await;
+            assert!(refused.is_empty());
+            if window.state.entries.len() < 3 {
+                continue;
+            }
+            let expected = &windows[emitted];
+            let record = window.emitted().await;
+            assert_eq!(
+                batch_value(&record, "healthy_samples"),
+                Some(RuntimeValue::I64(expected.healthy_samples))
+            );
+            assert_eq!(
+                batch_value(&record, "all_healthy"),
+                Some(RuntimeValue::Bool(expected.all_healthy))
+            );
+            assert_eq!(
+                batch_value(&record, "any_healthy"),
+                Some(RuntimeValue::Bool(true))
+            );
+            assert_eq!(batch_value(&record, "mean_value"), f64_value(expected.mean));
+            assert_eq!(
+                batch_value(&record, "value_var_samp"),
+                f64_value(expected.var_samp)
+            );
+            assert_eq!(
+                batch_value(&record, "value_var_pop"),
+                f64_value(expected.var_pop)
+            );
+            assert_eq!(
+                batch_value(&record, "value_stddev_samp"),
+                f64_value(expected.var_samp.sqrt())
+            );
+            assert_eq!(
+                batch_value(&record, "load_covar_pop"),
+                f64_value(expected.covar_pop)
+            );
+            assert_eq!(
+                batch_value(&record, "load_covar_samp"),
+                f64_value(expected.covar_samp)
+            );
+            assert_eq!(batch_value(&record, "load_corr"), f64_value(1.0));
+            assert_eq!(
+                batch_value(&record, "lowest_sensor"),
+                Some(RuntimeValue::String(expected.lowest.to_string()))
+            );
+            assert_eq!(
+                batch_value(&record, "highest_sensor"),
+                Some(RuntimeValue::String(expected.highest.to_string()))
+            );
+            emitted += 1;
+            window.step(1, timestamp);
+        }
+        assert_eq!(emitted, windows.len());
+    }
+
+    #[tokio::test]
+    async fn null_arguments_contribute_nothing_and_undefined_results_are_typed_nulls() {
+        let set = "SET samples = COUNT(input.value), total = SUM(input.value), mean_value = \
+                   AVG(input.value), lowest = MIN(input.value), first_value = FIRST(input.value), \
+                   value_var_samp = VAR_SAMP(input.value), healthy_samples = \
+                   COUNT_IF(input.healthy), all_healthy = BOOL_AND(input.healthy), lowest_label = \
+                   ARG_MIN(input.label, input.value), correlation = CORR(input.value, input.value)";
+        let input = [
+            optional("value", ParseAsType::I64),
+            optional("healthy", ParseAsType::Bool),
+            optional("label", ParseAsType::String),
+        ];
+        let output = [
+            field("samples", ParseAsType::I64),
+            optional("total", ParseAsType::I64),
+            optional("mean_value", ParseAsType::F64),
+            optional("lowest", ParseAsType::I64),
+            optional("first_value", ParseAsType::I64),
+            optional("value_var_samp", ParseAsType::F64),
+            field("healthy_samples", ParseAsType::I64),
+            optional("all_healthy", ParseAsType::Bool),
+            optional("lowest_label", ParseAsType::String),
+            optional("correlation", ParseAsType::F64),
+        ];
+
+        let mut sparse = TestWindow::new(set, &input, &output);
+        sparse
+            .admit(
+                vec![
+                    int64([None, Some(4), Some(10)]),
+                    booleans([None, Some(true), Some(false)]),
+                    strings([Some("missing"), None, Some("ten")]),
+                ],
+                &[1, 2, 3],
+            )
+            .await;
+        let record = sparse.emitted().await;
+        assert_eq!(batch_value(&record, "samples"), Some(RuntimeValue::I64(3)));
+        assert_eq!(batch_value(&record, "total"), Some(RuntimeValue::I64(14)));
+        assert_eq!(batch_value(&record, "mean_value"), f64_value(7.0));
+        assert_eq!(batch_value(&record, "lowest"), Some(RuntimeValue::I64(4)));
+        assert_eq!(
+            batch_value(&record, "first_value"),
+            Some(RuntimeValue::I64(4))
+        );
+        assert_eq!(batch_value(&record, "value_var_samp"), f64_value(18.0));
+        assert_eq!(
+            batch_value(&record, "healthy_samples"),
+            Some(RuntimeValue::I64(1))
+        );
+        assert_eq!(
+            batch_value(&record, "all_healthy"),
+            Some(RuntimeValue::Bool(false))
+        );
+        assert_eq!(
+            batch_value(&record, "lowest_label"),
+            Some(RuntimeValue::String("ten".to_string()))
+        );
+        assert_eq!(batch_value(&record, "correlation"), f64_value(1.0));
+
+        let mut empty = TestWindow::new(set, &input, &output);
+        empty
+            .admit(
+                vec![
+                    int64([None, None]),
+                    booleans([None, None]),
+                    strings([None, Some("orphan")]),
+                ],
+                &[1, 2],
+            )
+            .await;
+        let record = empty.emitted().await;
+        assert_eq!(batch_value(&record, "samples"), Some(RuntimeValue::I64(2)));
+        assert_eq!(
+            batch_value(&record, "healthy_samples"),
+            Some(RuntimeValue::I64(0))
+        );
+        for field in [
+            "total",
+            "mean_value",
+            "lowest",
+            "first_value",
+            "value_var_samp",
+            "all_healthy",
+            "lowest_label",
+            "correlation",
+        ] {
+            assert_eq!(batch_value(&record, field), None, "{field} should be null");
+        }
+    }
+
+    #[tokio::test]
+    async fn rows_with_non_finite_statistic_arguments_are_refused_before_admission() {
+        let mut window = TestWindow::new(
+            "SET mean_reading = AVG(input.reading), highest = MAX(input.reading), samples = \
+             COUNT(input.reading)",
+            &[field("reading", ParseAsType::F64)],
+            &[
+                field("mean_reading", ParseAsType::F64),
+                field("highest", ParseAsType::F64),
+                field("samples", ParseAsType::I64),
+            ],
+        );
+        let refused = window
+            .admit(
+                vec![float64([
+                    Some(1.0),
+                    Some(f64::NAN),
+                    Some(3.0),
+                    Some(f64::INFINITY),
+                ])],
+                &[1, 2, 3, 4],
+            )
+            .await;
+        assert_eq!(
+            refused,
+            vec![
+                "AVG requires finite floating-point arguments".to_string(),
+                "AVG requires finite floating-point arguments".to_string(),
+            ]
+        );
+        let record = window.emitted().await;
+        assert_eq!(batch_value(&record, "mean_reading"), f64_value(2.0));
+        assert_eq!(batch_value(&record, "highest"), f64_value(3.0));
+        assert_eq!(batch_value(&record, "samples"), Some(RuntimeValue::I64(2)));
+    }
+
+    #[tokio::test]
+    async fn argument_evaluation_failures_refuse_only_their_rows_in_one_vm_execution() {
+        let mut window = TestWindow::new(
+            "SET adjusted_total = SUM(120 / input.latency)",
+            &[field("latency", ParseAsType::I64)],
+            &[field("adjusted_total", ParseAsType::I64)],
+        );
+        WINDOW_ARGUMENT_VM_EXECUTIONS.with(|executions| executions.set(0));
+        let refused = window
+            .admit(vec![int64([Some(10), Some(0), Some(30)])], &[1, 2, 3])
+            .await;
+        assert_eq!(
+            WINDOW_ARGUMENT_VM_EXECUTIONS.with(std::cell::Cell::get),
+            1,
+            "all input rows must share one aggregate-argument VM execution"
+        );
+        assert_eq!(refused.len(), 1);
+        assert!(
+            refused[0].contains("division_by_zero"),
+            "the failed row should carry the division_by_zero side error, got {refused:?}"
+        );
+        assert_eq!(window.state.entries.len(), 2);
+        let record = window.emitted().await;
+        assert_eq!(
+            batch_value(&record, "adjusted_total"),
+            Some(RuntimeValue::I64(16))
+        );
+    }
+
+    #[tokio::test]
+    async fn integer_sums_are_exact_through_retraction_and_report_overflow_of_their_type() {
+        let mut window = TestWindow::new(
+            "SET total = SUM(input.value)",
+            &[field("value", ParseAsType::I64)],
+            &[field("total", ParseAsType::I64)],
+        );
+        window
+            .admit(vec![int64([Some(i64::MAX), Some(1)])], &[1, 2])
+            .await;
+        let overflow = window
+            .emit()
+            .await
+            .expect_err("MAX + 1 does not fit an I64 sum");
+        assert!(matches!(
+            overflow.current_context(),
+            WindowProcessorError::SumOverflow { .. }
+        ));
+        window.step(1, 3);
+        window.admit(vec![int64([Some(-1)])], &[3]).await;
+        let record = window.emitted().await;
+        assert_eq!(
+            batch_value(&record, "total"),
+            Some(RuntimeValue::I64(0)),
+            "a sum that returns to zero is zero, not an empty window"
+        );
+    }
+
+    #[tokio::test]
+    async fn float_sums_forget_an_evicted_outlier_exactly() {
+        let mut window = TestWindow::new(
+            "SET total = SUM(input.reading), mean_reading = AVG(input.reading), spread = \
+             VAR_POP(input.reading)",
+            &[field("reading", ParseAsType::F64)],
+            &[
+                field("total", ParseAsType::F64),
+                field("mean_reading", ParseAsType::F64),
+                field("spread", ParseAsType::F64),
+            ],
+        );
+        window
+            .admit(vec![float64([Some(1e16), Some(1.0)])], &[1, 2])
+            .await;
+        window.step(1, 2);
+        window.admit(vec![float64([Some(3.0)])], &[3]).await;
+        let record = window.emitted().await;
+        assert_eq!(batch_value(&record, "total"), f64_value(4.0));
+        assert_eq!(batch_value(&record, "mean_reading"), f64_value(2.0));
+        assert_eq!(batch_value(&record, "spread"), f64_value(1.0));
+    }
+
+    #[tokio::test]
+    async fn extremes_prefer_the_earliest_row_and_order_arrival_by_watermark() {
+        let mut window = TestWindow::new(
+            "SET lowest_label = ARG_MIN(input.label, input.value), highest_label = \
+             ARG_MAX(input.label, input.value), lowest = MIN(input.value), first_label = \
+             FIRST(input.label), last_label = LAST(input.label)",
+            &[
+                field("label", ParseAsType::String),
+                field("value", ParseAsType::I64),
+            ],
+            &[
+                field("lowest_label", ParseAsType::String),
+                field("highest_label", ParseAsType::String),
+                field("lowest", ParseAsType::I64),
+                field("first_label", ParseAsType::String),
+                field("last_label", ParseAsType::String),
+            ],
+        );
+        window
+            .admit(
+                vec![
+                    strings([Some("a"), Some("b"), Some("c"), Some("d")]),
+                    int64([Some(5), Some(1), Some(9), Some(1)]),
+                ],
+                &[30, 10, 20, 40],
+            )
+            .await;
+        let string = |value: &str| Some(RuntimeValue::String(value.to_string()));
+        let record = window.emitted().await;
+        assert_eq!(batch_value(&record, "lowest_label"), string("b"));
+        assert_eq!(batch_value(&record, "highest_label"), string("c"));
+        assert_eq!(batch_value(&record, "lowest"), Some(RuntimeValue::I64(1)));
+        assert_eq!(batch_value(&record, "first_label"), string("b"));
+        assert_eq!(batch_value(&record, "last_label"), string("d"));
+
+        window.step(2, 40);
+        let record = window.emitted().await;
+        assert_eq!(batch_value(&record, "lowest_label"), string("d"));
+        assert_eq!(batch_value(&record, "highest_label"), string("c"));
+        assert_eq!(batch_value(&record, "first_label"), string("c"));
+    }
+
+    #[tokio::test]
+    async fn admission_runs_end_at_the_row_that_fills_the_window() {
+        let mut window = TestWindow::new(
+            "SET samples = COUNT(input.value)",
+            &[field("value", ParseAsType::I64)],
+            &[field("samples", ParseAsType::I64)],
+        );
+        window
+            .admit(vec![int64([Some(1), Some(2)])], &[1_000, 2_000])
+            .await;
+        let pending = |timestamps: &[i64]| {
+            let values = int64(timestamps.iter().map(|_| Some(0)));
+            let schema = window.input_schema.arrow_schema();
+            let batch = RecordBatch::try_new(StdArc::clone(&schema), vec![values])
+                .expect("the pending rows match the input schema");
+            let carrier = Arc::new(
+                RuntimeRecordBatch::from_record_batch(schema, batch)
+                    .expect("the pending rows form a relay batch"),
+            );
+            timestamps
+                .iter()
+                .enumerate()
+                .map(|(row, timestamp)| WindowAdmission {
+                    message: RelayMessage {
+                        key: None,
+                        record: RuntimeRow::new(
+                            carrier.clone(),
+                            row,
+                            RuntimeRecordMetadata::from_ingested_at_watermarks(
+                                at(*timestamp),
+                                at(*timestamp),
+                            ),
+                        )
+                        .expect("every pending row is inside its batch"),
+                        acks: AckSet::empty(),
+                    },
+                    row,
+                })
+                .collect::<VecDeque<_>>()
+        };
+        let three = pending(&[3_000, 4_000, 5_000]);
+        assert_eq!(window.state.admission_run_len(&three, Some(3), None), 1);
+        assert_eq!(window.state.admission_run_len(&three, Some(10), None), 3);
+        assert_eq!(
+            window
+                .state
+                .admission_run_len(&three, None, Some(Duration::from_nanos(3_500))),
+            3,
+            "the row at 5_000 is the first one 3_500 or more after the window's first row at 1_000"
+        );
+        assert_eq!(
+            window
+                .state
+                .admission_run_len(&three, None, Some(Duration::from_nanos(2_500))),
+            2,
+            "the row at 4_000 is the first one 2_500 or more after the window's first row at 1_000"
+        );
+        let early = pending(&[500, 600]);
+        assert_eq!(
+            window
+                .state
+                .admission_run_len(&early, None, Some(Duration::from_nanos(1_000))),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn restored_windows_answer_every_aggregate_as_before_they_were_published() {
+        let set = "SET count = COUNT(input.latency), total = SUM(input.latency), first_latency = \
+                   FIRST(input.latency), highest = MAX(input.latency), mean_latency = \
+                   AVG(input.latency), healthy = BOOL_AND(input.healthy), p0 = \
+                   PERCENTILE_LINEAR_HISTOGRAM(input.latency, 0, 10, 0, 100, '2s')";
+        let input = [
+            field("latency", ParseAsType::I64),
+            field("healthy", ParseAsType::Bool),
+        ];
+        let output = [
+            field("count", ParseAsType::I64),
+            field("total", ParseAsType::I64),
+            field("first_latency", ParseAsType::I64),
+            field("highest", ParseAsType::I64),
+            field("mean_latency", ParseAsType::F64),
+            field("healthy", ParseAsType::Bool),
+            field("p0", ParseAsType::F64),
+        ];
+        let mut window = TestWindow::new(set, &input, &output);
+        window
+            .admit(
+                vec![
+                    int64([Some(10), Some(30), Some(90)]),
+                    booleans([Some(true), Some(false), Some(true)]),
+                ],
+                &[10, 20, 30],
+            )
+            .await;
+        window.step(1, 30);
+        window
+            .admit(vec![int64([Some(50)]), booleans([Some(true)])], &[40])
+            .await;
+        let before = window.emitted().await;
+
+        let snapshot = window
+            .state
+            .to_snapshot()
+            .expect("the window should publish");
+        let restored = WindowProcessorState::from_snapshot(
+            &window.plan,
+            window.input_schema.as_ref(),
+            &snapshot,
+        )
+        .expect("the published window should restore");
+        assert_eq!(restored.entries.len(), 3);
+        assert_eq!(restored.next_sequence, window.state.next_sequence);
+        assert_eq!(
+            restored.next_timeout_deadline(),
+            window.state.next_timeout_deadline(),
+            "the histogram's delayed removal survives publication"
+        );
+        window.state = restored;
+        let after = window.emitted().await;
+        for field in [
+            "count",
+            "total",
+            "first_latency",
+            "highest",
+            "mean_latency",
+            "healthy",
+            "p0",
+        ] {
+            assert_eq!(
+                batch_value(&after, field),
+                batch_value(&before, field),
+                "{field} should survive restoring the published window"
+            );
+        }
+        assert_eq!(batch_value(&after, "p0"), f64_value(15.0));
+    }
+
     #[tokio::test]
     async fn window_aggregate_evaluator_computes_vm_expression_percentile_and_array() {
-        let output_schema = compile_schema(&CreateSchema {
-            name: named("summary"),
-            fields: vec![
-                nervix_models::SchemaField {
-                    name: named("count"),
-                    ty: ParseAsType::I64,
-                    optional: false,
-                    sensitive: false,
-                },
-                nervix_models::SchemaField {
-                    name: named("adjusted_count"),
-                    ty: ParseAsType::I64,
-                    optional: false,
-                    sensitive: false,
-                },
-                nervix_models::SchemaField {
-                    name: named("p50"),
-                    ty: ParseAsType::F64,
-                    optional: false,
-                    sensitive: false,
-                },
-                nervix_models::SchemaField {
-                    name: named("latencies"),
-                    ty: ParseAsType::Array {
-                        element: Box::new(ParseAsType::F64),
-                        len: nonzero!(2u32),
-                    },
-                    optional: false,
-                    sensitive: false,
-                },
-                nervix_models::SchemaField {
-                    name: named("observed_at"),
-                    ty: ParseAsType::Datetime,
-                    optional: false,
-                    sensitive: false,
-                },
-            ],
-        });
-        let aggregate = window_aggregate(
+        let mut window = TestWindow::new(
             "SET count = COUNT(input.latency), adjusted_count = COUNT(input.latency) + 2, p50 = \
              PERCENTILE_LINEAR_HISTOGRAM(input.latency, 50, 10, 0, 100, '2s'), latencies = \
              [PERCENTILE_LINEAR_HISTOGRAM(input.latency, 50, 10, 0, 100, '2s'), \
              PERCENTILE_LINEAR_HISTOGRAM(input.latency, 100, 10, 0, 100, '2s')], observed_at = \
              now()",
-        );
-        let mut state = WindowProcessorState::new(&aggregate);
-        for value in [10.0, 20.0, 30.0] {
-            state
-                .push_message(
-                    &aggregate,
-                    Timestamp::now(),
-                    RelayMessage {
-                        key: None,
-                        record: test_runtime_row([(
-                            "latency".to_string(),
-                            RuntimeValue::F64(OrderedFloat(value)),
-                        )]),
-                        acks: AckSet::empty(),
+            &[field("latency", ParseAsType::F64)],
+            &[
+                field("count", ParseAsType::I64),
+                field("adjusted_count", ParseAsType::I64),
+                field("p50", ParseAsType::F64),
+                field(
+                    "latencies",
+                    ParseAsType::Array {
+                        element: Box::new(ParseAsType::F64),
+                        len: nonzero!(2u32),
                     },
-                    window_inputs(&aggregate, RuntimeValue::F64(OrderedFloat(value))),
-                )
-                .expect("aggregate state should accept message");
-        }
-
-        let compiled =
-            compile_window_aggregate_for_test(&aggregate, ParseAsType::F64, &output_schema);
-        let execution_now = Timestamp::from_unix_nanos(946_684_800_000_000_000);
-        let record = evaluate_window_aggregate(&compiled, &state, &output_schema, execution_now)
-            .await
-            .expect("aggregate should evaluate");
+                ),
+                field("observed_at", ParseAsType::Datetime),
+            ],
+        );
+        window
+            .admit(
+                vec![float64([Some(10.0), Some(20.0), Some(30.0)])],
+                &[1, 2, 3],
+            )
+            .await;
+        let record = window.emitted().await;
 
         assert_eq!(batch_value(&record, "count"), Some(RuntimeValue::I64(3)));
         assert_eq!(
             batch_value(&record, "adjusted_count"),
             Some(RuntimeValue::I64(5))
         );
-        assert_eq!(
-            batch_value(&record, "p50"),
-            Some(RuntimeValue::F64(OrderedFloat(25.0)))
-        );
+        assert_eq!(batch_value(&record, "p50"), f64_value(25.0));
         assert_eq!(
             batch_value(&record, "latencies"),
             Some(RuntimeValue::Array(vec![
@@ -1779,501 +1788,180 @@ mod tests {
         );
         assert_eq!(
             batch_value(&record, "observed_at"),
-            Some(RuntimeValue::Datetime(
-                execution_now.as_datetime().fixed_offset()
-            ))
+            Some(RuntimeValue::Datetime(at(42).as_datetime().fixed_offset()))
         );
-    }
-
-    #[tokio::test]
-    async fn window_aggregate_inputs_evaluate_one_batch_in_one_vm_execution() {
-        let output_schema = test_schema(&[("adjusted_total", ParseAsType::I64)]);
-        let aggregate = window_aggregate("SET adjusted_total = SUM(120 / input.latency)");
-        let compiled =
-            compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
-        let rows = [10, 0, 30]
-            .into_iter()
-            .map(|latency| test_runtime_row([("latency".to_string(), RuntimeValue::I64(latency))]))
-            .collect::<Vec<_>>();
-        let carrier = RuntimeRecordBatch::from_rows(rows[0].batch().schema(), rows.iter())
-            .expect("window input rows should form one Arrow batch");
-        WINDOW_AGGREGATE_INPUT_VM_EXECUTIONS.store(0, Ordering::Relaxed);
-
-        let evaluated =
-            evaluate_window_aggregate_inputs(&compiled, &carrier, Timestamp::from_unix_nanos(1))
-                .await
-                .expect("batched window aggregate inputs should evaluate");
-
-        assert_eq!(
-            WINDOW_AGGREGATE_INPUT_VM_EXECUTIONS.load(Ordering::Relaxed),
-            1,
-            "all input rows must share one aggregate-input VM execution"
-        );
-        assert_eq!(evaluated.len(), 3);
-        let first = evaluated[0]
-            .as_ref()
-            .expect("the first window input row should evaluate");
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].value, Some(RuntimeValue::I64(12)));
-        let row_error = evaluated[1]
-            .as_ref()
-            .expect_err("division by zero should fail only its input row");
-        assert!(
-            matches!(
-                row_error.current_context(),
-                WindowProcessorError::AggregateInputRow { reason }
-                    if reason.code().as_str() == "division_by_zero"
-            ),
-            "the failed row should carry the division_by_zero side error, got {row_error:?}"
-        );
-        let third = evaluated[2]
-            .as_ref()
-            .expect("the third window input row should evaluate");
-        assert_eq!(third.len(), 1);
-        assert_eq!(third[0].value, Some(RuntimeValue::I64(4)));
     }
 
     #[tokio::test]
     async fn window_linear_histogram_percentiles_share_accumulator_by_config() {
-        let output_schema = compile_schema(&CreateSchema {
-            name: named("summary"),
-            fields: vec![
-                nervix_models::SchemaField {
-                    name: named("p50"),
-                    ty: ParseAsType::F64,
-                    optional: false,
-                    sensitive: false,
-                },
-                nervix_models::SchemaField {
-                    name: named("p90"),
-                    ty: ParseAsType::F64,
-                    optional: false,
-                    sensitive: false,
-                },
-                nervix_models::SchemaField {
-                    name: named("p50_other_range"),
-                    ty: ParseAsType::F64,
-                    optional: false,
-                    sensitive: false,
-                },
-            ],
-        });
-        let aggregate = window_aggregate(
+        let mut window = TestWindow::new(
             "SET p50 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 50, 10, 0, 100, '2s'), p90 = \
              PERCENTILE_LINEAR_HISTOGRAM(input.latency, 90, 10, 0, 100, '2s'), p50_other_range = \
              PERCENTILE_LINEAR_HISTOGRAM(input.latency, 50, 10, 0, 200, '2s')",
+            &[field("latency", ParseAsType::I64)],
+            &[
+                field("p50", ParseAsType::F64),
+                field("p90", ParseAsType::F64),
+                field("p50_other_range", ParseAsType::F64),
+            ],
         );
-        let mut state = WindowProcessorState::new(&aggregate);
-
         assert_eq!(
-            state.accumulators.len(),
+            window.state.accumulators.len(),
             2,
             "same input and histogram config should share one accumulator"
         );
-
-        for value in [10, 20, 30] {
-            state
-                .push_message(
-                    &aggregate,
-                    Timestamp::now(),
-                    RelayMessage {
-                        key: None,
-                        record: test_runtime_row([(
-                            "latency".to_string(),
-                            RuntimeValue::I64(value),
-                        )]),
-                        acks: AckSet::empty(),
-                    },
-                    window_inputs(&aggregate, RuntimeValue::I64(value)),
-                )
-                .expect("aggregate state should accept message");
-        }
-
-        let compiled =
-            compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
-        let record = evaluate_window_aggregate(
-            &compiled,
-            &state,
-            &output_schema,
-            Timestamp::from_unix_nanos(42),
-        )
-        .await
-        .expect("aggregate should evaluate");
-
-        assert_eq!(
-            batch_value(&record, "p50"),
-            Some(RuntimeValue::F64(OrderedFloat(25.0)))
-        );
-        assert_eq!(
-            batch_value(&record, "p90"),
-            Some(RuntimeValue::F64(OrderedFloat(35.0)))
-        );
-        assert_eq!(
-            batch_value(&record, "p50_other_range"),
-            Some(RuntimeValue::F64(OrderedFloat(30.0)))
-        );
+        window
+            .admit(vec![int64([Some(10), Some(20), Some(30)])], &[1, 2, 3])
+            .await;
+        let record = window.emitted().await;
+        assert_eq!(batch_value(&record, "p50"), f64_value(25.0));
+        assert_eq!(batch_value(&record, "p90"), f64_value(35.0));
+        assert_eq!(batch_value(&record, "p50_other_range"), f64_value(30.0));
     }
 
-    #[test]
-    fn window_advance_removes_step_messages() {
-        let aggregate = window_aggregate("SET count = COUNT(input.latency)");
-        let mut state = WindowProcessorState::new(&aggregate);
-        for sequence in 0_i64..5 {
-            state
-                .push_message(
-                    &aggregate,
-                    Timestamp::now(),
-                    RelayMessage {
-                        key: None,
-                        record: test_runtime_row([(
-                            "latency".to_string(),
-                            RuntimeValue::I64(sequence),
-                        )]),
-                        acks: AckSet::empty(),
-                    },
-                    window_inputs(&aggregate, RuntimeValue::I64(sequence)),
-                )
-                .expect("aggregate state should accept message");
-        }
-
-        advance_window(&mut state, &aggregate, Some(2), None, Timestamp::now())
-            .expect("window should advance");
-
-        assert_eq!(state.entries.len(), 3);
-        assert_eq!(state.entries.front().map(|entry| entry.sequence), Some(2));
-        assert_eq!(
-            state.accumulators[0]
-                .evaluate(WindowAggregateFunction::Count, None)
-                .expect("count should evaluate"),
-            RuntimeValue::I64(3)
+    #[tokio::test]
+    async fn window_advance_removes_step_messages() {
+        let mut window = TestWindow::new(
+            "SET count = COUNT(input.latency)",
+            &[field("latency", ParseAsType::I64)],
+            &[field("count", ParseAsType::I64)],
         );
+        window
+            .admit(vec![int64((0..5).map(Some))], &[1, 2, 3, 4, 5])
+            .await;
+
+        advance_window(&mut window.state, Some(2), None, at(5));
+
+        assert_eq!(window.state.entries.len(), 3);
+        assert_eq!(
+            window.state.entries.front().map(|entry| entry.row.sequence),
+            Some(2)
+        );
+        let record = window.emitted().await;
+        assert_eq!(batch_value(&record, "count"), Some(RuntimeValue::I64(3)));
+    }
+
+    #[tokio::test]
+    async fn window_advance_steps_by_duration_after_messages() {
+        let mut window = TestWindow::new(
+            "SET count = COUNT(input.latency)",
+            &[field("latency", ParseAsType::I64)],
+            &[field("count", ParseAsType::I64)],
+        );
+        window
+            .admit(vec![int64((0..5).map(Some))], &[0, 10, 20, 30, 40])
+            .await;
+
+        advance_window(
+            &mut window.state,
+            Some(1),
+            Some(Duration::from_nanos(15)),
+            at(40),
+        );
+
+        assert_eq!(
+            window
+                .state
+                .entries
+                .front()
+                .map(|entry| entry.row.timestamp),
+            Some(at(30)),
+            "one message steps past 0, then the duration steps past everything before 10 + 15"
+        );
+        let record = window.emitted().await;
+        assert_eq!(batch_value(&record, "count"), Some(RuntimeValue::I64(2)));
     }
 
     #[tokio::test]
     async fn linear_histogram_zero_delay_removes_step_values_immediately() {
-        let output_schema = compile_schema(&CreateSchema {
-            name: named("summary"),
-            fields: vec![nervix_models::SchemaField {
-                name: named("p0"),
-                ty: ParseAsType::F64,
-                optional: false,
-                sensitive: false,
-            }],
-        });
-        let aggregate = window_aggregate(
+        let mut window = TestWindow::new(
             "SET p0 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 0, 10, 0, 100, '0ms')",
+            &[field("latency", ParseAsType::I64)],
+            &[field("p0", ParseAsType::F64)],
         );
-        let mut state = WindowProcessorState::new(&aggregate);
-        for (timestamp, value) in [
-            (Timestamp::from_unix_nanos(0), 10),
-            (Timestamp::from_unix_nanos(1_000_000_000), 90),
-        ] {
-            state
-                .push_message(
-                    &aggregate,
-                    timestamp,
-                    RelayMessage {
-                        key: None,
-                        record: test_runtime_row([(
-                            "latency".to_string(),
-                            RuntimeValue::I64(value),
-                        )]),
-                        acks: AckSet::empty(),
-                    },
-                    window_inputs(&aggregate, RuntimeValue::I64(value)),
-                )
-                .expect("aggregate state should accept message");
-        }
-
-        advance_window(
-            &mut state,
-            &aggregate,
-            Some(1),
-            None,
-            Timestamp::from_unix_nanos(1_000_000_000),
-        )
-        .expect("window should advance");
-        let compiled =
-            compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
-        let record = evaluate_window_aggregate(
-            &compiled,
-            &state,
-            &output_schema,
-            Timestamp::from_unix_nanos(42),
-        )
-        .await
-        .expect("aggregate should evaluate");
-
-        assert_eq!(
-            batch_value(&record, "p0"),
-            Some(RuntimeValue::F64(OrderedFloat(95.0)))
-        );
+        window
+            .admit(vec![int64([Some(10), Some(90)])], &[0, 1_000_000_000])
+            .await;
+        advance_window(&mut window.state, Some(1), None, at(1_000_000_000));
+        let record = window.emitted().await;
+        assert_eq!(batch_value(&record, "p0"), f64_value(95.0));
     }
 
     #[tokio::test]
     async fn linear_histogram_delay_retains_removed_step_values_until_expired() {
-        let output_schema = compile_schema(&CreateSchema {
-            name: named("summary"),
-            fields: vec![nervix_models::SchemaField {
-                name: named("p0"),
-                ty: ParseAsType::F64,
-                optional: false,
-                sensitive: false,
-            }],
-        });
-        let aggregate = window_aggregate(
+        let mut window = TestWindow::new(
             "SET p0 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 0, 10, 0, 100, '2s')",
+            &[field("latency", ParseAsType::I64)],
+            &[field("p0", ParseAsType::F64)],
         );
-        let mut state = WindowProcessorState::new(&aggregate);
-        for (timestamp, value) in [
-            (Timestamp::from_unix_nanos(0), 10),
-            (Timestamp::from_unix_nanos(1_000_000_000), 90),
-        ] {
-            state
-                .push_message(
-                    &aggregate,
-                    timestamp,
-                    RelayMessage {
-                        key: None,
-                        record: test_runtime_row([(
-                            "latency".to_string(),
-                            RuntimeValue::I64(value),
-                        )]),
-                        acks: AckSet::empty(),
-                    },
-                    window_inputs(&aggregate, RuntimeValue::I64(value)),
-                )
-                .expect("aggregate state should accept message");
-        }
+        window
+            .admit(vec![int64([Some(10), Some(90)])], &[0, 1_000_000_000])
+            .await;
+        advance_window(&mut window.state, Some(1), None, at(1_000_000_000));
+        let retained = window.emitted().await;
+        assert_eq!(batch_value(&retained, "p0"), f64_value(15.0));
 
-        advance_window(
-            &mut state,
-            &aggregate,
-            Some(1),
-            None,
-            Timestamp::from_unix_nanos(1_000_000_000),
-        )
-        .expect("window should advance");
-        let compiled =
-            compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
-        let retained = evaluate_window_aggregate(
-            &compiled,
-            &state,
-            &output_schema,
-            Timestamp::from_unix_nanos(42),
-        )
-        .await
-        .expect("aggregate should evaluate while delay retains value");
-        assert_eq!(
-            batch_value(&retained, "p0"),
-            Some(RuntimeValue::F64(OrderedFloat(15.0)))
-        );
+        window
+            .admit(vec![int64([Some(90)])], &[2_000_000_000])
+            .await;
+        let still_retained = window.emitted().await;
+        assert_eq!(batch_value(&still_retained, "p0"), f64_value(15.0));
 
-        state
-            .push_message(
-                &aggregate,
-                Timestamp::from_unix_nanos(2_000_000_000),
-                RelayMessage {
-                    key: None,
-                    record: test_runtime_row([("latency".to_string(), RuntimeValue::I64(90))]),
-                    acks: AckSet::empty(),
-                },
-                window_inputs(&aggregate, RuntimeValue::I64(90)),
-            )
-            .expect("aggregate state should accept message before delay expires");
-        let still_retained = evaluate_window_aggregate(
-            &compiled,
-            &state,
-            &output_schema,
-            Timestamp::from_unix_nanos(42),
-        )
-        .await
-        .expect("aggregate should evaluate before delay expires");
-        assert_eq!(
-            batch_value(&still_retained, "p0"),
-            Some(RuntimeValue::F64(OrderedFloat(15.0)))
-        );
-
-        state
-            .push_message(
-                &aggregate,
-                Timestamp::from_unix_nanos(4_000_000_000),
-                RelayMessage {
-                    key: None,
-                    record: test_runtime_row([("latency".to_string(), RuntimeValue::I64(90))]),
-                    acks: AckSet::empty(),
-                },
-                window_inputs(&aggregate, RuntimeValue::I64(90)),
-            )
-            .expect("aggregate state should accept message after delay expires");
-        let expired = evaluate_window_aggregate(
-            &compiled,
-            &state,
-            &output_schema,
-            Timestamp::from_unix_nanos(42),
-        )
-        .await
-        .expect("aggregate should evaluate after delay expires");
-        assert_eq!(
-            batch_value(&expired, "p0"),
-            Some(RuntimeValue::F64(OrderedFloat(95.0)))
-        );
+        window
+            .admit(vec![int64([Some(90)])], &[4_000_000_000])
+            .await;
+        let expired = window.emitted().await;
+        assert_eq!(batch_value(&expired, "p0"), f64_value(95.0));
     }
 
     #[tokio::test]
     async fn linear_histogram_delay_exposes_timeout_deadline_without_new_messages() {
-        let output_schema = compile_schema(&CreateSchema {
-            name: named("summary"),
-            fields: vec![nervix_models::SchemaField {
-                name: named("p0"),
-                ty: ParseAsType::F64,
-                optional: false,
-                sensitive: false,
-            }],
-        });
-        let aggregate = window_aggregate(
+        let mut window = TestWindow::new(
             "SET p0 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 0, 10, 0, 100, '2s')",
+            &[field("latency", ParseAsType::I64)],
+            &[field("p0", ParseAsType::F64)],
         );
-        let mut state = WindowProcessorState::new(&aggregate);
-        for (timestamp, value) in [
-            (Timestamp::from_unix_nanos(0), 10),
-            (Timestamp::from_unix_nanos(1_000_000_000), 90),
-        ] {
-            state
-                .push_message(
-                    &aggregate,
-                    timestamp,
-                    RelayMessage {
-                        key: None,
-                        record: test_runtime_row([(
-                            "latency".to_string(),
-                            RuntimeValue::I64(value),
-                        )]),
-                        acks: AckSet::empty(),
-                    },
-                    window_inputs(&aggregate, RuntimeValue::I64(value)),
-                )
-                .expect("aggregate state should accept message");
-        }
-
-        advance_window(
-            &mut state,
-            &aggregate,
-            Some(1),
-            None,
-            Timestamp::from_unix_nanos(1_000_000_000),
-        )
-        .expect("window should advance");
+        window
+            .admit(vec![int64([Some(10), Some(90)])], &[0, 1_000_000_000])
+            .await;
+        advance_window(&mut window.state, Some(1), None, at(1_000_000_000));
         assert_eq!(
-            state.next_timeout_deadline(),
-            Some(Timestamp::from_unix_nanos(3_000_000_000))
+            window.state.next_timeout_deadline(),
+            Some(at(3_000_000_000))
         );
 
-        assert!(
-            !state
-                .purge_timeouts(Timestamp::from_unix_nanos(2_999_999_999))
-                .expect("early purge check should succeed")
-        );
-        assert!(
-            state
-                .purge_timeouts(Timestamp::from_unix_nanos(3_000_000_000))
-                .expect("due purge should succeed")
-        );
-        assert_eq!(state.next_timeout_deadline(), None);
+        assert!(!window.state.purge_timeouts(at(2_999_999_999)));
+        assert!(window.state.purge_timeouts(at(3_000_000_000)));
+        assert_eq!(window.state.next_timeout_deadline(), None);
 
-        let compiled =
-            compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
-        let record = evaluate_window_aggregate(
-            &compiled,
-            &state,
-            &output_schema,
-            Timestamp::from_unix_nanos(42),
-        )
-        .await
-        .expect("aggregate should evaluate after timeout purge");
-        assert_eq!(
-            batch_value(&record, "p0"),
-            Some(RuntimeValue::F64(OrderedFloat(95.0)))
-        );
+        let record = window.emitted().await;
+        assert_eq!(batch_value(&record, "p0"), f64_value(95.0));
     }
 
     #[tokio::test]
     async fn window_aggregate_state_updates_first_last_min_max_and_sum() {
-        let output_schema = compile_schema(&CreateSchema {
-            name: named("summary"),
-            fields: vec![
-                nervix_models::SchemaField {
-                    name: named("first_latency"),
-                    ty: ParseAsType::I64,
-                    optional: false,
-                    sensitive: false,
-                },
-                nervix_models::SchemaField {
-                    name: named("last_latency"),
-                    ty: ParseAsType::I64,
-                    optional: false,
-                    sensitive: false,
-                },
-                nervix_models::SchemaField {
-                    name: named("min_latency"),
-                    ty: ParseAsType::I64,
-                    optional: false,
-                    sensitive: false,
-                },
-                nervix_models::SchemaField {
-                    name: named("max_latency"),
-                    ty: ParseAsType::I64,
-                    optional: false,
-                    sensitive: false,
-                },
-                nervix_models::SchemaField {
-                    name: named("total_latency"),
-                    ty: ParseAsType::I64,
-                    optional: false,
-                    sensitive: false,
-                },
-            ],
-        });
-        let aggregate = window_aggregate(
+        let mut window = TestWindow::new(
             "SET first_latency = FIRST(input.latency), last_latency = LAST(input.latency), \
              min_latency = MIN(input.latency), max_latency = MAX(input.latency), total_latency = \
              SUM(input.latency)",
+            &[field("latency", ParseAsType::I64)],
+            &[
+                field("first_latency", ParseAsType::I64),
+                field("last_latency", ParseAsType::I64),
+                field("min_latency", ParseAsType::I64),
+                field("max_latency", ParseAsType::I64),
+                field("total_latency", ParseAsType::I64),
+            ],
         );
-        let mut state = WindowProcessorState::new(&aggregate);
-        for value in [30, 10, 20] {
-            state
-                .push_message(
-                    &aggregate,
-                    Timestamp::now(),
-                    RelayMessage {
-                        key: None,
-                        record: test_runtime_row([(
-                            "latency".to_string(),
-                            RuntimeValue::I64(value),
-                        )]),
-                        acks: AckSet::empty(),
-                    },
-                    window_inputs(&aggregate, RuntimeValue::I64(value)),
-                )
-                .expect("aggregate state should accept message");
-        }
-
         assert_eq!(
-            state.accumulators.len(),
+            window.state.accumulators.len(),
             3,
             "FIRST/LAST and MIN/MAX should each share one physical structure"
         );
-        let compiled =
-            compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
-        let record = evaluate_window_aggregate(
-            &compiled,
-            &state,
-            &output_schema,
-            Timestamp::from_unix_nanos(42),
-        )
-        .await
-        .expect("aggregate should evaluate");
-
+        window
+            .admit(vec![int64([Some(30), Some(10), Some(20)])], &[1, 2, 3])
+            .await;
+        let record = window.emitted().await;
         assert_eq!(
             batch_value(&record, "first_latency"),
             Some(RuntimeValue::I64(30))
@@ -2295,17 +1983,8 @@ mod tests {
             Some(RuntimeValue::I64(60))
         );
 
-        advance_window(&mut state, &aggregate, Some(1), None, Timestamp::now())
-            .expect("window should advance");
-        let record = evaluate_window_aggregate(
-            &compiled,
-            &state,
-            &output_schema,
-            Timestamp::from_unix_nanos(42),
-        )
-        .await
-        .expect("aggregate should evaluate after removal");
-
+        advance_window(&mut window.state, Some(1), None, at(3));
+        let record = window.emitted().await;
         assert_eq!(
             batch_value(&record, "first_latency"),
             Some(RuntimeValue::I64(10))
@@ -2332,145 +2011,31 @@ mod tests {
     fn window_message_timestamp_uses_low_watermark() {
         let message = RelayMessage {
             key: None,
-            record: test_runtime_row([]).with_metadata(
-                RuntimeRecordMetadata::from_ingested_at_watermarks(
-                    Timestamp::from_unix_nanos(10),
-                    Timestamp::from_unix_nanos(20),
-                ),
+            record: crate::runtime_schema::test_runtime_row([]).with_metadata(
+                RuntimeRecordMetadata::from_ingested_at_watermarks(at(10), at(20)),
             ),
             acks: AckSet::empty(),
         };
 
-        let timestamp = message_timestamp(&message);
-
-        assert_eq!(timestamp, Timestamp::from_unix_nanos(10));
-    }
-
-    #[test]
-    fn window_output_metadata_uses_window_low_and_emit_high_watermark() {
-        let aggregate = window_aggregate("SET count = COUNT(input.latency)");
-        let mut state = WindowProcessorState::new(&aggregate);
-        for timestamp in [
-            Timestamp::from_unix_nanos(30),
-            Timestamp::from_unix_nanos(10),
-            Timestamp::from_unix_nanos(20),
-        ] {
-            state
-                .push_message(
-                    &aggregate,
-                    timestamp,
-                    RelayMessage {
-                        key: None,
-                        record: test_runtime_row([(
-                            "latency".to_string(),
-                            RuntimeValue::I64(timestamp.unix_nanos()),
-                        )]),
-                        acks: AckSet::empty(),
-                    },
-                    window_inputs(&aggregate, RuntimeValue::I64(timestamp.unix_nanos())),
-                )
-                .expect("aggregate state should accept message");
-        }
-
-        let metadata = window_output_metadata(&state, Timestamp::from_unix_nanos(40))
-            .expect("non-empty window should emit metadata");
-
-        assert_eq!(
-            metadata.ingested_at_low_watermark(),
-            Timestamp::from_unix_nanos(10)
-        );
-        assert_eq!(
-            metadata.ingested_at_high_watermark(),
-            Timestamp::from_unix_nanos(40)
-        );
+        assert_eq!(message_timestamp(&message), at(10));
     }
 
     #[tokio::test]
-    async fn window_processor_state_snapshot_roundtrips_entries_and_accumulators() {
-        let output_schema = compile_schema(&CreateSchema {
-            name: named("summary"),
-            fields: vec![
-                nervix_models::SchemaField {
-                    name: named("count"),
-                    ty: ParseAsType::I64,
-                    optional: false,
-                    sensitive: false,
-                },
-                nervix_models::SchemaField {
-                    name: named("first_latency"),
-                    ty: ParseAsType::I64,
-                    optional: false,
-                    sensitive: false,
-                },
-                nervix_models::SchemaField {
-                    name: named("p50"),
-                    ty: ParseAsType::F64,
-                    optional: false,
-                    sensitive: false,
-                },
-            ],
-        });
-        let aggregate = window_aggregate(
-            "SET count = COUNT(input.latency), first_latency = FIRST(input.latency), p50 = \
-             PERCENTILE_LINEAR_HISTOGRAM(input.latency, 50, 10, 0, 100, '2s')",
+    async fn window_output_metadata_uses_window_low_and_emit_high_watermark() {
+        let mut window = TestWindow::new(
+            "SET count = COUNT(input.latency)",
+            &[field("latency", ParseAsType::I64)],
+            &[field("count", ParseAsType::I64)],
         );
-        let mut state = WindowProcessorState::new(&aggregate);
-        for (timestamp, value) in [
-            (Timestamp::from_unix_nanos(10), 10),
-            (Timestamp::from_unix_nanos(20), 30),
-        ] {
-            state
-                .push_message(
-                    &aggregate,
-                    timestamp,
-                    RelayMessage {
-                        key: string_branch_key("tenant", "acme"),
-                        record: test_runtime_row([(
-                            "latency".to_string(),
-                            RuntimeValue::I64(value),
-                        )])
-                        .with_metadata(
-                            RuntimeRecordMetadata::from_ingested_at_watermarks(
-                                timestamp, timestamp,
-                            ),
-                        ),
-                        acks: AckSet::empty(),
-                    },
-                    window_inputs(&aggregate, RuntimeValue::I64(value)),
-                )
-                .expect("window should accept message");
-        }
+        window
+            .admit(vec![int64([Some(1), Some(2), Some(3)])], &[30, 10, 20])
+            .await;
 
-        let input_schema = test_schema(&[("latency", ParseAsType::I64)]);
-        let snapshot = state.to_snapshot().expect("snapshot should encode");
-        let restored =
-            WindowProcessorState::from_snapshot(&aggregate, input_schema.as_ref(), &snapshot)
-                .expect("snapshot should restore");
-        let compiled =
-            compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
-        let record = evaluate_window_aggregate(
-            &compiled,
-            &restored,
-            &output_schema,
-            Timestamp::from_unix_nanos(42),
-        )
-        .await
-        .expect("restored aggregate should evaluate");
+        let metadata = window_output_metadata(&window.state, at(40))
+            .expect("non-empty window should emit metadata");
 
-        assert_eq!(restored.entries.len(), 2);
-        assert_eq!(
-            key_label(&restored.entries.front().unwrap().message.key),
-            r#"{"tenant":"acme"}"#
-        );
-        assert_eq!(batch_value(&record, "count"), Some(RuntimeValue::I64(2)));
-        assert_eq!(
-            batch_value(&record, "first_latency"),
-            Some(RuntimeValue::I64(10))
-        );
-        assert_eq!(
-            batch_value(&record, "p50"),
-            Some(RuntimeValue::F64(OrderedFloat(35.0)))
-        );
+        assert_eq!(metadata.ingested_at_low_watermark(), at(10));
+        assert_eq!(metadata.ingested_at_high_watermark(), at(40));
     }
 
     /// The message a failed operation reports to the processor that called it.
@@ -2481,245 +2046,95 @@ mod tests {
         error.current_context().to_string()
     }
 
-    fn empty_histogram(
-        delay: Duration,
-        delayed_removals: VecDeque<LinearHistogramDelayedRemoval>,
-    ) -> WindowAggregateAccumulator {
-        WindowAggregateAccumulator::LinearHistogram {
-            buckets: vec![0; 2],
-            total: 0,
-            min: 0.0,
-            max: 100.0,
-            width: 50.0,
-            delay,
-            delayed_removals,
-        }
-    }
-
-    #[test]
-    fn window_accumulators_reject_removals_they_never_admitted() {
-        let aggregate = window_aggregate("SET latest = LAST(input.latency)");
-        let demand = &aggregate.demands()[0];
-        let at = Timestamp::from_unix_nanos(10);
-        let value = Some(RuntimeValue::I64(15));
-
-        let mut sequence = WindowAggregateAccumulator::Sequence {
-            values: VecDeque::new(),
-        };
-        assert_eq!(
-            failure(sequence.remove(demand, at, at, 0, value.clone())),
-            "sequence accumulator is missing removed window entry"
+    #[tokio::test]
+    async fn restoring_a_window_rejects_snapshots_that_disagree_with_its_plan() {
+        let mut window = TestWindow::new(
+            "SET count = COUNT(input.latency)",
+            &[field("latency", ParseAsType::I64)],
+            &[field("count", ParseAsType::I64)],
         );
-        let mut sorted = WindowAggregateAccumulator::SortedMap {
-            counts: BTreeMap::new(),
-        };
-        assert_eq!(
-            failure(sorted.remove(demand, at, at, 0, value.clone())),
-            "sorted accumulator is missing removed window value"
+        window
+            .admit(vec![int64([Some(10), Some(20)])], &[1, 2])
+            .await;
+        let snapshot = window
+            .state
+            .to_snapshot()
+            .expect("the window should publish");
+        let wider = TestWindow::new(
+            "SET count = COUNT(input.latency), total = SUM(input.latency)",
+            &[field("latency", ParseAsType::I64)],
+            &[
+                field("count", ParseAsType::I64),
+                field("total", ParseAsType::I64),
+            ],
         );
-        let mut histogram = empty_histogram(Duration::ZERO, VecDeque::new());
-        assert_eq!(
-            failure(histogram.remove(demand, at, at, 0, value)),
-            "linear histogram accumulator is missing removed value"
-        );
-
-        let removal = |bucket| {
-            VecDeque::from([LinearHistogramDelayedRemoval {
-                expires_at: at,
-                bucket,
-            }])
-        };
-        let mut out_of_range = empty_histogram(Duration::from_secs(1), removal(5));
-        assert_eq!(
-            failure(out_of_range.purge_expired(at)),
-            "linear histogram delayed removal bucket is out of range"
-        );
-        let mut never_admitted = empty_histogram(Duration::from_secs(1), removal(1));
-        assert_eq!(
-            failure(never_admitted.purge_expired(at)),
-            "linear histogram accumulator is missing delayed removed value"
-        );
-    }
-
-    #[test]
-    fn window_accumulators_reject_empty_windows_and_incompatible_functions() {
-        let sequence = WindowAggregateAccumulator::Sequence {
-            values: VecDeque::new(),
-        };
-        let sorted = WindowAggregateAccumulator::SortedMap {
-            counts: BTreeMap::new(),
-        };
-        assert_eq!(
-            failure(sequence.evaluate(WindowAggregateFunction::First, None)),
-            "FIRST requires a non-empty window"
-        );
-        assert_eq!(
-            failure(sequence.evaluate(WindowAggregateFunction::Last, None)),
-            "LAST requires a non-empty window"
-        );
-        assert_eq!(
-            failure(sorted.evaluate(WindowAggregateFunction::Max, None)),
-            "MAX requires a non-empty window"
-        );
-        assert_eq!(
-            failure(sorted.evaluate(WindowAggregateFunction::Min, None)),
-            "MIN requires a non-empty window"
-        );
-        let histogram = empty_histogram(Duration::ZERO, VecDeque::new());
-        assert_eq!(
-            failure(histogram.evaluate(WindowAggregateFunction::PercentileLinearHistogram, None)),
-            "PERCENTILE_LINEAR_HISTOGRAM requires a constant percentile"
-        );
-        let counter = WindowAggregateAccumulator::Counter { count: 0 };
-        assert_eq!(
-            failure(counter.evaluate(WindowAggregateFunction::First, None)),
-            "First aggregate is backed by an incompatible accumulator"
-        );
-    }
-
-    #[test]
-    fn linear_histogram_helpers_reject_values_they_cannot_place() {
-        assert_eq!(
-            failure(linear_histogram_bucket(f64::NAN, 0.0, 100.0, 50.0, 2)),
-            "PERCENTILE_LINEAR_HISTOGRAM requires finite numeric values"
-        );
-        assert_eq!(
-            failure(linear_histogram_bucket(5.0, 0.0, 100.0, 50.0, 0)),
-            "PERCENTILE_LINEAR_HISTOGRAM requires at least one bucket"
-        );
-        assert_eq!(
-            failure(percentile_from_linear_histogram(
-                &[0, 0],
-                0,
-                0.0,
-                100.0,
-                50.0,
-                50.0
-            )),
-            "PERCENTILE_LINEAR_HISTOGRAM requires a non-empty window"
-        );
-        assert_eq!(
-            failure(percentile_from_linear_histogram(
-                &[1, 0],
-                1,
-                0.0,
-                100.0,
-                50.0,
-                f64::NAN
-            )),
-            "PERCENTILE_LINEAR_HISTOGRAM percentile NaN has no rank in a window of 1 samples"
-        );
-        assert_eq!(
-            failure(percentile_from_linear_histogram(
-                &[0, 0],
-                2,
-                0.0,
-                100.0,
-                50.0,
-                50.0
-            )),
-            "PERCENTILE_LINEAR_HISTOGRAM histogram is empty"
-        );
-    }
-
-    #[test]
-    fn window_arithmetic_rejects_incompatible_runtime_values() {
-        assert_eq!(
-            failure(runtime_value_to_f64(&RuntimeValue::String(
-                "fast".to_string()
-            ))),
-            "expected numeric value, found STRING"
-        );
-        assert_eq!(
-            failure(sum_runtime_values(
-                RuntimeValue::I64(1),
-                RuntimeValue::F64(OrderedFloat(1.0))
-            )),
-            "SUM cannot combine I64 and F64"
-        );
-        assert_eq!(
-            failure(subtract_runtime_values(
-                RuntimeValue::I64(1),
-                RuntimeValue::F64(OrderedFloat(1.0))
-            )),
-            "SUM cannot remove F64 from I64"
-        );
-    }
-
-    #[test]
-    fn window_state_rejects_mismatched_inputs_and_snapshots() {
-        let aggregate = window_aggregate("SET count = COUNT(input.latency)");
-        let at = Timestamp::from_unix_nanos(10);
-        let message = || RelayMessage {
-            key: string_branch_key("tenant", "acme"),
-            record: test_runtime_row([("latency".to_string(), RuntimeValue::I64(10))]),
-            acks: AckSet::empty(),
-        };
-        let mut state = WindowProcessorState::new(&aggregate);
-        let rejected = state
-            .push_message(&aggregate, at, message(), Vec::new())
-            .expect_err("inputs that disagree with the accumulators must be rejected");
-        assert_eq!(
-            rejected.error.current_context().to_string(),
-            "window aggregate input count 0 does not match accumulator count 1"
-        );
-        assert_eq!(key_label(&rejected.message.key), r#"{"tenant":"acme"}"#);
-
-        state
-            .push_message(
-                &aggregate,
-                at,
-                message(),
-                window_inputs(&aggregate, RuntimeValue::I64(10)),
-            )
-            .expect("matching inputs should be admitted");
-        let input_schema = test_schema(&[("latency", ParseAsType::I64)]);
-        let mut snapshot = state.to_snapshot().expect("the window should encode");
-        let wider =
-            window_aggregate("SET count = COUNT(input.latency), total = SUM(input.latency)");
         assert_eq!(
             failure(WindowProcessorState::from_snapshot(
-                &wider,
-                input_schema.as_ref(),
+                &wider.plan,
+                window.input_schema.as_ref(),
                 &snapshot
             )),
             "window snapshot accumulator count 1 does not match aggregate demand count 2"
         );
 
-        snapshot.entries[0].key = Some(Vec::new());
+        let mut keyed = snapshot.clone();
+        keyed.entries[0].key = Some(Vec::new());
         assert_eq!(
             failure(WindowProcessorState::from_snapshot(
-                &aggregate,
-                input_schema.as_ref(),
-                &snapshot
+                &window.plan,
+                window.input_schema.as_ref(),
+                &keyed
             )),
             "failed to restore a window entry branch key: branch key must contain at least one \
              field"
         );
+
+        let mut gapped = snapshot.clone();
+        gapped.entries[1].sequence = 5;
+        assert_eq!(
+            failure(WindowProcessorState::from_snapshot(
+                &window.plan,
+                window.input_schema.as_ref(),
+                &gapped
+            )),
+            "window snapshot row sequence 5 does not follow sequence 0"
+        );
+
+        let mut truncated = snapshot;
+        truncated.entries[0].arguments.clear();
+        assert_eq!(
+            failure(WindowProcessorState::from_snapshot(
+                &window.plan,
+                window.input_schema.as_ref(),
+                &truncated
+            )),
+            "window snapshot row carries 0 argument values for 1 arguments"
+        );
     }
 
     #[tokio::test]
-    async fn window_aggregate_reports_uninitialized_outputs_and_empty_windows() {
-        let now = Timestamp::from_unix_nanos(42);
-        let aggregate = window_aggregate("SET count = COUNT(input.latency)");
-        let output_schema =
-            test_schema(&[("count", ParseAsType::I64), ("extra", ParseAsType::I64)]);
-        let compiled =
-            compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
-        let state = WindowProcessorState::new(&aggregate);
+    async fn window_aggregate_reports_uninitialized_outputs_and_null_required_results() {
+        let window = TestWindow::new(
+            "SET count = COUNT(input.latency)",
+            &[field("latency", ParseAsType::I64)],
+            &[
+                field("count", ParseAsType::I64),
+                field("extra", ParseAsType::I64),
+            ],
+        );
         assert_eq!(
-            failure(evaluate_window_aggregate(&compiled, &state, &output_schema, now).await),
+            failure(window.emit().await),
             "window aggregate did not initialize required output field 'extra'"
         );
 
-        let first = window_aggregate("SET first_latency = FIRST(input.latency)");
-        let first_schema = test_schema(&[("first_latency", ParseAsType::I64)]);
-        let compiled_first =
-            compile_window_aggregate_for_test(&first, ParseAsType::I64, &first_schema);
-        let empty = WindowProcessorState::new(&first);
+        let empty = TestWindow::new(
+            "SET first_latency = FIRST(input.latency)",
+            &[field("latency", ParseAsType::I64)],
+            &[field("first_latency", ParseAsType::I64)],
+        );
         assert_eq!(
-            failure(evaluate_window_aggregate(&compiled_first, &empty, &first_schema, now).await),
-            "window aggregate VM execution failed"
+            failure(empty.emit().await),
+            "window aggregate VM produced null 'first_latency' output"
         );
     }
 
@@ -2747,15 +2162,19 @@ mod tests {
             (input.clone(), input_schema.clone()),
             (output.clone(), test_schema(&[("total", ParseAsType::I64)])),
         ]);
-        assert_eq!(
-            failure(CompiledWindowAggregateProgram::compile(
-                &aggregate,
-                std::slice::from_ref(&input),
-                &output,
-                &unrelated_output,
-                None,
-            )),
-            "window aggregate output schema is missing field 'count'"
+        let Err(missing_field) = CompiledWindowAggregateProgram::compile(
+            &aggregate,
+            std::slice::from_ref(&input),
+            &output,
+            &unrelated_output,
+            None,
+        ) else {
+            panic!("an assignment to an undeclared field must not compile");
+        };
+        assert!(
+            format!("{missing_field:#}")
+                .contains("window aggregate output schema is missing field 'count'"),
+            "{missing_field:#}"
         );
 
         let array = window_aggregate("SET count = [COUNT(input.latency), COUNT(input.latency)]");
@@ -2763,15 +2182,37 @@ mod tests {
             (input.clone(), input_schema),
             (output.clone(), test_schema(&[("count", ParseAsType::I64)])),
         ]);
+        let Err(array_target) = CompiledWindowAggregateProgram::compile(
+            &array,
+            std::slice::from_ref(&input),
+            &output,
+            &scalar_output,
+            None,
+        ) else {
+            panic!("an array cannot be assigned to a scalar field");
+        };
+        assert!(
+            format!("{array_target:#}")
+                .contains("window aggregate array cannot be assigned to Int64 field 'count'"),
+            "{array_target:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn datetime_extremes_keep_their_timezone() {
+        let mut window = TestWindow::new(
+            "SET latest = MAX(input.observed_at)",
+            &[field("observed_at", ParseAsType::Datetime)],
+            &[field("latest", ParseAsType::Datetime)],
+        );
+        let observed: ArrayRef = StdArc::new(
+            TimestampNanosecondArray::from(vec![Some(5), Some(9), Some(7)]).with_timezone("+00:00"),
+        );
+        window.admit(vec![observed], &[1, 2, 3]).await;
+        let record = window.emitted().await;
         assert_eq!(
-            failure(CompiledWindowAggregateProgram::compile(
-                &array,
-                std::slice::from_ref(&input),
-                &output,
-                &scalar_output,
-                None,
-            )),
-            "window aggregate array cannot be assigned to Int64 field 'count'"
+            batch_value(&record, "latest"),
+            Some(RuntimeValue::Datetime(at(9).as_datetime().fixed_offset()))
         );
     }
 }

@@ -508,7 +508,7 @@ Feature: Window processor runtime behavior
       """
       structure 2:
         functions: MAX, MIN
-        storage: sorted_map
+        storage: extremes
         references: 2
         input: input.latency
       """
@@ -1060,7 +1060,7 @@ Feature: Window processor runtime behavior
         input: input.tenant
       structure 5:
         functions: MAX, MIN
-        storage: sorted_map
+        storage: extremes
         references: 2
         input: input.latency
       """

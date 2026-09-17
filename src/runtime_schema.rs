@@ -571,12 +571,23 @@ pub(crate) fn test_runtime_row(
         .collect::<Result<Vec<_>, _>>()
         .verified("the columns are built from the very types inferred from these same values");
     let schema = StdArc::new(ArrowSchema::new(arrow_fields));
-    let columns = fields
-        .iter()
-        .zip(schema.fields())
-        .map(|((_, value), field)| runtime_value_arrow_array(field.data_type(), Some(value), 1))
-        .collect::<Result<Vec<_>, _>>()
+    let mut columns = Vec::with_capacity(fields.len());
+    for ((name, value), field) in fields.iter().zip(schema.fields()) {
+        let ty = parse_as_type_from_arrow(field.data_type())
+            .verified("the columns are built from the very types inferred from these same values");
+        let mut builder = make_builder(field.data_type(), 1);
+        append_runtime_value_to_arrow(
+            builder.as_mut(),
+            &ty,
+            Some(value),
+            &RuntimeValueLocationRef::BatchField {
+                row: 0,
+                field: name,
+            },
+        )
         .verified("the columns are built from the very types inferred from these same values");
+        columns.push(builder.finish());
+    }
     let batch = if columns.is_empty() {
         RecordBatch::try_new_with_options(
             schema.clone(),
@@ -1584,9 +1595,6 @@ pub enum RuntimeValueLocation {
         field: String,
         elements: Vec<usize>,
     },
-    ScalarColumn {
-        elements: Vec<usize>,
-    },
     VmInputField {
         field: String,
         elements: Vec<usize>,
@@ -1604,7 +1612,6 @@ impl RuntimeValueLocation {
         match self {
             Self::BatchField { elements, .. }
             | Self::CodecField { elements, .. }
-            | Self::ScalarColumn { elements }
             | Self::VmInputField { elements, .. }
             | Self::AbandonedBatchRow { elements }
             | Self::AbandonedFixedSizeList { elements } => elements,
@@ -1615,7 +1622,6 @@ impl RuntimeValueLocation {
         match self {
             Self::BatchField { elements, .. }
             | Self::CodecField { elements, .. }
-            | Self::ScalarColumn { elements }
             | Self::VmInputField { elements, .. }
             | Self::AbandonedBatchRow { elements }
             | Self::AbandonedFixedSizeList { elements } => elements,
@@ -1630,7 +1636,6 @@ impl fmt::Display for RuntimeValueLocation {
                 write!(formatter, "Arrow batch row {row} field '{field}'")?;
             }
             Self::CodecField { field, .. } => write!(formatter, "field '{field}'")?,
-            Self::ScalarColumn { .. } => formatter.write_str("runtime scalar column")?,
             Self::VmInputField { field, .. } => write!(formatter, "VM input field '{field}'")?,
             Self::AbandonedBatchRow { .. } => {
                 formatter.write_str("abandoned Arrow batch row")?;
@@ -1654,7 +1659,6 @@ enum RuntimeValueLocationRef<'a> {
     CodecField {
         field: &'a str,
     },
-    ScalarColumn,
     AbandonedBatchRow,
     AbandonedFixedSizeList,
     Element {
@@ -1673,9 +1677,6 @@ impl RuntimeValueLocationRef<'_> {
             },
             Self::CodecField { field } => RuntimeValueLocation::CodecField {
                 field: (*field).to_string(),
-                elements: Vec::new(),
-            },
-            Self::ScalarColumn => RuntimeValueLocation::ScalarColumn {
                 elements: Vec::new(),
             },
             Self::AbandonedBatchRow => RuntimeValueLocation::AbandonedBatchRow {
@@ -2068,20 +2069,6 @@ pub(crate) fn parse_as_type_from_arrow(
             data_type: other.clone(),
         })),
     }
-}
-
-pub(crate) fn runtime_value_arrow_array(
-    data_type: &ArrowDataType,
-    value: Option<&RuntimeValue>,
-    len: usize,
-) -> error_stack::Result<ArrayRef, RuntimeSchemaError> {
-    let ty = parse_as_type_from_arrow(data_type)?;
-    let mut builder = make_builder(data_type, len);
-    let location = RuntimeValueLocationRef::ScalarColumn;
-    for _ in 0..len {
-        append_runtime_value_to_arrow(builder.as_mut(), &ty, value, &location)?;
-    }
-    Ok(builder.finish())
 }
 
 impl RuntimeRecordMetadata {
