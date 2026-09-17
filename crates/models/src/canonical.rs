@@ -795,7 +795,7 @@ fn subscription_literal_to_nspl(literal: &SubscriptionLiteral) -> String {
     }
 }
 
-impl Model {
+impl<Version: Display> Model<Version> {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         match self {
             Self::Schema(schema) => schema.to_canonical_nspl(),
@@ -1222,16 +1222,14 @@ fn signaling_protocol_clause(signaling_protocol: Option<&SignalingProtocolName>)
     }
 }
 
-impl CreateVhost {
+impl<Version: Display> CreateVhost<Version> {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         let tls = match &self.tls {
-            Some(tls) => {
-                let mut rendered = format!(" WITH TLS {}", tls.resource.as_str());
-                if let Some(version) = tls.version {
-                    rendered.push_str(&format!(" VERSION {version}"));
-                }
-                rendered
-            }
+            Some(tls) => format!(
+                " WITH TLS {} VERSION {}",
+                tls.resource.as_str(),
+                tls.version
+            ),
             None => String::new(),
         };
         Ok(format!(
@@ -1256,7 +1254,7 @@ impl CreateEndpoint {
     }
 }
 
-impl CreateSignalingProtocol {
+impl<Version: Display> CreateSignalingProtocol<Version> {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         let mut clauses = String::new();
         if self.on_connect.accept_data {
@@ -1291,14 +1289,10 @@ impl CreateSignalingProtocol {
     }
 }
 
-impl SignalingWireFormat {
+impl<Version: Display> SignalingWireFormat<Version> {
     fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         let Self::Protobuf(config) = self else {
             return Ok(self.as_ref().to_string());
-        };
-        let version = match config.resource_version {
-            Some(version) => format!(" VERSION {version}"),
-            None => String::new(),
         };
         let protobuf_config = config
             .config
@@ -1307,9 +1301,9 @@ impl SignalingWireFormat {
             .collect::<Result<Vec<_>, _>>()?
             .join(", ");
         Ok(format!(
-            "PROTOBUF USING RESOURCE {}{} CONFIG {{{}}} SEND MESSAGE {} WAIT MESSAGE {}",
+            "PROTOBUF USING RESOURCE {} VERSION {} CONFIG {{{}}} SEND MESSAGE {} WAIT MESSAGE {}",
             config.resource.as_str(),
-            version,
+            config.resource_version,
             protobuf_config,
             string_literal(&config.send_message),
             string_literal(&config.wait_message)
@@ -1343,7 +1337,7 @@ fn jaq_program_list_to_nspl(programs: &[String]) -> String {
         .join(", ")
 }
 
-impl CreateCodec {
+impl<Version: Display> CreateCodec<Version> {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         let (wire, transformations) = match &self.wire_format {
             CodecWireFormat::Json { wire_schema } => (
@@ -1374,10 +1368,6 @@ impl CreateCodec {
                 codec_jaq_transformations_to_nspl(transformations)?,
             ),
             CodecWireFormat::Protobuf(config) => {
-                let version = match config.resource_version {
-                    Some(version) => format!(" VERSION {version}"),
-                    None => String::new(),
-                };
                 let protobuf_config = config
                     .config
                     .iter()
@@ -1386,9 +1376,9 @@ impl CreateCodec {
                     .join(", ");
                 (
                     format!(
-                        "PROTOBUF USING RESOURCE {}{} CONFIG {{{}}} MESSAGE {}",
+                        "PROTOBUF USING RESOURCE {} VERSION {} CONFIG {{{}}} MESSAGE {}",
                         config.resource.as_str(),
-                        version,
+                        config.resource_version,
                         protobuf_config,
                         string_literal(&config.message)
                     ),
@@ -1944,20 +1934,17 @@ impl CreateReingestor {
     }
 }
 
-impl CreateInferencer {
+impl<Version: Display> CreateInferencer<Version> {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let version = match self.resource_version {
-            Some(version) => format!(" VERSION {version}"),
-            None => String::new(),
-        };
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
             processor_inputs_to_nspl(&self.from)?
         ))];
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
-            "USING RESOURCE {}{version}",
-            self.resource.as_str()
+            "USING RESOURCE {} VERSION {}",
+            self.resource.as_str(),
+            self.resource_version
         )));
         clauses.push(Clause::line(format!("FILE {}", string_literal(&self.file))));
         clauses.push(Clause::braced(
@@ -1985,20 +1972,17 @@ impl CreateInferencer {
     }
 }
 
-impl CreateWasmProcessor {
+impl<Version: Display> CreateWasmProcessor<Version> {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let version = match self.resource_version {
-            Some(version) => format!(" VERSION {version}"),
-            None => String::new(),
-        };
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
             processor_inputs_to_nspl(&self.from)?
         ))];
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
-            "USING RESOURCE {}{version}",
-            self.resource.as_str()
+            "USING RESOURCE {} VERSION {}",
+            self.resource.as_str(),
+            self.resource_version
         )));
         clauses.push(Clause::line(format!("FILE {}", string_literal(&self.file))));
         clauses.push(Clause::line(format!("MAX FUEL {}", self.limits.max_fuel)));
@@ -3696,7 +3680,7 @@ mod tests {
 
     #[test]
     fn renders_wire_schema_canonical() {
-        let schema = Model::WireAvroSchema(CreateWireSchema {
+        let schema: Model = Model::WireAvroSchema(CreateWireSchema {
             name: named("latency"),
             strictness: Default::default(),
             fields: vec![
@@ -3820,7 +3804,7 @@ mod tests {
 
     #[test]
     fn renders_json_wire_schema_canonical() {
-        let schema = Model::WireJsonSchema(CreateWireSchema {
+        let schema: Model = Model::WireJsonSchema(CreateWireSchema {
             name: named("payload"),
             strictness: Default::default(),
             fields: vec![
@@ -3845,7 +3829,7 @@ mod tests {
 
     #[test]
     fn renders_loose_cbor_wire_schema_canonical() {
-        let schema = Model::WireCborSchema(CreateWireSchema {
+        let schema: Model = Model::WireCborSchema(CreateWireSchema {
             name: named("payload"),
             strictness: crate::WireSchemaStrictness::Loose,
             fields: vec![WireSchemaField {
@@ -3872,7 +3856,7 @@ mod tests {
                 sensitive: false,
             }],
         };
-        let wire = Model::WireJsonSchema(CreateWireSchema {
+        let wire: Model = Model::WireJsonSchema(CreateWireSchema {
             name: named("payload"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
@@ -4057,7 +4041,7 @@ mod tests {
 
     #[test]
     fn renders_other_model_kinds_canonical() {
-        let vhost = CreateVhost {
+        let vhost: CreateVhost = CreateVhost {
             name: named("public"),
             hostnames: vec!["example.com".to_string(), "api.example.com".to_string()],
             tls: None,
@@ -4067,12 +4051,12 @@ mod tests {
             "CREATE VHOST public example.com, api.example.com;"
         );
 
-        let tls_vhost = CreateVhost {
+        let tls_vhost: CreateVhost = CreateVhost {
             name: named("secure"),
             hostnames: vec!["secure.example.com".to_string()],
             tls: Some(crate::VhostTlsResource {
                 resource: named("certs"),
-                version: Some(7),
+                version: 7,
             }),
         };
         assert_eq!(
@@ -4104,7 +4088,7 @@ mod tests {
              PROTOCOL binance_ws;"
         );
 
-        let signaling_protocol = CreateSignalingProtocol {
+        let signaling_protocol: CreateSignalingProtocol = CreateSignalingProtocol {
             name: named("binance_ws"),
             format: SignalingWireFormat::Json,
             on_connect: crate::SignalingProtocolOnConnect {
@@ -4124,11 +4108,11 @@ mod tests {
             r#"CREATE SIGNALING PROTOCOL binance_ws FORMAT JSON ON CONNECT SEND JAQ '{method: "SUBSCRIBE", id: 1}' WAIT JAQ '.id == 1 and .result == null' TIMEOUT 5s;"#
         );
 
-        let protobuf_signaling_protocol = CreateSignalingProtocol {
+        let protobuf_signaling_protocol: CreateSignalingProtocol = CreateSignalingProtocol {
             name: named("orders_ws"),
             format: SignalingWireFormat::Protobuf(SignalingProtobufConfig {
                 resource: named("proto_bundle"),
-                resource_version: Some(2),
+                resource_version: 2,
                 config: vec![crate::ClientConfigEntry {
                     key: "file".to_string(),
                     value: "signaling.proto".to_string(),
@@ -4164,7 +4148,7 @@ mod tests {
              '{id: 2, token: $state.token}' WAIT JAQ '.id == 2' TIMEOUT 5s;"
         );
 
-        let codec = CreateCodec {
+        let codec: CreateCodec = CreateCodec {
             name: named("orders_codec"),
             wire_format: CodecWireFormat::Json {
                 wire_schema: named("orders_wire"),
@@ -4177,7 +4161,7 @@ mod tests {
             "CREATE CODEC orders_codec\n  FROM WIRE JSON SCHEMA orders_wire\n  TO SCHEMA orders;"
         );
 
-        let syslog_codec = CreateCodec {
+        let syslog_codec: CreateCodec = CreateCodec {
             name: named("syslog_codec"),
             wire_format: CodecWireFormat::Syslog,
             schema: named("syslog_event"),
@@ -4188,7 +4172,7 @@ mod tests {
             "CREATE CODEC syslog_codec\n  FROM SYSLOG\n  TO SCHEMA syslog_event;"
         );
 
-        let codec_with_encoding = CreateCodec {
+        let codec_with_encoding: CreateCodec = CreateCodec {
             name: named("orders_codec"),
             wire_format: CodecWireFormat::Json {
                 wire_schema: named("orders_wire"),
@@ -4206,7 +4190,7 @@ mod tests {
             "CREATE CODEC orders_codec\n  FROM WIRE JSON SCHEMA orders_wire\n  TO SCHEMA orders\n  ENCODE created_at AS RFC3339;"
         );
 
-        let codec_with_jaq = CreateCodec {
+        let codec_with_jaq: CreateCodec = CreateCodec {
             name: named("orders_codec"),
             wire_format: CodecWireFormat::JaqNative {
                 format: CodecJaqFormat::Json,
@@ -4224,7 +4208,7 @@ mod tests {
              TRANSFORMATIONS ON INGESTION '.payload' ON EMITTING '{payload: .}';"
         );
 
-        let ingestion_codec = CreateCodec {
+        let ingestion_codec: CreateCodec = CreateCodec {
             name: named("orders_ingestion"),
             wire_format: CodecWireFormat::JaqNative {
                 format: CodecJaqFormat::Json,
@@ -4242,7 +4226,7 @@ mod tests {
              TRANSFORMATIONS ON INGESTION '.payload';"
         );
 
-        let cbor_codec = CreateCodec {
+        let cbor_codec: CreateCodec = CreateCodec {
             name: named("orders_cbor"),
             wire_format: CodecWireFormat::JaqNative {
                 format: CodecJaqFormat::Cbor,
@@ -4260,11 +4244,11 @@ mod tests {
              TRANSFORMATIONS ON INGESTION '.' ON EMITTING '.';"
         );
 
-        let protobuf_codec = CreateCodec {
+        let protobuf_codec: CreateCodec = CreateCodec {
             name: named("orders_proto"),
             wire_format: CodecWireFormat::Protobuf(CodecProtobufConfig {
                 resource: named("proto_bundle"),
-                resource_version: Some(3),
+                resource_version: 3,
                 config: vec![crate::ClientConfigEntry {
                     key: "file".to_string(),
                     value: "order.proto".to_string(),
@@ -5047,7 +5031,7 @@ mod tests {
 
     #[test]
     fn model_dispatches_to_variant_specific_canonicalization() {
-        let model = Model::ClientKafka(CreateClientKafka {
+        let model: Model = Model::ClientKafka(CreateClientKafka {
             name: named("kafka_main"),
             mount: None,
             config: vec![config_entry("bootstrap.servers", "localhost:9092")],

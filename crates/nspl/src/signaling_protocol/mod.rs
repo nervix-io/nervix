@@ -1,8 +1,8 @@
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    CreateSignalingProtocol, CreateStatement, SignalingProtobufConfig, SignalingProtocolOnConnect,
-    SignalingStep, SignalingWaitStep, SignalingWireFormat,
+    CreateSignalingProtocol, CreateStatement, RequestedResourceVersion, SignalingProtobufConfig,
+    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
 };
 
 use crate::{
@@ -10,7 +10,7 @@ use crate::{
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, config_entries_block, duration_lit,
         if_not_exists_clause, into_parse_error, kw, lex_input, resource_ref,
-        signaling_protocol_name, string_lit, suggest_from, tok, u64_value,
+        resource_version_clause, signaling_protocol_name, string_lit, suggest_from, tok,
     },
 };
 
@@ -98,8 +98,12 @@ fn signaling_step<'src>()
     choice((send, wait)).boxed()
 }
 
-fn signaling_wire_format<'src>()
--> impl Parser<'src, &'src [Token], SignalingWireFormat, extra::Err<ParseError<'src>>> + Clone {
+fn signaling_wire_format<'src>() -> impl Parser<
+    'src,
+    &'src [Token],
+    SignalingWireFormat<RequestedResourceVersion>,
+    extra::Err<ParseError<'src>>,
+> + Clone {
     let native = choice((
         kw(Identifier::Json).to(SignalingWireFormat::Json),
         kw(Identifier::Yaml).to(SignalingWireFormat::Yaml),
@@ -112,7 +116,7 @@ fn signaling_wire_format<'src>()
         .ignore_then(kw(Identifier::Using))
         .ignore_then(kw(Identifier::Resource))
         .ignore_then(resource_ref())
-        .then(kw(Identifier::Version).ignore_then(u64_value()).or_not())
+        .then(resource_version_clause())
         .then(config_entries_block())
         .boxed()
         .then_ignore(kw(Identifier::Send))
@@ -139,7 +143,7 @@ fn signaling_wire_format<'src>()
 pub fn create_signaling_protocol_parser<'src>() -> impl Parser<
     'src,
     &'src [Token],
-    CreateStatement<CreateSignalingProtocol>,
+    CreateStatement<CreateSignalingProtocol<RequestedResourceVersion>>,
     extra::Err<ParseError<'src>>,
 > + Clone {
     kw(Identifier::Create)
@@ -201,7 +205,8 @@ pub fn create_signaling_protocol_parser<'src>() -> impl Parser<
 
 pub fn parse_create_signaling_protocol_tokens(
     tokens: &[Token],
-) -> Result<CreateStatement<CreateSignalingProtocol>, Vec<ParseError<'_>>> {
+) -> Result<CreateStatement<CreateSignalingProtocol<RequestedResourceVersion>>, Vec<ParseError<'_>>>
+{
     let out = create_signaling_protocol_parser()
         .then_ignore(end())
         .parse(tokens);
@@ -216,7 +221,8 @@ pub fn parse_create_signaling_protocol_tokens(
 
 pub fn parse_create_signaling_protocol(
     input: &str,
-) -> Result<CreateStatement<CreateSignalingProtocol>, ParseFromSourceError> {
+) -> Result<CreateStatement<CreateSignalingProtocol<RequestedResourceVersion>>, ParseFromSourceError>
+{
     let LexedInput {
         source,
         spanned_tokens,
@@ -441,7 +447,7 @@ mod tests {
             SignalingWireFormat::Protobuf(SignalingProtobufConfig {
                 resource: nervix_models::ResourceName::parse("proto_bundle")
                     .expect("valid identifier"),
-                resource_version: Some(2),
+                resource_version: RequestedResourceVersion::Number(2),
                 config: vec![
                     ClientConfigEntry {
                         key: "file".to_string(),
@@ -459,11 +465,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_create_signaling_protocol_from_protobuf_without_version() {
+    fn parses_create_signaling_protocol_bound_to_the_latest_resource_version() {
         let tokens = to_tokens(
             r#"
             CREATE SIGNALING PROTOCOL proto_handshake
-              FORMAT PROTOBUF USING RESOURCE proto_bundle
+              FORMAT PROTOBUF USING RESOURCE proto_bundle VERSION LATEST
                 CONFIG {'file' = 'signaling.proto'}
                 SEND MESSAGE 'nervix.test.Subscribe'
                 WAIT MESSAGE 'nervix.test.Ack'
@@ -478,7 +484,17 @@ mod tests {
         let SignalingWireFormat::Protobuf(config) = &parsed.format else {
             panic!("expected protobuf signaling format");
         };
-        assert_eq!(config.resource_version, None);
+        assert_eq!(config.resource_version, RequestedResourceVersion::Latest);
+    }
+
+    #[test]
+    fn requires_a_version_for_the_protobuf_resource() {
+        let input = "CREATE SIGNALING PROTOCOL proto_handshake FORMAT PROTOBUF USING RESOURCE \
+                     proto_bundle CONFIG {'file' = 'signaling.proto'} SEND MESSAGE \
+                     'nervix.test.Subscribe' WAIT MESSAGE 'nervix.test.Ack' ON CONNECT SEND JAQ \
+                     '{id: 1}' WAIT JAQ '.id == 1' TIMEOUT 5s;";
+
+        assert!(parse_create_signaling_protocol(input).is_err());
     }
 
     #[test]
@@ -668,7 +684,7 @@ mod tests {
     #[test]
     fn rejects_protobuf_without_config() {
         let input = "CREATE SIGNALING PROTOCOL proto_handshake FORMAT PROTOBUF USING RESOURCE \
-                     proto_bundle SEND MESSAGE 'nervix.test.Subscribe' WAIT MESSAGE \
+                     proto_bundle VERSION 1 SEND MESSAGE 'nervix.test.Subscribe' WAIT MESSAGE \
                      'nervix.test.Ack' ON CONNECT SEND JAQ '{id: 1}' WAIT JAQ '.id == 1' TIMEOUT \
                      5s;";
 
@@ -678,7 +694,7 @@ mod tests {
     #[test]
     fn rejects_protobuf_without_wait_message() {
         let input = "CREATE SIGNALING PROTOCOL proto_handshake FORMAT PROTOBUF USING RESOURCE \
-                     proto_bundle CONFIG {'file' = 'signaling.proto'} SEND MESSAGE \
+                     proto_bundle VERSION 1 CONFIG {'file' = 'signaling.proto'} SEND MESSAGE \
                      'nervix.test.Subscribe' ON CONNECT SEND JAQ '{id: 1}' WAIT JAQ '.id == 1' \
                      TIMEOUT 5s;";
 
@@ -729,9 +745,31 @@ mod tests {
     }
 
     #[test]
+    fn suggests_only_version_after_the_protobuf_resource() {
+        let input = "CREATE SIGNALING PROTOCOL proto_handshake FORMAT PROTOBUF USING RESOURCE \
+                     proto_bundle ";
+        let suggestions = suggest_create_signaling_protocol(input, input.len());
+
+        assert!(suggestions.contains(&"VERSION".to_string()));
+        assert!(!suggestions.contains(&"CONFIG".to_string()));
+        assert!(!suggestions.contains(&"SEND".to_string()));
+    }
+
+    #[test]
+    fn suggests_latest_and_a_completed_version_after_version() {
+        let input = "CREATE SIGNALING PROTOCOL proto_handshake FORMAT PROTOBUF USING RESOURCE \
+                     proto_bundle VERSION ";
+        let suggestions = suggest_create_signaling_protocol(input, input.len());
+
+        assert!(suggestions.contains(&"LATEST".to_string()));
+        assert!(suggestions.contains(&"completed_resource_version".to_string()));
+        assert!(!suggestions.contains(&"CONFIG".to_string()));
+    }
+
+    #[test]
     fn suggests_send_message_after_protobuf_config() {
         let input = "CREATE SIGNALING PROTOCOL proto_handshake FORMAT PROTOBUF USING RESOURCE \
-                     proto_bundle CONFIG {'file' = 'signaling.proto'} ";
+                     proto_bundle VERSION 1 CONFIG {'file' = 'signaling.proto'} ";
         let suggestions = suggest_create_signaling_protocol(input, input.len());
 
         assert!(suggestions.contains(&"SEND".to_string()));

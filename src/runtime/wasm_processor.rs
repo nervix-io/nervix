@@ -13,15 +13,6 @@ use super::*;
 /// fails.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum WasmInstanceError {
-    #[error(
-        "failed to resolve wasm processor '{}' resource '{}'",
-        .processor.as_str(),
-        .resource.as_str()
-    )]
-    ResolveResource {
-        processor: ModelName,
-        resource: ResourceName,
-    },
     #[error("resource store is not attached")]
     ResourceStoreDetached,
     #[error(
@@ -58,8 +49,6 @@ pub(super) enum WasmInstanceError {
         version: u64,
         file: String,
     },
-    #[error("wasm processor '{}' was not compiled", .processor.as_str())]
-    NotCompiled { processor: ModelName },
     #[error(
         "failed to instantiate wasm processor '{}' branch '{}'",
         .processor.as_str(),
@@ -339,7 +328,7 @@ pub(super) struct WasmInstanceContext<'a> {
     pub(super) branch: &'a BranchRuntime,
     pub(super) processor: &'a ModelName,
     pub(super) resource: &'a ResourceName,
-    pub(super) resource_version: Option<u64>,
+    pub(super) resource_version: u64,
     pub(super) file: &'a str,
     pub(super) limits: nervix_models::WasmProcessorLimits,
     pub(super) guest_input_relay: &'a RelayName,
@@ -350,22 +339,18 @@ pub(super) struct WasmInstanceContext<'a> {
 }
 
 impl Runtime {
+    /// Compiles the guest module of the resource version a WASM processor pins. The version is
+    /// part of the processor's model, so compiling never consults the resource catalog.
     pub(super) async fn compile_wasm_processor_module(
         &self,
         domain: &DomainName,
         processor: impl Into<ModelName>,
         resource: &ResourceName,
-        resource_version: Option<u64>,
+        resource_version: u64,
         file: &str,
     ) -> error_stack::Result<WasmCompiledBranchProcessor, WasmInstanceError> {
         let processor = processor.into();
-        let id = self
-            .resolve_resource_id(domain, resource, resource_version, resource.as_str())
-            .change_context_lazy(|| WasmInstanceError::ResolveResource {
-                processor: processor.clone(),
-                resource: resource.clone(),
-            })?;
-        let version = id.version;
+        let id = ResourceId::new(domain.clone(), resource.clone(), resource_version);
         let Some(resource_store) = self.inner.resource_store.load_full() else {
             return Err(Report::new(WasmInstanceError::ResourceStoreDetached));
         };
@@ -374,7 +359,7 @@ impl Runtime {
             .change_context_lazy(|| WasmInstanceError::ResolveFile {
                 processor: processor.clone(),
                 resource: resource.clone(),
-                version,
+                version: resource_version,
                 file: file.to_string(),
             })?;
         let wasm =
@@ -383,7 +368,7 @@ impl Runtime {
                 .change_context_lazy(|| WasmInstanceError::ReadModule {
                     processor: processor.clone(),
                     resource: resource.clone(),
-                    version,
+                    version: resource_version,
                     path: path.clone(),
                 })?;
         let compiled = self
@@ -394,16 +379,17 @@ impl Runtime {
             .change_context_lazy(|| WasmInstanceError::CompileModule {
                 processor: processor.clone(),
                 resource: resource.clone(),
-                version,
+                version: resource_version,
                 file: file.to_string(),
             })?;
         Ok(WasmCompiledBranchProcessor {
-            version,
             compiled: Arc::new(compiled),
         })
     }
 }
 
+/// Makes sure the branch has a guest instance. The module is compiled at most once per branch
+/// instance, from the resource version the processor pins.
 pub(super) async fn ensure_wasm_processor_instance(
     context: WasmInstanceContext<'_>,
     compiled: &mut Option<WasmCompiledBranchProcessor>,
@@ -422,44 +408,27 @@ pub(super) async fn ensure_wasm_processor_instance(
         replicated_state,
         execution_now,
     } = context;
-    let version = branch
-        .runtime
-        .resolve_resource_id(
-            &branch.domain,
-            resource,
-            resource_version,
-            resource.as_str(),
-        )
-        .change_context_lazy(|| WasmInstanceError::ResolveResource {
-            processor: processor.clone(),
-            resource: resource.clone(),
-        })?
-        .version;
-    let needs_compile = compiled
-        .as_ref()
-        .is_none_or(|compiled| compiled.version != version);
-    if needs_compile {
-        *compiled = Some(
-            branch
+    let module = match compiled.as_ref() {
+        Some(module) => module.compiled.clone(),
+        None => {
+            let prepared = branch
                 .runtime
                 .compile_wasm_processor_module(
                     &branch.domain,
                     processor,
                     resource,
-                    Some(version),
+                    resource_version,
                     file,
                 )
-                .await?,
-        );
-        *instance = None;
-    }
+                .await?;
+            let module = prepared.compiled.clone();
+            *compiled = Some(prepared);
+            *instance = None;
+            module
+        }
+    };
 
     if instance.is_none() {
-        let Some(compiled) = compiled.as_ref() else {
-            return Err(Report::new(WasmInstanceError::NotCompiled {
-                processor: processor.clone(),
-            }));
-        };
         let init = WasmBranchInit {
             domain_name: branch.domain.as_str().to_string(),
             domain_type: "runtime".to_string(),
@@ -475,21 +444,19 @@ pub(super) async fn ensure_wasm_processor_instance(
                 .collect(),
         };
         let restored_guest_state = replicated_state.restore_guest_state();
-        *instance = Some(Box::new(
-            compiled
-                .compiled
-                .instantiate_branch(
-                    limits,
-                    init,
-                    nervix_wasm::WasmExecutionContext::new(execution_now),
-                    restored_guest_state.restorable(),
-                )
-                .await
-                .change_context_lazy(|| WasmInstanceError::Instantiate {
-                    processor: processor.clone(),
-                    branch: branch.key.clone(),
-                })?,
-        ));
+        let instantiated = module
+            .instantiate_branch(
+                limits,
+                init,
+                nervix_wasm::WasmExecutionContext::new(execution_now),
+                restored_guest_state.restorable(),
+            )
+            .await
+            .change_context_lazy(|| WasmInstanceError::Instantiate {
+                processor: processor.clone(),
+                branch: branch.key.clone(),
+            })?;
+        *instance = Some(Box::new(instantiated));
     }
     Ok(())
 }

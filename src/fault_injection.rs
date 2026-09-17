@@ -69,6 +69,8 @@ struct FaultInjectionState {
     /// One-shot, domain-scoped drain failures consumed after a pending status is observed.
     forced_entity_drain_timeouts: DashMap<DomainName, (), RandomState>,
     transaction_binding_drops: DashMap<ClusterNodeName, (), RandomState>,
+    /// One-shot installation failures, consumed by the next resource version a node installs.
+    failed_resource_installations: DashMap<ClusterNodeName, (), RandomState>,
     consensus_probes: DashMap<ClusterNodeName, ConsensusProbeState, RandomState>,
     /// Consensus storage failures armed as each named node builds its storage, before it answers
     /// any Raft traffic.
@@ -192,6 +194,7 @@ impl Default for FaultInjection {
                 failed_schedule_publications: DashMap::default(),
                 forced_entity_drain_timeouts: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
+                failed_resource_installations: DashMap::default(),
                 consensus_probes: DashMap::default(),
                 startup_consensus_faults: DashMap::default(),
                 bulk_executions: DashMap::default(),
@@ -436,6 +439,13 @@ impl FaultInjection {
 
     pub fn drop_transaction_bindings_on(&self, node_id: ClusterNodeName) {
         self.inner.transaction_binding_drops.insert(node_id, ());
+    }
+
+    /// Fails the next resource version `node_id` installs, after the node installed and published
+    /// the version and before the upload is promoted, so a scenario can produce a failed version
+    /// whose archive is present.
+    pub fn fail_next_resource_installation_on(&self, node_id: ClusterNodeName) {
+        self.inner.failed_resource_installations.insert(node_id, ());
     }
 
     /// Fill every bulk worker on `node_id` and return once every occupying job is running.
@@ -933,6 +943,17 @@ impl FaultInjection {
         self.inner
             .forced_entity_drain_timeouts
             .remove(domain)
+            .is_some()
+    }
+
+    /// Consumes an armed installation failure for `node_id` at its next installation.
+    pub(crate) fn take_armed_resource_installation_failure(
+        &self,
+        node_id: &ClusterNodeName,
+    ) -> bool {
+        self.inner
+            .failed_resource_installations
+            .remove(node_id)
             .is_some()
     }
 

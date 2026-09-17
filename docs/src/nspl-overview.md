@@ -57,7 +57,7 @@ CREATE [IF NOT EXISTS] CODEC <name>
 
 CREATE [IF NOT EXISTS] CODEC <name>
   FROM PROTOBUF
-  USING RESOURCE <resource> [VERSION <n>]
+  USING RESOURCE <resource> VERSION <n> | LATEST
   CONFIG {'file' = '<path.proto>', 'include' = '.'}
   MESSAGE '<package.Message>'
   TO SCHEMA <schema>
@@ -581,7 +581,7 @@ WebSocket clients and endpoints may also reference a signaling protocol:
 ```nspl,ignore
 CREATE [IF NOT EXISTS] SIGNALING PROTOCOL <name>
   FORMAT JSON | YAML | TOML | XML | CBOR | RAW
-       | PROTOBUF USING RESOURCE <resource> [VERSION <version>]
+       | PROTOBUF USING RESOURCE <resource> VERSION <n> | LATEST
          CONFIG { '<key>' = '<value>' }
          SEND MESSAGE '<message_type>' WAIT MESSAGE '<message_type>'
   ON CONNECT
@@ -646,10 +646,14 @@ TLS-capable VHOSTs:
 
 ```nspl,ignore
 CREATE [IF NOT EXISTS] VHOST <name> <hostname>, ...
-  [WITH TLS <resource> [VERSION <n>]];
+  [WITH TLS <resource> VERSION <n> | LATEST];
 ```
 
-If `VERSION <n>` is omitted from `WITH TLS`, the VHOST resolves the latest completed version of that resource. Explicit versions must also be completed before they can be bound.
+Every resource binding names its version: `WITH TLS` on a VHOST, `USING RESOURCE` on a protobuf
+codec, a protobuf signaling protocol, an inferencer, and a WASM processor. `VERSION <n>` binds that
+completed version. `VERSION LATEST` binds the highest completed version when the statement is
+applied, and the stored model keeps that number, so a later upload never moves the binding. See
+[Versioning](resources.md#versioning).
 
 Session-only commands:
 

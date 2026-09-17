@@ -746,7 +746,7 @@ mod tests {
             &protocol(
                 SignalingWireFormat::Protobuf(SignalingProtobufConfig {
                     resource: ResourceName::parse("proto_bundle").expect("valid identifier"),
-                    resource_version: None,
+                    resource_version: 1,
                     config: Vec::new(),
                     send_message: "nervix.test.Subscribe".to_string(),
                     wait_message: "nervix.test.Ack".to_string(),

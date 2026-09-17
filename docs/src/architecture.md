@@ -73,7 +73,8 @@ unreplicated; optional materialized records use the relay's state replicas.
 One concrete example is `VHOST` TLS:
 
 - the control plane tracks uploaded certificate bundles as resource versions
-- a `VHOST` can bind one of those resources, optionally pinned to an explicit version
+- a `VHOST` binds one completed version of one of those resources, always pinned to that number
+  whether the statement wrote `VERSION <n>` or resolved `VERSION LATEST` when it was applied
 - the data plane serves HTTPS and WSS from a dedicated HTTPS listener using the local replicated resource files
 
 All node-to-node traffic uses one mutually authenticated TLS 1.3 and HTTP/2 listener. Independent

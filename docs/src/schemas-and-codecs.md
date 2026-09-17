@@ -230,7 +230,9 @@ CREATE IF NOT EXISTS CODEC notification_proto
   WITH JAQ TRANSFORMATIONS ON INGESTION '{user_id: .user_id, payload: .payload}';
 ```
 
-The resource contains the `.proto` files. `CONFIG` declares compile parameters; `file`/`files` select source files and `include`/`includes` select import roots, all relative to the resource root. If no file is listed, all `.proto` files in the resource are compiled.
+The resource contains the `.proto` files. `USING RESOURCE` requires `VERSION <n>` or
+`VERSION LATEST`, and the codec compiles its descriptors from the one version it stores.
+`CONFIG` declares compile parameters; `file`/`files` select source files and `include`/`includes` select import roots, all relative to the resource root. If no file is listed, all `.proto` files in the resource are compiled.
 
 Current schemaful codec wire formats are:
 
@@ -272,7 +274,8 @@ CREATE IF NOT EXISTS CODEC notification_codec
 Semantics:
 
 - no-wire codecs must use `FROM JSON|YAML|TOML|XML|CBOR ... WITH JAQ ...`
-- protobuf codecs must use `FROM PROTOBUF USING RESOURCE ... CONFIG {...} MESSAGE ... WITH JAQ ...`
+- protobuf codecs must use
+  `FROM PROTOBUF USING RESOURCE ... VERSION <n> | LATEST CONFIG {...} MESSAGE ... WITH JAQ ...`
 - codecs using declared wire schemas must use `FROM WIRE JSON|CBOR|AVRO SCHEMA ...` and do not
   carry JAQ transforms
 - codecs using the predefined SYSLOG wire schema must use `FROM SYSLOG TO SCHEMA ...` and do not

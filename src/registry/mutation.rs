@@ -12,7 +12,8 @@ use nervix_models::{
     AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction, AlterPlacement,
     AlterPlacementOperation, AlterReingestor, AlterRelay, AlterReorderer, AlterSchema,
     AlterWireSchema, AvroType, CborType, DomainName, DropModel, JsonType, Model, ModelChangeAspect,
-    ModelIndex, ModelKind, NodeRef, QuiesceLevel, StatePurge, Statement,
+    ModelIndex, ModelKind, NodeRef, QuiesceLevel, RequestedResourceVersion, ResourceName,
+    StatePurge, Statement,
 };
 use nervix_recovery::Discarded;
 use thiserror::Error;
@@ -22,9 +23,14 @@ use crate::registry::{
     graph::ActiveGraph,
     storage::{ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS, RuntimeChanges},
 };
+/// One change to a domain's Models.
+///
+/// `Version` follows [`Model`]: a mutation read from a statement carries the resource versions the
+/// statement wrote, and planning pins them to numbers before a mutation is folded into stored
+/// configuration.
 #[derive(Debug, Clone)]
-pub(crate) enum RegistryMutation {
-    Create(Box<Model>),
+pub(crate) enum RegistryMutation<Version = u64> {
+    Create(Box<Model<Version>>),
     AlterSchema(AlterSchema),
     AlterWireJsonSchema(AlterWireSchema<JsonType>),
     AlterWireCborSchema(AlterWireSchema<CborType>),
@@ -45,7 +51,7 @@ pub(crate) enum RegistryMutation {
 #[error("the statement is not a model mutation")]
 pub(crate) struct RegistryMutationConversionError;
 
-impl TryFrom<&Statement> for RegistryMutation {
+impl TryFrom<&Statement> for RegistryMutation<RequestedResourceVersion> {
     type Error = RegistryMutationConversionError;
 
     fn try_from(statement: &Statement) -> Result<Self, Self::Error> {
@@ -71,7 +77,38 @@ impl TryFrom<&Statement> for RegistryMutation {
     }
 }
 
-impl RegistryMutation {
+impl RegistryMutation<RequestedResourceVersion> {
+    /// Pins every resource version this mutation writes through `pin`, which returns the concrete
+    /// version a written one resolves to. Only a create binds resources; every other mutation is
+    /// carried over unchanged.
+    pub(crate) fn pin_resource_versions<Error>(
+        self,
+        pin: impl FnMut(&ResourceName, RequestedResourceVersion) -> Result<u64, Error>,
+    ) -> Result<RegistryMutation, Error> {
+        let pinned = match self {
+            Self::Create(model) => {
+                RegistryMutation::Create(Box::new(model.try_map_resource_versions(pin)?))
+            }
+            Self::AlterSchema(alter) => RegistryMutation::AlterSchema(alter),
+            Self::AlterWireJsonSchema(alter) => RegistryMutation::AlterWireJsonSchema(alter),
+            Self::AlterWireCborSchema(alter) => RegistryMutation::AlterWireCborSchema(alter),
+            Self::AlterWireAvroSchema(alter) => RegistryMutation::AlterWireAvroSchema(alter),
+            Self::AlterRelay(alter) => RegistryMutation::AlterRelay(alter),
+            Self::AlterJunction(alter) => RegistryMutation::AlterJunction(alter),
+            Self::AlterDeduplicator(alter) => RegistryMutation::AlterDeduplicator(alter),
+            Self::AlterReorderer(alter) => RegistryMutation::AlterReorderer(alter),
+            Self::AlterEmitter(alter) => RegistryMutation::AlterEmitter(alter),
+            Self::AlterIngestor(alter) => RegistryMutation::AlterIngestor(alter),
+            Self::AlterReingestor(alter) => RegistryMutation::AlterReingestor(alter),
+            Self::AlterGenerator(alter) => RegistryMutation::AlterGenerator(alter),
+            Self::AlterPlacement(alter) => RegistryMutation::AlterPlacement(alter),
+            Self::Drop(drop) => RegistryMutation::Drop(drop),
+        };
+        Ok(pinned)
+    }
+}
+
+impl<Version: Clone> RegistryMutation<Version> {
     pub(in crate::registry) fn target_key(&self) -> NodeRef {
         match self {
             Self::Create(model) => model.node_ref(),
@@ -133,7 +170,7 @@ impl RegistryMutation {
     /// Fold this mutation into `models` without validating the outcome. An alteration that no
     /// longer applies leaves the stored model as it was, so a description of queued configuration
     /// never fails on an intermediate state its later statements repair.
-    pub(in crate::registry) fn fold_into_models(&self, models: &mut ModelIndex) {
+    pub(in crate::registry) fn fold_into_models(&self, models: &mut ModelIndex<Version>) {
         match self {
             Self::Create(model) => {
                 models.insert(model.as_ref().clone());
@@ -159,7 +196,7 @@ impl RegistryMutation {
     /// as invalid against an intermediate state is routinely repaired by a later statement in the
     /// same batch. Validation happens once, on the batch's final models, where a rejection can
     /// name the statement that caused it.
-    fn apply_alteration(&self, model: &mut Model) {
+    fn apply_alteration(&self, model: &mut Model<Version>) {
         match (self, model) {
             (Self::AlterSchema(alter), Model::Schema(schema)) => {
                 schema
