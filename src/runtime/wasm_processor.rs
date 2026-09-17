@@ -5,7 +5,70 @@
 //! - **Depends on.** Compiled WASM processors, Arrow batches and explicit execution contexts.
 //! - **Must not know.** NSPL parsing, placement policy or external connector clients.
 
+use error_stack::{Report, ResultExt as _};
+
 use super::*;
+
+/// Every way preparing a branch's WASM processor instance, or the input envelope it is handed,
+/// fails.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum WasmInstanceError {
+    #[error("resource store is not attached")]
+    ResourceStoreDetached,
+    #[error(
+        "failed to resolve wasm processor '{}' resource '{}@{version}' file '{file}'",
+        .processor.as_str(),
+        .resource.as_str()
+    )]
+    ResolveFile {
+        processor: ModelName,
+        resource: ResourceName,
+        version: u64,
+        file: String,
+    },
+    #[error(
+        "failed to read wasm processor '{}' resource '{}@{version}' file '{}'",
+        .processor.as_str(),
+        .resource.as_str(),
+        .path.display()
+    )]
+    ReadModule {
+        processor: ModelName,
+        resource: ResourceName,
+        version: u64,
+        path: std::path::PathBuf,
+    },
+    #[error(
+        "failed to compile wasm processor '{}' resource '{}@{version}' file '{file}'",
+        .processor.as_str(),
+        .resource.as_str()
+    )]
+    CompileModule {
+        processor: ModelName,
+        resource: ResourceName,
+        version: u64,
+        file: String,
+    },
+    #[error(
+        "failed to instantiate wasm processor '{}' branch '{}'",
+        .processor.as_str(),
+        branch_key_display(.branch)
+    )]
+    Instantiate {
+        processor: ModelName,
+        branch: Option<BranchKey>,
+    },
+    #[error("failed to encode the wasm input batch")]
+    EncodeInput,
+    #[error(
+        "wasm input row count {rows} does not match ack count {acks} and metadata count {metadata}"
+    )]
+    InputRowCount {
+        rows: usize,
+        acks: usize,
+        metadata: usize,
+    },
+}
 
 pub(super) async fn flush_branch_wasm_processor(
     context: WasmFlushContext<'_>,
@@ -172,7 +235,7 @@ pub(super) async fn flush_branch_wasm_processor(
                     processor,
                     error_policies,
                     forwarded.acks.iter(),
-                    error,
+                    format!("{error:#}"),
                 );
                 return;
             }
@@ -237,7 +300,7 @@ pub(super) async fn flush_branch_wasm_processor(
             processor,
             error_policies,
             forwarded.acks.iter(),
-            error,
+            format!("{error:#}"),
         );
         return;
     }
@@ -256,7 +319,7 @@ pub(super) async fn flush_branch_wasm_processor(
             processor,
             error_policies,
             std::iter::empty::<&AckSet>(),
-            error,
+            format!("{error:#}"),
         );
     }
 }
@@ -275,46 +338,6 @@ pub(super) struct WasmInstanceContext<'a> {
     pub(super) execution_now: Timestamp,
 }
 
-/// The guest module one WASM processor runs: a file inside the resource version the processor
-/// pins.
-#[derive(Debug, Clone)]
-pub(crate) struct WasmGuestModule {
-    pub(crate) processor: ModelName,
-    pub(crate) resource: ResourceId,
-    pub(crate) file: String,
-}
-
-impl std::fmt::Display for WasmGuestModule {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "wasm processor '{}' resource '{}@{}' file '{}'",
-            self.processor.as_str(),
-            self.resource.identifier.as_str(),
-            self.resource.version,
-            self.file
-        )
-    }
-}
-
-/// Why the guest of a WASM processor could not be prepared for a branch.
-#[derive(Debug, Error)]
-pub(crate) enum WasmGuestPreparationError {
-    #[error("{module} cannot be read because the resource store is not attached")]
-    ResourceStoreUnavailable { module: WasmGuestModule },
-    #[error("{module} is not a valid path inside its resource")]
-    ModulePath { module: WasmGuestModule },
-    #[error("failed to read {module}")]
-    ReadModule { module: WasmGuestModule },
-    #[error("failed to compile {module}")]
-    CompileModule { module: WasmGuestModule },
-    #[error("failed to instantiate wasm processor '{processor}' branch '{branch}'")]
-    InstantiateBranch {
-        processor: ModelName,
-        branch: String,
-    },
-}
-
 impl Runtime {
     /// Compiles the guest module of the resource version a WASM processor pins. The version is
     /// part of the processor's model, so compiling never consults the resource catalog.
@@ -325,37 +348,40 @@ impl Runtime {
         resource: &ResourceName,
         resource_version: u64,
         file: &str,
-    ) -> error_stack::Result<WasmCompiledBranchProcessor, WasmGuestPreparationError> {
-        let module = WasmGuestModule {
-            processor: processor.into(),
-            resource: ResourceId::new(domain.clone(), resource.clone(), resource_version),
-            file: file.to_string(),
-        };
+    ) -> error_stack::Result<WasmCompiledBranchProcessor, WasmInstanceError> {
+        let processor = processor.into();
+        let id = ResourceId::new(domain.clone(), resource.clone(), resource_version);
         let Some(resource_store) = self.inner.resource_store.load_full() else {
-            return Err(Report::new(
-                WasmGuestPreparationError::ResourceStoreUnavailable { module },
-            ));
+            return Err(Report::new(WasmInstanceError::ResourceStoreDetached));
         };
-        let path = match resource_store.resolve_content_path(&module.resource, &module.file) {
-            Ok(path) => path,
-            Err(error) => {
-                return Err(error.change_context(WasmGuestPreparationError::ModulePath { module }));
-            }
-        };
-        let wasm = match tokio::fs::read(&path).await {
-            Ok(wasm) => wasm,
-            Err(error) => {
-                return Err(Report::new(error)
-                    .change_context(WasmGuestPreparationError::ReadModule { module }));
-            }
-        };
-        let compiled = match self.inner.wasm_runtime.compile_processor(&wasm).await {
-            Ok(compiled) => compiled,
-            Err(error) => {
-                return Err(Report::new(error)
-                    .change_context(WasmGuestPreparationError::CompileModule { module }));
-            }
-        };
+        let path = resource_store
+            .resolve_content_path(&id, file)
+            .change_context_lazy(|| WasmInstanceError::ResolveFile {
+                processor: processor.clone(),
+                resource: resource.clone(),
+                version: resource_version,
+                file: file.to_string(),
+            })?;
+        let wasm =
+            tokio::fs::read(&path)
+                .await
+                .change_context_lazy(|| WasmInstanceError::ReadModule {
+                    processor: processor.clone(),
+                    resource: resource.clone(),
+                    version: resource_version,
+                    path: path.clone(),
+                })?;
+        let compiled = self
+            .inner
+            .wasm_runtime
+            .compile_processor(&wasm)
+            .await
+            .change_context_lazy(|| WasmInstanceError::CompileModule {
+                processor: processor.clone(),
+                resource: resource.clone(),
+                version: resource_version,
+                file: file.to_string(),
+            })?;
         Ok(WasmCompiledBranchProcessor {
             compiled: Arc::new(compiled),
         })
@@ -368,7 +394,7 @@ pub(super) async fn ensure_wasm_processor_instance(
     context: WasmInstanceContext<'_>,
     compiled: &mut Option<WasmCompiledBranchProcessor>,
     instance: &mut Option<Box<nervix_wasm::WasmBranchInstance>>,
-) -> error_stack::Result<(), WasmGuestPreparationError> {
+) -> error_stack::Result<(), WasmInstanceError> {
     let WasmInstanceContext {
         branch,
         processor,
@@ -425,18 +451,12 @@ pub(super) async fn ensure_wasm_processor_instance(
                 nervix_wasm::WasmExecutionContext::new(execution_now),
                 restored_guest_state.restorable(),
             )
-            .await;
-        match instantiated {
-            Ok(branch_instance) => *instance = Some(Box::new(branch_instance)),
-            Err(error) => {
-                return Err(Report::new(error).change_context(
-                    WasmGuestPreparationError::InstantiateBranch {
-                        processor: processor.clone(),
-                        branch: branch_key_display(&branch.key).to_string(),
-                    },
-                ));
-            }
-        }
+            .await
+            .change_context_lazy(|| WasmInstanceError::Instantiate {
+                processor: processor.clone(),
+                branch: branch.key.clone(),
+            })?;
+        *instance = Some(Box::new(instantiated));
     }
     Ok(())
 }
@@ -445,21 +465,20 @@ pub(super) async fn wasm_envelope_from_relay_batch(
     executor: &Executor,
     batch: &RelayRecordBatch,
     next_ack_token: &mut u64,
-) -> Result<(WasmEnvelope, WasmAckMap), String> {
+) -> error_stack::Result<(WasmEnvelope, WasmAckMap), WasmInstanceError> {
     let arrow_ipc_batch = batch
         .batch
         .encode_arrow_ipc(executor)
         .await
-        .map_err(|error| error.to_string())?
+        .change_context(WasmInstanceError::EncodeInput)?
         .to_vec();
     let row_count = batch.batch.batch().num_rows();
     if row_count != batch.acks.len() || row_count != batch.metadata.len() {
-        return Err(format!(
-            "wasm input row count {} does not match ack count {} and metadata count {}",
-            row_count,
-            batch.acks.len(),
-            batch.metadata.len()
-        ));
+        return Err(Report::new(WasmInstanceError::InputRowCount {
+            rows: row_count,
+            acks: batch.acks.len(),
+            metadata: batch.metadata.len(),
+        }));
     }
     let mut rows = Vec::with_capacity(batch.acks.len());
     let mut ack_map = HashMap::with_capacity(batch.acks.len());

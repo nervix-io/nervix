@@ -1166,6 +1166,11 @@ impl SessionServiceImpl {
         ))
         .await;
         result.execution_reference = execution_reference.to_string();
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_command_response_delivery_if_armed(self.inner.consensus.local_node_id())
+            .await;
         result
     }
 
@@ -1285,6 +1290,13 @@ impl SessionServiceImpl {
                 Ok(execution) => execution,
                 Err(result) => return *result,
             };
+            #[cfg(feature = "testing")]
+            self.inner
+                .runtime
+                .pause_command_after_durable_admission_if_armed(
+                    self.inner.consensus.local_node_id(),
+                )
+                .await;
             match &execution.state {
                 CommandExecutionState::Applying => {
                     persistent_execution = Some(execution);

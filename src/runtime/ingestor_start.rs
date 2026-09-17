@@ -7,7 +7,60 @@
 
 use std::borrow::Cow;
 
+use error_stack::ResultExt as _;
+
 use super::*;
+
+pub(in crate::runtime) type LookupRuntimeResult<T> = Result<T, Report<LookupRuntimeError>>;
+
+#[derive(Debug, Error)]
+pub(in crate::runtime) enum LookupRuntimeError {
+    #[error("resource store is not attached")]
+    ResourceStoreUnavailable,
+    #[error(
+        "resource '{resource}' has no completed versions for lookup '{lookup}' in domain \
+         '{domain}'"
+    )]
+    MissingResourceVersion {
+        domain: DomainName,
+        lookup: LookupName,
+        resource: ResourceName,
+    },
+    #[error(
+        "failed to resolve path '{path}' in resource '{resource}' for lookup '{lookup}' in domain \
+         '{domain}'"
+    )]
+    ResolveContentPath {
+        domain: DomainName,
+        lookup: LookupName,
+        resource: ResourceName,
+        path: String,
+    },
+    #[error("failed to open lookup file '{path}' for lookup '{lookup}' in domain '{domain}'")]
+    OpenFile {
+        domain: DomainName,
+        lookup: LookupName,
+        path: PathBuf,
+    },
+    #[error("failed to read lookup file '{path}' for lookup '{lookup}'")]
+    ReadFile { lookup: LookupName, path: PathBuf },
+    #[error("failed to decode lookup '{lookup}' line {line}")]
+    DecodeLine { lookup: LookupName, line: usize },
+    #[error("failed to build lookup '{lookup}' record batch")]
+    BuildBatch { lookup: LookupName },
+    #[error("failed to read lookup '{lookup}' key field '{key}' at line {line}")]
+    ReadKey {
+        lookup: LookupName,
+        line: usize,
+        key: FieldName,
+    },
+    #[error("lookup '{lookup}' line {line} is missing key field '{key}'")]
+    MissingKey {
+        lookup: LookupName,
+        line: usize,
+        key: FieldName,
+    },
+}
 
 pub(super) enum ScheduledIngestorStart {
     Plan(Box<IngestorStartPlan>),
@@ -443,9 +496,9 @@ impl Runtime {
         domain: &DomainName,
         lookup: CreateLookup,
         codec: Arc<CompiledCodec>,
-    ) -> Result<LookupRuntime, String> {
+    ) -> LookupRuntimeResult<LookupRuntime> {
         let Some(resource_store) = self.inner.resource_store.load_full() else {
-            return Err("resource store is not attached".to_string());
+            return Err(Report::new(LookupRuntimeError::ResourceStoreUnavailable));
         };
         let resource_id = self
             .inner
@@ -453,26 +506,27 @@ impl Runtime {
             .load()
             .uploads
             .resolve_completed_version(domain, &lookup.resource, RequestedResourceVersion::Latest)
-            .map_err(|_| {
-                format!(
-                    "resource '{}' has no completed versions for lookup '{}' in domain '{}'",
-                    lookup.resource.as_str(),
-                    lookup.name.as_str(),
-                    domain.as_str()
-                )
+            .change_context(LookupRuntimeError::MissingResourceVersion {
+                domain: domain.clone(),
+                lookup: lookup.name.clone(),
+                resource: lookup.resource.clone(),
             })?;
         let resource_version = resource_id.version;
         let path = resource_store
             .resolve_content_path(&resource_id, &lookup.path)
-            .map_err(|error| error.to_string())?;
-        let file = tokio::fs::File::open(&path).await.map_err(|error| {
-            format!(
-                "failed to open lookup file '{}' for lookup '{}' in domain '{}': {}",
-                path.display(),
-                lookup.name.as_str(),
-                domain.as_str(),
-                error
-            )
+            .change_context(LookupRuntimeError::ResolveContentPath {
+                domain: domain.clone(),
+                lookup: lookup.name.clone(),
+                resource: lookup.resource.clone(),
+                path: lookup.path.clone(),
+            })?;
+        let file = tokio::fs::File::open(&path).await.map_err(|source| {
+            Report::new(LookupRuntimeError::OpenFile {
+                domain: domain.clone(),
+                lookup: lookup.name.clone(),
+                path: path.clone(),
+            })
+            .attach_printable(source.to_string())
         })?;
         let mut lines = tokio::io::BufReader::new(file).lines();
         let schema = codec.schema();
@@ -483,13 +537,12 @@ impl Runtime {
         let mut builder = schema.batch_builder(0);
         let mut row_lines = Vec::new();
         let mut line_number = 0usize;
-        while let Some(line) = lines.next_line().await.map_err(|error| {
-            format!(
-                "failed to read lookup file '{}' for lookup '{}': {}",
-                path.display(),
-                lookup.name.as_str(),
-                error
-            )
+        while let Some(line) = lines.next_line().await.map_err(|source| {
+            Report::new(LookupRuntimeError::ReadFile {
+                lookup: lookup.name.clone(),
+                path: path.clone(),
+            })
+            .attach_printable(source.to_string())
         })? {
             tokio::task::consume_budget().await;
             line_number += 1;
@@ -499,31 +552,37 @@ impl Runtime {
             let messages =
                 decode_ingested_payload(&codec, Cow::Owned(line.into_bytes()), &mut builder)
                     .await
-                    .map_err(|error| {
-                        format!(
-                            "failed to decode lookup '{}' line {}: {}",
-                            lookup.name.as_str(),
-                            line_number,
-                            error
-                        )
+                    .map_err(|source| {
+                        Report::new(LookupRuntimeError::DecodeLine {
+                            lookup: lookup.name.clone(),
+                            line: line_number,
+                        })
+                        .attach_printable(source.to_string())
                     })?;
             row_lines.extend(std::iter::repeat_n(line_number, messages));
         }
 
-        let batch = builder.finish().map_err(|error| error.to_string())?;
+        let batch = builder
+            .finish()
+            .change_context(LookupRuntimeError::BuildBatch {
+                lookup: lookup.name.clone(),
+            })?;
         let mut entries = HashMap::new();
         for (row, line_number) in row_lines.into_iter().enumerate() {
             tokio::task::consume_budget().await;
-            let Some(value) = batch
-                .value(row, lookup.key_field.as_str())
-                .map_err(|error| error.to_string())?
+            let Some(value) = batch.value(row, lookup.key_field.as_str()).change_context(
+                LookupRuntimeError::ReadKey {
+                    lookup: lookup.name.clone(),
+                    line: line_number,
+                    key: lookup.key_field.clone(),
+                },
+            )?
             else {
-                return Err(format!(
-                    "lookup '{}' line {} is missing key field '{}'",
-                    lookup.name.as_str(),
-                    line_number,
-                    lookup.key_field.as_str()
-                ));
+                return Err(Report::new(LookupRuntimeError::MissingKey {
+                    lookup: lookup.name.clone(),
+                    line: line_number,
+                    key: lookup.key_field.clone(),
+                }));
             };
             entries.insert(value.to_key_fragment(), row);
         }

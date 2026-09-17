@@ -5,7 +5,48 @@
 //! - **Depends on.** Validated correlator plans, Arrow batches and bound domain execution time.
 //! - **Must not know.** NSPL parsing, placement decisions or connector transports.
 
+use error_stack::{Report, ResultExt as _};
+
 use super::*;
+
+/// Every way building a correlator's matched batch fails once its pairs are chosen.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum CorrelatorError {
+    #[error("cannot batch zero correlator matches")]
+    NoMatches,
+    #[error(
+        "correlator match cannot combine branch '{}' with branch '{}'",
+        branch_key_display(.left),
+        branch_key_display(.right)
+    )]
+    MixedBranchKeys {
+        left: Option<BranchKey>,
+        right: Option<BranchKey>,
+    },
+    #[error("failed to batch correlator {side:?} rows")]
+    SideRows { side: CorrelatorSide },
+    #[error("correlator materialized input '{field}' has conflicting Arrow fields")]
+    ConflictingMaterializedField { field: String },
+    #[error("correlator output row {row} is outside {rows} metadata rows")]
+    MetadataRowOutOfRange { row: usize, rows: usize },
+    #[error("correlator output row {row} is outside {keys} branch keys")]
+    BranchKeyRowOutOfRange { row: usize, keys: usize },
+    #[error("failed to build correlator output row {row}")]
+    OutputRow { row: usize },
+    #[error(
+        "correlator input has {left} left rows, {right} right rows, and {materialized} \
+         materialized-state rows"
+    )]
+    InputRowCount {
+        left: usize,
+        right: usize,
+        materialized: usize,
+    },
+    #[error("failed to build correlator materialized input column '{field}'")]
+    MaterializedColumn { field: String },
+    #[error("failed to build the correlator input batch")]
+    InputBatch,
+}
 
 pub(super) fn compile_correlator_where_program(
     processor: &ModelName,
@@ -15,7 +56,7 @@ pub(super) fn compile_correlator_where_program(
     right_relays: &[RelayName],
     right_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
-) -> Result<CompiledCorrelatorWhereProgram, String> {
+) -> error_stack::Result<CompiledCorrelatorWhereProgram, ProcessorCompileError> {
     let parsed = lower_route_construction(
         &RouteConstruction {
             where_clause: Some(correlate_where.clone()),
@@ -26,18 +67,13 @@ pub(super) fn compile_correlator_where_program(
             "__invalid_correlator_target",
         ),
     )
-    .map_err(|reason| {
-        format!(
-            "correlator '{}' CORRELATE WHERE is invalid: {}",
-            processor.as_str(),
-            reason
-        )
+    .change_context_lazy(|| ProcessorCompileError::CorrelateWhereInvalid {
+        processor: processor.clone(),
     })?;
     if left_relays.is_empty() || right_relays.is_empty() {
-        return Err(format!(
-            "correlator '{}' requires both LEFT and RIGHT inputs",
-            processor.as_str()
-        ));
+        return Err(Report::new(ProcessorCompileError::CorrelatorSides {
+            processor: processor.clone(),
+        }));
     }
     let bindings = vec![
         VmCompileBinding::writable("left", left_schema.clone()),
@@ -50,12 +86,8 @@ pub(super) fn compile_correlator_where_program(
         bindings,
         runtime_udf_compile_options(udfs, VmCompileOptions::default()),
     )
-    .map_err(|error| {
-        format!(
-            "correlator '{}' CORRELATE WHERE compile failed: {}",
-            processor.as_str(),
-            error.message
-        )
+    .change_context_lazy(|| ProcessorCompileError::CorrelateWhereCompile {
+        processor: processor.clone(),
     })?;
     Ok(CompiledCorrelatorWhereProgram {
         program: Arc::new(program),
@@ -76,25 +108,30 @@ pub(super) struct CorrelatorOutputCompileContext<'a> {
 }
 
 impl CorrelatorOutputCompileContext<'_> {
-    pub(super) fn compile(self) -> Result<CompiledCorrelatorOutputProgram, String> {
+    pub(super) fn compile(
+        self,
+    ) -> error_stack::Result<CompiledCorrelatorOutputProgram, ProcessorCompileError> {
+        let invalid_output = || ProcessorCompileError::CorrelatorOutputInvalid {
+            processor: self.processor.clone(),
+            relay: self.output_relay.clone(),
+        };
         let parsed = lower_route_construction(
             self.construction,
             SemanticNamespaces::new("__invalid_correlator_bare_read", "output"),
         )
-        .map_err(|error| format!("{error:#}"))?;
+        .change_context_lazy(invalid_output)?;
         if !parsed.inner.invoke.is_empty() || parsed.inner.set.is_empty() {
-            return Err(format!(
-                "correlator '{}' TO output '{}' must contain SET assignments and may contain WHERE",
-                self.processor.as_str(),
-                self.output_relay.as_str()
-            ));
+            return Err(Report::new(ProcessorCompileError::CorrelatorOutputShape {
+                processor: self.processor.clone(),
+                relay: self.output_relay.clone(),
+            }));
         }
         let error_sites = compiled_message_error_sites(
             &parsed,
             &vec![MessageErrorOperation::Set; parsed.inner.set.len()],
             Some(MessageErrorOperation::RouteWhere),
         )
-        .map_err(|error| format!("{error:#}"))?;
+        .change_context_lazy(invalid_output)?;
         let original_parsed = parsed.clone();
         let mut bindings = vec![
             VmCompileBinding::readonly("left", self.left_schema.clone())
@@ -120,18 +157,18 @@ impl CorrelatorOutputCompileContext<'_> {
                 self.runtime.available_materialized_streams,
                 self.runtime.current_branching,
             )
-            .map_err(|error| format!("{error:#}"))?;
+            .change_context_lazy(invalid_output)?;
         bindings.extend(materialized_bindings);
         let (parsed, pending_lookup_calls) =
             rewrite_lookup_hash_map_program(&parsed, self.runtime.available_lookups)
-                .map_err(|error| error.to_string())?;
+                .change_context_lazy(invalid_output)?;
         let (lookup_hash_maps, lookup_binding) = compile_lookup_hash_map_calls(
             pending_lookup_calls,
             "output",
             &bindings,
             self.runtime.udfs,
         )
-        .map_err(|error| error.to_string())?;
+        .change_context_lazy(invalid_output)?;
         if let Some(lookup_binding) = lookup_binding {
             bindings.push(lookup_binding);
         }
@@ -145,13 +182,9 @@ impl CorrelatorOutputCompileContext<'_> {
                 ..VmCompileOptions::default()
             }),
         )
-        .map_err(|error| {
-            format!(
-                "correlator '{}' TO output '{}' compile failed: {}",
-                self.processor.as_str(),
-                self.output_relay.as_str(),
-                error.message
-            )
+        .change_context_lazy(|| ProcessorCompileError::CorrelatorOutputCompile {
+            processor: self.processor.clone(),
+            relay: self.output_relay.clone(),
         })?;
         Ok(CompiledCorrelatorOutputProgram {
             program: CompiledProgramWithMaterializedInterest {
@@ -213,15 +246,18 @@ impl CorrelatorMatchedBatch {
     pub(super) fn from_correlations(
         correlations: &[(CorrelatorPendingMessage, CorrelatorPendingMessage)],
         programs: &[&CompiledCorrelatorOutputProgram],
-    ) -> Result<Self, String> {
+    ) -> error_stack::Result<Self, CorrelatorError> {
         if correlations.is_empty() {
-            return Err("cannot batch zero correlator matches".to_string());
+            return Err(Report::new(CorrelatorError::NoMatches));
         }
-        if correlations
+        if let Some((left, right)) = correlations
             .iter()
-            .any(|(left, right)| left.message.key != right.message.key)
+            .find(|(left, right)| left.message.key != right.message.key)
         {
-            return Err("correlator match cannot combine different branch keys".to_string());
+            return Err(Report::new(CorrelatorError::MixedBranchKeys {
+                left: left.message.key.clone(),
+                right: right.message.key.clone(),
+            }));
         }
         let left_rows = correlations
             .iter()
@@ -233,12 +269,16 @@ impl CorrelatorMatchedBatch {
             .collect::<Vec<_>>();
         let left =
             RuntimeRecordBatch::from_rows(left_rows[0].batch().schema(), left_rows.iter().copied())
-                .map_err(|error| error.to_string())?;
+                .change_context(CorrelatorError::SideRows {
+                    side: CorrelatorSide::Left,
+                })?;
         let right = RuntimeRecordBatch::from_rows(
             right_rows[0].batch().schema(),
             right_rows.iter().copied(),
         )
-        .map_err(|error| error.to_string())?;
+        .change_context(CorrelatorError::SideRows {
+            side: CorrelatorSide::Right,
+        })?;
         let materialized_state = correlations
             .iter()
             .map(|(left, right)| CorrelatorMaterializedState {
@@ -274,7 +314,7 @@ impl CorrelatorMatchedBatch {
 
     pub(super) fn materialized_fields(
         programs: &[&CompiledCorrelatorOutputProgram],
-    ) -> Result<Vec<StdArc<arrow_schema::Field>>, String> {
+    ) -> error_stack::Result<Vec<StdArc<arrow_schema::Field>>, CorrelatorError> {
         let mut fields = BTreeMap::<String, StdArc<arrow_schema::Field>>::new();
         for program in programs {
             let schemas = std::iter::once(&program.program.compiled.input_schema).chain(
@@ -293,10 +333,9 @@ impl CorrelatorMatchedBatch {
                     if let Some(existing) = fields.get(field.name())
                         && existing.as_ref() != field.as_ref()
                     {
-                        return Err(format!(
-                            "correlator materialized input '{}' has conflicting Arrow fields",
-                            field.name()
-                        ));
+                        return Err(Report::new(CorrelatorError::ConflictingMaterializedField {
+                            field: field.name().clone(),
+                        }));
                     }
                     fields.insert(field.name().clone(), field.clone());
                 }
@@ -309,25 +348,26 @@ impl CorrelatorMatchedBatch {
         self.carrier.batch().num_rows()
     }
 
-    pub(super) fn source_message(&self, row: usize, acks: AckSet) -> Result<RelayMessage, String> {
+    pub(super) fn source_message(
+        &self,
+        row: usize,
+        acks: AckSet,
+    ) -> error_stack::Result<RelayMessage, CorrelatorError> {
         let metadata = self.metadata.get(row).cloned().ok_or_else(|| {
-            format!(
-                "correlator output row {row} is outside {} metadata rows",
-                self.metadata.len()
-            )
+            Report::new(CorrelatorError::MetadataRowOutOfRange {
+                row,
+                rows: self.metadata.len(),
+            })
         })?;
         let key = self.keys.get(row).cloned().ok_or_else(|| {
-            format!(
-                "correlator output row {row} is outside {} branch keys",
-                self.keys.len()
-            )
+            Report::new(CorrelatorError::BranchKeyRowOutOfRange {
+                row,
+                keys: self.keys.len(),
+            })
         })?;
-        Ok(RelayMessage {
-            key,
-            record: RuntimeRow::new(self.carrier.clone(), row, metadata)
-                .map_err(|error| error.to_string())?,
-            acks,
-        })
+        let record = RuntimeRow::new(self.carrier.clone(), row, metadata)
+            .change_context(CorrelatorError::OutputRow { row })?;
+        Ok(RelayMessage { key, record, acks })
     }
 }
 
@@ -568,15 +608,14 @@ pub(super) fn correlator_input_batch(
     right: &RuntimeRecordBatch,
     materialized_fields: &[StdArc<arrow_schema::Field>],
     materialized_state: &[CorrelatorMaterializedState],
-) -> Result<RuntimeRecordBatch, String> {
+) -> error_stack::Result<RuntimeRecordBatch, CorrelatorError> {
     let row_count = left.batch().num_rows();
     if right.batch().num_rows() != row_count || materialized_state.len() != row_count {
-        return Err(format!(
-            "correlator input has {row_count} left rows, {} right rows, and {} materialized-state \
-             rows",
-            right.batch().num_rows(),
-            materialized_state.len()
-        ));
+        return Err(Report::new(CorrelatorError::InputRowCount {
+            left: row_count,
+            right: right.batch().num_rows(),
+            materialized: materialized_state.len(),
+        }));
     }
     let mut fields = Vec::with_capacity(
         left.schema().fields().len() + right.schema().fields().len() + materialized_fields.len(),
@@ -600,7 +639,9 @@ pub(super) fn correlator_input_batch(
             row_count,
             field,
         )
-        .map_err(|error| error.to_string())?;
+        .change_context_lazy(|| CorrelatorError::MaterializedColumn {
+            field: field.name().clone(),
+        })?;
         fields.push(field.clone());
         columns.push(column.to_array_ref());
     }
@@ -614,8 +655,8 @@ pub(super) fn correlator_input_batch(
     } else {
         RecordBatch::try_new(schema.clone(), columns)
     }
-    .map_err(|error| error.to_string())?;
-    RuntimeRecordBatch::from_record_batch(schema, batch).map_err(|error| error.to_string())
+    .change_context(CorrelatorError::InputBatch)?;
+    RuntimeRecordBatch::from_record_batch(schema, batch).change_context(CorrelatorError::InputBatch)
 }
 
 pub(super) fn correlator_output_metadata(
@@ -1557,6 +1598,112 @@ mod tests {
         assert!(
             Arc::ptr_eq(&relay_batch.batch, &output_batch),
             "relay batching must preserve the correlator's shared output allocation"
+        );
+    }
+
+    /// The message a failed operation reports to the processor that called it.
+    fn failure<T, C: error_stack::Context>(result: error_stack::Result<T, C>) -> String {
+        let Err(error) = result else {
+            panic!("the operation must fail");
+        };
+        error.current_context().to_string()
+    }
+
+    #[test]
+    fn correlator_compilation_rejects_missing_sides_and_setless_outputs() {
+        let schema = test_schema(&[("id", ParseAsType::U32)]);
+        let processor = named("join_profiles");
+        assert_eq!(
+            failure(compile_correlator_where_program(
+                &processor,
+                &expression("left.id = right.id"),
+                &[],
+                schema.arrow_schema(),
+                &[named("right_profiles")],
+                schema.arrow_schema(),
+                None,
+            )),
+            "correlator 'join_profiles' requires both LEFT and RIGHT inputs"
+        );
+
+        let output_relay = named("joined_profiles");
+        let where_only = construction("WHERE left.id = right.id");
+        let lookups = HashMap::default();
+        let materialized_streams = HashMap::default();
+        let setless = CorrelatorOutputCompileContext {
+            processor: &processor,
+            left_schema: schema.arrow_schema(),
+            left_sensitivity: VmSchemaSensitivity::default(),
+            right_schema: schema.arrow_schema(),
+            right_sensitivity: VmSchemaSensitivity::default(),
+            output_relay: &output_relay,
+            output_schema: schema.arrow_schema(),
+            output_sensitivity: VmSchemaSensitivity::default(),
+            construction: &where_only,
+            runtime: RuntimeVmCompileContext {
+                available_materialized_streams: &materialized_streams,
+                available_lookups: &lookups,
+                current_branching: &[],
+                current_branch_schema: None,
+                current_branch_sensitivity: None,
+                udfs: None,
+            },
+        };
+        assert_eq!(
+            failure(setless.compile()),
+            "correlator 'join_profiles' TO output 'joined_profiles' must contain SET assignments \
+             and may contain WHERE"
+        );
+    }
+
+    #[test]
+    fn correlator_batches_reject_empty_mixed_and_misaligned_matches() {
+        assert_eq!(
+            failure(CorrelatorMatchedBatch::from_correlations(&[], &[])),
+            "cannot batch zero correlator matches"
+        );
+
+        let now = Timestamp::now();
+        let pending = |tenant: &str| CorrelatorPendingMessage {
+            received_at: now,
+            message: RelayMessage {
+                key: string_branch_key("tenant", tenant),
+                record: test_runtime_row([("id".to_string(), RuntimeValue::U32(7))]),
+                acks: AckSet::empty(),
+            },
+            materialized_state: Arc::new(HashMap::default()),
+        };
+        assert_eq!(
+            failure(CorrelatorMatchedBatch::from_correlations(
+                &[(pending("acme"), pending("globex"))],
+                &[],
+            )),
+            r#"correlator match cannot combine branch '{"tenant":"acme"}' with branch '{"tenant":"globex"}'"#
+        );
+
+        let row = test_runtime_row([("id".to_string(), RuntimeValue::U32(1))]);
+        let one = RuntimeRecordBatch::from_rows(row.batch().schema(), std::iter::once(&row))
+            .expect("one row should form a batch");
+        let two = RuntimeRecordBatch::from_rows(row.batch().schema(), [&row, &row].into_iter())
+            .expect("two rows should form a batch");
+        assert_eq!(
+            failure(correlator_input_batch(&one, &two, &[], &[])),
+            "correlator input has 1 left rows, 2 right rows, and 0 materialized-state rows"
+        );
+
+        let matched = CorrelatorMatchedBatch {
+            carrier: Arc::new(one),
+            keys: Vec::new(),
+            metadata: vec![RuntimeRecordMetadata::test()],
+            materialized_state: Vec::new(),
+        };
+        assert_eq!(
+            failure(matched.source_message(1, AckSet::empty())),
+            "correlator output row 1 is outside 1 metadata rows"
+        );
+        assert_eq!(
+            failure(matched.source_message(0, AckSet::empty())),
+            "correlator output row 0 is outside 0 branch keys"
         );
     }
 }

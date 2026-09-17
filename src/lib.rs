@@ -4,14 +4,22 @@
 //! with the contract for the layer it belongs to, and the crate split follows those names.
 //!
 //! - **Owns.** Validating and scheduling Models, executing the resulting graph on this node,
-//!   coordinating the cluster, and serving the session, HTTP, cluster and metrics surfaces.
+//!   coordinating the cluster, and serving the session, HTTP, cluster and metrics surfaces. It is
+//!   the composition root, and the only crate that names every connector.
 //! - **Depends on.** The vocabulary, the engines, and the language layer at its session edge alone.
 //! - **Must not know.** NSPL syntax outside the session adapter, and the harnesses that drive it.
 //!   Nothing sits above this crate, so its only boundaries are the ones its modules declare.
 //!
-//! The crate breaks its own contract by spanning four layers in one compilation unit. That is what
-//! the split resolves, and until it happens the module headers are where the boundary is written
-//! down.
+//! Connectors follow one rule. A connector crate is an engine driven by this crate's data plane,
+//! which hands it a typed plan the decision layer converted from Models, so no connector reads a
+//! Model. The capabilities the registry validates live in the vocabulary, because the registry
+//! names no connector crate.
+//!
+//! The crate breaks its own contract twice. It spans four layers in one compilation unit, and its
+//! data plane still holds every connector although a connector is an engine. The split resolves
+//! both: the layers separate along the module headers, and each external integration moves into
+//! its own crate under `crates/connectors/` behind the `nervix-connector` contract, leaving this
+//! crate to compose them. Until then the module headers are where the boundary is written down.
 
 #![recursion_limit = "256"]
 

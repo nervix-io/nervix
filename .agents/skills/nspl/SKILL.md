@@ -155,6 +155,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - Use `IF ... THEN ... ELSE ... END` or searched/simple `CASE` for conditional values. Keep every
   result at one exact type; remember that omitted `CASE ELSE` yields a typed null and requires an
   optional destination.
+- Count string positions in `substr`, `split_part`, and `strpos` from 1, but `nth(list, index)`
+  from 0. Outside window processors, `count`, `sum`, `first`, `last`, and `nth` take one `ARRAY` or
+  `VEC` value; inside a window processor route, `count`, `sum`, `first`, and `last` are window
+  aggregates over retained input rows.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Declare datetime encoding explicitly when required.
 - For every JAQ-backed codec, use `WITH JAQ TRANSFORMATIONS` and declare `ON INGESTION`,

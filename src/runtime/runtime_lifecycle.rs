@@ -251,6 +251,33 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn pause_command_response_delivery_if_armed(&self, node_id: &ClusterNodeName) {
+        self.inner
+            .fault_injection
+            .pause_command_response_delivery_if_armed(node_id)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_command_after_durable_admission_if_armed(
+        &self,
+        node_id: &ClusterNodeName,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_command_after_durable_admission_if_armed(node_id)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_relocation_publication_if_armed(&self, domain: &DomainName) {
+        self.inner
+            .fault_injection
+            .pause_relocation_publication_if_armed(domain)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_resource_installation_if_armed(&self, node_id: &ClusterNodeName) {
         self.inner
             .fault_injection

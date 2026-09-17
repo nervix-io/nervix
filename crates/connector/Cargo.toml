@@ -1,0 +1,9 @@
+[package]
+description = "The contract between the Nervix host and its connector crates: source and sink contracts, host handles and boundary values"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-connector"
+version.workspace = true
+
+[lints]
+workspace = true

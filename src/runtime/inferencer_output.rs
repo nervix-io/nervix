@@ -91,12 +91,11 @@ pub(super) async fn flush_branch_inferencer_output(
                     error_policies,
                     forwarded.acks.iter(),
                     format!(
-                        "inferencer '{}' failed to load resource '{}@{}' file '{}': {}",
+                        "inferencer '{}' failed to load resource '{}@{}' file '{}': {error:#}",
                         processor.as_str(),
                         resource.as_str(),
                         resource_version,
                         file,
-                        error
                     ),
                 );
                 return;
@@ -247,12 +246,12 @@ pub(super) async fn flush_branch_inferencer_output(
                 error_policies,
                 messages.iter().map(|message| &message.acks),
                 format!(
-                    "inferencer '{}' failed ONNX execution for resource '{}@{}' file '{}': {}",
+                    "inferencer '{}' failed ONNX execution for resource '{}@{}' file '{}': \
+                     {error:#}",
                     processor.as_str(),
                     resource.as_str(),
                     resource_version,
                     file,
-                    error
                 ),
             );
             return;

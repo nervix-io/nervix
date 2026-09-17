@@ -111,9 +111,7 @@ impl MqttEmitter {
         default_client_id: &str,
         mode: MqttPublishingMode,
     ) -> EmitterRuntimeResult<(AsyncClient, rumqttc::EventLoop)> {
-        let addr = emitter_config_value(config, "addr", || {
-            "missing MQTT client config key 'addr'".to_string()
-        })?;
+        let addr = emitter_config_value(config, "addr", "MQTT")?;
         let client_id = match optional_client_config_value(config, "client_id") {
             Some(client_id) => client_id.to_owned(),
             None => default_client_id.to_string(),

@@ -49,9 +49,12 @@ PARSER_EDGES = (
     "src/application/",
 )
 
-# The data plane executes plans. These decision modules are where a Model is still allowed to be
-# read while producing those plans.
-DATA_PLANE = "src/runtime/"
+# The data plane executes plans. It is the server's runtime together with the connector crates the
+# runtime drives: the contract crate and every integration crate. Connector code that moves out of
+# the runtime stays inside these prefixes, so a move carries its sites along and lowers no count.
+DATA_PLANE = ("src/runtime/", "crates/connector/src/", "crates/connectors/")
+
+# These decision modules are where a Model is still allowed to be read while producing those plans.
 DATA_PLANE_PLANNERS = frozenset(
     {"src/runtime/planning.rs", "src/runtime/ingestor_start_plan.rs"}
 )
@@ -59,7 +62,7 @@ DATA_PLANE_PLANNERS = frozenset(
 # Lock acquisitions in these files are the contention debt on the data-plane hot path. The method
 # spellings are deliberately counted textually: the selected files make the ownership boundary,
 # while later hot-path work removes the sites and lowers the baseline.
-DATA_PLANE_LOCK_PREFIXES = (DATA_PLANE, "crates/interconnect/src/")
+DATA_PLANE_LOCK_PREFIXES = (*DATA_PLANE, "crates/interconnect/src/")
 DATA_PLANE_LOCK_FILES = frozenset({"src/runtime_ack.rs", "src/metrics.rs"})
 
 
@@ -845,7 +848,7 @@ COUNTS: tuple[Count, ...] = (
     ),
     Count(
         "model_matches_in_data_plane",
-        f"`Model::` references under {DATA_PLANE} outside the planner",
+        "`Model::` references in data-plane files outside the planner",
         count_model_matches_in_data_plane,
     ),
     Count(

@@ -139,6 +139,9 @@ struct TestPauseState {
 #[derive(Debug)]
 struct TestPause {
     state: watch::Sender<TestPauseState>,
+    /// Command pauses are one-shot: later matching requests must be able to drive the failure
+    /// while the selected request remains at its barrier.
+    claimed: AtomicBool,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -157,6 +160,9 @@ struct HealthResponsePauseKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
     Admission(ClusterNodeName),
+    DurableAdmission(ClusterNodeName),
+    RelocationPublication(DomainName),
+    ResponseDelivery(ClusterNodeName),
     ResourceInstallation(ClusterNodeName),
     TransactionCommit {
         node_id: ClusterNodeName,
@@ -561,6 +567,58 @@ impl FaultInjection {
         self.release_command_pause(&CommandPausePoint::Admission(node_id.clone()));
     }
 
+    /// Holds the next persistent command after its applying record is committed and before its
+    /// effect begins.
+    pub fn pause_command_after_durable_admission_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::DurableAdmission(node_id));
+    }
+
+    pub async fn wait_for_command_durable_admission_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::DurableAdmission(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_command_durable_admission_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::DurableAdmission(node_id.clone()));
+    }
+
+    /// Holds a relocation after it has computed its target schedule but before it binds the
+    /// expected schedule used for publication.
+    pub fn pause_relocation_publication(&self, domain: DomainName) {
+        self.arm_command_pause(CommandPausePoint::RelocationPublication(domain));
+    }
+
+    pub async fn wait_for_relocation_publication_pause(&self, domain: &DomainName) {
+        self.wait_for_command_pause(&CommandPausePoint::RelocationPublication(domain.clone()))
+            .await;
+    }
+
+    pub fn release_relocation_publication_pause(&self, domain: &DomainName) {
+        self.release_command_pause(&CommandPausePoint::RelocationPublication(domain.clone()));
+    }
+
+    /// Holds the next completed command after its result exists but before either public session
+    /// transport can deliver it.
+    pub fn pause_command_response_delivery_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::ResponseDelivery(node_id));
+    }
+
+    pub async fn wait_for_command_response_delivery_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::ResponseDelivery(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_command_response_delivery_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::ResponseDelivery(node_id.clone()));
+    }
+
+    pub fn release_all_command_pauses(&self) {
+        for pause in &self.inner.command_pauses {
+            pause.release();
+        }
+        self.inner.command_pauses.clear();
+    }
+
     pub fn pause_resource_installation_on(&self, node_id: ClusterNodeName) {
         self.arm_command_pause(CommandPausePoint::ResourceInstallation(node_id));
     }
@@ -937,6 +995,24 @@ impl FaultInjection {
             .await;
     }
 
+    pub(crate) async fn pause_command_response_delivery_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::ResponseDelivery(node_id.clone()))
+            .await;
+    }
+
+    pub(crate) async fn pause_command_after_durable_admission_if_armed(
+        &self,
+        node_id: &ClusterNodeName,
+    ) {
+        self.pause_command_if_armed(CommandPausePoint::DurableAdmission(node_id.clone()))
+            .await;
+    }
+
+    pub(crate) async fn pause_relocation_publication_if_armed(&self, domain: &DomainName) {
+        self.pause_command_if_armed(CommandPausePoint::RelocationPublication(domain.clone()))
+            .await;
+    }
+
     pub(crate) async fn pause_resource_installation_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::ResourceInstallation(node_id.clone()))
             .await;
@@ -1207,6 +1283,9 @@ impl FaultInjection {
         else {
             return;
         };
+        if pause.claimed.swap(true, Ordering::AcqRel) {
+            return;
+        }
         pause.reach();
         pause.wait_until_released().await;
         self.inner.command_pauses.remove(&point);
@@ -1276,6 +1355,7 @@ impl Default for TestPause {
     fn default() -> Self {
         Self {
             state: watch::channel(TestPauseState::default()).0,
+            claimed: AtomicBool::new(false),
         }
     }
 }

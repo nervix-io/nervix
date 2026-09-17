@@ -53,9 +53,8 @@ use crate::{
     },
     runtime::{
         CompiledSubscriptionPredicate, RelayMessage, RelayRecordBatch, RelaySubscriptionReceiver,
-        RelaySubscriptionRecvError, Runtime, SubscriptionPredicateCompileContext,
-        compile_subscription_predicate, execute_subscription_predicate_on_record,
-        scheduled_relay_owner_nodes,
+        Runtime, SubscriptionPredicateCompileContext, compile_subscription_predicate,
+        execute_subscription_predicate_on_record, scheduled_relay_owner_nodes,
     },
     runtime_schema,
     task_shutdown::JoinShutdown,
@@ -256,7 +255,7 @@ impl SessionSubscriptions {
                 tokio::select! {
                     batch = receiver.recv() => {
                         match batch {
-                            Ok(batch) => {
+                            Some(batch) => {
                                 let messages = match batch.try_into_messages() {
                                     Ok(messages) => messages,
                                     Err(error_and_batch) => {
@@ -362,7 +361,7 @@ impl SessionSubscriptions {
                                     }
                                 }
                             }
-                            Err(RelaySubscriptionRecvError::Closed) => {
+                            None => {
                                 let event = SessionResponse {
                                     event: Some(proto::session_response::Event::Server(
                                         ServerEvent {
@@ -384,7 +383,6 @@ impl SessionSubscriptions {
                                     .means_peer_left("session subscription stream");
                                 break 'subscription_loop;
                             }
-                            Err(RelaySubscriptionRecvError::Overflowed(_)) => continue,
                         }
                     }
                     changed = stop_rx.changed() => {
@@ -1392,11 +1390,12 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
     use nervix_models::{DomainName, SubscriptionDeliveryBehavior};
     use tokio::{sync::mpsc, time::Duration};
 
     use super::{
-        super::test_fixtures::{named, string_branch_key},
+        super::test_fixtures::{TestService, build_test_service, named, string_branch_key},
         *,
     };
     use crate::{proto, proto::ServerEventLevel, runtime::Runtime};
@@ -1491,6 +1490,70 @@ mod tests {
                 .remove(&named("missing_events"))
                 .await
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "CLIENT-WIRE-10 makes relay-interest accounting exact across every removal path"]
+    async fn deleting_two_same_relay_subscriptions_clears_interest() {
+        let TestService { service, path, .. } = build_test_service(false).await;
+        let domain =
+            DomainName::parse("default").assured("the test domain is an identifier-shaped literal");
+        let relay: RelayName = named("events");
+        let key = SubscriptionInterestKey {
+            domain: domain.clone(),
+            relay: relay.clone(),
+        };
+        service
+            .inner
+            .subscription_interest_counts
+            .insert(key.clone(), 2);
+
+        let mut subscriptions = SessionSubscriptions::new();
+        let events = crate::runtime::RelayBroadcast::with_capacity(
+            std::num::NonZeroUsize::new(4).assured("the test relay capacity is a nonzero literal"),
+        );
+        for name in ["first", "second"] {
+            let (tx, _rx) = mpsc::channel(4);
+            subscriptions.insert(
+                named(name),
+                domain.clone(),
+                relay.clone(),
+                SessionSubscriptionTaskConfig {
+                    predicate: None,
+                    sensitivity: nervix_vm::SchemaSensitivity::default(),
+                    delivery_behavior: SubscriptionDeliveryBehavior::Blocking,
+                    batch_sample_rate: None,
+                    runtime: Runtime::default(),
+                    receiver: events.new_receiver(),
+                    tx,
+                },
+            );
+        }
+
+        for name in ["first", "second"] {
+            let result = service
+                .delete_subscription(
+                    nervix_models::DeleteSubscription { name: named(name) },
+                    &mut subscriptions,
+                )
+                .await;
+            assert!(
+                result.success,
+                "subscription '{name}' deletion failed: {}",
+                result.message
+            );
+        }
+        let leaked = service
+            .inner
+            .subscription_interest_counts
+            .contains_key(&key);
+        drop(service);
+        let _ = std::fs::remove_dir_all(path);
+
+        assert!(
+            !leaked,
+            "deleting the final subscription left relay interest behind"
         );
     }
 

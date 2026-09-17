@@ -1268,6 +1268,20 @@ async fn given_nervix_server_process_is_started(world: &mut ScenarioWorld) {
     start_ready_server_process(world, &[]).await;
 }
 
+#[given("a release nervix-server process is started for the client-wire baseline")]
+async fn given_release_server_process_is_started_for_client_wire_baseline(
+    world: &mut ScenarioWorld,
+) {
+    let executable = std::env::var_os("NERVIX_CLIENT_WIRE_BASELINE_SERVER")
+        .verified("the client-wire baseline recipe supplies its release server executable");
+    start_ready_server_process_with_launch(
+        world,
+        ServerProcessLaunch::Executable(PathBuf::from(executable)),
+        &[],
+    )
+    .await;
+}
+
 #[given(expr = "a nervix-server process is started with drain timeout {string}")]
 async fn given_nervix_server_process_is_started_with_drain_timeout(
     world: &mut ScenarioWorld,
@@ -1314,12 +1328,20 @@ async fn given_nervix_server_process_is_started_with_shutdown_timeouts(
 
 /// Starts the scenario's server process with `options` and waits until it accepts commands.
 async fn start_ready_server_process(world: &mut ScenarioWorld, options: &[ServerProcessOption]) {
+    start_ready_server_process_with_launch(world, ServerProcessLaunch::Direct, options).await;
+}
+
+async fn start_ready_server_process_with_launch(
+    world: &mut ScenarioWorld,
+    launch: ServerProcessLaunch,
+    options: &[ServerProcessOption],
+) {
     assert!(
         world.server_process.is_none(),
         "a scenario starts at most one nervix-server process"
     );
     initialize_scenario_identity(world);
-    let mut process = ServerProcess::start(ServerProcessLaunch::Direct, options)
+    let mut process = ServerProcess::start(launch, options)
         .unwrap_or_else(|error| panic!("failed to launch nervix-server: {error}"));
     process
         .wait_until_ready()
@@ -1351,7 +1373,7 @@ async fn given_server_process_is_configured_with_nspl_commands(
     let process = world
         .server_process
         .as_ref()
-        .expect("a nervix-server process must be started first");
+        .verified("the preceding step started a nervix-server process");
     for statement in nspl_statements(&commands) {
         if let Err(error) = process.run_commands(&world.domain, &statement).await {
             panic!(
@@ -1359,6 +1381,28 @@ async fn given_server_process_is_configured_with_nspl_commands(
                 process.log_tail()
             );
         }
+    }
+}
+
+#[when("these NSPL commands are executed on the server process")]
+async fn when_nspl_commands_are_executed_on_server_process(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let commands = expand_placeholders(world, docstring(step));
+    let process = world
+        .server_process
+        .as_ref()
+        .verified("the preceding step started a nervix-server process");
+    world.last_command_output = None;
+    for statement in nspl_statements(&commands) {
+        let output = process.run_commands(&world.domain, &statement).await;
+        world.last_command_output = Some(output.unwrap_or_else(|error| {
+            panic!(
+                "nervix-server rejected {statement:?}: {error}\n{}",
+                process.log_tail()
+            )
+        }));
     }
 }
 
@@ -1490,6 +1534,32 @@ async fn when_server_process_receives_signal(world: &mut ScenarioWorld, signal: 
     world.last_server_signal_at = Some(signalled_at);
 }
 
+#[then(expr = "the server process exits because of {word}")]
+async fn then_server_process_exits_because_of_signal(world: &mut ScenarioWorld, expected: String) {
+    let expected = expected
+        .parse::<nix::sys::signal::Signal>()
+        .assured("the scenario names a recognized signal such as SIGKILL");
+    world.server_process_http_load = None;
+    let process = world
+        .server_process
+        .as_mut()
+        .verified("the preceding step started a nervix-server process");
+    let status = process
+        .wait_for_exit()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let observed = status
+        .signal()
+        .and_then(|signal| nix::sys::signal::Signal::try_from(signal).ok());
+    assert_eq!(
+        observed,
+        Some(expected),
+        "nervix-server ended with {}, expected {expected}\n{}",
+        describe_exit(status),
+        process.log_tail()
+    );
+}
+
 #[then(expr = "the server process is terminated by {word} within {string} of the last signal")]
 async fn then_server_process_is_terminated_by_signal_within(
     world: &mut ScenarioWorld,
@@ -1498,16 +1568,17 @@ async fn then_server_process_is_terminated_by_signal_within(
 ) {
     let expected_signal = expected_signal
         .parse::<nix::sys::signal::Signal>()
-        .expect("the scenario names a signal such as SIGKILL");
-    let bound = humantime::parse_duration(&bound).expect("step duration must be a valid duration");
+        .assured("the scenario names a recognized signal such as SIGKILL");
+    let bound = humantime::parse_duration(&bound)
+        .assured("the scenario termination bound is a valid duration");
     let signalled_at = world
         .last_server_signal_at
-        .expect("a signal must be delivered to the server process first");
+        .verified("the preceding step delivered a signal to the server process");
     world.server_process_http_load = None;
     let process = world
         .server_process
         .as_mut()
-        .expect("a nervix-server process must be started first");
+        .verified("the preceding step started a nervix-server process");
     let status = process
         .wait_for_exit()
         .await
@@ -1531,6 +1602,21 @@ async fn then_server_process_is_terminated_by_signal_within(
     );
 }
 
+#[when("the server process is restarted")]
+async fn when_server_process_is_restarted(world: &mut ScenarioWorld) {
+    assert!(
+        world.server_process_http_load.is_none(),
+        "server process HTTP load must stop before the process restarts"
+    );
+    world
+        .server_process
+        .as_mut()
+        .verified("the preceding step started a nervix-server process")
+        .restart()
+        .await
+        .unwrap_or_else(|error| panic!("failed to restart nervix-server: {error}"));
+}
+
 #[when("the server process is restarted from its existing database")]
 async fn when_server_process_is_restarted_from_existing_database(world: &mut ScenarioWorld) {
     assert!(
@@ -1540,10 +1626,39 @@ async fn when_server_process_is_restarted_from_existing_database(world: &mut Sce
     world
         .server_process
         .as_mut()
-        .expect("a nervix-server process must be started first")
+        .verified("the preceding step started a nervix-server process")
         .restart()
         .await
         .unwrap_or_else(|error| panic!("failed to restart nervix-server: {error}"));
+}
+
+#[when("the current protobuf client-wire baseline is captured")]
+async fn when_current_protobuf_client_wire_baseline_is_captured(world: &mut ScenarioWorld) {
+    let domain = world.domain.clone();
+    let test_id = world.test_id.clone();
+    let process = world
+        .server_process
+        .as_ref()
+        .verified("the preceding step started a nervix-server process");
+    let artifact = crate::common::client_wire_baseline::capture(process, &domain, &test_id)
+        .await
+        .unwrap_or_else(|error| panic!("client-wire baseline failed: {error:#}"));
+    world.placeholders.insert(
+        "client_wire_baseline_artifact".to_string(),
+        artifact.display().to_string(),
+    );
+}
+
+#[then("the client-wire baseline artifact exists")]
+fn then_client_wire_baseline_artifact_exists(world: &mut ScenarioWorld) {
+    let artifact = world
+        .placeholders
+        .get("client_wire_baseline_artifact")
+        .verified("the preceding step captured the baseline artifact");
+    assert!(
+        Path::new(artifact).is_file(),
+        "client-wire baseline artifact was not written to {artifact}"
+    );
 }
 
 #[then(expr = "the server process exits with status {int}")]
@@ -5141,18 +5256,30 @@ async fn given_command_admission_pause(world: &mut ScenarioWorld, node_id: Strin
 async fn then_command_admission_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
     let fault_injection = world.fault_injection.clone();
-    let task = world
-        .background_command_result
-        .as_mut()
-        .unwrap_or_else(|| panic!("a background command request must be active"));
     tokio::time::timeout(Duration::from_secs(30), async {
-        let node_name = crate::common::cluster::node_name(&node_id);
-        tokio::select! {
-            () = fault_injection.wait_for_command_admission_pause(&node_name) => {},
-            result = task => panic!(
-                "command on '{node_id}' returned before reaching its admission pause: {result:?}"
-            ),
+        if let Some(task) = world.background_command_result.as_mut() {
+            let node_name = crate::common::cluster::node_name(&node_id);
+            tokio::select! {
+                () = fault_injection.wait_for_command_admission_pause(&node_name) => {},
+                result = task => panic!(
+                    "command on '{node_id}' returned before reaching its admission pause: \
+                     {result:?}"
+                ),
+            }
+            return;
         }
+        if let Some(task) = world.background_nspl.as_mut() {
+            let node_name = crate::common::cluster::node_name(&node_id);
+            tokio::select! {
+                () = fault_injection.wait_for_command_admission_pause(&node_name) => {},
+                result = task => panic!(
+                    "command on '{node_id}' returned before reaching its admission pause: \
+                     {result:?}"
+                ),
+            }
+            return;
+        }
+        panic!("a background command request must be active");
     })
     .await
     .unwrap_or_else(|error| {
@@ -5166,6 +5293,132 @@ async fn when_command_admission_pause_is_released(world: &mut ScenarioWorld, nod
     world
         .fault_injection
         .release_command_admission_pause(&crate::common::cluster::node_name(&node_id));
+}
+
+#[given(expr = "command execution on node {string} pauses after durable admission")]
+async fn given_command_durable_admission_pause(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_command_after_durable_admission_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "the durable command admission pause on node {string} is reached")]
+async fn then_command_durable_admission_pause_is_reached(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node_name = crate::common::cluster::node_name(&node_id);
+    let fault_injection = world.fault_injection.clone();
+    let task = world
+        .background_command_result
+        .as_mut()
+        .verified("the preceding step started a background command request");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::select! {
+            () = fault_injection.wait_for_command_durable_admission_pause(&node_name) => {},
+            result = task => panic!(
+                "command on '{node_id}' returned before its durable admission pause: {result:?}"
+            ),
+        }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        panic!("durable command admission pause on '{node_id}' was not reached: {error}")
+    });
+}
+
+#[when(expr = "the durable command admission pause on node {string} is released")]
+async fn when_command_durable_admission_pause_is_released(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_command_durable_admission_pause(&crate::common::cluster::node_name(&node_id));
+}
+
+#[given(expr = "relocation publication for domain {string} pauses after planning")]
+async fn given_relocation_publication_pauses_after_planning(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    world.fault_injection.pause_relocation_publication(domain);
+}
+
+#[then(expr = "the relocation publication pause for domain {string} is reached")]
+async fn then_relocation_publication_pause_is_reached(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    let fault_injection = world.fault_injection.clone();
+    let task = world
+        .background_nspl
+        .as_mut()
+        .verified("the preceding step started a background relocation");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::select! {
+            () = fault_injection.wait_for_relocation_publication_pause(&domain) => {},
+            result = task => panic!(
+                "relocation for domain '{domain}' returned before its publication pause: \
+                 {result:?}"
+            ),
+        }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        panic!("relocation publication pause for domain '{domain}' was not reached: {error}")
+    });
+}
+
+#[when(expr = "the relocation publication pause for domain {string} is released")]
+async fn when_relocation_publication_pause_is_released(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    world
+        .fault_injection
+        .release_relocation_publication_pause(&domain);
+}
+
+#[given(expr = "command response delivery on node {string} pauses after execution")]
+async fn given_command_response_delivery_pause(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_command_response_delivery_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "the command response delivery pause on node {string} is reached")]
+async fn then_command_response_delivery_pause_is_reached(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node_name = crate::common::cluster::node_name(&node_id);
+    let fault_injection = world.fault_injection.clone();
+    tokio::select! {
+        () = fault_injection.wait_for_command_response_delivery_pause(&node_name) => {},
+        () = tokio::time::sleep(Duration::from_secs(30)) => {
+            panic!("command response delivery pause on node '{node_id}' was not reached");
+        }
+    }
+}
+
+#[when(expr = "the command response delivery pause on node {string} is released")]
+async fn when_command_response_delivery_pause_is_released(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_command_response_delivery_pause(&crate::common::cluster::node_name(&node_id));
 }
 
 #[given(expr = "resource installation on node {string} pauses before promotion")]
@@ -6479,6 +6732,59 @@ async fn when_referenced_command_request_begins_in_background(
     })));
 }
 
+#[when(
+    expr = "the active session begins this NSPL command request with execution reference {string} \
+            in the background"
+)]
+async fn when_active_session_referenced_command_begins_in_background(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+    #[step] step: &Step,
+) {
+    assert!(
+        world.background_command_result.is_none(),
+        "a background command request is already active"
+    );
+    let query = expand_placeholders(world, docstring(step));
+    let execution_reference = expand_placeholders(world, &execution_reference);
+    let mut session = world
+        .active_session
+        .take()
+        .verified("the preceding setup created an active session");
+    world.active_session_node = None;
+    world.active_session_has_subscription = false;
+    world.background_command_result = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        session
+            .run_command_result_with_reference(&query, &execution_reference)
+            .await
+    })));
+}
+
+#[when(
+    expr = "the active session sends this NSPL command request with execution reference {string} \
+            without reading its response"
+)]
+async fn when_active_session_sends_referenced_command_without_reading_response(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+    #[step] step: &Step,
+) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    let query = expand_placeholders(world, docstring(step));
+    let execution_reference = expand_placeholders(world, &execution_reference);
+    let session = world
+        .active_session
+        .as_mut()
+        .verified("the preceding setup created an active session");
+    session
+        .send_command_request_with_reference(&query, &execution_reference)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to send command without reading its response: {error}")
+        });
+}
+
 #[when("the background command request connection is dropped")]
 async fn when_background_command_request_connection_is_dropped(world: &mut ScenarioWorld) {
     let request = world
@@ -6669,6 +6975,30 @@ async fn then_the_background_nspl_execution_succeeds(world: &mut ScenarioWorld) 
         .expect("background NSPL task must not panic")
         .expect("background NSPL execution must succeed");
     world.last_command_output = Some(output);
+}
+
+#[then("the background NSPL execution does not report success")]
+async fn then_background_nspl_execution_does_not_report_success(world: &mut ScenarioWorld) {
+    let task = world
+        .background_nspl
+        .take()
+        .verified("a background NSPL execution must be active");
+    let result = task
+        .await
+        .assured("the background NSPL task is owned by this scenario");
+    assert!(
+        result.is_err(),
+        "a command absent from the committed transaction was reported as successful"
+    );
+}
+
+#[then("the last command request succeeded")]
+fn then_last_command_request_succeeded(world: &mut ScenarioWorld) {
+    assert!(
+        world.last_command_error.is_none() && world.last_command_output.is_some(),
+        "command request failed: {:?}",
+        world.last_command_error
+    );
 }
 
 #[then(expr = "the background NSPL execution fails with {string}")]
@@ -7646,6 +7976,47 @@ async fn when_this_nspl_command_request_is_executed_on_leader_node(
     }
 }
 
+#[when(
+    expr = "a new session attaches to transaction {string} and executes this NSPL command with \
+            execution reference {string}"
+)]
+async fn when_new_session_attaches_and_executes_referenced_command(
+    world: &mut ScenarioWorld,
+    transaction_id: String,
+    execution_reference: String,
+    #[step] step: &Step,
+) {
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let execution_reference = expand_placeholders(world, &execution_reference);
+    let query = expand_placeholders(world, docstring(step));
+    let leader = current_leader_node(world).await;
+    let mut session = world
+        .cluster()
+        .open_session(&leader, &world.domain)
+        .await
+        .unwrap_or_else(|error| panic!("failed to open replay session: {error}"));
+    let attached = session
+        .attach_transaction(&transaction_id)
+        .await
+        .unwrap_or_else(|error| panic!("failed to attach replay session: {error}"));
+    assert!(
+        attached.success,
+        "failed to attach replay session: {}",
+        attached.message
+    );
+    let result = session
+        .run_command_result_with_reference(&query, &execution_reference)
+        .await
+        .unwrap_or_else(|error| panic!("replayed command request failed: {error}"));
+    if result.success {
+        world.last_command_error = None;
+        world.last_command_output = Some(result.message);
+    } else {
+        world.last_command_output = None;
+        world.last_command_error = Some(result.message);
+    }
+}
+
 #[then(expr = "the current leader node is saved as placeholder {string}")]
 async fn then_current_leader_node_is_saved_as_placeholder(
     world: &mut ScenarioWorld,
@@ -7653,6 +8024,28 @@ async fn then_current_leader_node_is_saved_as_placeholder(
 ) {
     let leader = current_leader_node(world).await;
     world.placeholders.insert(placeholder, leader);
+}
+
+#[then(expr = "the only transaction id is saved as placeholder {string}")]
+async fn then_only_transaction_id_is_saved_as_placeholder(
+    world: &mut ScenarioWorld,
+    placeholder: String,
+) {
+    let output = world
+        .last_command_output
+        .as_deref()
+        .verified("the preceding SHOW TRANSACTIONS command produced output");
+    let ids = output
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter_map(|field| field.strip_prefix("id="))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids.len(),
+        1,
+        "expected exactly one transaction, got output:\n{output}"
+    );
+    world.placeholders.insert(placeholder, ids[0].to_string());
 }
 
 #[then(expr = "transaction {string} eventually has state {string}")]
@@ -11667,6 +12060,41 @@ async fn then_a_node_other_than_placeholder_is_saved_as_placeholder(
     world.placeholders.insert(placeholder, node_id);
 }
 
+#[then(
+    expr = "a node other than placeholders {string} and {string} is saved as placeholder {string}"
+)]
+async fn then_a_node_other_than_two_placeholders_is_saved_as_placeholder(
+    world: &mut ScenarioWorld,
+    first_excluded_placeholder: String,
+    second_excluded_placeholder: String,
+    placeholder: String,
+) {
+    let first_excluded = world
+        .placeholders
+        .get(&first_excluded_placeholder)
+        .unwrap_or_else(|| {
+            panic!("placeholder '{first_excluded_placeholder}' must be saved before assertion")
+        });
+    let second_excluded = world
+        .placeholders
+        .get(&second_excluded_placeholder)
+        .unwrap_or_else(|| {
+            panic!("placeholder '{second_excluded_placeholder}' must be saved before assertion")
+        });
+    let node_id = world
+        .cluster()
+        .node_ids()
+        .into_iter()
+        .find(|node_id| node_id != first_excluded && node_id != second_excluded)
+        .unwrap_or_else(|| {
+            panic!(
+                "no node exists other than placeholders '{first_excluded_placeholder}' and \
+                 '{second_excluded_placeholder}'"
+            )
+        });
+    world.placeholders.insert(placeholder, node_id);
+}
+
 #[then(expr = "the last command output owner equals placeholder {string}")]
 async fn then_last_command_output_owner_equals_placeholder(
     world: &mut ScenarioWorld,
@@ -14080,6 +14508,7 @@ async fn when_http_payload_is_posted_to_node(
     path: String,
     #[step] step: &Step,
 ) {
+    let node_id = expand_placeholders(world, &node_id);
     let host = expand_placeholders(world, &host);
     let path = expand_placeholders(world, &path);
     let payload = expand_placeholders(world, docstring(step));
@@ -14248,6 +14677,40 @@ async fn then_within_stream_subscription_receives_payload(
         docstring(step).replace('\n', "\\n")
     ));
     capture_and_assert_subscription_payload(world, docstring(step), false, duration).await;
+}
+
+#[then(expr = "within {string} client {string} receives a subscription payload")]
+async fn then_named_client_receives_subscription_payload(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_name: String,
+    #[step] step: &Step,
+) {
+    let duration = humantime::parse_duration(&duration)
+        .assured("the scenario subscription deadline is a valid duration");
+    let client_name = expand_placeholders(world, &client_name);
+    let expected = expand_placeholders(world, docstring(step));
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
+        .clone();
+    let event = tokio::time::timeout(duration, client.next_subscription())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "client '{client_name}' did not receive a subscription payload within {duration:?}"
+            )
+        })
+        .unwrap_or_else(|error| {
+            panic!("client '{client_name}' subscription stream closed: {error}")
+        });
+    assert!(
+        payload_matches_expected(&event.payload, &expected),
+        "client '{client_name}' expected subscription payload {expected:?}, got {:?}",
+        event.payload
+    );
+    world.last_subscription_payload = Some(event.payload);
 }
 
 #[then(expr = "node {string} eventually accepts websocket traffic for host {string} path {string}")]
@@ -17742,8 +18205,15 @@ async fn run_dependency_lifecycle_helper(scope: String) -> Option<String> {
 }
 
 async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
-    let cli =
+    let mut cli =
         cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, TestParallelismArgs>::parsed();
+    if cli.tags_filter.is_none() {
+        cli.tags_filter = Some(
+            "(not @client_wire_expected_failure) and (not @client_wire_baseline)"
+                .parse()
+                .assured("the built-in opt-in scenario tag expression is valid"),
+        );
+    }
     let concurrency_factor = cli.custom.concurrency_factor();
     let default_max_concurrent_scenarios = parallelism.max_concurrent_scenarios(concurrency_factor);
     let effective_max_concurrent_scenarios = cli
@@ -17821,6 +18291,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
                     world.stop_durable_catch_up_work();
                     world.fault_injection.release_all_health_responses();
                     world.fault_injection.release_all_domain_clock_progress();
+                    world.fault_injection.release_all_command_pauses();
                     append_cluster_statuses(world, "scenario teardown").await;
                     append_cucumber_log_line(&format!(
                         "scenario context: domain={} test_id={} last_command_error={:?} \

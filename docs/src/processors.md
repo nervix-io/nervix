@@ -311,6 +311,10 @@ Aggregate calls may participate in larger scalar expressions and may combine wit
 initialized `output`, `branch`, and declared `relay_state` values. Route `WHERE` cannot read live
 input rows. Windows use `WIDTH` and `STEP`, never `FLUSH`.
 
+In a window route, `COUNT`, `SUM`, `FIRST`, and `LAST` always name window aggregates. The
+[array and vector functions](filter-map-functions.md#array-and-vector-functions) with the same names
+apply to one `ARRAY` or `VEC` value everywhere else.
+
 A duration width begins at the first retained record's low watermark and becomes due when an input
 watermark or the bound domain clock reaches that logical target. A paced `TIME RATE` therefore
 changes how soon a partially filled window becomes due in real time without changing its source

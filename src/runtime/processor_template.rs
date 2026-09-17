@@ -1,4 +1,73 @@
+use error_stack::{Report, ResultExt as _};
+
 use super::*;
+
+/// Every way applying a refreshed template to a running processor, or instantiating a processor
+/// for a branch, fails.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ProcessorTemplateError {
+    #[error("dynamic processor update changed its route topology")]
+    RouteTopology,
+    #[error("dynamic deduplicator update changed its state keyspace")]
+    DeduplicatorKeyspace,
+    #[error("dynamic window processor update changed its state shape")]
+    WindowStateShape,
+    #[error("dynamic reorderer update changed its ordering key")]
+    ReordererOrderingKey,
+    #[error("dynamic correlator update changed its input sides")]
+    CorrelatorInputSides,
+    #[error("dynamic correlator update changed its timeout wiring")]
+    CorrelatorTimeoutWiring,
+    #[error("dynamic inferencer update changed its inference session")]
+    InferencerSession,
+    #[error("WASM processors do not support dynamic configuration refresh")]
+    WasmRefresh,
+    #[error("dynamic processor update changed its operation kind")]
+    OperationKind,
+    #[error(
+        "processor template targets {} '{}', not {} '{}'",
+        .template_kind.as_str(),
+        .template_processor.as_str(),
+        .kind.as_str(),
+        .processor.as_str()
+    )]
+    TargetMismatch {
+        template_kind: ModelKind,
+        template_processor: ModelName,
+        kind: ModelKind,
+        processor: ModelName,
+    },
+    #[error("dynamic {} update changed processor input topology", .kind.as_str())]
+    InputTopology { kind: ModelKind },
+    #[error("dynamic {} update changed materialized-state dependencies", .kind.as_str())]
+    MaterializedDependencies { kind: ModelKind },
+    #[error(
+        "failed to open {} '{}' replicated state for branch '{}'",
+        .kind.as_str(),
+        .processor.as_str(),
+        branch_key_display(.branch)
+    )]
+    ReplicatedState {
+        kind: ModelKind,
+        processor: ModelName,
+        branch: Option<BranchKey>,
+    },
+    #[error("window processor '{}' requires an input relay", .processor.as_str())]
+    WindowInputRelay { processor: ModelName },
+    #[error("failed to resolve window processor '{}' input schema", .processor.as_str())]
+    WindowInputSchema { processor: ModelName },
+    #[error(
+        "failed to restore window processor '{}' state for branch '{}'",
+        .processor.as_str(),
+        branch_key_display(.branch)
+    )]
+    WindowRestore {
+        processor: ModelName,
+        branch: Option<BranchKey>,
+    },
+    #[error("could not bind branch domain clock")]
+    BindDomainClock,
+}
 
 macro_rules! declare_processor_input_filter_kinds {
     ($($Kind:ident => $label:literal, $operation:ident;)+) => {
@@ -52,7 +121,7 @@ impl RelayProcessorOutputsNode {
     pub(super) fn apply_template(
         &mut self,
         template: &RelayProcessorOutputsTemplate,
-    ) -> Result<bool, String> {
+    ) -> error_stack::Result<bool, ProcessorTemplateError> {
         if self.routes.len() != template.routes.len()
             || self
                 .routes
@@ -60,7 +129,7 @@ impl RelayProcessorOutputsNode {
                 .zip(&template.routes)
                 .any(|(runtime, desired)| runtime.relay != desired.output_relay)
         {
-            return Err("dynamic processor update changed its route topology".to_string());
+            return Err(Report::new(ProcessorTemplateError::RouteTopology));
         }
 
         let mut changed = false;
@@ -83,7 +152,7 @@ impl RelayProcessorOperationNode {
     pub(super) fn apply_template(
         &mut self,
         template: &RelayProcessorOperationTemplate,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), ProcessorTemplateError> {
         match (self, template) {
             (
                 Self::Deduplicator {
@@ -99,9 +168,7 @@ impl RelayProcessorOperationNode {
                 },
             ) => {
                 if deduplicate_on != desired_deduplicate_on {
-                    return Err(
-                        "dynamic deduplicator update changed its state keyspace".to_string()
-                    );
+                    return Err(Report::new(ProcessorTemplateError::DeduplicatorKeyspace));
                 }
                 output_routes.apply_template(desired_outputs)?;
                 *max_time = *desired_max_time;
@@ -133,9 +200,7 @@ impl RelayProcessorOperationNode {
                     || step_duration != desired_step_duration
                     || aggregate != desired_aggregate
                 {
-                    return Err(
-                        "dynamic window processor update changed its state shape".to_string()
-                    );
+                    return Err(Report::new(ProcessorTemplateError::WindowStateShape));
                 }
                 output_routes.apply_template(desired_outputs)?;
                 Ok(())
@@ -154,7 +219,7 @@ impl RelayProcessorOperationNode {
                 },
             ) => {
                 if order_by != desired_order_by {
-                    return Err("dynamic reorderer update changed its ordering key".to_string());
+                    return Err(Report::new(ProcessorTemplateError::ReordererOrderingKey));
                 }
                 output_routes.apply_template(desired_outputs)?;
                 *max_time = *desired_max_time;
@@ -184,10 +249,10 @@ impl RelayProcessorOperationNode {
                 },
             ) => {
                 if left_relays != desired_left_relays || right_relays != desired_right_relays {
-                    return Err("dynamic correlator update changed its input sides".to_string());
+                    return Err(Report::new(ProcessorTemplateError::CorrelatorInputSides));
                 }
                 if timeout_policy != desired_timeout_policy {
-                    return Err("dynamic correlator update changed its timeout wiring".to_string());
+                    return Err(Report::new(ProcessorTemplateError::CorrelatorTimeoutWiring));
                 }
                 if correlate_where != desired_correlate_where {
                     *compiled_where_program = None;
@@ -235,9 +300,7 @@ impl RelayProcessorOperationNode {
                     || inputs != desired_inputs
                     || output_schema != desired_output_schema
                 {
-                    return Err(
-                        "dynamic inferencer update changed its inference session".to_string()
-                    );
+                    return Err(Report::new(ProcessorTemplateError::InferencerSession));
                 }
                 *compiled_input_program = desired_compiled_input_program.clone();
                 output_routes.apply_template(desired_outputs)?;
@@ -269,9 +332,9 @@ impl RelayProcessorOperationNode {
                 Ok(())
             }
             (Self::WasmProcessor { .. }, RelayProcessorOperationTemplate::WasmProcessor { .. }) => {
-                Err("WASM processors do not support dynamic configuration refresh".to_string())
+                Err(Report::new(ProcessorTemplateError::WasmRefresh))
             }
-            _ => Err("dynamic processor update changed its operation kind".to_string()),
+            _ => Err(Report::new(ProcessorTemplateError::OperationKind)),
         }
     }
 }
@@ -388,7 +451,7 @@ impl RelayProcessorTemplate {
         runtime: &Runtime,
         domain: &DomainName,
         key: &Option<BranchKey>,
-    ) -> Result<RelayProcessorNode, String> {
+    ) -> error_stack::Result<RelayProcessorNode, ProcessorTemplateError> {
         Ok(RelayProcessorNode {
             kind: self.kind,
             processor: self.processor.clone(),
@@ -419,7 +482,11 @@ impl RelayProcessorTemplate {
                             &self.processor,
                             key.clone(),
                         ))
-                        .map_err(|error| error.to_string())?;
+                        .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
+                            kind: self.kind,
+                            processor: self.processor.clone(),
+                            branch: key.clone(),
+                        })?;
                     RelayProcessorOperationNode::Deduplicator {
                         output_routes: Self::instantiate_outputs(output_routes),
                         deduplicate_on: deduplicate_on.clone(),
@@ -445,16 +512,26 @@ impl RelayProcessorTemplate {
                             &self.processor,
                             key.clone(),
                         ))
-                        .map_err(|error| error.to_string())?;
+                        .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
+                            kind: self.kind,
+                            processor: self.processor.clone(),
+                            branch: key.clone(),
+                        })?;
                     let input_relay = self.input_relays.first().ok_or_else(|| {
-                        format!(
-                            "window processor '{}' requires an input relay",
-                            self.processor.as_str()
-                        )
+                        Report::new(ProcessorTemplateError::WindowInputRelay {
+                            processor: self.processor.clone(),
+                        })
                     })?;
                     let input_schema = relay_schema_for_runtime(runtime, domain, input_relay)
-                        .map_err(|error| format!("{error:#}"))?;
-                    let state = replicated_state.restore_state(aggregate, &input_schema)?;
+                        .change_context_lazy(|| ProcessorTemplateError::WindowInputSchema {
+                            processor: self.processor.clone(),
+                        })?;
+                    let state = replicated_state
+                        .restore_state(aggregate, &input_schema)
+                        .change_context_lazy(|| ProcessorTemplateError::WindowRestore {
+                            processor: self.processor.clone(),
+                            branch: key.clone(),
+                        })?;
                     RelayProcessorOperationNode::WindowProcessor {
                         output_routes: Self::instantiate_outputs(output_routes),
                         width_messages: *width_messages,
@@ -560,7 +637,11 @@ impl RelayProcessorTemplate {
                             Vec::new(),
                             0,
                         )
-                        .map_err(|error| error.to_string())?;
+                        .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
+                            kind: self.kind,
+                            processor: self.processor.clone(),
+                            branch: key.clone(),
+                        })?;
                     RelayProcessorOperationNode::WasmProcessor {
                         output_routes: Self::instantiate_outputs(output_routes),
                         resource: resource.clone(),
@@ -587,7 +668,7 @@ impl BranchInstanceTemplate {
         &mut self,
         runtime: &Runtime,
         domain: &DomainName,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), WasmInstanceError> {
         for processor in self.processors.values_mut() {
             tokio::task::consume_budget().await;
             if let RelayProcessorOperationTemplate::WasmProcessor {
@@ -598,17 +679,17 @@ impl BranchInstanceTemplate {
                 ..
             } = &mut processor.operation
             {
-                let prepared = runtime
-                    .compile_wasm_processor_module(
-                        domain,
-                        &processor.processor,
-                        resource,
-                        *resource_version,
-                        file,
-                    )
-                    .await
-                    .map_err(|error| format!("{error:#}"))?;
-                *compiled = Some(prepared);
+                *compiled = Some(
+                    runtime
+                        .compile_wasm_processor_module(
+                            domain,
+                            &processor.processor,
+                            resource,
+                            *resource_version,
+                            file,
+                        )
+                        .await?,
+                );
             }
         }
         Ok(())
@@ -619,7 +700,7 @@ impl BranchInstanceTemplate {
         runtime: &Runtime,
         domain: &DomainName,
         key: Option<BranchKey>,
-    ) -> Result<Mutex<BranchRuntime>, String> {
+    ) -> error_stack::Result<Mutex<BranchRuntime>, ProcessorTemplateError> {
         let relays = self
             .relays
             .iter()
@@ -641,16 +722,11 @@ impl BranchInstanceTemplate {
         // because opening a persisted snapshot is admitted, charged work that this synchronous
         // instantiation cannot wait for.
         let materialized_states = HashMap::default();
-        let processors = self
-            .processors
-            .iter()
-            .map(|(processor, template)| {
-                Ok((
-                    processor.clone(),
-                    template.instantiate(runtime, domain, &key)?,
-                ))
-            })
-            .collect::<Result<HashMap<_, _>, String>>()?;
+        let mut processors = HashMap::default();
+        for (processor, template) in &self.processors {
+            let node = template.instantiate(runtime, domain, &key)?;
+            processors.insert(processor.clone(), node);
+        }
         let dispatcher = runtime.inner.remote_dispatcher.load();
         let physical_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
         let branch_key = branch_key_display(&key);
@@ -728,7 +804,7 @@ impl BranchInstanceTemplate {
             .collect();
         let domain_clock = runtime
             .bind_domain_clock(domain)
-            .map_err(|error| format!("could not bind branch domain clock: {error}"))?;
+            .change_context(ProcessorTemplateError::BindDomainClock)?;
         Ok(Mutex::new(BranchRuntime {
             key,
             runtime: runtime.clone(),
@@ -837,10 +913,93 @@ mod tests {
             panic!("test template must remain a deduplicator");
         };
         *deduplicate_on = vec![expression("input.other_id")];
-        assert!(
-            node.apply_node_template(incompatible)
-                .expect_err("a keyspace change must not hot-refresh")
-                .contains("state keyspace")
+        let error = node
+            .apply_node_template(incompatible)
+            .expect_err("a keyspace change must not hot-refresh");
+        assert_eq!(
+            error.current_context().to_string(),
+            "dynamic deduplicator update changed its state keyspace"
+        );
+    }
+
+    #[test]
+    fn processor_template_refresh_rejects_other_targets_topologies_and_kinds() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let input = named::<RelayName>("events");
+        let template = RelayProcessorTemplate {
+            kind: ModelKind::Deduplicator,
+            processor: named("deduplicate_events"),
+            input_relays: vec![input.clone()],
+            input_collect_policies: [(
+                input.clone(),
+                RuntimeInputCollectPolicy {
+                    interval: Duration::from_secs(1),
+                    max_batch_size: Some(1024),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            error_policies: ErrorPolicies::handled_by_log(),
+            from_where: HashMap::default(),
+            filter_where: None,
+            materialized_state: Vec::new(),
+            operation: RelayProcessorOperationTemplate::Deduplicator {
+                output_routes: RelayProcessorOutputsTemplate {
+                    routes: vec![RelayProcessorOutputTemplate {
+                        output_relay: named("unique_events"),
+                        construction: nervix_models::RouteConstruction::default(),
+                        flush_policy: Some(RuntimeFlushPolicy::Immediate),
+                        message_error_policy: MessageErrorPolicy::Log,
+                    }],
+                },
+                deduplicate_on: vec![expression("input.event_id")],
+                max_time: Duration::from_secs(600),
+            },
+        };
+        let mut node = template
+            .instantiate(&runtime, &domain, &None)
+            .expect("deduplicator template must instantiate");
+        let refusal = |node: &mut RelayProcessorNode, desired: RelayProcessorTemplate| {
+            node.apply_node_template(desired)
+                .expect_err("an incompatible template must not hot-refresh")
+                .current_context()
+                .to_string()
+        };
+
+        let mut other_target = template.clone();
+        other_target.processor = named("other_events");
+        assert_eq!(
+            refusal(&mut node, other_target),
+            "processor template targets deduplicator 'other_events', not deduplicator \
+             'deduplicate_events'"
+        );
+
+        let mut other_input = template.clone();
+        other_input.input_relays = vec![named("other_events")];
+        assert_eq!(
+            refusal(&mut node, other_input),
+            "dynamic deduplicator update changed processor input topology"
+        );
+
+        let mut other_routes = template.clone();
+        if let RelayProcessorOperationTemplate::Deduplicator { output_routes, .. } =
+            &mut other_routes.operation
+        {
+            output_routes.routes.clear();
+        }
+        assert_eq!(
+            refusal(&mut node, other_routes),
+            "dynamic processor update changed its route topology"
+        );
+
+        let mut other_kind = template;
+        other_kind.operation = RelayProcessorOperationTemplate::Junction {
+            output_routes: RelayProcessorOutputsTemplate { routes: Vec::new() },
+        };
+        assert_eq!(
+            refusal(&mut node, other_kind),
+            "dynamic processor update changed its operation kind"
         );
     }
 }

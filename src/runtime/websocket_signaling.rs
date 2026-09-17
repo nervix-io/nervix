@@ -1,5 +1,6 @@
 use std::{future::Future, time::Duration};
 
+use error_stack::{AttachmentKind, FrameKind, Report};
 use futures_util::{SinkExt, StreamExt};
 use nervix_models::CreateSignalingProtocol;
 use prost_reflect::MessageDescriptor;
@@ -22,6 +23,30 @@ use crate::{
 
 /// How much of a rejection value is carried into the failure reason.
 const MAX_REJECTION_REASON_BYTES: usize = 512;
+
+type SignalingFrameEncodeResult<T> = Result<T, Report<SignalingFrameEncodeError>>;
+
+#[derive(Debug, Error)]
+enum SignalingFrameEncodeError {
+    #[error("failed to encode {format} signaling frame")]
+    Native { format: &'static str },
+    #[error("failed to encode {format} signaling frame as UTF-8 text")]
+    Text { format: &'static str },
+    #[error("failed to encode signaling frame as protobuf message '{message}'")]
+    Protobuf { message: String },
+}
+
+fn signaling_frame_encode_error_message(error: &Report<SignalingFrameEncodeError>) -> String {
+    error
+        .frames()
+        .find_map(|frame| match frame.kind() {
+            FrameKind::Attachment(AttachmentKind::Printable(attachment)) => {
+                Some(attachment.to_string())
+            }
+            FrameKind::Context(_) | FrameKind::Attachment(_) => None,
+        })
+        .unwrap_or_else(|| error.current_context().to_string())
+}
 
 #[derive(Debug, Error)]
 pub(in crate::runtime) enum SignalingProtocolCompileError {
@@ -229,22 +254,35 @@ impl CompiledSignalingProtocol {
     }
 
     /// Serialize one SEND program output into the frame that carries it.
-    fn encode_frame(&self, value: JsonValue) -> Result<Message, String> {
+    fn encode_frame(&self, value: JsonValue) -> SignalingFrameEncodeResult<Message> {
         match &self.wire {
             CompiledSignalingWire::Native(format) => {
-                let encoded = format
-                    .write_value(value)
-                    .map_err(|error| error.to_string())?;
+                let encoded = format.write_value(value).map_err(|source| {
+                    Report::new(SignalingFrameEncodeError::Native {
+                        format: format.name(),
+                    })
+                    .attach_printable(source.to_string())
+                })?;
                 if format.is_binary() {
                     return Ok(Message::Binary(encoded));
                 }
                 String::from_utf8(encoded)
                     .map(Message::Text)
-                    .map_err(|error| error.to_string())
+                    .map_err(|source| {
+                        Report::new(SignalingFrameEncodeError::Text {
+                            format: format.name(),
+                        })
+                        .attach_printable(source.to_string())
+                    })
             }
             CompiledSignalingWire::Protobuf { send, .. } => encode_protobuf_payload(send, &value)
                 .map(Message::Binary)
-                .map_err(|error| error.to_string()),
+                .map_err(|source| {
+                    Report::new(SignalingFrameEncodeError::Protobuf {
+                        message: send.full_name().to_string(),
+                    })
+                    .attach_printable(source.to_string())
+                }),
         }
     }
 
@@ -367,11 +405,11 @@ impl WebsocketSignalingSession {
                                 index: sent,
                                 reason: error.to_string(),
                             })?;
-                        let frame = self.protocol.encode_frame(value).map_err(|reason| {
+                        let frame = self.protocol.encode_frame(value).map_err(|error| {
                             WebsocketSignalingError::SendEncode {
                                 index: sent,
                                 format: self.protocol.format_name(),
-                                reason,
+                                reason: signaling_frame_encode_error_message(&error),
                             }
                         })?;
                         websocket
@@ -604,6 +642,31 @@ mod tests {
         async fn accept(&self, payload: Vec<u8>) {
             self.accepted.lock().push(payload);
         }
+    }
+
+    #[test]
+    fn signaling_frame_error_message_prefers_printable_source_detail() {
+        let source = Report::new(SignalingFrameEncodeError::Native { format: "JSON" })
+            .attach_printable("invalid frame value");
+        assert_eq!(
+            signaling_frame_encode_error_message(&source),
+            "invalid frame value"
+        );
+
+        let context = Report::new(SignalingFrameEncodeError::Text { format: "RAW" });
+        assert_eq!(
+            signaling_frame_encode_error_message(&context),
+            "failed to encode RAW signaling frame as UTF-8 text"
+        );
+
+        let opaque = Report::new(SignalingFrameEncodeError::Protobuf {
+            message: "events.Envelope".to_string(),
+        })
+        .attach(17_u64);
+        assert_eq!(
+            signaling_frame_encode_error_message(&opaque),
+            "failed to encode signaling frame as protobuf message 'events.Envelope'"
+        );
     }
 
     /// A send step followed by a wait step, the ordinary shape of a one-exchange handshake.

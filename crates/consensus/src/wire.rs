@@ -261,6 +261,16 @@ impl InterconnectRequest for RequestVote {
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RequestPreVote(pub(crate) VoteRequestRecord);
+
+impl InterconnectRequest for RequestPreVote {
+    type Response = Result<VoteResponseRecord, ConsensusRequestError>;
+    const NAME: &'static str = "raft_pre_vote";
+    const CLASS: PoolClass = PoolClass::Management;
+    const TIMEOUT: Duration = Duration::from_secs(5);
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 struct SnapshotMetaRecord {
     last_log_id: Option<LogIdRecord>,
     last_membership: StoredMembershipRecord,

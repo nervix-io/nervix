@@ -756,11 +756,10 @@ fn materialize_nodes(
                             udfs,
                         )
                         .map_err(|reason| {
-                            Report::new(PlanningError::WindowOutputCompilation {
+                            reason.change_context(PlanningError::WindowOutputCompilation {
                                 node: node.processor.clone(),
                                 route: output.relay.clone(),
                             })
-                            .attach_printable(reason)
                         })?;
                         compiled_aggregates.push(compiled.with_demand_offset(demand_offset));
                         demand_offset += route_aggregate.demands().len();
@@ -879,11 +878,10 @@ fn materialize_nodes(
                         udfs,
                     )
                     .map_err(|reason| {
-                        Report::new(PlanningError::InferencerInputCompilation {
+                        reason.change_context(PlanningError::InferencerInputCompilation {
                             node: node.processor.clone(),
                             relay: input_relay.clone(),
                         })
-                        .attach_printable(reason)
                     })?;
                     RelayProcessorOperationTemplate::Inferencer {
                         output_routes: materialize_outputs(

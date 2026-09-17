@@ -8,7 +8,20 @@
 //!   and relay boundaries.
 //! - **Must not know.** NSPL text, control-plane transactions, consensus, or connector protocols.
 
+use error_stack::ResultExt as _;
+
 use super::*;
+
+/// Every way starting or restoring a processor's branch tasks fails.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ProcessorBranchTaskError {
+    #[error("failed to instantiate processor branch '{}'", branch_key_display(.branch))]
+    Instantiate { branch: Option<BranchKey> },
+    #[error("failed to read the persisted processor branch LRU snapshot")]
+    ReadLruSnapshot,
+    #[error("failed to decode the persisted processor branch LRU snapshot")]
+    DecodeLruSnapshot,
+}
 
 pub(super) const PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
@@ -41,7 +54,8 @@ pub(super) struct ProcessorBranchInput {
 }
 
 /// A snapshot task asking the branch task to publish the live state it owns.
-pub(super) type ProcessorSnapshotRequest = oneshot::Sender<Result<(), String>>;
+pub(super) type ProcessorSnapshotRequest =
+    oneshot::Sender<error_stack::Result<(), ProcessorLiveStateError>>;
 
 pub(super) struct ProcessorSnapshotTask {
     pub(super) shutdown_tx: watch::Sender<bool>,
@@ -192,7 +206,7 @@ pub(super) async fn run_processor_node_runtime(
                 warn!(
                     domain = domain.as_str(),
                     processor = processor.as_str(),
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "failed to restore processor branch lru snapshot"
                 );
                 0
@@ -219,7 +233,7 @@ pub(super) async fn run_processor_node_runtime(
                     warn!(
                         domain = domain.as_str(),
                         processor = processor.as_str(),
-                        error = %error,
+                        error = %format_args!("{error:#}"),
                         "failed to restore handed-off processor branch"
                     );
                 }
@@ -507,11 +521,7 @@ pub(super) async fn dispatch_processor_node_input(
                 &template.source,
                 &template.error_policies,
                 batch.acks.iter(),
-                format!(
-                    "failed to instantiate processor branch '{}': {}",
-                    branch_key_display(&key),
-                    error
-                ),
+                format!("{error:#}"),
             );
             return;
         }
@@ -578,9 +588,11 @@ pub(super) fn spawn_processor_branch_task(
     template: &BranchInstanceTemplate,
     key: Option<BranchKey>,
     pending_materialized: VecDeque<PendingMaterializedBatch>,
-) -> Result<ProcessorBranchTask, String> {
+) -> error_stack::Result<ProcessorBranchTask, ProcessorBranchTaskError> {
+    let branch_key = key.clone();
     let mut branch = template
-        .instantiate(&context.runtime_handle, &context.domain, key)?
+        .instantiate(&context.runtime_handle, &context.domain, key)
+        .change_context(ProcessorBranchTaskError::Instantiate { branch: branch_key })?
         .into_inner();
     if let Some(processor) = branch
         .processors
@@ -653,7 +665,7 @@ pub(super) async fn stop_processor_snapshot_task(
     {
         warn!(
             processor = processor.as_str(),
-            error = %error,
+            error = %format_args!("{error:#}"),
             "processor state snapshot failed again after clearing the entries it could not store"
         );
     }
@@ -1182,17 +1194,17 @@ pub(super) fn restore_processor_branch_lru_snapshot(
     graph: &SharedActiveGraph,
     template: &BranchInstanceTemplate,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
-) -> Result<u64, String> {
+) -> error_stack::Result<u64, ProcessorBranchTaskError> {
     let placement = branch_lru_placement(runtime, domain, template);
     let snapshot = runtime
         .take_restorable_branch_lru_snapshot(&placement)
-        .map_err(|error| error.to_string())?;
+        .change_context(ProcessorBranchTaskError::ReadLruSnapshot)?;
     let Some(snapshot) = snapshot else {
         return Ok(0);
     };
-    for (key, last_ingestion) in
-        decode_branch_lru_snapshot(&snapshot.payload).map_err(|error| error.to_string())?
-    {
+    let restored = decode_branch_lru_snapshot(&snapshot.payload)
+        .change_context(ProcessorBranchTaskError::DecodeLruSnapshot)?;
+    for (key, last_ingestion) in restored {
         let entry = spawn_processor_branch_task(
             ProcessorRuntimeContext::new(runtime.clone(), domain.clone(), graph.clone()),
             template,
