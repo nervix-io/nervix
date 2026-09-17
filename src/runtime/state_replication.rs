@@ -2183,7 +2183,7 @@ impl Runtime {
         schedule: DomainSchedule,
     ) -> OwnershipHandoffResult<()> {
         let mut activation = {
-            let _apply = self.inner.schedule_apply_lock.lock().await;
+            let _apply = self.inner.schedule_application.lock().await;
             if self.verify_ownership_handoff_activation(request).is_ok() {
                 return Ok(());
             }
