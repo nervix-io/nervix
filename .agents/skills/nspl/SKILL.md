@@ -159,6 +159,12 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   from 0. Outside window processors, `count`, `sum`, `first`, `last`, and `nth` take one `ARRAY` or
   `VEC` value; inside a window processor route, `count`, `sum`, `first`, and `last` are window
   aggregates over retained input rows.
+- In window routes, prefer the dedicated aggregates (`AVG`, `COUNT_IF`, `BOOL_AND`, `BOOL_OR`,
+  `ARG_MIN`, `ARG_MAX`, `*_POP` and `*_SAMP` variance, deviation, and covariance, `CORR`) over
+  hand-built formulas. Check `Processors` → `Window aggregate functions`: a null argument
+  contributes nothing while `COUNT` counts every row, and an aggregate that can be null (sample
+  statistics, `CORR`, anything over an `OPTIONAL` argument) needs an `OPTIONAL` output field or
+  `COALESCE`.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Declare datetime encoding explicitly when required.
 - For every JAQ-backed codec, use `WITH JAQ TRANSFORMATIONS` and declare `ON INGESTION`,

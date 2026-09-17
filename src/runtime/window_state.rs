@@ -1,34 +1,22 @@
 use error_stack::Report;
 use nervix_models::Timestamp;
-use nervix_vm::window::WindowAggregateProgram;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use super::{
     PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
-    WindowProcessorError, WindowProcessorState,
+    WindowAccumulatorPlan, WindowProcessorError, WindowProcessorState,
     published_generation::{Generation, PublishedGenerations},
 };
 
+/// One row a published window retains.
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
 pub(super) struct WindowEntrySnapshot {
     pub(super) sequence: u64,
     pub(super) timestamp: Timestamp,
     pub(super) key: Option<Vec<nervix_models::RemoteRuntimeField>>,
     pub(super) record: nervix_models::RemoteRuntimeRecord,
-    pub(super) aggregate_inputs: Vec<Option<nervix_models::RemoteRuntimeValue>>,
-}
-
-#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
-pub(super) struct WindowSequenceValueSnapshot {
-    pub(super) timestamp: Timestamp,
-    pub(super) sequence: u64,
-    pub(super) value: nervix_models::RemoteRuntimeValue,
-}
-
-#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
-pub(super) struct WindowSortedCountSnapshot {
-    pub(super) value: nervix_models::RemoteRuntimeValue,
-    pub(super) count: usize,
+    /// Every aggregate argument the row was admitted with, in demand and argument order.
+    pub(super) arguments: Vec<Option<nervix_models::RemoteRuntimeValue>>,
 }
 
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -37,28 +25,14 @@ pub(super) struct LinearHistogramDelayedRemovalSnapshot {
     pub(super) bucket: usize,
 }
 
+/// What one aggregate structure publishes beyond the rows its window retains.
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
-pub(super) enum WindowAggregateAccumulatorSnapshot {
-    Counter {
-        count: usize,
-    },
-    Sequence {
-        values: Vec<WindowSequenceValueSnapshot>,
-    },
-    SortedMap {
-        counts: Vec<WindowSortedCountSnapshot>,
-    },
+pub(super) enum WindowAccumulatorSnapshot {
+    /// The structure is rebuilt entirely from the retained rows.
+    Retained,
+    /// A linear histogram also keeps stepped rows counted until their delay expires.
     LinearHistogram {
-        buckets: Vec<usize>,
-        total: usize,
-        min: f64,
-        max: f64,
-        width: f64,
-        delay_nanos: u64,
         delayed_removals: Vec<LinearHistogramDelayedRemovalSnapshot>,
-    },
-    Sum {
-        total: Option<nervix_models::RemoteRuntimeValue>,
     },
 }
 
@@ -66,7 +40,7 @@ pub(super) enum WindowAggregateAccumulatorSnapshot {
 pub(super) struct WindowProcessorStateSnapshot {
     pub(super) entries: Vec<WindowEntrySnapshot>,
     pub(super) next_sequence: u64,
-    pub(super) accumulators: Vec<WindowAggregateAccumulatorSnapshot>,
+    pub(super) accumulators: Vec<WindowAccumulatorSnapshot>,
 }
 
 /// What one window processor branch keeps beyond the branch task that processes it.
@@ -118,14 +92,14 @@ impl ReplicatedWindowProcessorState {
     /// Build the live window a branch task owns from the window published last.
     pub(super) fn restore_state(
         &self,
-        program: &WindowAggregateProgram,
+        plan: &WindowAccumulatorPlan,
         input_schema: &crate::runtime_schema::CompiledSchema,
     ) -> error_stack::Result<WindowProcessorState, WindowProcessorError> {
         let published = self.generations.load();
         let Some(snapshot) = &published.value else {
-            return Ok(WindowProcessorState::new(program));
+            return Ok(WindowProcessorState::new(plan));
         };
-        WindowProcessorState::from_snapshot(program, input_schema, snapshot)
+        WindowProcessorState::from_snapshot(plan, input_schema, snapshot)
     }
 
     /// Publish the owning branch task's live window as the window everything else reads.

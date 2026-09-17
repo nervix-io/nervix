@@ -199,17 +199,17 @@ pub(super) fn compile_window_aggregate_for_test(
     .expect("window aggregate should compile")
 }
 
-pub(super) fn window_inputs(
-    aggregate: &nervix_vm::window::WindowAggregateProgram,
-    value: RuntimeValue,
-) -> Vec<super::WindowAggregateInput> {
-    aggregate
-        .demands()
-        .iter()
-        .map(|_| super::WindowAggregateInput {
-            value: Some(value.clone()),
-        })
-        .collect()
+/// The accumulator plan of a single-route window over an `events` relay whose `latency` field
+/// has `input_type`, writing `output_fields`.
+pub(super) fn window_plan(
+    set: &str,
+    input_type: ParseAsType,
+    output_fields: &[(&str, ParseAsType)],
+) -> super::WindowAccumulatorPlan {
+    let aggregate = window_aggregate(set);
+    let compiled =
+        compile_window_aggregate_for_test(&aggregate, input_type, &test_schema(output_fields));
+    super::WindowAccumulatorPlan::new([&compiled.route])
 }
 
 pub(super) fn branch_key(

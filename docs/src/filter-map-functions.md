@@ -275,8 +275,9 @@ whose elements are themselves `ARRAY` or `VEC` values is rejected when the state
 and a floating-point sum that is not finite reports a per-message error.
 
 In a [window processor](processors.md#window-processor) route, `count`, `sum`, `first`, and `last`
-are always window aggregates, like `min`, `max`, and `percentile_linear_histogram`. They take a
-per-row expression over `input` and aggregate it across the rows the window retained, so
+are always window aggregates, like every other
+[window aggregate function](processors.md#window-aggregate-functions). They take a per-row
+expression over `input` and aggregate it across the rows the window retained, so
 `COUNT(input.values)` aggregates retained rows rather than counting the elements of one list.
 Everywhere else these names are the list functions above.
 

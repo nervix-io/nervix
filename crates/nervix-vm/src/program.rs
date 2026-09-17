@@ -356,16 +356,33 @@ pub enum FunctionName {
     Unknown(String),
 }
 
+/// Every aggregate a window route can compute over the rows its window retains.
+///
+/// Variants are declared in name order, which is the order a shared aggregate structure lists
+/// the functions it serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, AsRefStr, EnumString)]
 #[strum(ascii_case_insensitive, serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum WindowAggregateFunction {
+    ArgMax,
+    ArgMin,
+    Avg,
+    BoolAnd,
+    BoolOr,
+    Corr,
     Count,
+    CountIf,
+    CovarPop,
+    CovarSamp,
     First,
     Last,
     Max,
     Min,
     PercentileLinearHistogram,
+    StddevPop,
+    StddevSamp,
     Sum,
+    VarPop,
+    VarSamp,
 }
 
 #[derive(Debug, Clone)]
@@ -420,7 +437,44 @@ impl WindowAggregateFunction {
     pub const fn expected_arity(self) -> usize {
         match self {
             Self::PercentileLinearHistogram => 6,
-            Self::Count | Self::First | Self::Last | Self::Max | Self::Min | Self::Sum => 1,
+            Self::ArgMax | Self::ArgMin | Self::Corr | Self::CovarPop | Self::CovarSamp => 2,
+            Self::Avg
+            | Self::BoolAnd
+            | Self::BoolOr
+            | Self::Count
+            | Self::CountIf
+            | Self::First
+            | Self::Last
+            | Self::Max
+            | Self::Min
+            | Self::StddevPop
+            | Self::StddevSamp
+            | Self::Sum
+            | Self::VarPop
+            | Self::VarSamp => 1,
+        }
+    }
+
+    /// Whether the function reads a second per-row argument. The histogram percentile's trailing
+    /// arguments are constants of its configuration, not per-row arguments.
+    pub const fn reads_argument_pair(self) -> bool {
+        match self {
+            Self::ArgMax | Self::ArgMin | Self::Corr | Self::CovarPop | Self::CovarSamp => true,
+            Self::Avg
+            | Self::BoolAnd
+            | Self::BoolOr
+            | Self::Count
+            | Self::CountIf
+            | Self::First
+            | Self::Last
+            | Self::Max
+            | Self::Min
+            | Self::PercentileLinearHistogram
+            | Self::StddevPop
+            | Self::StddevSamp
+            | Self::Sum
+            | Self::VarPop
+            | Self::VarSamp => false,
         }
     }
 }
