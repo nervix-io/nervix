@@ -315,6 +315,69 @@ In a window route, `COUNT`, `SUM`, `FIRST`, and `LAST` always name window aggreg
 [array and vector functions](filter-map-functions.md#array-and-vector-functions) with the same names
 apply to one `ARRAY` or `VEC` value everywhere else.
 
+### Window aggregate functions
+
+Every aggregate reads per-row arguments from the rows the window retains when it emits. Aggregate
+names are case-insensitive, and argument and result types are exact and checked when the processor
+is applied.
+
+| Function | Arguments | Returns | Typed null when |
+| --- | --- | --- | --- |
+| `COUNT(value)` | any | `I64` | never; counts every retained row |
+| `COUNT_IF(condition)` | `BOOL` | `I64` | never; counts rows whose condition is true |
+| `BOOL_AND(condition)` | `BOOL` | `BOOL` | no row has a condition |
+| `BOOL_OR(condition)` | `BOOL` | `BOOL` | no row has a condition |
+| `SUM(value)` | numeric | the argument's type | no row has a value |
+| `AVG(value)` | numeric | `F64` | no row has a value |
+| `MIN(value)`, `MAX(value)` | numeric, `BOOL`, `STRING`, or `DATETIME` | the argument's type | no row has a value |
+| `FIRST(value)`, `LAST(value)` | any | the argument's type | no row has a value |
+| `ARG_MIN(value, key)`, `ARG_MAX(value, key)` | any value; a numeric, `BOOL`, `STRING`, or `DATETIME` key | the value's type | no row has both a value and a key |
+| `VAR_POP(value)`, `STDDEV_POP(value)` | numeric | `F64` | no row has a value |
+| `VAR_SAMP(value)`, `STDDEV_SAMP(value)` | numeric | `F64` | fewer than two rows have a value |
+| `COVAR_POP(first, second)` | numeric, numeric | `F64` | no row has both values |
+| `COVAR_SAMP(first, second)` | numeric, numeric | `F64` | fewer than two rows have both values |
+| `CORR(first, second)` | numeric, numeric | `F64` | fewer than two rows have both values, or either variable is constant across them |
+| `PERCENTILE_LINEAR_HISTOGRAM(value, percentile, buckets, min, max, delay)` | numeric value, then constants | `F64` | the histogram counts no value |
+
+**Nulls.** A row contributes to an aggregate only when every argument that aggregate reads is
+present, so a null argument contributes nothing. `COUNT` is the exception: it counts every retained
+row whatever its argument holds, so `SUM(input.amount) / COUNT(input.amount)` is not the mean of an
+optional field; use `AVG`. A window emits only while it retains at least one row, so an aggregate
+whose arguments are all required always has a value, except the sample statistics and `CORR`,
+which can be undefined in any window. Assign an aggregate that can be null to an `OPTIONAL` field or
+give it a value with `COALESCE`; assigning it to a required field is rejected when the processor is
+applied.
+
+**Order and ties.** `MIN`, `MAX`, `ARG_MIN`, and `ARG_MAX` return the earliest admitted row among
+rows with equal keys. `FIRST` and `LAST` order rows by their ingestion low watermark, then by
+admission. `BOOL` orders `false` before `true`, `STRING` orders by bytes, and floating-point keys
+order NaN above every other value and treat both zeros as equal.
+
+**Population and sample.** `VAR_POP`, `STDDEV_POP`, and `COVAR_POP` divide by the number of
+contributing rows `n`; `VAR_SAMP`, `STDDEV_SAMP`, and `COVAR_SAMP` divide by `n - 1`. Standard
+deviations are the square roots of the matching variances. `CORR` is the Pearson correlation, kept
+within `[-1, 1]`.
+
+**Numerical behavior.** `COUNT`, `COUNT_IF`, `BOOL_AND`, `BOOL_OR`, and `SUM` over integers are
+exact, and an integer `SUM` that does not fit its argument's type is an error when the window
+emits. `SUM` over floating-point values carries the rounding error of every addition beside the
+running total. `AVG`, the variances, standard deviations, covariances, and `CORR` convert each
+argument to the nearest `F64` and keep centered moments, so a variance is never the difference of
+two large sums of squares. Stepping a window never subtracts a floating-point value from a
+statistic: the statistic of the rows that remain is rebuilt from the rows themselves, so a value
+that left the window, however large, leaves no rounding behind. A NaN or infinite floating-point
+argument to `SUM`, `AVG`, a variance, standard deviation, covariance, `CORR`, or
+`PERCENTILE_LINEAR_HISTOGRAM` is a per-message error for its row, which the window does not admit;
+a statistic or floating-point sum that overflows `F64` is an error when the window emits. An error
+at emission fails the acknowledgements of every retained row and clears the window.
+
+Aggregates that can be answered from one structure over the same arguments share it: `AVG`, the
+variances, and the standard deviations of one argument share a `moments` structure; the covariances
+and `CORR` of one argument pair share `co_moments`; `COUNT_IF`, `BOOL_AND`, and `BOOL_OR` share a
+`truth_counter`; `ARG_MIN` and `ARG_MAX` share `arg_extremes`; `MIN` and `MAX` share `extremes`;
+`FIRST` and `LAST` share a `sequence`. `DESCRIBE WINDOW PROCESSOR` lists every structure with the
+functions it serves and the arguments it reads.
+
 A duration width begins at the first retained record's low watermark and becomes due when an input
 watermark or the bound domain clock reaches that logical target. A paced `TIME RATE` therefore
 changes how soon a partially filled window becomes due in real time without changing its source
