@@ -481,12 +481,11 @@ impl PendingIngestGroup {
                 .pop_front()
                 .verified("the check above admits at most one metadata row per decoded payload");
             for _ in 0..messages {
-                builders.append(row).map_err(|error| {
-                    Report::new(IngestGroupError::Metadata {
+                builders
+                    .append(row)
+                    .change_context(IngestGroupError::Metadata {
                         operation: IngestMetadataOperation::Append,
-                    })
-                    .attach_printable(error)
-                })?;
+                    })?;
             }
             payload_acks.split_into(messages, &mut self.acks);
             self.ingested_at
@@ -514,12 +513,11 @@ impl PendingIngestGroup {
         let metadata = self
             .metadata
             .ok_or_else(|| Report::new(IngestGroupError::MissingMetadataBuilders))?;
-        let ingest_metadata = metadata.finish().map_err(|error| {
-            Report::new(IngestGroupError::Metadata {
+        let ingest_metadata = metadata
+            .finish()
+            .change_context(IngestGroupError::Metadata {
                 operation: IngestMetadataOperation::Finish,
-            })
-            .attach_printable(error)
-        })?;
+            })?;
         if ingest_metadata.len() != row_count {
             return Err(Report::new(IngestGroupError::MetadataRowCount {
                 records: row_count,
@@ -621,12 +619,11 @@ impl IngestGroupRows {
                 .enumerate()
                 .filter_map(|(row, metadata)| selected(row).then_some(metadata))
                 .collect(),
-            ingest_metadata: self.ingest_metadata.select(keep).map_err(|error| {
-                Report::new(IngestGroupError::Metadata {
+            ingest_metadata: self.ingest_metadata.select(keep).change_context(
+                IngestGroupError::Metadata {
                     operation: IngestMetadataOperation::Select,
-                })
-                .attach_printable(error)
-            })?,
+                },
+            )?,
             acks: self
                 .acks
                 .into_iter()
@@ -1884,14 +1881,11 @@ impl Runtime {
                 state.read(),
                 missing_partition_timestamp,
             )
-            .map_err(|error| {
-                Report::new(IngestGroupError::KafkaOffsets {
-                    operation: KafkaOffsetInitializationOperation::ResolveResumeOffsets,
-                    domain: domain.clone(),
-                    ingestor: ingestor.clone(),
-                    topic: topic.to_string(),
-                })
-                .attach_printable(error)
+            .change_context(IngestGroupError::KafkaOffsets {
+                operation: KafkaOffsetInitializationOperation::ResolveResumeOffsets,
+                domain: domain.clone(),
+                ingestor: ingestor.clone(),
+                topic: topic.to_string(),
             })?
         } else {
             let timestamp = match &last_start {
@@ -1903,15 +1897,14 @@ impl Runtime {
                 nervix_models::DomainStartPoint::At { timestamp, .. } => *timestamp,
                 nervix_models::DomainStartPoint::Resume => unreachable!("handled above"),
             };
-            KafkaIngestor::offsets_by_timestamp(consumer, topic, timestamp).map_err(|error| {
-                Report::new(IngestGroupError::KafkaOffsets {
+            KafkaIngestor::offsets_by_timestamp(consumer, topic, timestamp).change_context(
+                IngestGroupError::KafkaOffsets {
                     operation: KafkaOffsetInitializationOperation::ResolveTimestampOffsets,
                     domain: domain.clone(),
                     ingestor: ingestor.clone(),
                     topic: topic.to_string(),
-                })
-                .attach_printable(error)
-            })?
+                },
+            )?
         };
         let has_assignment = KafkaIngestor::assign_offsets_for_instance(
             consumer,
@@ -1920,14 +1913,11 @@ impl Runtime {
             scheduled_partition_schedule.as_ref(),
             instance_idx,
         )
-        .map_err(|error| {
-            Report::new(IngestGroupError::KafkaOffsets {
-                operation: KafkaOffsetInitializationOperation::AssignOffsets,
-                domain: domain.clone(),
-                ingestor: ingestor.clone(),
-                topic: topic.to_string(),
-            })
-            .attach_printable(error)
+        .change_context(IngestGroupError::KafkaOffsets {
+            operation: KafkaOffsetInitializationOperation::AssignOffsets,
+            domain: domain.clone(),
+            ingestor: ingestor.clone(),
+            topic: topic.to_string(),
         })?;
 
         if let nervix_models::DomainStartPoint::Resume = &last_start {
@@ -1936,14 +1926,11 @@ impl Runtime {
 
         let concrete_offsets =
             KafkaIngestor::concrete_next_offsets_from_assignment(consumer, topic, &offsets)
-                .map_err(|error| {
-                    Report::new(IngestGroupError::KafkaOffsets {
-                        operation: KafkaOffsetInitializationOperation::ResolveConcreteOffsets,
-                        domain: domain.clone(),
-                        ingestor: ingestor.clone(),
-                        topic: topic.to_string(),
-                    })
-                    .attach_printable(error)
+                .change_context(IngestGroupError::KafkaOffsets {
+                    operation: KafkaOffsetInitializationOperation::ResolveConcreteOffsets,
+                    domain: domain.clone(),
+                    ingestor: ingestor.clone(),
+                    topic: topic.to_string(),
                 })?;
         self.reset_domain_kafka_offsets(state, concrete_offsets)
             .await

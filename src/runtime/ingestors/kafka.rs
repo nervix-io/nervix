@@ -19,6 +19,34 @@ use crate::runtime::physical_time::actual_utc_now;
 
 pub(crate) struct KafkaIngestor;
 
+#[derive(Debug, Error)]
+pub(crate) enum KafkaIngestorError {
+    #[error("failed to build Kafka offset commit for topic '{topic}' partition {partition}")]
+    BuildOffsetCommit { topic: String, partition: i32 },
+    #[error("failed to commit Kafka offset for topic '{topic}' partition {partition}")]
+    CommitOffset { topic: String, partition: i32 },
+    #[error("failed to build Kafka assignment for topic '{topic}' partition {partition}")]
+    BuildAssignment { topic: String, partition: i32 },
+    #[error("failed to assign Kafka partitions for topic '{topic}'")]
+    Assign { topic: String },
+    #[error("failed to clear Kafka partition assignment for topic '{topic}'")]
+    Unassign { topic: String },
+    #[error("failed to fetch Kafka metadata for topic '{topic}'")]
+    FetchMetadata { topic: String },
+    #[error("Kafka returned no metadata for topic '{topic}'")]
+    MissingMetadata { topic: String },
+    #[error("failed to build Kafka timestamp query for topic '{topic}' partition {partition}")]
+    BuildTimestampQuery { topic: String, partition: i32 },
+    #[error("failed to resolve Kafka offsets by timestamp for topic '{topic}'")]
+    ResolveTimestampOffsets { topic: String },
+    #[error("failed to fetch Kafka watermarks for topic '{topic}' partition {partition}")]
+    FetchWatermarks { topic: String, partition: i32 },
+    #[error("unsupported Kafka domain offset for topic '{topic}' partition {partition}")]
+    UnsupportedDomainOffset { topic: String, partition: i32 },
+    #[error("failed to seek Kafka topic '{topic}' partition {partition}")]
+    Seek { topic: String, partition: i32 },
+}
+
 /// The headers of one borrowed Kafka message.
 ///
 /// Appending reads them out of the source message, so a message without headers costs
@@ -824,6 +852,7 @@ impl KafkaIngestor {
                                                                     message.partition(),
                                                                     message.offset() + 1,
                                                                 )
+                                                                .map_err(|error| error.to_string())
                                                             };
                                                             if let Err(error) = commit_result {
                                                                 task_events.report_error(format!(
@@ -1175,6 +1204,7 @@ impl KafkaIngestor {
                                                                 *partition,
                                                                 *next_offset,
                                                             )
+                                                            .map_err(|error| error.to_string())
                                                         };
                                                         if let Err(error) = commit_result {
                                                             task_events.report_error(format!(
@@ -1263,14 +1293,26 @@ impl KafkaIngestor {
         topic: &str,
         partition: i32,
         next_offset: i64,
-    ) -> Result<(), String> {
+    ) -> Result<(), Report<KafkaIngestorError>> {
         let mut offsets = TopicPartitionList::new();
         offsets
             .add_partition_offset(topic, partition, Offset::Offset(next_offset))
-            .map_err(|source| source.to_string())?;
+            .map_err(|source| {
+                Report::new(KafkaIngestorError::BuildOffsetCommit {
+                    topic: topic.to_string(),
+                    partition,
+                })
+                .attach_printable(source.to_string())
+            })?;
         consumer
             .commit(&offsets, CommitMode::Async)
-            .map_err(|source| source.to_string())
+            .map_err(|source| {
+                Report::new(KafkaIngestorError::CommitOffset {
+                    topic: topic.to_string(),
+                    partition,
+                })
+                .attach_printable(source.to_string())
+            })
     }
 
     pub(in crate::runtime) fn assign_offsets_for_instance(
@@ -1279,7 +1321,7 @@ impl KafkaIngestor {
         offsets: &HashMap<KafkaTopicPartition, Offset>,
         schedule: Option<&KafkaPartitionSchedule>,
         instance_idx: u64,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, Report<KafkaIngestorError>> {
         let mut partitions = Vec::new();
         for (key, offset) in offsets {
             if key.topic == topic {
@@ -1303,17 +1345,31 @@ impl KafkaIngestor {
             if assigned_partitions.contains(&partition) {
                 assignment
                     .add_partition_offset(topic, partition, offset)
-                    .map_err(|source| source.to_string())?;
+                    .map_err(|source| {
+                        Report::new(KafkaIngestorError::BuildAssignment {
+                            topic: topic.to_string(),
+                            partition,
+                        })
+                        .attach_printable(source.to_string())
+                    })?;
                 assigned_any = true;
             }
         }
 
         if assigned_any {
-            consumer
-                .assign(&assignment)
-                .map_err(|source| source.to_string())?;
+            consumer.assign(&assignment).map_err(|source| {
+                Report::new(KafkaIngestorError::Assign {
+                    topic: topic.to_string(),
+                })
+                .attach_printable(source.to_string())
+            })?;
         } else {
-            consumer.unassign().map_err(|source| source.to_string())?;
+            consumer.unassign().map_err(|source| {
+                Report::new(KafkaIngestorError::Unassign {
+                    topic: topic.to_string(),
+                })
+                .attach_printable(source.to_string())
+            })?;
         }
 
         Ok(has_topic_partitions)
@@ -1322,14 +1378,21 @@ impl KafkaIngestor {
     pub(crate) fn topic_partitions(
         consumer: &StreamConsumer,
         topic: &str,
-    ) -> Result<Vec<i32>, String> {
+    ) -> Result<Vec<i32>, Report<KafkaIngestorError>> {
         let metadata = consumer
             .fetch_metadata(Some(topic), Duration::from_secs(5))
-            .map_err(|source| source.to_string())?;
+            .map_err(|source| {
+                Report::new(KafkaIngestorError::FetchMetadata {
+                    topic: topic.to_string(),
+                })
+                .attach_printable(source.to_string())
+            })?;
         // The fetch above asked for this one topic, so the response carries at most that topic.
         let Some(topic_metadata) = metadata.topics().iter().find(|entry| entry.name() == topic)
         else {
-            return Err(format!("missing kafka topic metadata for '{topic}'"));
+            return Err(Report::new(KafkaIngestorError::MissingMetadata {
+                topic: topic.to_string(),
+            }));
         };
         Ok(topic_metadata
             .partitions()
@@ -1351,7 +1414,7 @@ impl KafkaIngestor {
         consumer: &StreamConsumer,
         topic: &str,
         timestamp: Timestamp,
-    ) -> Result<HashMap<KafkaTopicPartition, Offset>, String> {
+    ) -> Result<HashMap<KafkaTopicPartition, Offset>, Report<KafkaIngestorError>> {
         Self::offsets_for_partitions_by_timestamp(
             consumer,
             topic,
@@ -1365,7 +1428,7 @@ impl KafkaIngestor {
         topic: &str,
         partitions: I,
         timestamp: Timestamp,
-    ) -> Result<HashMap<KafkaTopicPartition, Offset>, String>
+    ) -> Result<HashMap<KafkaTopicPartition, Offset>, Report<KafkaIngestorError>>
     where
         I: IntoIterator<Item = i32>,
     {
@@ -1374,11 +1437,22 @@ impl KafkaIngestor {
         for partition in partitions {
             query
                 .add_partition_offset(topic, partition, Offset::Offset(timestamp_ms))
-                .map_err(|source| source.to_string())?;
+                .map_err(|source| {
+                    Report::new(KafkaIngestorError::BuildTimestampQuery {
+                        topic: topic.to_string(),
+                        partition,
+                    })
+                    .attach_printable(source.to_string())
+                })?;
         }
         let resolved = consumer
             .offsets_for_times(query, Duration::from_secs(5))
-            .map_err(|source| source.to_string())?;
+            .map_err(|source| {
+                Report::new(KafkaIngestorError::ResolveTimestampOffsets {
+                    topic: topic.to_string(),
+                })
+                .attach_printable(source.to_string())
+            })?;
         let mut offsets = HashMap::default();
         for element in resolved.elements() {
             let offset = match element.offset() {
@@ -1401,10 +1475,16 @@ impl KafkaIngestor {
         topic: &str,
         partition: i32,
         next_offset: i64,
-    ) -> Result<Offset, String> {
+    ) -> Result<Offset, Report<KafkaIngestorError>> {
         let (low, high) = consumer
             .fetch_watermarks(topic, partition, Duration::from_secs(5))
-            .map_err(|source| source.to_string())?;
+            .map_err(|source| {
+                Report::new(KafkaIngestorError::FetchWatermarks {
+                    topic: topic.to_string(),
+                    partition,
+                })
+                .attach_printable(source.to_string())
+            })?;
         let clamped = next_offset.clamp(low, high);
         Ok(Offset::Offset(clamped))
     }
@@ -1414,7 +1494,7 @@ impl KafkaIngestor {
         topic: &str,
         state: &KafkaOffsetStateRead,
         missing_partition_timestamp: Option<Timestamp>,
-    ) -> Result<HashMap<KafkaTopicPartition, Offset>, String> {
+    ) -> Result<HashMap<KafkaTopicPartition, Offset>, Report<KafkaIngestorError>> {
         let mut offsets = HashMap::default();
         let mut missing_partitions = Vec::new();
         for partition in Self::topic_partitions(consumer, topic)? {
@@ -1455,7 +1535,7 @@ impl KafkaIngestor {
         consumer: &StreamConsumer,
         topic: &str,
         offsets: &HashMap<KafkaTopicPartition, Offset>,
-    ) -> Result<HashMap<KafkaTopicPartition, i64>, String> {
+    ) -> Result<HashMap<KafkaTopicPartition, i64>, Report<KafkaIngestorError>> {
         let mut concrete = HashMap::default();
         for (key, offset) in offsets {
             if key.topic != topic {
@@ -1466,13 +1546,28 @@ impl KafkaIngestor {
                 Offset::Beginning => consumer
                     .fetch_watermarks(&key.topic, key.partition, Duration::from_secs(5))
                     .map(|(low, _)| low)
-                    .map_err(|source| source.to_string())?,
+                    .map_err(|source| {
+                        Report::new(KafkaIngestorError::FetchWatermarks {
+                            topic: key.topic.clone(),
+                            partition: key.partition,
+                        })
+                        .attach_printable(source.to_string())
+                    })?,
                 Offset::End | Offset::Invalid => consumer
                     .fetch_watermarks(&key.topic, key.partition, Duration::from_secs(5))
                     .map(|(_, high)| high)
-                    .map_err(|source| source.to_string())?,
+                    .map_err(|source| {
+                        Report::new(KafkaIngestorError::FetchWatermarks {
+                            topic: key.topic.clone(),
+                            partition: key.partition,
+                        })
+                        .attach_printable(source.to_string())
+                    })?,
                 Offset::Stored | Offset::OffsetTail(_) => {
-                    return Err("unsupported kafka domain offset assignment".to_string());
+                    return Err(Report::new(KafkaIngestorError::UnsupportedDomainOffset {
+                        topic: key.topic.clone(),
+                        partition: key.partition,
+                    }));
                 }
             };
             concrete.insert(key.clone(), next_offset);
@@ -1485,7 +1580,7 @@ impl KafkaIngestor {
         topic: &str,
         partition: i32,
         offset: i64,
-    ) -> Result<(), String> {
+    ) -> Result<(), Report<KafkaIngestorError>> {
         consumer
             .seek(
                 topic,
@@ -1493,6 +1588,105 @@ impl KafkaIngestor {
                 Offset::Offset(offset),
                 std::time::Duration::from_secs(5),
             )
-            .map_err(|source| source.to_string())
+            .map_err(|source| {
+                Report::new(KafkaIngestorError::Seek {
+                    topic: topic.to_string(),
+                    partition,
+                })
+                .attach_printable(source.to_string())
+            })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unavailable_consumer() -> StreamConsumer {
+        let consumer: StreamConsumer = ClientConfig::new()
+            .set("bootstrap.servers", "127.0.0.1:1")
+            .set("group.id", "nervix-kafka-typed-error-test")
+            .set("socket.timeout.ms", "10")
+            .set("enable.auto.commit", "false")
+            .create()
+            .expect("an unavailable broker still permits local consumer construction");
+        consumer
+            .subscribe(&["events"])
+            .expect("the test topic subscription should be valid");
+        consumer
+    }
+
+    #[tokio::test]
+    async fn kafka_control_operations_preserve_typed_failure_context() {
+        let consumer = unavailable_consumer();
+
+        let metadata = KafkaIngestor::topic_partitions(&consumer, "events")
+            .expect_err("metadata lookup against an unavailable broker must fail");
+        assert!(matches!(
+            metadata.current_context(),
+            KafkaIngestorError::FetchMetadata { .. }
+        ));
+
+        let timestamps = KafkaIngestor::offsets_for_partitions_by_timestamp(
+            &consumer,
+            "events",
+            [0],
+            Timestamp::from_unix_nanos(0),
+        )
+        .expect_err("timestamp lookup against an unavailable broker must fail");
+        assert!(matches!(
+            timestamps.current_context(),
+            KafkaIngestorError::ResolveTimestampOffsets { .. }
+        ));
+
+        let watermark = KafkaIngestor::normalized_resume_offset(&consumer, "events", 0, 10)
+            .expect_err("watermark lookup against an unavailable broker must fail");
+        assert!(matches!(
+            watermark.current_context(),
+            KafkaIngestorError::FetchWatermarks { .. }
+        ));
+
+        let stored = [(
+            KafkaTopicPartition {
+                topic: "events".to_string(),
+                partition: 0,
+            },
+            Offset::Stored,
+        )]
+        .into_iter()
+        .collect();
+        let unsupported =
+            KafkaIngestor::concrete_next_offsets_from_assignment(&consumer, "events", &stored)
+                .expect_err("stored offsets are not concrete domain offsets");
+        assert!(matches!(
+            unsupported.current_context(),
+            KafkaIngestorError::UnsupportedDomainOffset { .. }
+        ));
+
+        for offset in [Offset::Beginning, Offset::End] {
+            let offsets = [(
+                KafkaTopicPartition {
+                    topic: "events".to_string(),
+                    partition: 0,
+                },
+                offset,
+            )]
+            .into_iter()
+            .collect();
+            let error =
+                KafkaIngestor::concrete_next_offsets_from_assignment(&consumer, "events", &offsets)
+                    .expect_err("concrete boundary offsets require broker watermarks");
+            assert!(matches!(
+                error.current_context(),
+                KafkaIngestorError::FetchWatermarks { .. }
+            ));
+        }
+
+        let seek = KafkaIngestor::seek_offset(&consumer, "events", 0, 10)
+            .expect_err("an unassigned consumer cannot seek");
+        assert!(matches!(
+            seek.current_context(),
+            KafkaIngestorError::Seek { .. }
+        ));
     }
 }

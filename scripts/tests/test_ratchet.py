@@ -467,6 +467,30 @@ async fn reconcile(service: Service) {
 
             self.assertEqual(count(root, "data_plane_cluster_awaits"), 1)
 
+    def test_connector_crates_are_counted_as_data_plane(self) -> None:
+        data_plane_source = """
+async fn publish(model: Model, state: State, runtime: Runtime) {
+    matches!(model, Model::ClientKafka(_));
+    state.lock();
+    runtime.cluster.interested_nodes("orders").await;
+}
+"""
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(
+                root,
+                {
+                    "crates/connectors/kafka/src/sink.rs": data_plane_source,
+                    "crates/connector/src/lib.rs": data_plane_source,
+                    "crates/connectors/kafka/tests/sink.rs": data_plane_source,
+                    "crates/nervix-vm/src/lib.rs": data_plane_source,
+                },
+            )
+
+            self.assertEqual(count(root, "model_matches_in_data_plane"), 2)
+            self.assertEqual(count(root, "data_plane_lock_acquisitions"), 2)
+            self.assertEqual(count(root, "data_plane_cluster_awaits"), 2)
+
     def test_write_once_rwlocks_count_only_arc_and_name_struct_fields(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

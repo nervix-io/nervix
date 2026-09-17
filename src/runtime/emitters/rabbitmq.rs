@@ -68,9 +68,7 @@ impl RabbitMqEmitter {
     async fn connection_from_config(
         config: &[nervix_models::ClientConfigEntry],
     ) -> EmitterRuntimeResult<Connection> {
-        let addr = emitter_config_value(config, "addr", || {
-            "missing RabbitMQ client config key 'addr'".to_string()
-        })?;
+        let addr = emitter_config_value(config, "addr", "RabbitMQ")?;
         if emitter_service_url_has_scheme(&addr, "RabbitMQ addr", "amqps")? {
             let tls = client_tls_paths(config);
             let cert_chain = if let Some(ca_file) = tls.ca_file.as_ref() {

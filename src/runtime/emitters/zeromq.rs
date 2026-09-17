@@ -38,9 +38,7 @@ impl ZeroMqEmitter {
     fn addr_from_config(
         config: &[nervix_models::ClientConfigEntry],
     ) -> EmitterRuntimeResult<String> {
-        emitter_config_value(config, "addr", || {
-            "missing ZeroMQ client config key 'addr'".to_string()
-        })
+        emitter_config_value(config, "addr", "ZeroMQ")
     }
 
     fn bind_from_config(config: &[nervix_models::ClientConfigEntry]) -> bool {

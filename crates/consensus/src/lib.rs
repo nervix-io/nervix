@@ -1545,6 +1545,10 @@ impl Consensus {
                 election_timeout_min,
                 election_timeout_max: u64::try_from(settings.raft_election_timeout_max.as_millis())
                     .unwrap_or(u64::MAX),
+                // A restarted voter may time out before discovery reconnects it to a healthy
+                // leader. Pre-vote lets the current quorum reject that stale candidate without
+                // advancing the term and tearing down the leader's replication streams.
+                enable_pre_vote: Some(true),
                 // The log reader fills a batch to the append target and never splits a command,
                 // so the byte bound comes from storage. This only caps how many entries one
                 // batch may gather before that bound is reached.
@@ -1719,6 +1723,31 @@ impl Consensus {
                     }
                 },
             )?;
+
+        let receiver = self.protocol_receiver();
+        self.inner
+            .interconnect
+            .register_handler::<wire::RequestPreVote, _, _>(move |context, request| {
+                let receiver = receiver.clone();
+                async move {
+                    receiver
+                        .inner
+                        .connectivity
+                        .check()
+                        .map_err(wire::ConsensusRequestError::raft)?;
+                    validate_protocol_origin(
+                        context.peer_node_id(),
+                        request.0.origin_node_id(),
+                        "a pre-vote request",
+                    )
+                    .map_err(wire::ConsensusRequestError::invalid_origin)?;
+                    receiver
+                        .pre_vote(request.0.into_request())
+                        .await
+                        .map(wire::VoteResponseRecord::from)
+                        .map_err(wire::ConsensusRequestError::raft)
+                }
+            })?;
 
         let receiver = self.protocol_receiver();
         self.inner
@@ -3105,6 +3134,13 @@ impl ProtocolReceiver {
         self.inner.raft.vote(req).await
     }
 
+    pub async fn pre_vote(
+        &self,
+        req: VoteRequest<TypeConfig>,
+    ) -> Result<VoteResponse<TypeConfig>, RaftError<TypeConfig>> {
+        self.inner.raft.pre_vote(req).await
+    }
+
     pub async fn transfer_leader(
         &self,
         req: TransferLeaderRequest<TypeConfig>,
@@ -3423,6 +3459,27 @@ where
             .request_with_timeout(
                 &self.target,
                 wire::RequestVote(wire::VoteRequestRecord::from_request(rpc)),
+                rpc_timeout,
+            )
+            .await
+            .map_err(io_error)
+            .map_err(unreachable_err)?;
+        let response = response.map_err(io_error).map_err(unreachable_err)?;
+        Ok(response.into_response())
+    }
+
+    async fn pre_vote(
+        &mut self,
+        rpc: VoteRequest<TypeConfig>,
+        option: RPCOption,
+    ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
+        self.connectivity.check().map_err(unreachable_err)?;
+        let rpc_timeout = option.hard_ttl();
+        let response = self
+            .interconnect
+            .request_with_timeout(
+                &self.target,
+                wire::RequestPreVote(wire::VoteRequestRecord::from_request(rpc)),
                 rpc_timeout,
             )
             .await
