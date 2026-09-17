@@ -1482,7 +1482,6 @@ async fn persist_wasm_guest_state_with_failure_mode(
             processor: processor.clone(),
         }));
     };
-    let module = live.module.clone();
     let save_result = live
         .guest
         .save_state_in_context(nervix_wasm::WasmExecutionContext::new(execution_now))
@@ -1491,19 +1490,20 @@ async fn persist_wasm_guest_state_with_failure_mode(
         Ok(guest_state) => guest_state,
         Err(error) => {
             let resource_limit_exceeded = error.current_context().is_resource_limit_exceeded();
+            let failure = live.module.guest_failure(error, None);
             if resource_limit_exceeded
                 && let WasmStateSaveFailureMode::InvalidateInstance = failure_mode
             {
                 *instance = None;
             }
-            return Err(module.guest_failure(error, None));
+            return Err(failure);
         }
     };
     let saved = replicated_state.replace_guest_state(guest_state);
     runtime
         .persist_wasm_processor_snapshot(replicated_state, &saved)
         .await
-        .map_err(|error| module.persistence_failure(error, saved.revision()))
+        .map_err(|error| live.module.persistence_failure(error, saved.revision()))
 }
 
 pub(super) struct WasmOutputAttributionContext<'a> {

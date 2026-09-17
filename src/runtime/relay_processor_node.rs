@@ -2114,7 +2114,6 @@ impl RelayProcessorNode {
                     let Some(live) = instance.as_mut() else {
                         return;
                     };
-                    let module = live.module.clone();
                     let due_timeouts = live.guest.take_due_timeout_requests(now);
                     if due_timeouts.is_empty() {
                         return;
@@ -2155,7 +2154,14 @@ impl RelayProcessorNode {
                             Err(error) => {
                                 let resource_limit_exceeded =
                                     error.current_context().is_resource_limit_exceeded();
-                                let failure = module.guest_failure(error, None);
+                                let failure = instance
+                                    .as_ref()
+                                    .verified(
+                                        "the let-else above returned unless this branch holds an \
+                                         instance",
+                                    )
+                                    .module
+                                    .guest_failure(error, None);
                                 branch.runtime.handle_general_error_for_acks(
                                     &branch.domain,
                                     self.kind,
@@ -2183,7 +2189,13 @@ impl RelayProcessorNode {
                                 input_schema: &schemas.input,
                                 output_schemas: &schemas.outputs,
                                 key: &output_key,
-                                module: &module,
+                                module: &instance
+                                    .as_ref()
+                                    .verified(
+                                        "the let-else above returned unless this branch holds an \
+                                         instance",
+                                    )
+                                    .module,
                                 dispatch_error: "failed to forward timeout output",
                                 execution_now: now,
                             },
@@ -2281,10 +2293,9 @@ impl RelayProcessorNode {
             else {
                 return;
             };
-            let Some(live) = instance.as_ref() else {
+            if instance.is_none() {
                 return;
-            };
-            let module = live.module.clone();
+            }
             if output_routes.routes.is_empty() {
                 return;
             }
@@ -2299,7 +2310,7 @@ impl RelayProcessorNode {
             };
             let flush_result = instance
                 .as_mut()
-                .verified("the let-else above returned unless this branch holds an instance")
+                .verified("the is_none check above returned unless this branch holds an instance")
                 .guest
                 .flush_in_context(nervix_wasm::WasmExecutionContext::new(execution_now))
                 .await;
@@ -2308,7 +2319,13 @@ impl RelayProcessorNode {
                 Err(error) => {
                     let resource_limit_exceeded =
                         error.current_context().is_resource_limit_exceeded();
-                    let failure = module.guest_failure(error, None);
+                    let failure = instance
+                        .as_ref()
+                        .verified(
+                            "the is_none check above returned unless this branch holds an instance",
+                        )
+                        .module
+                        .guest_failure(error, None);
                     branch.runtime.handle_general_error_for_acks(
                         &branch.domain,
                         self.kind,
@@ -2340,7 +2357,12 @@ impl RelayProcessorNode {
                     input_schema: &schemas.input,
                     output_schemas: &schemas.outputs,
                     key: &output_key,
-                    module: &module,
+                    module: &instance
+                        .as_ref()
+                        .verified(
+                            "the is_none check above returned unless this branch holds an instance",
+                        )
+                        .module,
                     dispatch_error: "failed to forward quiesce flush output",
                     execution_now,
                 },

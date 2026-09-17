@@ -431,7 +431,7 @@ pub(super) async fn flush_branch_wasm_processor(
         );
         return;
     }
-    let Some(live) = instance.as_ref() else {
+    if instance.is_none() {
         branch.runtime.handle_internal_processor_error_for_acks(
             &branch.domain,
             node_kind,
@@ -444,8 +444,7 @@ pub(super) async fn flush_branch_wasm_processor(
             ),
         );
         return;
-    };
-    let module = live.module.clone();
+    }
 
     let (envelope, input_ack_map) =
         match wasm_envelope_from_relay_batch(branch.runtime.executor(), &forwarded, next_ack_token)
@@ -467,7 +466,7 @@ pub(super) async fn flush_branch_wasm_processor(
     ack_map.extend(input_ack_map);
     let process_result = instance
         .as_mut()
-        .verified("the let-else above returned unless this branch holds an instance")
+        .verified("the is_none check above returned unless this branch holds an instance")
         .guest
         .process_envelope_in_context(
             &envelope,
@@ -478,7 +477,11 @@ pub(super) async fn flush_branch_wasm_processor(
         Ok(outputs) => outputs,
         Err(error) => {
             let resource_limit_exceeded = error.current_context().is_resource_limit_exceeded();
-            let failure = module.guest_failure(error, None);
+            let failure = instance
+                .as_ref()
+                .verified("the is_none check above returned unless this branch holds an instance")
+                .module
+                .guest_failure(error, None);
             branch.runtime.handle_general_error_for_acks(
                 &branch.domain,
                 node_kind,
@@ -508,7 +511,10 @@ pub(super) async fn flush_branch_wasm_processor(
             input_schema: &input_schema,
             output_schemas: &output_schemas,
             key: &output_branch_key,
-            module: &module,
+            module: &instance
+                .as_ref()
+                .verified("the is_none check above returned unless this branch holds an instance")
+                .module,
             dispatch_error: "failed to forward message",
             execution_now,
         },
