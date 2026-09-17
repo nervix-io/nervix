@@ -17,7 +17,7 @@ use nervix_interconnect::{
     CaptureOwnershipHandoffStateRequest as RemoteCaptureOwnershipHandoffStateRequest,
     ConfirmOwnershipHandoffStateRequest as RemoteConfirmOwnershipHandoffStateRequest,
     DiscardOwnershipHandoffStateRequest as RemoteDiscardOwnershipHandoffStateRequest,
-    EntityGatePurpose, HandlerRegistrationError, OwnershipHandoffFailure,
+    EntityGatePurpose, HandlerRegistrationError,
     PrepareForcedOwnershipRecoveryRequest as RemotePrepareForcedOwnershipRecoveryRequest,
     PrepareOwnershipHandoffStateRequest as RemotePrepareOwnershipHandoffStateRequest,
     ReconcileOwnershipHandoffPreparationsRequest as RemoteReconcileOwnershipHandoffPreparationsRequest,
@@ -1660,7 +1660,7 @@ impl SessionServiceImpl {
                     }
                     match result {
                         Ok(()) => Ok(()),
-                        Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                        Err(error) => Err(OwnershipHandoffError::remote_rejection(&error)),
                     }
                 }
             },
@@ -1681,7 +1681,7 @@ impl SessionServiceImpl {
                         .await
                     {
                         Ok(discarded) => Ok(discarded),
-                        Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                        Err(error) => Err(OwnershipHandoffError::remote_rejection(&error)),
                     }
                 }
             },

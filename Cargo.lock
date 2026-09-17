@@ -7046,6 +7046,7 @@ dependencies = [
  "nervix-wasm-protocol",
  "nonzero_ext",
  "parking_lot",
+ "strum 0.26.3",
  "thiserror 2.0.20",
  "tokio",
  "triomphe",

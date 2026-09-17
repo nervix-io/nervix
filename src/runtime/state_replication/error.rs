@@ -56,6 +56,23 @@ pub(crate) enum StateReplicationError {
 }
 
 impl StateReplicationError {
+    /// Whether the node failed to write the state to its own store, rather than to synchronize it.
+    pub(crate) const fn is_local_persistence(&self) -> bool {
+        matches!(self, Self::Persist { .. })
+    }
+
+    /// Whether a peer refused to serve the state because it is not the state's authority, rather
+    /// than failing to.
+    pub(crate) const fn is_authority_rejection(&self) -> bool {
+        matches!(
+            self,
+            Self::RemoteFailure {
+                failure: nervix_interconnect::RemoteOperationFailure::Rejected { .. },
+                ..
+            }
+        )
+    }
+
     pub(crate) fn as_remote_failure(
         &self,
         subject: nervix_interconnect::RemoteOperationSubject,

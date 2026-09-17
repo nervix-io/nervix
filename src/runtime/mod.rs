@@ -510,8 +510,10 @@ use wasm_output::{
     WasmOutputContext, checkpoint_wasm_guest_state, dispatch_wasm_output_envelopes,
     persist_wasm_guest_state,
 };
-use wasm_processor::{WasmInstanceError, flush_branch_wasm_processor};
-use wasm_state::{ReplicatedWasmProcessorState, WasmGuestState};
+use wasm_processor::{
+    WasmBranchModule, WasmInstanceError, WasmLiveInstance, flush_branch_wasm_processor,
+};
+use wasm_state::{ReplicatedWasmProcessorState, RestorableGuestState, WasmGuestState};
 pub(in crate::runtime) use websocket_signaling::SignalingProtobufDescriptors;
 use window_processor::{
     WindowAggregateInput, WindowProcessorError, WindowProcessorState, WindowPushFailure,

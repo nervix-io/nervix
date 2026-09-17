@@ -21,6 +21,12 @@ const (
 	maxGuestBufferBytes        = 4 * 1024 * 1024
 )
 
+// nervix_load_state answers with one of these codes when the saved state itself is unusable.
+const (
+	errSnapshotEnvelopeRejected int32 = -7
+	errApplicationStateRejected int32 = -8
+)
+
 //go:wasmimport env nervix_domain_time_nanos
 func hostDomainTimeNanos() int64
 
@@ -468,7 +474,8 @@ func outputRelaysFromInitMetadata(data []byte) ([]string, int32) {
 func loadStateBytes(data []byte) int32 {
 	snapshot, ok := decodeSnapshot(data)
 	if !ok {
-		return errInvalidSize
+		setGlobalError("saved state is not a guest snapshot envelope")
+		return errSnapshotEnvelopeRejected
 	}
 
 	processedBatches = snapshot.ProcessedBatches
@@ -480,13 +487,15 @@ func loadStateBytes(data []byte) int32 {
 	if len(pendingBatch) > 0 {
 		pending, code := decodeEnvelope(pendingBatch)
 		if code != success || pending.Kind != "input" {
-			return errInvalidSize
+			setGlobalError("saved pending batch is not an input envelope")
+			return errApplicationStateRejected
 		}
 	}
 	initMetadata = append(initMetadata[:0], snapshot.InitMetadata...)
 	relays, code := outputRelaysFromInitMetadata(initMetadata)
 	if code != success {
-		return code
+		setGlobalError("saved snapshot carries undecodable branch configuration")
+		return errSnapshotEnvelopeRejected
 	}
 	outputRelays = append(outputRelays[:0], relays...)
 	savedState = append(savedState[:0], snapshot.SavedState...)

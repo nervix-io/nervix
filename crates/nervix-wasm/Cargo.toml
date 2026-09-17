@@ -19,6 +19,7 @@ nervix-recovery = { workspace = true }
 nervix-wasm-protocol = { workspace = true }
 nonzero_ext = { workspace = true }
 parking_lot = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }
 triomphe = { workspace = true }

@@ -31,8 +31,8 @@ The guest imports these functions from the `env` module:
 | `nervix_on_timeout` | `(handle: i64) -> i32` | Host callback when a previously requested timeout fires. |
 | `nervix_flush` | `() -> i32` | Host request to release everything the guest still buffers because the branch is being quiesced for a handoff or shutdown. Queue every buffered output envelope for `nervix_read_emit`. Input the guest keeps past this call stays unacknowledged until the branch resumes. |
 | `nervix_read_emit` | `() -> i32` | If the guest has a pending outgoing batch envelope, writes the next envelope into the reusable buffer, removes it from the pending emit queue, and returns the byte size. Returns `0` when nothing is pending. |
-| `nervix_dump_state` | `() -> i32` | Serializes guest state into the reusable buffer and returns the byte size. |
-| `nervix_load_state` | `(ptr: i32, size: i32) -> i32` | Loads previously dumped guest state bytes. Returns a negative value on rejection. |
+| `nervix_dump_state` | `() -> i32` | Serializes guest state into the reusable buffer and returns the byte size, or a negative code when it cannot serialize the state. |
+| `nervix_load_state` | `(ptr: i32, size: i32) -> i32` | Loads previously dumped guest state bytes. Returns `-7` or `-8` when it rejects the saved state, and another negative code when restoring fails for any other reason. |
 | `nervix_reset_state` | `() -> i32` | Clears guest-owned state while keeping the reusable buffer. |
 
 Return code `0` means success. Negative return codes are guest errors:
@@ -44,6 +44,14 @@ Return code `0` means success. Negative return codes are guest errors:
 | `-3` | Processor called before `nervix_init`. |
 | `-4` | Arrow IPC decode/encode error. |
 | `-5` | Batch envelope decode/encode error. |
+| `-6` | The guest latched into error state; the reason is on the global-error channel. |
+| `-7` | `nervix_load_state` only: the saved bytes are not a snapshot envelope the guest can decode. |
+| `-8` | `nervix_load_state` only: the guest refuses the application state in a decoded snapshot. |
+
+`-7` and `-8` are the only codes that classify the saved state itself as
+unusable. The host keeps the saved state after every failed restore and reports
+a rejection separately from a restore that trapped, exhausted a limit, or
+failed with another code.
 
 ## Batch Envelope
 
@@ -205,7 +213,10 @@ the upstream ingestor reacts according to its delivery mode and retry policy.
 
 WASM guest state is separate from ACK state. The runtime persists and replicates
 the guest-owned bytes returned from `nervix_dump_state`, then restores them with
-`nervix_load_state` when a branch instance is recreated.
+`nervix_load_state` when a branch instance is recreated. A guest that cannot
+decode the snapshot envelope returns `-7`; a guest that decodes it but refuses
+the state it carries returns `-8`. Both example guests put the reason on the
+global-error channel before returning either code.
 
 ## Init Payload
 
