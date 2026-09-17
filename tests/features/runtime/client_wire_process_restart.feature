@@ -22,3 +22,18 @@ Feature: Client wire full-process restart
         sequence I64
       );
       """
+
+  @client_wire_inactivity_restart @exclusive
+  Scenario: Physical inactivity while every node is stopped expires an open transaction
+    Given a nervix-server process is started with transaction idle timeout "1s" and tombstone retention "5s"
+    And the server process is configured with these NSPL commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100000h;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 1000000.0;
+      """
+    When an open transaction is held on the server process as placeholder "transaction_id"
+    And the server process receives SIGKILL
+    Then the server process exits because of SIGKILL
+    When physical time passes for "2s"
+    And the server process is restarted
+    Then server process transaction "{{transaction_id}}" eventually has state "EXPIRED"
