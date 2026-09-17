@@ -5,7 +5,7 @@ use std::{
 };
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
-use arrow_schema::{DataType, Field, Schema};
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 
@@ -478,40 +478,140 @@ impl Compiler {
                 span,
             });
         }
-        let input_type = self.infer_expr_type(&args[0])?;
+        let first_type = self.infer_expr_type(&args[0])?;
         match function {
             WindowAggregateFunction::Count => Ok(DataType::Int64),
-            WindowAggregateFunction::PercentileLinearHistogram => {
-                if !input_type.is_numeric() {
-                    return Err(CompileError {
-                        code: "type_mismatch",
-                        message: format!(
-                            "function '{}' requires a numeric input, found {input_type:?}",
-                            function.nspl_name()
-                        ),
-                        span: args[0].span,
-                    });
+            WindowAggregateFunction::CountIf => {
+                if let Some(error) =
+                    Self::non_boolean_window_argument(function, &first_type, args[0].span)
+                {
+                    return Err(error);
+                }
+                Ok(DataType::Int64)
+            }
+            WindowAggregateFunction::BoolAnd | WindowAggregateFunction::BoolOr => {
+                if let Some(error) =
+                    Self::non_boolean_window_argument(function, &first_type, args[0].span)
+                {
+                    return Err(error);
+                }
+                Ok(DataType::Boolean)
+            }
+            WindowAggregateFunction::Sum => {
+                if let Some(error) =
+                    Self::non_numeric_window_argument(function, &first_type, args[0].span)
+                {
+                    return Err(error);
+                }
+                Ok(first_type)
+            }
+            WindowAggregateFunction::Avg
+            | WindowAggregateFunction::PercentileLinearHistogram
+            | WindowAggregateFunction::StddevPop
+            | WindowAggregateFunction::StddevSamp
+            | WindowAggregateFunction::VarPop
+            | WindowAggregateFunction::VarSamp => {
+                if let Some(error) =
+                    Self::non_numeric_window_argument(function, &first_type, args[0].span)
+                {
+                    return Err(error);
                 }
                 Ok(DataType::Float64)
             }
-            WindowAggregateFunction::Sum => {
-                if !input_type.is_numeric() {
+            WindowAggregateFunction::Corr
+            | WindowAggregateFunction::CovarPop
+            | WindowAggregateFunction::CovarSamp => {
+                if let Some(error) =
+                    Self::non_numeric_window_argument(function, &first_type, args[0].span)
+                {
+                    return Err(error);
+                }
+                let second_type = self.infer_expr_type(&args[1])?;
+                if let Some(error) =
+                    Self::non_numeric_window_argument(function, &second_type, args[1].span)
+                {
+                    return Err(error);
+                }
+                Ok(DataType::Float64)
+            }
+            WindowAggregateFunction::First | WindowAggregateFunction::Last => Ok(first_type),
+            WindowAggregateFunction::Max | WindowAggregateFunction::Min => {
+                if !Self::is_window_orderable(&first_type) {
                     return Err(CompileError {
                         code: "type_mismatch",
                         message: format!(
-                            "function '{}' requires a numeric input, found {input_type:?}",
+                            "function '{}' requires an orderable argument (numeric, BOOL, STRING \
+                             or DATETIME), found {first_type:?}",
                             function.nspl_name()
                         ),
                         span: args[0].span,
                     });
                 }
-                Ok(input_type)
+                Ok(first_type)
             }
-            WindowAggregateFunction::First
-            | WindowAggregateFunction::Last
-            | WindowAggregateFunction::Max
-            | WindowAggregateFunction::Min => Ok(input_type),
+            WindowAggregateFunction::ArgMax | WindowAggregateFunction::ArgMin => {
+                let key_type = self.infer_expr_type(&args[1])?;
+                if !Self::is_window_orderable(&key_type) {
+                    return Err(CompileError {
+                        code: "type_mismatch",
+                        message: format!(
+                            "function '{}' requires an orderable key (numeric, BOOL, STRING or \
+                             DATETIME), found {key_type:?}",
+                            function.nspl_name()
+                        ),
+                        span: args[1].span,
+                    });
+                }
+                Ok(first_type)
+            }
         }
+    }
+
+    /// The error for a window aggregate argument that is not numeric, if it is not.
+    fn non_numeric_window_argument(
+        function: WindowAggregateFunction,
+        argument_type: &DataType,
+        span: Span,
+    ) -> Option<CompileError> {
+        if argument_type.is_numeric() {
+            return None;
+        }
+        Some(CompileError {
+            code: "type_mismatch",
+            message: format!(
+                "function '{}' requires a numeric argument, found {argument_type:?}",
+                function.nspl_name()
+            ),
+            span,
+        })
+    }
+
+    /// The error for a window aggregate argument that is not `BOOL`, if it is not.
+    fn non_boolean_window_argument(
+        function: WindowAggregateFunction,
+        argument_type: &DataType,
+        span: Span,
+    ) -> Option<CompileError> {
+        if argument_type == &DataType::Boolean {
+            return None;
+        }
+        Some(CompileError {
+            code: "type_mismatch",
+            message: format!(
+                "function '{}' requires a BOOL argument, found {argument_type:?}",
+                function.nspl_name()
+            ),
+            span,
+        })
+    }
+
+    /// The types a window orders values or keys by: numbers, booleans, strings and datetimes.
+    fn is_window_orderable(data_type: &DataType) -> bool {
+        data_type.is_numeric()
+            || matches!(
+                data_type,
+                DataType::Boolean | DataType::Utf8 | DataType::Timestamp(TimeUnit::Nanosecond, _)
+            )
     }
 
     fn new(bindings: &[CompileBinding]) -> Result<(Self, Arc<Schema>), CompileError> {
@@ -1229,7 +1329,34 @@ impl Compiler {
                 if let FunctionName::ReadHeader = function {
                     return Ok(true);
                 }
-                if let FunctionName::WindowAggregate(_) = function {
+                if let FunctionName::WindowAggregate(invocation) = function {
+                    // An aggregate is null when no retained row contributed to it, and a row
+                    // contributes only when every argument it reads is present. A window that
+                    // emits retains a row, so present arguments always contribute, except that
+                    // sample statistics need two rows and a correlation needs variation.
+                    let window_function = invocation.function;
+                    if let WindowAggregateFunction::Count | WindowAggregateFunction::CountIf =
+                        window_function
+                    {
+                        return Ok(false);
+                    }
+                    if let WindowAggregateFunction::Corr
+                    | WindowAggregateFunction::CovarSamp
+                    | WindowAggregateFunction::StddevSamp
+                    | WindowAggregateFunction::VarSamp = window_function
+                    {
+                        return Ok(true);
+                    }
+                    let row_arguments = if window_function.reads_argument_pair() {
+                        2
+                    } else {
+                        1
+                    };
+                    for argument in args.iter().take(row_arguments) {
+                        if self.expr_may_be_null(argument)? {
+                            return Ok(true);
+                        }
+                    }
                     return Ok(false);
                 }
                 if let FunctionName::NullIf = function {

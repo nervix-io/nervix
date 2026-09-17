@@ -18,7 +18,7 @@ CREATE SCHEMA order_window (
   order_count I64,
   total_amount I64,
   max_amount I64,
-  avg_amount I64
+  avg_amount F64
 );
 
 CREATE RELAY order_windows SCHEMA order_window BRANCHED BY by_customer;
@@ -40,15 +40,21 @@ CREATE WINDOW PROCESSOR customer_order_window
         order_count = COUNT(input.order_id),
         total_amount = SUM(input.amount),
         max_amount = MAX(input.amount),
-        avg_amount = SUM(input.amount) / COUNT(input.amount)
+        avg_amount = AVG(input.amount)
   ON MESSAGE ERROR LOG;
 
 COMMIT;
 ```
 
-- The aggregate functions are `COUNT`, `FIRST`, `LAST`, `MIN`, `MAX`, `SUM`, and
-  `PERCENTILE_LINEAR_HISTOGRAM`. There is no `AVG` — but aggregate calls participate in larger
-  scalar expressions, so `SUM(...) / COUNT(...)` computes it.
+- The aggregate functions are `COUNT`, `COUNT_IF`, `SUM`, `AVG`, `MIN`, `MAX`, `FIRST`, `LAST`,
+  `ARG_MIN`, `ARG_MAX`, `BOOL_AND`, `BOOL_OR`, `VAR_POP`, `VAR_SAMP`, `STDDEV_POP`, `STDDEV_SAMP`,
+  `COVAR_POP`, `COVAR_SAMP`, `CORR`, and `PERCENTILE_LINEAR_HISTOGRAM`. Aggregate calls also
+  participate in larger scalar expressions. See
+  [Window aggregate functions](processors.md#window-aggregate-functions) for their types, null
+  handling, and numerical behavior.
+- A null argument contributes nothing to an aggregate. An aggregate that can be null, such as
+  `VAR_SAMP` or any aggregate over an `OPTIONAL` field, needs an `OPTIONAL` output field or a
+  `COALESCE`.
 - `input.<field>` is valid **only** inside aggregate arguments; a bare `customer = input.customer`
   is rejected. Aggregates cannot be nested.
 - `WIDTH` equal to `STEP` makes the windows tumbling (no overlap); a smaller `STEP` slides them.
