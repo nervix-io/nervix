@@ -8,15 +8,23 @@ version.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+shuttle = ["tokio/shuttle"]
+
 [dependencies]
 arch-into = { workspace = true }
 error-stack = { workspace = true }
 meticulous = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
+tokio = { package = "shuttle-tokio", version = "1", features = ["full"] }
 triomphe = { workspace = true }
 ubyte = { workspace = true }
 
 [dev-dependencies]
 parking_lot = { workspace = true }
-tokio = { workspace = true, features = ["full", "test-util"] }
+shuttle = { workspace = true }
+tokio = { package = "shuttle-tokio", version = "1", features = [
+  "full",
+  "test-util",
+] }

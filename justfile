@@ -27,7 +27,12 @@ test: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo test --all-targets --all-features --features testing --workspace
+    # The execution crate's `shuttle` feature replaces Tokio primitives and is valid only inside a
+    # Shuttle runner. Keep it out of the ordinary workspace test process, then test execution with
+    # its default real-Tokio wrapper; `test-shuttle` exercises that feature separately.
+    cargo test --all-targets --all-features --features testing --workspace \
+        --exclude nervix-execution
+    cargo test --all-targets --package nervix-execution
 
 test-scenarios *args: tests-deps
     #!/usr/bin/env bash
@@ -65,6 +70,47 @@ test-lib *args: tests-deps
 # server lib.
 test-execution *args:
     cargo test --package nervix-execution --lib -- {{ args }}
+
+# Explore every bounded-execution race invariant under both Shuttle's random and PCT schedulers.
+# Each test gets its own process so a persisted schedule's parent directory identifies the exact
+# invariant that `test-shuttle-replay` must run.
+test-shuttle:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trace_root="{{ cargo_target_dir }}/shuttle-failures"
+    mkdir -p "${trace_root}"
+    shuttle_test_list="$(
+        cargo test --package nervix-execution --features shuttle --lib shuttle_ -- \
+            --list --format terse | sed -n 's/: test$//p'
+    )"
+    if [[ -z "${shuttle_test_list}" ]]; then
+        echo "no shuttle_ tests found in nervix-execution" >&2
+        exit 1
+    fi
+    mapfile -t shuttle_tests <<< "${shuttle_test_list}"
+    for shuttle_test in "${shuttle_tests[@]}"; do
+        trace_directory="${trace_root}/${shuttle_test}"
+        mkdir -p "${trace_directory}"
+        SHUTTLE_TRACE_DIR="${trace_directory}" \
+            cargo test --package nervix-execution --features shuttle --lib \
+                "${shuttle_test}" -- --exact --test-threads=1
+    done
+
+# Replay a schedule emitted under target/shuttle-failures. Its parent directory is the exact test
+# name written by `test-shuttle`, so the schedule cannot accidentally run against another invariant.
+test-shuttle-replay schedule:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    schedule={{ quote(schedule) }}
+    if [[ ! -f "${schedule}" ]]; then
+        echo "Shuttle schedule does not exist: ${schedule}" >&2
+        exit 1
+    fi
+    schedule="$(realpath "${schedule}")"
+    shuttle_test="$(basename "$(dirname "${schedule}")")"
+    SHUTTLE_TRACE_FILE="${schedule}" \
+        cargo test --package nervix-execution --features shuttle --lib \
+            "${shuttle_test}" -- --exact --test-threads=1 --nocapture
 
 # Run the expression VM unit tests, which live in the nervix-vm crate rather than the server lib.
 test-vm *args:
@@ -111,7 +157,13 @@ test-coverage: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo llvm-cov --all-targets --all-features --features testing --workspace --lcov --output-path lcov.info
+    # Merge the default execution tests into the workspace profile without enabling the
+    # Shuttle-only Tokio implementation in ordinary downstream tests.
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov --no-report --all-targets --all-features --features testing --workspace \
+        --exclude nervix-execution
+    cargo llvm-cov --no-report --all-targets --package nervix-execution
+    cargo llvm-cov report --lcov --output-path lcov.info
     cargo crap --lcov lcov.info --min 30 --threshold 30
 
 # Run every Criterion suite. Extra arguments are forwarded to Criterion, so CI can use
