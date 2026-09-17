@@ -12,6 +12,7 @@ workspace = true
 default = []
 shuttle = [
   "dashmap/shuttle",
+  "dep:shuttle",
   "nervix-execution/shuttle",
   "parking_lot/shuttle",
   "tokio/shuttle",
@@ -38,6 +39,7 @@ rand_core = { workspace = true }
 rkyv = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
+shuttle = { workspace = true, optional = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { package = "shuttle-tokio", version = "1", features = ["full"] }

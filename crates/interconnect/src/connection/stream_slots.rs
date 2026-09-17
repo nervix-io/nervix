@@ -3,8 +3,8 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The stream-slot partition each traffic class runs under, the reserved subquotas
-//!   inside the management, replication and bulk partitions, and the drain that takes every slot
-//!   back when a connection retires.
+//!   inside the management, replication and bulk partitions, the leases taken from them, and the
+//!   drain that takes every slot back when a connection retires.
 //! - **Depends on.** The traffic classes and the reserved request subquotas they are divided by.
 //! - **Must not know.** Connection lifetime, request dispatch, or what any message means.
 //!
@@ -12,12 +12,46 @@
 //! never be given capacity the connection does not have and the shared remainder is always what
 //! the reservations leave behind.
 
+#[cfg(not(feature = "shuttle"))]
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(feature = "shuttle")]
+use shuttle::sync::atomic::{AtomicBool, Ordering};
+
 use super::*;
 
+/// One connection's stream-slot partition, and the fence that ends leasing from it once the
+/// connection drains.
+///
 /// Tokio's owned permits retain a `std::sync::Arc` to their one semaphore after the connection
 /// quota bundle is no longer borrowed. The surrounding `triomphe::Arc` keeps cloning a complete
 /// quota bundle to one reference-count operation.
-pub(super) struct ManagementStreamSlotQuotas {
+#[derive(Clone)]
+pub(super) struct StreamSlotQuotas {
+    inner: Arc<StreamSlotQuotasInner>,
+}
+
+struct StreamSlotQuotasInner {
+    /// Raised when the connection begins to drain and never lowered, because a drained connection
+    /// is closed rather than reused. A lease reads it only after taking its slot, and the drain
+    /// raises it before taking any slot back. With sequentially consistent reads and writes, a
+    /// lease therefore either finds it raised and returns its slot, or took its slot before the
+    /// drain began and is one the drain waits for.
+    draining: AtomicBool,
+    partition: StreamSlotPartition,
+}
+
+enum StreamSlotPartition {
+    Management(ManagementStreamSlotQuotas),
+    Replication(ReplicationStreamSlotQuotas),
+    Bulk(BulkStreamSlotQuotas),
+    Shared {
+        class: PoolClass,
+        slots: StdArc<Semaphore>,
+    },
+}
+
+struct ManagementStreamSlotQuotas {
     shared: StdArc<Semaphore>,
     discovery: StdArc<Semaphore>,
     liveness: StdArc<Semaphore>,
@@ -27,7 +61,7 @@ pub(super) struct ManagementStreamSlotQuotas {
     terminal: StdArc<Semaphore>,
 }
 
-pub(super) struct BulkStreamSlotQuotas {
+struct BulkStreamSlotQuotas {
     shared: StdArc<Semaphore>,
     resource: StdArc<Semaphore>,
     snapshot: StdArc<Semaphore>,
@@ -35,20 +69,9 @@ pub(super) struct BulkStreamSlotQuotas {
 
 /// The one ordered append stream a leader keeps open to a follower reserves its own slot, so the
 /// ownership handoff requests that share this pool are never held behind it.
-pub(super) struct ReplicationStreamSlotQuotas {
+struct ReplicationStreamSlotQuotas {
     shared: StdArc<Semaphore>,
     append: StdArc<Semaphore>,
-}
-
-#[derive(Clone)]
-pub(super) enum StreamSlotQuotas {
-    Management(Arc<ManagementStreamSlotQuotas>),
-    Replication(Arc<ReplicationStreamSlotQuotas>),
-    Bulk(Arc<BulkStreamSlotQuotas>),
-    Shared {
-        class: PoolClass,
-        slots: StdArc<Semaphore>,
-    },
 }
 
 const MANAGEMENT_TOTAL_STREAMS: usize = PoolClass::Management.stream_slots_per_connection();
@@ -112,8 +135,54 @@ const _: () = assert!(
 
 impl StreamSlotQuotas {
     pub(super) fn new(class: PoolClass) -> Self {
+        Self {
+            inner: Arc::new(StreamSlotQuotasInner {
+                draining: AtomicBool::new(false),
+                partition: StreamSlotPartition::new(class),
+            }),
+        }
+    }
+
+    /// Lease one stream slot from `subquota`, unless every slot it reserves is already leased or
+    /// the connection has begun to drain.
+    pub(super) fn try_lease(&self, subquota: RequestSubquota) -> Option<OwnedSemaphorePermit> {
+        let quota = self
+            .inner
+            .partition
+            .for_subquota(subquota)
+            .assured("reserved stream subquotas are assigned to their configured pool");
+        let slot = StdArc::clone(quota).try_acquire_owned().ok()?;
+        if self.inner.draining.load(Ordering::SeqCst) {
+            drop(slot);
+            return None;
+        }
+        Some(slot)
+    }
+
+    /// Stream slots currently leased on this connection: its class capacity, less what its
+    /// subquotas still hold free.
+    pub(super) fn leased(&self, class: PoolClass) -> usize {
+        class
+            .stream_slots_per_connection()
+            .checked_sub(self.inner.partition.available())
+            .verified("stream permits are only taken and returned by this connection's leases")
+    }
+
+    /// Stop leasing from this connection, and return the wait for every slot leased before that.
+    ///
+    /// Leasing stops when this is called rather than when the wait is first polled, so a caller
+    /// that races the wait against a deadline has fenced the connection either way. Once the wait
+    /// completes no slot is leased, and none is leased afterwards.
+    pub(super) fn drain(&self) -> impl Future<Output = ()> + Send + '_ {
+        self.inner.draining.store(true, Ordering::SeqCst);
+        self.inner.partition.drain()
+    }
+}
+
+impl StreamSlotPartition {
+    fn new(class: PoolClass) -> Self {
         if class == PoolClass::Management {
-            return Self::Management(Arc::new(ManagementStreamSlotQuotas {
+            return Self::Management(ManagementStreamSlotQuotas {
                 shared: StdArc::new(Semaphore::new(MANAGEMENT_SHARED_STREAMS)),
                 discovery: StdArc::new(Semaphore::new(MANAGEMENT_DISCOVERY_STREAMS)),
                 liveness: StdArc::new(Semaphore::new(MANAGEMENT_LIVENESS_STREAMS)),
@@ -121,20 +190,20 @@ impl StreamSlotQuotas {
                 admission: StdArc::new(Semaphore::new(MANAGEMENT_ADMISSION_STREAMS)),
                 cancellation: StdArc::new(Semaphore::new(MANAGEMENT_CANCELLATION_STREAMS)),
                 terminal: StdArc::new(Semaphore::new(MANAGEMENT_TERMINAL_STREAMS)),
-            }));
+            });
         }
         if class == PoolClass::Replication {
-            return Self::Replication(Arc::new(ReplicationStreamSlotQuotas {
+            return Self::Replication(ReplicationStreamSlotQuotas {
                 shared: StdArc::new(Semaphore::new(REPLICATION_SHARED_STREAMS)),
                 append: StdArc::new(Semaphore::new(REPLICATION_APPEND_STREAMS)),
-            }));
+            });
         }
         if class == PoolClass::Bulk {
-            return Self::Bulk(Arc::new(BulkStreamSlotQuotas {
+            return Self::Bulk(BulkStreamSlotQuotas {
                 shared: StdArc::new(Semaphore::new(BULK_SHARED_STREAMS)),
                 resource: StdArc::new(Semaphore::new(BULK_RESOURCE_STREAMS)),
                 snapshot: StdArc::new(Semaphore::new(BULK_SNAPSHOT_STREAMS)),
-            }));
+            });
         }
         Self::Shared {
             class,
@@ -142,7 +211,7 @@ impl StreamSlotQuotas {
         }
     }
 
-    pub(super) fn for_subquota(&self, subquota: RequestSubquota) -> Option<&StdArc<Semaphore>> {
+    fn for_subquota(&self, subquota: RequestSubquota) -> Option<&StdArc<Semaphore>> {
         match self {
             Self::Management(quotas) => quotas.for_subquota(subquota),
             Self::Replication(quotas) => quotas.for_subquota(subquota),
@@ -157,22 +226,17 @@ impl StreamSlotQuotas {
         }
     }
 
-    /// Stream slots currently leased on this connection: its class capacity, less what its
-    /// subquotas still hold free.
-    pub(super) fn leased(&self, class: PoolClass) -> usize {
-        let available = match self {
+    /// Free slots across the whole partition.
+    fn available(&self) -> usize {
+        match self {
             Self::Management(quotas) => quotas.available(),
             Self::Replication(quotas) => quotas.available(),
             Self::Bulk(quotas) => quotas.available(),
             Self::Shared { slots, .. } => slots.available_permits(),
-        };
-        class
-            .stream_slots_per_connection()
-            .checked_sub(available)
-            .verified("stream permits are only taken and returned by this connection's leases")
+        }
     }
 
-    pub(super) async fn drain(&self) {
+    async fn drain(&self) {
         match self {
             Self::Management(quotas) => quotas.drain().await,
             Self::Replication(quotas) => quotas.drain().await,
@@ -344,3 +408,6 @@ fn available_permits<const QUOTAS: usize>(quotas: [&StdArc<Semaphore>; QUOTAS]) 
     }
     available
 }
+
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_checks;
