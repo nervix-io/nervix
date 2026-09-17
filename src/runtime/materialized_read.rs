@@ -143,7 +143,7 @@ impl Runtime {
         if !found {
             let placement = self.state_placement(
                 domain,
-                RuntimeStateKind::MaterializedRelay,
+                RuntimeState::MaterializedRelay,
                 ModelKind::Relay,
                 relay,
                 None,
@@ -224,7 +224,7 @@ impl Runtime {
     ) -> Vec<RuntimeStatePlacement> {
         let relay_scoped = self.state_placement(
             domain,
-            RuntimeStateKind::MaterializedRelay,
+            RuntimeState::MaterializedRelay,
             ModelKind::Relay,
             relay,
             None,
@@ -459,7 +459,7 @@ impl Runtime {
         }
         let expiring_placement = self.state_placement(
             &placement.domain,
-            RuntimeStateKind::MaterializedRelay,
+            RuntimeState::MaterializedRelay,
             ModelKind::Relay,
             &placement.identifier,
             None,
@@ -480,7 +480,7 @@ impl Runtime {
     ) -> error_stack::Result<Vec<MaterializedRecordReport>, MaterializedReadError> {
         let placement = self.state_placement(
             domain,
-            RuntimeStateKind::MaterializedRelay,
+            RuntimeState::MaterializedRelay,
             ModelKind::Relay,
             relay,
             None,
@@ -527,7 +527,7 @@ impl Runtime {
         let routing = routing.load().clone();
         let placement = self.state_placement(
             domain,
-            RuntimeStateKind::MaterializedRelay,
+            RuntimeState::MaterializedRelay,
             ModelKind::Relay,
             relay,
             None,
@@ -621,7 +621,7 @@ impl Runtime {
     ) -> error_stack::Result<Option<MaterializedGenerationRecord>, MaterializedReadError> {
         let placement = self.state_placement(
             domain,
-            RuntimeStateKind::MaterializedRelay,
+            RuntimeState::MaterializedRelay,
             ModelKind::Relay,
             relay,
             None,
@@ -984,7 +984,7 @@ mod tests {
         let runtime = Runtime::default();
         let placement = runtime.state_placement(
             &domain,
-            RuntimeStateKind::MaterializedRelay,
+            RuntimeState::MaterializedRelay,
             ModelKind::Relay,
             &relay,
             None,

@@ -11,9 +11,8 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt, io,
+    io,
     net::SocketAddr,
-    str::FromStr,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -31,14 +30,15 @@ use nervix_interconnect::{
     ApplicationRevisionResponse, InterconnectRequest, PeerTarget, PoolClass, RequestContext,
     RequestSubquota, Transport as InterconnectTransport,
 };
-use nervix_models::{ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName};
+use nervix_models::{
+    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, NodeEndpoint, NodeServiceUrl,
+};
 use nervix_recovery::Discarded as _;
 use parking_lot::Mutex;
 use rkyv::{Archive, Deserialize, Serialize};
 #[cfg(not(feature = "shuttle"))]
 use tokio as chitchat_tokio;
 use tokio::{
-    net::lookup_host,
     sync::{broadcast, mpsc, watch},
     task::JoinHandle,
 };
@@ -211,12 +211,12 @@ impl ClusterEvents {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct PeerHealthEndpoint {
     identity: ClusterNodeIdentity,
-    address: String,
+    endpoint: NodeEndpoint,
 }
 
 impl PeerHealthEndpoint {
-    pub(crate) fn new(identity: ClusterNodeIdentity, address: String) -> Self {
-        Self { identity, address }
+    pub(crate) fn new(identity: ClusterNodeIdentity, endpoint: NodeEndpoint) -> Self {
+        Self { identity, endpoint }
     }
 }
 
@@ -228,7 +228,7 @@ impl PeerHealthEndpoint {
 pub(crate) struct PeerHealthProbeTarget {
     identity: ClusterNodeIdentity,
     endpoint_generation: u64,
-    address: String,
+    endpoint: NodeEndpoint,
 }
 
 impl PeerHealthProbeTarget {
@@ -244,16 +244,17 @@ impl PeerHealthProbeTarget {
         self.endpoint_generation
     }
 
-    pub(crate) fn address(&self) -> &str {
-        &self.address
+    pub(crate) const fn endpoint(&self) -> &NodeEndpoint {
+        &self.endpoint
     }
 
     fn matches_endpoint(&self, endpoint: &PeerHealthEndpoint) -> bool {
-        self.identity == endpoint.identity && self.address == endpoint.address
+        self.identity == endpoint.identity && self.endpoint == endpoint.endpoint
     }
 
     fn matches_gossip_node(&self, node: &GossipNode) -> bool {
-        self.identity == node.identity() && self.address == node.interconnect_advertise_addr
+        self.identity == node.identity()
+            && node.interconnect_endpoint.as_ref() == Some(&self.endpoint)
     }
 }
 
@@ -422,7 +423,7 @@ impl PeerHealthStateSnapshot {
                     target: PeerHealthProbeTarget {
                         identity: endpoint.identity,
                         endpoint_generation: self.issue_endpoint_generation(),
-                        address: endpoint.address,
+                        endpoint: endpoint.endpoint,
                     },
                     observation: None,
                 },
@@ -727,111 +728,14 @@ impl ClusterStateWatcher {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct HostPort {
-    host: String,
-    port: u16,
-}
-
-impl HostPort {
-    pub fn new(host: impl Into<String>, port: u16) -> Self {
-        Self {
-            host: host.into(),
-            port,
-        }
-    }
-
-    pub fn from_socket_addr(addr: SocketAddr) -> Self {
-        Self::new(addr.ip().to_string(), addr.port())
-    }
-
-    pub fn port(&self) -> u16 {
-        self.port
-    }
-
-    pub fn host(&self) -> &str {
-        &self.host
-    }
-
-    pub fn with_port(&self, port: u16) -> Self {
-        Self::new(self.host.clone(), port)
-    }
-
-    pub fn url_authority(&self) -> String {
-        self.authority()
-    }
-
-    fn authority(&self) -> String {
-        if self.host.contains(':') && !self.host.starts_with('[') {
-            format!("[{}]:{}", self.host, self.port)
-        } else {
-            format!("{}:{}", self.host, self.port)
-        }
-    }
-
-    pub async fn resolve_all(&self) -> io::Result<Vec<SocketAddr>> {
-        let resolved = lookup_host((self.host.as_str(), self.port))
-            .await?
-            .collect::<Vec<_>>();
-        if resolved.is_empty() {
-            Err(io::Error::other(format!(
-                "host '{}' resolved to no addresses",
-                self.host
-            )))
-        } else {
-            Ok(resolved)
-        }
-    }
-
-    pub async fn resolve_one(&self) -> io::Result<SocketAddr> {
-        self.resolve_all().await.map(|mut addrs| addrs.remove(0))
-    }
-}
-
-impl fmt::Display for HostPort {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.authority())
-    }
-}
-
-impl From<SocketAddr> for HostPort {
-    fn from(addr: SocketAddr) -> Self {
-        Self::from_socket_addr(addr)
-    }
-}
-
-impl FromStr for HostPort {
-    type Err = String;
-
-    fn from_str(raw: &str) -> Result<Self, Self::Err> {
-        if let Ok(addr) = raw.parse::<SocketAddr>() {
-            return Ok(Self::from_socket_addr(addr));
-        }
-
-        let (host, port) = raw
-            .rsplit_once(':')
-            .ok_or_else(|| "missing ':port' suffix".to_string())?;
-        if host.is_empty() {
-            return Err("missing host".to_string());
-        }
-        if host.contains(':') {
-            return Err("IPv6 addresses must use '[addr]:port' form".to_string());
-        }
-        let port = port
-            .parse::<u16>()
-            .map_err(|_| format!("invalid port '{port}'"))?;
-        Ok(Self::new(host.to_string(), port))
-    }
-}
-
 #[derive(Clone)]
 pub struct ClusterSettings {
     pub cluster_id: String,
     pub node_id: ClusterNodeName,
     pub grpc_listen_addr: SocketAddr,
-    pub grpc_advertise_addr: String,
-    pub web_console_advertise_addr: String,
-    pub interconnect_advertise_addr: HostPort,
+    pub client_advertise_url: NodeServiceUrl,
+    pub console_advertise_url: NodeServiceUrl,
+    pub interconnect_advertise_addr: NodeEndpoint,
     pub bootstrap_host: Option<String>,
     pub interconnect: InterconnectTransport,
     pub node_unavailability_timeout: Duration,
@@ -959,10 +863,7 @@ impl InterconnectGossipTransport {
             if &node_id == self.inner.interconnect.node_id() {
                 continue;
             }
-            let Some(endpoint) = state.get(KEY_INTERCONNECT_ADVERTISE_ADDR) else {
-                continue;
-            };
-            let Ok(endpoint) = endpoint.parse::<HostPort>() else {
+            let Some(endpoint) = advertised_endpoint(state) else {
                 continue;
             };
             if endpoint.port() != id.gossip_advertise_addr.port() {
@@ -1114,18 +1015,25 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
             .as_nanos(),
     )
     .assured("nanoseconds since the epoch stay within a u64 until the year 2554");
-    let gossip_advertise_addr = settings.interconnect_advertise_addr.resolve_one().await?;
+    let advertised_targets = PeerTarget::resolve(&settings.interconnect_advertise_addr).await?;
+    let gossip_advertise_addr = advertised_targets
+        .into_iter()
+        .next()
+        .assured("PeerTarget::resolve rejects an endpoint that resolves to no addresses")
+        .addr;
     let mut seed_targets = Vec::new();
     let seed_nodes = match settings.bootstrap_host.as_deref() {
         Some(seed) => {
             let seed = seed
-                .parse::<HostPort>()
+                .parse::<NodeEndpoint>()
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-            let addresses = seed.resolve_all().await?;
-            for addr in &addresses {
-                seed_targets.push((*addr, PeerTarget::new(*addr, seed.host().to_string())));
+            let targets = PeerTarget::resolve(&seed).await?;
+            let mut addresses = Vec::new();
+            for target in targets {
+                addresses.push(target.addr.to_string());
+                seed_targets.push((target.addr, target));
             }
-            addresses.into_iter().map(|addr| addr.to_string()).collect()
+            addresses
         }
         None => Vec::new(),
     };
@@ -1161,11 +1069,11 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
         ),
         (
             KEY_GRPC_ADVERTISE_ADDR.to_string(),
-            settings.grpc_advertise_addr.clone(),
+            settings.client_advertise_url.to_string(),
         ),
         (
             KEY_WEB_CONSOLE_ADVERTISE_ADDR.to_string(),
-            settings.web_console_advertise_addr.clone(),
+            settings.console_advertise_url.to_string(),
         ),
         (
             KEY_INTERCONNECT_LISTEN_ADDR.to_string(),
@@ -1566,7 +1474,7 @@ impl ClusterHandle {
                 format!(
                     "- {node_id}: addr={} generation={} observation={outcome} \
                      observation_age={observation_age} status={status}",
-                    peer.target.address(),
+                    peer.target.endpoint(),
                     peer.target.endpoint_generation(),
                 )
             })
@@ -1690,30 +1598,42 @@ fn membership_report(nodes: &BTreeMap<ChitchatId, NodeState>) -> Vec<String> {
         .collect()
 }
 
-/// The peer `state` describes, or `None` while it is still incomplete.
+/// The peer `state` describes, or `None` when this build does not accept its node identity.
 ///
-/// Gossip converges field by field, so a peer that has not yet published every address, or has
-/// published a node identity this build does not accept, is one to skip and read again on the next
-/// round rather than one to report.
+/// Gossip converges field by field, so each advertised endpoint is reported only once the peer has
+/// published a value this build accepts. Until then that endpoint is unavailable and the next round
+/// reads it again.
 fn to_gossip_node(node_id: &ChitchatId, state: &NodeState) -> Option<GossipNode> {
     let identity = cluster_node_identity(node_id)?;
-    let grpc_advertise_addr = state.get(KEY_GRPC_ADVERTISE_ADDR).unwrap_or("").to_string();
-    let web_console_advertise_addr = state
-        .get(KEY_WEB_CONSOLE_ADVERTISE_ADDR)
-        .unwrap_or("")
-        .to_string();
-    let interconnect_advertise_addr = state
-        .get(KEY_INTERCONNECT_ADVERTISE_ADDR)
-        .unwrap_or("")
-        .to_string();
     Some(GossipNode {
         node_id: identity.node_id().clone(),
         incarnation: identity.incarnation(),
         terminating: state.get(KEY_TERMINATING).is_some(),
-        grpc_advertise_addr,
-        web_console_advertise_addr,
-        interconnect_advertise_addr,
+        client_url: advertised_service_url(state, KEY_GRPC_ADVERTISE_ADDR),
+        console_url: advertised_service_url(state, KEY_WEB_CONSOLE_ADVERTISE_ADDR),
+        interconnect_endpoint: advertised_endpoint(state),
     })
+}
+
+/// The interconnect endpoint `state` advertises, or `None` while it is unavailable.
+///
+/// A peer that has not published the key yet, or published one this build cannot read, has no
+/// endpoint to offer until a later gossip round replaces it.
+fn advertised_endpoint(state: &NodeState) -> Option<NodeEndpoint> {
+    let published = state.get(KEY_INTERCONNECT_ADVERTISE_ADDR)?;
+    let Ok(endpoint) = published.parse::<NodeEndpoint>() else {
+        return None;
+    };
+    Some(endpoint)
+}
+
+/// The service URL `state` advertises under `key`, or `None` while it is unavailable.
+fn advertised_service_url(state: &NodeState, key: &str) -> Option<NodeServiceUrl> {
+    let published = state.get(key)?;
+    let Ok(url) = published.parse::<NodeServiceUrl>() else {
+        return None;
+    };
+    Some(url)
 }
 
 fn current_live_nodes(chitchat: &Chitchat) -> BTreeMap<ClusterNodeName, GossipNode> {
@@ -1764,7 +1684,12 @@ mod tests {
     }
 
     fn health_endpoint(node: &str, incarnation: u64, address: &str) -> PeerHealthEndpoint {
-        PeerHealthEndpoint::new(health_identity(node, incarnation), address.to_string())
+        PeerHealthEndpoint::new(
+            health_identity(node, incarnation),
+            address
+                .parse::<NodeEndpoint>()
+                .expect("the test endpoint is a host and port"),
+        )
     }
 
     fn subscription_state(
@@ -1785,6 +1710,77 @@ mod tests {
         (id, state)
     }
 
+    fn gossip_id(node: &str, incarnation: u64) -> ChitchatId {
+        ChitchatId {
+            node_id: node.to_string(),
+            generation_id: incarnation,
+            gossip_advertise_addr: SocketAddr::from(([127, 0, 0, 1], 47392)),
+        }
+    }
+
+    #[test]
+    fn gossip_endpoints_arrive_field_by_field() {
+        let id = gossip_id("node-2", 7);
+        let mut state = NodeState::for_test();
+
+        let discovered = to_gossip_node(&id, &state).expect("a named node is discovered");
+        assert_eq!(discovered.client_url, None);
+        assert_eq!(discovered.console_url, None);
+        assert_eq!(discovered.interconnect_endpoint, None);
+
+        state.set(KEY_INTERCONNECT_ADVERTISE_ADDR, "node-2.test:47392");
+        let discovered = to_gossip_node(&id, &state).expect("a named node is discovered");
+        assert_eq!(
+            discovered.interconnect_endpoint,
+            Some(NodeEndpoint::new("node-2.test", 47392))
+        );
+        assert_eq!(discovered.client_url, None);
+        assert_eq!(discovered.console_url, None);
+
+        state.set(KEY_GRPC_ADVERTISE_ADDR, "http://node-2.test:47391");
+        state.set(KEY_WEB_CONSOLE_ADVERTISE_ADDR, "https://node-2.test:8443");
+        let discovered = to_gossip_node(&id, &state).expect("a named node is discovered");
+        assert_eq!(
+            discovered.client_url,
+            Some(
+                "http://node-2.test:47391"
+                    .parse::<NodeServiceUrl>()
+                    .expect("the test url has a scheme and a host")
+            )
+        );
+        assert_eq!(
+            discovered.console_url,
+            Some(
+                "https://node-2.test:8443"
+                    .parse::<NodeServiceUrl>()
+                    .expect("the test url has a scheme and a host")
+            )
+        );
+    }
+
+    #[test]
+    fn malformed_gossip_endpoints_stay_unavailable() {
+        let id = gossip_id("node-2", 7);
+        let mut state = NodeState::for_test();
+        state.set(KEY_INTERCONNECT_ADVERTISE_ADDR, "node-2.test");
+        state.set(KEY_GRPC_ADVERTISE_ADDR, "node-2.test:47391");
+        state.set(KEY_WEB_CONSOLE_ADVERTISE_ADDR, "");
+
+        let discovered = to_gossip_node(&id, &state).expect("a named node is discovered");
+        assert_eq!(discovered.interconnect_endpoint, None);
+        assert_eq!(discovered.client_url, None);
+        assert_eq!(discovered.console_url, None);
+    }
+
+    #[test]
+    fn a_node_whose_name_this_build_rejects_is_not_discovered() {
+        let id = gossip_id("Node 2", 7);
+        let mut state = NodeState::for_test();
+        state.set(KEY_INTERCONNECT_ADVERTISE_ADDR, "node-2.test:47392");
+
+        assert!(to_gossip_node(&id, &state).is_none());
+    }
+
     #[test]
     fn derive_peer_addr_increments_port() {
         let grpc_addr: SocketAddr = "127.0.0.1:47391".parse().expect("valid socket addr");
@@ -1797,23 +1793,6 @@ mod tests {
     fn derive_peer_addr_returns_none_on_port_overflow() {
         let grpc_addr: SocketAddr = "127.0.0.1:65535".parse().expect("valid socket addr");
         assert!(derive_peer_addr(grpc_addr).is_none());
-    }
-
-    #[test]
-    fn host_port_parses_hostname() {
-        let parsed = "nervix-0.nervix-headless:47392"
-            .parse::<HostPort>()
-            .expect("host:port should parse");
-        assert_eq!(parsed.to_string(), "nervix-0.nervix-headless:47392");
-    }
-
-    #[test]
-    fn host_port_round_trips_ipv6_socket_addr() {
-        let parsed = "[::1]:47392"
-            .parse::<HostPort>()
-            .expect("IPv6 socket address should parse");
-        assert_eq!(parsed.to_string(), "[::1]:47392");
-        assert_eq!(parsed.url_authority(), "[::1]:47392");
     }
 
     #[test]

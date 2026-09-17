@@ -67,6 +67,13 @@ retained terminal result. Persisted consensus records have exactly one current c
 shape. A malformed archive, an archive that fails current-shape validation, or incomplete stored
 state fails startup with a recreation error; recovery never defaults or reinterprets it.
 
+Each node applies a published cluster revision once. A revision at or below the one it has already
+applied carries nothing newer and is ignored, and the first revision a node sees always applies. No
+revision value is reserved to mean that a node has applied nothing yet, so every revision a cluster
+can publish, including the largest one, still suppresses the stale revisions that follow it. A
+revision whose application fails is not recorded as applied, so the node applies that revision again
+instead of treating the failed attempt as its current state.
+
 ## Replication And Log Retention
 
 The leader replicates to each follower over one ordered append stream, separate from the
@@ -89,18 +96,21 @@ the gap between the heartbeat interval and the minimum election timeout, so a fo
 from the leader before its election timer can expire.
 
 A node snapshots its replicated state automatically after 10,000 committed entries
-(`--raft-snapshot-entry-threshold`) or 64 MiB of appended entries since its last completed
-snapshot (`--raft-snapshot-byte-threshold`), whichever comes first, with one build at a time. A
-snapshot is sealed as bounded sections of keyed records rather than one aggregate value, so a
-larger cluster state becomes more sections instead of a snapshot that no longer fits. The builder
-pins one consistent database view, then reads, encodes, and synchronizes one section per consensus
-storage turn under the bulk-memory budget. State-machine writes may proceed between sections
-without changing that pinned view. The sections are written and synchronized first; the manifest
-naming the generation, its applied position, and its membership is published afterwards in one
-atomic write. A node interrupted between the two finishes the replacement on its next start, and a
-start also deletes every stored generation the published manifest does not name. A node keeps the
-newest snapshot and at most one older one, held only while a transfer is still reading it; a
-transfer that would hold a second older snapshot is cancelled and restarts from the newest.
+(`--raft-snapshot-entry-threshold`) or 64 MiB of appended entries since its last completed snapshot
+(`--raft-snapshot-byte-threshold`), whichever comes first, with one build at a time. The byte
+threshold asks for at most one build per completed snapshot, and a node that has completed no
+snapshot yet is a state of its own rather than one standing at snapshot index zero, so the threshold
+can ask again as soon as a snapshot completes. A snapshot is sealed as bounded sections of keyed
+records rather than one aggregate value, so a larger cluster state becomes more sections instead of
+a snapshot that no longer fits. The builder pins one consistent database view, then reads, encodes,
+and synchronizes one section per consensus storage turn under the bulk-memory budget. State-machine
+writes may proceed between sections without changing that pinned view. The sections are written and
+synchronized first; the manifest naming the generation, its applied position, and its membership is
+published afterwards in one atomic write. A node interrupted between the two finishes the
+replacement on its next start, and a start also deletes every stored generation the published
+manifest does not name. A node keeps the newest snapshot and at most one older one, held only while
+a transfer is still reading it; a transfer that would hold a second older snapshot is cancelled and
+restarts from the newest.
 
 The node then keeps at most 1,000 snapshot-covered entries
 (`--raft-covered-log-entries-retained`) or 64 MiB of covered suffix
@@ -503,6 +513,16 @@ reapplying its retained schedule after a destination restart or a later domain r
 newer checkpoints the destination has published. A state reset occurs only when the accepted recovery
 decision either stages the recreated checkpoint inventory or reports a reset outcome for every state
 component owned by the entity.
+
+A forced recovery of a WASM processor also starts a new guest-state generation for every branch, in
+the schedule publication that names the new owner, and that schedule is the one the recovery
+preparation is fingerprinted against. The destination stages the checkpoints of the generation being
+replaced and activation publishes them in the new generation. A snapshot of any earlier generation,
+whether it is held by the lost owner, a replica that was offline, or an older preparation, is never
+selected, installed, or restored again, even when its revision is higher than every current one. A
+planned handoff keeps the generation. Generation transitions are published only by a committed
+schedule, so they are serialized with every other mutation of the domain through the same lease or
+automatic-decision fence as the schedule itself.
 
 For a planned handoff, each prepare destination becomes a tracked participant before the
 side-effecting request is sent. A lost response and cancellation of the coordinating future are

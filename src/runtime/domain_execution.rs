@@ -344,7 +344,7 @@ impl Runtime {
                     domain: domain.as_str().to_string(),
                     reason: error.to_string(),
                 })?;
-        self.install_state_schema_fingerprints_from_graph(domain, &graph);
+        self.install_state_identities_from_graph(domain, &graph);
 
         let domain_graph = self.domain_graph_handle(domain).await;
         domain_graph.store(Some(StdArc::new(graph.clone())));

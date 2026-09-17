@@ -380,7 +380,7 @@ impl Runtime {
         let primary_node = node.execution_node()?.clone();
         let branch_lru = self.state_placement(
             domain,
-            RuntimeStateKind::BranchLru,
+            RuntimeState::BranchLru,
             node.kind(),
             node.identifier.clone(),
             None,
@@ -422,11 +422,14 @@ impl Runtime {
                     .await
                 {
                     Ok(Some(snapshot)) => {
-                        if let Err(error) = runtime.install_passive_state_replica_snapshot(
-                            &primary_node,
-                            &branch_lru,
-                            snapshot,
-                        ) {
+                        if let Err(error) = runtime
+                            .install_passive_state_replica_snapshot(
+                                &primary_node,
+                                &branch_lru,
+                                snapshot,
+                            )
+                            .await
+                        {
                             warn!(error = %error, "failed to install replicated branch lifecycle checkpoint");
                             continue;
                         }
@@ -461,13 +464,19 @@ impl Runtime {
                 };
                 for (branch_key, _) in branches {
                     tokio::task::consume_budget().await;
-                    let placement = runtime.state_placement(
+                    let placement = match runtime.branch_state_placement(
                         &branch_lru.domain,
                         state_kind,
                         branch_lru.kind,
                         branch_lru.identifier.clone(),
                         branch_key,
-                    );
+                    ) {
+                        Ok(placement) => placement,
+                        Err(error) => {
+                            warn!(error = %error, "failed to place replicated branch state");
+                            continue;
+                        }
+                    };
                     let after_lsm = match runtime.passive_state_replica_lsm(&placement) {
                         Ok(lsm) => lsm,
                         Err(error) => {
@@ -485,11 +494,14 @@ impl Runtime {
                         .await
                     {
                         Ok(Some(snapshot)) => {
-                            if let Err(error) = runtime.install_passive_state_replica_snapshot(
-                                &primary_node,
-                                &placement,
-                                snapshot,
-                            ) {
+                            if let Err(error) = runtime
+                                .install_passive_state_replica_snapshot(
+                                    &primary_node,
+                                    &placement,
+                                    snapshot,
+                                )
+                                .await
+                            {
                                 warn!(error = %error, "failed to install replicated branch state checkpoint");
                             }
                         }
@@ -642,15 +654,16 @@ impl Runtime {
         }))
     }
 
-    /// Installs the fingerprint every runtime state of `schedule`'s domain is keyed by.
+    /// Installs what every runtime state of `schedule`'s domain is keyed by: each node's schema
+    /// fingerprint and, for a WASM processor, the guest-state generation of every branch.
     ///
-    /// A node the schedule still carries keeps its fingerprint throughout: each one is written
-    /// before any stale node is dropped, so a concurrent [`Self::state_placement`] always resolves
-    /// to the state the node already owns. Emptying the domain first would expose a window where a
-    /// scheduled node has no fingerprint, and a placement resolved in that window addresses a
+    /// A node the schedule still carries keeps its identity throughout: each one is written before
+    /// any stale node is dropped, so a concurrent [`Self::state_placement`] always resolves to the
+    /// state the node already owns. Emptying the domain first would expose a window where a
+    /// scheduled node has no identity, and a placement resolved in that window addresses a
     /// different — empty — runtime state. Relocation rebuilds these while the relocating node's
     /// own state task is still reading them, which is exactly when that window is observed.
-    pub(in crate::runtime) fn install_state_schema_fingerprints(&self, schedule: &DomainSchedule) {
+    pub(in crate::runtime) fn install_state_identities(&self, schedule: &DomainSchedule) {
         let start_version = match self.inner.domains.get(&schedule.domain) {
             Some(state) => state.start_version,
             None => 0,
@@ -674,17 +687,23 @@ impl Runtime {
                 node.kind(),
                 node.identifier.clone(),
             );
-            self.inner
-                .state_schema_fingerprints
-                .insert(node_ref.clone(), schema_fingerprint);
+            self.inner.state_identities.insert(
+                node_ref.clone(),
+                ScheduledStateIdentity {
+                    schema_fingerprint,
+                    wasm_state_generations: node.wasm_state_generations().cloned(),
+                },
+            );
             scheduled.insert(node_ref);
         }
-        self.retain_state_schema_fingerprints(&schedule.domain, &scheduled);
+        self.retain_state_identities(&schedule.domain, &scheduled);
     }
 
-    /// The graph-driven form of [`Self::install_state_schema_fingerprints`], written the same way
-    /// and for the same reason: a node the graph still carries never loses its fingerprint.
-    pub(in crate::runtime) fn install_state_schema_fingerprints_from_graph(
+    /// The graph-driven form of [`Self::install_state_identities`], written the same way and for
+    /// the same reason: a node the graph still carries never loses its identity. A graph carries no
+    /// schedule, so it publishes no WASM guest-state generation; a node that already has one keeps
+    /// it.
+    pub(in crate::runtime) fn install_state_identities_from_graph(
         &self,
         domain: &DomainName,
         graph: &ActiveGraph,
@@ -693,26 +712,34 @@ impl Runtime {
         for node in graph.nodes() {
             let node_ref =
                 DomainNodeRef::node_in(domain.clone(), node.kind, node.identifier.clone());
-            self.inner.state_schema_fingerprints.insert(
-                node_ref.clone(),
-                graph
-                    .schema_fingerprint(node.kind, &node.identifier)
-                    .unwrap_or([0; 32]),
-            );
+            let schema_fingerprint = graph
+                .schema_fingerprint(node.kind, &node.identifier)
+                .unwrap_or([0; 32]);
+            if let Some(mut identity) = self.inner.state_identities.get_mut(&node_ref) {
+                identity.schema_fingerprint = schema_fingerprint;
+            } else {
+                self.inner.state_identities.insert(
+                    node_ref.clone(),
+                    ScheduledStateIdentity {
+                        schema_fingerprint,
+                        wasm_state_generations: None,
+                    },
+                );
+            }
             active.insert(node_ref);
         }
-        self.retain_state_schema_fingerprints(domain, &active);
+        self.retain_state_identities(domain, &active);
     }
 
-    pub(in crate::runtime) fn clear_state_schema_fingerprints(&self, domain: &DomainName) {
-        self.retain_state_schema_fingerprints(domain, &HashSet::default());
+    pub(in crate::runtime) fn clear_state_identities(&self, domain: &DomainName) {
+        self.retain_state_identities(domain, &HashSet::default());
     }
 
-    /// Drops the fingerprints of `domain` that `keep` no longer names, leaving the rest in place.
-    fn retain_state_schema_fingerprints(&self, domain: &DomainName, keep: &HashSet<DomainNodeRef>) {
+    /// Drops the identities of `domain` that `keep` no longer names, leaving the rest in place.
+    fn retain_state_identities(&self, domain: &DomainName, keep: &HashSet<DomainNodeRef>) {
         let stale = self
             .inner
-            .state_schema_fingerprints
+            .state_identities
             .iter()
             .filter_map(|entry| {
                 (&entry.key().domain == domain && !keep.contains(entry.key()))
@@ -720,36 +747,38 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         for key in stale {
-            self.inner.state_schema_fingerprints.remove(&key);
+            self.inner.state_identities.remove(&key);
         }
     }
 
     pub(in crate::runtime) fn state_placement(
         &self,
         domain: &DomainName,
-        state: RuntimeStateKind,
+        state: RuntimeState,
         kind: ModelKind,
         identifier: impl Into<ModelName>,
         branch_key: Option<BranchKey>,
     ) -> RuntimeStatePlacement {
         let identifier = identifier.into();
-        let schema_fingerprint =
-            if let RuntimeStateKind::BranchAggregated | RuntimeStateKind::KafkaOffset = state {
-                [0; 32]
-            } else {
-                let stored = self
-                    .inner
-                    .state_schema_fingerprints
-                    .get(&DomainNodeRef::node_in(
-                        domain.clone(),
-                        kind,
-                        identifier.clone(),
-                    ));
+        let schema_fingerprint = match state.kind() {
+            RuntimeStateKind::BranchAggregated | RuntimeStateKind::KafkaOffset => [0; 32],
+            RuntimeStateKind::Correlator
+            | RuntimeStateKind::Deduplicator
+            | RuntimeStateKind::MaterializedRelay
+            | RuntimeStateKind::WasmProcessor
+            | RuntimeStateKind::WindowProcessor
+            | RuntimeStateKind::BranchLru => {
+                let stored = self.inner.state_identities.get(&DomainNodeRef::node_in(
+                    domain.clone(),
+                    kind,
+                    identifier.clone(),
+                ));
                 match stored {
-                    Some(fingerprint) => *fingerprint,
+                    Some(identity) => identity.schema_fingerprint,
                     None => [0; 32],
                 }
-            };
+            }
+        };
         RuntimeStatePlacement {
             domain: domain.clone(),
             state,
@@ -760,30 +789,64 @@ impl Runtime {
         }
     }
 
+    /// The placement of branch-local runtime state of `state` for `branch_key`.
+    ///
+    /// WASM guest state is placed in the generation the committed schedule names for its branch, and
+    /// cannot be placed at all while no schedule has published one for the processor. Every other
+    /// kind of state has a single lifetime.
+    pub(in crate::runtime) fn branch_state_placement(
+        &self,
+        domain: &DomainName,
+        state: RuntimeStateKind,
+        kind: ModelKind,
+        identifier: impl Into<ModelName>,
+        branch_key: Option<BranchKey>,
+    ) -> error_stack::Result<RuntimeStatePlacement, StateGenerationError> {
+        let identifier = identifier.into();
+        if let Some(state) = RuntimeState::single_lifetime(state) {
+            return Ok(self.state_placement(domain, state, kind, identifier, branch_key));
+        }
+        let node = DomainNodeRef::node_in(domain.clone(), kind, identifier.clone());
+        let branch = branch_key.as_ref().map(BranchKey::fingerprint);
+        let generation = match self.inner.state_identities.get(&node) {
+            Some(identity) => identity.wasm_state_generation(branch.as_ref()),
+            None => None,
+        };
+        let Some(generation) = generation else {
+            return Err(Report::new(StateGenerationError::Unpublished {
+                domain: domain.clone(),
+                kind,
+                identifier,
+            }));
+        };
+        Ok(self.state_placement(
+            domain,
+            RuntimeState::WasmProcessor { generation },
+            kind,
+            identifier,
+            branch_key,
+        ))
+    }
+
+    /// Whether `placement` still names the state the committed schedule keys this node's state by.
     pub(in crate::runtime) fn runtime_state_placement_is_current(
         &self,
         placement: &RuntimeStatePlacement,
     ) -> bool {
-        let Some(current) = self
-            .inner
-            .state_schema_fingerprints
-            .get(&DomainNodeRef::node_in(
-                placement.domain.clone(),
-                placement.kind,
-                placement.identifier.clone(),
-            ))
-            .map(|fingerprint| *fingerprint)
-        else {
+        let node = DomainNodeRef::node_in(
+            placement.domain.clone(),
+            placement.kind,
+            placement.identifier.clone(),
+        );
+        let branch = placement.branch_key.as_ref().map(BranchKey::fingerprint);
+        let Some(identity) = self.inner.state_identities.get(&node) else {
             return false;
         };
-        let expected = if let RuntimeStateKind::BranchAggregated | RuntimeStateKind::KafkaOffset =
-            placement.state
-        {
-            [0; 32]
-        } else {
-            current
-        };
-        placement.schema_fingerprint == expected
+        identity.names(
+            placement.state,
+            placement.schema_fingerprint,
+            branch.as_ref(),
+        )
     }
 
     pub(in crate::runtime) fn purge_stale_runtime_state(
@@ -893,14 +956,14 @@ impl Runtime {
         if let Some(store) = self.inner.state_store.as_ref() {
             let current = self
                 .inner
-                .state_schema_fingerprints
+                .state_identities
                 .iter()
                 .filter_map(|entry| {
                     let key = entry.key();
-                    (&key.domain == domain).then(|| (key.node.clone(), *entry.value()))
+                    (&key.domain == domain).then(|| (key.node.clone(), entry.value().clone()))
                 })
                 .collect::<HashMap<_, _>>();
-            store.purge_stale_schema_fingerprints(domain, &current)?;
+            store.purge_stale_state_identities(domain, &current)?;
         }
         Ok(())
     }

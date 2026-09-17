@@ -6747,6 +6747,7 @@ dependencies = [
  "strum 0.26.3",
  "thiserror 2.0.20",
  "triomphe",
+ "url",
  "uuid",
 ]
 
@@ -7020,6 +7021,8 @@ dependencies = [
  "criterion 0.5.1",
  "error-stack",
  "humantime",
+ "jiff",
+ "jiff-tzdb",
  "md5",
  "meticulous",
  "nervix-approx-into",

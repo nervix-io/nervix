@@ -9,24 +9,33 @@ use std::{
 };
 
 use ahash::HashMap;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::sync::{ArcSwap, Guard};
-pub(crate) use nervix_interconnect::RuntimeStateKind;
+use nervix_execution::{
+    Executor, MemoryClass, StorageClass,
+    sync::{ArcSwap, Guard},
+};
+pub(crate) use nervix_interconnect::{RuntimeState, RuntimeStateKind};
 use nervix_models::{
-    ClusterNodeIncarnation, ClusterNodeName, CoordinationIdentity, DomainName, DomainNodeRef,
-    ModelKind, ModelName, NodeRef,
+    BranchKeyFingerprint, ClusterNodeIncarnation, ClusterNodeName, CoordinationIdentity,
+    DomainName, DomainNodeRef, ModelKind, ModelName, NodeRef, WasmStateGeneration,
+    WasmStateGenerations,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use thiserror::Error;
+use triomphe::Arc;
 
-use super::BranchKey;
+use super::{BranchKey, WasmGuestState};
+
+/// The byte that opens the generation segment of a WASM guest state key. A key without it was not
+/// written in the current shape and fails to decode instead of addressing the current lifetime.
+const STATE_GENERATION_KEY_MARKER: u8 = b'g';
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RuntimeStatePlacement {
     pub(in crate::runtime) domain: DomainName,
-    pub(crate) state: RuntimeStateKind,
+    pub(crate) state: RuntimeState,
     pub(crate) kind: ModelKind,
     pub(crate) identifier: ModelName,
     pub(in crate::runtime) schema_fingerprint: [u8; 32],
@@ -42,12 +51,70 @@ impl fmt::Display for RuntimeStatePlacement {
         };
         write!(
             formatter,
-            "{branch_scope} {} state for {} '{}' in domain '{}'",
-            self.state.as_str(),
+            "{branch_scope} {} state",
+            self.state.kind().as_str()
+        )?;
+        if let RuntimeState::WasmProcessor { generation } = self.state {
+            write!(formatter, " generation {generation}")?;
+        }
+        write!(
+            formatter,
+            " for {} '{}' in domain '{}'",
             self.kind.as_str(),
             self.identifier.as_str(),
             self.domain.as_str()
         )
+    }
+}
+
+/// What the committed schedule keys one node's runtime state by: the schema fingerprint its state
+/// is written under and, for a WASM processor, the generation of every branch's guest state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::runtime) struct ScheduledStateIdentity {
+    pub(in crate::runtime) schema_fingerprint: [u8; 32],
+    pub(in crate::runtime) wasm_state_generations: Option<WasmStateGenerations>,
+}
+
+impl ScheduledStateIdentity {
+    /// Whether runtime state of `state` for `branch`, written under `schema_fingerprint`, is the
+    /// state this identity currently names.
+    ///
+    /// WASM guest state is current only in the generation the schedule names for its branch, so a
+    /// snapshot of an earlier lifetime is never current, whatever revision it carries.
+    pub(in crate::runtime) fn names(
+        &self,
+        state: RuntimeState,
+        schema_fingerprint: [u8; 32],
+        branch: Option<&BranchKeyFingerprint>,
+    ) -> bool {
+        let expected_fingerprint = match state.kind() {
+            RuntimeStateKind::BranchAggregated | RuntimeStateKind::KafkaOffset => [0; 32],
+            RuntimeStateKind::Correlator
+            | RuntimeStateKind::Deduplicator
+            | RuntimeStateKind::MaterializedRelay
+            | RuntimeStateKind::WasmProcessor
+            | RuntimeStateKind::WindowProcessor
+            | RuntimeStateKind::BranchLru => self.schema_fingerprint,
+        };
+        if schema_fingerprint != expected_fingerprint {
+            return false;
+        }
+        let RuntimeState::WasmProcessor { generation } = state else {
+            return true;
+        };
+        let Some(generations) = self.wasm_state_generations.as_ref() else {
+            return false;
+        };
+        generations.of_branch(branch) == generation
+    }
+
+    /// The generation the guest state of `branch` is written in, when this node is a WASM processor.
+    pub(in crate::runtime) fn wasm_state_generation(
+        &self,
+        branch: Option<&BranchKeyFingerprint>,
+    ) -> Option<WasmStateGeneration> {
+        let generations = self.wasm_state_generations.as_ref()?;
+        Some(generations.of_branch(branch))
     }
 }
 
@@ -432,6 +499,22 @@ pub(in crate::runtime) struct StateAuthorityError {
     operation: StateCapability,
 }
 
+/// Why guest state of a WASM processor cannot be placed in a lifetime.
+#[derive(Debug, Error)]
+pub(in crate::runtime) enum StateGenerationError {
+    #[error(
+        "{} '{}' in domain '{}' has no published guest-state generation",
+        .kind.as_str(),
+        .identifier.as_str(),
+        .domain.as_str()
+    )]
+    Unpublished {
+        domain: DomainName,
+        kind: ModelKind,
+        identifier: ModelName,
+    },
+}
+
 #[derive(Debug, Error)]
 pub(in crate::runtime) enum RuntimeStateOperationError {
     #[error(transparent)]
@@ -513,6 +596,10 @@ pub(crate) enum RuntimePersistenceError {
     InvalidForcedRecoveryDecision,
     #[error("local node incarnation is unavailable while activating recovered runtime state")]
     MissingNodeIncarnation,
+    #[error("runtime state storage admission failed")]
+    StorageAdmission,
+    #[error("runtime state storage job did not complete")]
+    StorageExecution,
 }
 
 pub(in crate::runtime) struct RuntimeStateStore {
@@ -523,7 +610,87 @@ pub(in crate::runtime) struct RuntimeStateStore {
     handoff_activations: Keyspace,
     forced_recovery_preparations: Keyspace,
     forced_recovery_completions: Keyspace,
-    replica_installs: parking_lot::Mutex<()>,
+    /// Held by every replica installation, which compares with the stored snapshot before it
+    /// replaces it. The storage job that installs a replica holds its own handle.
+    replica_installs: Arc<parking_lot::Mutex<()>>,
+    /// Runs the writes that must not occupy an async worker.
+    executor: Executor,
+}
+
+/// The handles one latest-snapshot write needs, cloned into the storage job that performs it.
+struct LatestSnapshotWriter {
+    db: Database,
+    latest: Keyspace,
+    lsm_index: Keyspace,
+    replica_installs: Arc<parking_lot::Mutex<()>>,
+}
+
+impl LatestSnapshotWriter {
+    fn write_latest_snapshot(
+        &self,
+        placement: &RuntimeStatePlacement,
+        lsm: u64,
+        payload: &[u8],
+    ) -> error_stack::Result<(), RuntimePersistenceError> {
+        let entry = PersistedRuntimeStateEntry {
+            lsm,
+            schema_fingerprint: placement.schema_fingerprint,
+            payload: payload.to_vec(),
+        };
+        let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&entry)
+            .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
+        let placement_key = placement.as_storage_key();
+        self.latest
+            .insert(placement_key.clone(), encoded.to_vec())
+            .map_err(|_| RuntimePersistenceError::WriteValue)?;
+        self.lsm_index
+            .insert(placement.as_lsm_index_key(lsm), placement_key)
+            .map_err(|_| RuntimePersistenceError::WriteValue)?;
+        Ok(())
+    }
+
+    fn persist(&self, mode: PersistMode) -> error_stack::Result<(), RuntimePersistenceError> {
+        self.db
+            .persist(mode)
+            .map_err(|_| Report::new(RuntimePersistenceError::WriteValue))
+    }
+
+    fn latest_lsm(
+        &self,
+        placement: &RuntimeStatePlacement,
+    ) -> error_stack::Result<Option<u64>, RuntimePersistenceError> {
+        let Some(raw) = self
+            .latest
+            .get(placement.as_storage_key())
+            .map_err(|_| RuntimePersistenceError::ReadValue)?
+        else {
+            return Ok(None);
+        };
+        let archived = rkyv::access::<
+            <PersistedRuntimeStateEntry as Archive>::Archived,
+            rkyv::rancor::Error,
+        >(raw.as_ref())
+        .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
+        Ok(Some(archived.lsm.into()))
+    }
+
+    /// Replace the stored snapshot of `placement` with `snapshot` unless the stored one is as new,
+    /// and hand back the snapshot it installed.
+    fn install_replica_if_newer(
+        &self,
+        placement: &RuntimeStatePlacement,
+        snapshot: PersistedRuntimeStateEntry,
+    ) -> error_stack::Result<Option<PersistedRuntimeStateEntry>, RuntimePersistenceError> {
+        let _install = self.replica_installs.lock();
+        if let Some(stored_lsm) = self.latest_lsm(placement)?
+            && stored_lsm >= snapshot.lsm
+        {
+            return Ok(None);
+        }
+        self.write_latest_snapshot(placement, snapshot.lsm, &snapshot.payload)?;
+        self.persist(PersistMode::Buffer)?;
+        Ok(Some(snapshot))
+    }
 }
 
 #[derive(Debug, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -668,7 +835,7 @@ impl RuntimeStatePlacement {
         let mut key = Vec::new();
         key.extend_from_slice(self.domain.as_str().as_bytes());
         key.push(0);
-        key.push(u8::from(self.state));
+        key.push(u8::from(self.state.kind()));
         key.push(0);
         key.extend_from_slice(self.kind.as_str().as_bytes());
         key.push(0);
@@ -676,6 +843,11 @@ impl RuntimeStatePlacement {
         key.push(0);
         key.extend_from_slice(&self.schema_fingerprint);
         key.push(0);
+        if let RuntimeState::WasmProcessor { generation } = self.state {
+            key.push(STATE_GENERATION_KEY_MARKER);
+            key.extend_from_slice(&u64::from(generation).to_be_bytes());
+            key.push(0);
+        }
         match self.branch_key.as_ref() {
             Some(branch_key) => {
                 key.push(1);
@@ -684,6 +856,28 @@ impl RuntimeStatePlacement {
             None => key.push(0),
         }
         key
+    }
+
+    /// This placement in the lifetimes a committed schedule publishes for its node. WASM guest
+    /// state moves to the generation `generations` names for its branch; every other kind of state
+    /// has a single lifetime and keeps its placement.
+    pub(in crate::runtime) fn published_in(
+        self,
+        generations: Option<&WasmStateGenerations>,
+    ) -> Self {
+        let RuntimeState::WasmProcessor { .. } = self.state else {
+            return self;
+        };
+        let Some(generations) = generations else {
+            return self;
+        };
+        let branch = self.branch_key.as_ref().map(BranchKey::fingerprint);
+        Self {
+            state: RuntimeState::WasmProcessor {
+                generation: generations.of_branch(branch.as_ref()),
+            },
+            ..self
+        }
     }
 
     fn as_lsm_index_key(&self, lsm: u64) -> Vec<u8> {
@@ -710,7 +904,7 @@ impl RuntimeStatePlacement {
         let branch_key = BranchKey::from_remote_key(placement.branch_key).map_err(|reason| {
             Report::new(RuntimeStatePlacementError {
                 domain: placement.domain.clone(),
-                state: placement.state,
+                state: placement.state.kind(),
                 kind: placement.kind,
                 identifier: placement.identifier.clone(),
             })
@@ -728,7 +922,10 @@ impl RuntimeStatePlacement {
 }
 
 impl RuntimeStateStore {
-    pub(in crate::runtime) fn from_database(db: Database) -> Result<Self, RuntimePersistenceError> {
+    pub(in crate::runtime) fn from_database(
+        db: Database,
+        executor: Executor,
+    ) -> Result<Self, RuntimePersistenceError> {
         let latest = db
             .keyspace("runtime_state_latest", KeyspaceCreateOptions::default)
             .map_err(|_| RuntimePersistenceError::OpenKeyspace)?;
@@ -767,8 +964,18 @@ impl RuntimeStateStore {
             handoff_activations,
             forced_recovery_preparations,
             forced_recovery_completions,
-            replica_installs: parking_lot::Mutex::new(()),
+            replica_installs: Arc::new(parking_lot::Mutex::new(())),
+            executor,
         })
+    }
+
+    fn latest_snapshot_writer(&self) -> LatestSnapshotWriter {
+        LatestSnapshotWriter {
+            db: self.db.clone(),
+            latest: self.latest.clone(),
+            lsm_index: self.lsm_index.clone(),
+            replica_installs: self.replica_installs.clone(),
+        }
     }
 
     fn handoff_preparation_key(
@@ -1016,10 +1223,13 @@ impl RuntimeStateStore {
         Ok(())
     }
 
+    /// Activate the forced recovery `transition` names and publish its checkpoints in the lifetimes
+    /// `generations` names, which is the committed schedule that accepted the recovery.
     pub(in crate::runtime) fn activate_forced_recovery(
         &self,
         transition: &ForcedRuntimeStateRecoveryTransition<'_>,
         authorization: ForcedRuntimeStateRecoveryAuthorization,
+        generations: Option<&WasmStateGenerations>,
     ) -> Result<
         Option<Vec<(RuntimeStatePlacement, PersistedRuntimeStateEntry)>>,
         Report<RuntimePersistenceError>,
@@ -1064,6 +1274,10 @@ impl RuntimeStateStore {
                 ));
             }
         };
+        let checkpoints = checkpoints
+            .into_iter()
+            .map(|(placement, snapshot)| (placement.published_in(generations), snapshot))
+            .collect::<Vec<_>>();
         self.replace_entity_snapshots(
             &transition.entity.domain,
             transition.entity.kind(),
@@ -1254,10 +1468,13 @@ impl RuntimeStateStore {
         revision: u64,
         payload: &[u8],
     ) -> Result<(), RuntimePersistenceError> {
-        self.write_latest_snapshot(placement, revision, payload)?;
-        self.db
+        let writer = self.latest_snapshot_writer();
+        writer
+            .write_latest_snapshot(placement, revision, payload)
+            .map_err(|error| error.current_context().clone())?;
+        writer
             .persist(PersistMode::SyncAll)
-            .map_err(|_| RuntimePersistenceError::WriteValue)
+            .map_err(|error| error.current_context().clone())
     }
 
     pub(in crate::runtime) fn persist_latest_snapshot(
@@ -1266,33 +1483,43 @@ impl RuntimeStateStore {
         lsm: u64,
         payload: &[u8],
     ) -> Result<(), RuntimePersistenceError> {
-        self.write_latest_snapshot(placement, lsm, payload)?;
-        self.db
+        let writer = self.latest_snapshot_writer();
+        writer
+            .write_latest_snapshot(placement, lsm, payload)
+            .map_err(|error| error.current_context().clone())?;
+        writer
             .persist(PersistMode::Buffer)
-            .map_err(|_| RuntimePersistenceError::WriteValue)
+            .map_err(|error| error.current_context().clone())
     }
 
-    fn write_latest_snapshot(
+    /// Persist the guest state a WASM processor branch saved under `placement`.
+    ///
+    /// A branch saves after every batch, so the write runs on the storage workers instead of the
+    /// async worker driving the branch. The job shares the saved buffer rather than receiving a copy
+    /// of it.
+    pub(in crate::runtime) async fn persist_wasm_guest_state(
         &self,
         placement: &RuntimeStatePlacement,
-        lsm: u64,
-        payload: &[u8],
-    ) -> Result<(), RuntimePersistenceError> {
-        let entry = PersistedRuntimeStateEntry {
-            lsm,
-            schema_fingerprint: placement.schema_fingerprint,
-            payload: payload.to_vec(),
-        };
-        let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&entry)
-            .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
-        let placement_key = placement.as_storage_key();
-        self.latest
-            .insert(placement_key.clone(), encoded.to_vec())
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
-        self.lsm_index
-            .insert(placement.as_lsm_index_key(lsm), placement_key)
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
-        Ok(())
+        saved: StdArc<WasmGuestState>,
+    ) -> error_stack::Result<(), RuntimePersistenceError> {
+        let writer = self.latest_snapshot_writer();
+        let placement = placement.clone();
+        let reservation = self
+            .executor
+            .reserve(MemoryClass::Bulk, 1)
+            .await
+            .change_context(RuntimePersistenceError::StorageAdmission)?;
+        self.executor
+            .run_storage(
+                StorageClass::Filesystem,
+                reservation,
+                move |_charge, _cancellation| {
+                    writer.write_latest_snapshot(&placement, saved.revision(), saved.bytes())?;
+                    writer.persist(PersistMode::Buffer)
+                },
+            )
+            .await
+            .change_context(RuntimePersistenceError::StorageExecution)?
     }
 
     fn replace_entity_snapshots(
@@ -1362,20 +1589,29 @@ impl RuntimeStateStore {
         Ok(())
     }
 
-    pub(in crate::runtime) fn persist_replica_snapshot_if_newer(
+    /// Persist a replicated checkpoint unless the stored one is at least as new, and hand back the
+    /// checkpoint when it was written. The comparison and the write run together on the storage
+    /// workers.
+    pub(in crate::runtime) async fn persist_replica_snapshot_if_newer(
         &self,
         placement: &RuntimeStatePlacement,
-        snapshot: &PersistedRuntimeStateEntry,
-    ) -> Result<bool, Report<RuntimePersistenceError>> {
-        let _install = self.replica_installs.lock();
-        if self
-            .latest_snapshot(placement)?
-            .is_some_and(|current| current.lsm >= snapshot.lsm)
-        {
-            return Ok(false);
-        }
-        self.persist_latest_snapshot(placement, snapshot.lsm, &snapshot.payload)?;
-        Ok(true)
+        snapshot: PersistedRuntimeStateEntry,
+    ) -> error_stack::Result<Option<PersistedRuntimeStateEntry>, RuntimePersistenceError> {
+        let writer = self.latest_snapshot_writer();
+        let placement = placement.clone();
+        let reservation = self
+            .executor
+            .reserve(MemoryClass::Bulk, 1)
+            .await
+            .change_context(RuntimePersistenceError::StorageAdmission)?;
+        self.executor
+            .run_storage(
+                StorageClass::Filesystem,
+                reservation,
+                move |_charge, _cancellation| writer.install_replica_if_newer(&placement, snapshot),
+            )
+            .await
+            .change_context(RuntimePersistenceError::StorageExecution)?
     }
 
     pub(in crate::runtime) fn latest_snapshot(
@@ -1503,10 +1739,13 @@ impl RuntimeStateStore {
             .map_err(|_| RuntimePersistenceError::WriteValue)
     }
 
-    pub(in crate::runtime) fn purge_stale_schema_fingerprints(
+    /// Remove every stored state of `domain` that `current` no longer names: state of a node the
+    /// schedule dropped, state written under another schema fingerprint, and WASM guest state of a
+    /// generation the committed schedule has moved past.
+    pub(in crate::runtime) fn purge_stale_state_identities(
         &self,
         domain: &DomainName,
-        current: &HashMap<NodeRef, [u8; 32]>,
+        current: &HashMap<NodeRef, ScheduledStateIdentity>,
     ) -> Result<(), Report<RuntimePersistenceError>> {
         let mut domain_prefix = domain.as_str().as_bytes().to_vec();
         domain_prefix.push(0);
@@ -1517,19 +1756,19 @@ impl RuntimeStateStore {
                 .map(|key| key.as_ref().to_vec())
                 .map_err(|_| RuntimePersistenceError::ReadValue)?;
             let stored = stored_placement_schema(&key)?;
-            let mut expected = current
-                .get(&NodeRef {
-                    kind: stored.kind,
-                    identifier: stored.identifier,
-                })
-                .copied();
-            if expected.is_some()
-                && let RuntimeStateKind::BranchAggregated | RuntimeStateKind::KafkaOffset =
-                    stored.state
-            {
-                expected = Some([0; 32]);
-            }
-            if expected != Some(stored.schema_fingerprint) {
+            let node = NodeRef {
+                kind: stored.kind,
+                identifier: stored.identifier,
+            };
+            let is_current = match current.get(&node) {
+                Some(identity) => identity.names(
+                    stored.state,
+                    stored.schema_fingerprint,
+                    stored.branch.as_ref(),
+                ),
+                None => false,
+            };
+            if !is_current {
                 stale_latest_keys.push(key);
             }
         }
@@ -1566,13 +1805,14 @@ impl RuntimeStateStore {
     }
 }
 
-/// The placement a stored runtime-state key encodes: which kind of state it is, which model owns
-/// it, and the schema fingerprint the state was written under.
+/// The placement a stored runtime-state key encodes: which state and lifetime it is, which model
+/// owns it, the schema fingerprint the state was written under, and the branch it belongs to.
 struct StoredPlacementSchema {
-    state: RuntimeStateKind,
+    state: RuntimeState,
     kind: ModelKind,
     identifier: ModelName,
     schema_fingerprint: [u8; 32],
+    branch: Option<BranchKeyFingerprint>,
 }
 
 fn stored_placement_schema(
@@ -1586,11 +1826,11 @@ fn stored_placement_schema(
     let state_offset = domain_end
         .checked_add(1)
         .verified("the separator position is an index into this key");
-    let state = key
+    let state_kind = key
         .get(state_offset)
         .copied()
         .and_then(RuntimeStateKind::from_repr);
-    let Some(state) = state else {
+    let Some(state_kind) = state_kind else {
         return Err(Report::new(RuntimePersistenceError::DecodeState(
             "runtime state key has an invalid state kind".to_string(),
         )));
@@ -1652,12 +1892,80 @@ fn stored_placement_schema(
     };
     let mut schema_fingerprint = [0; 32];
     schema_fingerprint.copy_from_slice(fingerprint);
+    let scope_start = fingerprint_start
+        .checked_add(33)
+        .verified("the schema fingerprint slice above ended inside this key");
+    let (state, branch_start) = match RuntimeState::single_lifetime(state_kind) {
+        Some(state) => (state, scope_start),
+        None => stored_state_generation(key, scope_start)?,
+    };
+    let branch = match key.get(branch_start) {
+        Some(0) => None,
+        Some(1) => {
+            let text_start = branch_start
+                .checked_add(1)
+                .verified("the branch flag read above is inside this key");
+            let text = std::str::from_utf8(&key[text_start..]).map_err(|_| {
+                RuntimePersistenceError::DecodeState(
+                    "runtime state key has an invalid branch key".to_string(),
+                )
+            })?;
+            Some(BranchKey::fingerprint_of_canonical_text(text))
+        }
+        _ => {
+            return Err(Report::new(RuntimePersistenceError::DecodeState(
+                "runtime state key has an invalid branch scope".to_string(),
+            )));
+        }
+    };
     Ok(StoredPlacementSchema {
         state,
         kind,
         identifier,
         schema_fingerprint,
+        branch,
     })
+}
+
+/// The generation segment a WASM guest state key carries at `start`, and where its branch scope
+/// begins after it.
+fn stored_state_generation(
+    key: &[u8],
+    start: usize,
+) -> Result<(RuntimeState, usize), Report<RuntimePersistenceError>> {
+    if key.get(start) != Some(&STATE_GENERATION_KEY_MARKER) {
+        return Err(Report::new(RuntimePersistenceError::DecodeState(
+            "runtime state key has no state generation".to_string(),
+        )));
+    }
+    let generation_start = start
+        .checked_add(1)
+        .verified("the generation marker read above is inside this key");
+    let generation_end = generation_start
+        .checked_add(8)
+        .assured("a key index is below isize::MAX, so eight more bytes stay within usize");
+    let Some(generation) = key.get(generation_start..generation_end) else {
+        return Err(Report::new(RuntimePersistenceError::DecodeState(
+            "runtime state key has a truncated state generation".to_string(),
+        )));
+    };
+    let generation = <[u8; 8]>::try_from(generation)
+        .verified("the generation slice above is exactly eight bytes long");
+    let generation =
+        WasmStateGeneration::try_from(u64::from_be_bytes(generation)).map_err(|_| {
+            RuntimePersistenceError::DecodeState(
+                "runtime state key has an invalid state generation".to_string(),
+            )
+        })?;
+    if key.get(generation_end) != Some(&0) {
+        return Err(Report::new(RuntimePersistenceError::DecodeState(
+            "runtime state key has no state generation separator".to_string(),
+        )));
+    }
+    let branch_start = generation_end
+        .checked_add(1)
+        .verified("the generation separator read above is inside this key");
+    Ok((RuntimeState::WasmProcessor { generation }, branch_start))
 }
 
 #[cfg(test)]
@@ -1692,7 +2000,8 @@ mod tests {
             let db = Database::builder(dir.path())
                 .open()
                 .expect("database should open");
-            let store = RuntimeStateStore::from_database(db).expect("state store should open");
+            let store = RuntimeStateStore::from_database(db, Executor::default())
+                .expect("state store should open");
             store
                 .persist_handoff_preparation(&transition, &[])
                 .expect("ownership handoff preparation should persist");
@@ -1701,7 +2010,8 @@ mod tests {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should reopen");
-        let store = RuntimeStateStore::from_database(db).expect("state store should reopen");
+        let store = RuntimeStateStore::from_database(db, Executor::default())
+            .expect("state store should reopen");
         let preparations = store
             .handoff_preparations()
             .expect("persisted handoff preparation should load");
@@ -1777,7 +2087,7 @@ mod tests {
         let destination_incarnation = ClusterNodeIncarnation::new(42);
         let placement = RuntimeStatePlacement {
             domain: domain.clone(),
-            state: RuntimeStateKind::MaterializedRelay,
+            state: RuntimeState::MaterializedRelay,
             kind: ModelKind::Relay,
             identifier: identifier.clone(),
             schema_fingerprint: [7; 32],
@@ -1806,7 +2116,8 @@ mod tests {
             let db = Database::builder(dir.path())
                 .open()
                 .expect("database should open");
-            let store = RuntimeStateStore::from_database(db).expect("state store should open");
+            let store = RuntimeStateStore::from_database(db, Executor::default())
+                .expect("state store should open");
             store
                 .persist_latest_snapshot(&placement, 4, &payload)
                 .expect("earlier state should persist");
@@ -1822,11 +2133,13 @@ mod tests {
             let db = Database::builder(dir.path())
                 .open()
                 .expect("database should reopen");
-            let store = RuntimeStateStore::from_database(db).expect("state store should reopen");
+            let store = RuntimeStateStore::from_database(db, Executor::default())
+                .expect("state store should reopen");
             let activated = store
                 .activate_forced_recovery(
                     &transition,
                     ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+                    None,
                 )
                 .expect("persisted forced recovery should activate")
                 .expect("the first activation should apply its checkpoint");
@@ -1840,11 +2153,13 @@ mod tests {
             let db = Database::builder(dir.path())
                 .open()
                 .expect("database should reopen again");
-            let store = RuntimeStateStore::from_database(db).expect("state store should reopen");
+            let store = RuntimeStateStore::from_database(db, Executor::default())
+                .expect("state store should reopen");
             let activated = store
                 .activate_forced_recovery(
                     &transition,
                     ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+                    None,
                 )
                 .expect("repeated forced recovery activation should be readable");
             assert!(activated.is_none());
@@ -1866,7 +2181,7 @@ mod tests {
         let destination_incarnation = ClusterNodeIncarnation::new(42);
         let placement = RuntimeStatePlacement {
             domain: domain.clone(),
-            state: RuntimeStateKind::MaterializedRelay,
+            state: RuntimeState::MaterializedRelay,
             kind: ModelKind::Relay,
             identifier: identifier.clone(),
             schema_fingerprint: [7; 32],
@@ -1895,7 +2210,8 @@ mod tests {
             let db = Database::builder(dir.path())
                 .open()
                 .expect("database should open");
-            let store = RuntimeStateStore::from_database(db).expect("state store should open");
+            let store = RuntimeStateStore::from_database(db, Executor::default())
+                .expect("state store should open");
             store
                 .persist_latest_snapshot(&placement, 4, &payload)
                 .expect("earlier state should persist");
@@ -1911,11 +2227,13 @@ mod tests {
             let db = Database::builder(dir.path())
                 .open()
                 .expect("database should reopen");
-            let store = RuntimeStateStore::from_database(db).expect("state store should reopen");
+            let store = RuntimeStateStore::from_database(db, Executor::default())
+                .expect("state store should reopen");
             let activated = store
                 .activate_forced_recovery(
                     &transition,
                     ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+                    None,
                 )
                 .expect("persisted forced recovery should activate")
                 .expect("the first activation should apply its checkpoint");
@@ -1929,7 +2247,8 @@ mod tests {
             let db = Database::builder(dir.path())
                 .open()
                 .expect("database should reopen again");
-            let store = RuntimeStateStore::from_database(db).expect("state store should reopen");
+            let store = RuntimeStateStore::from_database(db, Executor::default())
+                .expect("state store should reopen");
             let transition = ForcedRuntimeStateRecoveryTransition {
                 destination_incarnation: ClusterNodeIncarnation::new(43),
                 ..transition
@@ -1938,6 +2257,7 @@ mod tests {
                 .activate_forced_recovery(
                     &transition,
                     ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+                    None,
                 )
                 .expect("repeated forced recovery activation should be readable");
             let current = store
@@ -1958,7 +2278,7 @@ mod tests {
         let destination_incarnation = ClusterNodeIncarnation::new(42);
         let placement = RuntimeStatePlacement {
             domain: domain.clone(),
-            state: RuntimeStateKind::MaterializedRelay,
+            state: RuntimeState::MaterializedRelay,
             kind: ModelKind::Relay,
             identifier: identifier.clone(),
             schema_fingerprint: [7; 32],
@@ -1987,7 +2307,8 @@ mod tests {
             let db = Database::builder(dir.path())
                 .open()
                 .expect("database should open");
-            let store = RuntimeStateStore::from_database(db).expect("state store should open");
+            let store = RuntimeStateStore::from_database(db, Executor::default())
+                .expect("state store should open");
             store
                 .persist_latest_snapshot(&placement, 4, &payload)
                 .expect("earlier state should persist");
@@ -2003,11 +2324,13 @@ mod tests {
             let db = Database::builder(dir.path())
                 .open()
                 .expect("database should reopen");
-            let store = RuntimeStateStore::from_database(db).expect("state store should reopen");
+            let store = RuntimeStateStore::from_database(db, Executor::default())
+                .expect("state store should reopen");
             let activated = store
                 .activate_forced_recovery(
                     &transition,
                     ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+                    None,
                 )
                 .expect("persisted forced recovery should activate")
                 .expect("the first activation should apply its checkpoint");
@@ -2021,7 +2344,8 @@ mod tests {
             let db = Database::builder(dir.path())
                 .open()
                 .expect("database should reopen again");
-            let store = RuntimeStateStore::from_database(db).expect("state store should reopen");
+            let store = RuntimeStateStore::from_database(db, Executor::default())
+                .expect("state store should reopen");
             let transition = ForcedRuntimeStateRecoveryTransition {
                 target_schedule_fingerprint: [10; 32],
                 ..transition
@@ -2030,6 +2354,7 @@ mod tests {
                 .activate_forced_recovery(
                     &transition,
                     ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+                    None,
                 )
                 .expect("repeated forced recovery activation should be readable");
             let current = store
@@ -2038,6 +2363,249 @@ mod tests {
                 .expect("post-activation state should remain");
             assert_eq!(current.lsm, 6);
         }
+    }
+
+    fn tenant_branch(tenant: &str) -> BranchKey {
+        BranchKey::from_fields([(
+            nervix_models::FieldName::parse("tenant").expect("valid field name"),
+            crate::runtime_schema::RuntimeValue::String(tenant.to_string()),
+        )])
+        .expect("a tenant branch key is not empty")
+    }
+
+    fn generation(value: u64) -> WasmStateGeneration {
+        WasmStateGeneration::try_from(value).expect("test generations are non-zero")
+    }
+
+    fn wasm_guest_placement(tenant: &str, value: u64) -> RuntimeStatePlacement {
+        RuntimeStatePlacement {
+            domain: DomainName::parse("testing").expect("valid domain name"),
+            state: RuntimeState::WasmProcessor {
+                generation: generation(value),
+            },
+            kind: ModelKind::WasmProcessor,
+            identifier: ModelName::parse("counting_guest").expect("valid model name"),
+            schema_fingerprint: [4; 32],
+            branch_key: Some(tenant_branch(tenant)),
+        }
+    }
+
+    fn open_store(dir: &tempfile::TempDir) -> RuntimeStateStore {
+        let db = Database::builder(dir.path())
+            .open()
+            .expect("database should open");
+        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open")
+    }
+
+    fn current_identity(
+        generations: WasmStateGenerations,
+    ) -> HashMap<NodeRef, ScheduledStateIdentity> {
+        HashMap::from_iter([(
+            NodeRef::new(
+                ModelKind::WasmProcessor,
+                ModelName::parse("counting_guest").expect("valid model name"),
+            ),
+            ScheduledStateIdentity {
+                schema_fingerprint: [4; 32],
+                wasm_state_generations: Some(generations),
+            },
+        )])
+    }
+
+    /// A snapshot saved in an earlier generation keeps its own key, so no revision it carries, however
+    /// high, can replace or stand in for the guest state of the generation that succeeded it.
+    #[test]
+    fn an_earlier_generation_never_addresses_the_current_guest_state() {
+        let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
+        let store = open_store(&dir);
+        let earlier = wasm_guest_placement("acme", 1);
+        let current = wasm_guest_placement("acme", 2);
+
+        store
+            .persist_latest_snapshot(&current, 1, b"current")
+            .expect("current guest state should persist");
+        store
+            .persist_latest_snapshot(&earlier, 9, b"earlier")
+            .expect("a late save of the earlier generation writes only its own key");
+
+        let restored = store
+            .latest_snapshot(&current)
+            .expect("current guest state should load")
+            .expect("current guest state should remain");
+        assert_eq!(
+            (restored.lsm, restored.payload.as_slice()),
+            (1, b"current".as_slice())
+        );
+        let decoded = stored_placement_schema(&current.as_storage_key())
+            .expect("a current-shape WASM key decodes");
+        assert_eq!(decoded.state, current.state);
+        assert_eq!(decoded.branch, Some(tenant_branch("acme").fingerprint()));
+    }
+
+    /// Purging a domain against its committed identities removes exactly the guest state of the
+    /// generations a transition replaced: a concrete-branch transition leaves every other branch in
+    /// place, and a transition of every branch fences all of them at once, including branches that
+    /// exist only as persisted state. The purge survives a restart of the store.
+    #[test]
+    fn purging_removes_only_guest_state_of_superseded_generations() {
+        let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
+        let mut generations = WasmStateGenerations::first();
+        {
+            let store = open_store(&dir);
+            for (tenant, value) in [("acme", 1), ("beta", 1)] {
+                store
+                    .persist_latest_snapshot(&wasm_guest_placement(tenant, value), 3, b"state")
+                    .expect("first-generation guest state should persist");
+            }
+            generations.begin_branch(tenant_branch("acme").fingerprint());
+            store
+                .persist_latest_snapshot(&wasm_guest_placement("acme", 2), 1, b"reset")
+                .expect("the transitioned branch saves in its new generation");
+            store
+                .purge_stale_state_identities(
+                    &DomainName::parse("testing").expect("valid domain name"),
+                    &current_identity(generations.clone()),
+                )
+                .expect("stale guest state should purge");
+        }
+
+        let store = open_store(&dir);
+        let loaded = |tenant: &str, value: u64| {
+            store
+                .latest_snapshot(&wasm_guest_placement(tenant, value))
+                .expect("guest state should load")
+                .map(|snapshot| snapshot.lsm)
+        };
+        assert_eq!(loaded("acme", 1), None);
+        assert_eq!(loaded("acme", 2), Some(1));
+        assert_eq!(loaded("beta", 1), Some(3));
+
+        let every_branch = generations.begin_every_branch();
+        store
+            .purge_stale_state_identities(
+                &DomainName::parse("testing").expect("valid domain name"),
+                &current_identity(generations),
+            )
+            .expect("stale guest state should purge");
+        assert_eq!(every_branch, generation(3));
+        assert_eq!(loaded("acme", 2), None);
+        assert_eq!(loaded("beta", 1), None);
+    }
+
+    /// Guest saves and replica installations go through the store's storage workers. A replica
+    /// installation hands back the checkpoint it wrote, and refuses one that is not newer than the
+    /// checkpoint already stored for that generation.
+    #[tokio::test]
+    async fn guest_saves_and_replica_installs_are_written_by_the_storage_workers() {
+        let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
+        let store = open_store(&dir);
+        let placement = wasm_guest_placement("acme", 1);
+        let guest =
+            super::super::ReplicatedWasmProcessorState::new(placement.clone(), Vec::new(), 0, None)
+                .expect("guest state should initialize");
+        let saved = guest.replace_guest_state(vec![1, 2, 3]);
+
+        store
+            .persist_wasm_guest_state(&placement, saved)
+            .await
+            .expect("guest state should persist");
+        let stored = store
+            .latest_snapshot(&placement)
+            .expect("guest state should load")
+            .expect("the saved guest state is stored");
+        assert_eq!((stored.lsm, stored.payload), (1, vec![1, 2, 3]));
+
+        let older = PersistedRuntimeStateEntry {
+            lsm: 1,
+            schema_fingerprint: placement.schema_fingerprint,
+            payload: vec![9],
+        };
+        assert_eq!(
+            store
+                .persist_replica_snapshot_if_newer(&placement, older)
+                .await
+                .expect("the replica installation should run"),
+            None
+        );
+        let newer = PersistedRuntimeStateEntry {
+            lsm: 5,
+            schema_fingerprint: placement.schema_fingerprint,
+            payload: vec![7],
+        };
+        let installed = store
+            .persist_replica_snapshot_if_newer(&placement, newer.clone())
+            .await
+            .expect("the replica installation should run");
+        assert_eq!(installed, Some(newer));
+    }
+
+    /// Activating a forced recovery publishes the checkpoints it staged in the generation the
+    /// committed schedule names, and replaying the same recovery publishes nothing again.
+    #[test]
+    fn forced_recovery_publishes_staged_guest_state_in_the_committed_generation() {
+        let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
+        let store = open_store(&dir);
+        let staged = wasm_guest_placement("acme", 1);
+        let snapshot = PersistedRuntimeStateEntry {
+            lsm: 6,
+            schema_fingerprint: staged.schema_fingerprint,
+            payload: vec![2],
+        };
+        let entity = DomainNodeRef::node_in(
+            staged.domain.clone(),
+            ModelKind::WasmProcessor,
+            staged.identifier.clone(),
+        );
+        let source = ClusterNodeName::parse("node-1").expect("valid cluster node name");
+        let destination = ClusterNodeName::parse("node-2").expect("valid cluster node name");
+        let transition = ForcedRuntimeStateRecoveryTransition {
+            operation_id: "owner-replacement",
+            source: &source,
+            destination: &destination,
+            destination_incarnation: ClusterNodeIncarnation::new(7),
+            entity: &entity,
+            target_schedule_fingerprint: [8; 32],
+        };
+        store
+            .persist_forced_recovery_preparation(&transition, &[(staged.clone(), snapshot.clone())])
+            .expect("the recovery preparation should persist");
+        let mut committed = WasmStateGenerations::first();
+        committed.begin_every_branch();
+
+        let activated = store
+            .activate_forced_recovery(
+                &transition,
+                ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+                Some(&committed),
+            )
+            .expect("the recovery should activate")
+            .expect("the first activation publishes its checkpoints");
+
+        let published = wasm_guest_placement("acme", 2);
+        assert_eq!(activated, vec![(published.clone(), snapshot)]);
+        assert_eq!(
+            store
+                .latest_snapshot(&published)
+                .expect("guest state should load")
+                .map(|stored| stored.lsm),
+            Some(6)
+        );
+        assert_eq!(
+            store
+                .latest_snapshot(&staged)
+                .expect("guest state should load"),
+            None
+        );
+        assert_eq!(
+            store
+                .activate_forced_recovery(
+                    &transition,
+                    ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+                    Some(&committed),
+                )
+                .expect("a replayed activation should be readable"),
+            None
+        );
     }
 
     /// A stored key is bytes read back from the database, so decoding one that ends inside the

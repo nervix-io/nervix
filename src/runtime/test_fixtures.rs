@@ -320,8 +320,12 @@ pub(super) async fn attach_loopback_cluster(
         cluster_id: "test".to_string(),
         node_id: node_id.clone(),
         grpc_listen_addr: interconnect_addr,
-        grpc_advertise_addr: interconnect_addr.to_string(),
-        web_console_advertise_addr: format!("http://{interconnect_addr}"),
+        client_advertise_url: crate::application::test_fixtures::test_service_url(
+            interconnect_addr,
+        ),
+        console_advertise_url: crate::application::test_fixtures::test_service_url(
+            interconnect_addr,
+        ),
         interconnect_advertise_addr: interconnect_addr.into(),
         bootstrap_host: None,
         interconnect: interconnect.clone(),
@@ -642,10 +646,56 @@ pub(super) fn wasm_guest_stream(schema: StdArc<ArrowSchema>, batches: &[RecordBa
 }
 
 pub(super) fn scheduled_model(model: nervix_models::Model) -> ScheduledNode {
-    ScheduledNode::new(model).placed_on(
-        Some(ClusterNodeName::parse("node-1").expect("valid name")),
-        vec![ClusterNodeName::parse("node-1").expect("valid name")],
-    )
+    let resolved_branching = match &model {
+        nervix_models::Model::Relay(model) => {
+            assert!(
+                model.branching.is_unbranched(),
+                "branched schedule fixtures must provide their resolved branch and schema"
+            );
+            Some(ResolvedBranching::unbranched())
+        }
+        nervix_models::Model::Generator(model) => {
+            assert_unbranched_schedule_fixture(&model.branched_by)
+        }
+        nervix_models::Model::Inferencer(model) => {
+            assert_unbranched_schedule_fixture(&model.branched_by)
+        }
+        nervix_models::Model::WasmProcessor(model) => {
+            assert_unbranched_schedule_fixture(&model.branched_by)
+        }
+        nervix_models::Model::Deduplicator(model) => {
+            assert_unbranched_schedule_fixture(&model.branched_by)
+        }
+        nervix_models::Model::Correlator(model) => {
+            assert_unbranched_schedule_fixture(&model.branched_by)
+        }
+        nervix_models::Model::Junction(model) => {
+            assert_unbranched_schedule_fixture(&model.branched_by)
+        }
+        nervix_models::Model::Reorderer(model) => {
+            assert_unbranched_schedule_fixture(&model.branched_by)
+        }
+        nervix_models::Model::WindowProcessor(model) => {
+            assert_unbranched_schedule_fixture(&model.branched_by)
+        }
+        _ => None,
+    };
+    ScheduledNode::new(model)
+        .with_resolved_branching(resolved_branching)
+        .placed_on(
+            Some(ClusterNodeName::parse("node-1").expect("valid name")),
+            vec![ClusterNodeName::parse("node-1").expect("valid name")],
+        )
+}
+
+fn assert_unbranched_schedule_fixture(
+    branching: &nervix_models::BranchSelection,
+) -> Option<ResolvedBranching> {
+    assert!(
+        branching.is_unbranched(),
+        "branched schedule fixtures must provide their resolved branch and schema"
+    );
+    Some(ResolvedBranching::unbranched())
 }
 
 pub(super) fn install_test_domain_execution(

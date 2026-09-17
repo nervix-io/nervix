@@ -1307,6 +1307,26 @@ async fn given_nervix_server_process_is_started_with_state_snapshot_interval(
 }
 
 #[given(
+    expr = "a nervix-server process is started with transaction idle timeout {string} and \
+            tombstone retention {string}"
+)]
+async fn given_nervix_server_process_is_started_with_transaction_retention(
+    world: &mut ScenarioWorld,
+    idle_timeout: String,
+    tombstone_retention: String,
+) {
+    let idle_timeout = humantime::parse_duration(&idle_timeout)
+        .expect("transaction idle timeout must be a valid duration");
+    let tombstone_retention = humantime::parse_duration(&tombstone_retention)
+        .expect("transaction tombstone retention must be a valid duration");
+    let options = [
+        ServerProcessOption::TransactionIdleTimeout(idle_timeout),
+        ServerProcessOption::TransactionTombstoneRetention(tombstone_retention),
+    ];
+    start_ready_server_process(world, &options).await;
+}
+
+#[given(
     expr = "a nervix-server process is started with drain timeout {string} and shutdown timeout \
             {string}"
 )]
@@ -1384,6 +1404,38 @@ async fn given_server_process_is_configured_with_nspl_commands(
     }
 }
 
+#[when(expr = "an open transaction is held on the server process as placeholder {string}")]
+async fn when_open_transaction_is_held_on_server_process(
+    world: &mut ScenarioWorld,
+    placeholder: String,
+) {
+    let domain = world.domain.clone();
+    let mut session = world
+        .server_process
+        .as_ref()
+        .verified("the preceding step started a nervix-server process")
+        .open_session(&domain)
+        .await
+        .unwrap_or_else(|error| panic!("failed to open the server process session: {error}"));
+    let result = session
+        .run_command_result("BEGIN;")
+        .await
+        .unwrap_or_else(|error| panic!("failed to open the retained transaction: {error}"));
+    assert!(
+        result.success,
+        "the retained transaction must open: {}",
+        result.message
+    );
+    let transaction = result
+        .transaction
+        .verified("a successful BEGIN returns its transaction identity");
+    world
+        .placeholders
+        .insert(placeholder, transaction.id.clone());
+    world.last_command_output = Some(result.message);
+    world.active_session = Some(session);
+}
+
 #[when("these NSPL commands are executed on the server process")]
 async fn when_nspl_commands_are_executed_on_server_process(
     world: &mut ScenarioWorld,
@@ -1403,6 +1455,47 @@ async fn when_nspl_commands_are_executed_on_server_process(
                 process.log_tail()
             )
         }));
+    }
+}
+
+#[then(expr = "server process transaction {string} eventually has state {string}")]
+async fn then_server_process_transaction_eventually_has_state(
+    world: &mut ScenarioWorld,
+    transaction_id: String,
+    expected_state: String,
+) {
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let expected_state = expand_placeholders(world, &expected_state).to_ascii_uppercase();
+    let expected_id = format!("id={transaction_id}");
+    let expected_state_fragment = format!("state={expected_state}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last_output = String::new();
+    loop {
+        tokio::task::consume_budget().await;
+        assert!(
+            Instant::now() < deadline,
+            "server process transaction '{transaction_id}' did not reach state \
+             '{expected_state}'; last output: {last_output}"
+        );
+        let output = world
+            .server_process
+            .as_ref()
+            .verified("the preceding step started a nervix-server process")
+            .run_commands(&world.domain, "SHOW TRANSACTIONS;")
+            .await;
+        match output {
+            Ok(output)
+                if output.lines().any(|line| {
+                    line.contains(&expected_id) && line.contains(&expected_state_fragment)
+                }) =>
+            {
+                world.last_command_output = Some(output);
+                return;
+            }
+            Ok(output) => last_output = output,
+            Err(error) => last_output = error.to_string(),
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -1558,6 +1651,9 @@ async fn then_server_process_exits_because_of_signal(world: &mut ScenarioWorld, 
         describe_exit(status),
         process.log_tail()
     );
+    world.active_session = None;
+    world.active_session_node = None;
+    world.active_session_has_subscription = false;
 }
 
 #[then(expr = "the server process is terminated by {word} within {string} of the last signal")]
@@ -4393,6 +4489,23 @@ async fn given_node_has_state_rejecting_wasm_processor_fixture_resource_director
 }
 
 #[given(
+    expr = "node {string} has state-counting WASM processor fixture resource directory {string}"
+)]
+async fn given_node_has_state_counting_wasm_processor_fixture_resource_directory(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    placeholder: String,
+) {
+    place_generated_wasm_processor_fixture(
+        world,
+        &node_id,
+        &placeholder,
+        state_counting_wasm_fixture("counted_events"),
+    )
+    .await;
+}
+
+#[given(
     expr = "node {string} has {string} failing WASM processor fixture resource directory {string}"
 )]
 async fn given_node_has_failing_wasm_processor_fixture_resource_directory(
@@ -4656,6 +4769,104 @@ fn trapping_wasm_fixture() -> &'static [u8] {
       (func (export "nervix_load_state") (param i32 i32) (result i32) (i32.const 0))
       (func (export "nervix_reset_state") (result i32) (i32.const 0))
     )"#
+}
+
+/// A guest whose only saved state is how many batches its branch has processed. It emits one row
+/// with uninitialized columns for every even-numbered batch, so whether the next batch produces a
+/// row tells which saved count a recreated instance restored. Written as text, it compiles quickly
+/// enough for a forced ownership recovery to validate its restore within the recovery budget.
+fn state_counting_wasm_fixture(output_relay: &str) -> Vec<u8> {
+    let encoded = WasmEnvelope::output(
+        Vec::new(),
+        vec![WasmRoutedOutput::new(
+            output_relay,
+            vec![
+                WasmOutputColumnRef::uninitialized(),
+                WasmOutputColumnRef::uninitialized(),
+            ],
+            WasmAckSidecar {
+                rows: vec![WasmOutputRow::default()],
+                ..WasmAckSidecar::default()
+            },
+        )],
+    )
+    .encode()
+    .expect("state-counting WASM output fixture must encode");
+    let encoded_wat = encoded
+        .iter()
+        .map(|byte| format!("\\{byte:02x}"))
+        .collect::<String>();
+    let encoded_len = encoded.len();
+
+    format!(
+        r#"(module
+          (memory (export "memory") 1)
+          (global $count (mut i32) (i32.const 0))
+          (global $emitted (mut i32) (i32.const 0))
+          (global $read_ptr (mut i32) (i32.const 0))
+          (data (i32.const 32768) "{encoded_wat}")
+          (func (export "nervix_buffer_ptr") (result i32) global.get $read_ptr)
+          (func (export "nervix_buffer_len") (result i32) (i32.const {encoded_len}))
+          (func (export "nervix_buffer_capacity") (result i32) (i32.const 16384))
+          (func (export "nervix_alloc") (param i32) (result i32)
+            i32.const 0
+            global.set $read_ptr
+            i32.const 0)
+          (func (export "nervix_init") (param i32 i32) (result i32) (i32.const 0))
+          (func (export "nervix_current_domain_time_nanos") (result i64) (i64.const 0))
+          (func (export "nervix_process_batch") (param i32 i32) (result i32)
+            global.get $count
+            i32.const 1
+            i32.add
+            global.set $count
+            global.get $count
+            i32.const 2
+            i32.rem_u
+            i32.eqz
+            global.set $emitted
+            i32.const 0)
+          (func (export "nervix_on_timeout") (param i64) (result i32) (i32.const 0))
+          (func (export "nervix_flush") (result i32) (i32.const 0))
+          (func (export "nervix_read_emit") (result i32)
+            global.get $emitted
+            if (result i32)
+              i32.const 0
+              global.set $emitted
+              i32.const 32768
+              global.set $read_ptr
+              i32.const {encoded_len}
+            else
+              i32.const 0
+            end)
+          (func (export "nervix_dump_state") (result i32)
+            i32.const 16
+            global.get $count
+            i32.store
+            i32.const 16
+            global.set $read_ptr
+            i32.const 4)
+          (func (export "nervix_load_state") (param $ptr i32) (param $len i32) (result i32)
+            local.get $len
+            i32.const 4
+            i32.ne
+            if (result i32)
+              i32.const {rejected}
+            else
+              local.get $ptr
+              i32.load
+              global.set $count
+              i32.const 0
+            end)
+          (func (export "nervix_reset_state") (result i32)
+            i32.const 0
+            global.set $count
+            i32.const 0
+            global.set $emitted
+            i32.const 0)
+        )"#,
+        rejected = nervix_wasm::SavedStateRejection::ApplicationState.code()
+    )
+    .into_bytes()
 }
 
 fn state_rejecting_wasm_fixture(output_relay: &str) -> Vec<u8> {

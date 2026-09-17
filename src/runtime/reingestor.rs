@@ -2018,6 +2018,12 @@ mod tests {
                         ]
                         .into_iter()
                         .collect(),
+                        relay_branchings: [
+                            (input_relay.clone(), ResolvedBranching::unbranched()),
+                            (output_relay.clone(), ResolvedBranching::unbranched()),
+                        ]
+                        .into_iter()
+                        .collect(),
                         ..DomainRoutingSnapshot::default()
                     },
                 ),

@@ -83,6 +83,12 @@ impl ScheduleDelta {
                 .config
                 .change_aspects_against(&desired_node.config);
             let level = aspects.quiesce_level();
+            // A new guest-state lifetime replaces the branch instances that still hold the previous
+            // one. A reassignment alone rebuilds a node only where its execution starts or stops,
+            // so the lifetime change swaps the entity wherever it keeps executing.
+            if existing_node.wasm_state_generations() != desired_node.wasm_state_generations() {
+                entities.push(desired_node.identity());
+            }
             let emitter_schema_fingerprint_may_change =
                 desired_node.kind() == ModelKind::Emitter && level == QuiesceLevel::EntityPause;
             let model_derived_residue_may_change = matches!(
@@ -217,12 +223,13 @@ mod tests {
     use std::num::NonZeroUsize;
 
     use nervix_models::{
-        AckMode, BranchSelection, ClusterNodeName, CreateEmitter, CreateIngestor, CreateJunction,
-        CreatePlacement, CreateRelay, DomainName, DomainSchedule, DynamicModelUpdate, EmitSink,
-        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, Expression, FlushPolicy,
-        GeneralErrorPolicy, IngestSource, Literal, Model, ModelKind, NodeRef, OutputBranch,
-        PlacementPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
-        ResolvedBranching, RetryPolicy, RouteConstruction, ScheduledNode,
+        AckMode, BranchKeyFingerprint, BranchSelection, ClusterNodeName, CreateEmitter,
+        CreateIngestor, CreateJunction, CreatePlacement, CreateRelay, CreateWasmProcessor,
+        DomainName, DomainSchedule, DynamicModelUpdate, EmitSink, EmitterPublishingMode,
+        EndpointIngestMode, ErrorPolicies, Expression, FlushPolicy, GeneralErrorPolicy,
+        IngestSource, Literal, Model, ModelKind, NodeRef, OutputBranch, PlacementPolicy,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching, ResolvedBranching,
+        RetryPolicy, RouteConstruction, ScheduledNode, WasmProcessorLimits,
     };
     use nonzero_ext::nonzero;
 
@@ -317,6 +324,47 @@ mod tests {
             ],
             Vec::new(),
         )
+    }
+
+    fn wasm_processor_schedule(owner: &str) -> DomainSchedule {
+        DomainSchedule::new(
+            DomainName::parse("testing").expect("valid domain"),
+            vec![
+                ScheduledNode::new(Model::WasmProcessor(CreateWasmProcessor {
+                    name: named("counting_guest"),
+                    from: ProcessorInputs::single(named("events")),
+                    output_routes: ProcessorOutputs::single(named("counted_events")),
+                    branched_by: BranchSelection::unbranched(),
+                    resource: named("counting_bundle"),
+                    resource_version: 1,
+                    file: "processors/counting.wasm".to_string(),
+                    limits: WasmProcessorLimits {
+                        max_fuel: nonzero!(1_000_000u64),
+                        max_memory_bytes: nonzero!(67_108_864u64),
+                    },
+                    global_error_policy: GeneralErrorPolicy::Log,
+                    mode: AckMode::Attached,
+                    filter_where: None,
+                    materialized_state: Vec::new(),
+                }))
+                .with_schema_fingerprint([1; 32])
+                .placed_on(
+                    Some(ClusterNodeName::parse(owner).expect("valid name")),
+                    vec![
+                        ClusterNodeName::parse("node-1").expect("valid name"),
+                        ClusterNodeName::parse("node-2").expect("valid name"),
+                    ],
+                ),
+            ],
+            Vec::new(),
+        )
+    }
+
+    fn wasm_processor_ref() -> NodeRef {
+        NodeRef {
+            kind: ModelKind::WasmProcessor,
+            identifier: named("counting_guest"),
+        }
     }
 
     #[test]
@@ -670,6 +718,43 @@ mod tests {
                     relay: named("events"),
                     capacity: nonzero!(5usize),
                 }],
+            }
+        );
+    }
+
+    #[test]
+    fn a_guest_state_lifetime_change_swaps_the_processor_where_it_keeps_executing() {
+        let existing = wasm_processor_schedule("node-1");
+        let mut every_branch = wasm_processor_schedule("node-1");
+        every_branch.nodes[0].begin_wasm_state_generation();
+        let mut one_branch = wasm_processor_schedule("node-1");
+        one_branch.nodes[0].begin_wasm_branch_state_generation(BranchKeyFingerprint::new([3; 32]));
+        let swap = ScheduleDelta::EntitySwap {
+            entities: vec![wasm_processor_ref()],
+            reassignments: Vec::new(),
+            dynamic_updates: Vec::new(),
+        };
+
+        assert_eq!(ScheduleDelta::classify(&existing, &every_branch), swap);
+        assert_eq!(ScheduleDelta::classify(&existing, &one_branch), swap);
+        assert_eq!(
+            ScheduleDelta::classify(&every_branch, &every_branch),
+            ScheduleDelta::Unchanged
+        );
+    }
+
+    #[test]
+    fn an_owner_replacement_with_a_new_guest_state_lifetime_swaps_and_reassigns() {
+        let existing = wasm_processor_schedule("node-1");
+        let mut desired = wasm_processor_schedule("node-2");
+        desired.nodes[0].begin_wasm_state_generation();
+
+        assert_eq!(
+            ScheduleDelta::classify(&existing, &desired),
+            ScheduleDelta::EntitySwap {
+                entities: vec![wasm_processor_ref()],
+                reassignments: vec![wasm_processor_ref()],
+                dynamic_updates: Vec::new(),
             }
         );
     }

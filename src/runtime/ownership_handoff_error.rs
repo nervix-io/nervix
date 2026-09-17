@@ -7,7 +7,7 @@
 
 use error_stack::Report;
 use nervix_interconnect::OwnershipHandoffFailure;
-use nervix_models::ModelName;
+use nervix_models::{ModelKind, ModelName};
 use thiserror::Error;
 
 use super::RuntimePersistenceError;
@@ -32,6 +32,15 @@ pub(crate) enum OwnershipHandoffError {
     WasmRestore { processor: ModelName },
     #[error("ownership handoff checkpoint failed for wasm processor '{}'", .processor.as_str())]
     WasmCheckpoint { processor: ModelName },
+    #[error(
+        "ownership handoff cannot place the branch state of {} '{}'",
+        .kind.as_str(),
+        .identifier.as_str()
+    )]
+    StatePlacement {
+        kind: ModelKind,
+        identifier: ModelName,
+    },
     #[error(transparent)]
     Persistence(#[from] RuntimePersistenceError),
 }

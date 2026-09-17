@@ -23,9 +23,10 @@ use nervix_execution::sync::DashMap;
 use nervix_interconnect::{TlsConfigBundle, Transport};
 use nervix_models::{
     AckMode, BranchSelection, ClusterNodeName, CreateDeduplicator, CreateEmitter, CreateIngestor,
-    CreateJunction, CreateSchema, DomainConfig, DomainName, DomainPace, DomainStartPoint,
-    DomainState, DomainStatus, EmitSink, IngestSource, KafkaOffsetMode, Model, ModelKind,
-    ModelName, NodeRef, PlacementGroupSchedule, ProcessorInputs, ProcessorOutputs, ScheduledNode,
+    CreateJunction, CreateSchema, CreateWasmProcessor, DomainConfig, DomainName, DomainPace,
+    DomainStartPoint, DomainState, DomainStatus, EmitSink, IngestSource, KafkaOffsetMode, Model,
+    ModelKind, ModelName, NodeEndpoint, NodeRef, NodeServiceUrl, PlacementGroupSchedule,
+    ProcessorInputs, ProcessorOutputs, ScheduledNode, WasmProcessorLimits,
 };
 use nonzero_ext::nonzero;
 use parking_lot::RwLock;
@@ -129,6 +130,12 @@ pub(in crate::application) fn test_addr(base_port: u16) -> std::net::SocketAddr 
     format!("127.0.0.1:{base_port}")
         .parse()
         .expect("valid socket addr")
+}
+
+/// The url a test node advertises for a service it serves at `addr`.
+pub(crate) fn test_service_url(addr: std::net::SocketAddr) -> NodeServiceUrl {
+    NodeServiceUrl::new("http", &NodeEndpoint::from(addr))
+        .expect("a loopback address and port form a url")
 }
 
 pub(in crate::application) fn test_args(extra: &[&str]) -> Args {
@@ -235,6 +242,7 @@ fn test_session_service(
             transaction_bindings: DashMap::with_hasher(RandomState::new()),
             command_executions: DashMap::with_hasher(RandomState::new()),
             transaction_executions: DashMap::with_hasher(RandomState::new()),
+            transaction_recovery: Default::default(),
             ownership_handoff_operations: tokio::sync::Mutex::new(()),
             resource_upload_executions: DashMap::with_hasher(RandomState::new()),
             resource_replication_executions: DashMap::with_hasher(RandomState::new()),
@@ -326,6 +334,23 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             deduplicate_on: Vec::new(),
             max_time: "1m".to_string(),
             branched_by: BranchSelection::unbranched(),
+            mode: AckMode::Attached,
+            filter_where: None,
+            materialized_state: Vec::new(),
+        }),
+        ModelKind::WasmProcessor => Model::WasmProcessor(CreateWasmProcessor {
+            name: named(identifier_raw),
+            from: ProcessorInputs::new(Vec::new(), Vec::new()),
+            output_routes: ProcessorOutputs::new(Vec::new()),
+            branched_by: BranchSelection::unbranched(),
+            resource: named("guest_bundle"),
+            resource_version: 1,
+            file: "processors/guest.wasm".to_string(),
+            limits: WasmProcessorLimits {
+                max_fuel: nonzero!(1_000_000u64),
+                max_memory_bytes: nonzero!(67_108_864u64),
+            },
+            global_error_policy: nervix_models::GeneralErrorPolicy::Log,
             mode: AckMode::Attached,
             filter_where: None,
             materialized_state: Vec::new(),
@@ -446,7 +471,7 @@ pub(in crate::application) async fn build_test_service(
         ConsensusSettings {
             cluster_name: "test".to_string(),
             node_id: expected_leader.clone(),
-            interconnect_advertise_addr: interconnect.local_addr().to_string(),
+            interconnect_advertise_addr: interconnect.local_addr().into(),
             interconnect: interconnect.clone(),
             executor: executor.clone(),
             raft_heartbeat_interval: Duration::from_millis(50),
@@ -477,8 +502,8 @@ pub(in crate::application) async fn build_test_service(
             cluster_id: "test".to_string(),
             node_id: expected_leader,
             grpc_listen_addr: grpc_addr,
-            grpc_advertise_addr: grpc_addr.to_string(),
-            web_console_advertise_addr: format!("http://{}", grpc_addr),
+            client_advertise_url: test_service_url(grpc_addr),
+            console_advertise_url: test_service_url(grpc_addr),
             interconnect_advertise_addr: interconnect_addr.into(),
             bootstrap_host: None,
             interconnect: interconnect.clone(),

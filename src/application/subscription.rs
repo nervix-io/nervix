@@ -37,7 +37,6 @@ use triomphe::Arc;
 #[cfg(test)]
 use super::authentication::DEFAULT_USER;
 use super::{
-    domain_clock::current_timestamp,
     model_mutation::{
         append_command_result, command_batch_result, command_error, command_ok,
         command_results_message,
@@ -1366,7 +1365,7 @@ impl SessionServiceImpl {
                                 id.clone(),
                                 domain,
                                 subscriptions.user.clone(),
-                                current_timestamp(),
+                                self.transaction_activity(),
                             );
                             match self
                                 .inner

@@ -6,6 +6,8 @@
 //! This module breaks its contract: `DomainSchedule` still carries raw node Models. Runtime
 //! planning must close that boundary before ownership handoffs consume the schedule.
 
+use nervix_models::WasmStateGenerations;
+
 use super::*;
 
 impl Runtime {
@@ -21,6 +23,7 @@ impl Runtime {
             kafka_partition_schedule: &'a Option<KafkaPartitionSchedule>,
             primary_node: &'a Option<ClusterNodeName>,
             assigned_nodes: &'a [ClusterNodeName],
+            wasm_state_generations: Option<&'a WasmStateGenerations>,
         }
 
         #[derive(serde::Serialize)]
@@ -41,6 +44,7 @@ impl Runtime {
                 kafka_partition_schedule: &node.kafka_partition_schedule,
                 primary_node: &node.primary_node,
                 assigned_nodes: &node.assigned_nodes,
+                wasm_state_generations: node.wasm_state_generations(),
             })
             .collect::<Vec<_>>();
         let fingerprint = DomainScheduleFingerprint {

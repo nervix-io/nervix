@@ -49,7 +49,6 @@ use super::{
     completion::{ApplicationRevisionPhase, wait_for_application_revision},
     describe_output::placement_runtime_node_ref_suggestions,
     model_mutation::{RequestDomainError, command_error, parse_request_domain},
-    peer_grpc::grpc_uri_from_advertise_addr,
     resource::{
         ResourceUploadError, completed_resource_version_suggestions, resource_named_before_version,
         resource_ref_suggestions, resource_version_suggestions,
@@ -58,6 +57,7 @@ use super::{
     scheduling::RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
     service_tasks::ServiceTasks,
     subscription::{SessionSubscriptions, SubscriptionInterestKey},
+    transaction::TransactionRecovery,
 };
 use crate::{
     cluster, proto,
@@ -177,6 +177,8 @@ pub(in crate::application) struct SessionServiceInner {
     /// commits in independent domains.
     pub(in crate::application) transaction_executions:
         DashMap<String, StdArc<AsyncMutex<()>>, RandomState>,
+    /// Bounded fair admission for leader-side recovery of durable COMMITTING work.
+    pub(in crate::application) transaction_recovery: TransactionRecovery,
     /// Serializes destination preparation with authority reconciliation so a request from a
     /// superseded leader cannot race a current leader's preparation into the runtime.
     pub(in crate::application) ownership_handoff_operations: AsyncMutex<()>,
@@ -404,9 +406,9 @@ impl SessionService for SessionServiceImpl {
             };
             let mut leader_grpc_uri = String::new();
             if let Some(node) = leader_node
-                && let Some(uri) = grpc_uri_from_advertise_addr(&node.grpc_advertise_addr)
+                && let Some(url) = node.client_url
             {
-                leader_grpc_uri = uri;
+                leader_grpc_uri = url.to_string();
             }
             return Ok(Response::new(UploadResourceResponse {
                 success: false,

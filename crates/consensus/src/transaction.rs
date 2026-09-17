@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use arch_into::ArchInto as _;
 use meticulous::OptionExt as _;
 #[cfg(test)]
@@ -173,6 +175,8 @@ pub struct TransactionCommitAdvance {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct TransactionCommitProgress {
+    /// The latest actual-UTC observation associated with administrative commit progress.
+    pub last_activity_at: Timestamp,
     /// The first statement whose application has not completed yet.
     pub next_statement: usize,
     /// Results whose authoritative effects and application obligations both completed.
@@ -231,19 +235,80 @@ pub struct FinishedTransaction {
     pub results: Vec<TransactionStepResult>,
 }
 
+/// The durable actual-UTC activity and inclusive inactivity boundary of an OPEN transaction.
+///
+/// The boundary is fixed when activity is admitted, so a restart or a different domain clock
+/// cannot reinterpret the timeout. A backward wall-clock adjustment cannot move either value
+/// backward; a later actual-UTC observation at or beyond `inactivity_deadline` expires the
+/// transaction before that observation can renew it.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct TransactionActivity {
+    last_activity_at: Timestamp,
+    inactivity_deadline: Timestamp,
+}
+
+impl TransactionActivity {
+    pub fn from_timeout(last_activity_at: Timestamp, timeout: Duration) -> Self {
+        let inactivity_deadline = match last_activity_at.checked_add(timeout) {
+            Ok(deadline) => deadline,
+            // A timeout beyond the vocabulary's final actual-UTC instant cannot become due inside
+            // that vocabulary. Clamping to the endpoint is therefore the timeout's meaning.
+            Err(_) => Timestamp::from_unix_nanos(i64::MAX),
+        };
+        Self {
+            last_activity_at,
+            inactivity_deadline,
+        }
+    }
+
+    pub const fn last_activity_at(self) -> Timestamp {
+        self.last_activity_at
+    }
+
+    pub const fn inactivity_deadline(self) -> Timestamp {
+        self.inactivity_deadline
+    }
+
+    pub fn is_inactive_at(self, observed_at: Timestamp) -> bool {
+        observed_at >= self.inactivity_deadline
+    }
+
+    fn renew(&mut self, activity: Self) {
+        self.last_activity_at = self.last_activity_at.max(activity.last_activity_at);
+        self.inactivity_deadline = self.inactivity_deadline.max(activity.inactivity_deadline);
+    }
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum TransactionState {
-    Open,
+    Open(TransactionActivity),
     Committing(Box<TransactionCommitProgress>),
     Finished(FinishedTransaction),
+}
+
+enum OpenActivityDecision {
+    Active,
+    Expired,
+    NotOpen,
 }
 
 impl TransactionState {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Open => "OPEN",
+            Self::Open(_) => "OPEN",
             Self::Committing(_) => "COMMITTING",
             Self::Finished(finished) => finished.outcome.as_str(),
         }
@@ -251,7 +316,7 @@ impl TransactionState {
 
     pub fn is_live(&self) -> bool {
         match self {
-            Self::Open | Self::Committing(_) => true,
+            Self::Open(_) | Self::Committing(_) => true,
             Self::Finished(_) => false,
         }
     }
@@ -265,7 +330,6 @@ pub struct ReplicatedTransaction {
     pub domain: DomainName,
     pub owner: UserName,
     pub created_at: Timestamp,
-    pub last_activity_at: Timestamp,
     pub state: TransactionState,
     pub statement_count: usize,
     pub queued_source_bytes: u64,
@@ -274,23 +338,28 @@ pub struct ReplicatedTransaction {
 }
 
 impl ReplicatedTransaction {
-    pub fn open(id: String, domain: DomainName, owner: UserName, now: Timestamp) -> Self {
+    pub fn open(
+        id: String,
+        domain: DomainName,
+        owner: UserName,
+        activity: TransactionActivity,
+    ) -> Self {
         let mutation_owner = DomainMutationOwner::transaction(id.clone());
-        Self::open_with_mutation_owner(id, domain, owner, now, mutation_owner)
+        Self::open_with_mutation_owner(id, domain, owner, activity, mutation_owner)
     }
 
     pub fn open_for_command(
         id: String,
         domain: DomainName,
         owner: UserName,
-        now: Timestamp,
+        activity: TransactionActivity,
         command: CommandExecutionReference,
     ) -> Self {
         Self::open_with_mutation_owner(
             id,
             domain,
             owner,
-            now,
+            activity,
             DomainMutationOwner::command(command),
         )
     }
@@ -299,16 +368,15 @@ impl ReplicatedTransaction {
         id: String,
         domain: DomainName,
         owner: UserName,
-        now: Timestamp,
+        activity: TransactionActivity,
         mutation_owner: DomainMutationOwner,
     ) -> Self {
         Self {
             id,
             domain,
             owner,
-            created_at: now,
-            last_activity_at: now,
-            state: TransactionState::Open,
+            created_at: activity.last_activity_at(),
+            state: TransactionState::Open(activity),
             statement_count: 0,
             queued_source_bytes: 0,
             statements: Vec::new(),
@@ -319,7 +387,22 @@ impl ReplicatedTransaction {
     pub fn domain_mutation(&self) -> Option<&DomainMutationLease> {
         match &self.state {
             TransactionState::Committing(progress) => progress.domain_mutation.as_ref(),
-            TransactionState::Open | TransactionState::Finished(_) => None,
+            TransactionState::Open(_) | TransactionState::Finished(_) => None,
+        }
+    }
+
+    pub fn last_activity_at(&self) -> Timestamp {
+        match &self.state {
+            TransactionState::Open(activity) => activity.last_activity_at(),
+            TransactionState::Committing(progress) => progress.last_activity_at,
+            TransactionState::Finished(finished) => finished.finished_at,
+        }
+    }
+
+    pub fn inactivity_deadline(&self) -> Option<Timestamp> {
+        match &self.state {
+            TransactionState::Open(activity) => Some(activity.inactivity_deadline()),
+            TransactionState::Committing(_) | TransactionState::Finished(_) => None,
         }
     }
 
@@ -335,7 +418,7 @@ impl ReplicatedTransaction {
 
     pub fn pending_statement_count(&self) -> usize {
         match &self.state {
-            TransactionState::Open => self.statements.len(),
+            TransactionState::Open(_) => self.statements.len(),
             TransactionState::Committing(progress) => self
                 .statements
                 .len()
@@ -347,7 +430,7 @@ impl ReplicatedTransaction {
 
     pub fn completed_statement_count(&self) -> usize {
         match &self.state {
-            TransactionState::Open => 0,
+            TransactionState::Open(_) => 0,
             TransactionState::Committing(progress) => progress.next_statement,
             TransactionState::Finished(finished) => finished
                 .results
@@ -361,14 +444,14 @@ impl ReplicatedTransaction {
         match &self.state {
             TransactionState::Committing(progress) => &progress.results,
             TransactionState::Finished(finished) => &finished.results,
-            TransactionState::Open => &[],
+            TransactionState::Open(_) => &[],
         }
     }
 
     pub fn finished_outcome(&self) -> Option<&TransactionOutcome> {
         match &self.state {
             TransactionState::Finished(finished) => Some(&finished.outcome),
-            TransactionState::Open | TransactionState::Committing(_) => None,
+            TransactionState::Open(_) | TransactionState::Committing(_) => None,
         }
     }
 
@@ -423,7 +506,7 @@ impl ReplicatedTransaction {
                 request_reference: statement.request_reference.clone(),
             });
         }
-        if !matches!(self.state, TransactionState::Open) {
+        if !matches!(self.state, TransactionState::Open(_)) {
             return Err(TransactionMutationError::NotOpen {
                 id: self.id.clone(),
                 state: self.state.as_str().to_string(),
@@ -457,23 +540,65 @@ impl ReplicatedTransaction {
         Ok(TransactionQueueAdmission::New)
     }
 
+    fn not_open_error(&self) -> TransactionMutationError {
+        TransactionMutationError::NotOpen {
+            id: self.id.clone(),
+            state: self.state.as_str().to_string(),
+        }
+    }
+
+    /// Atomically decides whether an OPEN transaction may record fresh activity.
+    ///
+    /// `Expired` means the transaction crossed its inclusive inactivity boundary and was made
+    /// terminal instead. The caller must not apply the requested OPEN mutation in that case.
+    fn expire_open_if_inactive(
+        &mut self,
+        activity: TransactionActivity,
+        outcome_revision: u64,
+    ) -> OpenActivityDecision {
+        let TransactionState::Open(current) = &mut self.state else {
+            return OpenActivityDecision::NotOpen;
+        };
+        if current.is_inactive_at(activity.last_activity_at()) {
+            self.finish(
+                activity.last_activity_at(),
+                outcome_revision,
+                TransactionOutcome::Expired,
+                Vec::new(),
+            );
+            return OpenActivityDecision::Expired;
+        }
+        OpenActivityDecision::Active
+    }
+
     pub(crate) fn queue(
         &mut self,
         owner: &UserName,
         domain: &DomainName,
-        at: Timestamp,
+        activity: TransactionActivity,
+        outcome_revision: u64,
         statement: TransactionStatement,
         limits: TransactionQueueLimits,
     ) -> Result<(), TransactionMutationError> {
+        self.ensure_owner(owner)?;
+        self.ensure_domain(domain)?;
+        match self.expire_open_if_inactive(activity, outcome_revision) {
+            OpenActivityDecision::Active => {}
+            OpenActivityDecision::Expired => return Ok(()),
+            OpenActivityDecision::NotOpen => return Err(self.not_open_error()),
+        }
         match self.queue_admission(owner, domain, &statement.request, limits)? {
             TransactionQueueAdmission::Existing(_) => return Ok(()),
             TransactionQueueAdmission::New => {}
         }
+        let TransactionState::Open(current) = &mut self.state else {
+            return Err(self.not_open_error());
+        };
+        current.renew(activity);
         let next_source_bytes = self
             .queued_source_bytes
             .checked_add(statement.source_bytes())
             .verified("the admission check above rejected a statement that does not fit");
-        self.last_activity_at = at;
         self.statement_count = self
             .statement_count
             .checked_add(1)
@@ -486,18 +611,23 @@ impl ReplicatedTransaction {
     pub(crate) fn start_commit(
         &mut self,
         owner: &UserName,
-        at: Timestamp,
+        activity: TransactionActivity,
+        outcome_revision: u64,
         domain_mutation: Option<DomainMutationLease>,
     ) -> Result<(), TransactionMutationError> {
         self.ensure_owner(owner)?;
-        if !matches!(self.state, TransactionState::Open) {
-            return Err(TransactionMutationError::NotOpen {
-                id: self.id.clone(),
-                state: self.state.as_str().to_string(),
-            });
+        match self.expire_open_if_inactive(activity, outcome_revision) {
+            OpenActivityDecision::Active => {}
+            OpenActivityDecision::Expired => return Ok(()),
+            OpenActivityDecision::NotOpen => return Err(self.not_open_error()),
         }
-        self.last_activity_at = at;
+        let TransactionState::Open(current) = &mut self.state else {
+            return Err(self.not_open_error());
+        };
+        current.renew(activity);
+        let last_activity_at = current.last_activity_at();
         self.state = TransactionState::Committing(Box::new(TransactionCommitProgress {
+            last_activity_at,
             next_statement: 0,
             results: Vec::new(),
             applying: None,
@@ -509,18 +639,33 @@ impl ReplicatedTransaction {
     pub(crate) fn touch(
         &mut self,
         owner: &UserName,
-        at: Timestamp,
+        activity: TransactionActivity,
+        outcome_revision: u64,
     ) -> Result<(), TransactionMutationError> {
         self.ensure_owner(owner)?;
-        match self.state {
-            TransactionState::Open | TransactionState::Committing(_) => {
-                self.last_activity_at = at;
+        if matches!(self.state, TransactionState::Open(_)) {
+            match self.expire_open_if_inactive(activity, outcome_revision) {
+                OpenActivityDecision::Active => {}
+                OpenActivityDecision::Expired => return Ok(()),
+                OpenActivityDecision::NotOpen => return Err(self.not_open_error()),
+            }
+            let TransactionState::Open(current) = &mut self.state else {
+                return Err(self.not_open_error());
+            };
+            current.renew(activity);
+            return Ok(());
+        }
+        match &mut self.state {
+            TransactionState::Committing(progress) => {
+                progress.last_activity_at =
+                    progress.last_activity_at.max(activity.last_activity_at());
                 Ok(())
             }
-            TransactionState::Finished(_) => Err(TransactionMutationError::Finished {
+            TransactionState::Finished(finished) => Err(TransactionMutationError::Finished {
                 id: self.id.clone(),
-                outcome: self.state.as_str().to_string(),
+                outcome: finished.outcome.as_str().to_string(),
             }),
+            TransactionState::Open(_) => Ok(()),
         }
     }
 
@@ -569,7 +714,7 @@ impl ReplicatedTransaction {
                 id: self.id.clone(),
             });
         }
-        self.last_activity_at = at;
+        progress.last_activity_at = progress.last_activity_at.max(at);
         progress.applying = Some(applying);
         Ok(())
     }
@@ -640,12 +785,13 @@ impl ReplicatedTransaction {
             };
             applying.completion
         };
-        self.last_activity_at = at;
+        progress.last_activity_at = progress.last_activity_at.max(at);
         progress.next_statement = applying.next_statement;
         progress.results.push(applying.result);
         if let Some(outcome) = completion {
+            let finished_at = progress.last_activity_at;
             let results = std::mem::take(&mut progress.results);
-            self.finish(at, outcome_revision, outcome, results);
+            self.finish(finished_at, outcome_revision, outcome, results);
         }
         Ok(())
     }
@@ -671,8 +817,9 @@ impl ReplicatedTransaction {
                 statement_count: self.statements.len(),
             });
         }
+        let finished_at = progress.last_activity_at.max(at);
         self.finish(
-            at,
+            finished_at,
             outcome_revision,
             TransactionOutcome::Committed,
             Vec::new(),
@@ -683,18 +830,22 @@ impl ReplicatedTransaction {
     pub(crate) fn revert(
         &mut self,
         owner: &UserName,
-        at: Timestamp,
+        activity: TransactionActivity,
         outcome_revision: u64,
     ) -> Result<(), TransactionMutationError> {
         self.ensure_owner(owner)?;
-        if !matches!(self.state, TransactionState::Open) {
-            return Err(TransactionMutationError::NotOpen {
-                id: self.id.clone(),
-                state: self.state.as_str().to_string(),
-            });
+        match self.expire_open_if_inactive(activity, outcome_revision) {
+            OpenActivityDecision::Active => {}
+            OpenActivityDecision::Expired => return Ok(()),
+            OpenActivityDecision::NotOpen => return Err(self.not_open_error()),
         }
+        let TransactionState::Open(current) = &mut self.state else {
+            return Err(self.not_open_error());
+        };
+        current.renew(activity);
+        let finished_at = current.last_activity_at();
         self.finish(
-            at,
+            finished_at,
             outcome_revision,
             TransactionOutcome::Reverted,
             Vec::new(),
@@ -705,13 +856,12 @@ impl ReplicatedTransaction {
     pub(crate) fn expire(
         &mut self,
         at: Timestamp,
-        idle_before: Timestamp,
         outcome_revision: u64,
     ) -> Result<bool, TransactionMutationError> {
-        if !matches!(self.state, TransactionState::Open) {
+        let TransactionState::Open(activity) = &self.state else {
             return Ok(false);
-        }
-        if self.last_activity_at > idle_before {
+        };
+        if !activity.is_inactive_at(at) {
             return Ok(false);
         }
         self.finish(
@@ -730,7 +880,6 @@ impl ReplicatedTransaction {
         outcome: TransactionOutcome,
         results: Vec<TransactionStepResult>,
     ) {
-        self.last_activity_at = at;
         self.statements.clear();
         self.queued_source_bytes = 0;
         self.state = TransactionState::Finished(FinishedTransaction {
@@ -887,6 +1036,10 @@ mod tests {
         DomainName::parse("default").assured("the test domain is an identifier-shaped literal")
     }
 
+    fn activity(at: i64) -> TransactionActivity {
+        TransactionActivity::from_timeout(Timestamp::from_unix_nanos(at), Duration::from_nanos(10))
+    }
+
     fn transaction_with_one_statement() -> ReplicatedTransaction {
         let owner = test_owner();
         let domain = test_domain();
@@ -894,13 +1047,14 @@ mod tests {
             "transaction-1".to_string(),
             domain.clone(),
             owner.clone(),
-            Timestamp::from_unix_nanos(1),
+            activity(1),
         );
         transaction
             .queue(
                 &owner,
                 &domain,
-                Timestamp::from_unix_nanos(2),
+                activity(2),
+                2,
                 TransactionStatement::test_admitted(TransactionStatementRequest {
                     request_reference: CommandExecutionReference::parse("request.0")
                         .assured("the test command reference is an accepted literal"),
@@ -915,7 +1069,7 @@ mod tests {
             )
             .assured("the first test statement is within every admission limit");
         transaction
-            .start_commit(&owner, Timestamp::from_unix_nanos(3), None)
+            .start_commit(&owner, activity(3), 3, None)
             .assured("an open test transaction can begin committing");
         transaction
     }
@@ -985,7 +1139,7 @@ mod tests {
             "open".to_string(),
             test_domain(),
             test_owner(),
-            Timestamp::from_unix_nanos(1),
+            activity(1),
         );
         assert!(matches!(
             open.complete_application(0, Timestamp::from_unix_nanos(2), 2, None),
@@ -1049,7 +1203,7 @@ mod tests {
             "open".to_string(),
             test_domain(),
             test_owner(),
-            Timestamp::from_unix_nanos(1),
+            activity(1),
         );
         assert!(matches!(
             open.finish_empty_commit(Timestamp::from_unix_nanos(2), 2),
@@ -1071,10 +1225,10 @@ mod tests {
             "empty".to_string(),
             test_domain(),
             owner.clone(),
-            Timestamp::from_unix_nanos(1),
+            activity(1),
         );
         empty
-            .start_commit(&owner, Timestamp::from_unix_nanos(2), None)
+            .start_commit(&owner, activity(2), 2, None)
             .assured("the empty test transaction can begin committing");
         empty
             .finish_empty_commit(Timestamp::from_unix_nanos(3), 7)
@@ -1085,5 +1239,136 @@ mod tests {
         assert_eq!(finished.outcome, TransactionOutcome::Committed);
         assert_eq!(finished.outcome_revision, 7);
         assert!(finished.results.is_empty());
+    }
+
+    #[test]
+    fn open_activity_uses_an_inclusive_durable_deadline() {
+        let owner = test_owner();
+        let mut transaction = ReplicatedTransaction::open(
+            "deadline".to_string(),
+            test_domain(),
+            owner.clone(),
+            activity(1),
+        );
+
+        transaction
+            .touch(&owner, activity(11), 7)
+            .assured("activity at the deadline resolves to a terminal outcome");
+
+        let TransactionState::Finished(finished) = &transaction.state else {
+            panic!("activity at the inclusive inactivity boundary must expire the transaction");
+        };
+        assert_eq!(finished.outcome, TransactionOutcome::Expired);
+        assert_eq!(finished.finished_at, Timestamp::from_unix_nanos(11));
+        assert_eq!(finished.outcome_revision, 7);
+    }
+
+    #[test]
+    fn renewal_wins_over_an_older_sweep_without_moving_backward() {
+        let owner = test_owner();
+        let mut transaction = ReplicatedTransaction::open(
+            "renewed".to_string(),
+            test_domain(),
+            owner.clone(),
+            activity(1),
+        );
+        transaction
+            .touch(&owner, activity(5), 2)
+            .assured("activity before the original deadline renews the transaction");
+
+        assert!(
+            !transaction
+                .expire(Timestamp::from_unix_nanos(11), 3)
+                .assured("an older sweep observation is a valid expiry proposal")
+        );
+        assert_eq!(
+            transaction.last_activity_at(),
+            Timestamp::from_unix_nanos(5)
+        );
+        assert_eq!(
+            transaction.inactivity_deadline(),
+            Some(Timestamp::from_unix_nanos(15))
+        );
+
+        transaction
+            .touch(&owner, activity(3), 4)
+            .assured("a backward clock observation cannot invalidate current activity");
+        assert_eq!(
+            transaction.last_activity_at(),
+            Timestamp::from_unix_nanos(5)
+        );
+        assert_eq!(
+            transaction.inactivity_deadline(),
+            Some(Timestamp::from_unix_nanos(15))
+        );
+        assert!(
+            transaction
+                .expire(Timestamp::from_unix_nanos(15), 5)
+                .assured("the renewed inclusive deadline is a valid expiry proposal")
+        );
+    }
+
+    #[test]
+    fn an_expiry_decision_cannot_be_renewed_or_applied_as_a_mutation() {
+        let owner = test_owner();
+        let domain = test_domain();
+        let mut transaction = ReplicatedTransaction::open(
+            "expired-mutation".to_string(),
+            domain.clone(),
+            owner.clone(),
+            activity(1),
+        );
+        let statement = TransactionStatement::test_admitted(TransactionStatementRequest {
+            request_reference: CommandExecutionReference::parse("expired.request")
+                .assured("the test command reference is an accepted literal"),
+            expected_position: 0,
+            source: "SHOW TRANSACTIONS".to_string(),
+            statement: Statement::ShowTransactions(ShowTransactions),
+        });
+
+        transaction
+            .queue(
+                &owner,
+                &domain,
+                activity(11),
+                9,
+                statement,
+                TransactionQueueLimits {
+                    max_statements: 2,
+                    max_source_bytes: 1024,
+                },
+            )
+            .assured("an overdue mutation resolves authoritatively as expiry");
+
+        assert!(transaction.statements.is_empty());
+        assert!(matches!(
+            transaction.finished_outcome(),
+            Some(TransactionOutcome::Expired)
+        ));
+        assert!(matches!(
+            transaction.touch(&owner, activity(12), 10),
+            Err(TransactionMutationError::Finished { .. })
+        ));
+    }
+
+    #[test]
+    fn committing_transactions_are_not_subject_to_open_inactivity() {
+        let owner = test_owner();
+        let mut transaction = ReplicatedTransaction::open(
+            "committing".to_string(),
+            test_domain(),
+            owner.clone(),
+            activity(1),
+        );
+        transaction
+            .start_commit(&owner, activity(2), 2, None)
+            .assured("the open transaction can enter commit recovery");
+
+        assert!(
+            !transaction
+                .expire(Timestamp::from_unix_nanos(i64::MAX), 3)
+                .assured("expiry ignores a durable committing state")
+        );
+        assert!(matches!(transaction.state, TransactionState::Committing(_)));
     }
 }

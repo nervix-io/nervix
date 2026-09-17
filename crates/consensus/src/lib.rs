@@ -30,8 +30,9 @@ use nervix_interconnect::{HandlerRegistrationError, Transport};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule,
     CoordinationIdentity, DomainClockAuthority, DomainClockState, DomainName, DomainSchedule,
-    DomainStartPoint, DomainState, DomainStatus, ResourceName, ResourceNodeStatus, ResourceUpload,
-    ResourceUploadKey, ResourceVersion, ResourceVersionStatus, Statement, UserName,
+    DomainStartPoint, DomainState, DomainStatus, NodeEndpoint, NodeServiceUrl, ResourceName,
+    ResourceNodeStatus, ResourceUpload, ResourceUploadKey, ResourceVersion, ResourceVersionStatus,
+    Statement, UserName,
 };
 use nervix_recovery::Discarded as _;
 pub use openraft::raft::{
@@ -99,11 +100,12 @@ pub use storage_fault::{StorageBoundary, StorageFault, StoragePause};
 mod wire;
 
 pub use transaction::{
-    FinishedTransaction, ReplicatedTransaction, TransactionApplyingStep, TransactionCommandResult,
-    TransactionCommitAdvance, TransactionCommitProgress, TransactionDiagnostic,
-    TransactionMutationError, TransactionMutationResponse, TransactionOutcome,
-    TransactionQueueAdmission, TransactionQueueLimits, TransactionState, TransactionStatement,
-    TransactionStatementRequest, TransactionStepEffect, TransactionStepResult,
+    FinishedTransaction, ReplicatedTransaction, TransactionActivity, TransactionApplyingStep,
+    TransactionCommandResult, TransactionCommitAdvance, TransactionCommitProgress,
+    TransactionDiagnostic, TransactionMutationError, TransactionMutationResponse,
+    TransactionOutcome, TransactionQueueAdmission, TransactionQueueLimits, TransactionState,
+    TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
+    TransactionStepResult,
 };
 
 /// Domain-owned authoritative inputs captured from one state-machine read for transaction
@@ -236,19 +238,19 @@ pub enum ConsensusCommand {
         id: String,
         owner: UserName,
         domain: DomainName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
         statement: Box<TransactionStatement>,
         limits: TransactionQueueLimits,
     },
     TouchTransaction {
         id: String,
         owner: UserName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
     },
     StartTransactionCommit {
         id: String,
         owner: UserName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
     },
     AdvanceTransactionCommit {
         id: String,
@@ -272,12 +274,11 @@ pub enum ConsensusCommand {
     RevertTransaction {
         id: String,
         owner: UserName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
     },
     ExpireTransaction {
         id: String,
         at: nervix_models::Timestamp,
-        idle_before: nervix_models::Timestamp,
     },
     RemoveFinishedTransactions {
         finished_before: nervix_models::Timestamp,
@@ -485,7 +486,7 @@ static NEXT_SNAPSHOT_TRANSFER_ID: AtomicU64 = AtomicU64::new(1);
 pub struct ConsensusSettings {
     pub cluster_name: String,
     pub node_id: ClusterNodeName,
-    pub interconnect_advertise_addr: String,
+    pub interconnect_advertise_addr: NodeEndpoint,
     pub interconnect: Transport,
     pub executor: nervix_execution::Executor,
     pub raft_heartbeat_interval: Duration,
@@ -494,14 +495,22 @@ pub struct ConsensusSettings {
     pub raft_retention: RaftRetentionPolicy,
 }
 
+/// One node as cluster discovery currently describes it.
+///
+/// Each advertised endpoint is present only once the node has published a value this build accepts.
+/// Discovery converges field by field, so a node can be seen before any of them arrives, and a node
+/// whose interconnect endpoint is still unavailable is never a membership admission candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GossipNode {
     pub node_id: ClusterNodeName,
     pub incarnation: ClusterNodeIncarnation,
     pub terminating: bool,
-    pub grpc_advertise_addr: String,
-    pub web_console_advertise_addr: String,
-    pub interconnect_advertise_addr: String,
+    /// Where clients reach this node's session service.
+    pub client_url: Option<NodeServiceUrl>,
+    /// Where operators reach this node's web console.
+    pub console_url: Option<NodeServiceUrl>,
+    /// Where peers reach this node's interconnect listener.
+    pub interconnect_endpoint: Option<NodeEndpoint>,
 }
 
 impl GossipNode {
@@ -664,6 +673,7 @@ impl AutomaticScheduleInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MembershipSnapshot {
     voters: BTreeSet<ClusterNodeName>,
+    /// The address Raft holds for each member, in the `BasicNode` form openraft stores.
     nodes: BTreeMap<ClusterNodeName, String>,
 }
 
@@ -671,7 +681,7 @@ struct MembershipSnapshot {
 enum MembershipMutation {
     AddLearner {
         node_id: ClusterNodeName,
-        address: String,
+        endpoint: NodeEndpoint,
         refresh: bool,
     },
     ChangeVoters {
@@ -688,9 +698,9 @@ impl MembershipSnapshot {
         let mut mutations = Vec::new();
         let mut desired_voters = self.voters.clone();
         for node in gossip.latest_admission_candidates().into_values() {
-            if node.interconnect_advertise_addr.is_empty() {
+            let Some(endpoint) = node.interconnect_endpoint else {
                 continue;
-            }
+            };
             let is_fenced = match admission_fences.get(&node.node_id) {
                 Some(incarnation) => node.incarnation <= *incarnation,
                 None => false,
@@ -699,14 +709,15 @@ impl MembershipSnapshot {
                 continue;
             }
 
+            let advertised = endpoint.to_string();
             let known_address = self.nodes.get(&node.node_id);
             let is_voter = self.voters.contains(&node.node_id);
-            if !is_voter || known_address != Some(&node.interconnect_advertise_addr) {
-                let refresh = known_address.is_some()
-                    && known_address != Some(&node.interconnect_advertise_addr);
+            let address_changed = known_address != Some(&advertised);
+            if !is_voter || address_changed {
+                let refresh = known_address.is_some() && address_changed;
                 mutations.push(MembershipMutation::AddLearner {
                     node_id: node.node_id.clone(),
-                    address: node.interconnect_advertise_addr,
+                    endpoint,
                     refresh,
                 });
             }
@@ -1332,7 +1343,7 @@ struct ConsensusState {
     // The Raft runtime independently owns the store as both log storage and state machine.
     store: FjallStore,
     local_node_id: ClusterNodeName,
-    interconnect_advertise_addr: String,
+    interconnect_advertise_addr: NodeEndpoint,
     interconnect: Transport,
     connectivity: ConnectivityFault,
     raft_retention: RaftRetentionPolicy,
@@ -2853,7 +2864,7 @@ impl Proposer {
         id: String,
         owner: UserName,
         domain: DomainName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
         statement: TransactionStatement,
         limits: TransactionQueueLimits,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
@@ -2861,7 +2872,7 @@ impl Proposer {
             id,
             owner,
             domain,
-            at,
+            activity,
             statement: Box::new(statement),
             limits,
         })
@@ -2872,20 +2883,28 @@ impl Proposer {
         &self,
         id: String,
         owner: UserName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
-        self.write_transaction(ConsensusCommand::TouchTransaction { id, owner, at })
-            .await
+        self.write_transaction(ConsensusCommand::TouchTransaction {
+            id,
+            owner,
+            activity,
+        })
+        .await
     }
 
     pub async fn start_transaction_commit(
         &self,
         id: String,
         owner: UserName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
-        self.write_transaction(ConsensusCommand::StartTransactionCommit { id, owner, at })
-            .await
+        self.write_transaction(ConsensusCommand::StartTransactionCommit {
+            id,
+            owner,
+            activity,
+        })
+        .await
     }
 
     pub async fn advance_transaction_commit(
@@ -2942,24 +2961,23 @@ impl Proposer {
         &self,
         id: String,
         owner: UserName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
-        self.write_transaction(ConsensusCommand::RevertTransaction { id, owner, at })
-            .await
+        self.write_transaction(ConsensusCommand::RevertTransaction {
+            id,
+            owner,
+            activity,
+        })
+        .await
     }
 
     pub async fn expire_transaction(
         &self,
         id: String,
         at: nervix_models::Timestamp,
-        idle_before: nervix_models::Timestamp,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
-        self.write_transaction(ConsensusCommand::ExpireTransaction {
-            id,
-            at,
-            idle_before,
-        })
-        .await
+        self.write_transaction(ConsensusCommand::ExpireTransaction { id, at })
+            .await
     }
 
     pub async fn remove_finished_transactions(
@@ -2996,7 +3014,7 @@ impl Administrator {
         let mut nodes = BTreeMap::new();
         nodes.insert(
             self.inner.local_node_id.clone(),
-            BasicNode::new(self.inner.interconnect_advertise_addr.clone()),
+            BasicNode::new(self.inner.interconnect_advertise_addr.to_string()),
         );
         self.inner
             .raft
@@ -3031,22 +3049,24 @@ impl Administrator {
             match mutation {
                 MembershipMutation::AddLearner {
                     node_id,
-                    address,
+                    endpoint,
                     refresh,
                 } => {
                     let operation = if refresh {
-                        format!("refresh learner '{node_id}' at {address}")
+                        format!("refresh learner '{node_id}' at {endpoint}")
                     } else if before.nodes.contains_key(&node_id) {
-                        format!("wait for learner '{node_id}' to catch up at {address}")
+                        format!("wait for learner '{node_id}' to catch up at {endpoint}")
                     } else {
-                        format!("add learner '{node_id}' at {address}")
+                        format!("add learner '{node_id}' at {endpoint}")
                     };
                     self.inner.events.report(format!("raft {operation}"));
                     let admission = timeout(
                         MEMBERSHIP_MUTATION_TIMEOUT,
-                        self.inner
-                            .raft
-                            .add_learner(node_id, BasicNode::new(address), true),
+                        self.inner.raft.add_learner(
+                            node_id,
+                            BasicNode::new(endpoint.to_string()),
+                            true,
+                        ),
                     )
                     .await;
                     let result = match admission {
@@ -4317,28 +4337,71 @@ fn apply_consensus_command_at(
             id,
             owner,
             domain,
-            at,
+            activity,
             statement,
             limits,
         } => {
+            let outcome_revision = match &state.last_applied_log_id {
+                Some(log_id) => log_id.index,
+                None => 0,
+            };
             let result = mutate_transaction(state, id, |transaction| {
-                transaction.queue(owner, domain, *at, statement.as_ref().clone(), *limits)
+                transaction.queue(
+                    owner,
+                    domain,
+                    *activity,
+                    outcome_revision,
+                    statement.as_ref().clone(),
+                    *limits,
+                )
             });
             changes.transactions_changed = result.is_ok();
             return AppliedConsensusCommand::transaction(result, changes);
         }
-        ConsensusCommand::TouchTransaction { id, owner, at } => {
-            let result = mutate_transaction(state, id, |transaction| transaction.touch(owner, *at));
+        ConsensusCommand::TouchTransaction {
+            id,
+            owner,
+            activity,
+        } => {
+            let outcome_revision = match &state.last_applied_log_id {
+                Some(log_id) => log_id.index,
+                None => 0,
+            };
+            let result = mutate_transaction(state, id, |transaction| {
+                transaction.touch(owner, *activity, outcome_revision)
+            });
             changes.transactions_changed = result.is_ok();
             return AppliedConsensusCommand::transaction(result, changes);
         }
-        ConsensusCommand::StartTransactionCommit { id, owner, at } => {
+        ConsensusCommand::StartTransactionCommit {
+            id,
+            owner,
+            activity,
+        } => {
+            let outcome_revision = match &state.last_applied_log_id {
+                Some(log_id) => log_id.index,
+                None => 0,
+            };
             let Some(mut transaction) = state.transactions.get(id).cloned() else {
                 return AppliedConsensusCommand::transaction(
                     Err(TransactionMutationError::Unknown { id: id.clone() }),
                     changes,
                 );
             };
+            if let Err(error) = transaction.ensure_owner(owner) {
+                return AppliedConsensusCommand::transaction(Err(error), changes);
+            }
+            match transaction.expire(activity.last_activity_at(), outcome_revision) {
+                Ok(true) => {
+                    state.transactions.insert(id.clone(), transaction.clone());
+                    changes.transactions_changed = true;
+                    return AppliedConsensusCommand::transaction(Ok(transaction), changes);
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    return AppliedConsensusCommand::transaction(Err(error), changes);
+                }
+            }
             let domain_mutation = if transaction.requires_domain_mutation() {
                 let admission = DomainMutationAdmission::decide(
                     state.domain_mutations.get(&transaction.domain),
@@ -4359,7 +4422,12 @@ fn apply_consensus_command_at(
             } else {
                 None
             };
-            if let Err(error) = transaction.start_commit(owner, *at, domain_mutation.clone()) {
+            if let Err(error) = transaction.start_commit(
+                owner,
+                *activity,
+                outcome_revision,
+                domain_mutation.clone(),
+            ) {
                 return AppliedConsensusCommand::transaction(Err(error), changes);
             }
             if let Some(lease) = domain_mutation {
@@ -4507,22 +4575,22 @@ fn apply_consensus_command_at(
             changes.transactions_changed = result.is_ok();
             return AppliedConsensusCommand::transaction(result, changes);
         }
-        ConsensusCommand::RevertTransaction { id, owner, at } => {
+        ConsensusCommand::RevertTransaction {
+            id,
+            owner,
+            activity,
+        } => {
             let outcome_revision = match &state.last_applied_log_id {
                 Some(log_id) => log_id.index,
                 None => 0,
             };
             let result = mutate_transaction(state, id, |transaction| {
-                transaction.revert(owner, *at, outcome_revision)
+                transaction.revert(owner, *activity, outcome_revision)
             });
             changes.transactions_changed = result.is_ok();
             return AppliedConsensusCommand::transaction(result, changes);
         }
-        ConsensusCommand::ExpireTransaction {
-            id,
-            at,
-            idle_before,
-        } => {
+        ConsensusCommand::ExpireTransaction { id, at } => {
             let outcome_revision = match &state.last_applied_log_id {
                 Some(log_id) => log_id.index,
                 None => 0,
@@ -4533,7 +4601,7 @@ fn apply_consensus_command_at(
                     changes,
                 );
             };
-            match transaction.expire(*at, *idle_before, outcome_revision) {
+            match transaction.expire(*at, outcome_revision) {
                 Ok(expired) => {
                     if expired {
                         state.transactions.insert(id.clone(), transaction.clone());
@@ -4879,6 +4947,7 @@ mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
         ops::RangeInclusive,
+        time::Duration,
     };
 
     use fjall::Database;
@@ -4886,7 +4955,7 @@ mod tests {
     use nervix_models::{
         ClusterNodeIdentity, ClusterNodeIncarnation, DomainClockAuthority, DomainClockState,
         DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
-        DomainStatus, DomainTimeRate, ResourceId, ResourceName, ResourceNodeState,
+        DomainStatus, DomainTimeRate, NodeEndpoint, ResourceId, ResourceName, ResourceNodeState,
         ResourceNodeStatus, ResourceReplicaKey, ResourceUploadIdentity, ResourceUploadKey,
         ResourceUploadState, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus,
         Statement, Timestamp,
@@ -4912,12 +4981,16 @@ mod tests {
         validate_protocol_origin,
     };
     use crate::{
-        ClusterNodeName, ConsensusError, LogIdOf, ReplicatedTransaction, TransactionQueueLimits,
-        TransactionState, UserName, VoteOf,
+        ClusterNodeName, ConsensusError, LogIdOf, ReplicatedTransaction, TransactionActivity,
+        TransactionQueueLimits, TransactionState, UserName, VoteOf,
     };
 
     fn domain(raw: &str) -> DomainName {
         DomainName::try_from(raw).expect("valid domain")
+    }
+
+    fn transaction_activity(at: i64) -> TransactionActivity {
+        TransactionActivity::from_timeout(Timestamp::from_unix_nanos(at), Duration::from_nanos(10))
     }
 
     #[test]
@@ -4996,26 +5069,30 @@ mod tests {
         Ok(())
     }
 
+    /// One discovered node whose endpoints have not been published yet.
+    fn undiscovered_node(name: &str, incarnation: u64) -> GossipNode {
+        GossipNode {
+            node_id: ClusterNodeName::parse(name).assured("the test node name is valid"),
+            incarnation: ClusterNodeIncarnation::new(incarnation),
+            terminating: false,
+            client_url: None,
+            console_url: None,
+            interconnect_endpoint: None,
+        }
+    }
+
+    fn node_endpoint(advertised: &str) -> NodeEndpoint {
+        advertised
+            .parse()
+            .assured("the test endpoint is a host and port")
+    }
+
     #[test]
     fn dead_gossip_nodes_are_not_membership_admission_candidates() {
         let state = GossipState {
             live_nodes: vec![
-                GossipNode {
-                    node_id: ClusterNodeName::parse("node-2").expect("valid name"),
-                    incarnation: ClusterNodeIncarnation::new(2),
-                    terminating: false,
-                    grpc_advertise_addr: String::new(),
-                    web_console_advertise_addr: String::new(),
-                    interconnect_advertise_addr: String::new(),
-                },
-                GossipNode {
-                    node_id: ClusterNodeName::parse("node-3").expect("valid name"),
-                    incarnation: ClusterNodeIncarnation::new(3),
-                    terminating: false,
-                    grpc_advertise_addr: String::new(),
-                    web_console_advertise_addr: String::new(),
-                    interconnect_advertise_addr: String::new(),
-                },
+                undiscovered_node("node-2", 2),
+                undiscovered_node("node-3", 3),
             ],
             dead_node_ids: [ClusterNodeName::parse("node-3").expect("valid node name")]
                 .into_iter()
@@ -5033,19 +5110,11 @@ mod tests {
 
     #[test]
     fn live_identities_require_the_newest_nondead_node_incarnation() {
-        let gossip_node = |name: &str, incarnation| GossipNode {
-            node_id: ClusterNodeName::parse(name).expect("valid node name"),
-            incarnation: ClusterNodeIncarnation::new(incarnation),
-            terminating: false,
-            grpc_advertise_addr: String::new(),
-            web_console_advertise_addr: String::new(),
-            interconnect_advertise_addr: String::new(),
-        };
         let state = GossipState {
             live_nodes: vec![
-                gossip_node("node-1", 10),
-                gossip_node("node-1", 11),
-                gossip_node("node-2", 20),
+                undiscovered_node("node-1", 10),
+                undiscovered_node("node-1", 11),
+                undiscovered_node("node-2", 20),
             ],
             dead_node_ids: BTreeSet::from([
                 ClusterNodeName::parse("node-2").expect("valid node name")
@@ -5061,12 +5130,8 @@ mod tests {
     #[test]
     fn placement_candidates_exclude_only_the_newest_terminating_incarnation() {
         let gossip_node = |name: &str, incarnation, terminating| GossipNode {
-            node_id: ClusterNodeName::parse(name).assured("the test node name is valid"),
-            incarnation: ClusterNodeIncarnation::new(incarnation),
             terminating,
-            grpc_advertise_addr: String::new(),
-            web_console_advertise_addr: String::new(),
-            interconnect_advertise_addr: String::new(),
+            ..undiscovered_node(name, incarnation)
         };
         let mut state = GossipState {
             live_nodes: vec![
@@ -5108,20 +5173,16 @@ mod tests {
         let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
         let gossip = GossipState {
             live_nodes: vec![GossipNode {
-                node_id: joining.clone(),
-                incarnation: ClusterNodeIncarnation::new(2),
-                terminating: false,
-                grpc_advertise_addr: String::new(),
-                web_console_advertise_addr: String::new(),
-                interconnect_advertise_addr: "https://node-2.test:7443".to_string(),
+                interconnect_endpoint: Some(node_endpoint("node-2.test:7443")),
+                ..undiscovered_node("node-2", 2)
             }],
             dead_node_ids: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
             nodes: BTreeMap::from([
-                (first.clone(), "https://node-1.test:7443".to_string()),
-                (joining.clone(), "https://node-2.test:7443".to_string()),
+                (first.clone(), "node-1.test:7443".to_string()),
+                (joining.clone(), "node-2.test:7443".to_string()),
             ]),
         };
         let admission_fences = BTreeMap::new();
@@ -5131,7 +5192,59 @@ mod tests {
             vec![
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
-                    address: "https://node-2.test:7443".to_string(),
+                    endpoint: node_endpoint("node-2.test:7443"),
+                    refresh: false,
+                },
+                MembershipMutation::ChangeVoters {
+                    voters: BTreeSet::from([first, joining]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unavailable_interconnect_endpoint_is_never_an_admission_candidate() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![undiscovered_node("node-2", 2)],
+            dead_node_ids: BTreeSet::new(),
+        };
+        let membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone()]),
+            nodes: BTreeMap::from([(first, "node-1.test:7443".to_string())]),
+        };
+        let admission_fences = BTreeMap::new();
+
+        assert!(
+            membership
+                .automatic_mutations(&gossip, &admission_fences)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_unavailable_client_or_console_url_does_not_withhold_admission() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![GossipNode {
+                interconnect_endpoint: Some(node_endpoint("node-2.test:7443")),
+                ..undiscovered_node("node-2", 2)
+            }],
+            dead_node_ids: BTreeSet::new(),
+        };
+        let membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone()]),
+            nodes: BTreeMap::new(),
+        };
+        let admission_fences = BTreeMap::new();
+
+        assert_eq!(
+            membership.automatic_mutations(&gossip, &admission_fences),
+            vec![
+                MembershipMutation::AddLearner {
+                    node_id: joining.clone(),
+                    endpoint: node_endpoint("node-2.test:7443"),
                     refresh: false,
                 },
                 MembershipMutation::ChangeVoters {
@@ -5145,23 +5258,19 @@ mod tests {
     fn changed_endpoint_is_refreshed_before_membership_promotion() {
         let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
         let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
-        let current_address = "https://node-2.test:7443".to_string();
-        let replacement_address = "https://node-2.test:8443".to_string();
+        let current_address = "node-2.test:7443".to_string();
+        let replacement_endpoint = node_endpoint("node-2.test:8443");
         let gossip = GossipState {
             live_nodes: vec![GossipNode {
-                node_id: joining.clone(),
-                incarnation: ClusterNodeIncarnation::new(3),
-                terminating: false,
-                grpc_advertise_addr: String::new(),
-                web_console_advertise_addr: String::new(),
-                interconnect_advertise_addr: replacement_address.clone(),
+                interconnect_endpoint: Some(replacement_endpoint.clone()),
+                ..undiscovered_node("node-2", 3)
             }],
             dead_node_ids: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
             nodes: BTreeMap::from([
-                (first.clone(), "https://node-1.test:7443".to_string()),
+                (first.clone(), "node-1.test:7443".to_string()),
                 (joining.clone(), current_address),
             ]),
         };
@@ -5172,7 +5281,7 @@ mod tests {
             vec![
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
-                    address: replacement_address,
+                    endpoint: replacement_endpoint,
                     refresh: true,
                 },
                 MembershipMutation::ChangeVoters {
@@ -5188,18 +5297,14 @@ mod tests {
         let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
         let gossip = GossipState {
             live_nodes: vec![GossipNode {
-                node_id: joining.clone(),
-                incarnation: ClusterNodeIncarnation::new(2),
-                terminating: false,
-                grpc_advertise_addr: String::new(),
-                web_console_advertise_addr: String::new(),
-                interconnect_advertise_addr: "https://node-2.test:7443".to_string(),
+                interconnect_endpoint: Some(node_endpoint("node-2.test:7443")),
+                ..undiscovered_node("node-2", 2)
             }],
             dead_node_ids: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
-            nodes: BTreeMap::from([(first.clone(), "https://node-1.test:7443".to_string())]),
+            nodes: BTreeMap::from([(first.clone(), "node-1.test:7443".to_string())]),
         };
         let admission_fences = BTreeMap::from([(joining.clone(), ClusterNodeIncarnation::new(2))]);
 
@@ -5220,7 +5325,7 @@ mod tests {
             vec![
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
-                    address: "https://node-2.test:7443".to_string(),
+                    endpoint: node_endpoint("node-2.test:7443"),
                     refresh: false,
                 },
                 MembershipMutation::ChangeVoters {
@@ -6095,7 +6200,7 @@ mod tests {
             "tx-append".to_string(),
             domain_id.clone(),
             owner.clone(),
-            Timestamp::from_unix_nanos(1),
+            transaction_activity(1),
         );
         let limits = TransactionQueueLimits {
             max_statements: 4,
@@ -6112,7 +6217,8 @@ mod tests {
             .queue(
                 &owner,
                 &domain_id,
-                Timestamp::from_unix_nanos(2),
+                transaction_activity(2),
+                2,
                 first.clone(),
                 limits,
             )
@@ -6121,13 +6227,17 @@ mod tests {
             .queue(
                 &owner,
                 &domain_id,
-                Timestamp::from_unix_nanos(3),
+                transaction_activity(3),
+                3,
                 first.clone(),
                 limits,
             )
             .assured("an exact duplicate joins the append already admitted above");
         assert_eq!(transaction.statements.len(), 1);
-        assert_eq!(transaction.last_activity_at, Timestamp::from_unix_nanos(2));
+        assert_eq!(
+            transaction.last_activity_at(),
+            Timestamp::from_unix_nanos(2)
+        );
         assert_eq!(
             transaction
                 .queue_admission(&owner, &domain_id, &first.request, limits)
@@ -6141,13 +6251,17 @@ mod tests {
             transaction.queue(
                 &owner,
                 &domain_id,
-                Timestamp::from_unix_nanos(4),
+                transaction_activity(4),
+                4,
                 changed,
                 limits,
             ),
             Err(TransactionMutationError::RequestConflict { .. })
         ));
-        assert_eq!(transaction.last_activity_at, Timestamp::from_unix_nanos(2));
+        assert_eq!(
+            transaction.last_activity_at(),
+            Timestamp::from_unix_nanos(2)
+        );
 
         let mut second = TransactionStatement::test_admitted(TransactionStatementRequest {
             request_reference: nervix_models::CommandExecutionReference::parse("append-2")
@@ -6160,7 +6274,8 @@ mod tests {
             transaction.queue(
                 &owner,
                 &domain_id,
-                Timestamp::from_unix_nanos(5),
+                transaction_activity(5),
+                5,
                 second.clone(),
                 limits,
             ),
@@ -6170,18 +6285,60 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(transaction.last_activity_at, Timestamp::from_unix_nanos(2));
+        assert_eq!(
+            transaction.last_activity_at(),
+            Timestamp::from_unix_nanos(2)
+        );
         second.request.expected_position = 1;
         transaction
             .queue(
                 &owner,
                 &domain_id,
-                Timestamp::from_unix_nanos(6),
+                transaction_activity(6),
+                6,
                 second,
                 limits,
             )
             .assured("the corrected append uses the current position and a new reference");
         assert_eq!(transaction.statements.len(), 2);
+    }
+
+    #[test]
+    fn transaction_tombstone_retention_starts_at_the_terminal_decision_inclusively() {
+        let owner =
+            UserName::parse("app_user").assured("the test owner is an identifier-shaped literal");
+        let mut transaction = ReplicatedTransaction::open(
+            "retained".to_string(),
+            domain("tenant"),
+            owner.clone(),
+            transaction_activity(1),
+        );
+        transaction
+            .revert(&owner, transaction_activity(2), 7)
+            .assured("the open test transaction can be reverted");
+        let TransactionState::Finished(finished) = &transaction.state else {
+            panic!("revert must make the test transaction terminal");
+        };
+        assert_eq!(finished.finished_at, Timestamp::from_unix_nanos(2));
+
+        let mut state = StateMachineData::default();
+        state
+            .transactions
+            .insert(transaction.id.clone(), transaction);
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::RemoveFinishedTransactions {
+                finished_before: Timestamp::from_unix_nanos(1),
+            },
+        );
+        assert!(state.transactions.contains_key("retained"));
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::RemoveFinishedTransactions {
+                finished_before: Timestamp::from_unix_nanos(2),
+            },
+        );
+        assert!(!state.transactions.contains_key("retained"));
     }
 
     #[test]
@@ -6199,7 +6356,7 @@ mod tests {
             "tx-1".to_string(),
             domain_id.clone(),
             owner.clone(),
-            nervix_models::Timestamp::from_unix_nanos(1),
+            transaction_activity(1),
         );
         apply_consensus_command(
             &mut state,
@@ -6223,7 +6380,7 @@ mod tests {
                     id: "tx-1".to_string(),
                     owner: owner.clone(),
                     domain: domain_id.clone(),
-                    at: nervix_models::Timestamp::from_unix_nanos(
+                    activity: transaction_activity(
                         i64::try_from(at)
                             .unwrap_or_default()
                             .checked_add(2)
@@ -6252,7 +6409,7 @@ mod tests {
             &ConsensusCommand::StartTransactionCommit {
                 id: "tx-1".to_string(),
                 owner,
-                at: nervix_models::Timestamp::from_unix_nanos(4),
+                activity: transaction_activity(4),
             },
         );
 

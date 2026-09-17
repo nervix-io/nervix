@@ -21,16 +21,16 @@ use strum::{AsRefStr, EnumIter, EnumProperty, EnumString, IntoEnumIterator, Into
 use thiserror::Error;
 
 use crate::{
-    AlterSchema, AlterWireSchema, AvroType, BranchName, CborType, ChannelName, ClientName,
-    ClusterNodeName, CodecName, CollectionName, ConsumerGroupName, CorrelatorName,
-    CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, CreateSchema, CreateUdf,
-    DeduplicatorName, DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName,
+    AlterSchema, AlterWireSchema, AvroType, BranchKeyFingerprint, BranchName, CborType,
+    ChannelName, ClientName, ClusterNodeName, CodecName, CollectionName, ConsumerGroupName,
+    CorrelatorName, CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, CreateSchema,
+    CreateUdf, DeduplicatorName, DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName,
     DomainTimeRate, EmitterName, EndpointName, FieldName, GeneratorName, InferencerName,
     IngestorName, JsonType, JunctionName, LookupName, ModelName, NodeRef, ParseAsType,
     PlacementName, PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName, RelayName,
     ReordererName, RequestedResourceVersion, ResourceName, SchemaName, SignalingProtocolName,
     SubjectName, SubscriptionName, TableName, Timestamp, TopicName, UdfName, UserName, VhostName,
-    WasmProcessorName, WindowProcessorName, WireSchemaName,
+    WasmProcessorName, WasmStateGenerations, WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
@@ -4433,11 +4433,18 @@ pub struct ScheduledNode {
     #[serde(default)]
     pub assigned_nodes: Vec<ClusterNodeName>,
     pub ownership_transition: Option<OwnershipTransition>,
+    /// The guest-state generation of every branch when this node is a WASM processor, and nothing
+    /// for every other kind. Only [`Self::new`] decides which, from the configuration it places.
+    wasm_state_generations: Option<WasmStateGenerations>,
 }
 
 impl ScheduledNode {
     /// An unplaced entry for `config`, before a scheduler decides which cluster nodes run it.
     pub fn new(config: Model) -> Self {
+        let mut wasm_state_generations = None;
+        if let Model::WasmProcessor(_) = &config {
+            wasm_state_generations = Some(WasmStateGenerations::first());
+        }
         Self {
             identifier: config.name(),
             config: Box::new(config),
@@ -4447,6 +4454,7 @@ impl ScheduledNode {
             primary_node: None,
             assigned_nodes: Vec::new(),
             ownership_transition: None,
+            wasm_state_generations,
         }
     }
 
@@ -4493,6 +4501,52 @@ impl ScheduledNode {
             return None;
         };
         Some(processor)
+    }
+
+    /// The guest-state generation of every branch, when this node is a WASM processor.
+    pub fn wasm_state_generations(&self) -> Option<&WasmStateGenerations> {
+        self.wasm_state_generations.as_ref()
+    }
+
+    /// Continue the guest-state lifetimes `existing` published for this same node.
+    ///
+    /// A generation belongs to the pinned module binding it was published for. When this entry
+    /// binds a different resource version or file than `existing`, the lifetimes continue from
+    /// `existing` and every branch then starts a new one, so no snapshot saved under the previous
+    /// binding can attach to this one.
+    pub fn continue_wasm_state_generations_of(&mut self, existing: &Self) {
+        let (Some(processor), Some(existing_processor)) =
+            (self.wasm_processor(), existing.wasm_processor())
+        else {
+            return;
+        };
+        let binding_changed = processor.resource != existing_processor.resource
+            || processor.resource_version != existing_processor.resource_version
+            || processor.file != existing_processor.file;
+        let Some(existing_generations) = existing.wasm_state_generations.as_ref() else {
+            return;
+        };
+        let mut generations = existing_generations.clone();
+        if binding_changed {
+            generations.begin_every_branch();
+        }
+        self.wasm_state_generations = Some(generations);
+    }
+
+    /// Start a new guest-state lifetime for every branch of this WASM processor, including branches
+    /// that exist only as persisted snapshots. Every other kind of node has no guest state.
+    pub fn begin_wasm_state_generation(&mut self) {
+        if let Some(generations) = self.wasm_state_generations.as_mut() {
+            generations.begin_every_branch();
+        }
+    }
+
+    /// Start a new guest-state lifetime for one concrete branch of this WASM processor, leaving every
+    /// other branch in the lifetime it has.
+    pub fn begin_wasm_branch_state_generation(&mut self, branch: BranchKeyFingerprint) {
+        if let Some(generations) = self.wasm_state_generations.as_mut() {
+            generations.begin_branch(branch);
+        }
     }
 
     pub fn ownership_state_components(&self) -> Vec<OwnershipStateComponent> {

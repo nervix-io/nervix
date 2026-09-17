@@ -198,12 +198,12 @@ impl Runtime {
         let Some(schedule) = schedule else {
             self.clear_domain_ingestor_quiescence(domain);
             self.inner.compiled_domain_udfs.remove(domain);
-            self.clear_state_schema_fingerprints(domain);
+            self.clear_state_identities(domain);
             Box::pin(self.clear_domain_graph_handle(domain)).await;
             self.clear_expiring_stream_states_for_domain(domain);
             return Ok(());
         };
-        self.install_state_schema_fingerprints(&schedule);
+        self.install_state_identities(&schedule);
         let stopped = self
             .inner
             .domains
@@ -530,7 +530,7 @@ impl Runtime {
             if let Some(schema) = materialized_schema.as_ref() {
                 let state_placement = self.state_placement(
                     domain,
-                    RuntimeStateKind::MaterializedRelay,
+                    RuntimeState::MaterializedRelay,
                     ModelKind::Relay,
                     RelayName::from(&node.identifier),
                     None,

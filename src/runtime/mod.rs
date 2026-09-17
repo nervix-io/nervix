@@ -62,32 +62,32 @@ use nervix_interconnect::{
     Transport,
 };
 use nervix_models::{
-    AckMode, Assignment, AtomicTimestamp, BranchName, ClickHouseValueMapping, ClientConfigEntry,
-    ClientName, ClientPoolBounds, ClientResourceMount, ClusterNodeIncarnation, ClusterNodeName,
-    ClusterSchedule, CodecName, CodecWireFormat, CoordinationIdentity, CorrelationTimeoutAction,
-    CorrelatorMatchPolicy, CreateClientAzureBlob, CreateClientGcs, CreateClientIcebergRest,
-    CreateClientKafka, CreateClientMqtt, CreateClientNats, CreateClientOtel, CreateClientPulsar,
-    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
-    CreateClientSyslog, CreateClientZeroMq, CreateCodec, CreateEmitter, CreateGenerator,
-    CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateSignalingProtocol,
-    CreateUdf, DomainClockAuthority, DomainConfig, DomainName, DomainNodeRef, DomainSchedule,
-    DomainState, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName,
-    EndpointType, ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy,
-    GeneratorName, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
-    InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
-    IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode,
-    KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
-    MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind,
-    ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
-    MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality, OtelMetric,
-    OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch, OwnershipStateComponent,
-    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
-    PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
-    RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
-    RemoteRuntimeField, ResolvedBranching, ResourceId, ResourceName, RetryPolicy,
-    RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes, SignalingProtocolName,
-    SignalingWireFormat, SqsFifoGroup, SqsIngestMode, StructuredMessageError, SubscriptionName,
-    Timestamp,
+    AckMode, Assignment, AtomicTimestamp, BranchKeyFingerprint, BranchName, ClickHouseValueMapping,
+    ClientConfigEntry, ClientName, ClientPoolBounds, ClientResourceMount, ClusterNodeIncarnation,
+    ClusterNodeName, ClusterSchedule, CodecName, CodecWireFormat, CoordinationIdentity,
+    CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateClientAzureBlob, CreateClientGcs,
+    CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt, CreateClientNats,
+    CreateClientOtel, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
+    CreateClientSentry, CreateClientSqs, CreateClientSyslog, CreateClientZeroMq, CreateCodec,
+    CreateEmitter, CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay,
+    CreateSignalingProtocol, CreateUdf, DomainClockAuthority, DomainConfig, DomainName,
+    DomainNodeRef, DomainSchedule, DomainState, EmitSink, EmitterAckWindow, EmitterName,
+    EmitterPublishingMode, EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath,
+    FlushPolicy, GeneralErrorPolicy, GeneratorName, IcebergCatalog, IcebergStorageBackend,
+    IcebergValueMapping, InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode,
+    IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode,
+    KafkaOffsetMode, KafkaPartitionSchedule, Literal as ModelLiteral, LookupName,
+    MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model,
+    ModelIndex, ModelKind, ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
+    MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NodeRef,
+    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
+    OtelValueMapping, OutputBranch, OwnershipStateComponent, OwnershipStateRecoveryOutcome,
+    OwnershipStateReset, OwnershipStateResetCause, ParseAsType, PostgresConflictAction,
+    PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName,
+    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField,
+    ResolvedBranching, ResourceId, ResourceName, RetryPolicy, RouteConstruction, ScheduledModel,
+    ScheduledNode, ScheduledNodes, SignalingProtocolName, SignalingWireFormat, SqsFifoGroup,
+    SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp,
 };
 #[cfg(test)]
 use nervix_models::{CreateClientHttp, CreateClientPrometheus, CreateClientWebsockets};
@@ -441,6 +441,7 @@ use relay_interaction::{
 };
 use remote_dispatch::{REMOTE_ACK_ALIVE_INTERVAL, RemoteDispatchRegistry, RemoteDispatcher};
 use reorderer::{ReordererFlushContext, flush_branch_reorderer_output, reorder_key_part};
+use schedule_apply::ScheduleApplication;
 use scheduled_node::{
     EmitterTaskBuildDeps, EmitterTaskDeps, ExecutionBuildDeps, ScheduledNodePlacement,
     ScheduledNodeTask,
@@ -458,9 +459,10 @@ use state_replication::{
 };
 pub(in crate::runtime) use state_store::{
     ForcedRuntimeStateRecoveryAuthorization, ForcedRuntimeStateRecoveryIdentity,
-    ForcedRuntimeStateRecoveryTransition, RuntimeStateHandoffTransition, RuntimeStateKind,
-    RuntimeStateOperationError, RuntimeStateResult, RuntimeStateStore, StateAssignmentAuthority,
-    StateAssignmentToken, StateAuthorityError, StateCapability, StateReplicationRoles,
+    ForcedRuntimeStateRecoveryTransition, RuntimeState, RuntimeStateHandoffTransition,
+    RuntimeStateKind, RuntimeStateOperationError, RuntimeStateResult, RuntimeStateStore,
+    ScheduledStateIdentity, StateAssignmentAuthority, StateAssignmentToken, StateAuthorityError,
+    StateCapability, StateGenerationError, StateReplicationRoles,
 };
 #[cfg(test)]
 pub(in crate::runtime) use test_fixtures::STUPID_CHANNEL_CAPACITY_REMOVE_ME;

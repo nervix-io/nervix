@@ -25,6 +25,14 @@ before it knows the remote node identifier, then obtains and authenticates that 
 peer certificate. Once discovered, a peer is addressed by its authenticated identity rather than by
 an unverified endpoint claim.
 
+A peer advertises three endpoints independently: its interconnect endpoint as a host and port, and
+its client and web-console endpoints as URLs. Discovery converges field by field, so each one is
+either available, meaning the peer has published a value this node accepts, or unavailable. An
+advertisement that has not arrived yet and one this node cannot read are the same unavailable state,
+carry no reason, and are replaced by whatever a later round publishes. An unavailable endpoint is
+never filled in from a default, another field, or an earlier value, so no consumer can rebuild an
+address the peer has not advertised.
+
 Discovery also carries whether the advertised process incarnation has begun terminating. That state
 belongs to the incarnation rather than the stable node identifier: it keeps the process available to
 finish existing ownership handoffs and consensus work, but removes it from new placement
@@ -396,6 +404,19 @@ management-event bound, so discovery cannot allocate an arbitrary wire message. 
 shutting down closes its gossip transport before it stops gossip, so an exchange still waiting on a
 peer that stopped first ends at once instead of holding shutdown until its one-second deadline.
 
+Admission to consensus membership requires an available interconnect endpoint. A discovered node
+without one is not an admission candidate, so it is neither added as a learner nor promoted to
+voter, and it becomes eligible on the round that publishes an endpoint this node accepts. The
+client and web-console advertisements are independent of admission: a node joins, votes, and leads
+with either of them unavailable. Membership follows a replaced endpoint by refreshing the learner
+at its new address before promotion, and a node removed from membership stays out until it returns
+with a newer incarnation.
+
+A redirect to the leader names only the advertised endpoints discovery has established. A client
+redirected during an election that has not yet observed the new leader's client endpoint receives
+the leader identity without a redirect target rather than a guessed address, and retries until an
+endpoint appears.
+
 Terminal teardown closes the gossip exchange path before it asks the gossip loop to stop. The loop
 reads its stop request only between rounds, and a round exchanges with each selected peer in turn
 under a one-second request timeout. Closing the path first makes an exchange still waiting on a
@@ -461,6 +482,17 @@ bulk class. Receivers stage and validate the owning artifact while releasing HTT
 chunk. The whole transfer may exceed the 32 MiB bulk-memory budget because only bounded chunks and
 the active decoded section are resident at once.
 
+A runtime-state placement names exactly the state it addresses: the domain, entity, state kind,
+schema fingerprint, and concrete branch, and for WASM processor guest state the generation the
+committed schedule names for that branch. A node answers a synchronization request, and acts on a
+checkpoint announcement or a handoff checkpoint, only while the placement is current on that node,
+so an owner never serves, and a replica never installs, guest state of a generation that has been
+replaced. A replication acknowledgement counts only toward the placement it names, so an
+acknowledgement for a replaced generation never satisfies the replica quorum of the current one.
+The schedule fingerprint an ownership handoff or forced recovery is bound to covers those
+generations, so a preparation staged against an earlier generation cannot activate after a later one
+is committed.
+
 Runtime-state synchronization replies and materialized-snapshot descriptions carry the shared
 typed remote-operation failure envelope. Rejection, absence, temporary unreadiness, and execution
 failure remain distinct across the node boundary, and the requester keeps that classification in
@@ -511,6 +543,10 @@ superseded report cannot replace the mapping or move logical time backward. See
 An established HTTP/2 connection and a successful transport `PING` show that bytes can move; they
 do not show that the peer application can accept work. Nervix therefore probes application health
 through a typed management request with reserved liveness capacity.
+
+A peer becomes a health target and an outbound target only while its interconnect endpoint is
+available. One whose endpoint is unavailable is neither probed nor dialled, and its availability
+stays unknown until discovery publishes an endpoint for it.
 
 Each health round has at most one probe in flight for each peer and at most 32 probes across the
 node. A probe has a one-second total deadline. Results are published as they complete, so a silent
