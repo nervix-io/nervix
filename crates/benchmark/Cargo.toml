@@ -24,6 +24,7 @@ nervix-recovery = { workspace = true }
 nervix-test-environment = { workspace = true }
 ordered-float = { workspace = true }
 parking_lot = { workspace = true }
+rcgen = { workspace = true }
 rdkafka = { workspace = true, features = [
   "tokio",
   "curl-static",
@@ -34,7 +35,6 @@ rdkafka = { workspace = true, features = [
   "aws-lc",
 ] }
 reqwest = { workspace = true, features = ["rustls"] }
-rcgen = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 testcontainers = { workspace = true }
