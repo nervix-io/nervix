@@ -107,6 +107,12 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   Its scope includes mappings and lifecycle generations, authority selection and fencing, local
   installation and reads, progress delivery, execution snapshots, admission, logical and physical
   deadline ownership, recovery, and distributed-time guarantees.
+- [Data-Plane Concurrency](docs/src/data-plane-concurrency.md) is the authoritative architecture
+  reference for synchronization on record, batch, remote-frame, and acknowledgement paths. Any
+  change to hot-path state publication, task or branch ownership, delivery or assignment fences,
+  or the data-plane lock ratchet must keep that chapter current in the same change. Its scope
+  includes the contentionless rule, published and pre-resolved state, mutable execution state,
+  bounded synchronization, and review classification for new lock sites.
 - [Shutdown And Recovery](docs/src/shutdown.md) is the authoritative architecture reference for
   stopping a node and recovering from a forced ending. Any change to shutdown phases, the shutdown
   or drain deadline, termination signals, terminating placement eligibility, intake stop, graph

@@ -26,6 +26,10 @@ Nervix has three separate persistence boundaries:
   A deduplicator's keys and a window processor's window belong to the branch task that processes the branch, which changes them without waiting on snapshots or replicas. While that state keeps changing, the task publishes an immutable copy of it at least once per replication poll interval, and it publishes again before an ownership handoff checkpoint and when the branch stops. Snapshots, replica synchronization, and the next task for the same branch read only the published copy, so a replica holds a branch's state as of its latest publication. A branch task that is aborted after exceeding its shutdown grace period still has its latest publication persisted, but loses the changes it made after that publication. A WASM processor saves its guest state after every batch and keeps the bytes the guest returned instead of copying them; a save the guest cannot complete leaves the state saved last in place. A guest saves only its computation state there, never the input it buffers or that input's ACK tokens.
 - Message streaming is the hot path. In-flight records, relay batches, processor handoff, outbound emitter attempts, ACK guards, ACK tokens, and ACK maps stay in memory and are never persisted as runtime state.
 
+The [Data-Plane Concurrency](./data-plane-concurrency.md) chapter defines how this hot path avoids
+shared lock acquisition, publishes reconfigurable state, owns per-row mutation, and retains only
+the ordering fences required by delivery and ownership contracts.
+
 Every relay has one scheduled owner. Producers on other cluster nodes use one fixed dispatch slot
 per relay and serialize each batch once for the owner. The owner alone maintains the bounded relay
 buffer, concrete branch presence, metrics, subscriptions, and fan-out. It sends at most one
