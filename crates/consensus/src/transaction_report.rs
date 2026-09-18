@@ -22,11 +22,15 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{durable_batch::DurableBatch, records::Records};
+use crate::{
+    durable_batch::{DurableBatch, StorageFailure},
+    records::Records,
+};
 
 const REPORT_HEADER_TAG: u8 = b'h';
 const REPORT_OPERATION_TAG: u8 = b'i';
 const REPORT_STEP_TAG: u8 = b'j';
+const REPORT_REVISION_INDEX_TAG: u8 = b'y';
 const TOPOLOGY_HEADER_TAG: u8 = b'k';
 const TOPOLOGY_NODE_TAG: u8 = b'l';
 const TOPOLOGY_EDGE_TAG: u8 = b'q';
@@ -353,11 +357,29 @@ struct ImpactTopologyHeader {
     edge_count: usize,
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+struct TransactionReportRevisionIndex {
+    /// Terminal cleanup uses this bounded transaction-local list instead of scanning every report.
+    identities: Vec<TransactionPreviewIdentity>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TransactionReportRecords {
     headers: Records<TransactionPreviewIdentity, TransactionReportHeader>,
     operations: Records<TransactionReportItemKey, StoredOperationImpactReport>,
     execution_steps: Records<TransactionReportItemKey, StoredExecutionStepImpactReport>,
+    revisions: Records<String, TransactionReportRevisionIndex>,
     topology_headers: Records<ImpactTopologyId, ImpactTopologyHeader>,
     topology_nodes: Records<ImpactTopologyItemKey, AttributedImpactNode>,
     topology_edges: Records<ImpactTopologyItemKey, ImpactTopologyEdge>,
@@ -365,14 +387,37 @@ pub(crate) struct TransactionReportRecords {
 
 impl TransactionReportRecords {
     pub(crate) fn load(keyspace: &Keyspace) -> io::Result<Self> {
-        Ok(Self {
+        let records = Self {
             headers: Records::load(REPORT_HEADER_TAG, keyspace)?,
             operations: Records::load(REPORT_OPERATION_TAG, keyspace)?,
             execution_steps: Records::load(REPORT_STEP_TAG, keyspace)?,
+            revisions: Records::load(REPORT_REVISION_INDEX_TAG, keyspace)?,
             topology_headers: Records::load(TOPOLOGY_HEADER_TAG, keyspace)?,
             topology_nodes: Records::load(TOPOLOGY_NODE_TAG, keyspace)?,
             topology_edges: Records::load(TOPOLOGY_EDGE_TAG, keyspace)?,
-        })
+        };
+        if !records.has_consistent_revision_index() {
+            return Err(io::Error::other(StorageFailure::InvalidState));
+        }
+        Ok(records)
+    }
+
+    fn has_consistent_revision_index(&self) -> bool {
+        let indexes_match_headers = self.revisions.iter().all(|(transaction_id, revisions)| {
+            let mut unique = BTreeSet::new();
+            !revisions.identities.is_empty()
+                && revisions.identities.iter().all(|identity| {
+                    identity.transaction_id.as_str() == transaction_id.as_str()
+                        && unique.insert(identity)
+                        && self.headers.contains_key(identity)
+                })
+        });
+        indexes_match_headers
+            && self.headers.keys().all(|identity| {
+                self.revisions
+                    .get(&identity.transaction_id)
+                    .is_some_and(|revisions| revisions.identities.contains(identity))
+            })
     }
 
     pub(crate) fn write_changes(
@@ -392,6 +437,12 @@ impl TransactionReportRecords {
         self.execution_steps.write_changes(
             &preceding.execution_steps,
             REPORT_STEP_TAG,
+            batch,
+            keyspace,
+        )?;
+        self.revisions.write_changes(
+            &preceding.revisions,
+            REPORT_REVISION_INDEX_TAG,
             batch,
             keyspace,
         )?;
@@ -434,6 +485,19 @@ impl TransactionReportRecords {
                 .insert(TransactionReportItemKey::new(&identity, index), step);
         }
         candidate.headers.insert(identity.clone(), archive.header);
+        let transaction_id = identity.transaction_id.clone();
+        match candidate.revisions.get_mut(&transaction_id) {
+            Some(revisions) if !revisions.identities.contains(&identity) => {
+                revisions.identities.push(identity.clone());
+            }
+            Some(_) => {}
+            None => candidate.revisions.insert(
+                transaction_id,
+                TransactionReportRevisionIndex {
+                    identities: vec![identity.clone()],
+                },
+            ),
+        }
         candidate
             .report(&identity)
             .map_err(|_| Report::new(TransactionReportStoreError::InvalidArchive))?;
@@ -730,27 +794,65 @@ impl TransactionReportRecords {
         })
     }
 
-    pub(crate) fn remove_transaction(&mut self, transaction_id: &str) {
-        self.headers
-            .retain(|identity, _| identity.transaction_id != transaction_id);
-        self.operations
-            .retain(|key, _| key.identity.transaction_id != transaction_id);
-        self.execution_steps
-            .retain(|key, _| key.identity.transaction_id != transaction_id);
-        self.collect_unreferenced_topologies();
+    pub(crate) fn remove_transactions(&mut self, transaction_ids: &[String]) {
+        let mut removed_report = false;
+        for transaction_id in transaction_ids {
+            let Some(revisions) = self.revisions.get(transaction_id).cloned() else {
+                continue;
+            };
+            for identity in revisions.identities {
+                removed_report |= self.remove_revision(&identity);
+            }
+            self.revisions.remove(transaction_id);
+        }
+        if removed_report {
+            self.collect_unreferenced_topologies();
+        }
     }
 
     pub(crate) fn retain_revision(&mut self, retained: &TransactionPreviewIdentity) {
-        self.headers.retain(|identity, _| {
-            identity.transaction_id != retained.transaction_id || identity == retained
-        });
-        self.operations.retain(|key, _| {
-            key.identity.transaction_id != retained.transaction_id || key.identity == *retained
-        });
-        self.execution_steps.retain(|key, _| {
-            key.identity.transaction_id != retained.transaction_id || key.identity == *retained
-        });
-        self.collect_unreferenced_topologies();
+        let Some(revisions) = self.revisions.get(&retained.transaction_id).cloned() else {
+            return;
+        };
+        if !revisions.identities.contains(retained) {
+            return;
+        }
+        if revisions.identities.len() == 1 && revisions.identities.first() == Some(retained) {
+            return;
+        }
+        let mut removed_report = false;
+        for identity in revisions
+            .identities
+            .into_iter()
+            .filter(|identity| identity != retained)
+        {
+            removed_report |= self.remove_revision(&identity);
+        }
+        self.revisions.insert(
+            retained.transaction_id.clone(),
+            TransactionReportRevisionIndex {
+                identities: vec![retained.clone()],
+            },
+        );
+        if removed_report {
+            self.collect_unreferenced_topologies();
+        }
+    }
+
+    fn remove_revision(&mut self, identity: &TransactionPreviewIdentity) -> bool {
+        let Some(header) = self.headers.get(identity).cloned() else {
+            return false;
+        };
+        self.headers.remove(identity);
+        for index in 0..header.operation_count {
+            self.operations
+                .remove(&TransactionReportItemKey::new(identity, index));
+        }
+        for index in 0..header.execution_step_count {
+            self.execution_steps
+                .remove(&TransactionReportItemKey::new(identity, index));
+        }
+        true
     }
 
     fn collect_unreferenced_topologies(&mut self) {
@@ -1054,6 +1156,7 @@ mod tests {
             .insert(current)
             .assured("the current report revision can be retained");
         assert_eq!(records.headers.len(), 2);
+        assert!(records.has_consistent_revision_index());
 
         records.retain_revision(&current_identity);
         let Err(error) = records.report(&first_identity) else {
@@ -1066,8 +1169,9 @@ mod tests {
         assert!(records.report(&current_identity).is_ok());
         assert_eq!(records.headers.len(), 1);
         assert_eq!(records.topology_headers.len(), 3);
+        assert!(records.has_consistent_revision_index());
 
-        records.remove_transaction("tx");
+        records.remove_transactions(&["tx".to_string()]);
         let Err(error) = records.report(&current_identity) else {
             panic!("removing the transaction removes its retained report");
         };
@@ -1079,6 +1183,21 @@ mod tests {
         assert_eq!(records.operations.len(), 0);
         assert_eq!(records.execution_steps.len(), 0);
         assert_eq!(records.topology_headers.len(), 0);
+        assert!(records.has_consistent_revision_index());
+    }
+
+    #[test]
+    fn revision_index_is_required_for_retained_reports() {
+        let domain = domain("tenant");
+        let archive = test_report_archive("tx", &domain, 1);
+        let mut records = TransactionReportRecords::default();
+        records
+            .insert(archive)
+            .assured("the report revision can be retained");
+        assert!(records.has_consistent_revision_index());
+
+        records.revisions = Records::default();
+        assert!(!records.has_consistent_revision_index());
     }
 
     #[test]

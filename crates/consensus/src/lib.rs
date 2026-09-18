@@ -5434,10 +5434,10 @@ fn apply_consensus_command_at(
                 };
                 finished.finished_at > *finished_before
             });
-            for id in removed_ids {
-                state.transaction_commit_plans.remove(&id);
-                state.transaction_reports.remove_transaction(&id);
+            for id in &removed_ids {
+                state.transaction_commit_plans.remove(id);
             }
+            state.transaction_reports.remove_transactions(&removed_ids);
             changes.transactions_changed = state.transactions.len() != before;
         }
     }
