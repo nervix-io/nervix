@@ -104,6 +104,7 @@ mysql_async = { workspace = true, features = ["default-rustls"] }
 nervix-approx-into = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-client-wire = { workspace = true }
+nervix-connector = { workspace = true }
 nervix-consensus = { workspace = true }
 nervix-dataflow-graph = { workspace = true }
 nervix-execution = { workspace = true }
@@ -177,7 +178,6 @@ reqwest = { workspace = true, features = [
 rkyv = { workspace = true }
 rumqttc = { workspace = true }
 rustls = { workspace = true }
-rustls-native-certs = { workspace = true }
 rustls-pki-types = { workspace = true }
 sentry-types = { workspace = true }
 serde = { workspace = true }

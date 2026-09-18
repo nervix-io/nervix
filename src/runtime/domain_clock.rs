@@ -13,6 +13,7 @@ use std::{sync::Arc as StdArc, time::Duration};
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_connector::physical_time::{PhysicalDeadlineCapability, actual_utc_now};
 use nervix_execution::sync::ArcSwap;
 #[cfg(test)]
 use nervix_models::DomainTick;
@@ -34,7 +35,6 @@ use triomphe::Arc;
 #[cfg(test)]
 use super::VmExecutionContext;
 use super::{ObservedDomainTick, Runtime};
-use crate::runtime::physical_time::{PhysicalDeadlineCapability, actual_utc_now};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub(crate) enum DomainClockAccessError {
@@ -571,7 +571,7 @@ impl DomainClock {
                 .change_context(DomainClockWaitError::Clock {
                     domain: self.inner.domain.clone(),
                 })?;
-            let physical_time = PhysicalDeadlineCapability::new();
+            let physical_time = PhysicalDeadlineCapability::operational();
             let physical = physical_time.after(duration).change_context(
                 DomainClockWaitError::PhysicalDeadline {
                     domain: self.inner.domain.clone(),

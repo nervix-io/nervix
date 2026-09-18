@@ -6,10 +6,12 @@
 //! - **Must not know.** NSPL parsing, registry validation or placement computation.
 
 use error_stack::ResultExt as _;
+use nervix_connector::{
+    client_config_value, optional_client_config_value, physical_time::actual_utc_now,
+};
 use zeromq::{PullSocket, Socket, SocketRecv};
 
 use super::super::*;
-use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct ZeroMqIngestor;
 
@@ -353,7 +355,7 @@ impl ZeroMqIngestor {
     #[cfg(test)]
     pub(in crate::runtime) fn addr_from_config(
         config: &[ClientConfigEntry],
-    ) -> crate::runtime::client_config::ClientConfigResult<String> {
+    ) -> nervix_connector::ClientConfigResult<String> {
         client_config_value(config, "addr", "ZeroMQ")
     }
 

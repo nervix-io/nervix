@@ -96,7 +96,7 @@ pub(super) fn vm_input_from_test_rows(
 /// The headers of one test message, standing in for a connector's borrowed message.
 pub(super) struct TestIngestHeaders<'a>(pub(super) &'a [(&'a str, &'a str)]);
 
-impl super::IngestMessageHeaders for TestIngestHeaders<'_> {
+impl nervix_connector::IngestMessageHeaders for TestIngestHeaders<'_> {
     fn visit(&self, visit: &mut dyn FnMut(&str, &str)) {
         for (name, value) in self.0 {
             visit(name, value);
@@ -107,7 +107,7 @@ impl super::IngestMessageHeaders for TestIngestHeaders<'_> {
 /// Builds one group's ingest metadata through the group builders, as the runtime does.
 pub(super) fn ingest_metadata_for_test(
     kind: super::IngestMetadataKind,
-    rows: &[super::IngestMetadataRow<'_>],
+    rows: &[nervix_connector::IngestMetadataRow<'_>],
 ) -> super::IngestFilterMapMetadata {
     let mut builders = super::IngestMetadataBuilders::new(kind, rows.len());
     for row in rows {

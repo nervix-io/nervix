@@ -1,3 +1,5 @@
+use nervix_connector::{ClientResourceMounts, ResolvedClientConfig, render_client_config_template};
+
 use super::*;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -463,10 +465,7 @@ impl Runtime {
 
         Ok(ResolvedClientConfig {
             entries,
-            mounts: Some(Arc::new(ClientResourceMounts {
-                _root: mount_root,
-                _aliases: aliases,
-            })),
+            mounts: Some(Arc::new(ClientResourceMounts::new(mount_root, aliases))),
         })
     }
 
