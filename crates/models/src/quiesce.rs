@@ -15,8 +15,8 @@ use strum::{AsRefStr, IntoStaticStr};
 use crate::{
     CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
     CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateWireSchema, EmitSink,
-    EmitterName, MessageErrorPolicy, Model, ModelKind, ModelName, ProcessorInputs, ProcessorOutput,
-    ProcessorOutputs, RelayName,
+    EmitterName, MessageErrorPolicy, Model, ModelKind, ModelName, NodeRef, ProcessorInputs,
+    ProcessorOutput, ProcessorOutputs, RelayName, VhostName,
 };
 
 mod impact;
@@ -77,6 +77,33 @@ pub enum DynamicModelUpdate {
         emitter: EmitterName,
         config: Box<CreateEmitter>,
     },
+    /// The VHOST presents another version of the TLS resource it already binds. Endpoint routing
+    /// does not read the certificate, so no execution node changes; every node's HTTPS listener
+    /// installs the new certificate instead.
+    VhostTlsVersion { vhost: VhostName },
+}
+
+impl DynamicModelUpdate {
+    /// The node this update changes in place.
+    pub fn node(&self) -> NodeRef {
+        match self {
+            Self::RelayCapacity { relay, .. } => NodeRef::new(ModelKind::Relay, relay.clone()),
+            Self::Processor { kind, processor } => NodeRef::new(*kind, processor.clone()),
+            Self::Emitter { emitter, .. } => NodeRef::new(ModelKind::Emitter, emitter.clone()),
+            Self::VhostTlsVersion { vhost } => NodeRef::new(ModelKind::Vhost, vhost.clone()),
+        }
+    }
+
+    /// How the update takes effect: an execution node activates its new configuration in place,
+    /// while a VHOST's new TLS version is an HTTPS listener refresh on every node.
+    pub const fn activation(&self) -> ActivationAction {
+        match self {
+            Self::RelayCapacity { .. } | Self::Processor { .. } | Self::Emitter { .. } => {
+                ActivationAction::Activate
+            }
+            Self::VhostTlsVersion { .. } => ActivationAction::RefreshHttpsListener,
+        }
+    }
 }
 
 /// Node-owned runtime state that a model change makes meaningless even though the schemas around
@@ -220,6 +247,7 @@ declare_model_change_aspects! {
     ClientConfig => DomainPause, None, false;
     VhostHostnames => DomainPause, None, false;
     VhostTls => DomainPause, None, false;
+    VhostTlsVersion => Dynamic, None, false;
     EndpointDefinition => DomainPause, None, false;
     SignalingProtocolDefinition => DomainPause, None, false;
     LookupDefinition => DomainPause, None, false;
@@ -1018,8 +1046,22 @@ fn vhost_change_aspects(
     if base.hostnames != candidate.hostnames {
         changes.push(ModelChangeAspect::VhostHostnames);
     }
-    if base.tls != candidate.tls {
-        changes.push(ModelChangeAspect::VhostTls);
+    match (&base.tls, &candidate.tls) {
+        (Some(base_tls), Some(candidate_tls)) if base_tls.resource == candidate_tls.resource => {
+            if base_tls.version != candidate_tls.version {
+                changes.push_dynamic(
+                    ModelChangeAspect::VhostTlsVersion,
+                    DynamicModelUpdate::VhostTlsVersion {
+                        vhost: candidate.name.clone(),
+                    },
+                );
+            }
+        }
+        (base_tls, candidate_tls) => {
+            if base_tls != candidate_tls {
+                changes.push(ModelChangeAspect::VhostTls);
+            }
+        }
     }
     changes
 }
@@ -2309,12 +2351,12 @@ mod catch_all_kind_tests {
     use nonzero_ext::nonzero;
 
     use crate::{
-        AckMode, BranchSelection, CodecWireFormat, CorrelationTimeoutAction,
+        AckMode, ActivationAction, BranchSelection, CodecWireFormat, CorrelationTimeoutAction,
         CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateCodec,
         CreateCorrelator, CreateInferencer, CreateVhost, CreateWasmProcessor,
-        CreateWindowProcessor, FlushPolicy, GeneralErrorPolicy, Literal, Model, ModelChangeAspect,
-        ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, VhostTlsResource,
-        WasmProcessorLimits, WindowBound,
+        CreateWindowProcessor, DynamicModelUpdate, FlushPolicy, GeneralErrorPolicy, Literal, Model,
+        ModelChangeAspect, ModelKind, ModelName, NodeRef, ProcessorInputs, ProcessorOutput,
+        ProcessorOutputs, QuiesceLevel, VhostTlsResource, WasmProcessorLimits, WindowBound,
     };
 
     fn named<N>(raw: &str) -> N
@@ -2591,6 +2633,75 @@ mod catch_all_kind_tests {
             ModelChangeAspect::BranchSchema,
             QuiesceLevel::DomainPause,
         );
+    }
+
+    #[test]
+    fn a_tls_version_change_refreshes_the_https_listener_without_a_pause() {
+        let base = CreateVhost {
+            name: named("edge"),
+            hostnames: vec!["edge.example.com".to_string()],
+            tls: Some(VhostTlsResource {
+                resource: named("edge_tls"),
+                version: 1,
+            }),
+        };
+        let mut rotated = base.clone();
+        rotated.tls = Some(VhostTlsResource {
+            resource: named("edge_tls"),
+            version: 2,
+        });
+        let changes = Model::Vhost(base.clone()).change_aspects_against(&Model::Vhost(rotated));
+        assert_eq!(changes.aspects(), &[ModelChangeAspect::VhostTlsVersion]);
+        assert_eq!(changes.quiesce_level(), QuiesceLevel::Dynamic);
+        assert_eq!(
+            changes.dynamic_updates(),
+            &[DynamicModelUpdate::VhostTlsVersion {
+                vhost: named("edge"),
+            }]
+        );
+        let update = &changes.dynamic_updates()[0];
+        assert_eq!(
+            update.node(),
+            NodeRef::new(ModelKind::Vhost, named::<ModelName>("edge"))
+        );
+        assert_eq!(update.activation(), ActivationAction::RefreshHttpsListener);
+
+        let mut rebound = base.clone();
+        rebound.tls = Some(VhostTlsResource {
+            resource: named("other_tls"),
+            version: 1,
+        });
+        assert_single_aspect(
+            Model::Vhost(base.clone()),
+            Model::Vhost(rebound),
+            ModelChangeAspect::VhostTls,
+            QuiesceLevel::DomainPause,
+        );
+
+        let mut unsecured = base.clone();
+        unsecured.tls = None;
+        assert_single_aspect(
+            Model::Vhost(base.clone()),
+            Model::Vhost(unsecured),
+            ModelChangeAspect::VhostTls,
+            QuiesceLevel::DomainPause,
+        );
+
+        let mut renamed_and_rotated = base.clone();
+        renamed_and_rotated.hostnames = vec!["edge2.example.com".to_string()];
+        renamed_and_rotated.tls = Some(VhostTlsResource {
+            resource: named("edge_tls"),
+            version: 2,
+        });
+        let changes = Model::Vhost(base).change_aspects_against(&Model::Vhost(renamed_and_rotated));
+        assert_eq!(
+            changes.aspects(),
+            &[
+                ModelChangeAspect::VhostHostnames,
+                ModelChangeAspect::VhostTlsVersion
+            ]
+        );
+        assert_eq!(changes.quiesce_level(), QuiesceLevel::DomainPause);
     }
 
     #[test]

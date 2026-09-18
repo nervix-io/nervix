@@ -121,6 +121,15 @@ UPLOAD RESOURCE fraud_model VERSION './models/2026-09-17';
 REBIND RESOURCE fraud_model TO VERSION LATEST;
 ```
 
+The rebinding runs at the level of the usages it moves. Rotating a VHOST certificate this way is
+`DYNAMIC`: every node's HTTPS listener installs the new bundle before the command succeeds,
+established connections keep their session, new connections present the new certificate, and
+ingestion does not pause. The refresh also applies while the domain is stopped. An inferencer or
+WASM processor usage pauses only that entity, and a protobuf codec, signaling protocol, hash map, or
+client mount usage pauses the domain. If any node's listener cannot install the new certificate,
+the rebinding fails; when none of its usages paused, as when it moves only VHOSTs, every usage keeps
+its previous version.
+
 ## Upload Format
 
 The client builds a deterministic tar archive, declares its exact size, and sends it in bounded chunks. Internode replication also streams bounded chunks with HTTP/2 flow control; neither endpoint retains the complete archive in memory. A failed transfer restarts from the beginning on its next reconciliation attempt.
@@ -135,7 +144,9 @@ The per-version limits are configured with `NERVIX_RESOURCE_MAX_ARCHIVE_BYTES`, 
 
 ## TLS Bundles
 
-The first runtime integration for resources is `VHOST` TLS.
+The first runtime integration for resources is `VHOST` TLS. A VHOST presents the bundle version it
+binds on the HTTPS listener of every node, and `REBIND RESOURCE` moves it to another version
+without pausing the domain.
 
 A TLS resource bundle must contain these files at its root:
 

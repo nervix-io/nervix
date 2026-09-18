@@ -931,6 +931,36 @@ impl TransactionStepEffect {
     }
 }
 
+/// How the application of the step a transaction is applying ends.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum TransactionApplicationOutcome {
+    /// Every obligation of the step's committed effect completed.
+    Applied,
+    /// The step's committed effect did not become usable, and it stays committed.
+    Failed { error: String },
+    /// The step's committed model schedule did not become usable. The entry that records the
+    /// failure also puts back the schedule the step replaced, which the step's own effect captured
+    /// as its planning basis, so the step leaves no model change behind.
+    RolledBack {
+        error: String,
+        /// The domain as the failed step left it. The rollback conflicts when these no longer
+        /// describe the domain, so it never discards a change made after the step.
+        inputs: Box<DomainPlanningInputs>,
+    },
+}
+
+impl TransactionApplicationOutcome {
+    /// The failure the step's result reports, absent when the step applied.
+    pub fn error(&self) -> Option<&str> {
+        match self {
+            Self::Applied => None,
+            Self::Failed { error } | Self::RolledBack { error, .. } => Some(error),
+        }
+    }
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
