@@ -39,6 +39,8 @@ use tokio_util::sync::CancellationToken;
 use tonic::Status;
 use triomphe::Arc;
 
+#[cfg(feature = "shuttle")]
+use super::shutdown::{ShutdownCoordinator, ShutdownPhaseOutcome, ShutdownRequest};
 use super::{
     Args,
     session_service::{SessionEvents, SessionServiceImpl, SessionServiceInner},
@@ -591,4 +593,27 @@ pub(in crate::application) async fn queue_in_transaction(
         result.success,
         "queueing {query:?} should succeed: {result:?}"
     );
+}
+
+/// A shutdown timeout no model execution outlives, so a deadline measured from a stop request never
+/// passes while a model runs.
+#[cfg(feature = "shuttle")]
+pub(in crate::application) const FAR_FUTURE_SHUTDOWN_TIMEOUT: Duration =
+    Duration::from_secs(24 * 60 * 60);
+
+/// Moves `shutdown` through its phases in the order the composition root does once a stop has been
+/// requested, and returns that request. Every phase finishes as soon as it begins, so a model
+/// interleaves the phase transitions alone.
+#[cfg(feature = "shuttle")]
+pub(in crate::application) async fn shut_down_in_phase_order(
+    shutdown: ShutdownCoordinator,
+) -> ShutdownRequest {
+    let request = shutdown.requested().await;
+    let deadline = request.deadline();
+    shutdown.stop_admission();
+    shutdown.begin_drain_support(ShutdownPhaseOutcome::Completed.unless_deadline_passed(deadline));
+    shutdown
+        .begin_terminal_teardown(ShutdownPhaseOutcome::Abandoned.unless_deadline_passed(deadline));
+    shutdown.finish(ShutdownPhaseOutcome::Completed.unless_deadline_passed(deadline));
+    request
 }
