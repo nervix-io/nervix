@@ -6657,7 +6657,10 @@ dependencies = [
  "nervix-models",
  "rdkafka",
  "shuttle-tokio",
+ "thiserror 2.0.20",
  "tokio",
+ "tracing",
+ "triomphe",
 ]
 
 [[package]]
@@ -6995,7 +6998,6 @@ dependencies = [
  "protox",
  "pulsar",
  "rcgen",
- "rdkafka",
  "redis",
  "reqwest 0.13.4",
  "rkyv",

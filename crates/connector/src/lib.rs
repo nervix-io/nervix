@@ -37,6 +37,7 @@ mod ingest_metadata;
 pub mod physical_time;
 mod service_url;
 mod sink;
+mod source;
 mod tls;
 
 pub use client_config::{
@@ -56,5 +57,13 @@ pub use sink::{
     SinkDeadline, SinkEventReporter, SinkGeneralErrorHandler, SinkHost, SinkHostServices,
     SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordPosition,
     SinkStagingDirectory, SinkStartError, SinkStartResult, SinkTransientErrorStatus,
+};
+pub use source::{
+    SourceAckPolicy, SourceAcknowledgement, SourceAcknowledgementOutcome,
+    SourceAcknowledgementServices, SourceAcknowledgementSupport, SourceBatch, SourceBatchRequest,
+    SourceCapabilities, SourceConnector, SourceError, SourceHost, SourceHostServices,
+    SourceIntakeBatch, SourceIntakeError, SourceIntakeMessage, SourceIntakeMode,
+    SourceIntakeOutcome, SourceIntakeResult, SourceMessage, SourceMetadataScope, SourcePlan,
+    SourceResult, SourceResume,
 };
 pub use tls::{RustlsClientConfigSource, TlsClientConfigError};

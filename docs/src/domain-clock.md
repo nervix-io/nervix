@@ -246,7 +246,8 @@ later, such as a processor flush, scheduled callback, or message released from m
 
 Generated records use the snapshot assigned to their generating operation. Buffered emitter
 batches and their retries retain the snapshot from acceptance, while external observation fields
-whose contract is actual UTC obtain that value at their connector boundary.
+whose contract is actual UTC obtain that value at the shared source-host intake boundary or their
+connector boundary.
 
 ## Admission Windows
 

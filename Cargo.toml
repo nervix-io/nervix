@@ -40,7 +40,7 @@ shuttle = [
 ]
 # Test-only feature used by the standard test recipes for fault injection, random multinode
 # scheduling, and lower intentionally expensive password hashing parameters.
-testing = ["nervix-consensus/testing"]
+testing = ["nervix-connector-kafka/testing", "nervix-consensus/testing"]
 
 [dependencies]
 ahash = { workspace = true }
@@ -162,16 +162,6 @@ prost-reflect = { workspace = true, features = ["serde"] }
 prost-types = { workspace = true }
 protox = { workspace = true }
 pulsar = { workspace = true }
-# Use AWS-LC for Kafka TLS and Rustls for the statically linked curl/OIDC path.
-rdkafka = { workspace = true, features = [
-  "tokio",
-  "curl-static",
-  "curl-rustls",
-  "libz-static",
-  "cmake_build",
-  "static-linking",
-  "aws-lc",
-] }
 redis = { workspace = true }
 reqwest = { workspace = true, features = [
   "json",
