@@ -23,7 +23,7 @@ pub use self::route::{
 };
 pub use crate::program::{WindowAggregateFunction, WindowAggregateInvocation};
 use crate::{
-    frontend::lower_expression,
+    frontend::{SemanticScopePolicy, lower_expression},
     program::{Expr, FieldRef, FunctionName, Literal, Span, SpannedExpr, SpannedNode, spanned},
 };
 
@@ -316,10 +316,11 @@ fn lower_window_expression(
             ))
         }
         _ => {
-            let expression = lower_expression(expression, "output").map_err(|error| {
-                let message = error.current_context().to_string();
-                error.change_context(WindowAggregateError { message })
-            })?;
+            let expression = lower_expression(expression, SemanticScopePolicy::read_only("output"))
+                .map_err(|error| {
+                    let message = error.current_context().to_string();
+                    error.change_context(WindowAggregateError { message })
+                })?;
             validate_aggregate_expr(&expression)?;
             validate_window_input_scope(&expression.inner, false)?;
             Ok(spanned(WindowAggregateExpr::Scalar(expression), span))

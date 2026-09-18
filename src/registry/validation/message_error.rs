@@ -14,7 +14,7 @@ use nervix_models::{
     ModelKind, ModelName, NodeRef, ProcessorOutputs, RouteConstruction,
 };
 use nervix_vm::{
-    CompileBinding, CompileOptions, OutputMode, SemanticNamespaces,
+    CompileBinding, CompileOptions, OutputMode, SemanticScopePolicy,
     compile_program_with_options_for_bindings_with_sensitivity, lower_route_construction,
 };
 use petgraph::{graph::DiGraph, prelude::NodeIndex};
@@ -315,7 +315,7 @@ fn validate_message_error_policy(
             assignments: assignments.clone(),
             ..RouteConstruction::default()
         },
-        SemanticNamespaces::new("error_output", "error_output"),
+        SemanticScopePolicy::read_write("error_output", "error_output"),
     )
     .map_err(|reason| {
         Report::new(RegistryError::InvalidModel {
