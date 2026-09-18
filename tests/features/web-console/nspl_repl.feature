@@ -348,6 +348,64 @@ Feature: Web console NSPL REPL
     When selector ".modal-scrim" is clicked by script
     Then selector ".resource-dialog" does not exist
 
+  Scenario Outline: Web console shows the latest completed resource version and the usages bound to each version
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And node "node-1" has resource directory "lookup_v1" containing
+      """
+      {
+        "lookup.jsonl": "{\"id\":\"one\",\"value\":1}\n"
+      }
+      """
+    And node "node-1" has resource directory "lookup_v2" containing
+      """
+      {
+        "lookup.jsonl": "{\"id\":\"one\",\"value\":2}\n"
+      }
+      """
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE lookup_bundle;
+      CREATE SCHEMA lookup_entry (id STRING, value I64);
+      CREATE WIRE JSON SCHEMA lookup_wire MODE STRICT (id string, value integer);
+      CREATE CODEC lookup_codec FROM WIRE JSON SCHEMA lookup_wire TO SCHEMA lookup_entry;
+      """
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".nav-item.resources:has-text('lookup_bundle')" contains "catalog"
+    When selector ".nav-item.resources:has-text('lookup_bundle')" is clicked
+    And selector ".resource-dialog .file-upload-input" uploads resource directory "lookup_v1"
+    Then selector ".resource-upload-status" contains "uploaded resource version 1"
+    And selector ".nav-item.resources:has-text('lookup_bundle')" contains "v1"
+    And selector ".resource-version-row[data-version='1'] .resource-usage-list" contains "none"
+    Given the leader node is configured with these NSPL commands
+      """
+      CREATE HASH MAP lookup_by_id KEY id FROM RESOURCE lookup_bundle VERSION 1 PATH 'lookup.jsonl' DECODE USING lookup_codec;
+      CREATE CLIENT lookup_store TYPE HTTP MOUNT lookup_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1'};
+      """
+    When selector ".resource-dialog .file-upload-input" uploads resource directory "lookup_v2"
+    Then selector ".resource-upload-status" contains "uploaded resource version 2"
+    And selector ".resource-version-row[data-version='1'] .resource-usage-list" contains "HASH MAP lookup_by_id"
+    And selector ".resource-version-row[data-version='1'] .resource-usage-list" contains "CLIENT lookup_store"
+    And selector ".resource-version-row[data-version='2'] .resource-usage-list" contains "none"
+    And selector ".nav-item.resources:has-text('lookup_bundle')" contains "v2"
+    When selector ".modal-scrim" is clicked by script
+    And selector ".prompt-row input" is filled with "REBIND RESOURCE lookup_bundle TO VERSION LATEST;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "rebound 2 of 2 usage(s) of resource 'lookup_bundle' to version 2 (latest)"
+    When selector ".nav-item.resources:has-text('lookup_bundle')" is clicked
+    Then selector ".terminal" contains "- kind=hash_map name=lookup_by_id version=2"
+    And selector ".resource-version-row[data-version='2'] .resource-usage-list" contains "HASH MAP lookup_by_id"
+    And selector ".resource-version-row[data-version='2'] .resource-usage-list" contains "CLIENT lookup_store"
+    And selector ".resource-version-row[data-version='1'] .resource-usage-list" contains "none"
+    And selector ".nav-item.resources:has-text('lookup_bundle')" contains "v2"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario: Web console switches domains through the domain selector after REPL domain creation
     Given a 3 node nervix cluster is started
     When the web console is opened on the leader node
