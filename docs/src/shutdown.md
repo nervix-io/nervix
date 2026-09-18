@@ -417,8 +417,10 @@ emitter that cannot finish reports `emitter '<name>' did not drain before its co
 and holds the drain until the timeout.
 
 Kafka is the only sink whose client-side queue shutdown drains explicitly: after its buffered
-batches are published, the producer's local queue is flushed within the remaining deadline. Other
-sinks hold no such queue, so the publish itself is the completion point.
+batches are published, the emitter host calls the sink contract's finish hook with the remaining
+stop deadline. Kafka implements that hook by flushing the producer's local queue within the same
+deadline. Other sinks hold no such queue, so their default finish hook completes immediately and
+the publish itself is the completion point.
 
 Iceberg commits its staged data through its catalog, forced by the drain rather than waiting for the
 `COMMIT EACH` cadence. Staged rows live as local files that only a successful commit removes, so a

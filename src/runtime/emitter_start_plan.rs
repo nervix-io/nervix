@@ -17,28 +17,12 @@
 //! task and its sink constructors receive. Neither of them sees a Model.
 
 use error_stack::Report;
-use nervix_connector::{ParsedRetryPolicy, ResolvedClientConfig};
+use nervix_connector::{
+    AckConfirmation, BrokerPublishingMode, ParsedRetryPolicy, ResolvedClientConfig,
+};
 use nervix_models::{ChannelName, CollectionName, QueueName, SubjectName, TableName, TopicName};
 
 use super::*;
-
-/// How many publishes may await confirmation at once, and how long each one may take.
-///
-/// `MODE ACK SEQUENTIAL` and `MODE ACK PARALLEL MAX <n>` both name a window of at least one, so
-/// the window is non-zero by construction and no publishing path has to decide what a window of
-/// zero would mean.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct AckConfirmation {
-    pub(super) max_in_flight: NonZeroUsize,
-    pub(super) timeout: Duration,
-}
-
-/// How a Kafka, Pulsar or RabbitMQ sink learns that a record was accepted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BrokerPublishingMode {
-    NoAck,
-    Ack(AckConfirmation),
-}
 
 /// The quality of service an MQTT sink publishes at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -600,7 +584,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     &client.config,
                 )?,
                 topic: topic.clone(),
-                mode: BrokerPublishingMode::decide(sink, mode)?,
+                mode: decide_broker_publishing_mode(sink, mode)?,
             }),
             (
                 EmitSink::Pulsar {
@@ -616,7 +600,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     &client.config,
                 )?,
                 topic: topic.clone(),
-                mode: BrokerPublishingMode::decide(sink, mode)?,
+                mode: decide_broker_publishing_mode(sink, mode)?,
             }),
             (
                 EmitSink::RabbitMq {
@@ -632,7 +616,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     &client.config,
                 )?,
                 queue: queue.clone(),
-                mode: BrokerPublishingMode::decide(sink, mode)?,
+                mode: decide_broker_publishing_mode(sink, mode)?,
             }),
             (
                 EmitSink::Redis {
@@ -1019,46 +1003,41 @@ impl EmitterStartPlan<DeclaredClientConfig> {
     }
 }
 
-impl AckConfirmation {
-    /// The confirmation window and timeout an acknowledging publishing mode declares.
-    fn decide(
-        window: &EmitterAckWindow,
-        ack_timeout: &str,
-    ) -> Result<Self, Report<EmitterStartPlanError>> {
-        let timeout = EmitterDurationSetting::AckTimeout.parse(ack_timeout)?;
-        if timeout.is_zero() {
-            return Err(Report::new(EmitterStartPlanError::ZeroAckTimeout));
-        }
-        let max_in_flight = match window {
-            EmitterAckWindow::Sequential => NonZeroUsize::MIN,
-            EmitterAckWindow::Parallel { max } => addressable_count(*max),
-        };
-        Ok(Self {
-            max_in_flight,
-            timeout,
-        })
+/// The confirmation window and timeout an acknowledging publishing mode declares.
+fn decide_ack_confirmation(
+    window: &EmitterAckWindow,
+    ack_timeout: &str,
+) -> Result<AckConfirmation, Report<EmitterStartPlanError>> {
+    let timeout = EmitterDurationSetting::AckTimeout.parse(ack_timeout)?;
+    if timeout.is_zero() {
+        return Err(Report::new(EmitterStartPlanError::ZeroAckTimeout));
     }
+    let max_in_flight = match window {
+        EmitterAckWindow::Sequential => NonZeroUsize::MIN,
+        EmitterAckWindow::Parallel { max } => addressable_count(*max),
+    };
+    Ok(AckConfirmation {
+        max_in_flight,
+        timeout,
+    })
 }
 
-impl BrokerPublishingMode {
-    /// The broker mode `mode` declares for `sink`, which publishes with `MODE NO_ACK` or
-    /// `MODE ACK`.
-    fn decide(
-        sink: &EmitSink,
-        mode: &EmitterPublishingMode,
-    ) -> Result<Self, Report<EmitterStartPlanError>> {
-        match mode {
-            EmitterPublishingMode::NoAck { .. } => Ok(Self::NoAck),
-            EmitterPublishingMode::BrokerAck {
-                window,
-                ack_timeout,
-                ..
-            } => {
-                let confirmation = AckConfirmation::decide(window, ack_timeout)?;
-                Ok(Self::Ack(confirmation))
-            }
-            _ => Err(EmitterStartPlanError::unsupported_mode(sink, mode)),
+/// The broker mode `mode` declares for `sink`, which publishes with `MODE NO_ACK` or `MODE ACK`.
+fn decide_broker_publishing_mode(
+    sink: &EmitSink,
+    mode: &EmitterPublishingMode,
+) -> Result<BrokerPublishingMode, Report<EmitterStartPlanError>> {
+    match mode {
+        EmitterPublishingMode::NoAck { .. } => Ok(BrokerPublishingMode::NoAck),
+        EmitterPublishingMode::BrokerAck {
+            window,
+            ack_timeout,
+            ..
+        } => {
+            let confirmation = decide_ack_confirmation(window, ack_timeout)?;
+            Ok(BrokerPublishingMode::Ack(confirmation))
         }
+        _ => Err(EmitterStartPlanError::unsupported_mode(sink, mode)),
     }
 }
 
@@ -1075,7 +1054,7 @@ impl MqttPublishingMode {
                 ack_timeout,
                 ..
             } => {
-                let confirmation = AckConfirmation::decide(window, ack_timeout)?;
+                let confirmation = decide_ack_confirmation(window, ack_timeout)?;
                 Ok(Self::Qos1(confirmation))
             }
             EmitterPublishingMode::MqttQos2 {
@@ -1083,7 +1062,7 @@ impl MqttPublishingMode {
                 ack_timeout,
                 ..
             } => {
-                let confirmation = AckConfirmation::decide(window, ack_timeout)?;
+                let confirmation = decide_ack_confirmation(window, ack_timeout)?;
                 Ok(Self::Qos2(confirmation))
             }
             _ => Err(EmitterStartPlanError::unsupported_mode(sink, mode)),
@@ -1104,7 +1083,7 @@ impl NatsPublishingMode {
                 ack_timeout,
                 ..
             } => {
-                let confirmation = AckConfirmation::decide(window, ack_timeout)?;
+                let confirmation = decide_ack_confirmation(window, ack_timeout)?;
                 Ok(Self::JetStream(confirmation))
             }
             _ => Err(EmitterStartPlanError::unsupported_mode(sink, mode)),

@@ -697,7 +697,7 @@ impl OtelEmitter {
                     tokio::task::consume_budget().await;
                     if let Some(error) = Self::side_error(program, &output, *row, execution_now) {
                         outcome.reject_structured(
-                            BrokerRecordPosition {
+                            SinkRecordPosition {
                                 batch_index,
                                 row_index: *row,
                             },
@@ -708,13 +708,13 @@ impl OtelEmitter {
                     match mapped.log_record(*row, observed_time) {
                         Ok(record) => {
                             records.push(record);
-                            positions.push(BrokerRecordPosition {
+                            positions.push(SinkRecordPosition {
                                 batch_index,
                                 row_index: *row,
                             });
                         }
                         Err(error) => outcome.reject_structured(
-                            BrokerRecordPosition {
+                            SinkRecordPosition {
                                 batch_index,
                                 row_index: *row,
                             },
@@ -740,7 +740,7 @@ impl OtelEmitter {
                     tokio::task::consume_budget().await;
                     if let Some(error) = Self::side_error(program, &output, *row, execution_now) {
                         outcome.reject_structured(
-                            BrokerRecordPosition {
+                            SinkRecordPosition {
                                 batch_index,
                                 row_index: *row,
                             },
@@ -751,13 +751,13 @@ impl OtelEmitter {
                     match mapped.span(*row) {
                         Ok(span) => {
                             spans.push(span);
-                            positions.push(BrokerRecordPosition {
+                            positions.push(SinkRecordPosition {
                                 batch_index,
                                 row_index: *row,
                             });
                         }
                         Err(error) => outcome.reject_structured(
-                            BrokerRecordPosition {
+                            SinkRecordPosition {
                                 batch_index,
                                 row_index: *row,
                             },
@@ -783,7 +783,7 @@ impl OtelEmitter {
                     tokio::task::consume_budget().await;
                     if let Some(error) = Self::side_error(program, &output, *row, execution_now) {
                         outcome.reject_structured(
-                            BrokerRecordPosition {
+                            SinkRecordPosition {
                                 batch_index,
                                 row_index: *row,
                             },
@@ -1390,7 +1390,7 @@ impl<'a> OtelMappedBatch<'a> {
         model: &OtelMetric,
         pending_rows: &[usize],
         batch_index: usize,
-        positions: &mut Vec<BrokerRecordPosition>,
+        positions: &mut Vec<SinkRecordPosition>,
         outcome: &mut PerRecordPublishOutcome,
         execution_now: Timestamp,
     ) -> Metric {
@@ -1409,13 +1409,13 @@ impl<'a> OtelMappedBatch<'a> {
                     match self.number_point(*row, require_start_time) {
                         Ok(point) => {
                             points.push(point);
-                            positions.push(BrokerRecordPosition {
+                            positions.push(SinkRecordPosition {
                                 batch_index,
                                 row_index: *row,
                             });
                         }
                         Err(error) => outcome.reject_structured(
-                            BrokerRecordPosition {
+                            SinkRecordPosition {
                                 batch_index,
                                 row_index: *row,
                             },
@@ -1446,13 +1446,13 @@ impl<'a> OtelMappedBatch<'a> {
                     match self.histogram_point(*row, require_start_time) {
                         Ok(point) => {
                             points.push(point);
-                            positions.push(BrokerRecordPosition {
+                            positions.push(SinkRecordPosition {
                                 batch_index,
                                 row_index: *row,
                             });
                         }
                         Err(error) => outcome.reject_structured(
-                            BrokerRecordPosition {
+                            SinkRecordPosition {
                                 batch_index,
                                 row_index: *row,
                             },

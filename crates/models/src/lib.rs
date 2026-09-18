@@ -159,11 +159,12 @@ pub use statement::{
     S3ConfigEntry, ScheduledModel, ScheduledNode, ScheduledNodes, SentryConfigEntry,
     ShowClusterStatus, ShowCreate, ShowPlacements, ShowRelayMaterializedState, ShowTransactions,
     ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
-    SignalingWaitStep, SignalingWireFormat, SqsConfigEntry, SqsFifoGroup, SqsIngestMode,
-    StartDomain, Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior,
-    SubscriptionLiteral, SyslogConfigEntry, UncordonNode, UniquelyKindedModel, UploadResource,
-    VhostTlsResource, WasmProcessorLimits, WebsocketsConfigEntry, WebsocketsIngestMode,
-    WindowBound, WireSchemaLookup, ZeroMqConfigEntry, ZeroMqIngestMode, default_relay_buffer,
+    SignalingWaitStep, SignalingWireFormat, SinkCapabilities, SqsConfigEntry, SqsFifoGroup,
+    SqsIngestMode, StartDomain, Statement, StopDomain, SubscriptionBinding,
+    SubscriptionDeliveryBehavior, SubscriptionLiteral, SyslogConfigEntry, UncordonNode,
+    UniquelyKindedModel, UploadResource, VhostTlsResource, WasmProcessorLimits,
+    WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaLookup, ZeroMqConfigEntry,
+    ZeroMqIngestMode, default_relay_buffer,
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};

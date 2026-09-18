@@ -417,7 +417,7 @@ use processors::{
     ReordererRowOrder, WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext,
     WindowBounds, WindowFlushContext,
 };
-pub(in crate::runtime) use reconnect_backoff::RuntimeReconnectBackoff;
+pub(in crate::runtime) use reconnect_backoff::{AcknowledgementKeepalive, RuntimeReconnectBackoff};
 use reingestor::ReingestorInputSpec;
 pub(in crate::runtime) use relay_batch::RelayDispatchResult;
 use relay_batch::build_stream_record_batch_preserving_acks;

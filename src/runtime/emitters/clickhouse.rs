@@ -286,7 +286,7 @@ impl ClickHouseEmitter {
             {
                 Ok(()) => {
                     for row in chunk {
-                        outcome.deliver(BrokerRecordPosition {
+                        outcome.deliver(SinkRecordPosition {
                             batch_index,
                             row_index: *row,
                         });
@@ -321,13 +321,13 @@ impl ClickHouseEmitter {
                         )
                         .await
                         {
-                            Ok(()) => outcome.deliver(BrokerRecordPosition {
+                            Ok(()) => outcome.deliver(SinkRecordPosition {
                                 batch_index,
                                 row_index: *row,
                             }),
                             Err(error) if error.is_record_error() => {
                                 outcome.reject(
-                                    BrokerRecordPosition {
+                                    SinkRecordPosition {
                                         batch_index,
                                         row_index: *row,
                                     },
@@ -344,7 +344,7 @@ impl ClickHouseEmitter {
                 Err(error) if error.is_record_error() => {
                     if let Some(row) = chunk.first() {
                         outcome.reject(
-                            BrokerRecordPosition {
+                            SinkRecordPosition {
                                 batch_index,
                                 row_index: *row,
                             },
