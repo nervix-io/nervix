@@ -15,13 +15,13 @@ use nervix_connector::{
     physical_time::{PhysicalDeadline, PhysicalDeadlineCapability, actual_utc_now},
     read_tls_file,
 };
+use nervix_connector_kafka::{KafkaSink, KafkaSinkConfig};
 use thiserror::Error;
 
 use super::*;
 
 pub(in crate::runtime) mod clickhouse;
 mod iceberg;
-mod kafka;
 mod mongodb;
 mod mqtt;
 mod mysql;
@@ -38,7 +38,6 @@ mod zeromq;
 
 use clickhouse::ClickHouseEmitter;
 use iceberg::{IcebergEmitter, IcebergEmitterError, IcebergEmitterInit, IcebergEmitterResult};
-use kafka::{KafkaSink, KafkaSinkConfig};
 use mongodb::MongoDbEmitter;
 pub(in crate::runtime) use mongodb::{MongoDbClient, open_mongodb_client};
 use mqtt::MqttEmitter;

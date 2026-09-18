@@ -64,6 +64,8 @@ per-record delivery or structured-rejection outcomes and at most one infrastruct
 runtime retains batching, retry cadence, acknowledgement keepalive, stop deadlines, and fault
 injection. Connectors reach transient status, events, staging storage, and general-error handling
 only through an opaque host handle, so neither runtime types nor ACK maps cross the boundary.
+Kafka implements this record-sink contract in `crates/connectors/kafka`; its driver and raw client
+configuration no longer belong to the server runtime.
 
 Clock ownership follows the same one-way conversion. NSPL parsing turns `PERIOD`, `SKEW`, start
 timestamps, and rates into validated vocabulary values. The control plane commits one mapping and

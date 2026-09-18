@@ -1,3 +1,17 @@
+//! Kafka sink connector.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Kafka producer configuration, record and header publication, delivery-report
+//!   classification, and producer queue shutdown.
+//! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio, and
+//!   `rust-rdkafka`.
+//! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
+//!   connector implementation.
+
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+
 use std::{collections::VecDeque, time::Duration};
 
 use async_trait::async_trait;
@@ -20,13 +34,13 @@ use tokio::time::{Instant, sleep};
 
 const KAFKA: &str = "kafka";
 
-pub(in crate::runtime) struct KafkaSinkConfig {
-    pub(in crate::runtime) config: Vec<ClientConfigEntry>,
-    pub(in crate::runtime) topic: TopicName,
-    pub(in crate::runtime) mode: BrokerPublishingMode,
+pub struct KafkaSinkConfig {
+    pub config: Vec<ClientConfigEntry>,
+    pub topic: TopicName,
+    pub mode: BrokerPublishingMode,
 }
 
-pub(in crate::runtime) struct KafkaSink {
+pub struct KafkaSink {
     producer: FutureProducer,
     topic: TopicName,
     mode: BrokerPublishingMode,
@@ -40,10 +54,7 @@ struct PendingKafkaConfirmation {
 }
 
 impl KafkaSink {
-    pub(in crate::runtime) fn new(
-        config: KafkaSinkConfig,
-        _host: SinkHost,
-    ) -> SinkStartResult<Self> {
+    pub fn new(config: KafkaSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
         let producer = Self::producer_from_config(&config.config)?;
         Ok(Self {
             producer,
@@ -316,7 +327,9 @@ impl RecordSink for KafkaSink {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use rdkafka::error::{KafkaError, RDKafkaErrorCode};
+
+    use super::KafkaSink;
 
     #[test]
     fn oversized_and_invalid_records_are_definitive_rejections() {
