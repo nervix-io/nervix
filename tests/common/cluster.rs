@@ -15,6 +15,7 @@ use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_sqs::{Client as SqsClient, types::QueueAttributeName};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use error_stack::Report;
 use fjall::Database;
 use futures_util::SinkExt;
 use lapin::{
@@ -24,7 +25,7 @@ use lapin::{
 };
 use meticulous::ResultExt as _;
 use nervix_approx_into::ApproxInto as _;
-use nervix_client_core::{Client, CommandOutcomeKind, ConnectOptions, TlsRequirement};
+use nervix_client_core::{Client, ConnectOptions, TlsRequirement};
 use nervix_consensus::RaftRetentionPolicy;
 use nervix_execution::Executor;
 use nervix_interconnect::{
@@ -107,18 +108,28 @@ use super::{
         PULSAR_TLS_ADDR, RABBITMQ_ADDR, REDIS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
     },
     node_liveness::{
-        NodeTaskTerminalOutcome, NodeTaskWaitOutcome, OwnedNodeTask, ReadinessConnectionFailure,
-        ReadinessProbeOutcome,
+        NodeTaskTerminalOutcome, NodeTaskWaitOutcome, OwnedNodeTask, ReadinessProbeOutcome,
+    },
+    phase_deadline::PhaseDeadline,
+    status_request::{
+        STATUS_DIAGNOSTIC_BUDGET, STATUS_REQUEST_TIMEOUT, STATUS_REQUESTS_PER_STARTUP,
+        STATUS_WAIT_BUDGET, StatusEndpoint, StatusRequestError, StatusTransport,
     },
 };
 
 const HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
-const STATUS_TIMEOUT: Duration = Duration::from_secs(40);
+const _: () = assert!(
+    match STATUS_REQUEST_TIMEOUT.checked_mul(STATUS_REQUESTS_PER_STARTUP) {
+        Some(requests) => requests.as_nanos() <= STARTUP_TIMEOUT.as_nanos(),
+        None => false,
+    },
+    "a node startup attempt must outlast its stalled readiness requests"
+);
 const TEST_NODE_UNAVAILABILITY_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_TEST_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT: Duration =
-    match TEST_NODE_UNAVAILABILITY_TIMEOUT.checked_add(STATUS_TIMEOUT) {
+    match TEST_NODE_UNAVAILABILITY_TIMEOUT.checked_add(STATUS_WAIT_BUDGET) {
         Some(timeout) => timeout,
         None => panic!(
             "the test node-unavailability timeout and cluster status observation budget must fit \
@@ -587,9 +598,15 @@ fn dev_tls_ca_pem() -> io::Result<Vec<u8>> {
 
 fn dev_tls_ca_path() -> io::Result<PathBuf> {
     ensure_dev_tls_assets()?;
-    Ok(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    Ok(dev_tls_ca_file())
+}
+
+/// Where the dev TLS certificate authority is written. A node serving HTTPS has already generated
+/// it, because starting such a node runs `ensure_dev_tls_assets` first.
+fn dev_tls_ca_file() -> PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tls/dev")
-        .join("ca.pem"))
+        .join("ca.pem")
 }
 
 fn kafka_client_config(dependencies: &DependencyEndpoints) -> io::Result<ClientConfig> {
@@ -900,6 +917,7 @@ impl Cluster {
     pub(crate) async fn start_node(&mut self, node_id: &str) -> io::Result<()> {
         self.start_node_without_waiting_for_raft_catch_up(node_id)
             .await?;
+        let leader_lookup = PhaseDeadline::after(STATUS_WAIT_BUDGET);
         let mut leader_applied = None;
         for probe_node_id in self
             .nodes
@@ -907,7 +925,10 @@ impl Cluster {
             .filter(|existing_id| existing_id.as_str() != node_id)
         {
             tokio::task::consume_budget().await;
-            let Ok(probe_status) = self.show_status(probe_node_id).await else {
+            if leader_lookup.has_passed() {
+                break;
+            }
+            let Ok(probe_status) = self.cluster_status(probe_node_id, leader_lookup).await else {
                 continue;
             };
             let Some(leader_id) = probe_status
@@ -916,7 +937,7 @@ impl Cluster {
             else {
                 continue;
             };
-            let Ok(leader_status) = self.show_status(&leader_id).await else {
+            let Ok(leader_status) = self.cluster_status(&leader_id, leader_lookup).await else {
                 continue;
             };
             leader_applied = leader_status.last_applied.filter(|value| *value > 0);
@@ -1374,7 +1395,7 @@ impl Cluster {
         group: &str,
         expected: usize,
     ) -> io::Result<()> {
-        let deadline = Instant::now() + STATUS_TIMEOUT;
+        let deadline = Instant::now() + STATUS_WAIT_BUDGET;
         loop {
             tokio::task::consume_budget().await;
             match kafka_consumer_group_member_count(&self.dependencies, group) {
@@ -1449,7 +1470,7 @@ impl Cluster {
         queue: &str,
         expected: usize,
     ) -> io::Result<()> {
-        let deadline = Instant::now() + STATUS_TIMEOUT;
+        let deadline = Instant::now() + STATUS_WAIT_BUDGET;
         loop {
             tokio::task::consume_budget().await;
             match rabbitmq_queue_consumer_count(&self.dependencies, queue).await {
@@ -1566,7 +1587,7 @@ impl Cluster {
     ) -> io::Result<f64> {
         let url = self.observability_metrics_url(node_id)?;
         let client = reqwest::Client::new();
-        let response = timeout(STATUS_TIMEOUT, async {
+        let response = timeout(STATUS_WAIT_BUDGET, async {
             let response = client.get(&url).send().await?;
             response.text().await
         })
@@ -2138,7 +2159,7 @@ impl Cluster {
         let mut last_response = None;
         let mut last_error = None;
 
-        while start.elapsed() < STATUS_TIMEOUT {
+        while start.elapsed() < STATUS_WAIT_BUDGET {
             tokio::task::consume_budget().await;
             match client.get(&url).send().await {
                 Ok(response) => {
@@ -2197,7 +2218,7 @@ impl Cluster {
         let mut last_response = None;
         let mut last_error = None;
 
-        while start.elapsed() < STATUS_TIMEOUT {
+        while start.elapsed() < STATUS_WAIT_BUDGET {
             tokio::task::consume_budget().await;
             match client.get(&url).send().await {
                 Ok(response) => {
@@ -2251,7 +2272,7 @@ impl Cluster {
         let mut last_response = None;
         let mut last_error = None;
         let mut last_matching_lines = Vec::new();
-        let deadline = Instant::now() + wait.unwrap_or(STATUS_TIMEOUT);
+        let deadline = Instant::now() + wait.unwrap_or(STATUS_WAIT_BUDGET);
 
         while Instant::now() < deadline {
             tokio::task::consume_budget().await;
@@ -2324,7 +2345,7 @@ impl Cluster {
         let mut last_response = None;
         let mut last_error = None;
         let mut last_matching_lines = Vec::new();
-        let deadline = Instant::now() + wait.unwrap_or(STATUS_TIMEOUT);
+        let deadline = Instant::now() + wait.unwrap_or(STATUS_WAIT_BUDGET);
 
         while Instant::now() < deadline {
             tokio::task::consume_budget().await;
@@ -2390,7 +2411,7 @@ impl Cluster {
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
         let url = format!("http://{}/metrics", handle.spec.observability_addr());
         let client = reqwest::Client::new();
-        let response = timeout(STATUS_TIMEOUT, async {
+        let response = timeout(STATUS_WAIT_BUDGET, async {
             let response = client.get(&url).send().await?;
             let status = response.status().as_u16();
             response.text().await.map(|body| (status, body))
@@ -2408,25 +2429,24 @@ impl Cluster {
     }
 
     pub(crate) async fn current_leader(&self, node_id: &str) -> io::Result<Option<String>> {
-        let handle = self
-            .nodes
-            .get(node_id)
-            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
-        handle
-            .show_cluster_status()
+        let status = self
+            .cluster_status(node_id, PhaseDeadline::after(STATUS_REQUEST_TIMEOUT))
             .await
-            .map(|status| status.current_leader)
+            .map_err(|error| {
+                io::Error::other(format!("node '{node_id}' status request failed: {error:#}"))
+            })?;
+        Ok(status.current_leader)
     }
 
     /// The leader every reachable node agrees on, ignoring nodes a scenario has stopped.
     pub(crate) async fn wait_for_leader_among_running(&self) -> io::Result<String> {
-        let start = Instant::now();
-        while start.elapsed() < STATUS_TIMEOUT {
+        let deadline = PhaseDeadline::after(STATUS_WAIT_BUDGET);
+        while !deadline.has_passed() {
             tokio::task::consume_budget().await;
             let mut reported = BTreeMap::new();
-            for node_id in self.nodes.keys() {
-                if let Ok(status) = self.show_status(node_id).await {
-                    reported.insert(node_id.clone(), status);
+            for (node_id, status) in self.cluster_statuses(deadline).await {
+                if let Ok(status) = status {
+                    reported.insert(node_id, status);
                 }
             }
             let mut leaders = reported
@@ -2441,26 +2461,28 @@ impl Cluster {
             {
                 return Ok(leader.clone());
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            deadline.pause(POLL_INTERVAL).await;
         }
-        Err(io::Error::other(
-            "timed out waiting for a leader the running nodes agree on",
-        ))
+        Err(io::Error::other(format!(
+            "timed out after {:?} waiting for a leader the running nodes agree on",
+            deadline.elapsed()
+        )))
     }
 
     pub(crate) async fn wait_for_consistent_leader_on_all_nodes(&self) -> io::Result<String> {
-        let start = Instant::now();
+        let deadline = PhaseDeadline::after(STATUS_WAIT_BUDGET);
         let mut last_statuses = BTreeMap::new();
+        let mut last_failures = BTreeMap::new();
         let mut stable_leader = None;
         let mut stable_count = 0u8;
 
-        while start.elapsed() < STATUS_TIMEOUT {
+        while !deadline.has_passed() {
             tokio::task::consume_budget().await;
             let mut leader = None;
             let mut consistent = true;
 
-            for node_id in self.nodes.keys() {
-                match self.show_status(node_id).await {
+            for (node_id, status) in self.cluster_statuses(deadline).await {
+                match status {
                     Ok(status) => {
                         if let Some(current) = status.current_leader.clone() {
                             if let Some(expected) = leader.as_ref() {
@@ -2473,10 +2495,11 @@ impl Cluster {
                         } else {
                             consistent = false;
                         }
-                        last_statuses.insert(node_id.clone(), status);
+                        last_statuses.insert(node_id, status);
                     }
-                    Err(_) => {
+                    Err(failure) => {
                         consistent = false;
+                        last_failures.insert(node_id, failure);
                     }
                 }
             }
@@ -2502,36 +2525,77 @@ impl Cluster {
                 stable_count = 0;
             }
 
-            sleep(POLL_INTERVAL).await;
+            deadline.pause(POLL_INTERVAL).await;
         }
 
-        let mut message = "timed out waiting for a consistent cluster leader".to_string();
+        let mut message = format!(
+            "timed out after {:?} waiting for a consistent cluster leader",
+            deadline.elapsed()
+        );
         for (node_id, status) in last_statuses {
             message.push_str(&format!("\nlast status for '{node_id}':\n{}", status.raw));
+        }
+        for (node_id, failure) in last_failures {
+            message.push_str(&format!("\nlast error for '{node_id}': {failure:#}"));
         }
         Err(io::Error::other(message))
     }
 
+    /// Every node's status text, requested from all nodes at once under the short diagnostic
+    /// budget. Each node keeps its own outcome, so a node that never replies costs the caller at
+    /// most that budget and cannot hide another node's status.
     pub(crate) async fn collect_status_snapshots(
         &self,
-    ) -> BTreeMap<String, Result<String, String>> {
-        let mut snapshots = BTreeMap::new();
-        for node_id in self.nodes.keys() {
-            let result = match self.show_status(node_id).await {
-                Ok(status) => Ok(status.raw),
-                Err(error) => Err(error.to_string()),
-            };
-            snapshots.insert(node_id.clone(), result);
-        }
-        snapshots
+    ) -> BTreeMap<String, Result<String, Report<StatusRequestError>>> {
+        let endpoints = self.status_endpoints();
+        StatusEndpoint::cluster_statuses(&endpoints, PhaseDeadline::after(STATUS_DIAGNOSTIC_BUDGET))
+            .await
     }
 
-    async fn show_status(&self, node_id: &str) -> io::Result<ClusterStatus> {
+    /// One node's status text, requested within `phase`. Scenario steps that wait on a status
+    /// fragment use it so no status request outlives the step's own deadline.
+    pub(crate) async fn status_text(
+        &self,
+        node_id: &str,
+        phase: PhaseDeadline,
+    ) -> Result<String, Report<StatusRequestError>> {
         let handle = self
             .nodes
             .get(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
-        handle.show_cluster_status().await
+        handle.status_endpoint().cluster_status(phase).await
+    }
+
+    async fn cluster_status(
+        &self,
+        node_id: &str,
+        phase: PhaseDeadline,
+    ) -> Result<ClusterStatus, Report<StatusRequestError>> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        handle.cluster_status(phase).await
+    }
+
+    /// Every node's parsed status, requested from all nodes at once within `phase`.
+    async fn cluster_statuses(
+        &self,
+        phase: PhaseDeadline,
+    ) -> BTreeMap<String, Result<ClusterStatus, Report<StatusRequestError>>> {
+        let endpoints = self.status_endpoints();
+        let statuses = StatusEndpoint::cluster_statuses(&endpoints, phase).await;
+        statuses
+            .into_iter()
+            .map(|(node_id, status)| (node_id, status.map(ClusterStatus::parse)))
+            .collect()
+    }
+
+    fn status_endpoints(&self) -> BTreeMap<String, StatusEndpoint> {
+        self.nodes
+            .iter()
+            .map(|(node_id, handle)| (node_id.clone(), handle.status_endpoint()))
+            .collect()
     }
 
     async fn wait_for_last_applied_at_least(
@@ -2579,29 +2643,28 @@ impl Cluster {
             .nodes
             .get(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
-        let start = Instant::now();
-        let mut last_status = None;
-        let mut last_error = None;
+        let deadline = PhaseDeadline::after(STATUS_WAIT_BUDGET);
+        let waited = deadline
+            .poll_until(
+                POLL_INTERVAL,
+                |phase| handle.cluster_status(phase),
+                predicate,
+            )
+            .await;
+        let expired = match waited {
+            Ok(_) => return Ok(()),
+            Err(expired) => expired,
+        };
 
-        while start.elapsed() < STATUS_TIMEOUT {
-            match handle.show_cluster_status().await {
-                Ok(status) => {
-                    if predicate(&status) {
-                        return Ok(());
-                    }
-                    last_status = Some(status);
-                }
-                Err(err) => last_error = Some(err),
-            }
-            sleep(POLL_INTERVAL).await;
-        }
-
-        let mut message = format!("timed out waiting for cluster state via node '{node_id}'");
-        if let Some(status) = last_status {
+        let mut message = format!(
+            "timed out after {:?} waiting for cluster state via node '{node_id}'",
+            deadline.elapsed()
+        );
+        if let Some(status) = expired.last_output {
             message.push_str(&format!("\nlast status:\n{}", status.raw));
         }
-        if let Some(err) = last_error {
-            message.push_str(&format!("\nlast error: {err}"));
+        if let Some(failure) = expired.last_failure {
+            message.push_str(&format!("\nlast error: {failure:#}"));
         }
         Err(io::Error::other(message))
     }
@@ -2777,23 +2840,46 @@ impl NodeHandle {
     }
 
     async fn wait_until_ready(&mut self, attempt: usize) -> io::Result<()> {
-        let grpc_uri = self.spec.grpc_uri(self.config.grpc_mode);
+        let endpoint = self.status_endpoint();
         let node = node_name(&self.spec.node_id);
         self.task
-            .wait_until_ready(&node, attempt, STARTUP_TIMEOUT, POLL_INTERVAL, || {
-                probe_server_readiness(&grpc_uri)
-            })
+            .wait_until_ready(
+                &node,
+                attempt,
+                PhaseDeadline::after(STARTUP_TIMEOUT),
+                POLL_INTERVAL,
+                |phase| ReadinessProbeOutcome::probe(&endpoint, phase),
+            )
             .await
             .map_err(io::Error::other)
     }
 
-    async fn show_cluster_status(&self) -> io::Result<ClusterStatus> {
-        let output = run_command(
-            &self.spec.grpc_uri(self.config.grpc_mode),
-            "SHOW CLUSTER STATUS;",
-        )
-        .await?;
-        Ok(ClusterStatus::parse(output))
+    /// Where status requests reach this node: the session endpoint of its configured client
+    /// transport, authenticated as the default test user.
+    fn status_endpoint(&self) -> StatusEndpoint {
+        let authorization = test_basic_authorization();
+        match self.config.grpc_mode {
+            InternalTransportMode::Http => StatusEndpoint::new(
+                SocketAddr::new(HOST, self.spec.grpc_port),
+                StatusTransport::Plaintext,
+                authorization,
+            ),
+            InternalTransportMode::Https => StatusEndpoint::new(
+                SocketAddr::new(HOST, self.spec.grpc_https_port),
+                StatusTransport::Tls {
+                    authority: dev_tls_ca_file(),
+                },
+                authorization,
+            ),
+        }
+    }
+
+    async fn cluster_status(
+        &self,
+        phase: PhaseDeadline,
+    ) -> Result<ClusterStatus, Report<StatusRequestError>> {
+        let status = self.status_endpoint().cluster_status(phase).await?;
+        Ok(ClusterStatus::parse(status))
     }
 
     fn abort(&mut self) {
@@ -3939,13 +4025,6 @@ fn parse_interconnect_line(line: &str) -> Option<(String, String)> {
     Some((node_id.to_string(), status.to_string()))
 }
 
-async fn run_command(server: &str, query: &str) -> io::Result<String> {
-    let mut session = open_raw_session(server, "default").await?;
-    let output = session.run_command(query).await?;
-    drop(session);
-    Ok(output)
-}
-
 /// Renders a batched command result as its aggregate message followed by every non-empty nested
 /// message. Transaction queue responses remain nested in a multi-command request, while COMMIT
 /// itself returns only its executed aggregate.
@@ -3989,40 +4068,6 @@ pub(crate) async fn run_command_via_client(
             "command failed: {}\ndiagnostics: {:?}",
             outcome.message, outcome.diagnostics
         )))
-    }
-}
-
-pub(crate) async fn probe_server_readiness(server: &str) -> ReadinessProbeOutcome {
-    let options = match client_connect_options(server) {
-        Ok(options) => options,
-        Err(error) => {
-            return ReadinessProbeOutcome::ConnectionFailed(ReadinessConnectionFailure::Options(
-                error,
-            ));
-        }
-    };
-    let client = match Client::connect_with_options(server, "default".to_string(), options).await {
-        Ok(client) => client,
-        Err(error) => {
-            return ReadinessProbeOutcome::ConnectionFailed(ReadinessConnectionFailure::Session(
-                error,
-            ));
-        }
-    };
-    let outcome = match client.execute("SHOW CLUSTER STATUS;".to_string()).await {
-        Ok(outcome) => outcome,
-        Err(error) => return ReadinessProbeOutcome::CommandFailed(error),
-    };
-    if outcome.success || outcome.kind == CommandOutcomeKind::NotLeader {
-        ReadinessProbeOutcome::Ready {
-            response_kind: outcome.kind,
-        }
-    } else {
-        ReadinessProbeOutcome::UnsuccessfulResponse {
-            response_kind: outcome.kind,
-            message: outcome.message,
-            diagnostics: outcome.diagnostics,
-        }
     }
 }
 
@@ -4399,7 +4444,7 @@ async fn wait_for_redis_channel_subscribers(
     channel: &str,
     expected: usize,
 ) -> io::Result<()> {
-    let deadline = Instant::now() + STATUS_TIMEOUT;
+    let deadline = Instant::now() + STATUS_WAIT_BUDGET;
     loop {
         tokio::task::consume_budget().await;
         match redis_channel_subscriber_count(dependencies, channel).await {
