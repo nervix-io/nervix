@@ -71,7 +71,7 @@ client-wire-baseline samples="100" upload_samples="5" payload_bytes="1024" outpu
     export NERVIX_CLIENT_WIRE_BASELINE_UPLOAD_SAMPLES={{ quote(upload_samples) }}
     export NERVIX_CLIENT_WIRE_BASELINE_PAYLOAD_BYTES={{ quote(payload_bytes) }}
     export NERVIX_CLIENT_WIRE_BASELINE_OUTPUT={{ quote(output) }}
-    RUSTC_WRAPPER= cargo test --features testing --test scenarios -- \
+    cargo test --features testing --test scenarios -- \
         --input tests/features/runtime/client_wire_baseline.feature \
         --tags @client_wire_baseline \
         --concurrency 1
