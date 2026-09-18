@@ -100,10 +100,12 @@ use crate::common::{
         MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR,
         RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
     },
+    phase_deadline::{BeforeDeadline, PhaseDeadline},
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
         ServerProcessLaunch, ServerProcessOption, describe_exit,
     },
+    status_request::{STATUS_DIAGNOSTIC_BUDGET, STATUS_REQUEST_TIMEOUT, StatusRequestError},
 };
 
 mod common;
@@ -3137,9 +3139,17 @@ async fn append_cluster_statuses(world: &ScenarioWorld, prefix: &str) {
                 "{prefix}: node={node_id} status={}",
                 status.replace('\n', "\\n")
             )),
-            Err(error) => {
-                append_cucumber_log_line(&format!("{prefix}: node={node_id} status_error={error}"))
-            }
+            Err(error) => match error.current_context() {
+                StatusRequestError::DeadlinePassed { operation, budget } => {
+                    append_cucumber_log_line(&format!(
+                        "{prefix}: node={node_id} status_timeout={operation} pending after \
+                         {budget:?}"
+                    ));
+                }
+                _ => append_cucumber_log_line(&format!(
+                    "{prefix}: node={node_id} status_error={error:#}"
+                )),
+            },
         }
     }
 }
@@ -9043,12 +9053,22 @@ async fn when_the_ingestor_logic_fixture_starts_with_output_schema_and_program(
         .await
         .expect("failed to start ingestor logic fixture on leader");
     if transport.executes_on_scheduled_owner() {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let placement = PhaseDeadline::after(Duration::from_secs(5));
+        let mut last_output = None;
         let owner = loop {
             tokio::task::consume_budget().await;
-            let output = run_nspl_commands_on_node(world, &leader, "SHOW CLUSTER STATUS;")
+            assert!(
+                !placement.has_passed(),
+                "timed out waiting for logic_ingestor schedule placement; last output: \
+                 {last_output:?}"
+            );
+            let output = world
+                .cluster()
+                .status_text(&leader, placement)
                 .await
-                .expect("failed to inspect ingestor logic schedule");
+                .unwrap_or_else(|error| {
+                    panic!("failed to inspect ingestor logic schedule: {error:#}")
+                });
             if let Some((owner, _)) = scheduled_node_placement_from_status(
                 &output,
                 &world.domain,
@@ -9057,11 +9077,8 @@ async fn when_the_ingestor_logic_fixture_starts_with_output_schema_and_program(
             ) {
                 break owner.to_string();
             }
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for logic_ingestor schedule placement; last output: {output}"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            last_output = Some(output);
+            placement.pause(Duration::from_millis(50)).await;
         };
         if owner == leader {
             world.active_session = Some(session);
@@ -12932,11 +12949,18 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_equals_pla
         .get(&placeholder)
         .unwrap_or_else(|| panic!("placeholder '{placeholder}' must be saved before assertion"))
         .clone();
-    let deadline = Instant::now() + duration;
+    let placement = PhaseDeadline::after(duration);
 
     loop {
         tokio::task::consume_budget().await;
-        match run_nspl_commands_on_node(world, &node_id, "SHOW CLUSTER STATUS;").await {
+        assert!(
+            !placement.has_passed(),
+            "timed out waiting for scheduled {kind} {name} owner to equal '{expected}'. last \
+             output: {:?}, last error: {:?}",
+            world.last_command_output,
+            world.last_command_error
+        );
+        match world.cluster().status_text(&node_id, placement).await {
             Ok(output) => {
                 world.last_command_output = Some(output.clone());
                 if scheduled_node_placement_from_status(&output, &world.domain, &kind, &name)
@@ -12945,16 +12969,9 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_equals_pla
                     return;
                 }
             }
-            Err(error) => world.last_command_error = Some(error),
+            Err(error) => world.last_command_error = Some(format!("{error:#}")),
         }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for scheduled {kind} {name} owner to equal '{expected}'. last \
-             output: {:?}, last error: {:?}",
-            world.last_command_output,
-            world.last_command_error
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        placement.pause(Duration::from_millis(100)).await;
     }
 }
 
@@ -12980,13 +12997,22 @@ async fn then_for_duration_node_keeps_reporting_scheduled_owner_equal_to_placeho
         .get(&placeholder)
         .unwrap_or_else(|| panic!("placeholder '{placeholder}' must be saved before assertion"))
         .clone();
-    let deadline = Instant::now() + duration;
+    let observation = PhaseDeadline::after(duration);
 
-    while Instant::now() < deadline {
+    while !observation.has_passed() {
         tokio::task::consume_budget().await;
-        let output = run_nspl_commands_on_node(world, &node_id, "SHOW CLUSTER STATUS;")
+        // The observation window bounds how long the owner is watched, not how long one read may
+        // take, so every read keeps a full request budget even near the end of the window.
+        let output = world
+            .cluster()
+            .status_text(&node_id, PhaseDeadline::after(STATUS_REQUEST_TIMEOUT))
             .await
-            .expect("cluster status must be readable while observing assignment stability");
+            .unwrap_or_else(|error| {
+                panic!(
+                    "cluster status must be readable while observing assignment stability: \
+                     {error:#}"
+                )
+            });
         world.last_command_output = Some(output.clone());
         let owner = scheduled_node_placement_from_status(&output, &world.domain, &kind, &name)
             .map(|(owner, _)| owner.to_string())
@@ -12997,7 +13023,7 @@ async fn then_for_duration_node_keeps_reporting_scheduled_owner_equal_to_placeho
             owner, expected,
             "scheduled {kind} {name} must keep owner '{expected}', got: {output}"
         );
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        observation.pause(Duration::from_millis(250)).await;
     }
 }
 
@@ -13023,11 +13049,18 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_different_
         .get(&placeholder)
         .unwrap_or_else(|| panic!("placeholder '{placeholder}' must be saved before assertion"))
         .clone();
-    let deadline = Instant::now() + duration;
+    let placement = PhaseDeadline::after(duration);
 
     loop {
         tokio::task::consume_budget().await;
-        match run_nspl_commands_on_node(world, &node_id, "SHOW CLUSTER STATUS;").await {
+        assert!(
+            !placement.has_passed(),
+            "timed out waiting for scheduled {kind} {name} owner to differ from '{unexpected}'. \
+             last output: {:?}, last error: {:?}",
+            world.last_command_output,
+            world.last_command_error
+        );
+        match world.cluster().status_text(&node_id, placement).await {
             Ok(output) => {
                 world.last_command_output = Some(output.clone());
                 if scheduled_node_placement_from_status(&output, &world.domain, &kind, &name)
@@ -13036,16 +13069,9 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_different_
                     return;
                 }
             }
-            Err(error) => world.last_command_error = Some(error),
+            Err(error) => world.last_command_error = Some(format!("{error:#}")),
         }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for scheduled {kind} {name} owner to differ from '{unexpected}'. \
-             last output: {:?}, last error: {:?}",
-            world.last_command_output,
-            world.last_command_error
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        placement.pause(Duration::from_millis(100)).await;
     }
 }
 
@@ -18361,22 +18387,44 @@ async fn then_within_duration_the_observed_broker_receives_payloads(
             .await
             .expect("failed while waiting for broker payloads");
         let Some(payload) = payload else {
+            // Every diagnostic below is bounded, so a node that never answers cannot keep this
+            // step from reporting its failure.
+            let status_snapshots = world.cluster().collect_status_snapshots().await;
+            let descriptions = PhaseDeadline::after(STATUS_DIAGNOSTIC_BUDGET);
             let mut runtime_diagnostics = Vec::new();
-            for node_id in world.cluster().node_ids() {
+            for (node_id, status) in status_snapshots {
                 tokio::task::consume_budget().await;
                 let mut node_diagnostics = Vec::new();
+                match status {
+                    Ok(status) => {
+                        node_diagnostics.push(format!("SHOW CLUSTER STATUS; => Ok({status:?})"));
+                    }
+                    Err(error) => {
+                        node_diagnostics.push(format!("SHOW CLUSTER STATUS; => Err({error:#})"));
+                    }
+                }
                 for command in [
-                    "SHOW CLUSTER STATUS;",
                     "DESCRIBE DOMAIN;",
                     "DESCRIBE INGESTOR ws_notifications;",
                     "DESCRIBE EMITTER kafka_forward;",
                 ] {
                     tokio::task::consume_budget().await;
-                    let result = world
-                        .cluster()
-                        .run_command(&node_id, &world.domain, command)
+                    let described = descriptions
+                        .bound(
+                            world
+                                .cluster()
+                                .run_command(&node_id, &world.domain, command),
+                        )
                         .await;
-                    node_diagnostics.push(format!("{command} => {result:?}"));
+                    match described {
+                        BeforeDeadline::Finished(result) => {
+                            node_diagnostics.push(format!("{command} => {result:?}"));
+                        }
+                        BeforeDeadline::Passed => node_diagnostics.push(format!(
+                            "{command} => still pending when the {STATUS_DIAGNOSTIC_BUDGET:?} \
+                             diagnostic budget ran out"
+                        )),
+                    }
                 }
                 runtime_diagnostics.push(format!("{node_id}: {node_diagnostics:?}"));
             }
