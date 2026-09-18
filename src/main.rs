@@ -1,3 +1,6 @@
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+
 use clap::Parser;
 use error_stack::{Report, ResultExt as _};
 use nervix_server::application::{AppError, Args, TerminationSignals, init_tracing, run_cli};

@@ -487,30 +487,19 @@ validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries v
 
 validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-shuttle-dependencies
 
-# Production package manifests name only the pass-through synchronization wrappers. The real
-# primitive crates may appear transitively below those wrappers, but never as direct dependencies.
+# Shuttle's runner and synchronization wrappers belong only to modeled builds. Production package
+# graphs use the real synchronization crates directly and contain no Shuttle package.
 validate-shuttle-dependencies:
     #!/usr/bin/env bash
     set -euo pipefail
-    packages=(
-        nervix-client-core
-        nervix-consensus
-        nervix-execution
-        nervix-interconnect
-        nervix-server
-        nervix-wasm
-    )
-    for package in "${packages[@]}"; do
-        direct_dependencies="$(
-            cargo tree --package "${package}" --edges normal --depth 1 \
-                --no-default-features --prefix none
-        )"
-        if printf '%s\n' "${direct_dependencies}" \
-            | grep -E '^(dashmap|parking_lot|tokio|tokio-stream|tokio-util) v'; then
-            echo "${package} names a real synchronization primitive directly" >&2
-            exit 1
-        fi
-    done
+    production_dependencies="$(
+        cargo tree --workspace --edges normal --no-default-features --prefix none
+    )"
+    if printf '%s\n' "${production_dependencies}" \
+        | grep -E '^shuttle([[:space:]-]|$)'; then
+        echo "the production workspace includes a Shuttle package" >&2
+        exit 1
+    fi
 
 validate-clock-boundaries:
     python3 scripts/check_clock_boundaries.py

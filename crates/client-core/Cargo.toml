@@ -11,7 +11,12 @@ workspace = true
 [features]
 autocomplete = []
 default = []
-shuttle = ["tokio/shuttle", "tokio-stream/shuttle"]
+shuttle = [
+  "dep:shuttle-tokio",
+  "dep:shuttle-tokio-stream",
+  "shuttle-tokio/shuttle",
+  "shuttle-tokio-stream/shuttle",
+]
 
 [dependencies]
 arch-into = { workspace = true }
@@ -25,17 +30,25 @@ nervix-proto = { workspace = true, features = ["client"] }
 nervix-recovery = { workspace = true }
 prost = { workspace = true }
 rustls = { workspace = true }
+shuttle-tokio = { workspace = true, features = [
+  "fs",
+  "io-util",
+  "rt",
+  "rt-multi-thread",
+  "sync",
+], optional = true }
+shuttle-tokio-stream = { workspace = true, optional = true }
 strum = { workspace = true, features = ["derive"] }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
-tokio = { package = "shuttle-tokio", version = "1", features = [
+tokio = { workspace = true, features = [
   "fs",
   "io-util",
   "rt",
   "rt-multi-thread",
   "sync",
 ] }
-tokio-stream = { package = "shuttle-tokio-stream", version = "0.1" }
+tokio-stream = { workspace = true }
 tonic = { workspace = true }
 triomphe = { workspace = true }
 url = { workspace = true }
