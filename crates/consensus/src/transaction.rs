@@ -135,6 +135,13 @@ pub enum TransactionQueueAdmission {
     Existing(TransactionCommandResult),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransactionQueueDecision {
+    Added,
+    Existing,
+    Expired,
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -530,6 +537,14 @@ impl ReplicatedTransaction {
         self.commit_plan.as_ref()
     }
 
+    pub(crate) fn has_commit_admission(&self, plan: &TransactionCommitPlanHeader) -> bool {
+        self.commit_plan.as_ref() == Some(plan)
+            && matches!(
+                &self.state,
+                TransactionState::Committing(_) | TransactionState::Finished(_)
+            )
+    }
+
     pub(crate) fn ensure_owner(&self, owner: &UserName) -> Result<(), TransactionMutationError> {
         if &self.owner == owner {
             Ok(())
@@ -654,16 +669,18 @@ impl ReplicatedTransaction {
         outcome_revision: u64,
         statement: TransactionStatement,
         limits: TransactionQueueLimits,
-    ) -> Result<(), TransactionMutationError> {
+    ) -> Result<TransactionQueueDecision, TransactionMutationError> {
         self.ensure_owner(owner)?;
         self.ensure_domain(domain)?;
         match self.expire_open_if_inactive(activity, outcome_revision) {
             OpenActivityDecision::Active => {}
-            OpenActivityDecision::Expired => return Ok(()),
+            OpenActivityDecision::Expired => return Ok(TransactionQueueDecision::Expired),
             OpenActivityDecision::NotOpen => return Err(self.not_open_error()),
         }
         match self.queue_admission(owner, domain, &statement.request, limits)? {
-            TransactionQueueAdmission::Existing(_) => return Ok(()),
+            TransactionQueueAdmission::Existing(_) => {
+                return Ok(TransactionQueueDecision::Existing);
+            }
             TransactionQueueAdmission::New => {}
         }
         let TransactionState::Open(current) = &mut self.state else {
@@ -680,7 +697,7 @@ impl ReplicatedTransaction {
             .verified("the admission check above bounds the count by the statement limit");
         self.queued_source_bytes = next_source_bytes;
         self.statements.push(statement);
-        Ok(())
+        Ok(TransactionQueueDecision::Added)
     }
 
     pub(crate) fn start_commit(
@@ -714,17 +731,13 @@ impl ReplicatedTransaction {
         Ok(())
     }
 
-    pub(crate) fn fail_commit_admission(
-        &mut self,
-        owner: &UserName,
-        activity: TransactionActivity,
-        outcome_revision: u64,
+    pub(crate) fn matches_commit_admission_failure(
+        &self,
         preview: &TransactionPreviewIdentity,
         failing_step: usize,
         error: &str,
-    ) -> Result<TransactionCommitFailureDecision, TransactionMutationError> {
-        self.ensure_owner(owner)?;
-        if self.latest_preview.as_ref() == Some(preview)
+    ) -> bool {
+        self.latest_preview.as_ref() == Some(preview)
             && matches!(
                 &self.state,
                 TransactionState::Finished(FinishedTransaction {
@@ -735,7 +748,19 @@ impl ReplicatedTransaction {
                     ..
                 }) if *retained_step == failing_step && retained_error == error
             )
-        {
+    }
+
+    pub(crate) fn fail_commit_admission(
+        &mut self,
+        owner: &UserName,
+        activity: TransactionActivity,
+        outcome_revision: u64,
+        preview: &TransactionPreviewIdentity,
+        failing_step: usize,
+        error: &str,
+    ) -> Result<TransactionCommitFailureDecision, TransactionMutationError> {
+        self.ensure_owner(owner)?;
+        if self.matches_commit_admission_failure(preview, failing_step, error) {
             return Ok(TransactionCommitFailureDecision::Existing);
         }
         match self.expire_open_if_inactive(activity, outcome_revision) {

@@ -4749,7 +4749,7 @@ fn apply_consensus_command_at(
                     changes,
                 );
             };
-            let result = match transaction.queue(
+            let (result, transaction_changed) = match transaction.queue(
                 owner,
                 domain,
                 *activity,
@@ -4757,35 +4757,42 @@ fn apply_consensus_command_at(
                 statement.as_ref().clone(),
                 *limits,
             ) {
-                Err(error) => Err(error),
-                Ok(()) if matches!(transaction.state, TransactionState::Finished(_)) => {
+                Err(error) => (Err(error), false),
+                Ok(transaction::TransactionQueueDecision::Expired) => {
                     if let Some(preview) = transaction.latest_preview() {
                         state.transaction_reports.retain_revision(preview);
                     }
                     state.transactions.insert(id.clone(), transaction.clone());
-                    Ok(transaction)
+                    (Ok(transaction), true)
                 }
-                Ok(()) => {
+                Ok(transaction::TransactionQueueDecision::Existing) => (Ok(transaction), false),
+                Ok(transaction::TransactionQueueDecision::Added) => {
                     let identity = report.identity();
                     if identity.transaction_id != *id
                         || report.domain() != domain
                         || identity.position.accepted_operations() != transaction.statements.len()
                     {
-                        Err(TransactionMutationError::ReportMismatch { id: id.clone() })
+                        (
+                            Err(TransactionMutationError::ReportMismatch { id: id.clone() }),
+                            false,
+                        )
                     } else if state
                         .transaction_reports
                         .insert(report.as_ref().clone())
                         .is_err()
                     {
-                        Err(TransactionMutationError::ReportConflict { id: id.clone() })
+                        (
+                            Err(TransactionMutationError::ReportConflict { id: id.clone() }),
+                            false,
+                        )
                     } else {
                         transaction.set_latest_preview(identity.clone());
                         state.transactions.insert(id.clone(), transaction.clone());
-                        Ok(transaction)
+                        (Ok(transaction), true)
                     }
                 }
             };
-            changes.transactions_changed = result.is_ok();
+            changes.transactions_changed = transaction_changed;
             return AppliedConsensusCommand::transaction(result, changes);
         }
         ConsensusCommand::TouchTransaction {
@@ -4840,15 +4847,6 @@ fn apply_consensus_command_at(
             }
             let current_preview = report.identity();
             let decision = plan.decision();
-            if expected_preview != current_preview {
-                return AppliedConsensusCommand::transaction(
-                    Err(TransactionMutationError::PreviewStale {
-                        expected: Box::new(expected_preview.clone()),
-                        current: Box::new(current_preview.clone()),
-                    }),
-                    changes,
-                );
-            }
             if current_preview.transaction_id != *id
                 || report.domain() != &transaction.domain
                 || current_preview.position.accepted_operations() != transaction.statements.len()
@@ -4874,6 +4872,22 @@ fn apply_consensus_command_at(
                     changes,
                 );
             }
+            let plan_header = TransactionCommitPlanHeader {
+                preview: current_preview.clone(),
+                step_count: decision.steps.len(),
+            };
+            if transaction.has_commit_admission(&plan_header) {
+                if expected_preview == current_preview
+                    && state.transaction_reports.matches_admitted_archive(report)
+                    && state.transaction_commit_plans.matches_admission(plan)
+                {
+                    return AppliedConsensusCommand::transaction(Ok(transaction), changes);
+                }
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::InvalidCommitPlan { id: id.clone() }),
+                    changes,
+                );
+            }
             if let Some(inputs) = plan.inputs().first()
                 && let Err(reason) = validate_domain_planning_inputs(state, inputs)
             {
@@ -4881,6 +4895,27 @@ fn apply_consensus_command_at(
                     Err(TransactionMutationError::PlanningInputsChanged {
                         id: id.clone(),
                         reason: reason.to_string(),
+                    }),
+                    changes,
+                );
+            }
+            if expected_preview != current_preview {
+                let mut transaction_reports = state.transaction_reports.clone();
+                if transaction_reports.insert(report.as_ref().clone()).is_err() {
+                    return AppliedConsensusCommand::transaction(
+                        Err(TransactionMutationError::ReportConflict { id: id.clone() }),
+                        changes,
+                    );
+                }
+                transaction.set_latest_preview(current_preview.clone());
+                transaction_reports.retain_revision(current_preview);
+                state.transaction_reports = transaction_reports;
+                state.transactions.insert(id.clone(), transaction);
+                changes.transactions_changed = true;
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::PreviewStale {
+                        expected: Box::new(expected_preview.clone()),
+                        current: Box::new(current_preview.clone()),
                     }),
                     changes,
                 );
@@ -4904,10 +4939,6 @@ fn apply_consensus_command_at(
                 Some(lease)
             } else {
                 None
-            };
-            let plan_header = TransactionCommitPlanHeader {
-                preview: current_preview.clone(),
-                step_count: decision.steps.len(),
             };
             if let Err(error) = transaction.start_commit(
                 owner,
@@ -4987,6 +5018,24 @@ fn apply_consensus_command_at(
                 || failure.inputs.domain() != &transaction.domain
                 || current_preview.position.accepted_operations() != transaction.statement_count
             {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::InvalidCommitFailure {
+                        id: failure.id.clone(),
+                    }),
+                    changes,
+                );
+            }
+            if transaction.matches_commit_admission_failure(
+                current_preview,
+                failing_step,
+                &failure.error,
+            ) {
+                if state
+                    .transaction_reports
+                    .matches_admitted_archive(&failure.report)
+                {
+                    return AppliedConsensusCommand::transaction(Ok(transaction), changes);
+                }
                 return AppliedConsensusCommand::transaction(
                     Err(TransactionMutationError::InvalidCommitFailure {
                         id: failure.id.clone(),
@@ -5641,11 +5690,11 @@ mod tests {
         CommandExecutionState, ConsensusCommand, ConsensusResponse, FjallLogReader, FjallStore,
         GossipNode, GossipState, LeaderTenure, MembershipMutation, MembershipSnapshot,
         ProtocolOriginError, ResourceRecords, StateMachineChanges, StateMachineData,
-        TransactionCommandResult, TransactionMutationError, TransactionOutcome,
-        TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
-        TransactionStepResult, TypeConfig, UserCredentials, apply_consensus_command,
-        apply_consensus_command_at, apply_transaction_step_effect, io_error, storage_decode,
-        validate_protocol_origin,
+        TransactionCommandResult, TransactionCommitAdmissionFailure, TransactionMutationError,
+        TransactionOutcome, TransactionStatement, TransactionStatementRequest,
+        TransactionStepEffect, TransactionStepResult, TypeConfig, UserCredentials,
+        apply_consensus_command, apply_consensus_command_at, apply_transaction_step_effect,
+        io_error, storage_decode, validate_protocol_origin,
     };
     use crate::{
         ClusterNodeName, ConsensusError, LogIdOf, ReplicatedTransaction, TransactionActivity,
@@ -7229,9 +7278,15 @@ mod tests {
         assert_eq!(retried.statements[0].admission.admission, Some(admission));
         assert_eq!(state, retained_after_first);
 
-        let plan = crate::transaction::test_commit_plan("tx-preview", 1);
-        let mut stale = plan.preview.clone();
-        stale.planning_basis = nervix_models::ImpactPlanningBasis::new([9; 32]);
+        let fresh_report = crate::transaction_report::test_report_archive_with_basis(
+            "tx-preview",
+            &domain_id,
+            1,
+            nervix_models::ImpactPlanningBasis::new([9; 32]),
+        );
+        let fresh_preview = fresh_report.identity().clone();
+        let mut plan = crate::transaction::test_commit_plan("tx-preview", 1);
+        plan.preview = fresh_preview.clone();
         let stale_admission_plan =
             crate::transaction_plan::test_admission_plan(&state, &domain_id, plan.clone());
         let rejected = apply_consensus_command(
@@ -7240,8 +7295,8 @@ mod tests {
                 id: "tx-preview".to_string(),
                 owner: owner.clone(),
                 activity: transaction_activity(3),
-                expected_preview: stale.clone(),
-                report: Box::new(report.clone()),
+                expected_preview: preview.clone(),
+                report: Box::new(fresh_report.clone()),
                 plan: Box::new(stale_admission_plan),
             },
         );
@@ -7253,22 +7308,35 @@ mod tests {
             Err(TransactionMutationError::PreviewStale {
                 expected,
                 current,
-            }) if *expected == stale && *current == preview
+            }) if *expected == preview && *current == fresh_preview
         ));
-        assert!(matches!(
-            state
-                .transactions
-                .get("tx-preview")
-                .verified("the rejected transaction remains retained")
-                .state,
-            TransactionState::Open(_)
-        ));
+        let refreshed = state
+            .transactions
+            .get("tx-preview")
+            .verified("the rejected transaction remains retained");
+        assert!(matches!(refreshed.state, TransactionState::Open(_)));
+        assert_eq!(refreshed.latest_preview(), Some(&fresh_preview));
+        state
+            .transaction_reports
+            .report(&fresh_preview)
+            .assured("the fresh validated preview is retained for the exact retry");
         assert!(
             state
                 .transaction_commit_plans
                 .step("tx-preview", 0)
                 .is_err()
         );
+
+        let retained_after_refresh = state.clone();
+        let delayed_append = apply_consensus_command(&mut state, &command);
+        let ConsensusResponse::Transaction(delayed_append) = delayed_append.response else {
+            panic!("delayed append retry must return its replicated transaction");
+        };
+        let delayed_append = delayed_append
+            .result
+            .assured("the delayed append retry joins its retained operation");
+        assert_eq!(delayed_append.latest_preview(), Some(&fresh_preview));
+        assert_eq!(state, retained_after_refresh);
 
         let changed_inputs_plan =
             crate::transaction_plan::test_admission_plan(&state, &domain_id, plan.clone());
@@ -7283,8 +7351,8 @@ mod tests {
                 id: "tx-preview".to_string(),
                 owner: owner.clone(),
                 activity: transaction_activity(4),
-                expected_preview: preview.clone(),
-                report: Box::new(report.clone()),
+                expected_preview: fresh_preview.clone(),
+                report: Box::new(fresh_report.clone()),
                 plan: Box::new(changed_inputs_plan),
             },
         );
@@ -7313,12 +7381,12 @@ mod tests {
         let incomplete =
             crate::transaction_report::test_incomplete_report_archive("tx-preview", &domain_id, 1);
         let incomplete_admission_plan =
-            crate::transaction_plan::test_admission_plan(&state, &domain_id, plan);
+            crate::transaction_plan::test_admission_plan(&state, &domain_id, plan.clone());
         let rejected = apply_consensus_command(
             &mut state,
             &ConsensusCommand::StartTransactionCommit {
                 id: "tx-preview".to_string(),
-                owner,
+                owner: owner.clone(),
                 activity: transaction_activity(5),
                 expected_preview: incomplete.identity().clone(),
                 report: Box::new(incomplete),
@@ -7340,6 +7408,201 @@ mod tests {
                 .state,
             TransactionState::Open(_)
         ));
+
+        let admitted_plan = crate::transaction_plan::test_admission_plan(&state, &domain_id, plan);
+        let start = ConsensusCommand::StartTransactionCommit {
+            id: "tx-preview".to_string(),
+            owner,
+            activity: transaction_activity(6),
+            expected_preview: fresh_preview.clone(),
+            report: Box::new(fresh_report),
+            plan: Box::new(admitted_plan),
+        };
+        let started = apply_consensus_command(&mut state, &start);
+        let ConsensusResponse::Transaction(started) = started.response else {
+            panic!("the refreshed preview must admit the frozen commit plan");
+        };
+        let started = started
+            .result
+            .assured("the exact refreshed preview admits commit");
+        assert!(matches!(started.state, TransactionState::Committing(_)));
+        assert_eq!(started.latest_preview(), Some(&fresh_preview));
+        state
+            .transaction_commit_plans
+            .step("tx-preview", 0)
+            .assured("commit admission freezes the first execution step");
+
+        state.resources.ensure_catalog(
+            &domain_id,
+            &ResourceName::parse("after_admission")
+                .assured("the test resource is an identifier-shaped literal"),
+        );
+        let retained_after_start = state.clone();
+        let retried = apply_consensus_command(&mut state, &start);
+        let ConsensusResponse::Transaction(retried) = retried.response else {
+            panic!("exact commit retry must return its replicated transaction");
+        };
+        assert_eq!(
+            retried
+                .result
+                .assured("the exact commit retry joins the frozen plan"),
+            started
+        );
+        assert_eq!(state, retained_after_start);
+    }
+
+    #[test]
+    fn incomplete_commit_failure_refreshes_then_replays_its_retained_outcome() {
+        let owner =
+            UserName::parse("app_user").assured("the test owner is an identifier-shaped literal");
+        let domain_id = domain("tenant");
+        let mut state = StateMachineData::default();
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::OpenTransaction {
+                transaction: Box::new(ReplicatedTransaction::open(
+                    "tx-incomplete".to_string(),
+                    domain_id.clone(),
+                    owner.clone(),
+                    transaction_activity(1),
+                )),
+                max_open_transactions: 4,
+            },
+        );
+        let queued_report =
+            crate::transaction_report::test_report_archive("tx-incomplete", &domain_id, 1);
+        let queued_preview = queued_report.identity().clone();
+        let queued = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::QueueTransactionStatement {
+                id: "tx-incomplete".to_string(),
+                owner: owner.clone(),
+                domain: domain_id.clone(),
+                activity: transaction_activity(2),
+                statement: Box::new(TransactionStatement::test_admitted(
+                    TransactionStatementRequest {
+                        request_reference: nervix_models::CommandExecutionReference::parse(
+                            "append-incomplete",
+                        )
+                        .assured("the test request reference is an accepted literal"),
+                        expected_position: 0,
+                        source: "START".to_string(),
+                        statement: Statement::StartDomain(nervix_models::StartDomain {
+                            start: DomainStartPoint::Resume,
+                        }),
+                    },
+                )),
+                report: Box::new(queued_report),
+                limits: TransactionQueueLimits {
+                    max_statements: 4,
+                    max_source_bytes: 1024,
+                },
+            },
+        );
+        let ConsensusResponse::Transaction(queued) = queued.response else {
+            panic!("the append must return its replicated transaction");
+        };
+        queued
+            .result
+            .assured("the incomplete-plan fixture first admits its statement");
+
+        let incomplete = crate::transaction_report::test_incomplete_report_archive_with_basis(
+            "tx-incomplete",
+            &domain_id,
+            1,
+            nervix_models::ImpactPlanningBasis::new([2; 32]),
+        );
+        let incomplete_preview = incomplete.identity().clone();
+        let operation = nervix_models::TransactionOperationNumber::from_index(0)
+            .assured("the first test operation is addressable");
+        let failure_message = "the planned domain transition is invalid".to_string();
+        let stale_failure = ConsensusCommand::FailTransactionCommitAdmission {
+            failure: Box::new(TransactionCommitAdmissionFailure {
+                id: "tx-incomplete".to_string(),
+                owner: owner.clone(),
+                activity: transaction_activity(3),
+                expected_preview: queued_preview.clone(),
+                report: incomplete.clone(),
+                inputs: state.domain_planning_inputs(&domain_id),
+                operation,
+                error: failure_message.clone(),
+            }),
+        };
+        let refreshed = apply_consensus_command(&mut state, &stale_failure);
+        let ConsensusResponse::Transaction(refreshed) = refreshed.response else {
+            panic!("stale incomplete admission must return a transaction error");
+        };
+        assert!(matches!(
+            refreshed.result,
+            Err(TransactionMutationError::PreviewStale {
+                expected,
+                current,
+            }) if *expected == queued_preview && *current == incomplete_preview
+        ));
+        let refreshed = state
+            .transactions
+            .get("tx-incomplete")
+            .verified("the refreshed incomplete preview remains attached to its transaction");
+        assert!(matches!(refreshed.state, TransactionState::Open(_)));
+        assert_eq!(refreshed.latest_preview(), Some(&incomplete_preview));
+
+        let failure = ConsensusCommand::FailTransactionCommitAdmission {
+            failure: Box::new(TransactionCommitAdmissionFailure {
+                id: "tx-incomplete".to_string(),
+                owner,
+                activity: transaction_activity(4),
+                expected_preview: incomplete_preview.clone(),
+                report: incomplete,
+                inputs: state.domain_planning_inputs(&domain_id),
+                operation,
+                error: failure_message.clone(),
+            }),
+        };
+        let failed = apply_consensus_command(&mut state, &failure);
+        let ConsensusResponse::Transaction(failed) = failed.response else {
+            panic!("the exact incomplete preview must return its terminal transaction");
+        };
+        let failed = failed
+            .result
+            .assured("the exact incomplete preview records its planning failure");
+        assert!(matches!(
+            &failed.state,
+            TransactionState::Finished(finished)
+                if matches!(
+                    &finished.outcome,
+                    TransactionOutcome::Failed {
+                        failing_step: 0,
+                        error,
+                    } if error == &failure_message
+                )
+        ));
+        let retained_report = state
+            .transaction_reports
+            .report(&incomplete_preview)
+            .assured("the terminal planning failure retains its identified report");
+        assert!(matches!(
+            &retained_report.execution_steps()[0].actual().outcome,
+            nervix_models::ExecutionStepOutcome::Failed { diagnostic }
+                if diagnostic.message == failure_message
+        ));
+
+        state.resources.ensure_catalog(
+            &domain_id,
+            &ResourceName::parse("after_failure")
+                .assured("the test resource is an identifier-shaped literal"),
+        );
+        let retained_after_failure = state.clone();
+        let retried = apply_consensus_command(&mut state, &failure);
+        let ConsensusResponse::Transaction(retried) = retried.response else {
+            panic!("the exact failure retry must return its retained transaction");
+        };
+        assert_eq!(
+            retried
+                .result
+                .assured("the exact failure retry joins the retained outcome"),
+            failed
+        );
+        assert_eq!(state, retained_after_failure);
     }
 
     #[test]

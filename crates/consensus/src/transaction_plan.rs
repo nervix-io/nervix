@@ -412,6 +412,34 @@ impl TransactionCommitPlanRecords {
         Ok(())
     }
 
+    pub(crate) fn matches_admission(&self, plan: &TransactionCommitAdmissionPlan) -> bool {
+        let decision = plan.decision();
+        let transaction_id = &decision.preview.transaction_id;
+        let header = TransactionCommitPlanRecordHeader {
+            preview: decision.preview.clone(),
+            step_count: decision.steps.len(),
+            eligibility: plan.eligibility().clone(),
+        };
+        if self.headers.get(transaction_id) != Some(&header)
+            || decision.steps.len() != plan.inputs().len()
+        {
+            return false;
+        }
+        decision
+            .steps
+            .iter()
+            .zip(plan.inputs())
+            .enumerate()
+            .all(|(index, (decision, inputs))| {
+                self.steps
+                    .get(&TransactionCommitPlanStepKey::new(transaction_id, index))
+                    == Some(&TransactionCommitPlanRecordStep {
+                        decision: decision.clone(),
+                        inputs: inputs.clone(),
+                    })
+            })
+    }
+
     pub(crate) fn step(
         &self,
         transaction_id: &str,

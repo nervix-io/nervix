@@ -441,6 +441,43 @@ impl TransactionReportRecords {
         Ok(())
     }
 
+    pub(crate) fn matches_admitted_archive(&self, archive: &TransactionReportArchive) -> bool {
+        let identity = &archive.header.identity;
+        if archive.header.operation_count != archive.operations.len()
+            || archive.header.execution_step_count != archive.execution_steps.len()
+            || self.headers.get(identity) != Some(&archive.header)
+        {
+            return false;
+        }
+        let operations_match = archive
+            .operations
+            .iter()
+            .enumerate()
+            .all(|(index, operation)| {
+                self.operations
+                    .get(&TransactionReportItemKey::new(identity, index))
+                    == Some(operation)
+            });
+        if !operations_match {
+            return false;
+        }
+        archive
+            .execution_steps
+            .iter()
+            .enumerate()
+            .all(|(index, incoming)| {
+                let Some(retained) = self
+                    .execution_steps
+                    .get(&TransactionReportItemKey::new(identity, index))
+                else {
+                    return false;
+                };
+                retained.report.operations() == incoming.report.operations()
+                    && retained.report.planned() == incoming.report.planned()
+                    && retained.planned_topology == incoming.planned_topology
+            })
+    }
+
     fn insert_graphs(
         &mut self,
         graphs: Vec<ArchivedImpactTopology>,
@@ -764,13 +801,19 @@ pub enum TransactionReportReadError {
 
 #[cfg(test)]
 pub(crate) fn test_report(domain: &DomainName, operation_count: usize) -> TransactionImpactReport {
-    test_report_with_completeness(domain, operation_count, ImpactReportCompleteness::Complete)
+    test_report_with_completeness(
+        domain,
+        operation_count,
+        nervix_models::ImpactPlanningBasis::new([1; 32]),
+        ImpactReportCompleteness::Complete,
+    )
 }
 
 #[cfg(test)]
 fn test_report_with_completeness(
     domain: &DomainName,
     operation_count: usize,
+    planning_basis: nervix_models::ImpactPlanningBasis,
     completeness: ImpactReportCompleteness,
 ) -> TransactionImpactReport {
     use meticulous::ResultExt as _;
@@ -833,7 +876,7 @@ fn test_report_with_completeness(
     TransactionImpactReport::new(
         domain.clone(),
         TransactionPosition::new(operation_count),
-        nervix_models::ImpactPlanningBasis::new([1; 32]),
+        planning_basis,
         completeness,
         operations,
         steps,
@@ -847,11 +890,31 @@ pub(crate) fn test_report_archive(
     domain: &DomainName,
     operation_count: usize,
 ) -> TransactionReportArchive {
+    test_report_archive_with_basis(
+        transaction_id,
+        domain,
+        operation_count,
+        nervix_models::ImpactPlanningBasis::new([1; 32]),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn test_report_archive_with_basis(
+    transaction_id: &str,
+    domain: &DomainName,
+    operation_count: usize,
+    planning_basis: nervix_models::ImpactPlanningBasis,
+) -> TransactionReportArchive {
     use meticulous::ResultExt as _;
 
     TransactionReportArchive::new(
         transaction_id.to_string(),
-        test_report(domain, operation_count),
+        test_report_with_completeness(
+            domain,
+            operation_count,
+            planning_basis,
+            ImpactReportCompleteness::Complete,
+        ),
     )
     .assured("the test report topology can be archived")
 }
@@ -861,6 +924,21 @@ pub(crate) fn test_incomplete_report_archive(
     transaction_id: &str,
     domain: &DomainName,
     operation_count: usize,
+) -> TransactionReportArchive {
+    test_incomplete_report_archive_with_basis(
+        transaction_id,
+        domain,
+        operation_count,
+        nervix_models::ImpactPlanningBasis::new([1; 32]),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn test_incomplete_report_archive_with_basis(
+    transaction_id: &str,
+    domain: &DomainName,
+    operation_count: usize,
+    planning_basis: nervix_models::ImpactPlanningBasis,
 ) -> TransactionReportArchive {
     use meticulous::ResultExt as _;
     use nervix_models::{ImpactDiagnostic, ImpactDiagnosticKind, TransactionOperationNumber};
@@ -876,7 +954,7 @@ pub(crate) fn test_incomplete_report_archive(
     .assured("the incomplete test report supplies a diagnostic");
     TransactionReportArchive::new(
         transaction_id.to_string(),
-        test_report_with_completeness(domain, operation_count, completeness),
+        test_report_with_completeness(domain, operation_count, planning_basis, completeness),
     )
     .assured("the incomplete test report topology can be archived")
 }

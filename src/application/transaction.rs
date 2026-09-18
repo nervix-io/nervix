@@ -1504,8 +1504,12 @@ impl SessionServiceImpl {
                 })
                 .attach(error)
             })?;
+        let expected_preview = transaction
+            .latest_preview()
+            .cloned()
+            .unwrap_or_else(|| report.identity().clone());
         Ok(PreparedTransactionCommit {
-            expected_preview: report.identity().clone(),
+            expected_preview,
             report,
             plan: commit_plan,
         })
