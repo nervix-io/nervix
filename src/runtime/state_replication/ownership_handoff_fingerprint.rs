@@ -20,7 +20,7 @@ impl Runtime {
             config: &'a Model,
             effective_branching: &'a Option<Vec<FieldName>>,
             effective_branching_schema: &'a Option<SchemaName>,
-            schema_fingerprint: [u8; 32],
+            schema_fingerprint: SchemaFingerprint,
             kafka_partition_schedule: &'a Option<KafkaPartitionSchedule>,
             primary_node: &'a Option<ClusterNodeName>,
             assigned_nodes: &'a [ClusterNodeName],

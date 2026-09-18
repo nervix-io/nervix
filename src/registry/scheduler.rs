@@ -490,10 +490,12 @@ impl ActiveGraph {
                     *node_load.entry(assigned_node.clone()).or_insert(0) += 1;
                 }
             }
-            let scheduled_node = ScheduledNode::new((*node.config).clone())
-                .with_effective_branching(node.effective_branching, node.effective_branching_schema)
-                .with_schema_fingerprint(self.schema_fingerprint_for_index(index))
-                .placed_on(primary_node, assigned_nodes);
+            let scheduled_node = ScheduledNode::new(
+                (*node.config).clone(),
+                self.schema_fingerprint_for_index(index),
+            )
+            .with_effective_branching(node.effective_branching, node.effective_branching_schema)
+            .placed_on(primary_node, assigned_nodes);
             scheduled_nodes.insert(scheduled_node.identity(), scheduled_node);
         }
         let placement_groups = placement

@@ -1860,7 +1860,6 @@ impl Application {
                         result: snapshot.map(|snapshot| {
                             snapshot.map(|snapshot| nervix_interconnect::StateSnapshotEnvelope {
                                 lsm: snapshot.lsm,
-                                schema_fingerprint: snapshot.schema_fingerprint,
                                 payload: snapshot.payload,
                             })
                         }),

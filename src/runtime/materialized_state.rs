@@ -244,7 +244,6 @@ impl MaterializedRelayStateRead {
                 revision,
                 binding.fence(),
                 branch_generation,
-                self.state.placement.schema_fingerprint,
                 self.state.schema.clone(),
                 records,
             )
@@ -563,12 +562,13 @@ mod tests {
         RuntimeStatePlacement {
             domain: DomainName::parse("default")
                 .assured("the test domain name satisfies the domain grammar"),
-            state: super::super::RuntimeState::MaterializedRelay,
+            state: super::super::RuntimeState::MaterializedRelay {
+                schema: nervix_models::SchemaFingerprint::from_digest([7; 32]),
+            },
             kind: ModelKind::Relay,
             identifier: ModelName::from(
                 &RelayName::parse(relay).assured("the test relay name satisfies the relay grammar"),
             ),
-            schema_fingerprint: [0; 32],
             branch_key: None,
         }
     }
@@ -611,7 +611,6 @@ mod tests {
         let restored = RestoredMaterializedSnapshot::open(
             &executor,
             &schema,
-            placement.schema_fingerprint,
             SealedSource::memory(sealed.bytes),
         )
         .await
@@ -837,7 +836,6 @@ mod tests {
         let restored = RestoredMaterializedSnapshot::open(
             &executor,
             &schema,
-            placement.schema_fingerprint,
             SealedSource::memory(earlier.bytes),
         )
         .await
