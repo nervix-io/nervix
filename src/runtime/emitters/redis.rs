@@ -2,7 +2,7 @@ use ::redis::{
     AsyncCommands, Client as RedisClient, ClientTlsConfig, ErrorKind as RedisErrorKind,
     ServerErrorKind, TlsCertificates as RedisTlsCertificates,
 };
-use nervix_connector::{ResolvedClientConfig, client_tls_paths, optional_client_config_value};
+use nervix_connector::{client_tls_paths, optional_client_config_value};
 use nervix_models::ChannelName;
 
 use super::*;
@@ -86,20 +86,18 @@ impl RedisEmitterClient {
 
 impl RedisEmitter {
     pub(in crate::runtime) async fn new(
-        model: &Model,
-        client: &CreateClientRedis,
-        resolved: Option<&ResolvedClientConfig>,
+        plan: &RedisSinkPlan,
         context: &EmitterSinkContext,
     ) -> EmitterRuntimeResult<Self> {
         let lease = context
             .runtime
-            .lease_shared_client(&context.domain, &client.name, model, resolved)
+            .lease_shared_client(&context.domain, &plan.client, plan.pooled_client())
             .await
             .map_err(|error| emitter_init_error(error.to_string()))?;
         Ok(Self {
             client: Some(RedisEmitterClient {
                 lease,
-                client: client.name.clone(),
+                client: plan.client.name.clone(),
                 runtime: context.runtime.clone(),
                 waiter: DomainNodeRef::node_in(
                     context.domain.clone(),

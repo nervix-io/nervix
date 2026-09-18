@@ -4,8 +4,8 @@
 //! Owns: the connector instance behind each named client on this node, the interest its local
 //! users hold in it, and the wait a user sits in between asking for a connection and being handed
 //! one.
-//! Depends on: the vocabulary that names a domain and a client, the client Models an instance is
-//! built from, the resolved client configuration, and the connector drivers.
+//! Depends on: the vocabulary that names a domain and a client, the pooled client a sink's start
+//! plan decides, the resolved client configuration, and the connector drivers.
 //! Must not know: which graph node asked for a connection, how a batch is built, or how a
 //! schedule was decided.
 //!
@@ -14,13 +14,12 @@
 //! a property of the transport rather than of whoever happened to open a connection first.
 
 use error_stack::Report;
-use nervix_connector::{ClientResourceMounts, ResolvedClientConfig, client_config_entries};
+use nervix_connector::{ClientResourceMounts, ResolvedClientConfig};
 use url::Url;
 
 use super::*;
-use crate::runtime::{
-    emitters::{MongoDbClient, MySqlPool, MySqlSharedPool, PgPool, RedisCommandPool},
-    planning::{PooledClientPlan, PooledTransport},
+use crate::runtime::emitters::{
+    MongoDbClient, MySqlPool, MySqlSharedPool, PgPool, RedisCommandPool,
 };
 
 /// Why one client's connector instance could not be opened.
@@ -103,8 +102,6 @@ fn reject_pool_sizing(
 /// Why this node could not supply a shared client.
 #[derive(Debug, thiserror::Error)]
 pub(in crate::runtime) enum SharedClientError {
-    #[error("client '{client}' does not own a connection pool")]
-    NotPooled { client: String },
     #[error("failed to open client '{client}'")]
     Open { client: String },
     #[error("client '{client}' is not a {expected} client")]
@@ -264,7 +261,7 @@ impl Drop for PoolWaitGuard {
 }
 
 impl Runtime {
-    /// This node's shared instance of `client`, opening it on first local use.
+    /// This node's shared instance of `client`, opening it on first local use as `pool` plans.
     ///
     /// The instance is built from the first user's resolved configuration. Every pool-capable
     /// client renders the same configuration for all of its users, so the instance a later user
@@ -272,15 +269,10 @@ impl Runtime {
     pub(in crate::runtime) async fn lease_shared_client(
         &self,
         domain: &DomainName,
-        name: &ClientName,
-        model: &Model,
-        resolved: Option<&ResolvedClientConfig>,
+        client: &EmitterClientSpec,
+        pool: PooledClientPlan,
     ) -> Result<SharedClientLease, Report<SharedClientError>> {
-        let Some(plan) = PooledClientPlan::for_model(model) else {
-            return Err(Report::new(SharedClientError::NotPooled {
-                client: name.as_str().to_string(),
-            }));
-        };
+        let name = &client.name;
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Client, name.clone());
         let cell = {
             let mut slot = self
@@ -299,7 +291,7 @@ impl Runtime {
         };
 
         let opened = cell
-            .get_or_try_init(|| Self::open_shared_client(name, &plan, resolved))
+            .get_or_try_init(|| Self::open_shared_client(name, pool, &client.config))
             .await;
 
         match opened {
@@ -320,12 +312,12 @@ impl Runtime {
     /// Build the driver instance behind one pool-capable client.
     async fn open_shared_client(
         name: &ClientName,
-        plan: &PooledClientPlan<'_>,
-        resolved: Option<&ResolvedClientConfig>,
+        pool: PooledClientPlan,
+        resolved: &ResolvedClientConfig,
     ) -> Result<StdArc<SharedClient>, Report<SharedClientError>> {
-        let mounts = resolved.and_then(|resolved| resolved.mounts.clone());
-        let config = client_config_entries(resolved, plan.config);
-        let transport: &'static str = match plan.transport {
+        let mounts = resolved.mounts.clone();
+        let config = resolved.entries.as_slice();
+        let transport: &'static str = match pool.transport {
             PooledTransport::Postgres => "Postgres",
             PooledTransport::MySql => "MySQL",
             PooledTransport::MongoDb => "MongoDB",
@@ -341,24 +333,24 @@ impl Runtime {
                 client: name.as_str().to_string(),
             })
         };
-        let instance = match plan.transport {
+        let instance = match pool.transport {
             PooledTransport::Postgres => SharedClientInstance::Postgres(
-                emitters::open_postgres_pool(config, plan.bounds)
+                emitters::open_postgres_pool(config, pool.bounds)
                     .await
                     .map_err(opened)?,
             ),
             PooledTransport::MySql => SharedClientInstance::MySql(
-                emitters::open_mysql_pool(config, plan.bounds)
+                emitters::open_mysql_pool(config, pool.bounds)
                     .await
                     .map_err(opened)?,
             ),
             PooledTransport::MongoDb => SharedClientInstance::MongoDb(
-                emitters::open_mongodb_client(config, plan.bounds)
+                emitters::open_mongodb_client(config, pool.bounds)
                     .await
                     .map_err(opened)?,
             ),
             PooledTransport::Redis => SharedClientInstance::Redis(
-                emitters::open_redis_command_pool(config, plan.bounds)
+                emitters::open_redis_command_pool(config, pool.bounds)
                     .await
                     .map_err(opened)?,
             ),

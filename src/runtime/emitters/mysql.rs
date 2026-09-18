@@ -4,7 +4,7 @@ use mysql_async::{
     Params as MySqlParams, PoolConstraints as MySqlPoolConstraints, PoolOpts as MySqlPoolOpts,
     SslOpts as MySqlSslOpts, Value as MySqlValue, prelude::Queryable as MySqlQueryable,
 };
-use nervix_connector::{ResolvedClientConfig, optional_client_config_value};
+use nervix_connector::optional_client_config_value;
 use nervix_models::TableName;
 
 use super::*;
@@ -216,21 +216,18 @@ impl MySqlEmitter {
     }
 
     pub(in crate::runtime) async fn new(
-        model: &Model,
-        client: &nervix_models::CreateClientMySql,
-        resolved: Option<&ResolvedClientConfig>,
+        plan: &MySqlSinkPlan,
         context: &EmitterSinkContext,
-        values: &[MySqlValueMapping],
         input_schema: StdArc<arrow_schema::Schema>,
     ) -> Self {
         let client = match context
             .runtime
-            .lease_shared_client(&context.domain, &client.name, model, resolved)
+            .lease_shared_client(&context.domain, &plan.client, plan.pooled_client())
             .await
         {
             Ok(lease) => Some(MySqlEmitterClient {
                 lease,
-                client: client.name.clone(),
+                client: plan.client.name.clone(),
                 runtime: context.runtime.clone(),
                 waiter: DomainNodeRef::node_in(
                     context.domain.clone(),
@@ -246,7 +243,7 @@ impl MySqlEmitter {
         let program = match compile_mysql_values_program(
             &context.domain,
             &context.emitter,
-            values,
+            &plan.values,
             input_schema,
             context.udfs.as_ref(),
         ) {

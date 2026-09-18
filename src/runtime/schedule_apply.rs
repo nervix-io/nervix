@@ -1086,9 +1086,9 @@ impl Runtime {
                             domain,
                             shutdown_tx: &spawn.shutdown,
                             codecs: &spawn.codecs,
-                            clients: &spawn.clients,
                             deps: spawn.deps,
                         },
+                        &spawn.clients,
                         desired_emitter,
                         spawn.inputs,
                     )?;

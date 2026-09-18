@@ -1,5 +1,4 @@
 use futures_util::FutureExt;
-use nervix_connector::{ResolvedClientConfig, client_config_entries};
 use nervix_models::TopicName;
 use rdkafka::{
     config::ClientConfig,
@@ -23,16 +22,11 @@ struct PendingKafkaConfirmation {
 }
 
 impl KafkaEmitter {
-    pub(super) fn new(
-        client: &CreateClientKafka,
-        resolved: Option<&ResolvedClientConfig>,
-        mode: BrokerPublishingMode,
-    ) -> EmitterRuntimeResult<Self> {
-        let producer =
-            Self::producer_from_config(client_config_entries(resolved, client.config.as_slice()))?;
+    pub(super) fn new(plan: &KafkaSinkPlan) -> EmitterRuntimeResult<Self> {
+        let producer = Self::producer_from_config(&plan.client.config.entries)?;
         Ok(Self {
             producer: Some(producer),
-            mode,
+            mode: plan.mode,
         })
     }
 

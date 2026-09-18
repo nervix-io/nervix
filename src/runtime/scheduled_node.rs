@@ -38,7 +38,6 @@ pub(super) struct EmitterTaskBuildDeps<'a> {
     pub(super) domain: &'a DomainName,
     pub(super) shutdown_tx: &'a watch::Sender<bool>,
     pub(super) codecs: &'a HashMap<CodecName, Arc<CompiledCodec>>,
-    pub(super) clients: &'a HashMap<ClientName, Arc<Model>>,
     pub(super) deps: EmitterTaskDeps,
 }
 

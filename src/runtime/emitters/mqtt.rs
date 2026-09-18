@@ -1,10 +1,7 @@
 use std::{future::Future, pin::Pin};
 
 use futures_util::FutureExt;
-use nervix_connector::{
-    ParsedRetryPolicy, ResolvedClientConfig, client_config_entries, client_tls_paths,
-    optional_client_config_value,
-};
+use nervix_connector::{ParsedRetryPolicy, client_tls_paths, optional_client_config_value};
 use nervix_models::TopicName;
 use rumqttc::{
     AsyncClient, ClientError as MqttClientError, Event, MqttOptions,
@@ -32,15 +29,13 @@ struct PendingMqttConfirmation {
 
 impl MqttEmitter {
     pub(in crate::runtime) fn new(
-        client: &CreateClientMqtt,
-        resolved: Option<&ResolvedClientConfig>,
-        topic: &TopicName,
+        plan: &MqttSinkPlan,
         context: &EmitterSinkContext,
-        mode: MqttPublishingMode,
         retry_policy: ParsedRetryPolicy,
     ) -> EmitterRuntimeResult<Self> {
+        let mode = plan.mode;
         let (client, mut eventloop) = Self::client_from_config(
-            client_config_entries(resolved, client.config.as_slice()),
+            &plan.client.config.entries,
             &format!("{}-{}", context.domain.as_str(), context.emitter.as_str()),
             mode,
         )?;
@@ -102,7 +97,7 @@ impl MqttEmitter {
                 }
             }
         });
-        ValidatedTopic::new(topic.as_str()).map_err(emitter_config_error)?;
+        ValidatedTopic::new(plan.topic.as_str()).map_err(emitter_config_error)?;
         Ok(Self {
             client: Some(client),
             mode,

@@ -56,7 +56,11 @@ DATA_PLANE = ("src/runtime/", "crates/connector/src/", "crates/connectors/")
 
 # These decision modules are where a Model is still allowed to be read while producing those plans.
 DATA_PLANE_PLANNERS = frozenset(
-    {"src/runtime/planning.rs", "src/runtime/ingestor_start_plan.rs"}
+    {
+        "src/runtime/planning.rs",
+        "src/runtime/ingestor_start_plan.rs",
+        "src/runtime/emitter_start_plan.rs",
+    }
 )
 
 # Lock acquisitions in these files are the contention debt on the data-plane hot path. The method
