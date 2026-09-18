@@ -11,7 +11,7 @@ use ::mongodb::{
         UpdateOneModel as MongoDbUpdateOneModel, WriteModel as MongoDbWriteModel,
     },
 };
-use nervix_connector::{ResolvedClientConfig, client_config_entries, optional_client_config_value};
+use nervix_connector::optional_client_config_value;
 use nervix_models::CollectionName;
 
 use super::*;
@@ -130,23 +130,19 @@ impl MongoDbEmitter {
     }
 
     pub(in crate::runtime) async fn new(
-        model: &Model,
-        client: &nervix_models::CreateClientMongoDb,
-        resolved: Option<&ResolvedClientConfig>,
+        plan: &MongoDbSinkPlan,
         context: &EmitterSinkContext,
-        values: &[MongoDbValueMapping],
         input_schema: StdArc<arrow_schema::Schema>,
     ) -> Self {
-        let config = client_config_entries(resolved, client.config.as_slice());
-        let client = match mongodb_database(config) {
+        let client = match mongodb_database(&plan.client.config.entries) {
             Ok(database) => match context
                 .runtime
-                .lease_shared_client(&context.domain, &client.name, model, resolved)
+                .lease_shared_client(&context.domain, &plan.client, plan.pooled_client())
                 .await
             {
                 Ok(lease) => Some(MongoDbEmitterClient {
                     lease,
-                    client: client.name.clone(),
+                    client: plan.client.name.clone(),
                     database,
                 }),
                 Err(error) => {
@@ -162,7 +158,7 @@ impl MongoDbEmitter {
         let program = match compile_mongodb_values_program(
             &context.domain,
             &context.emitter,
-            values,
+            &plan.values,
             input_schema,
             context.udfs.as_ref(),
         ) {

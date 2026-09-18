@@ -4,10 +4,7 @@ use ::pulsar::{
     producer::{Message as PulsarProducerMessage, SendFuture as PulsarSendFuture},
 };
 use futures_util::FutureExt;
-use nervix_connector::{
-    ResolvedClientConfig, client_config_entries, client_tls_paths, optional_client_config_value,
-};
-use nervix_models::TopicName;
+use nervix_connector::{client_tls_paths, optional_client_config_value};
 
 use super::*;
 
@@ -24,20 +21,12 @@ struct PendingPulsarConfirmation {
 }
 
 impl PulsarEmitter {
-    pub(super) async fn new(
-        client: &CreateClientPulsar,
-        resolved: Option<&ResolvedClientConfig>,
-        topic: &TopicName,
-        mode: BrokerPublishingMode,
-    ) -> EmitterRuntimeResult<Self> {
-        let producer = Self::producer_from_config(
-            client_config_entries(resolved, client.config.as_slice()),
-            topic.as_str(),
-        )
-        .await?;
+    pub(super) async fn new(plan: &PulsarSinkPlan) -> EmitterRuntimeResult<Self> {
+        let producer =
+            Self::producer_from_config(&plan.client.config.entries, plan.topic.as_str()).await?;
         Ok(Self {
             producer: Some(producer),
-            mode,
+            mode: plan.mode,
         })
     }
 

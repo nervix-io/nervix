@@ -5,7 +5,7 @@
 //! - **Depends on.** Validated emitter plans, Arrow batches and the Sentry HTTP protocol.
 //! - **Must not know.** NSPL parsing, placement decisions or control-plane transactions.
 
-use nervix_connector::{HttpClientConfig, ResolvedClientConfig, client_config_entries};
+use nervix_connector::HttpClientConfig;
 use reqwest::{
     Client as HttpClient, StatusCode,
     header::{CONTENT_TYPE, HeaderValue, RETRY_AFTER},
@@ -26,11 +26,8 @@ pub(in crate::runtime) struct SentryEmitter {
 }
 
 impl SentryEmitter {
-    pub(in crate::runtime) fn new(
-        client: &CreateClientSentry,
-        resolved: Option<&ResolvedClientConfig>,
-    ) -> EmitterRuntimeResult<Self> {
-        let config = client_config_entries(resolved, client.config.as_slice());
+    pub(in crate::runtime) fn new(plan: &SentrySinkPlan) -> EmitterRuntimeResult<Self> {
+        let config = plan.client.config.entries.as_slice();
         let dsn = emitter_config_value(config, "dsn", "Sentry")?
             .parse::<Dsn>()
             .map_err(|error| emitter_config_error(format!("invalid Sentry dsn: {error}")))?;

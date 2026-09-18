@@ -15,8 +15,7 @@ use arrow_array::{
 use arrow_schema::{DataType, TimeUnit};
 use flate2::{Compression as GzipLevel, write::GzEncoder};
 use nervix_connector::{
-    HttpClientConfig, ResolvedClientConfig, client_config_entries, client_tls_paths,
-    optional_client_config_value, read_tls_file,
+    HttpClientConfig, client_tls_paths, optional_client_config_value, read_tls_file,
 };
 use nervix_models::EmitterName;
 use opentelemetry_proto::tonic::{
@@ -68,14 +67,8 @@ pub(in crate::runtime) struct OtelEmitter {
 }
 
 pub(super) struct OtelEmitterInit<'a> {
-    pub(super) client: &'a CreateClientOtel,
-    pub(super) resolved: Option<&'a ResolvedClientConfig>,
+    pub(super) plan: &'a OtelSinkPlan,
     pub(super) context: &'a EmitterSinkContext,
-    pub(super) signal: &'a OtelSignal,
-    pub(super) values: &'a [OtelValueMapping],
-    pub(super) attributes: &'a [OtelValueMapping],
-    pub(super) resource: &'a [OtelValueMapping],
-    pub(super) scope: Option<&'a OtelScope>,
     pub(super) input_schema: StdArc<arrow_schema::Schema>,
 }
 
@@ -315,18 +308,11 @@ impl OtelClientSettings {
 impl OtelEmitter {
     pub(in crate::runtime) fn new(init: OtelEmitterInit<'_>) -> Self {
         let OtelEmitterInit {
-            client,
-            resolved,
+            plan,
             context,
-            signal,
-            values,
-            attributes,
-            resource,
-            scope,
             input_schema,
         } = init;
-        let config = client_config_entries(resolved, client.config.as_slice());
-        let client = match Self::transport_from_config(config) {
+        let client = match Self::transport_from_config(&plan.client.config.entries) {
             Ok(transport) => Some(OtelClient {
                 transport,
                 fault_injection: context.runtime.inner.fault_injection.clone(),
@@ -338,9 +324,9 @@ impl OtelEmitter {
             }
         };
 
-        let mut mappings = Vec::with_capacity(values.len() + attributes.len());
-        mappings.extend_from_slice(values);
-        mappings.extend_from_slice(attributes);
+        let mut mappings = Vec::with_capacity(plan.values.len() + plan.attributes.len());
+        mappings.extend_from_slice(&plan.values);
+        mappings.extend_from_slice(&plan.attributes);
         let program = match compile_sql_values_program(
             "OTEL",
             "otel",
@@ -350,8 +336,12 @@ impl OtelEmitter {
             input_schema,
             context.udfs.as_ref(),
         ) {
-            Ok(program) => match Self::validate_program_types(signal, values, attributes, &program)
-            {
+            Ok(program) => match Self::validate_program_types(
+                &plan.signal,
+                &plan.values,
+                &plan.attributes,
+                &program,
+            ) {
                 Ok(()) => Some(program),
                 Err(error) => {
                     context.report_init_error("otel", &error.to_string());
@@ -363,14 +353,14 @@ impl OtelEmitter {
                 None
             }
         };
-        let resource = match Self::resource_from_mappings(resource) {
+        let resource = match Self::resource_from_mappings(&plan.resource) {
             Ok(resource) => Some(resource),
             Err(error) => {
                 context.report_init_error("otel", &error.to_string());
                 None
             }
         };
-        let scope = scope.map(|scope| InstrumentationScope {
+        let scope = plan.scope.as_ref().map(|scope| InstrumentationScope {
             name: scope.name.clone(),
             version: scope.version.clone().unwrap_or_default(),
             attributes: Vec::new(),

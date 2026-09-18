@@ -3,10 +3,7 @@ use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
     rt::TokioExecutor as HyperTokioExecutor,
 };
-use nervix_connector::{
-    ResolvedClientConfig, RustlsClientConfigSource, client_config_entries,
-    optional_client_config_value,
-};
+use nervix_connector::{RustlsClientConfigSource, optional_client_config_value};
 use nervix_models::TableName;
 
 use super::*;
@@ -66,16 +63,12 @@ impl ClickHouseWriteError {
 
 impl ClickHouseEmitter {
     pub(in crate::runtime) fn new(
-        client: &nervix_models::CreateClientClickHouse,
-        resolved: Option<&ResolvedClientConfig>,
+        plan: &ClickHouseSinkPlan,
         context: &EmitterSinkContext,
-        values: &[ClickHouseValueMapping],
         input_schema: StdArc<arrow_schema::Schema>,
     ) -> Self {
-        let (client, request_timeout) = match Self::client_from_config(client_config_entries(
-            resolved,
-            client.config.as_slice(),
-        )) {
+        let (client, request_timeout) = match Self::client_from_config(&plan.client.config.entries)
+        {
             Ok((client, request_timeout)) => (Some(client), request_timeout),
             Err(error) => {
                 context.report_init_error("clickhouse", &emitter_error_message(&error));
@@ -85,7 +78,7 @@ impl ClickHouseEmitter {
         let program = match compile_clickhouse_values_program(
             &context.domain,
             &context.emitter,
-            values,
+            &plan.values,
             input_schema,
             context.udfs.as_ref(),
         ) {
