@@ -246,7 +246,6 @@ Feature: Coordinated WASM processor state reset
       key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
       """
 
-  @exclusive
   Scenario: A reset survives owner failover and cannot be resurrected by the former owner
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
     And the production sticky scheduler is configured
