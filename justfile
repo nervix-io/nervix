@@ -27,6 +27,7 @@ test: tests-deps
     shuttle_packages=(
         nervix-client-core
         nervix-connector
+        nervix-connector-kafka
         nervix-consensus
         nervix-execution
         nervix-interconnect
@@ -42,6 +43,7 @@ test: tests-deps
     cargo test --all-targets \
         --package nervix-client-core \
         --package nervix-connector \
+        --package nervix-connector-kafka \
         --package nervix-consensus \
         --package nervix-execution \
         --package nervix-interconnect \
@@ -251,6 +253,7 @@ test-coverage: tests-deps
     shuttle_packages=(
         nervix-client-core
         nervix-connector
+        nervix-connector-kafka
         nervix-consensus
         nervix-execution
         nervix-interconnect
@@ -268,6 +271,7 @@ test-coverage: tests-deps
     cargo llvm-cov --no-report --all-targets \
         --package nervix-client-core \
         --package nervix-connector \
+        --package nervix-connector-kafka \
         --package nervix-consensus \
         --package nervix-execution \
         --package nervix-interconnect \
@@ -440,6 +444,7 @@ cargo-clippy-all:
     shuttle_packages=(
         nervix-client-core
         nervix-connector
+        nervix-connector-kafka
         nervix-consensus
         nervix-execution
         nervix-interconnect
@@ -453,7 +458,9 @@ cargo-clippy-all:
     cargo clippy --all-features --all-targets --workspace "${workspace_exclusions[@]}"
     cargo clippy --all-targets --features 'benchmarks testing' --package nervix-server
     cargo clippy --all-targets --features autocomplete --package nervix-client-core
-    cargo clippy --all-targets --package nervix-connector
+    cargo clippy --all-targets \
+        --package nervix-connector \
+        --package nervix-connector-kafka
     cargo clippy --all-targets --features testing --package nervix-consensus
     cargo clippy --all-targets \
         --package nervix-execution \
@@ -462,6 +469,7 @@ cargo-clippy-all:
     cargo clippy --lib --features 'shuttle testing' \
         --package nervix-client-core \
         --package nervix-connector \
+        --package nervix-connector-kafka \
         --package nervix-consensus \
         --package nervix-execution \
         --package nervix-interconnect \

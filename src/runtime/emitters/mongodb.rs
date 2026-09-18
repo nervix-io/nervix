@@ -320,7 +320,7 @@ impl MongoDbEmitter {
             if let Some(code) = errors.get(&local_index) {
                 if Self::is_record_write_error(*code) {
                     outcome.reject(
-                        BrokerRecordPosition {
+                        SinkRecordPosition {
                             batch_index,
                             row_index: *row,
                         },
@@ -330,7 +330,7 @@ impl MongoDbEmitter {
                     has_infrastructure_error = true;
                 }
             } else {
-                outcome.deliver(BrokerRecordPosition {
+                outcome.deliver(SinkRecordPosition {
                     batch_index,
                     row_index: *row,
                 });
@@ -364,7 +364,7 @@ impl MongoDbEmitter {
                 .chain(result.delete_results.keys())
             {
                 if let Some(row) = chunk.get(*local_index) {
-                    outcome.deliver(BrokerRecordPosition {
+                    outcome.deliver(SinkRecordPosition {
                         batch_index,
                         row_index: *row,
                     });
@@ -380,7 +380,7 @@ impl MongoDbEmitter {
             };
             if Self::is_record_write_error(error.code) {
                 outcome.reject(
-                    BrokerRecordPosition {
+                    SinkRecordPosition {
                         batch_index,
                         row_index: *row,
                     },
@@ -531,7 +531,7 @@ impl MongoDbEmitter {
                     {
                         Ok(_) => {
                             for row in chunk {
-                                outcome.deliver(BrokerRecordPosition {
+                                outcome.deliver(SinkRecordPosition {
                                     batch_index,
                                     row_index: *row,
                                 });
@@ -571,7 +571,7 @@ impl MongoDbEmitter {
                     {
                         Ok(_) => {
                             for row in chunk {
-                                outcome.deliver(BrokerRecordPosition {
+                                outcome.deliver(SinkRecordPosition {
                                     batch_index,
                                     row_index: *row,
                                 });
@@ -630,7 +630,7 @@ mod tests {
 
         assert_eq!(
             outcome.delivered,
-            [BrokerRecordPosition {
+            [SinkRecordPosition {
                 batch_index: 7,
                 row_index: 10,
             }]
@@ -638,7 +638,7 @@ mod tests {
         assert_eq!(outcome.rejected.len(), 1);
         assert_eq!(
             outcome.rejected[0].position,
-            BrokerRecordPosition {
+            SinkRecordPosition {
                 batch_index: 7,
                 row_index: 11,
             }
