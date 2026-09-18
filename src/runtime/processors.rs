@@ -18,7 +18,7 @@ use nervix_roto::UdfExecutor;
 use nervix_vm::{
     CompileBinding as VmCompileBinding, CompileOptions as VmCompileOptions,
     CompiledProgram as VmCompiledProgram, OutputMode as VmOutputMode,
-    SchemaSensitivity as VmSchemaSensitivity, SemanticNamespaces,
+    SchemaSensitivity as VmSchemaSensitivity, SemanticScopePolicy,
     compile_program_with_options_for_bindings_with_sensitivity as compile_vm_program,
     lower_route_construction,
     window::{CompiledWindowRoute, WindowAggregateProgram, WindowRouteSchemas},
@@ -546,7 +546,7 @@ impl CompiledInferencerInputProgram {
                 assignments,
                 ..RouteConstruction::default()
             },
-            SemanticNamespaces::new("input", "mapped_input"),
+            SemanticScopePolicy::read_write("input", "mapped_input"),
         )
         .change_context_lazy(|| ProcessorCompileError::InferencerInputsMapping {
             processor: processor.clone(),

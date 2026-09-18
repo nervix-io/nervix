@@ -577,13 +577,27 @@ fn execute_program_with_selection_in_context_sync(
     }
 
     let filtered = if let Some(predicate) = global_predicate.as_ref() {
-        let selected = selected_rows(predicate);
+        let predicate_with_error_rows = if row_errors.is_error_free() {
+            None
+        } else {
+            Some(BooleanArray::from_iter(predicate.iter().enumerate().map(
+                |(row, selected)| {
+                    if row_errors.row(row).is_empty() {
+                        selected
+                    } else {
+                        Some(true)
+                    }
+                },
+            )))
+        };
+        let selection_predicate = predicate_with_error_rows.as_ref().unwrap_or(predicate);
+        let selected = selected_rows(selection_predicate);
         for invocation in &mut invocations {
             invocation.arguments =
-                filter_columns(&invocation.arguments, predicate, selected.len())?;
+                filter_columns(&invocation.arguments, selection_predicate, selected.len())?;
         }
         FilteredOutput {
-            columns: filter_columns(&columns, predicate, selected.len())?,
+            columns: filter_columns(&columns, selection_predicate, selected.len())?,
             row_errors: row_errors.select_rows(&selected),
             selected_rows: RowSelection::Selected(selected),
         }
@@ -3836,6 +3850,33 @@ mod tests {
         assert_eq!(output.selected_rows, RowSelection::Selected(vec![0, 2]));
         assert_eq!(lowered.value(0), "error");
         assert_eq!(lowered.value(1), "error");
+    }
+
+    #[test]
+    fn filter_preserves_evaluation_error_rows_for_caller_handling() {
+        let parsed = parse_program("WHERE input.left / input.right > 0").expect("must parse");
+        let schema = schema(vec![
+            Field::new("left", DataType::Int64, false),
+            Field::new("right", DataType::Int64, false),
+        ]);
+        let compiled = compile_program_with_output_fields(&parsed, schema.clone(), Vec::new());
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Int64(Int64Array::from(vec![8, 9, -1])),
+                TypedArray::Int64(Int64Array::from(vec![2, 0, 1])),
+            ],
+        )
+        .expect("batch must build");
+
+        let output = execute_program_with_selection_sync(&compiled, &batch).expect("must execute");
+
+        assert_eq!(output.selected_rows, RowSelection::Selected(vec![0, 1]));
+        assert!(output.batch.errors().row(0).is_empty());
+        assert_eq!(
+            output.batch.errors().row(1)[0].code(),
+            ErrorCode::DivisionByZero
+        );
     }
 
     #[test]
