@@ -1246,12 +1246,18 @@ impl Application {
                             live_node_incarnations
                                 .insert(node.node_id.clone(), node.incarnation);
                         }
-                        let live_voters = consensus_for_reconcile
-                            .live_voter_ids(live_node_ids)
-                            .await;
-                        let schedulable_node_ids = consensus_for_reconcile
-                            .schedulable_live_voter_ids(placement_candidate_node_ids)
-                            .await;
+                        let topology = automatic_schedule_input.topology();
+                        let live_voters = live_node_ids
+                            .into_iter()
+                            .filter(|node| topology.voters().contains(node))
+                            .collect::<Vec<_>>();
+                        let schedulable_node_ids = placement_candidate_node_ids
+                            .into_iter()
+                            .filter(|node| {
+                                topology.voters().contains(node)
+                                    && !topology.cordoned().contains(node)
+                            })
+                            .collect::<Vec<_>>();
                         let current_schedule = &automatic_schedule_input.runtime_state().schedule;
                         let live_voter_set = live_voters.iter().cloned().collect::<BTreeSet<_>>();
                         let schedulable_node_set = schedulable_node_ids
@@ -1319,11 +1325,25 @@ impl Application {
                             {
                                 break;
                             }
+                            let current_availability =
+                                cluster_for_reconcile.availability_state().await;
+                            if !schedule_planning::DomainSchedulePlanningSnapshot::same_eligibility(
+                                &scheduling_availability,
+                                &current_availability,
+                                automatic_schedule_input.topology().voters(),
+                            ) {
+                                break;
+                            }
                             match consensus_for_reconcile
                                 .apply_automatic_domain_schedule(
                                     automatic_schedule_input.fence(),
-                                    domain_schedule.domain.clone(),
-                                    Some(domain_schedule.clone()),
+                                    automatic_schedule_input
+                                        .planning_inputs(&domain_schedule.domain)
+                                        .cloned()
+                                        .verified(
+                                            "the automatic runtime snapshot and planning inputs \
+                                             contain the same domains",
+                                        ),
                                     Some(failover_schedule),
                                 )
                                 .await
@@ -1418,11 +1438,25 @@ impl Application {
                                 {
                                     break;
                                 }
+                                let current_availability =
+                                    cluster_for_reconcile.availability_state().await;
+                                if !schedule_planning::DomainSchedulePlanningSnapshot::same_eligibility(
+                                    &scheduling_availability,
+                                    &current_availability,
+                                    automatic_schedule_input.topology().voters(),
+                                ) {
+                                    break;
+                                }
                                 match consensus_for_reconcile
                                     .apply_automatic_domain_schedule(
                                         automatic_schedule_input.fence(),
-                                        domain,
-                                        current_domain.cloned(),
+                                        automatic_schedule_input
+                                            .planning_inputs(&domain)
+                                            .cloned()
+                                            .verified(
+                                                "the automatic runtime snapshot and planning \
+                                                 inputs contain the same domains",
+                                            ),
                                         Some(schedule),
                                     )
                                     .await
