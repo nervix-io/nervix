@@ -12,10 +12,124 @@ use std::{collections::BTreeMap, fmt, num::NonZeroU64};
 
 use meticulous::OptionExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use thiserror::Error;
 
-use crate::BranchKeyFingerprint;
+use crate::{BranchKeyFingerprint, CommandExecutionReference};
+
+/// The branch-local guest state one coordinated reset replaces.
+///
+/// A branched processor names either one concrete branch or every branch. An unbranched processor
+/// uses the explicit `Unbranched` variant so absence never doubles as an all-branches request.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum WasmStateResetScope {
+    Unbranched,
+    Branch(BranchKeyFingerprint),
+    AllBranches,
+}
+
+impl WasmStateResetScope {
+    /// Whether this scope selects the supplied concrete-branch fingerprint. `None` is the explicit
+    /// unbranched execution.
+    pub fn contains(&self, branch: Option<&BranchKeyFingerprint>) -> bool {
+        match (self, branch) {
+            (Self::Unbranched, None) => true,
+            (Self::Branch(selected), Some(branch)) => selected == branch,
+            (Self::AllBranches, Some(_)) => true,
+            _ => false,
+        }
+    }
+}
+
+/// How far the durable reset transition has progressed.
+///
+/// `Publishing` already names the new generation, but its initial guest checkpoint has not yet
+/// reached the storage boundary assigned to the processor. Runtime admission for the scope stays
+/// fenced until the same request reaches `Ready`.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum WasmStateResetPhase {
+    Publishing,
+    Ready,
+}
+
+/// The latest coordinated reset published for one scheduled WASM processor.
+///
+/// The request reference makes a lost response idempotent. Reapplying `Publishing` continues the
+/// same generation and durability work; it never starts another lifetime. `Ready` is published
+/// only after every initial checkpoint required for the selected scope is durable.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct WasmStateReset {
+    request: CommandExecutionReference,
+    scope: WasmStateResetScope,
+    phase: WasmStateResetPhase,
+}
+
+impl WasmStateReset {
+    pub fn publishing(request: CommandExecutionReference, scope: WasmStateResetScope) -> Self {
+        Self {
+            request,
+            scope,
+            phase: WasmStateResetPhase::Publishing,
+        }
+    }
+
+    pub fn request(&self) -> &CommandExecutionReference {
+        &self.request
+    }
+
+    pub fn scope(&self) -> &WasmStateResetScope {
+        &self.scope
+    }
+
+    pub const fn phase(&self) -> WasmStateResetPhase {
+        self.phase
+    }
+
+    pub fn mark_ready(&mut self) {
+        self.phase = WasmStateResetPhase::Ready;
+    }
+}
 
 /// One lifetime of a WASM processor branch's guest state.
 ///
@@ -97,7 +211,59 @@ pub struct WasmStateGenerations {
     every_branch: WasmStateGeneration,
     /// The concrete branches that started a lifetime of their own after `every_branch` was
     /// published. Each generation here is later than `every_branch`.
+    #[serde(with = "branch_generations")]
     branches: BTreeMap<BranchKeyFingerprint, WasmStateGeneration>,
+}
+
+mod branch_generations {
+    use super::*;
+
+    #[derive(Serialize)]
+    struct BranchGenerationRef<'a> {
+        branch: &'a BranchKeyFingerprint,
+        generation: WasmStateGeneration,
+    }
+
+    #[derive(Deserialize)]
+    struct BranchGeneration {
+        branch: BranchKeyFingerprint,
+        generation: WasmStateGeneration,
+    }
+
+    pub(super) fn serialize<S>(
+        branches: &BTreeMap<BranchKeyFingerprint, WasmStateGeneration>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        branches
+            .iter()
+            .map(|(branch, generation)| BranchGenerationRef {
+                branch,
+                generation: *generation,
+            })
+            .collect::<Vec<_>>()
+            .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<BTreeMap<BranchKeyFingerprint, WasmStateGeneration>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let entries = Vec::<BranchGeneration>::deserialize(deserializer)?;
+        let mut branches = BTreeMap::new();
+        for entry in entries {
+            if branches.insert(entry.branch, entry.generation).is_some() {
+                return Err(D::Error::custom(
+                    "WASM state generations contain a duplicate concrete branch",
+                ));
+            }
+        }
+        Ok(branches)
+    }
 }
 
 impl WasmStateGenerations {
@@ -136,6 +302,16 @@ impl WasmStateGenerations {
         let generation = self.latest().successor();
         self.branches.insert(branch, generation);
         generation
+    }
+
+    /// Start the lifetime selected by one coordinated reset.
+    pub fn begin_reset(&mut self, scope: &WasmStateResetScope) -> WasmStateGeneration {
+        match scope {
+            WasmStateResetScope::Unbranched | WasmStateResetScope::AllBranches => {
+                self.begin_every_branch()
+            }
+            WasmStateResetScope::Branch(branch) => self.begin_branch(*branch),
+        }
     }
 
     /// The most recent generation handed out. Transitions are control-plane decisions, so the
@@ -252,6 +428,64 @@ mod tests {
         replanned.begin_every_branch();
 
         assert_eq!(published, replanned);
+    }
+
+    #[test]
+    fn a_coordinated_branch_reset_advances_once_and_becomes_ready_for_the_same_request() {
+        let mut processor = wasm_processor(1, nonzero!(1_000u64));
+        let request = CommandExecutionReference::parse("reset-alpha")
+            .expect("the reset reference must be valid");
+        let other_request = CommandExecutionReference::parse("reset-beta")
+            .expect("the reset reference must be valid");
+        let scope = WasmStateResetScope::Branch(branch(1));
+
+        assert!(processor.begin_wasm_state_reset(request.clone(), scope));
+        assert!(!processor.begin_wasm_state_reset(request.clone(), scope));
+        assert_eq!(
+            processor
+                .wasm_state_generations()
+                .expect("a WASM processor carries generations")
+                .of_branch(Some(&branch(1))),
+            generation(2)
+        );
+        assert_eq!(
+            processor
+                .wasm_state_generations()
+                .expect("a WASM processor carries generations")
+                .of_branch(Some(&branch(2))),
+            WasmStateGeneration::FIRST
+        );
+        assert_eq!(
+            processor
+                .wasm_state_reset()
+                .expect("the reset was published")
+                .phase(),
+            WasmStateResetPhase::Publishing
+        );
+
+        assert!(!processor.complete_wasm_state_reset(&other_request));
+        assert!(processor.complete_wasm_state_reset(&request));
+        assert!(!processor.complete_wasm_state_reset(&request));
+        assert_eq!(
+            processor
+                .wasm_state_reset()
+                .expect("the reset remains durable after readiness")
+                .phase(),
+            WasmStateResetPhase::Ready
+        );
+    }
+
+    #[test]
+    fn concrete_branch_generations_have_a_json_safe_stored_shape() {
+        let mut generations = WasmStateGenerations::first();
+        generations.begin_branch(branch(7));
+
+        let encoded = serde_json::to_vec(&generations)
+            .expect("concrete branch generations must have a JSON representation");
+        let decoded = serde_json::from_slice::<WasmStateGenerations>(&encoded)
+            .expect("the current branch generation shape must decode");
+
+        assert_eq!(decoded, generations);
     }
 
     #[test]

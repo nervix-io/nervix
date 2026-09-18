@@ -154,6 +154,7 @@ pub(crate) mod test_fixtures;
 mod tls;
 mod tracing_setup;
 mod transaction;
+mod wasm_state_reset;
 mod web_console;
 
 use service_tasks::ServiceTasks;
@@ -1717,6 +1718,8 @@ impl Application {
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),
             }),
         };
+        #[cfg(feature = "testing")]
+        service.register_wasm_state_reset_test_coordinator(&fault_injection, shutdown.clone());
         let domain_clock_progress_service = service.clone();
         interconnect
             .register_handler::<RemoteDomainClockProgressRequest, _, _>(move |context, request| {
@@ -1946,6 +1949,8 @@ impl Application {
                 }
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        service.register_wasm_state_reset_interconnect_handler()?;
 
         let entity_drain_service = service.clone();
         interconnect

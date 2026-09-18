@@ -84,15 +84,33 @@ pub(super) enum ProcessorNodeCommand {
     Handoff {
         response: oneshot::Sender<Vec<ProcessorBranchHandoff>>,
     },
+    PrepareWasmStateReset {
+        preparation: WasmStateResetPreparation,
+        response: oneshot::Sender<error_stack::Result<(), WasmStateResetRuntimeError>>,
+    },
+    AbortWasmStateReset {
+        request: CommandExecutionReference,
+        response: oneshot::Sender<error_stack::Result<(), WasmStateResetRuntimeError>>,
+    },
+    ApplyWasmStateReset {
+        reset: nervix_models::WasmStateReset,
+        response: oneshot::Sender<error_stack::Result<(), WasmStateResetRuntimeError>>,
+    },
 }
 
 impl RelayInteractionCommand for ProcessorNodeCommand {
     fn drain_inputs_before_handling(&self) -> bool {
-        true
+        matches!(
+            self,
+            Self::Checkpoint { .. } | Self::Handoff { .. } | Self::PrepareWasmStateReset { .. }
+        )
     }
 
     fn cancels_external_waits_while_draining(&self) -> bool {
-        true
+        matches!(
+            self,
+            Self::Checkpoint { .. } | Self::Handoff { .. } | Self::PrepareWasmStateReset { .. }
+        )
     }
 }
 
@@ -271,6 +289,11 @@ pub(super) async fn run_processor_node_runtime(
     .verified("the registry validated these processor inputs before the node was started");
     let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
     let mut next_lru_snapshot = Instant::now() + runtime_handle.state_snapshot_interval();
+    let mut reset_fence = template
+        .wasm_state_reset
+        .clone()
+        .filter(|reset| reset.phase() == nervix_models::WasmStateResetPhase::Publishing);
+    let mut prepared_reset = None::<PreparedWasmStateReset>;
 
     let mut handoff_response = None;
     loop {
@@ -305,7 +328,7 @@ pub(super) async fn run_processor_node_runtime(
             next_expiration_scan = Instant::now() + expiration_scan_interval;
             did_scheduled_work = true;
         }
-        if Instant::now() >= next_lru_snapshot {
+        if Instant::now() >= next_lru_snapshot && prepared_reset.is_none() {
             if let Err(error) = persist_branch_instance_lru_snapshot(
                 &runtime_handle,
                 &domain,
@@ -370,6 +393,17 @@ pub(super) async fn run_processor_node_runtime(
                 let work = work.verified(
                     "a batch event always carries the quiesce work the interaction recorded for it",
                 );
+                let branch = batch.key.as_ref().map(BranchKey::fingerprint);
+                if reset_fence
+                    .as_ref()
+                    .is_some_and(|reset| reset.scope().contains(branch.as_ref()))
+                {
+                    for ack in batch.acks.iter() {
+                        ack.no_ack("WASM guest-state reset is not ready for this branch");
+                    }
+                    drop(work);
+                    continue;
+                }
                 dispatch_processor_node_input(
                     ProcessorNodeDispatchContext {
                         runtime_handle: &runtime_handle,
@@ -398,6 +432,80 @@ pub(super) async fn run_processor_node_runtime(
                 ProcessorNodeCommand::Handoff { response } => {
                     handoff_response = Some(response);
                     break;
+                }
+                ProcessorNodeCommand::PrepareWasmStateReset {
+                    preparation,
+                    response,
+                } => {
+                    let reset_context = ProcessorWasmStateResetContext::new(
+                        &runtime_handle,
+                        &domain,
+                        &graph,
+                        &template,
+                    );
+                    let request = preparation.request.clone();
+                    let scope = preparation.scope;
+                    let result = reset_context
+                        .prepare(&mut instances, preparation, &mut prepared_reset)
+                        .await;
+                    if result.is_ok() {
+                        reset_fence =
+                            Some(nervix_models::WasmStateReset::publishing(request, scope));
+                    }
+                    response
+                        .send(result)
+                        .means_peer_left("WASM state reset preparation requester");
+                }
+                ProcessorNodeCommand::AbortWasmStateReset { request, response } => {
+                    let result = abort_processor_wasm_state_reset(
+                        &runtime_handle,
+                        &domain,
+                        &graph,
+                        &template,
+                        &mut instances,
+                        &request,
+                        &mut prepared_reset,
+                    )
+                    .await;
+                    if result.is_ok() {
+                        reset_fence = template.wasm_state_reset.clone().filter(|reset| {
+                            reset.phase() == nervix_models::WasmStateResetPhase::Publishing
+                        });
+                    }
+                    response
+                        .send(result)
+                        .means_peer_left("WASM state reset abort requester");
+                }
+                ProcessorNodeCommand::ApplyWasmStateReset { reset, response } => {
+                    let result = match reset.phase() {
+                        nervix_models::WasmStateResetPhase::Publishing => {
+                            reset_fence = Some(reset.clone());
+                            ProcessorWasmStateResetContext::new(
+                                &runtime_handle,
+                                &domain,
+                                &graph,
+                                &template,
+                            )
+                            .commit(
+                                &mut instances,
+                                &mut last_persisted_lru_lsm,
+                                &reset,
+                                &mut prepared_reset,
+                            )
+                            .await
+                        }
+                        nervix_models::WasmStateResetPhase::Ready => {
+                            complete_processor_wasm_state_reset(
+                                &ModelName::from(&processor),
+                                &reset,
+                                &mut reset_fence,
+                                &mut prepared_reset,
+                            )
+                        }
+                    };
+                    response
+                        .send(result)
+                        .means_peer_left("WASM state reset schedule application requester");
                 }
             },
             RelayInteractionEvent::ForceFlush(completion) => {
@@ -453,6 +561,383 @@ pub(super) async fn run_processor_node_runtime(
         )
         .await;
     }
+}
+
+struct ProcessorWasmStateResetContext<'a> {
+    runtime: &'a Runtime,
+    domain: &'a DomainName,
+    graph: &'a SharedActiveGraph,
+    template: &'a BranchInstanceTemplate,
+}
+
+impl<'a> ProcessorWasmStateResetContext<'a> {
+    fn new(
+        runtime: &'a Runtime,
+        domain: &'a DomainName,
+        graph: &'a SharedActiveGraph,
+        template: &'a BranchInstanceTemplate,
+    ) -> Self {
+        Self {
+            runtime,
+            domain,
+            graph,
+            template,
+        }
+    }
+}
+
+fn processor_reset_target_keys(
+    processor: &ModelName,
+    template: &BranchInstanceTemplate,
+    instances: &BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+    scope: WasmStateResetScope,
+    branch_key: Option<BranchKey>,
+) -> error_stack::Result<Vec<Option<BranchKey>>, WasmStateResetRuntimeError> {
+    if template.source_kind != ModelKind::WasmProcessor {
+        return Err(Report::new(WasmStateResetRuntimeError::NotWasmProcessor {
+            processor: processor.clone(),
+        }));
+    }
+    match (template.branch.as_ref(), scope, branch_key) {
+        (None, WasmStateResetScope::Unbranched, None) => Ok(vec![None]),
+        (Some(_), WasmStateResetScope::Branch(selected), Some(branch))
+            if branch.fingerprint() == selected =>
+        {
+            Ok(vec![Some(branch)])
+        }
+        (Some(_), WasmStateResetScope::Branch(selected), None) => Ok(instances
+            .snapshot_entries()
+            .into_iter()
+            .map(|(key, _)| key)
+            .filter(|key| {
+                key.as_ref()
+                    .is_some_and(|branch| branch.fingerprint() == selected)
+            })
+            .collect()),
+        (Some(_), WasmStateResetScope::AllBranches, None) => Ok(instances
+            .snapshot_entries()
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect()),
+        _ => Err(Report::new(WasmStateResetRuntimeError::InvalidScope {
+            processor: processor.clone(),
+        })),
+    }
+}
+
+fn restore_processor_wasm_state_reset_branches(
+    runtime: &Runtime,
+    domain: &DomainName,
+    graph: &SharedActiveGraph,
+    template: &BranchInstanceTemplate,
+    instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+    branches: &mut Vec<PreparedWasmStateResetBranch>,
+) -> error_stack::Result<(), WasmStateResetRuntimeError> {
+    let processor = ModelName::from(&template.source);
+    for mut branch in branches.drain(..) {
+        let Some(handoff) = branch.previous.take() else {
+            continue;
+        };
+        let restored_at = handoff.restored_at;
+        let key = branch.key.clone();
+        let task = spawn_processor_branch_task(
+            ProcessorRuntimeContext::new(runtime.clone(), domain.clone(), graph.clone()),
+            template,
+            key.clone(),
+            handoff.pending_materialized,
+        )
+        .change_context_lazy(|| WasmStateResetRuntimeError::RestoreAfterAbort {
+            processor: processor.clone(),
+        })?;
+        runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &key);
+        instances.insert_changed(key, restored_at, task);
+    }
+    Ok(())
+}
+
+impl ProcessorWasmStateResetContext<'_> {
+    async fn prepare(
+        &self,
+        instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+        preparation: WasmStateResetPreparation,
+        prepared: &mut Option<PreparedWasmStateReset>,
+    ) -> error_stack::Result<(), WasmStateResetRuntimeError> {
+        let runtime = self.runtime;
+        let domain = self.domain;
+        let graph = self.graph;
+        let template = self.template;
+        let WasmStateResetPreparation {
+            request,
+            scope,
+            branch_key,
+            published,
+        } = preparation;
+        let processor = ModelName::from(&template.source);
+        if let Some(current) = prepared.as_mut() {
+            if !current.matches(&request, scope) {
+                return Err(Report::new(WasmStateResetRuntimeError::RequestConflict {
+                    processor,
+                }));
+            }
+            current.published |= published;
+            return Ok(());
+        }
+
+        let targets =
+            processor_reset_target_keys(&processor, template, instances, scope, branch_key)?;
+        let mut branches = Vec::with_capacity(targets.len());
+        for key in targets {
+            tokio::task::consume_budget().await;
+            let previous = if let Some(entry) = instances.remove(&key) {
+                runtime.observe_branch_instance_removed(
+                    domain,
+                    template.branch.as_ref(),
+                    &key,
+                    None,
+                );
+                let (response, receiver) = oneshot::channel();
+                stop_processor_branch_task(
+                    domain,
+                    processor.clone(),
+                    &key,
+                    entry,
+                    ProcessorBranchStopMode::Handoff(response),
+                )
+                .await;
+                match receiver.await {
+                    Ok(handoff) => Some(handoff),
+                    Err(error) => {
+                        let restore = restore_processor_wasm_state_reset_branches(
+                            runtime,
+                            domain,
+                            graph,
+                            template,
+                            instances,
+                            &mut branches,
+                        );
+                        restore?;
+                        return Err(Report::new(WasmStateResetRuntimeError::StopBranch {
+                            processor,
+                        })
+                        .attach_printable(error));
+                    }
+                }
+            } else {
+                None
+            };
+            let initial_state = template
+                .prepare_fresh_wasm_state(runtime, domain, key.clone())
+                .await;
+            match initial_state {
+                Ok(initial_state) => branches.push(PreparedWasmStateResetBranch {
+                    key,
+                    initial_state: Some(initial_state),
+                    previous,
+                    activated: false,
+                }),
+                Err(error) => {
+                    branches.push(PreparedWasmStateResetBranch {
+                        key,
+                        initial_state: None,
+                        previous,
+                        activated: false,
+                    });
+                    restore_processor_wasm_state_reset_branches(
+                        runtime,
+                        domain,
+                        graph,
+                        template,
+                        instances,
+                        &mut branches,
+                    )?;
+                    return Err(error);
+                }
+            }
+        }
+        *prepared = Some(PreparedWasmStateReset {
+            request,
+            scope,
+            published,
+            branches,
+        });
+        Ok(())
+    }
+}
+
+async fn abort_processor_wasm_state_reset(
+    runtime: &Runtime,
+    domain: &DomainName,
+    graph: &SharedActiveGraph,
+    template: &BranchInstanceTemplate,
+    instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+    request: &CommandExecutionReference,
+    prepared: &mut Option<PreparedWasmStateReset>,
+) -> error_stack::Result<(), WasmStateResetRuntimeError> {
+    let processor = ModelName::from(&template.source);
+    let Some(current) = prepared.as_ref() else {
+        return Ok(());
+    };
+    if &current.request != request || current.published {
+        return Err(Report::new(WasmStateResetRuntimeError::RequestConflict {
+            processor,
+        }));
+    }
+    let mut current = prepared
+        .take()
+        .verified("the reset preparation was observed immediately before this take");
+    restore_processor_wasm_state_reset_branches(
+        runtime,
+        domain,
+        graph,
+        template,
+        instances,
+        &mut current.branches,
+    )
+}
+
+impl ProcessorWasmStateResetContext<'_> {
+    async fn commit(
+        &self,
+        instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+        last_persisted_lru_lsm: &mut u64,
+        reset: &nervix_models::WasmStateReset,
+        prepared: &mut Option<PreparedWasmStateReset>,
+    ) -> error_stack::Result<(), WasmStateResetRuntimeError> {
+        let runtime = self.runtime;
+        let domain = self.domain;
+        let graph = self.graph;
+        let template = self.template;
+        let processor = ModelName::from(&template.source);
+        if prepared.is_none() {
+            self.prepare(
+                instances,
+                WasmStateResetPreparation {
+                    request: reset.request().clone(),
+                    scope: *reset.scope(),
+                    branch_key: None,
+                    published: true,
+                },
+                prepared,
+            )
+            .await?;
+        }
+        let current = prepared
+            .as_mut()
+            .verified("the preparation above either returned an error or installed reset state");
+        if !current.matches(reset.request(), *reset.scope()) {
+            return Err(Report::new(WasmStateResetRuntimeError::RequestConflict {
+                processor,
+            }));
+        }
+        current.published = true;
+
+        let execution_now = runtime
+            .bind_domain_clock(domain)
+            .change_context_lazy(|| WasmStateResetRuntimeError::InitialCheckpoint {
+                processor: processor.clone(),
+            })?
+            .snapshot()
+            .change_context_lazy(|| WasmStateResetRuntimeError::InitialCheckpoint {
+                processor: processor.clone(),
+            })?
+            .now();
+        for branch in &mut current.branches {
+            tokio::task::consume_budget().await;
+            if branch.activated {
+                continue;
+            }
+            let key = branch.key.clone();
+            let task = spawn_processor_branch_task(
+                ProcessorRuntimeContext::new(runtime.clone(), domain.clone(), graph.clone()),
+                template,
+                key.clone(),
+                VecDeque::new(),
+            )
+            .change_context_lazy(|| WasmStateResetRuntimeError::InitialCheckpoint {
+                processor: processor.clone(),
+            })?;
+            runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &key);
+            instances.insert_changed(key, execution_now, task);
+            branch.activated = true;
+        }
+        publish_branch_instance_lru_snapshot(runtime, domain, template, instances)
+            .change_context_lazy(|| WasmStateResetRuntimeError::InitialCheckpoint {
+                processor: processor.clone(),
+            })?;
+        persist_branch_instance_lru_snapshot(
+            runtime,
+            domain,
+            template,
+            instances,
+            last_persisted_lru_lsm,
+        )
+        .map_err(|error| {
+            Report::new(WasmStateResetRuntimeError::InitialCheckpoint {
+                processor: processor.clone(),
+            })
+            .attach_printable(error)
+        })?;
+        let branch_lru =
+            branch_lru_placement(runtime, domain, template).change_context_lazy(|| {
+                WasmStateResetRuntimeError::InitialCheckpoint {
+                    processor: processor.clone(),
+                }
+            })?;
+        let branch_lru_deadline = Instant::now()
+            .checked_add(WASM_CHECKPOINT_DEADLINE)
+            .assured("the configured WASM checkpoint deadline stays within Instant");
+        runtime
+            .confirm_branch_lru_checkpoint(&branch_lru, instances.version(), branch_lru_deadline)
+            .await
+            .change_context_lazy(|| WasmStateResetRuntimeError::InitialCheckpoint {
+                processor: processor.clone(),
+            })?;
+
+        for branch in &mut current.branches {
+            tokio::task::consume_budget().await;
+            let Some(initial_state) = branch.initial_state.as_ref() else {
+                continue;
+            };
+            runtime
+                .commit_wasm_state_reset_checkpoint(
+                    domain,
+                    &processor,
+                    branch.key.clone(),
+                    initial_state.clone(),
+                )
+                .await?;
+            branch.initial_state = None;
+        }
+        for branch in &mut current.branches {
+            branch.previous.take();
+        }
+        Ok(())
+    }
+}
+
+fn complete_processor_wasm_state_reset(
+    processor: &ModelName,
+    reset: &nervix_models::WasmStateReset,
+    fence: &mut Option<nervix_models::WasmStateReset>,
+    prepared: &mut Option<PreparedWasmStateReset>,
+) -> error_stack::Result<(), WasmStateResetRuntimeError> {
+    if let Some(current) = fence.as_ref()
+        && (current.request() != reset.request() || current.scope() != reset.scope())
+    {
+        return Err(Report::new(WasmStateResetRuntimeError::RequestConflict {
+            processor: processor.clone(),
+        }));
+    }
+    if let Some(current) = prepared.as_ref()
+        && !current.matches(reset.request(), *reset.scope())
+    {
+        return Err(Report::new(WasmStateResetRuntimeError::RequestConflict {
+            processor: processor.clone(),
+        }));
+    }
+    *prepared = None;
+    *fence = None;
+    Ok(())
 }
 
 pub(super) struct ProcessorNodeDispatchContext<'a> {
@@ -1317,6 +1802,7 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            wasm_state_reset: None,
         };
         let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
         let domain_clock = runtime

@@ -257,6 +257,22 @@ checkpoint as it waits for any other outstanding acknowledgement. The checkpoint
 deadline bounds that wait: a checkpoint that cannot complete fails and negatively acknowledges what
 it held.
 
+A coordinated WASM state reset is serialized with domain lifecycle, placement, ownership movement,
+resource rebinding, and model mutation by the domain alteration lease and its entity gate. If node
+shutdown interrupts a preparation before reset publication, the old generation remains
+authoritative; ordinary reset error handling restores the stopped task when it can, while terminal
+teardown may discard its volatile handoff and negatively acknowledge what it held. Restart then
+restores the old generation. If the reset's `Publishing` schedule wins, the old generation is
+already fenced permanently. Drain support keeps schedule activation, state storage, replication,
+and interconnect handlers alive so the fresh initial checkpoint and `Ready` publication can finish
+within their ordinary bounds. If shutdown ends first, restart observes `Publishing` and resumes the
+new generation rather than restoring the old one.
+
+Resetting one concrete branch does not turn a sibling branch into shutdown work. Its scoped relay
+gate and processor command lane select only that branch; sibling callbacks, checkpoints, outputs,
+ACKs, and timers continue until shutdown itself reaches them. Old timeout handles belong to the
+discarded branch instance and are never transferred to the fresh instance.
+
 Two kinds of work deliberately do not hold the drain open:
 
 - **Pending `REQUIRED WAIT` records.** A message suspended on absent materialized state cannot

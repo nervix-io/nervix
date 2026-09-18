@@ -157,6 +157,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   There is no context-free engine clock. Guest initialization, input, timeout, flush, and state
   lifecycle operations each use the snapshot selected for that operation; guest timeout delays are
   logical, while Wasmtime fuel and epoch yielding are physical safety controls.
+- Do not simulate a WASM guest-state reset with `ALTER`, resource rebinding, or a stop/start cycle.
+  A coordinated reset is a control-plane state-lifetime operation with an explicit unbranched,
+  concrete-branch, or all-branches target and a stable execution reference. It is not currently an
+  NSPL graph statement. Until a documented administrative or SDK surface exposes it, say that no
+  public NSPL reset syntax exists rather than inventing one.
 - Declare exact schema types and nullability. Use explicit conversions; never invent implicit
   casts between wire, internal, branch, processor, lookup, state, and sink values.
 - Use `IF ... THEN ... ELSE ... END` or searched/simple `CASE` for conditional values. Keep every

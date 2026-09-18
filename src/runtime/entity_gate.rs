@@ -238,6 +238,7 @@ impl EntityDrainStatus {
 
 pub(in crate::runtime) struct EntityGateHold {
     pub(super) gates: Vec<RelayDispatchGateLease>,
+    pub(super) branch_gates: Vec<BranchRelayDispatchGateLease>,
 }
 
 #[derive(Clone, Copy)]
@@ -519,6 +520,7 @@ impl EntityGateHold {
 
     pub(super) fn release_all(&mut self) {
         self.gates.clear();
+        self.branch_gates.clear();
     }
 }
 
@@ -596,13 +598,52 @@ impl Runtime {
         let mut gates = Vec::with_capacity(relays.len());
         for relay in relays {
             let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone());
-            let Some(fanout) = self.inner.relay_boundary_fanouts.get(&key) else {
+            let Some(fanout) = self
+                .inner
+                .relay_boundary_fanouts
+                .get(&key)
+                .map(|fanout| fanout.clone())
+            else {
                 continue;
             };
             let gate = fanout.dispatch_gate();
             gates.push(RelayDispatchGateLease::engage(gate, deadline, reason));
         }
-        EntityGateHold { gates }
+        EntityGateHold {
+            gates,
+            branch_gates: Vec::new(),
+        }
+    }
+
+    async fn engage_wasm_state_reset_gates(
+        &self,
+        domain: &DomainName,
+        relays: &[RelayName],
+        scope: WasmStateResetScope,
+        deadline: Instant,
+        reason: &str,
+    ) -> Option<EntityGateHold> {
+        let mut branch_gates = Vec::with_capacity(relays.len());
+        for relay in relays {
+            tokio::task::consume_budget().await;
+            let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone());
+            let Some(fanout) = self
+                .inner
+                .relay_boundary_fanouts
+                .get(&key)
+                .map(|fanout| fanout.clone())
+            else {
+                continue;
+            };
+            let gate = fanout
+                .engage_branch_dispatch_gate(scope, deadline, reason)
+                .await?;
+            branch_gates.push(gate);
+        }
+        Some(EntityGateHold {
+            gates: Vec::new(),
+            branch_gates,
+        })
     }
 
     pub(crate) async fn engage_entity_gate_operation(
@@ -660,7 +701,33 @@ impl Runtime {
     ) {
         let domain = &scope.domain;
         let purpose = scope.purpose;
-        let mut gates = self.engage_entity_gates(domain, &scope.relays, deadline, &reason);
+        let mut gates = match purpose {
+            EntityGatePurpose::WasmStateReset(reset_scope) => {
+                let Some(gates) = self
+                    .engage_wasm_state_reset_gates(
+                        domain,
+                        &scope.relays,
+                        reset_scope,
+                        deadline,
+                        &reason,
+                    )
+                    .await
+                else {
+                    let failure = EntityGateOperationError::RelayFenceDeadline {
+                        domain: domain.clone(),
+                    };
+                    operation.fail(failure);
+                    self.inner
+                        .entity_gate_holds
+                        .remove_if(&coordination, |_, current| Arc::ptr_eq(current, &operation));
+                    return;
+                };
+                gates
+            }
+            EntityGatePurpose::ModelAlteration | EntityGatePurpose::OwnershipHandoff => {
+                self.engage_entity_gates(domain, &scope.relays, deadline, &reason)
+            }
+        };
         if !gates.wait_quiescent().await {
             gates.release();
             let failure = EntityGateOperationError::RelayFenceDeadline {
@@ -681,6 +748,7 @@ impl Runtime {
         let quiesce_cause = match purpose {
             EntityGatePurpose::ModelAlteration => IngestorQuiesceCause::EntityHold,
             EntityGatePurpose::OwnershipHandoff => IngestorQuiesceCause::OwnershipHandoff,
+            EntityGatePurpose::WasmStateReset(_) => IngestorQuiesceCause::EntityHold,
         };
         let mut quiesced_ingestors = Vec::new();
         for ingestor in &ingestors {
@@ -718,7 +786,9 @@ impl Runtime {
             purpose,
             quiesced_ingestors,
         };
-        self.force_flush_domain(domain);
+        if !matches!(purpose, EntityGatePurpose::WasmStateReset(_)) {
+            self.force_flush_domain(domain);
+        }
         if Instant::now() >= deadline {
             Self::release_entity_alter_hold(
                 &self.inner.ingestors,

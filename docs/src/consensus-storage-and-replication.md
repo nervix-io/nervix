@@ -66,6 +66,27 @@ A crash or lost connection after durable application but before delivery of the 
 the client uncertain even though the command took effect; persistent administrative requests use
 their stable execution reference to join or retrieve that result.
 
+### Coordinated WASM Reset Publications
+
+A coordinated WASM state reset stores its command execution reference, exact branch scope, phase,
+and advanced guest-state generation in the domain schedule. The first applied schedule phase,
+`Publishing`, is the irreversible authority boundary: after that applied response, restart and
+leader failover continue the new generation even when its fresh initial checkpoint is not usable
+yet. Repeating the same request rejoins that publication rather than appending another generation.
+
+The initial guest checkpoint is runtime state and follows its separate local and replica
+synchronization path. Live replicas install the published generation before the owner starts its
+initial checkpoint. Reset preparation never publishes the temporary absence of a selected branch
+through the branch-lifecycle checkpoint, and reinserting the branch advances that checkpoint's
+revision before the new guest checkpoint is offered. Once the guest checkpoint is durable on the
+owner and every assigned replica, a second consensus mutation changes the same reset to `Ready`.
+Success is returned only after every live node applies that phase while the selected relay scope
+remains fenced. A follower or offline replica that skips the intermediate runtime activation still
+catches up through the ordered schedule records and cannot accept a checkpoint from the replaced
+generation. Thus a pre-publication failure leaves the old schedule authoritative, while a
+post-publication failure is recovered as committed but not yet usable rather than rolled back or
+acknowledged early.
+
 ## Replication Pacing
 
 The leader keeps one ordered append stream to each follower. That stream uses the replication pool;

@@ -2357,6 +2357,7 @@ mod tests {
                     error_policies: ErrorPolicies::handled_by_log(),
                     relays: HashMap::default(),
                     processors: HashMap::default(),
+                    wasm_state_reset: None,
                 },
                 ack_boundary: BranchInstanceAckBoundary::Preserve,
                 flush_policy: RuntimeFlushPolicy::Each {

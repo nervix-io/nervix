@@ -165,5 +165,6 @@ pub use statement::{
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};
 pub use wasm_state_generation::{
-    InvalidWasmStateGeneration, WasmStateGeneration, WasmStateGenerations,
+    InvalidWasmStateGeneration, WasmStateGeneration, WasmStateGenerations, WasmStateReset,
+    WasmStateResetPhase, WasmStateResetScope,
 };

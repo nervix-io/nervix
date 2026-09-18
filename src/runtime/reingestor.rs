@@ -1536,6 +1536,7 @@ mod tests {
             .into_iter()
             .collect(),
             processors: HashMap::default(),
+            wasm_state_reset: None,
         };
         let inputs = [
             RelayRecordBatch::single(
@@ -1694,6 +1695,7 @@ mod tests {
             .into_iter()
             .collect(),
             processors: HashMap::default(),
+            wasm_state_reset: None,
         };
         let graph = StdArc::new(ArcSwapOption::from(None));
         let mut instances =
@@ -1848,6 +1850,7 @@ mod tests {
                     .into_iter()
                     .collect(),
                     processors: HashMap::default(),
+                    wasm_state_reset: None,
                 },
                 ack_boundary: BranchInstanceAckBoundary::Reingestor(AckMode::Attached),
                 flush_policy: RuntimeFlushPolicy::Immediate,

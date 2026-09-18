@@ -193,6 +193,7 @@ fn processor_node_spec(
         branch: policy.branch,
         branch_ttl: policy.ttl,
         branch_max_instances: policy.max_instances,
+        wasm_state_reset: None,
     }
 }
 
@@ -206,11 +207,23 @@ pub(in crate::runtime) struct PlannedModel {
 pub(in crate::runtime) fn branched_node_specs_from_scheduled_nodes(
     nodes: &ScheduledNodes,
 ) -> BranchedNodeSpecs {
-    branched_node_specs_from_models(nodes.values().map(|node| PlannedModel {
+    let resets = nodes
+        .values()
+        .filter_map(|node| {
+            node.wasm_state_reset()
+                .cloned()
+                .map(|reset| (node.identifier.clone(), reset))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut specs = branched_node_specs_from_models(nodes.values().map(|node| PlannedModel {
         kind: node.kind(),
         identifier: node.identifier.clone(),
         model: (*node.config).clone(),
-    }))
+    }));
+    for processor in &mut specs.processors {
+        processor.wasm_state_reset = resets.get(&processor.spec.processor).cloned();
+    }
+    specs
 }
 
 pub(in crate::runtime) fn branched_node_specs_from_active_graph(
@@ -997,6 +1010,7 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
             error_policies: spec.error_policies.clone(),
             relays,
             processors: HashMap::default(),
+            wasm_state_reset: None,
         },
         ack_boundary: spec.output_ack_boundary,
         flush_policy: parse_branch_flush_policy(
@@ -1050,6 +1064,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
         error_policies: spec.error_policies.clone(),
         relays,
         processors,
+        wasm_state_reset: node.wasm_state_reset.clone(),
     })
 }
 
@@ -1429,6 +1444,7 @@ mod tests {
             branch: None,
             branch_ttl: None,
             branch_max_instances: None,
+            wasm_state_reset: None,
         };
         let error = materialize_processor_instance_template(
             &node,
