@@ -26,6 +26,7 @@ test: tests-deps
     # their modeled features separately.
     shuttle_packages=(
         nervix-client-core
+        nervix-connector
         nervix-consensus
         nervix-execution
         nervix-interconnect
@@ -40,6 +41,7 @@ test: tests-deps
     cargo test --all-targets --features testing --package nervix-server
     cargo test --all-targets \
         --package nervix-client-core \
+        --package nervix-connector \
         --package nervix-consensus \
         --package nervix-execution \
         --package nervix-interconnect \
@@ -245,6 +247,7 @@ test-coverage: tests-deps
     # without running modeled synchronization outside a Shuttle runner.
     shuttle_packages=(
         nervix-client-core
+        nervix-connector
         nervix-consensus
         nervix-execution
         nervix-interconnect
@@ -261,6 +264,7 @@ test-coverage: tests-deps
     cargo llvm-cov --no-report --all-targets --features testing --package nervix-server
     cargo llvm-cov --no-report --all-targets \
         --package nervix-client-core \
+        --package nervix-connector \
         --package nervix-consensus \
         --package nervix-execution \
         --package nervix-interconnect \
@@ -426,6 +430,7 @@ cargo-clippy-all:
     # boundary separately. `test-shuttle` compiles and runs the modeled test targets.
     shuttle_packages=(
         nervix-client-core
+        nervix-connector
         nervix-consensus
         nervix-execution
         nervix-interconnect
@@ -439,6 +444,7 @@ cargo-clippy-all:
     cargo clippy --all-features --all-targets --workspace "${workspace_exclusions[@]}"
     cargo clippy --all-targets --features 'benchmarks testing' --package nervix-server
     cargo clippy --all-targets --features autocomplete --package nervix-client-core
+    cargo clippy --all-targets --package nervix-connector
     cargo clippy --all-targets --features testing --package nervix-consensus
     cargo clippy --all-targets \
         --package nervix-execution \
@@ -446,6 +452,7 @@ cargo-clippy-all:
         --package nervix-wasm
     cargo clippy --lib --features 'shuttle testing' \
         --package nervix-client-core \
+        --package nervix-connector \
         --package nervix-consensus \
         --package nervix-execution \
         --package nervix-interconnect \
@@ -492,31 +499,19 @@ validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries v
 
 validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-shuttle-dependencies
 
-# Production package manifests name only the pass-through synchronization wrappers. The real
-# primitive crates may appear transitively below those wrappers, but never as direct dependencies.
+# Shuttle's runner and synchronization wrappers belong only to modeled builds. Production package
+# graphs use the real synchronization crates directly and contain no Shuttle package.
 validate-shuttle-dependencies:
     #!/usr/bin/env bash
     set -euo pipefail
-    packages=(
-        nervix-client-core
-        nervix-connector
-        nervix-consensus
-        nervix-execution
-        nervix-interconnect
-        nervix-server
-        nervix-wasm
-    )
-    for package in "${packages[@]}"; do
-        direct_dependencies="$(
-            cargo tree --package "${package}" --edges normal --depth 1 \
-                --no-default-features --prefix none
-        )"
-        if printf '%s\n' "${direct_dependencies}" \
-            | grep -E '^(dashmap|parking_lot|tokio|tokio-stream|tokio-util) v'; then
-            echo "${package} names a real synchronization primitive directly" >&2
-            exit 1
-        fi
-    done
+    production_dependencies="$(
+        cargo tree --workspace --edges normal --no-default-features --prefix none
+    )"
+    if printf '%s\n' "${production_dependencies}" \
+        | grep -E '^shuttle([[:space:]-]|$)'; then
+        echo "the production workspace includes a Shuttle package" >&2
+        exit 1
+    fi
 
 validate-clock-boundaries:
     python3 scripts/check_clock_boundaries.py

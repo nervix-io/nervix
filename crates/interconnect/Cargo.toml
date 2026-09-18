@@ -11,19 +11,23 @@ workspace = true
 [features]
 default = []
 shuttle = [
-  "dashmap/shuttle",
   "dep:shuttle",
   "nervix-execution/shuttle",
-  "parking_lot/shuttle",
-  "tokio/shuttle",
-  "tokio-util/shuttle",
+  "dep:shuttle-dashmap",
+  "dep:shuttle-parking-lot",
+  "dep:shuttle-tokio",
+  "dep:shuttle-tokio-util",
+  "shuttle-dashmap/shuttle",
+  "shuttle-parking-lot/shuttle",
+  "shuttle-tokio/shuttle",
+  "shuttle-tokio-util/shuttle",
 ]
 
 [dependencies]
 ahash = { workspace = true }
 arch-into = { workspace = true }
 bytes = { workspace = true }
-dashmap = { package = "shuttle-dashmap", version = "6" }
+dashmap = { workspace = true }
 error-stack = { workspace = true }
 fastrand = { workspace = true }
 futures-util = { workspace = true }
@@ -33,20 +37,22 @@ meticulous = { workspace = true }
 nervix-execution = { workspace = true }
 nervix-models = { workspace = true }
 nervix-recovery = { workspace = true }
-parking_lot = { package = "shuttle-parking_lot", version = "0.12" }
+parking_lot = { workspace = true }
 percent-encoding = { workspace = true }
 rand_core = { workspace = true }
 rkyv = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 shuttle = { workspace = true, optional = true }
+shuttle-dashmap = { workspace = true, optional = true }
+shuttle-parking-lot = { workspace = true, optional = true }
+shuttle-tokio = { workspace = true, features = ["full"], optional = true }
+shuttle-tokio-util = { workspace = true, features = ["rt"], optional = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
-tokio = { package = "shuttle-tokio", version = "1", features = ["full"] }
+tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
-tokio-util = { package = "shuttle-tokio-util", version = "0.7", features = [
-  "rt",
-] }
+tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
 triomphe = { workspace = true }
 url = { workspace = true }

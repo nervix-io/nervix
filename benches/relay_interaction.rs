@@ -1,3 +1,6 @@
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+
 use std::time::{Duration, Instant};
 
 use arch_into::ArchInto as _;

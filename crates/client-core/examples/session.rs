@@ -1,3 +1,6 @@
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+
 use nervix_client_core::{Client, SubscriptionRequest};
 
 #[tokio::main(flavor = "current_thread")]
