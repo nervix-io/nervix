@@ -13,7 +13,9 @@ use std::{collections::BTreeSet, num::NonZeroU64};
 use ahash::{HashMap, HashSet};
 use meticulous::OptionExt as _;
 use nervix_client_core::Client as NervixClient;
-use nervix_consensus::{CommandExecution, ConsensusError, DomainMutationLease};
+use nervix_consensus::{
+    CommandExecution, ConsensusError, DomainMutationLease, DomainPlanningInputs,
+};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, DomainName, IngestSource, IngestorName, KafkaOffsetMode,
     KafkaPartitionSchedule, Model, ModelKind, ModelName, NodeRef, PlacementGroupSchedule,
@@ -32,8 +34,8 @@ use super::{
         AssignmentRelocation, DrainMove, format_planned_ownership_move,
         mark_complete_ownership_transitions, planned_ownership_moves,
     },
-    peer_grpc::{grpc_client_connect_options, grpc_uri_from_advertise_addr},
-    schedule_planning::PreparedDomainSchedule,
+    peer_grpc::grpc_client_connect_options,
+    schedule_planning::{DomainSchedulePlanningSnapshot, PreparedDomainSchedule},
     session_service::SessionServiceImpl,
     shutdown::{ShutdownDeadline, ShutdownPhaseOutcome},
 };
@@ -159,6 +161,8 @@ pub(in crate::application) struct ScheduleTransition {
     pub(in crate::application) expected_schedule: Option<nervix_models::DomainSchedule>,
     pub(in crate::application) prepared_schedule: Option<nervix_models::DomainSchedule>,
     pub(in crate::application) planned_relocations: usize,
+    pub(in crate::application) inputs: Option<DomainPlanningInputs>,
+    pub(in crate::application) planning: Option<DomainSchedulePlanningSnapshot>,
 }
 
 /// One Kafka partition watcher the leader runs: the ingestor it watches for, and the task doing
@@ -195,30 +199,30 @@ impl SessionServiceImpl {
                 domain.as_str()
             ));
         }
-        let default_policy = self
-            .inner
-            .consensus
-            .current_domain(domain)
-            .await
+        let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
+        let default_policy = inputs
+            .state()
             .ok_or_else(|| format!("domain '{}' does not exist", domain.as_str()))?
             .config
             .placement;
-        let expected_schedule = self
-            .inner
-            .consensus
-            .current_schedule()
-            .await
-            .domain(domain)
-            .cloned();
+        let planning = self
+            .capture_domain_schedule_planning_snapshot(&inputs)
+            .await;
         let PreparedDomainSchedule {
             schedule,
             relocations,
-        } = self
-            .prepare_domain_schedule(domain, graph, default_policy)
-            .await?;
+            ..
+        } = planning.prepare(&inputs, domain, graph, default_policy, inputs.schedule());
+        self.validate_domain_planning_inputs(&inputs)
+            .await
+            .map_err(|error| error.to_string())?;
+        planning
+            .validate_eligibility(self)
+            .await
+            .map_err(|error| error.to_string())?;
         self.inner
             .consensus
-            .replace_domain_schedule(domain.clone(), expected_schedule, schedule, mutation)
+            .replace_domain_schedule(inputs, schedule, mutation)
             .await
             .map_err(|error| error.to_string())?;
         self.apply_current_cluster_state().await.map_err(|error| {
@@ -236,9 +240,11 @@ impl SessionServiceImpl {
         graph: Option<ActiveGraph>,
         placement: PlacementPolicy,
     ) -> Result<PreparedDomainSchedule, String> {
-        let snapshot = self.capture_domain_schedule_planning_snapshot().await;
-        let current = self.inner.consensus.current_schedule().await;
-        Ok(snapshot.prepare(domain, graph, placement, current.domain(domain)))
+        let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
+        let snapshot = self
+            .capture_domain_schedule_planning_snapshot(&inputs)
+            .await;
+        Ok(snapshot.prepare(&inputs, domain, graph, placement, inputs.schedule()))
     }
 
     pub(in crate::application) async fn drop_node(
@@ -287,7 +293,6 @@ impl SessionServiceImpl {
             }
         }
 
-        let current_schedule = self.inner.consensus.current_schedule().await;
         if !is_resuming_applied_removal {
             match self
                 .inner
@@ -307,21 +312,18 @@ impl SessionServiceImpl {
             }
         }
 
-        let availability = self.inner.cluster.availability_state().await;
-        let live_node_ids = availability.live_node_ids();
-        let placement_candidate_node_ids = availability.placement_candidate_node_ids();
-        let live_voters = self.inner.consensus.live_voter_ids(live_node_ids).await;
-        let schedulable_nodes = self
-            .inner
-            .consensus
-            .schedulable_live_voter_ids(placement_candidate_node_ids)
-            .await;
-        let (cluster_nodes, preservable_nodes) =
-            Self::drop_node_schedule_node_sets(&live_voters, &schedulable_nodes);
         for (domain, graph) in self.inner.registry.active_graphs() {
-            let Some(domain_state) = self.inner.consensus.current_domain(&domain).await else {
+            let inputs = self.inner.consensus.domain_planning_inputs(&domain).await;
+            let Some(domain_state) = inputs.state() else {
                 continue;
             };
+            let planning = self
+                .capture_domain_schedule_planning_snapshot(&inputs)
+                .await;
+            let (cluster_nodes, preservable_nodes) = Self::drop_node_schedule_node_sets(
+                planning.live_voters(),
+                planning.cluster_nodes(),
+            );
             #[cfg(feature = "testing")]
             let mut schedule = graph.schedule_for_domain_with_mode(
                 &domain,
@@ -337,20 +339,23 @@ impl SessionServiceImpl {
                 self.inner.replica_count,
                 domain_state.config.placement,
             );
-            Self::merge_existing_schedule_data(
-                &mut schedule,
-                current_schedule.domain(&domain),
-                preservable_nodes,
-            );
+            Self::merge_existing_schedule_data(&mut schedule, inputs.schedule(), preservable_nodes);
+            if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {
+                return command_error(format!(
+                    "dropped node '{node_id}', but could not replan domain '{}': {error}",
+                    domain.as_str()
+                ));
+            }
+            if let Err(error) = planning.validate_eligibility(self).await {
+                return command_error(format!(
+                    "dropped node '{node_id}', but could not replan domain '{}': {error}",
+                    domain.as_str()
+                ));
+            }
             if let Err(error) = self
                 .inner
                 .consensus
-                .replace_domain_schedule(
-                    domain.clone(),
-                    current_schedule.domain(&domain).cloned(),
-                    Some(schedule),
-                    None,
-                )
+                .replace_domain_schedule(inputs, Some(schedule), None)
                 .await
             {
                 return command_error(format!(
@@ -484,24 +489,6 @@ impl SessionServiceImpl {
         let mut failed_units = BTreeSet::<(DomainName, String)>::new();
         let mut failed_domains = BTreeSet::<DomainName>::new();
         loop {
-            let availability = self.inner.cluster.availability_state().await;
-            let live_node_ids = availability.live_node_ids();
-            let placement_candidate_node_ids = availability.placement_candidate_node_ids();
-            let live_voters = self.inner.consensus.live_voter_ids(live_node_ids).await;
-            let replacement_nodes = self
-                .inner
-                .consensus
-                .schedulable_live_voter_ids(placement_candidate_node_ids)
-                .await;
-            if replacement_nodes.is_empty() {
-                failed = true;
-                outcomes.push(format!(
-                    "- owner={node_id} failed: no live schedulable raft voters remain"
-                ));
-                break;
-            }
-            let live_voter_set = live_voters.iter().cloned().collect::<BTreeSet<_>>();
-            let replacement_node_set = replacement_nodes.iter().cloned().collect::<BTreeSet<_>>();
             let mut handled_this_iteration = false;
 
             for (domain, graph) in self.inner.registry.active_graphs() {
@@ -553,10 +540,31 @@ impl SessionServiceImpl {
                 } else {
                     None
                 };
-                let Some(domain_state) = self.inner.consensus.current_domain(&domain).await else {
+                let inputs = self.inner.consensus.domain_planning_inputs(&domain).await;
+                let Some(domain_state) = inputs.state() else {
                     continue;
                 };
-                let current_schedule = self.inner.consensus.current_schedule().await;
+                let planning = self
+                    .capture_domain_schedule_planning_snapshot(&inputs)
+                    .await;
+                let replacement_nodes = planning.cluster_nodes().to_vec();
+                let live_voter_set = planning
+                    .live_voters()
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let replacement_node_set =
+                    replacement_nodes.iter().cloned().collect::<BTreeSet<_>>();
+                if replacement_nodes.is_empty() {
+                    failed = true;
+                    failed_domains.insert(domain.clone());
+                    outcomes.push(format!(
+                        "- domain={} owner={node_id} failed: no live schedulable raft voters \
+                         remain",
+                        domain.as_str()
+                    ));
+                    continue;
+                }
                 #[cfg(feature = "testing")]
                 let desired = graph.schedule_for_domain_with_mode(
                     &domain,
@@ -572,16 +580,31 @@ impl SessionServiceImpl {
                     self.inner.replica_count,
                     domain_state.config.placement,
                 );
-                let Some(current_domain) = current_schedule.domain(&domain) else {
+                let Some(current_domain) = inputs.schedule() else {
+                    if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {
+                        failed = true;
+                        failed_domains.insert(domain.clone());
+                        outcomes.push(format!(
+                            "- domain={} owner={node_id} failed: {error}",
+                            domain.as_str()
+                        ));
+                        handled_this_iteration = true;
+                        break;
+                    }
+                    if let Err(error) = planning.validate_eligibility(self).await {
+                        failed = true;
+                        failed_domains.insert(domain.clone());
+                        outcomes.push(format!(
+                            "- domain={} owner={node_id} failed: {error}",
+                            domain.as_str()
+                        ));
+                        handled_this_iteration = true;
+                        break;
+                    }
                     if let Err(error) = self
                         .inner
                         .consensus
-                        .replace_domain_schedule(
-                            domain.clone(),
-                            None,
-                            Some(desired),
-                            domain_mutation.as_ref(),
-                        )
+                        .replace_domain_schedule(inputs, Some(desired), domain_mutation.as_ref())
                         .await
                     {
                         if let ConsensusError::LeadershipLost { .. } = &error {
@@ -638,6 +661,26 @@ impl SessionServiceImpl {
                 let unit_key = (domain.clone(), drain_move.label.clone());
                 mark_complete_ownership_transitions(Some(current_domain), &mut next);
                 let planned_moves = planned_ownership_moves(Some(current_domain), Some(&next));
+                if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {
+                    failed = true;
+                    failed_units.insert(unit_key);
+                    outcomes.push(format!(
+                        "- {} owner={node_id} failed: {error}",
+                        drain_move.label
+                    ));
+                    handled_this_iteration = true;
+                    break;
+                }
+                if let Err(error) = planning.validate_eligibility(self).await {
+                    failed = true;
+                    failed_units.insert(unit_key);
+                    outcomes.push(format!(
+                        "- {} owner={node_id} failed: {error}",
+                        drain_move.label
+                    ));
+                    handled_this_iteration = true;
+                    break;
+                }
                 let mut handoff = match self
                     .begin_planned_ownership_handoff(&domain, Some(current_domain), Some(&next))
                     .await
@@ -668,12 +711,7 @@ impl SessionServiceImpl {
                 if let Err(error) = self
                     .inner
                     .consensus
-                    .replace_domain_schedule(
-                        domain.clone(),
-                        Some(current_domain.clone()),
-                        Some(next),
-                        domain_mutation.as_ref(),
-                    )
+                    .replace_domain_schedule(inputs, Some(next), domain_mutation.as_ref())
                     .await
                 {
                     if let Some(handoff) = handoff.take() {
@@ -1052,15 +1090,15 @@ impl SessionServiceImpl {
         }
     }
 
+    /// Where the leader's session service is, or `None` while it has not advertised one.
     async fn leader_grpc_uri(&self, leader_id: &ClusterNodeName) -> Option<String> {
-        self.inner
-            .cluster
-            .gossip_state()
-            .await
+        let gossip = self.inner.cluster.gossip_state().await;
+        let leader = gossip
             .live_nodes
             .into_iter()
-            .find(|node| node.node_id == *leader_id)
-            .and_then(|node| grpc_uri_from_advertise_addr(&node.grpc_advertise_addr))
+            .find(|node| node.node_id == *leader_id)?;
+        let client_url = leader.client_url?;
+        Some(client_url.to_string())
     }
 
     #[cfg(test)]
@@ -1344,6 +1382,9 @@ impl SessionServiceImpl {
             );
             if let Some(ownership_transition) = ownership_transition {
                 node.ownership_transition = Some(ownership_transition);
+                if relocation.replaces_owner_state() {
+                    node.begin_wasm_state_generation();
+                }
             }
             node.primary_node = Some(target.clone());
             node.assigned_nodes = assigned_nodes;
@@ -1472,6 +1513,9 @@ impl SessionServiceImpl {
 
         if let Some(ownership_transition) = ownership_transition {
             node.ownership_transition = Some(ownership_transition);
+            if relocation.replaces_owner_state() {
+                node.begin_wasm_state_generation();
+            }
         }
         node.primary_node = Some(target.clone());
         node.assigned_nodes = assigned_nodes;
@@ -1618,6 +1662,7 @@ impl SessionServiceImpl {
         for node in schedule.nodes.values_mut() {
             if let Some(existing_node) = existing.nodes.get(&node.identity()) {
                 node.kafka_partition_schedule = existing_node.kafka_partition_schedule.clone();
+                node.continue_wasm_state_generations_of(existing_node);
             }
         }
 
@@ -1812,8 +1857,8 @@ impl SessionServiceImpl {
             return Ok(());
         }
 
-        let current = self.inner.consensus.current_schedule().await;
-        let Some(existing_domain_schedule) = current.domain(domain) else {
+        let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
+        let Some(existing_domain_schedule) = inputs.schedule() else {
             return Ok(());
         };
         let mut next_domain_schedule = existing_domain_schedule.clone();
@@ -1855,12 +1900,7 @@ impl SessionServiceImpl {
         ingestor_node.kafka_partition_schedule = Some(next_schedule);
         self.inner
             .consensus
-            .replace_domain_schedule(
-                domain.clone(),
-                Some(existing_domain_schedule.clone()),
-                Some(next_domain_schedule),
-                None,
-            )
+            .update_kafka_partition_schedule(inputs, next_domain_schedule)
             .await
             .map_err(|error| error.to_string())
     }
@@ -2023,927 +2063,8 @@ impl SessionServiceImpl {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeSet;
+mod tests;
 
-    use nervix_models::{
-        ClusterNodeName, DomainName, DomainSchedule, KafkaPartitionSchedule, ModelKind,
-    };
-    use nonzero_ext::nonzero;
-
-    use super::super::{
-        ownership_handoff::{DrainMove, prefer_former_owners_as_replicas},
-        session_service::SessionServiceImpl,
-        test_fixtures::{
-            named, node_named, placement_group, placement_member, scheduled_node, scheduled_node_on,
-        },
-    };
-
-    #[test]
-    fn drop_node_quorum_error_allows_available_current_quorum() {
-        let voters = BTreeSet::from([
-            named::<ClusterNodeName>("node-1"),
-            named::<ClusterNodeName>("node-2"),
-            named::<ClusterNodeName>("node-3"),
-        ]);
-        let live_node_ids = BTreeSet::from([
-            named::<ClusterNodeName>("node-1"),
-            named::<ClusterNodeName>("node-3"),
-        ]);
-
-        assert!(
-            SessionServiceImpl::drop_node_quorum_error(
-                &ClusterNodeName::parse("node-2").expect("valid name"),
-                &voters,
-                &live_node_ids
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn drop_node_rebuild_uses_only_schedulable_nodes_for_new_assignments() {
-        let live_voters = vec![
-            named::<ClusterNodeName>("node-live"),
-            named::<ClusterNodeName>("node-cordoned"),
-        ];
-        let schedulable_nodes = vec![named::<ClusterNodeName>("node-live")];
-
-        let (new_assignment_candidates, preservable_nodes) =
-            SessionServiceImpl::drop_node_schedule_node_sets(&live_voters, &schedulable_nodes);
-
-        assert_eq!(new_assignment_candidates, schedulable_nodes);
-        assert_eq!(preservable_nodes, live_voters);
-    }
-
-    #[test]
-    fn move_next_scheduled_node_for_drain_moves_only_one_node_in_canonical_order() {
-        let domain = DomainName::parse("payments").expect("valid domain");
-        let mut schedule = DomainSchedule::new(
-            domain.clone(),
-            vec![
-                scheduled_node_on("ingest_notifications", ModelKind::Ingestor, "node-2"),
-                scheduled_node_on("emit_notifications", ModelKind::Emitter, "node-2"),
-            ],
-            Vec::new(),
-        );
-        let desired = DomainSchedule::new(
-            domain,
-            vec![
-                scheduled_node_on("ingest_notifications", ModelKind::Ingestor, "node-1"),
-                scheduled_node_on("emit_notifications", ModelKind::Emitter, "node-3"),
-            ],
-            Vec::new(),
-        );
-
-        let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
-            &mut schedule,
-            &desired,
-            &ClusterNodeName::parse("node-2").expect("valid name"),
-            &BTreeSet::from([
-                named::<ClusterNodeName>("node-1"),
-                named::<ClusterNodeName>("node-2"),
-                named::<ClusterNodeName>("node-3"),
-            ]),
-            &BTreeSet::from([
-                named::<ClusterNodeName>("node-1"),
-                named::<ClusterNodeName>("node-3"),
-            ]),
-        );
-
-        assert_eq!(
-            moved,
-            Some(DrainMove {
-                label: "emitter emit_notifications".to_string(),
-                promoted_replica: None,
-                fallback_node: Some(ClusterNodeName::parse("node-3").expect("valid name")),
-            })
-        );
-        assert_eq!(
-            schedule.nodes[0].assigned_nodes,
-            vec![named::<ClusterNodeName>("node-2")]
-        );
-        assert_eq!(
-            schedule.nodes[1].assigned_nodes,
-            vec![named::<ClusterNodeName>("node-3")]
-        );
-    }
-
-    #[test]
-    fn planned_drain_uses_canonical_runtime_node_order() {
-        let domain = DomainName::parse("payments").expect("valid domain");
-        let mut schedule = DomainSchedule::new(
-            domain.clone(),
-            vec![
-                scheduled_node_on("zeta", ModelKind::Junction, "node-2"),
-                scheduled_node_on("alpha", ModelKind::Junction, "node-2"),
-            ],
-            Vec::new(),
-        );
-        let desired = DomainSchedule::new(
-            domain,
-            vec![
-                scheduled_node_on("zeta", ModelKind::Junction, "node-1"),
-                scheduled_node_on("alpha", ModelKind::Junction, "node-1"),
-            ],
-            Vec::new(),
-        );
-
-        let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
-            &mut schedule,
-            &desired,
-            &ClusterNodeName::parse("node-2").expect("valid name"),
-            &BTreeSet::from([
-                named::<ClusterNodeName>("node-1"),
-                named::<ClusterNodeName>("node-2"),
-            ]),
-            &BTreeSet::from([named::<ClusterNodeName>("node-1")]),
-        );
-
-        assert_eq!(
-            moved,
-            Some(DrainMove {
-                label: "junction alpha".to_string(),
-                promoted_replica: None,
-                fallback_node: Some(named::<ClusterNodeName>("node-1")),
-            })
-        );
-        assert_eq!(
-            schedule.nodes[0].primary_node.as_ref(),
-            Some(&named::<ClusterNodeName>("node-2"))
-        );
-        assert_eq!(
-            schedule.nodes[1].primary_node.as_ref(),
-            Some(&named::<ClusterNodeName>("node-1"))
-        );
-    }
-
-    #[test]
-    fn planned_drain_uses_the_first_member_to_order_placement_groups() {
-        let domain = DomainName::parse("payments").expect("valid domain");
-        let alpha_members = vec![placement_member("alpha", ModelKind::Junction)];
-        let zeta_members = vec![placement_member("zeta", ModelKind::Junction)];
-        let mut schedule = DomainSchedule::new(
-            domain.clone(),
-            vec![
-                scheduled_node_on("zeta", ModelKind::Junction, "node-2"),
-                scheduled_node_on("alpha", ModelKind::Junction, "node-2"),
-            ],
-            vec![
-                placement_group(
-                    zeta_members.clone(),
-                    &ClusterNodeName::parse("node-2").expect("valid name"),
-                ),
-                placement_group(
-                    alpha_members.clone(),
-                    &ClusterNodeName::parse("node-2").expect("valid name"),
-                ),
-            ],
-        );
-        let desired = DomainSchedule::new(
-            domain,
-            vec![
-                scheduled_node_on("zeta", ModelKind::Junction, "node-1"),
-                scheduled_node_on("alpha", ModelKind::Junction, "node-1"),
-            ],
-            vec![
-                placement_group(
-                    zeta_members,
-                    &ClusterNodeName::parse("node-1").expect("valid name"),
-                ),
-                placement_group(
-                    alpha_members,
-                    &ClusterNodeName::parse("node-1").expect("valid name"),
-                ),
-            ],
-        );
-
-        let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
-            &mut schedule,
-            &desired,
-            &ClusterNodeName::parse("node-2").expect("valid name"),
-            &BTreeSet::from([
-                named::<ClusterNodeName>("node-1"),
-                named::<ClusterNodeName>("node-2"),
-            ]),
-            &BTreeSet::from([named::<ClusterNodeName>("node-1")]),
-        );
-
-        assert_eq!(
-            moved,
-            Some(DrainMove {
-                label: "placement group [alpha]".to_string(),
-                promoted_replica: None,
-                fallback_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-            })
-        );
-        assert_eq!(
-            schedule.nodes[0].primary_node.as_ref(),
-            Some(&named::<ClusterNodeName>("node-2"))
-        );
-        assert_eq!(
-            schedule.nodes[1].primary_node.as_ref(),
-            Some(&named::<ClusterNodeName>("node-1"))
-        );
-    }
-
-    #[test]
-    fn planned_drain_prefers_policy_target_and_retains_former_owner_as_first_replica() {
-        let domain = DomainName::parse("payments").expect("valid domain");
-        let mut schedule = DomainSchedule::new(
-            domain.clone(),
-            vec![
-                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
-                    Some(node_named("node-2")),
-                    vec![
-                        node_named("node-2"),
-                        node_named("node-3"),
-                        node_named("node-4"),
-                    ],
-                ),
-            ],
-            Vec::new(),
-        );
-        let desired = DomainSchedule::new(
-            domain,
-            vec![
-                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
-                    Some(node_named("node-1")),
-                    vec![node_named("node-1"), node_named("node-3")],
-                ),
-            ],
-            Vec::new(),
-        );
-
-        let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
-            &mut schedule,
-            &desired,
-            &ClusterNodeName::parse("node-2").expect("valid name"),
-            &BTreeSet::from([
-                named::<ClusterNodeName>("node-1"),
-                named::<ClusterNodeName>("node-2"),
-                named::<ClusterNodeName>("node-3"),
-            ]),
-            &BTreeSet::from([
-                named::<ClusterNodeName>("node-1"),
-                named::<ClusterNodeName>("node-3"),
-            ]),
-        );
-
-        assert_eq!(
-            moved,
-            Some(DrainMove {
-                label: "deduplicator dedup_notifications".to_string(),
-                promoted_replica: None,
-                fallback_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-            })
-        );
-        assert_eq!(
-            schedule.nodes[0].primary_node.as_ref(),
-            Some(&named::<ClusterNodeName>("node-1"))
-        );
-        assert_eq!(
-            schedule.nodes[0].assigned_nodes,
-            vec![
-                named::<ClusterNodeName>("node-1"),
-                named::<ClusterNodeName>("node-2"),
-                named::<ClusterNodeName>("node-3"),
-            ]
-        );
-    }
-
-    #[test]
-    fn drain_require_group_prefers_policy_target_over_common_replica() {
-        let domain = DomainName::parse("payments").expect("valid domain");
-        let members = vec![
-            placement_member("corridor_source", ModelKind::Junction),
-            placement_member("corridor_sink", ModelKind::Junction),
-        ];
-        let mut schedule = DomainSchedule::new(
-            domain.clone(),
-            vec![
-                scheduled_node("corridor_source", ModelKind::Junction).placed_on(
-                    Some(node_named("node-2")),
-                    vec![node_named("node-2"), node_named("node-3")],
-                ),
-                scheduled_node("corridor_sink", ModelKind::Junction).placed_on(
-                    Some(node_named("node-2")),
-                    vec![node_named("node-2"), node_named("node-3")],
-                ),
-            ],
-            vec![placement_group(
-                members.clone(),
-                &ClusterNodeName::parse("node-2").expect("valid name"),
-            )],
-        );
-        let desired = DomainSchedule::new(
-            domain,
-            vec![
-                scheduled_node("corridor_source", ModelKind::Junction).placed_on(
-                    Some(node_named("node-1")),
-                    vec![node_named("node-1"), node_named("node-3")],
-                ),
-                scheduled_node("corridor_sink", ModelKind::Junction).placed_on(
-                    Some(node_named("node-1")),
-                    vec![node_named("node-1"), node_named("node-3")],
-                ),
-            ],
-            vec![placement_group(
-                members,
-                &ClusterNodeName::parse("node-1").expect("valid name"),
-            )],
-        );
-
-        let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
-            &mut schedule,
-            &desired,
-            &ClusterNodeName::parse("node-2").expect("valid name"),
-            &BTreeSet::from([
-                named::<ClusterNodeName>("node-1"),
-                named::<ClusterNodeName>("node-2"),
-                named::<ClusterNodeName>("node-3"),
-            ]),
-            &BTreeSet::from([
-                named::<ClusterNodeName>("node-1"),
-                named::<ClusterNodeName>("node-3"),
-            ]),
-        );
-
-        assert_eq!(
-            moved,
-            Some(DrainMove {
-                label: "placement group [corridor_source, corridor_sink]".to_string(),
-                promoted_replica: None,
-                fallback_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-            })
-        );
-        assert!(
-            schedule
-                .nodes
-                .values()
-                .all(|node| node.primary_node.as_ref()
-                    == Some(&ClusterNodeName::parse("node-1").expect("valid name")))
-        );
-        assert_eq!(
-            schedule.placement_groups[0].primary_node.as_ref(),
-            Some(&named::<ClusterNodeName>("node-1"))
-        );
-        assert!(schedule.nodes.values().all(|node| {
-            node.assigned_nodes
-                == vec![
-                    named::<ClusterNodeName>("node-1"),
-                    named::<ClusterNodeName>("node-2"),
-                ]
-        }));
-    }
-
-    #[test]
-    fn planned_drain_replaces_an_unavailable_replica_with_the_former_owner() {
-        let domain = DomainName::parse("payments").expect("valid domain");
-        let mut schedule = DomainSchedule::new(
-            domain.clone(),
-            vec![
-                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
-                    Some(node_named("node-2")),
-                    vec![node_named("node-2"), node_named("node-3")],
-                ),
-            ],
-            Vec::new(),
-        );
-        let desired = DomainSchedule::new(
-            domain,
-            vec![scheduled_node_on(
-                "dedup_notifications",
-                ModelKind::Deduplicator,
-                "node-1",
-            )],
-            Vec::new(),
-        );
-
-        let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
-            &mut schedule,
-            &desired,
-            &ClusterNodeName::parse("node-2").expect("valid name"),
-            &BTreeSet::from([
-                named::<ClusterNodeName>("node-1"),
-                named::<ClusterNodeName>("node-2"),
-            ]),
-            &BTreeSet::from([named::<ClusterNodeName>("node-1")]),
-        );
-
-        assert_eq!(
-            moved,
-            Some(DrainMove {
-                label: "deduplicator dedup_notifications".to_string(),
-                promoted_replica: None,
-                fallback_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-            })
-        );
-        assert_eq!(
-            schedule.nodes[0].primary_node.as_ref(),
-            Some(&named::<ClusterNodeName>("node-1"))
-        );
-        assert_eq!(
-            schedule.nodes[0].assigned_nodes,
-            vec![
-                named::<ClusterNodeName>("node-1"),
-                named::<ClusterNodeName>("node-2")
-            ]
-        );
-    }
-
-    #[test]
-    fn planned_schedule_move_prefers_the_former_owner_for_the_first_replica_slot() {
-        let domain = DomainName::parse("payments").expect("valid domain");
-        let current = DomainSchedule::new(
-            domain.clone(),
-            vec![
-                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
-                    Some(node_named("node-2")),
-                    vec![node_named("node-2"), node_named("node-3")],
-                ),
-            ],
-            Vec::new(),
-        );
-        let mut planned = DomainSchedule::new(
-            domain,
-            vec![
-                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
-                    Some(node_named("node-1")),
-                    vec![node_named("node-1"), node_named("node-3")],
-                ),
-            ],
-            Vec::new(),
-        );
-
-        prefer_former_owners_as_replicas(
-            Some(&current),
-            &mut planned,
-            &[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-                ClusterNodeName::parse("node-3").expect("valid name"),
-            ],
-        );
-
-        assert_eq!(
-            planned.nodes[0].assigned_nodes,
-            vec![
-                named::<ClusterNodeName>("node-1"),
-                named::<ClusterNodeName>("node-2")
-            ]
-        );
-    }
-
-    #[test]
-    fn merge_existing_schedule_data_prefers_policy_target_when_primary_dies() {
-        let domain = DomainName::parse("payments").expect("valid domain");
-        let mut next = DomainSchedule::new(
-            domain.clone(),
-            vec![
-                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
-                    Some(node_named("node-1")),
-                    vec![node_named("node-1"), node_named("node-4")],
-                ),
-            ],
-            Vec::new(),
-        );
-        let existing = DomainSchedule::new(
-            domain,
-            vec![
-                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
-                    Some(node_named("node-2")),
-                    vec![
-                        node_named("node-2"),
-                        node_named("node-3"),
-                        node_named("node-4"),
-                    ],
-                ),
-            ],
-            Vec::new(),
-        );
-
-        SessionServiceImpl::merge_existing_schedule_data(
-            &mut next,
-            Some(&existing),
-            &[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-3").expect("valid name"),
-            ],
-        );
-
-        assert_eq!(
-            next.nodes[0].primary_node.as_ref(),
-            Some(&named::<ClusterNodeName>("node-1"))
-        );
-        assert_eq!(
-            next.nodes[0].assigned_nodes,
-            vec![named::<ClusterNodeName>("node-1")]
-        );
-    }
-
-    #[test]
-    fn merge_existing_schedule_data_falls_back_to_fresh_assignment_without_live_replica() {
-        let domain = DomainName::parse("payments").expect("valid domain");
-        let mut next = DomainSchedule::new(
-            domain.clone(),
-            vec![scheduled_node_on(
-                "dedup_notifications",
-                ModelKind::Deduplicator,
-                "node-1",
-            )],
-            Vec::new(),
-        );
-        let existing = DomainSchedule::new(
-            domain,
-            vec![
-                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
-                    Some(node_named("node-2")),
-                    vec![node_named("node-2"), node_named("node-3")],
-                ),
-            ],
-            Vec::new(),
-        );
-
-        SessionServiceImpl::merge_existing_schedule_data(
-            &mut next,
-            Some(&existing),
-            &[ClusterNodeName::parse("node-1").expect("valid name")],
-        );
-
-        assert_eq!(
-            next.nodes[0].primary_node.as_ref(),
-            Some(&named::<ClusterNodeName>("node-1"))
-        );
-        assert_eq!(
-            next.nodes[0].assigned_nodes,
-            vec![named::<ClusterNodeName>("node-1")]
-        );
-    }
-
-    #[test]
-    fn merge_existing_schedule_data_preserves_matching_ingestor_schedule_and_assignment() {
-        let domain = DomainName::parse("payments").expect("valid domain");
-        let preserved_schedule = KafkaPartitionSchedule::new(nonzero!(2u64), vec![0, 1], 7);
-        let mut next = DomainSchedule::new(
-            domain.clone(),
-            vec![
-                scheduled_node("ingest_notifications", ModelKind::Ingestor).placed_on(
-                    Some(node_named("node-1")),
-                    vec![node_named("node-2"), node_named("node-3")],
-                ),
-            ],
-            Vec::new(),
-        );
-        let existing = DomainSchedule::new(
-            domain,
-            vec![
-                scheduled_node_on("ingest_notifications", ModelKind::Ingestor, "node-1")
-                    .with_kafka_partitions(preserved_schedule.clone()),
-            ],
-            Vec::new(),
-        );
-
-        SessionServiceImpl::merge_existing_schedule_data(
-            &mut next,
-            Some(&existing),
-            &[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-                ClusterNodeName::parse("node-3").expect("valid name"),
-            ],
-        );
-
-        assert_eq!(
-            next.nodes[0].kafka_partition_schedule,
-            Some(preserved_schedule)
-        );
-        assert_eq!(
-            next.nodes[0].assigned_nodes,
-            vec![named::<ClusterNodeName>("node-1")]
-        );
-    }
-
-    #[test]
-    fn merge_existing_schedule_data_ignores_non_matching_nodes() {
-        let domain = DomainName::parse("payments").expect("valid domain");
-        let mut next = DomainSchedule::new(
-            domain.clone(),
-            vec![
-                scheduled_node("ingest_notifications", ModelKind::Ingestor),
-                scheduled_node("kafka_main", ModelKind::Client),
-            ],
-            Vec::new(),
-        );
-        let existing = DomainSchedule::new(
-            domain,
-            vec![
-                scheduled_node("other_ingestor", ModelKind::Ingestor).with_kafka_partitions(
-                    KafkaPartitionSchedule::new(nonzero!(2u64), vec![0, 1], 3),
-                ),
-                scheduled_node("ingest_notifications", ModelKind::Client)
-                    .with_kafka_partitions(KafkaPartitionSchedule::new(nonzero!(1u64), vec![0], 2)),
-            ],
-            Vec::new(),
-        );
-
-        SessionServiceImpl::merge_existing_schedule_data(&mut next, Some(&existing), &[]);
-
-        assert_eq!(next.nodes[0].kafka_partition_schedule, None);
-        assert_eq!(next.nodes[1].kafka_partition_schedule, None);
-    }
-
-    #[test]
-    fn merge_existing_schedule_data_rejects_a_split_require_group() {
-        let domain = DomainName::parse("payments").expect("valid domain");
-        let members = vec![
-            placement_member("corridor_source", ModelKind::Junction),
-            placement_member("corridor_sink", ModelKind::Junction),
-        ];
-        let mut next = DomainSchedule::new(
-            domain.clone(),
-            vec![
-                scheduled_node_on("corridor_source", ModelKind::Junction, "node-1"),
-                scheduled_node_on("corridor_sink", ModelKind::Junction, "node-1"),
-            ],
-            vec![placement_group(
-                members.clone(),
-                &ClusterNodeName::parse("node-1").expect("valid name"),
-            )],
-        );
-        let existing = DomainSchedule::new(
-            domain,
-            vec![
-                scheduled_node_on("corridor_source", ModelKind::Junction, "node-2"),
-                scheduled_node_on("corridor_sink", ModelKind::Junction, "node-3"),
-            ],
-            vec![placement_group(
-                members,
-                &ClusterNodeName::parse("node-2").expect("valid name"),
-            )],
-        );
-
-        SessionServiceImpl::merge_existing_schedule_data(
-            &mut next,
-            Some(&existing),
-            &[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-                ClusterNodeName::parse("node-3").expect("valid name"),
-            ],
-        );
-
-        assert!(next.nodes.values().all(|node| node.primary_node.as_ref()
-            == Some(&ClusterNodeName::parse("node-1").expect("valid name"))));
-        assert_eq!(
-            next.placement_groups[0].primary_node.as_ref(),
-            Some(&named::<ClusterNodeName>("node-1"))
-        );
-    }
-
-    #[test]
-    fn merge_existing_schedule_data_preserves_an_intact_require_group() {
-        let domain = DomainName::parse("payments").expect("valid domain");
-        let members = vec![
-            placement_member("corridor_source", ModelKind::Junction),
-            placement_member("corridor_sink", ModelKind::Junction),
-        ];
-        let mut next = DomainSchedule::new(
-            domain.clone(),
-            vec![
-                scheduled_node_on("corridor_source", ModelKind::Junction, "node-1"),
-                scheduled_node_on("corridor_sink", ModelKind::Junction, "node-1"),
-            ],
-            vec![placement_group(
-                members.clone(),
-                &ClusterNodeName::parse("node-1").expect("valid name"),
-            )],
-        );
-        let existing = DomainSchedule::new(
-            domain,
-            vec![
-                scheduled_node_on("corridor_source", ModelKind::Junction, "node-2"),
-                scheduled_node_on("corridor_sink", ModelKind::Junction, "node-2"),
-            ],
-            vec![placement_group(
-                members,
-                &ClusterNodeName::parse("node-2").expect("valid name"),
-            )],
-        );
-
-        SessionServiceImpl::merge_existing_schedule_data(
-            &mut next,
-            Some(&existing),
-            &[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-            ],
-        );
-
-        assert!(next.nodes.values().all(|node| node.primary_node.as_ref()
-            == Some(&ClusterNodeName::parse("node-2").expect("valid name"))));
-        assert_eq!(
-            next.placement_groups[0].primary_node.as_ref(),
-            Some(&named::<ClusterNodeName>("node-2"))
-        );
-    }
-
-    #[test]
-    fn drain_relocates_a_require_group_as_one_unit() {
-        let domain = DomainName::parse("payments").expect("valid domain");
-        let members = vec![
-            placement_member("corridor_source", ModelKind::Junction),
-            placement_member("corridor_sink", ModelKind::Junction),
-        ];
-        let mut schedule = DomainSchedule::new(
-            domain.clone(),
-            vec![
-                scheduled_node_on("corridor_source", ModelKind::Junction, "node-2"),
-                scheduled_node_on("corridor_sink", ModelKind::Junction, "node-2"),
-            ],
-            vec![placement_group(
-                members.clone(),
-                &ClusterNodeName::parse("node-2").expect("valid name"),
-            )],
-        );
-        let desired = DomainSchedule::new(
-            domain,
-            vec![
-                scheduled_node_on("corridor_source", ModelKind::Junction, "node-1"),
-                scheduled_node_on("corridor_sink", ModelKind::Junction, "node-1"),
-            ],
-            vec![placement_group(
-                members,
-                &ClusterNodeName::parse("node-1").expect("valid name"),
-            )],
-        );
-
-        let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
-            &mut schedule,
-            &desired,
-            &ClusterNodeName::parse("node-2").expect("valid name"),
-            &BTreeSet::from([
-                named::<ClusterNodeName>("node-1"),
-                named::<ClusterNodeName>("node-2"),
-                named::<ClusterNodeName>("node-3"),
-            ]),
-            &BTreeSet::from([
-                named::<ClusterNodeName>("node-1"),
-                named::<ClusterNodeName>("node-3"),
-            ]),
-        );
-
-        assert!(moved.is_some());
-        assert!(
-            schedule
-                .nodes
-                .values()
-                .all(|node| node.primary_node.as_ref()
-                    == Some(&ClusterNodeName::parse("node-1").expect("valid name")))
-        );
-        assert_eq!(
-            schedule.placement_groups[0].primary_node.as_ref(),
-            Some(&named::<ClusterNodeName>("node-1"))
-        );
-    }
-
-    #[test]
-    fn failover_relocates_a_require_group_to_one_target() {
-        let domain = DomainName::parse("payments").expect("valid domain");
-        let members = vec![
-            placement_member("corridor_source", ModelKind::Junction),
-            placement_member("corridor_sink", ModelKind::Junction),
-        ];
-        let mut schedule = DomainSchedule::new(
-            domain,
-            vec![
-                scheduled_node("corridor_source", ModelKind::Junction).placed_on(
-                    Some(node_named("node-2")),
-                    vec![node_named("node-2"), node_named("node-3")],
-                ),
-                scheduled_node("corridor_sink", ModelKind::Junction).placed_on(
-                    Some(node_named("node-2")),
-                    vec![node_named("node-2"), node_named("node-1")],
-                ),
-            ],
-            vec![placement_group(
-                members,
-                &ClusterNodeName::parse("node-2").expect("valid name"),
-            )],
-        );
-
-        let moves = SessionServiceImpl::failover_unavailable_scheduled_nodes(
-            &mut schedule,
-            None,
-            &BTreeSet::from([
-                named::<ClusterNodeName>("node-1"),
-                named::<ClusterNodeName>("node-3"),
-            ]),
-            &BTreeSet::from([
-                named::<ClusterNodeName>("node-1"),
-                named::<ClusterNodeName>("node-3"),
-            ]),
-        );
-
-        assert!(!moves.is_empty());
-        let group_host = schedule.placement_groups[0]
-            .primary_node
-            .as_ref()
-            .expect("require group must retain a host");
-        assert!(
-            schedule
-                .nodes
-                .values()
-                .all(|node| node.primary_node.as_ref() == Some(group_host))
-        );
-    }
-
-    #[test]
-    fn failover_does_not_promote_a_cordoned_live_replica() {
-        let domain = DomainName::parse("payments").expect("valid domain");
-        let mut schedule = DomainSchedule::new(
-            domain,
-            vec![
-                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
-                    Some(node_named("node-2")),
-                    vec![node_named("node-2"), node_named("node-3")],
-                ),
-            ],
-            Vec::new(),
-        );
-
-        let moves = SessionServiceImpl::failover_unavailable_scheduled_nodes(
-            &mut schedule,
-            None,
-            &BTreeSet::from([
-                named::<ClusterNodeName>("node-1"),
-                named::<ClusterNodeName>("node-3"),
-            ]),
-            &BTreeSet::from([named::<ClusterNodeName>("node-1")]),
-        );
-
-        assert!(!moves.is_empty());
-        assert_eq!(
-            schedule.nodes[0].primary_node.as_ref(),
-            Some(&named::<ClusterNodeName>("node-1"))
-        );
-    }
-
-    #[test]
-    fn failover_promotes_live_replica_before_policy_target() {
-        let domain = DomainName::parse("payments").expect("valid domain");
-        let mut schedule = DomainSchedule::new(
-            domain.clone(),
-            vec![
-                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
-                    Some(node_named("node-2")),
-                    vec![node_named("node-2"), node_named("node-3")],
-                ),
-            ],
-            Vec::new(),
-        );
-        let desired = DomainSchedule::new(
-            domain,
-            vec![
-                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
-                    Some(node_named("node-1")),
-                    vec![node_named("node-1"), node_named("node-3")],
-                ),
-            ],
-            Vec::new(),
-        );
-
-        let moves = SessionServiceImpl::failover_unavailable_scheduled_nodes(
-            &mut schedule,
-            Some(&desired),
-            &BTreeSet::from([
-                named::<ClusterNodeName>("node-1"),
-                named::<ClusterNodeName>("node-3"),
-            ]),
-            &BTreeSet::from([
-                named::<ClusterNodeName>("node-1"),
-                named::<ClusterNodeName>("node-3"),
-            ]),
-        );
-
-        assert_eq!(
-            moves,
-            vec![DrainMove {
-                label: "deduplicator dedup_notifications".to_string(),
-                promoted_replica: Some(ClusterNodeName::parse("node-3").expect("valid name")),
-                fallback_node: None,
-            }]
-        );
-        assert_eq!(
-            schedule.nodes[0].primary_node.as_ref(),
-            Some(&named::<ClusterNodeName>("node-3"))
-        );
-        assert_eq!(
-            schedule.nodes[0].assigned_nodes,
-            vec![
-                named::<ClusterNodeName>("node-3"),
-                named::<ClusterNodeName>("node-1")
-            ]
-        );
-    }
-}
+#[cfg(test)]
+#[path = "scheduling_publication_tests.rs"]
+mod publication_tests;

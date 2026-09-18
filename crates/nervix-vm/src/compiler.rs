@@ -2618,7 +2618,8 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         | FunctionName::Sign
         | FunctionName::Trunc
         | FunctionName::ShiftLeft
-        | FunctionName::ShiftRight => None,
+        | FunctionName::ShiftRight
+        | FunctionName::Datetime(_) => None,
     }
 }
 
@@ -3302,7 +3303,7 @@ fn instruction_is_removable_if_dead(kind: &InstructionKind) -> bool {
             .semantics
             .supports_common_subexpression_elimination(),
         InstructionKind::Builtin { lowering, .. } => {
-            builtin_semantics_for_lowering(*lowering).supports_common_subexpression_elimination()
+            builtin_semantics_for_lowering(lowering).supports_common_subexpression_elimination()
         }
         InstructionKind::Inject { .. } => false,
         InstructionKind::Select { .. } => true,
@@ -3315,7 +3316,7 @@ fn instruction_can_emit_row_errors(kind: &InstructionKind) -> bool {
         InstructionKind::Binary { op, .. } => binary_descriptor(*op).semantics.can_error,
         InstructionKind::Cast { .. } => cast_descriptor().semantics.can_error,
         InstructionKind::Builtin { lowering, .. } => {
-            builtin_semantics_for_lowering(*lowering).can_error
+            builtin_semantics_for_lowering(lowering).can_error
         }
         InstructionKind::Move { .. }
         | InstructionKind::Assign { .. }
@@ -3562,11 +3563,11 @@ mod tests {
     fn has_builtin(compiled: &CompiledProgram, lowering: BuiltinLowering) -> bool {
         compiled.instructions.iter().any(|instruction| {
             matches!(
-                instruction.kind,
+                &instruction.kind,
                 InstructionKind::Builtin {
                     lowering: builtin,
                     ..
-                } if builtin == lowering
+                } if *builtin == lowering
             )
         })
     }

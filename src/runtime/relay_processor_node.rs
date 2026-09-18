@@ -482,7 +482,7 @@ impl RelayProcessorNode {
         let plan = match plan_filter_map_messages(
             self.kind.as_str(),
             &self.processor,
-            kind.label(),
+            kind.error_operation(),
             &program,
             batch,
             execution_now,

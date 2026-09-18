@@ -23,7 +23,7 @@ pub use self::route::{
 };
 pub use crate::program::{WindowAggregateFunction, WindowAggregateInvocation};
 use crate::{
-    frontend::lower_expression,
+    frontend::{SemanticScopePolicy, lower_expression},
     program::{Expr, FieldRef, FunctionName, Literal, Span, SpannedExpr, SpannedNode, spanned},
 };
 
@@ -316,10 +316,11 @@ fn lower_window_expression(
             ))
         }
         _ => {
-            let expression = lower_expression(expression, "output").map_err(|error| {
-                let message = error.current_context().to_string();
-                error.change_context(WindowAggregateError { message })
-            })?;
+            let expression = lower_expression(expression, SemanticScopePolicy::read_only("output"))
+                .map_err(|error| {
+                    let message = error.current_context().to_string();
+                    error.change_context(WindowAggregateError { message })
+                })?;
             validate_aggregate_expr(&expression)?;
             validate_window_input_scope(&expression.inner, false)?;
             Ok(spanned(WindowAggregateExpr::Scalar(expression), span))
@@ -839,6 +840,7 @@ mod tests {
     use nonzero_ext::nonzero;
 
     use super::*;
+    use crate::program::{DatetimeFunction, DatetimeUnit, FixedTimeUnit, Zone};
 
     fn lower_aggregate_program(
         assignments: &str,
@@ -1131,6 +1133,52 @@ mod tests {
 
         assert_eq!(parsed.demands().len(), 2);
         assert_eq!(parsed.demand_reference_counts(), vec![1, 1]);
+    }
+
+    #[test]
+    fn datetime_calls_wrap_aggregates_and_feed_their_inputs() {
+        let parsed = lower_aggregate_program(
+            "window_start = date_trunc('minute', MIN(input.occurred_at)), latest_hour = \
+             MAX(date_trunc('hour', input.occurred_at))",
+        )
+        .expect("datetime calls should be valid around and inside aggregate calls");
+
+        let WindowAggregateExpr::Scalar(window_start) = &parsed.assignments[0].value.inner else {
+            panic!("expected a scalar window start");
+        };
+        let Expr::Call { function, args } = &window_start.inner else {
+            panic!("expected the window start to be a datetime call");
+        };
+        assert_eq!(
+            *function,
+            FunctionName::Datetime(DatetimeFunction::DateTrunc {
+                unit: DatetimeUnit::Fixed(FixedTimeUnit::Minute),
+                zone: Zone::UTC,
+            })
+        );
+        assert!(matches!(
+            args.as_slice(),
+            [SpannedNode {
+                inner: Expr::Call {
+                    function: FunctionName::WindowAggregate(_),
+                    ..
+                },
+                ..
+            }]
+        ));
+
+        let demands = parsed.demands();
+        assert_eq!(demands.len(), 2);
+        assert!(matches!(
+            demands[1].arguments,
+            WindowArguments::Single(Expr::Call {
+                function: FunctionName::Datetime(DatetimeFunction::DateTrunc {
+                    unit: DatetimeUnit::Fixed(FixedTimeUnit::Hour),
+                    ..
+                }),
+                ..
+            })
+        ));
     }
 
     #[test]

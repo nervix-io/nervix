@@ -33,6 +33,7 @@ macro_rules! with_typed_registers {
 
 mod batch;
 mod compiler;
+mod datetime;
 mod error;
 mod frontend;
 mod ir;
@@ -54,15 +55,21 @@ pub use compiler::{
     compile_program_with_options_for_relay, compile_program_with_options_for_relays,
     infer_set_expr_types_for_bindings, infer_set_expr_types_for_bindings_with_udfs,
 };
+pub use datetime::{
+    DatetimeField, DatetimeFormat, DatetimeParser, DayPadding, FormatDefect, FormatDirective,
+    FractionDigits, NameLength, OffsetStyle, Padding, ParseFormat, ParserZoneMismatch,
+    TextExpectation, UnreadableText, Zone, ZoneDirective,
+};
 pub use error::{
-    CompileError, DivisionOperation, ErrorCode, FloatOperation, IntegerOperation, RowErrorLengths,
-    RowErrorMask, RowErrors, RuntimeError, ShiftOperation, SideError, SideErrorReason,
+    CompileError, DatetimeOperation, DivisionOperation, ErrorCode, FloatOperation,
+    IntegerOperation, RowErrorLengths, RowErrorMask, RowErrors, RuntimeError, ShiftOperation,
+    SideError, SideErrorReason,
 };
 pub use frontend::{
-    AssignmentTargetSet, CastTargetKind, FrontendError, FrontendErrorKind, FrontendResult,
-    SemanticNamespaces, lower_branch_construction, lower_expression, lower_finalized_output_filter,
-    lower_generated_route, lower_route_construction, lower_set_only_route,
-    lower_transforming_route,
+    ArgumentCount, AssignmentTargetSet, CastTargetKind, DatetimeLiteral, FrontendError,
+    FrontendErrorKind, FrontendResult, SemanticScopePolicy, lower_branch_construction,
+    lower_expression, lower_finalized_output_filter, lower_generated_route,
+    lower_route_construction, lower_set_only_route, lower_transforming_route,
 };
 pub use ir::{
     CompiledPredicate, CompiledProgram, InputBinding, Instruction, InstructionKind,
@@ -86,14 +93,17 @@ pub use semantics::{
 #[cfg(test)]
 mod test_support {
     use crate::{
-        SemanticNamespaces, lower_route_construction,
+        SemanticScopePolicy, lower_route_construction,
         program::{Program, SpannedNode},
     };
 
     pub(crate) fn parse_program(source: &str) -> Result<SpannedNode<Program>, String> {
         let construction =
             nervix_nspl::parse_route_construction(source).map_err(|error| error.to_string())?;
-        lower_route_construction(&construction, SemanticNamespaces::new("input", "input"))
-            .map_err(|error| error.to_string())
+        lower_route_construction(
+            &construction,
+            SemanticScopePolicy::read_write("input", "input"),
+        )
+        .map_err(|error| error.to_string())
     }
 }

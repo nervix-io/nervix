@@ -7,7 +7,7 @@ struct BranchKeyInner {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct BranchKey(Arc<BranchKeyInner>);
+pub struct BranchKey(Arc<BranchKeyInner>);
 
 impl std::fmt::Debug for BranchKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -19,8 +19,12 @@ impl std::fmt::Debug for BranchKey {
 }
 
 impl BranchKey {
-    pub(in crate::runtime) fn field_value(&self, name: &str) -> Option<&RuntimeValue> {
+    pub(crate) fn field_value(&self, name: &str) -> Option<&RuntimeValue> {
         self.0.fields.get(name)
+    }
+
+    pub(crate) fn field_count(&self) -> usize {
+        self.0.fields.len()
     }
 
     pub(crate) fn from_fields(
@@ -73,6 +77,20 @@ impl BranchKey {
     pub(crate) fn as_str(&self) -> &str {
         self.0.json.as_str()
     }
+
+    /// The non-sensitive identity the control plane names this concrete branch by.
+    pub(crate) fn fingerprint(&self) -> BranchKeyFingerprint {
+        Self::fingerprint_of_canonical_text(self.as_str())
+    }
+
+    /// The identity of the concrete branch whose canonical key text is `text`. A stored runtime
+    /// state key carries that text, so its branch is identified without decoding a key.
+    pub(in crate::runtime) fn fingerprint_of_canonical_text(text: &str) -> BranchKeyFingerprint {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"nervix/branch-key");
+        hasher.update(text.as_bytes());
+        BranchKeyFingerprint::new(*hasher.finalize().as_bytes())
+    }
 }
 
 pub(super) fn branch_key_display(key: &Option<BranchKey>) -> &str {
@@ -95,6 +113,27 @@ mod tests {
     #[test]
     fn branch_key_rejects_empty_fields() {
         assert!(BranchKey::from_fields([]).is_err());
+    }
+
+    /// A stored key carries only a branch's canonical text, and the control plane names the branch
+    /// by the fingerprint of its typed key, so both must identify the same branch.
+    #[test]
+    fn a_branch_fingerprint_is_the_fingerprint_of_its_canonical_text() {
+        let tenant = |value: &str| {
+            BranchKey::from_fields([(
+                FieldName::parse("tenant")
+                    .assured("the fixed test literal satisfies the field name grammar"),
+                RuntimeValue::String(value.to_string()),
+            )])
+            .assured("the fixed field produces a non-empty branch key")
+        };
+        let acme = tenant("acme");
+
+        assert_eq!(
+            acme.fingerprint(),
+            BranchKey::fingerprint_of_canonical_text(acme.as_str())
+        );
+        assert_ne!(acme.fingerprint(), tenant("beta").fingerprint());
     }
 
     #[test]

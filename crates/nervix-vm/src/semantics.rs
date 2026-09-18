@@ -16,7 +16,7 @@ use arrow_schema::{DataType, TimeUnit};
 
 use crate::{
     CompileError, RegisterType,
-    program::{BinaryOp, Expr, FunctionName, SpannedExpr, UnaryOp},
+    program::{BinaryOp, DatetimeFunction, Expr, FunctionName, SpannedExpr, UnaryOp},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -270,7 +270,7 @@ impl CaseMapping {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuiltinLowering {
     Now,
     UuidV4,
@@ -345,6 +345,65 @@ pub enum BuiltinLowering {
     ShiftLeft,
     ShiftRight,
     BitCount,
+    Datetime(DatetimeFunction),
+}
+
+/// A row-valued argument of a datetime builtin, after the constants that select what it computes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DatetimeOperand {
+    /// A `DATETIME` value.
+    Datetime,
+    /// A count of units, at any integer type.
+    UnitCount,
+    /// A `STRING` value.
+    Text,
+}
+
+impl DatetimeFunction {
+    /// The row-valued arguments the builtin takes, in written order.
+    const fn operands(&self) -> &'static [DatetimeOperand] {
+        match self {
+            Self::DatePart { .. }
+            | Self::DateTrunc { .. }
+            | Self::ToUnix(_)
+            | Self::FormatDatetime { .. } => &[DatetimeOperand::Datetime],
+            Self::DateBin(_) | Self::DateDiff { .. } => {
+                &[DatetimeOperand::Datetime, DatetimeOperand::Datetime]
+            }
+            Self::DateAdd { .. } => &[DatetimeOperand::UnitCount, DatetimeOperand::Datetime],
+            Self::FromUnix(_) => &[DatetimeOperand::UnitCount],
+            Self::ParseDatetime(_) => &[DatetimeOperand::Text],
+        }
+    }
+
+    fn output_type(&self) -> DataType {
+        match self {
+            Self::DatePart { .. } | Self::DateDiff { .. } | Self::ToUnix(_) => DataType::Int64,
+            Self::DateTrunc { .. }
+            | Self::DateBin(_)
+            | Self::DateAdd { .. }
+            | Self::FromUnix(_)
+            | Self::ParseDatetime(_) => RegisterType::Datetime.data_type(),
+            Self::FormatDatetime { .. } => DataType::Utf8,
+        }
+    }
+
+    /// Whether a row of this builtin can fail.
+    const fn can_error(&self) -> bool {
+        match self {
+            // Every DATETIME has every local date part and a text in every format, and a count of
+            // whole units since the epoch is never larger than the nanoseconds it counts.
+            Self::DatePart { .. } | Self::ToUnix(_) | Self::FormatDatetime { .. } => false,
+            // A truncated, binned, moved or converted instant can fall outside the DATETIME range, a
+            // difference in nanoseconds can exceed I64, and a text can name no instant.
+            Self::DateTrunc { .. }
+            | Self::DateBin(_)
+            | Self::DateAdd { .. }
+            | Self::DateDiff { .. }
+            | Self::FromUnix(_)
+            | Self::ParseDatetime(_) => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -426,7 +485,7 @@ impl CastDescriptor {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuiltinDescriptor {
     pub lowering: BuiltinLowering,
     pub semantics: OperationSemantics,
@@ -434,12 +493,12 @@ pub struct BuiltinDescriptor {
 
 impl BuiltinDescriptor {
     pub fn output_type(
-        self,
+        &self,
         function: &FunctionName,
         arg_types: &[DataType],
         span: impl Into<std::ops::Range<usize>>,
     ) -> Result<DataType, CompileError> {
-        builtin_output_type(function, self.lowering, arg_types, span.into())
+        builtin_output_type(function, &self.lowering, arg_types, span.into())
     }
 }
 
@@ -529,7 +588,7 @@ pub const fn cast_semantics() -> OperationSemantics {
     cast_descriptor().semantics
 }
 
-pub const fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescriptor> {
+pub fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescriptor> {
     let lowering = match function {
         FunctionName::Now => BuiltinLowering::Now,
         FunctionName::UuidV4 => BuiltinLowering::UuidV4,
@@ -604,6 +663,7 @@ pub const fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescri
         FunctionName::ShiftLeft => BuiltinLowering::ShiftLeft,
         FunctionName::ShiftRight => BuiltinLowering::ShiftRight,
         FunctionName::BitCount => BuiltinLowering::BitCount,
+        FunctionName::Datetime(function) => BuiltinLowering::Datetime(function.clone()),
         FunctionName::LeakSensitive
         | FunctionName::LookupHashMap
         | FunctionName::ReadHeader
@@ -613,13 +673,14 @@ pub const fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescri
         | FunctionName::Udf(_)
         | FunctionName::Unknown(_) => return None,
     };
+    let semantics = builtin_semantics_for_lowering(&lowering);
     Some(BuiltinDescriptor {
         lowering,
-        semantics: builtin_semantics_for_lowering(lowering),
+        semantics,
     })
 }
 
-pub const fn builtin_semantics_for_lowering(lowering: BuiltinLowering) -> OperationSemantics {
+pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> OperationSemantics {
     match lowering {
         BuiltinLowering::Now => OperationSemantics {
             volatility: Volatility::Stable,
@@ -678,6 +739,13 @@ pub const fn builtin_semantics_for_lowering(lowering: BuiltinLowering) -> Operat
             dependency_scope: DependencyScope::Constant,
             has_side_effects: false,
             can_error: false,
+            null_propagation: NullPropagation::Strict,
+        },
+        BuiltinLowering::Datetime(function) => OperationSemantics {
+            volatility: Volatility::Immutable,
+            dependency_scope: DependencyScope::Constant,
+            has_side_effects: false,
+            can_error: function.can_error(),
             null_propagation: NullPropagation::Strict,
         },
         BuiltinLowering::Coalesce | BuiltinLowering::NullIf | BuiltinLowering::Concat => {
@@ -757,7 +825,7 @@ pub fn builtin_signature(
 
 fn builtin_output_type(
     function: &FunctionName,
-    lowering: BuiltinLowering,
+    lowering: &BuiltinLowering,
     arg_types: &[DataType],
     span: std::ops::Range<usize>,
 ) -> Result<DataType, CompileError> {
@@ -1090,6 +1158,34 @@ fn builtin_output_type(
             let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
             require_integral_arg(function, input, span)?;
             Ok(DataType::Utf8)
+        }
+        BuiltinLowering::Datetime(datetime) => {
+            let operands = datetime.operands();
+            require_builtin_arity_exact(function, arg_types, operands.len(), span.clone())?;
+            for (operand, arg_type) in operands.iter().zip(arg_types) {
+                let input = require_supported_register_type(function, arg_type, span.clone())?;
+                match operand {
+                    DatetimeOperand::Datetime => {
+                        if input != RegisterType::Datetime {
+                            return Err(CompileError {
+                                code: "unsupported_function",
+                                message: format!(
+                                    "function '{}' requires Datetime input, found {input}",
+                                    function.as_str()
+                                ),
+                                span: span.into(),
+                            });
+                        }
+                    }
+                    DatetimeOperand::UnitCount => {
+                        require_integral_arg(function, input, span.clone())?;
+                    }
+                    DatetimeOperand::Text => {
+                        require_utf8_arg(function, input, span.clone())?;
+                    }
+                }
+            }
+            Ok(datetime.output_type())
         }
     }
 }

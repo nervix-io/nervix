@@ -2,14 +2,17 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    num::NonZeroU64,
     time::Duration,
 };
 
 use nervix_execution::{ExecutionConfig, MemoryBudgets, OperationLimits};
 use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, DomainConfig, DomainName,
-    DomainPace, DomainSchedule, DomainStartPoint, DomainState, DomainStatus, ResourceName,
-    ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
+    AckMode, BranchKeyFingerprint, BranchSelection, ClusterNodeIdentity, ClusterNodeIncarnation,
+    ClusterNodeName, CreateWasmProcessor, DomainConfig, DomainName, DomainPace, DomainSchedule,
+    DomainStartPoint, DomainState, DomainStatus, GeneralErrorPolicy, Model, ProcessorInputs,
+    ProcessorOutputs, RelayName, ResourceName, ResourceNodeState, ResourceNodeStatus,
+    ResourceReplicaKey, ScheduledNode, WasmProcessorLimits, WasmProcessorName, WasmStateGeneration,
 };
 use openraft::{
     entry::RaftEntry as _, storage::RaftLogStorageExt as _, type_config::TypeConfigExt as _,
@@ -209,6 +212,167 @@ async fn node_admission_fence_recovers_after_reopen() -> TestResult {
     Ok(())
 }
 
+/// A WASM processor's guest-state generations are committed control-plane state. The transitions a
+/// domain mutation publishes, for one concrete branch and then for every branch, are exactly what the
+/// store recovers after a restart, and a publication that does not hold the domain mutation lease
+/// changes neither the stored generations nor anything else.
+#[tokio::test]
+async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutation_lease()
+-> TestResult {
+    let mut harness = Harness::new().await?;
+    let domain = Harness::domain("tenant");
+    let processor = ScheduledNode::new(Model::WasmProcessor(CreateWasmProcessor {
+        name: WasmProcessorName::parse("guest")?,
+        from: ProcessorInputs::single(RelayName::parse("input")?),
+        output_routes: ProcessorOutputs::single(RelayName::parse("output")?),
+        branched_by: BranchSelection::unbranched(),
+        resource: ResourceName::parse("guest_bundle")?,
+        resource_version: 1,
+        file: "processors/guest.wasm".to_string(),
+        limits: WasmProcessorLimits {
+            max_fuel: NonZeroU64::MIN,
+            max_memory_bytes: NonZeroU64::MIN,
+        },
+        global_error_policy: GeneralErrorPolicy::Log,
+        mode: AckMode::Attached,
+        filter_where: None,
+        materialized_state: Vec::new(),
+    }));
+    let created = DomainSchedule::new(domain.id.clone(), [processor.clone()], vec![]);
+    let inputs = Box::new(
+        harness
+            .store
+            .inner
+            .state()
+            .domain_planning_inputs(&domain.id),
+    );
+    harness
+        .apply(
+            1,
+            ConsensusCommand::PutDomainAndSchedule {
+                inputs,
+                domain: Box::new(domain.clone()),
+                schedule: Some(Box::new(created)),
+                mutation: None,
+            },
+        )
+        .await?;
+    let owner = nervix_models::UserName::parse("operator")?;
+    let reference = nervix_models::CommandExecutionReference::parse("reset-request")?;
+    harness
+        .apply(
+            2,
+            ConsensusCommand::AdmitCommandExecution {
+                execution: Box::new(crate::CommandExecution::applying(
+                    reference.clone(),
+                    owner.clone(),
+                    Some(domain.id.clone()),
+                    [7; 32],
+                    nervix_models::Timestamp::from_unix_nanos(1),
+                    crate::CommandExecutionEffect::CreateUser {
+                        if_not_exists: false,
+                        name: owner,
+                        password_hash: "argon2-hash".to_string(),
+                    },
+                )),
+                mutation_domains: BTreeSet::from([domain.id.clone()]),
+            },
+        )
+        .await?;
+    let lease = {
+        let state = harness.store.inner.state();
+        let Some(execution) = state.command_executions.get(&reference) else {
+            return Err("the admitted command must be recorded".into());
+        };
+        let Some(lease) = execution.domain_mutation(&domain.id) else {
+            return Err("the admitted command must own the domain mutation".into());
+        };
+        lease.clone()
+    };
+
+    let branch = BranchKeyFingerprint::new([3; 32]);
+    let mut transitioned = processor;
+    transitioned.begin_wasm_branch_state_generation(branch);
+    let branch_schedule = DomainSchedule::new(domain.id.clone(), [transitioned.clone()], vec![]);
+    transitioned.begin_wasm_state_generation();
+    let every_branch_schedule =
+        DomainSchedule::new(domain.id.clone(), [transitioned.clone()], vec![]);
+    let inputs = Box::new(
+        harness
+            .store
+            .inner
+            .state()
+            .domain_planning_inputs(&domain.id),
+    );
+    harness
+        .apply(
+            3,
+            ConsensusCommand::ReplaceDomainSchedule {
+                inputs,
+                schedule: Some(Box::new(branch_schedule.clone())),
+                mutation: Some(Box::new(lease.clone())),
+            },
+        )
+        .await?;
+    let inputs = Box::new(
+        harness
+            .store
+            .inner
+            .state()
+            .domain_planning_inputs(&domain.id),
+    );
+    harness
+        .apply(
+            4,
+            ConsensusCommand::ReplaceDomainSchedule {
+                inputs,
+                schedule: Some(Box::new(every_branch_schedule.clone())),
+                mutation: None,
+            },
+        )
+        .await?;
+    assert_eq!(
+        harness.store.inner.state().schedule.domain(&domain.id),
+        Some(&branch_schedule),
+        "a generation transition published without the domain mutation lease must not apply"
+    );
+    let inputs = Box::new(
+        harness
+            .store
+            .inner
+            .state()
+            .domain_planning_inputs(&domain.id),
+    );
+    harness
+        .apply(
+            5,
+            ConsensusCommand::ReplaceDomainSchedule {
+                inputs,
+                schedule: Some(Box::new(every_branch_schedule.clone())),
+                mutation: Some(Box::new(lease)),
+            },
+        )
+        .await?;
+
+    let harness = harness.reopen().await?;
+    let recovered = harness.store.inner.state();
+    let recovered_schedule = recovered
+        .schedule
+        .domain(&domain.id)
+        .ok_or("the committed schedule must recover")?;
+    assert_eq!(recovered_schedule, &every_branch_schedule);
+    let Some(recovered_processor) = recovered_schedule.nodes.values().next() else {
+        return Err("the recovered schedule must carry the WASM processor".into());
+    };
+    let Some(generations) = recovered_processor.wasm_state_generations() else {
+        return Err("the recovered WASM processor must carry its generations".into());
+    };
+    let third = WasmStateGeneration::try_from(3)?;
+    assert_eq!(generations.of_branch(None), third);
+    assert_eq!(generations.of_branch(Some(&branch)), third);
+    Ok(())
+}
+
 #[tokio::test]
 async fn record_state_and_applied_position_recover_together_at_each_boundary() -> TestResult {
     for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
@@ -216,12 +380,18 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
         let mut harness = Harness::new().await?;
         let domain = Harness::domain("tenant");
         let schedule = DomainSchedule::new(domain.id.clone(), [], vec![]);
+        let inputs = Box::new(
+            harness
+                .store
+                .inner
+                .state()
+                .domain_planning_inputs(&domain.id),
+        );
         harness
             .apply(
                 1,
                 ConsensusCommand::PutDomainAndSchedule {
-                    expected_domain: None,
-                    expected_schedule: None,
+                    inputs,
                     domain: Box::new(domain.clone()),
                     schedule: Some(Box::new(schedule.clone())),
                     mutation: None,
@@ -233,9 +403,15 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
         let schedule_watch = harness.store.inner.schedule_tx.subscribe();
         let mut changed_domain = domain.clone();
         changed_domain.status = DomainStatus::Running;
+        let inputs = Box::new(
+            harness
+                .store
+                .inner
+                .state()
+                .domain_planning_inputs(&domain.id),
+        );
         let command = ConsensusCommand::PutDomainAndSchedule {
-            expected_domain: Some(Box::new(domain)),
-            expected_schedule: Some(Box::new(schedule)),
+            inputs,
             domain: Box::new(changed_domain.clone()),
             schedule: None,
             mutation: None,
@@ -1422,7 +1598,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
     use nervix_models::{StartDomain, Statement, Timestamp, UserName};
 
     use crate::{
-        ReplicatedTransaction, TransactionCommandResult, TransactionOutcome,
+        ReplicatedTransaction, TransactionActivity, TransactionCommandResult, TransactionOutcome,
         TransactionQueueLimits, TransactionState, TransactionStatement, TransactionStepEffect,
         TransactionStepResult,
     };
@@ -1432,6 +1608,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
         let domain = Harness::domain("tenant");
         let owner = UserName::parse("operator")?;
         let at = Timestamp::from_unix_nanos(1);
+        let activity = TransactionActivity::from_timeout(at, Duration::from_secs(60));
         harness
             .apply(
                 1,
@@ -1449,7 +1626,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                         "transaction".into(),
                         domain.id.clone(),
                         owner.clone(),
-                        at,
+                        activity,
                     )),
                     max_open_transactions: 10,
                 },
@@ -1462,7 +1639,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                     id: "transaction".into(),
                     owner: owner.clone(),
                     domain: domain.id.clone(),
-                    at,
+                    activity,
                     statement: Box::new(TransactionStatement::test_admitted(
                         crate::TransactionStatementRequest {
                             request_reference: nervix_models::CommandExecutionReference::parse(
@@ -1488,7 +1665,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                 ConsensusCommand::StartTransactionCommit {
                     id: "transaction".into(),
                     owner,
-                    at,
+                    activity,
                 },
             )
             .await?;
@@ -1501,6 +1678,13 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
             .ok_or("committing transaction mutation lease missing")?;
         assert_eq!(mutation.recovery_fence().revision(), 4);
         assert_eq!(preceding.domain_mutations.get(&domain.id), Some(&mutation));
+        let inputs = Box::new(
+            harness
+                .store
+                .inner
+                .state()
+                .domain_planning_inputs(&domain.id),
+        );
         let command = ConsensusCommand::AdvanceTransactionCommit {
             id: "transaction".into(),
             expected_next_statement: 0,
@@ -1516,8 +1700,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                 },
             }),
             effect: Some(Box::new(TransactionStepEffect::StartDomain {
-                domain_id: domain.id.clone(),
-                expected_start_version: 0,
+                inputs,
                 start: DomainStartPoint::Resume,
                 clock: None,
                 authority: None,

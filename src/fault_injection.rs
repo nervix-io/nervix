@@ -581,8 +581,8 @@ impl FaultInjection {
         self.release_command_pause(&CommandPausePoint::DurableAdmission(node_id.clone()));
     }
 
-    /// Holds a relocation after it has computed its target schedule but before it binds the
-    /// expected schedule used for publication.
+    /// Holds a relocation after it has computed its target schedule but before it validates and
+    /// publishes the captured planning inputs.
     pub fn pause_relocation_publication(&self, domain: DomainName) {
         self.arm_command_pause(CommandPausePoint::RelocationPublication(domain));
     }

@@ -30,8 +30,9 @@ use nervix_interconnect::{HandlerRegistrationError, Transport};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule,
     CoordinationIdentity, DomainClockAuthority, DomainClockState, DomainName, DomainSchedule,
-    DomainStartPoint, DomainState, DomainStatus, ResourceName, ResourceNodeStatus, ResourceUpload,
-    ResourceUploadKey, ResourceVersion, ResourceVersionStatus, Statement, UserName,
+    DomainStartPoint, DomainState, DomainStatus, NodeEndpoint, NodeServiceUrl, ResourceId,
+    ResourceName, ResourceNodeStatus, ResourceUpload, ResourceUploadKey, ResourceVersion,
+    ResourceVersionStatus, Statement, UserName,
 };
 use nervix_recovery::Discarded as _;
 pub use openraft::raft::{
@@ -54,8 +55,15 @@ use openraft::{
     },
 };
 use parking_lot::Mutex;
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use rkyv::{
+    Archive, Deserialize as RkyvDeserialize, Place, Serialize as RkyvSerialize,
+    rancor::Fallible,
+    ser::{Allocator, Writer},
+    vec::{ArchivedVec, VecResolver},
+    with::{ArchiveWith, DeserializeWith, SerializeWith},
+};
 use serde::{Deserialize, Serialize};
+use sorted_vec::SortedSet;
 use thiserror::Error;
 use tokio::{
     sync::{Mutex as AsyncMutex, broadcast, watch},
@@ -99,21 +107,189 @@ pub use storage_fault::{StorageBoundary, StorageFault, StoragePause};
 mod wire;
 
 pub use transaction::{
-    FinishedTransaction, ReplicatedTransaction, TransactionApplyingStep, TransactionCommandResult,
-    TransactionCommitAdvance, TransactionCommitProgress, TransactionDiagnostic,
-    TransactionMutationError, TransactionMutationResponse, TransactionOutcome,
-    TransactionQueueAdmission, TransactionQueueLimits, TransactionState, TransactionStatement,
-    TransactionStatementRequest, TransactionStepEffect, TransactionStepResult,
+    FinishedTransaction, ReplicatedTransaction, TransactionActivity, TransactionApplyingStep,
+    TransactionCommandResult, TransactionCommitAdvance, TransactionCommitProgress,
+    TransactionDiagnostic, TransactionMutationError, TransactionMutationResponse,
+    TransactionOutcome, TransactionQueueAdmission, TransactionQueueLimits, TransactionState,
+    TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
+    TransactionStepResult,
 };
 
-/// Domain-owned authoritative inputs captured from one state-machine read for transaction
-/// planning. The Raft revision is deliberately absent: unrelated log writes do not change the
-/// semantic planning basis.
+/// A sorted set archived as a vector so vocabulary types need no second archived ordering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[serde(transparent)]
+struct PlanningInputSet<T: Ord>(#[rkyv(with = PlanningInputSetAsVec)] SortedSet<T>);
+
+#[derive(Debug)]
+struct PlanningInputSetAsVec;
+
+impl<T> ArchiveWith<SortedSet<T>> for PlanningInputSetAsVec
+where
+    T: Archive + Ord,
+{
+    type Archived = ArchivedVec<T::Archived>;
+    type Resolver = VecResolver;
+
+    fn resolve_with(field: &SortedSet<T>, resolver: Self::Resolver, out: Place<Self::Archived>) {
+        ArchivedVec::resolve_from_len(field.len(), resolver, out);
+    }
+}
+
+impl<T, S> SerializeWith<SortedSet<T>, S> for PlanningInputSetAsVec
+where
+    T: RkyvSerialize<S> + Ord,
+    S: Fallible + Allocator + Writer + ?Sized,
+{
+    fn serialize_with(
+        field: &SortedSet<T>,
+        serializer: &mut S,
+    ) -> Result<Self::Resolver, S::Error> {
+        ArchivedVec::<T::Archived>::serialize_from_iter::<T, _, _>(field.iter(), serializer)
+    }
+}
+
+impl<T, D> DeserializeWith<ArchivedVec<T::Archived>, SortedSet<T>, D> for PlanningInputSetAsVec
+where
+    T: Archive + Ord,
+    T::Archived: RkyvDeserialize<T, D>,
+    D: Fallible + ?Sized,
+{
+    fn deserialize_with(
+        field: &ArchivedVec<T::Archived>,
+        deserializer: &mut D,
+    ) -> Result<SortedSet<T>, D::Error> {
+        let mut values = SortedSet::new();
+        for archived in field.iter() {
+            values.find_or_insert(archived.deserialize(deserializer)?);
+        }
+        Ok(values)
+    }
+}
+
+impl<T: Ord> PlanningInputSet<T> {
+    fn as_slice(&self) -> &[T] {
+        &self.0
+    }
+
+    fn contains(&self, value: &T) -> bool {
+        self.0.contains(value)
+    }
+}
+
+impl<T: Ord> FromIterator<T> for PlanningInputSet<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(values: I) -> Self {
+        Self(values.into_iter().collect())
+    }
+}
+
+impl<'de, T> Deserialize<'de> for PlanningInputSet<T>
+where
+    T: Deserialize<'de> + Ord,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let values = Vec::<T>::deserialize(deserializer)?;
+        Ok(Self(values.into_iter().collect()))
+    }
+}
+
+/// The resource inputs from one domain that can affect a control-plane plan.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct DomainResourcePlanningInputs {
+    resources: PlanningInputSet<ResourceName>,
+    completed_versions: PlanningInputSet<ResourceId>,
+}
+
+impl DomainResourcePlanningInputs {
+    pub fn resources(&self) -> &[ResourceName] {
+        self.resources.as_slice()
+    }
+
+    pub fn completed_versions(&self) -> &[ResourceId] {
+        self.completed_versions.as_slice()
+    }
+}
+
+/// Membership and operator eligibility inputs consumed by schedule decisions.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct ScheduleTopologyInputs {
+    members: PlanningInputSet<ClusterNodeName>,
+    voters: PlanningInputSet<ClusterNodeName>,
+    cordoned: PlanningInputSet<ClusterNodeName>,
+}
+
+impl ScheduleTopologyInputs {
+    pub fn members(&self) -> &[ClusterNodeName] {
+        self.members.as_slice()
+    }
+
+    pub fn voters(&self) -> &[ClusterNodeName] {
+        self.voters.as_slice()
+    }
+
+    pub fn cordoned(&self) -> &[ClusterNodeName] {
+        self.cordoned.as_slice()
+    }
+}
+
+/// Domain-owned authoritative inputs captured together for one plan.
+///
+/// Values are compared directly at the replicated apply boundary. There is deliberately no Raft
+/// log revision: writes that do not change these inputs cannot make an otherwise current plan
+/// stale.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct DomainPlanningInputs {
+    domain: DomainName,
+    state: Option<Box<DomainState>>,
+    resources: DomainResourcePlanningInputs,
+    schedule: Option<Box<DomainSchedule>>,
+    topology: ScheduleTopologyInputs,
+}
+
+impl DomainPlanningInputs {
+    pub fn domain(&self) -> &DomainName {
+        &self.domain
+    }
+
+    pub fn state(&self) -> Option<&DomainState> {
+        self.state.as_deref()
+    }
+
+    pub fn resources(&self) -> &DomainResourcePlanningInputs {
+        &self.resources
+    }
+
+    pub fn schedule(&self) -> Option<&DomainSchedule> {
+        self.schedule.as_deref()
+    }
+
+    pub fn topology(&self) -> &ScheduleTopologyInputs {
+        &self.topology
+    }
+
+    /// Derive the authoritative state a plan expects after its own pause transition.
+    pub fn after_domain_pause(mut self) -> Self {
+        if let Some(state) = self.state.as_deref_mut() {
+            state.status = DomainStatus::Paused;
+        }
+        self
+    }
+}
+
+/// Domain-owned authoritative inputs and the detailed resource state captured from one
+/// state-machine read for transaction planning.
 #[derive(Debug, Clone)]
 pub struct TransactionControlSnapshot {
-    pub domain: Option<DomainState>,
+    pub planning_inputs: DomainPlanningInputs,
     pub resources: ResourceVersionStatus,
-    pub schedule: Option<DomainSchedule>,
 }
 
 #[derive(
@@ -142,15 +318,17 @@ pub enum ConsensusCommand {
         at: nervix_models::Timestamp,
     },
     ReplaceDomainSchedule {
-        domain: DomainName,
-        expected_schedule: Option<Box<DomainSchedule>>,
+        inputs: Box<DomainPlanningInputs>,
         schedule: Option<Box<DomainSchedule>>,
         mutation: Option<Box<DomainMutationLease>>,
     },
+    UpdateKafkaPartitionSchedule {
+        inputs: Box<DomainPlanningInputs>,
+        schedule: Box<DomainSchedule>,
+    },
     ApplyAutomaticDomainSchedule {
         fence: AutomaticScheduleFence,
-        domain: DomainName,
-        expected_schedule: Option<Box<DomainSchedule>>,
+        inputs: Box<DomainPlanningInputs>,
         schedule: Option<Box<DomainSchedule>>,
     },
     /// Orders ownership-handoff reconciliation after every schedule proposal inherited by this
@@ -160,8 +338,7 @@ pub enum ConsensusCommand {
         authority: CoordinationIdentity,
     },
     PutDomainAndSchedule {
-        expected_domain: Option<Box<DomainState>>,
-        expected_schedule: Option<Box<DomainSchedule>>,
+        inputs: Box<DomainPlanningInputs>,
         domain: Box<DomainState>,
         schedule: Option<Box<DomainSchedule>>,
         mutation: Option<Box<DomainMutationLease>>,
@@ -236,19 +413,19 @@ pub enum ConsensusCommand {
         id: String,
         owner: UserName,
         domain: DomainName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
         statement: Box<TransactionStatement>,
         limits: TransactionQueueLimits,
     },
     TouchTransaction {
         id: String,
         owner: UserName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
     },
     StartTransactionCommit {
         id: String,
         owner: UserName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
     },
     AdvanceTransactionCommit {
         id: String,
@@ -272,12 +449,11 @@ pub enum ConsensusCommand {
     RevertTransaction {
         id: String,
         owner: UserName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
     },
     ExpireTransaction {
         id: String,
         at: nervix_models::Timestamp,
-        idle_before: nervix_models::Timestamp,
     },
     RemoveFinishedTransactions {
         finished_before: nervix_models::Timestamp,
@@ -319,21 +495,36 @@ impl std::fmt::Display for ConsensusCommand {
             }
             Self::ExpireCommandExecutions { .. } => f.write_str("expire-command-executions"),
             Self::ReplaceDomainSchedule {
-                domain, schedule, ..
+                inputs, schedule, ..
             } => {
                 if schedule.is_some() {
-                    write!(f, "replace-domain-schedule:{}", domain.as_str())
+                    write!(f, "replace-domain-schedule:{}", inputs.domain().as_str())
                 } else {
-                    write!(f, "clear-domain-schedule:{}", domain.as_str())
+                    write!(f, "clear-domain-schedule:{}", inputs.domain().as_str())
                 }
             }
+            Self::UpdateKafkaPartitionSchedule { inputs, .. } => {
+                write!(
+                    f,
+                    "update-kafka-partition-schedule:{}",
+                    inputs.domain().as_str()
+                )
+            }
             Self::ApplyAutomaticDomainSchedule {
-                domain, schedule, ..
+                inputs, schedule, ..
             } => {
                 if schedule.is_some() {
-                    write!(f, "apply-automatic-domain-schedule:{}", domain.as_str())
+                    write!(
+                        f,
+                        "apply-automatic-domain-schedule:{}",
+                        inputs.domain().as_str()
+                    )
                 } else {
-                    write!(f, "clear-automatic-domain-schedule:{}", domain.as_str())
+                    write!(
+                        f,
+                        "clear-automatic-domain-schedule:{}",
+                        inputs.domain().as_str()
+                    )
                 }
             }
             Self::ReconcileOwnershipHandoffPreparations { authority } => {
@@ -485,7 +676,7 @@ static NEXT_SNAPSHOT_TRANSFER_ID: AtomicU64 = AtomicU64::new(1);
 pub struct ConsensusSettings {
     pub cluster_name: String,
     pub node_id: ClusterNodeName,
-    pub interconnect_advertise_addr: String,
+    pub interconnect_advertise_addr: NodeEndpoint,
     pub interconnect: Transport,
     pub executor: nervix_execution::Executor,
     pub raft_heartbeat_interval: Duration,
@@ -494,14 +685,22 @@ pub struct ConsensusSettings {
     pub raft_retention: RaftRetentionPolicy,
 }
 
+/// One node as cluster discovery currently describes it.
+///
+/// Each advertised endpoint is present only once the node has published a value this build accepts.
+/// Discovery converges field by field, so a node can be seen before any of them arrives, and a node
+/// whose interconnect endpoint is still unavailable is never a membership admission candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GossipNode {
     pub node_id: ClusterNodeName,
     pub incarnation: ClusterNodeIncarnation,
     pub terminating: bool,
-    pub grpc_advertise_addr: String,
-    pub web_console_advertise_addr: String,
-    pub interconnect_advertise_addr: String,
+    /// Where clients reach this node's session service.
+    pub client_url: Option<NodeServiceUrl>,
+    /// Where operators reach this node's web console.
+    pub console_url: Option<NodeServiceUrl>,
+    /// Where peers reach this node's interconnect listener.
+    pub interconnect_endpoint: Option<NodeEndpoint>,
 }
 
 impl GossipNode {
@@ -632,22 +831,19 @@ impl LeaderTenure {
 )]
 pub struct AutomaticScheduleFence {
     leader_tenure: LeaderTenure,
-    input_revision: Option<u64>,
 }
 
 impl AutomaticScheduleFence {
     pub fn leader_tenure(&self) -> &LeaderTenure {
         &self.leader_tenure
     }
-
-    pub fn input_revision(&self) -> Option<u64> {
-        self.input_revision
-    }
 }
 
 #[derive(Debug, Clone)]
 pub struct AutomaticScheduleInput {
     runtime_state: ConsensusRuntimeState,
+    planning_inputs: BTreeMap<DomainName, DomainPlanningInputs>,
+    topology: ScheduleTopologyInputs,
     fence: AutomaticScheduleFence,
 }
 
@@ -659,11 +855,20 @@ impl AutomaticScheduleInput {
     pub fn fence(&self) -> AutomaticScheduleFence {
         self.fence.clone()
     }
+
+    pub fn planning_inputs(&self, domain: &DomainName) -> Option<&DomainPlanningInputs> {
+        self.planning_inputs.get(domain)
+    }
+
+    pub fn topology(&self) -> &ScheduleTopologyInputs {
+        &self.topology
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MembershipSnapshot {
     voters: BTreeSet<ClusterNodeName>,
+    /// The address Raft holds for each member, in the `BasicNode` form openraft stores.
     nodes: BTreeMap<ClusterNodeName, String>,
 }
 
@@ -671,7 +876,7 @@ struct MembershipSnapshot {
 enum MembershipMutation {
     AddLearner {
         node_id: ClusterNodeName,
-        address: String,
+        endpoint: NodeEndpoint,
         refresh: bool,
     },
     ChangeVoters {
@@ -688,9 +893,9 @@ impl MembershipSnapshot {
         let mut mutations = Vec::new();
         let mut desired_voters = self.voters.clone();
         for node in gossip.latest_admission_candidates().into_values() {
-            if node.interconnect_advertise_addr.is_empty() {
+            let Some(endpoint) = node.interconnect_endpoint else {
                 continue;
-            }
+            };
             let is_fenced = match admission_fences.get(&node.node_id) {
                 Some(incarnation) => node.incarnation <= *incarnation,
                 None => false,
@@ -699,14 +904,15 @@ impl MembershipSnapshot {
                 continue;
             }
 
+            let advertised = endpoint.to_string();
             let known_address = self.nodes.get(&node.node_id);
             let is_voter = self.voters.contains(&node.node_id);
-            if !is_voter || known_address != Some(&node.interconnect_advertise_addr) {
-                let refresh = known_address.is_some()
-                    && known_address != Some(&node.interconnect_advertise_addr);
+            let address_changed = known_address != Some(&advertised);
+            if !is_voter || address_changed {
+                let refresh = known_address.is_some() && address_changed;
                 mutations.push(MembershipMutation::AddLearner {
                     node_id: node.node_id.clone(),
-                    address: node.interconnect_advertise_addr,
+                    endpoint,
                     refresh,
                 });
             }
@@ -741,6 +947,55 @@ struct StateMachineData {
 }
 
 impl StateMachineData {
+    fn domain_resource_planning_inputs(&self, domain: &DomainName) -> DomainResourcePlanningInputs {
+        let status = ResourceVersionStatus::from(&self.resources);
+        let resources = status
+            .next_version_by_resource
+            .iter()
+            .filter(|counter| counter.domain == *domain)
+            .map(|counter| counter.identifier.clone())
+            .collect();
+        let completed_versions = status
+            .uploads
+            .completed_versions()
+            .filter(|id| id.domain == *domain)
+            .cloned()
+            .collect();
+        DomainResourcePlanningInputs {
+            resources,
+            completed_versions,
+        }
+    }
+
+    fn schedule_topology_inputs(&self) -> ScheduleTopologyInputs {
+        let membership = self.last_membership.membership();
+        let voters: PlanningInputSet<ClusterNodeName> = membership.voter_ids().collect();
+        let cordoned = self
+            .cordoned_node_ids
+            .keys()
+            .filter(|node_id| voters.contains(node_id))
+            .cloned()
+            .collect();
+        ScheduleTopologyInputs {
+            members: membership
+                .nodes()
+                .map(|(node_id, _)| node_id.clone())
+                .collect(),
+            voters,
+            cordoned,
+        }
+    }
+
+    fn domain_planning_inputs(&self, domain: &DomainName) -> DomainPlanningInputs {
+        DomainPlanningInputs {
+            domain: domain.clone(),
+            state: self.domains.get(domain).cloned().map(Box::new),
+            resources: self.domain_resource_planning_inputs(domain),
+            schedule: self.schedule.domain(domain).cloned().map(Box::new),
+            topology: self.schedule_topology_inputs(),
+        }
+    }
+
     fn record_runtime_revision(&mut self, revision: u64, applied: &AppliedConsensusCommand) {
         if applied.schedule_changed || applied.domains_changed {
             self.runtime_revision = revision;
@@ -1332,7 +1587,7 @@ struct ConsensusState {
     // The Raft runtime independently owns the store as both log storage and state machine.
     store: FjallStore,
     local_node_id: ClusterNodeName,
-    interconnect_advertise_addr: String,
+    interconnect_advertise_addr: NodeEndpoint,
     interconnect: Transport,
     connectivity: ConnectivityFault,
     raft_retention: RaftRetentionPolicy,
@@ -1970,16 +2225,24 @@ impl Observer {
     pub async fn current_schedule(&self) -> ClusterSchedule {
         (&self.inner.store.inner.state().schedule).into()
     }
+
+    /// Capture every authoritative state-machine input used to plan work in one domain.
+    pub async fn domain_planning_inputs(&self, domain: &DomainName) -> DomainPlanningInputs {
+        self.inner
+            .store
+            .inner
+            .state()
+            .domain_planning_inputs(domain)
+    }
+
     pub async fn transaction_control_snapshot(
         &self,
         domain: &DomainName,
     ) -> TransactionControlSnapshot {
         let state = self.inner.store.inner.state();
-        let schedule: ClusterSchedule = (&state.schedule).into();
         TransactionControlSnapshot {
-            domain: state.domains.get(domain).cloned(),
+            planning_inputs: state.domain_planning_inputs(domain),
             resources: (&state.resources).into(),
-            schedule: schedule.domain(domain).cloned(),
         }
     }
     pub async fn current_revision(&self) -> u64 {
@@ -2436,39 +2699,40 @@ impl Proposer {
             }));
         }
 
-        let input_revision = state
-            .last_applied_log_id
-            .as_ref()
-            .map(|log_id| log_id.index);
+        let domains: BTreeMap<DomainName, DomainState> = (&state.domains).into();
+        let planning_inputs = domains
+            .keys()
+            .map(|domain| (domain.clone(), state.domain_planning_inputs(domain)))
+            .collect();
+        let topology = state.schedule_topology_inputs();
         Ok(AutomaticScheduleInput {
             runtime_state: ConsensusRuntimeState {
                 revision: state.runtime_revision,
                 schedule: (&state.schedule).into(),
-                domains: (&state.domains).into(),
+                domains,
                 domain_clock_authorities: (&state.domain_clock_authorities).into(),
             },
+            planning_inputs,
+            topology,
             fence: AutomaticScheduleFence {
                 leader_tenure: LeaderTenure {
                     leader_id: self.inner.local_node_id.clone(),
                     term: before.current_term,
                 },
-                input_revision,
             },
         })
     }
 
     pub async fn replace_domain_schedule(
         &self,
-        domain: DomainName,
-        expected_schedule: Option<DomainSchedule>,
+        inputs: DomainPlanningInputs,
         schedule: Option<DomainSchedule>,
         mutation: Option<&DomainMutationLease>,
     ) -> Result<(), ConsensusError> {
         let response = self
             .inner
             .client_write(ConsensusCommand::ReplaceDomainSchedule {
-                domain,
-                expected_schedule: expected_schedule.map(Box::new),
+                inputs: Box::new(inputs),
                 schedule: schedule.map(Box::new),
                 mutation: mutation.cloned().map(Box::new),
             })
@@ -2480,11 +2744,38 @@ impl Proposer {
         }
     }
 
+    /// Publish connector-owned Kafka partition metadata against the schedule it was derived from.
+    ///
+    /// This narrow update is allowed while a domain mutation owns broader model work. The broader
+    /// plan carries its own captured inputs and will conflict if this metadata changed its base.
+    pub async fn update_kafka_partition_schedule(
+        &self,
+        inputs: DomainPlanningInputs,
+        schedule: DomainSchedule,
+    ) -> error_stack::Result<(), ConsensusError> {
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::UpdateKafkaPartitionSchedule {
+                inputs: Box::new(inputs),
+                schedule: Box::new(schedule),
+            })
+            .await
+            .map_err(Report::new)?;
+        match response.data {
+            ConsensusResponse::Applied => Ok(()),
+            ConsensusResponse::Conflict(reason) => {
+                Err(Report::new(ConsensusError::Conflict(reason)))
+            }
+            ConsensusResponse::Transaction(_) => {
+                Err(Report::new(ConsensusError::UnexpectedResponse))
+            }
+        }
+    }
+
     pub async fn apply_automatic_domain_schedule(
         &self,
         fence: AutomaticScheduleFence,
-        domain: DomainName,
-        expected_schedule: Option<DomainSchedule>,
+        inputs: DomainPlanningInputs,
         schedule: Option<DomainSchedule>,
     ) -> Result<(), Report<ConsensusError>> {
         if fence.leader_tenure.leader_id != self.inner.local_node_id {
@@ -2498,8 +2789,7 @@ impl Proposer {
             .raft
             .client_write(ConsensusCommand::ApplyAutomaticDomainSchedule {
                 fence,
-                domain,
-                expected_schedule: expected_schedule.map(Box::new),
+                inputs: Box::new(inputs),
                 schedule: schedule.map(Box::new),
             })
             .await
@@ -2536,8 +2826,7 @@ impl Proposer {
 
     pub async fn put_domain_and_schedule(
         &self,
-        expected_domain: Option<DomainState>,
-        expected_schedule: Option<DomainSchedule>,
+        inputs: DomainPlanningInputs,
         domain: DomainState,
         schedule: Option<DomainSchedule>,
         mutation: Option<&DomainMutationLease>,
@@ -2545,8 +2834,7 @@ impl Proposer {
         let response = self
             .inner
             .client_write(ConsensusCommand::PutDomainAndSchedule {
-                expected_domain: expected_domain.map(Box::new),
-                expected_schedule: expected_schedule.map(Box::new),
+                inputs: Box::new(inputs),
                 domain: Box::new(domain),
                 schedule: schedule.map(Box::new),
                 mutation: mutation.cloned().map(Box::new),
@@ -2853,7 +3141,7 @@ impl Proposer {
         id: String,
         owner: UserName,
         domain: DomainName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
         statement: TransactionStatement,
         limits: TransactionQueueLimits,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
@@ -2861,7 +3149,7 @@ impl Proposer {
             id,
             owner,
             domain,
-            at,
+            activity,
             statement: Box::new(statement),
             limits,
         })
@@ -2872,20 +3160,28 @@ impl Proposer {
         &self,
         id: String,
         owner: UserName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
-        self.write_transaction(ConsensusCommand::TouchTransaction { id, owner, at })
-            .await
+        self.write_transaction(ConsensusCommand::TouchTransaction {
+            id,
+            owner,
+            activity,
+        })
+        .await
     }
 
     pub async fn start_transaction_commit(
         &self,
         id: String,
         owner: UserName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
-        self.write_transaction(ConsensusCommand::StartTransactionCommit { id, owner, at })
-            .await
+        self.write_transaction(ConsensusCommand::StartTransactionCommit {
+            id,
+            owner,
+            activity,
+        })
+        .await
     }
 
     pub async fn advance_transaction_commit(
@@ -2942,24 +3238,23 @@ impl Proposer {
         &self,
         id: String,
         owner: UserName,
-        at: nervix_models::Timestamp,
+        activity: TransactionActivity,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
-        self.write_transaction(ConsensusCommand::RevertTransaction { id, owner, at })
-            .await
+        self.write_transaction(ConsensusCommand::RevertTransaction {
+            id,
+            owner,
+            activity,
+        })
+        .await
     }
 
     pub async fn expire_transaction(
         &self,
         id: String,
         at: nervix_models::Timestamp,
-        idle_before: nervix_models::Timestamp,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
-        self.write_transaction(ConsensusCommand::ExpireTransaction {
-            id,
-            at,
-            idle_before,
-        })
-        .await
+        self.write_transaction(ConsensusCommand::ExpireTransaction { id, at })
+            .await
     }
 
     pub async fn remove_finished_transactions(
@@ -2996,7 +3291,7 @@ impl Administrator {
         let mut nodes = BTreeMap::new();
         nodes.insert(
             self.inner.local_node_id.clone(),
-            BasicNode::new(self.inner.interconnect_advertise_addr.clone()),
+            BasicNode::new(self.inner.interconnect_advertise_addr.to_string()),
         );
         self.inner
             .raft
@@ -3031,22 +3326,24 @@ impl Administrator {
             match mutation {
                 MembershipMutation::AddLearner {
                     node_id,
-                    address,
+                    endpoint,
                     refresh,
                 } => {
                     let operation = if refresh {
-                        format!("refresh learner '{node_id}' at {address}")
+                        format!("refresh learner '{node_id}' at {endpoint}")
                     } else if before.nodes.contains_key(&node_id) {
-                        format!("wait for learner '{node_id}' to catch up at {address}")
+                        format!("wait for learner '{node_id}' to catch up at {endpoint}")
                     } else {
-                        format!("add learner '{node_id}' at {address}")
+                        format!("add learner '{node_id}' at {endpoint}")
                     };
                     self.inner.events.report(format!("raft {operation}"));
                     let admission = timeout(
                         MEMBERSHIP_MUTATION_TIMEOUT,
-                        self.inner
-                            .raft
-                            .add_learner(node_id, BasicNode::new(address), true),
+                        self.inner.raft.add_learner(
+                            node_id,
+                            BasicNode::new(endpoint.to_string()),
+                            true,
+                        ),
                     )
                     .await;
                     let result = match admission {
@@ -3779,7 +4076,6 @@ struct AppliedConsensusCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AppliedEntryContext {
     leader_term: u64,
-    input_revision: Option<u64>,
 }
 
 impl AppliedConsensusCommand {
@@ -3824,14 +4120,7 @@ fn apply_consensus_command(
     state: &mut StateMachineData,
     command: &ConsensusCommand,
 ) -> AppliedConsensusCommand {
-    apply_consensus_command_at(
-        state,
-        command,
-        AppliedEntryContext {
-            leader_term: 0,
-            input_revision: None,
-        },
-    )
+    apply_consensus_command_at(state, command, AppliedEntryContext { leader_term: 0 })
 }
 
 fn domain_mutation_recovery_fence(state: &StateMachineData) -> DomainMutationRecoveryFence {
@@ -3907,6 +4196,49 @@ fn validate_domain_mutation(
             owner: requested.owner().clone(),
         })),
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum DomainPlanningInputConflict {
+    #[error("domain '{}' configuration changed", .0.as_str())]
+    Domain(DomainName),
+    #[error("domain '{}' resource inputs changed", .0.as_str())]
+    Resources(DomainName),
+    #[error("domain '{}' schedule changed", .0.as_str())]
+    Schedule(DomainName),
+    #[error("domain '{}' membership changed", .0.as_str())]
+    Membership(DomainName),
+    #[error("domain '{}' voter set changed", .0.as_str())]
+    Voters(DomainName),
+    #[error("domain '{}' node eligibility changed", .0.as_str())]
+    Eligibility(DomainName),
+}
+
+fn validate_domain_planning_inputs(
+    state: &StateMachineData,
+    expected: &DomainPlanningInputs,
+) -> Result<(), DomainPlanningInputConflict> {
+    let current = state.domain_planning_inputs(expected.domain());
+    let domain = expected.domain().clone();
+    if current.state != expected.state {
+        return Err(DomainPlanningInputConflict::Domain(domain));
+    }
+    if current.resources != expected.resources {
+        return Err(DomainPlanningInputConflict::Resources(domain));
+    }
+    if current.schedule != expected.schedule {
+        return Err(DomainPlanningInputConflict::Schedule(domain));
+    }
+    if current.topology.members != expected.topology.members {
+        return Err(DomainPlanningInputConflict::Membership(domain));
+    }
+    if current.topology.voters != expected.topology.voters {
+        return Err(DomainPlanningInputConflict::Voters(domain));
+    }
+    if current.topology.cordoned != expected.topology.cordoned {
+        return Err(DomainPlanningInputConflict::Eligibility(domain));
+    }
+    Ok(())
 }
 
 fn release_domain_mutation(
@@ -4068,29 +4400,33 @@ fn apply_consensus_command_at(
             }
         }
         ConsensusCommand::ReplaceDomainSchedule {
-            domain,
-            expected_schedule,
+            inputs,
             schedule,
             mutation,
         } => {
+            let domain = inputs.domain();
             if let Err(reason) = validate_domain_mutation(state, domain, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
-            if state.schedule.domain(domain) != expected_schedule.as_deref() {
-                return AppliedConsensusCommand::conflict(format!(
-                    "domain '{}' schedule changed",
-                    domain.as_str()
-                ));
+            if let Err(reason) = validate_domain_planning_inputs(state, inputs) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
             }
             state.replace_domain_schedule(domain, schedule.as_deref());
             changes.schedule_changed = true;
         }
+        ConsensusCommand::UpdateKafkaPartitionSchedule { inputs, schedule } => {
+            if let Err(reason) = validate_domain_planning_inputs(state, inputs) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
+            state.replace_domain_schedule(inputs.domain(), Some(schedule));
+            changes.schedule_changed = true;
+        }
         ConsensusCommand::ApplyAutomaticDomainSchedule {
             fence,
-            domain,
-            expected_schedule,
+            inputs,
             schedule,
         } => {
+            let domain = inputs.domain();
             if let Err(reason) = validate_domain_mutation(state, domain, None) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
@@ -4099,24 +4435,15 @@ fn apply_consensus_command_at(
                     "automatic schedule decision leader tenure changed".to_string(),
                 );
             }
-            if context.input_revision != fence.input_revision {
-                return AppliedConsensusCommand::conflict(
-                    "automatic schedule decision input revision changed".to_string(),
-                );
-            }
-            if state.schedule.domain(domain) != expected_schedule.as_deref() {
-                return AppliedConsensusCommand::conflict(format!(
-                    "domain '{}' schedule changed",
-                    domain.as_str()
-                ));
+            if let Err(reason) = validate_domain_planning_inputs(state, inputs) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
             }
             state.replace_domain_schedule(domain, schedule.as_deref());
             changes.schedule_changed = true;
         }
         ConsensusCommand::ReconcileOwnershipHandoffPreparations { .. } => {}
         ConsensusCommand::PutDomainAndSchedule {
-            expected_domain,
-            expected_schedule,
+            inputs,
             domain,
             schedule,
             mutation,
@@ -4124,17 +4451,13 @@ fn apply_consensus_command_at(
             if let Err(reason) = validate_domain_mutation(state, &domain.id, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
-            if state.domains.get(&domain.id) != expected_domain.as_deref() {
-                return AppliedConsensusCommand::conflict(format!(
-                    "domain '{}' configuration changed",
-                    domain.id.as_str()
-                ));
+            if inputs.domain() != &domain.id {
+                return AppliedConsensusCommand::conflict(
+                    "domain update does not match its captured planning inputs".to_string(),
+                );
             }
-            if state.schedule.domain(&domain.id) != expected_schedule.as_deref() {
-                return AppliedConsensusCommand::conflict(format!(
-                    "domain '{}' schedule changed",
-                    domain.id.as_str()
-                ));
+            if let Err(reason) = validate_domain_planning_inputs(state, inputs) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
             }
             state
                 .domains
@@ -4317,28 +4640,71 @@ fn apply_consensus_command_at(
             id,
             owner,
             domain,
-            at,
+            activity,
             statement,
             limits,
         } => {
+            let outcome_revision = match &state.last_applied_log_id {
+                Some(log_id) => log_id.index,
+                None => 0,
+            };
             let result = mutate_transaction(state, id, |transaction| {
-                transaction.queue(owner, domain, *at, statement.as_ref().clone(), *limits)
+                transaction.queue(
+                    owner,
+                    domain,
+                    *activity,
+                    outcome_revision,
+                    statement.as_ref().clone(),
+                    *limits,
+                )
             });
             changes.transactions_changed = result.is_ok();
             return AppliedConsensusCommand::transaction(result, changes);
         }
-        ConsensusCommand::TouchTransaction { id, owner, at } => {
-            let result = mutate_transaction(state, id, |transaction| transaction.touch(owner, *at));
+        ConsensusCommand::TouchTransaction {
+            id,
+            owner,
+            activity,
+        } => {
+            let outcome_revision = match &state.last_applied_log_id {
+                Some(log_id) => log_id.index,
+                None => 0,
+            };
+            let result = mutate_transaction(state, id, |transaction| {
+                transaction.touch(owner, *activity, outcome_revision)
+            });
             changes.transactions_changed = result.is_ok();
             return AppliedConsensusCommand::transaction(result, changes);
         }
-        ConsensusCommand::StartTransactionCommit { id, owner, at } => {
+        ConsensusCommand::StartTransactionCommit {
+            id,
+            owner,
+            activity,
+        } => {
+            let outcome_revision = match &state.last_applied_log_id {
+                Some(log_id) => log_id.index,
+                None => 0,
+            };
             let Some(mut transaction) = state.transactions.get(id).cloned() else {
                 return AppliedConsensusCommand::transaction(
                     Err(TransactionMutationError::Unknown { id: id.clone() }),
                     changes,
                 );
             };
+            if let Err(error) = transaction.ensure_owner(owner) {
+                return AppliedConsensusCommand::transaction(Err(error), changes);
+            }
+            match transaction.expire(activity.last_activity_at(), outcome_revision) {
+                Ok(true) => {
+                    state.transactions.insert(id.clone(), transaction.clone());
+                    changes.transactions_changed = true;
+                    return AppliedConsensusCommand::transaction(Ok(transaction), changes);
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    return AppliedConsensusCommand::transaction(Err(error), changes);
+                }
+            }
             let domain_mutation = if transaction.requires_domain_mutation() {
                 let admission = DomainMutationAdmission::decide(
                     state.domain_mutations.get(&transaction.domain),
@@ -4359,7 +4725,12 @@ fn apply_consensus_command_at(
             } else {
                 None
             };
-            if let Err(error) = transaction.start_commit(owner, *at, domain_mutation.clone()) {
+            if let Err(error) = transaction.start_commit(
+                owner,
+                *activity,
+                outcome_revision,
+                domain_mutation.clone(),
+            ) {
                 return AppliedConsensusCommand::transaction(Err(error), changes);
             }
             if let Some(lease) = domain_mutation {
@@ -4507,22 +4878,22 @@ fn apply_consensus_command_at(
             changes.transactions_changed = result.is_ok();
             return AppliedConsensusCommand::transaction(result, changes);
         }
-        ConsensusCommand::RevertTransaction { id, owner, at } => {
+        ConsensusCommand::RevertTransaction {
+            id,
+            owner,
+            activity,
+        } => {
             let outcome_revision = match &state.last_applied_log_id {
                 Some(log_id) => log_id.index,
                 None => 0,
             };
             let result = mutate_transaction(state, id, |transaction| {
-                transaction.revert(owner, *at, outcome_revision)
+                transaction.revert(owner, *activity, outcome_revision)
             });
             changes.transactions_changed = result.is_ok();
             return AppliedConsensusCommand::transaction(result, changes);
         }
-        ConsensusCommand::ExpireTransaction {
-            id,
-            at,
-            idle_before,
-        } => {
+        ConsensusCommand::ExpireTransaction { id, at } => {
             let outcome_revision = match &state.last_applied_log_id {
                 Some(log_id) => log_id.index,
                 None => 0,
@@ -4533,7 +4904,7 @@ fn apply_consensus_command_at(
                     changes,
                 );
             };
-            match transaction.expire(*at, *idle_before, outcome_revision) {
+            match transaction.expire(*at, outcome_revision) {
                 Ok(expired) => {
                     if expired {
                         state.transactions.insert(id.clone(), transaction.clone());
@@ -4693,123 +5064,53 @@ fn validate_transaction_step_effect(
             id: transaction.id.clone(),
         });
     }
-    let effect_matches = match effect {
-        TransactionStepEffect::ReplaceDomainSchedule { domain, .. } => {
-            &transaction.domain == domain
-                && statements
-                    .iter()
-                    .all(|statement| statement.statement.is_model_mutation())
-        }
-        TransactionStepEffect::PutDomainAndSchedule {
-            expected_domain,
-            domain,
-            ..
-        } => {
-            statements.len() == 1
-                && transaction.domain == domain.id
-                && expected_domain.id == domain.id
-                && matches!(statements[0].statement, Statement::AlterDomain(_))
-        }
-        TransactionStepEffect::StartDomain { domain_id, .. } => {
-            statements.len() == 1
-                && &transaction.domain == domain_id
-                && matches!(statements[0].statement, Statement::StartDomain(_))
-        }
-        TransactionStepEffect::StopDomain { domain_id, .. } => {
-            statements.len() == 1
-                && &transaction.domain == domain_id
-                && matches!(statements[0].statement, Statement::StopDomain(_))
-        }
-        TransactionStepEffect::CreateResourceCatalog { identifier } => {
-            statements.len() == 1
-                && matches!(
-                    &statements[0].statement,
-                    Statement::CreateResource(create) if &create.identifier == identifier
-                )
-        }
-    };
+    let effect_matches = transaction.domain == *effect.inputs().domain()
+        && match effect {
+            TransactionStepEffect::ReplaceDomainSchedule { .. } => statements
+                .iter()
+                .all(|statement| statement.statement.is_model_mutation()),
+            TransactionStepEffect::PutDomainAndSchedule { inputs, domain, .. } => {
+                statements.len() == 1
+                    && transaction.domain == domain.id
+                    && inputs
+                        .state()
+                        .is_some_and(|previous| previous.id == domain.id)
+                    && matches!(statements[0].statement, Statement::AlterDomain(_))
+            }
+            TransactionStepEffect::StartDomain { inputs, .. } => {
+                statements.len() == 1
+                    && inputs
+                        .state()
+                        .is_some_and(|domain| matches!(domain.status, DomainStatus::Stopped))
+                    && matches!(statements[0].statement, Statement::StartDomain(_))
+            }
+            TransactionStepEffect::StopDomain { inputs } => {
+                statements.len() == 1
+                    && inputs
+                        .state()
+                        .is_some_and(|domain| !matches!(domain.status, DomainStatus::Stopped))
+                    && matches!(statements[0].statement, Statement::StopDomain(_))
+            }
+            TransactionStepEffect::CreateResourceCatalog { identifier, .. } => {
+                statements.len() == 1
+                    && matches!(
+                        &statements[0].statement,
+                        Statement::CreateResource(create) if &create.identifier == identifier
+                    )
+            }
+        };
     if !effect_matches {
         return Err(TransactionMutationError::EffectMismatch {
             id: transaction.id.clone(),
         });
     }
 
-    let conflict = match effect {
-        TransactionStepEffect::ReplaceDomainSchedule {
-            domain,
-            expected_schedule,
-            ..
-        } => (state.schedule.domain(domain) != expected_schedule.as_deref())
-            .then(|| format!("domain '{}' schedule changed", domain.as_str())),
-        TransactionStepEffect::PutDomainAndSchedule {
-            expected_domain,
-            expected_schedule,
-            ..
-        } => {
-            if state.domains.get(&expected_domain.id) != Some(expected_domain.as_ref()) {
-                Some(format!(
-                    "domain '{}' configuration changed",
-                    expected_domain.id.as_str()
-                ))
-            } else if state.schedule.domain(&expected_domain.id) != expected_schedule.as_deref() {
-                Some(format!(
-                    "domain '{}' schedule changed",
-                    expected_domain.id.as_str()
-                ))
-            } else {
-                None
-            }
-        }
-        TransactionStepEffect::StartDomain {
-            domain_id,
-            expected_start_version,
-            ..
-        } => match state.domains.get(domain_id) {
-            Some(domain)
-                if matches!(domain.status, DomainStatus::Stopped)
-                    && domain.start_version == *expected_start_version =>
-            {
-                None
-            }
-            Some(_) => Some(format!(
-                "domain '{}' start state changed",
-                domain_id.as_str()
-            )),
-            None => Some(format!("domain '{}' no longer exists", domain_id.as_str())),
-        },
-        TransactionStepEffect::StopDomain {
-            domain_id,
-            expected_start_version,
-        } => match state.domains.get(domain_id) {
-            Some(domain)
-                if !matches!(domain.status, DomainStatus::Stopped)
-                    && domain.start_version == *expected_start_version =>
-            {
-                None
-            }
-            Some(_) => Some(format!(
-                "domain '{}' stop state changed",
-                domain_id.as_str()
-            )),
-            None => Some(format!("domain '{}' no longer exists", domain_id.as_str())),
-        },
-        TransactionStepEffect::CreateResourceCatalog { identifier } => state
-            .resources
-            .is_declared(&transaction.domain, identifier)
-            .then(|| {
-                format!(
-                    "resource '{}' now exists in domain '{}'",
-                    identifier.as_str(),
-                    transaction.domain.as_str()
-                )
-            }),
-    };
-    match conflict {
-        Some(reason) => Err(TransactionMutationError::StepConflict {
+    match validate_domain_planning_inputs(state, effect.inputs()) {
+        Err(reason) => Err(TransactionMutationError::StepConflict {
             id: transaction.id.clone(),
-            reason,
+            reason: reason.to_string(),
         }),
-        None => Ok(()),
+        Ok(()) => Ok(()),
     }
 }
 
@@ -4821,9 +5122,9 @@ fn apply_transaction_step_effect(
 ) {
     match effect {
         TransactionStepEffect::ReplaceDomainSchedule {
-            domain, schedule, ..
+            inputs, schedule, ..
         } => {
-            state.replace_domain_schedule(domain, schedule.as_deref());
+            state.replace_domain_schedule(inputs.domain(), schedule.as_deref());
             changes.schedule_changed = true;
         }
         TransactionStepEffect::PutDomainAndSchedule {
@@ -4837,18 +5138,19 @@ fn apply_transaction_step_effect(
             changes.schedule_changed = true;
         }
         TransactionStepEffect::StartDomain {
-            domain_id,
+            inputs,
             start,
             clock,
             authority,
             ..
         } => {
-            changes.domains_changed = state.commit_domain_start(domain_id, start, clock, authority);
+            changes.domains_changed =
+                state.commit_domain_start(inputs.domain(), start, clock, authority);
         }
-        TransactionStepEffect::StopDomain { domain_id, .. } => {
-            changes.domains_changed = state.commit_domain_stop(domain_id);
+        TransactionStepEffect::StopDomain { inputs } => {
+            changes.domains_changed = state.commit_domain_stop(inputs.domain());
         }
-        TransactionStepEffect::CreateResourceCatalog { identifier } => {
+        TransactionStepEffect::CreateResourceCatalog { identifier, .. } => {
             state.resources.ensure_catalog(domain, identifier);
             changes.resources_changed = true;
         }
@@ -4879,6 +5181,7 @@ mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
         ops::RangeInclusive,
+        time::Duration,
     };
 
     use fjall::Database;
@@ -4886,7 +5189,7 @@ mod tests {
     use nervix_models::{
         ClusterNodeIdentity, ClusterNodeIncarnation, DomainClockAuthority, DomainClockState,
         DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
-        DomainStatus, DomainTimeRate, ResourceId, ResourceName, ResourceNodeState,
+        DomainStatus, DomainTimeRate, NodeEndpoint, ResourceId, ResourceName, ResourceNodeState,
         ResourceNodeStatus, ResourceReplicaKey, ResourceUploadIdentity, ResourceUploadKey,
         ResourceUploadState, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus,
         Statement, Timestamp,
@@ -4912,12 +5215,20 @@ mod tests {
         validate_protocol_origin,
     };
     use crate::{
-        ClusterNodeName, ConsensusError, LogIdOf, ReplicatedTransaction, TransactionQueueLimits,
-        TransactionState, UserName, VoteOf,
+        ClusterNodeName, ConsensusError, LogIdOf, ReplicatedTransaction, TransactionActivity,
+        TransactionQueueLimits, TransactionState, UserName, VoteOf,
     };
 
     fn domain(raw: &str) -> DomainName {
         DomainName::try_from(raw).expect("valid domain")
+    }
+
+    fn captured_inputs(state: &StateMachineData, raw: &str) -> Box<super::DomainPlanningInputs> {
+        Box::new(state.domain_planning_inputs(&domain(raw)))
+    }
+
+    fn transaction_activity(at: i64) -> TransactionActivity {
+        TransactionActivity::from_timeout(Timestamp::from_unix_nanos(at), Duration::from_nanos(10))
     }
 
     #[test]
@@ -4996,26 +5307,30 @@ mod tests {
         Ok(())
     }
 
+    /// One discovered node whose endpoints have not been published yet.
+    fn undiscovered_node(name: &str, incarnation: u64) -> GossipNode {
+        GossipNode {
+            node_id: ClusterNodeName::parse(name).assured("the test node name is valid"),
+            incarnation: ClusterNodeIncarnation::new(incarnation),
+            terminating: false,
+            client_url: None,
+            console_url: None,
+            interconnect_endpoint: None,
+        }
+    }
+
+    fn node_endpoint(advertised: &str) -> NodeEndpoint {
+        advertised
+            .parse()
+            .assured("the test endpoint is a host and port")
+    }
+
     #[test]
     fn dead_gossip_nodes_are_not_membership_admission_candidates() {
         let state = GossipState {
             live_nodes: vec![
-                GossipNode {
-                    node_id: ClusterNodeName::parse("node-2").expect("valid name"),
-                    incarnation: ClusterNodeIncarnation::new(2),
-                    terminating: false,
-                    grpc_advertise_addr: String::new(),
-                    web_console_advertise_addr: String::new(),
-                    interconnect_advertise_addr: String::new(),
-                },
-                GossipNode {
-                    node_id: ClusterNodeName::parse("node-3").expect("valid name"),
-                    incarnation: ClusterNodeIncarnation::new(3),
-                    terminating: false,
-                    grpc_advertise_addr: String::new(),
-                    web_console_advertise_addr: String::new(),
-                    interconnect_advertise_addr: String::new(),
-                },
+                undiscovered_node("node-2", 2),
+                undiscovered_node("node-3", 3),
             ],
             dead_node_ids: [ClusterNodeName::parse("node-3").expect("valid node name")]
                 .into_iter()
@@ -5033,19 +5348,11 @@ mod tests {
 
     #[test]
     fn live_identities_require_the_newest_nondead_node_incarnation() {
-        let gossip_node = |name: &str, incarnation| GossipNode {
-            node_id: ClusterNodeName::parse(name).expect("valid node name"),
-            incarnation: ClusterNodeIncarnation::new(incarnation),
-            terminating: false,
-            grpc_advertise_addr: String::new(),
-            web_console_advertise_addr: String::new(),
-            interconnect_advertise_addr: String::new(),
-        };
         let state = GossipState {
             live_nodes: vec![
-                gossip_node("node-1", 10),
-                gossip_node("node-1", 11),
-                gossip_node("node-2", 20),
+                undiscovered_node("node-1", 10),
+                undiscovered_node("node-1", 11),
+                undiscovered_node("node-2", 20),
             ],
             dead_node_ids: BTreeSet::from([
                 ClusterNodeName::parse("node-2").expect("valid node name")
@@ -5061,12 +5368,8 @@ mod tests {
     #[test]
     fn placement_candidates_exclude_only_the_newest_terminating_incarnation() {
         let gossip_node = |name: &str, incarnation, terminating| GossipNode {
-            node_id: ClusterNodeName::parse(name).assured("the test node name is valid"),
-            incarnation: ClusterNodeIncarnation::new(incarnation),
             terminating,
-            grpc_advertise_addr: String::new(),
-            web_console_advertise_addr: String::new(),
-            interconnect_advertise_addr: String::new(),
+            ..undiscovered_node(name, incarnation)
         };
         let mut state = GossipState {
             live_nodes: vec![
@@ -5108,20 +5411,16 @@ mod tests {
         let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
         let gossip = GossipState {
             live_nodes: vec![GossipNode {
-                node_id: joining.clone(),
-                incarnation: ClusterNodeIncarnation::new(2),
-                terminating: false,
-                grpc_advertise_addr: String::new(),
-                web_console_advertise_addr: String::new(),
-                interconnect_advertise_addr: "https://node-2.test:7443".to_string(),
+                interconnect_endpoint: Some(node_endpoint("node-2.test:7443")),
+                ..undiscovered_node("node-2", 2)
             }],
             dead_node_ids: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
             nodes: BTreeMap::from([
-                (first.clone(), "https://node-1.test:7443".to_string()),
-                (joining.clone(), "https://node-2.test:7443".to_string()),
+                (first.clone(), "node-1.test:7443".to_string()),
+                (joining.clone(), "node-2.test:7443".to_string()),
             ]),
         };
         let admission_fences = BTreeMap::new();
@@ -5131,7 +5430,59 @@ mod tests {
             vec![
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
-                    address: "https://node-2.test:7443".to_string(),
+                    endpoint: node_endpoint("node-2.test:7443"),
+                    refresh: false,
+                },
+                MembershipMutation::ChangeVoters {
+                    voters: BTreeSet::from([first, joining]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unavailable_interconnect_endpoint_is_never_an_admission_candidate() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![undiscovered_node("node-2", 2)],
+            dead_node_ids: BTreeSet::new(),
+        };
+        let membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone()]),
+            nodes: BTreeMap::from([(first, "node-1.test:7443".to_string())]),
+        };
+        let admission_fences = BTreeMap::new();
+
+        assert!(
+            membership
+                .automatic_mutations(&gossip, &admission_fences)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_unavailable_client_or_console_url_does_not_withhold_admission() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![GossipNode {
+                interconnect_endpoint: Some(node_endpoint("node-2.test:7443")),
+                ..undiscovered_node("node-2", 2)
+            }],
+            dead_node_ids: BTreeSet::new(),
+        };
+        let membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone()]),
+            nodes: BTreeMap::new(),
+        };
+        let admission_fences = BTreeMap::new();
+
+        assert_eq!(
+            membership.automatic_mutations(&gossip, &admission_fences),
+            vec![
+                MembershipMutation::AddLearner {
+                    node_id: joining.clone(),
+                    endpoint: node_endpoint("node-2.test:7443"),
                     refresh: false,
                 },
                 MembershipMutation::ChangeVoters {
@@ -5145,23 +5496,19 @@ mod tests {
     fn changed_endpoint_is_refreshed_before_membership_promotion() {
         let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
         let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
-        let current_address = "https://node-2.test:7443".to_string();
-        let replacement_address = "https://node-2.test:8443".to_string();
+        let current_address = "node-2.test:7443".to_string();
+        let replacement_endpoint = node_endpoint("node-2.test:8443");
         let gossip = GossipState {
             live_nodes: vec![GossipNode {
-                node_id: joining.clone(),
-                incarnation: ClusterNodeIncarnation::new(3),
-                terminating: false,
-                grpc_advertise_addr: String::new(),
-                web_console_advertise_addr: String::new(),
-                interconnect_advertise_addr: replacement_address.clone(),
+                interconnect_endpoint: Some(replacement_endpoint.clone()),
+                ..undiscovered_node("node-2", 3)
             }],
             dead_node_ids: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
             nodes: BTreeMap::from([
-                (first.clone(), "https://node-1.test:7443".to_string()),
+                (first.clone(), "node-1.test:7443".to_string()),
                 (joining.clone(), current_address),
             ]),
         };
@@ -5172,7 +5519,7 @@ mod tests {
             vec![
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
-                    address: replacement_address,
+                    endpoint: replacement_endpoint,
                     refresh: true,
                 },
                 MembershipMutation::ChangeVoters {
@@ -5188,18 +5535,14 @@ mod tests {
         let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
         let gossip = GossipState {
             live_nodes: vec![GossipNode {
-                node_id: joining.clone(),
-                incarnation: ClusterNodeIncarnation::new(2),
-                terminating: false,
-                grpc_advertise_addr: String::new(),
-                web_console_advertise_addr: String::new(),
-                interconnect_advertise_addr: "https://node-2.test:7443".to_string(),
+                interconnect_endpoint: Some(node_endpoint("node-2.test:7443")),
+                ..undiscovered_node("node-2", 2)
             }],
             dead_node_ids: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
-            nodes: BTreeMap::from([(first.clone(), "https://node-1.test:7443".to_string())]),
+            nodes: BTreeMap::from([(first.clone(), "node-1.test:7443".to_string())]),
         };
         let admission_fences = BTreeMap::from([(joining.clone(), ClusterNodeIncarnation::new(2))]);
 
@@ -5220,7 +5563,7 @@ mod tests {
             vec![
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
-                    address: "https://node-2.test:7443".to_string(),
+                    endpoint: node_endpoint("node-2.test:7443"),
                     refresh: false,
                 },
                 MembershipMutation::ChangeVoters {
@@ -5401,12 +5744,12 @@ mod tests {
             },
         );
         let mut changes = StateMachineChanges::default();
+        let inputs = captured_inputs(&transactional, "paced");
         apply_transaction_step_effect(
             &mut transactional,
             &domain_id,
             &TransactionStepEffect::StartDomain {
-                domain_id: domain_id.clone(),
-                expected_start_version: 0,
+                inputs,
                 start,
                 clock: Some(mapping),
                 authority: Some(owner),
@@ -5428,13 +5771,11 @@ mod tests {
             },
         );
         let mut changes = StateMachineChanges::default();
+        let inputs = captured_inputs(&transactional, "paced");
         apply_transaction_step_effect(
             &mut transactional,
             &domain_id,
-            &TransactionStepEffect::StopDomain {
-                domain_id: domain_id.clone(),
-                expected_start_version: 1,
-            },
+            &TransactionStepEffect::StopDomain { inputs },
             &mut changes,
         );
         assert!(changes.domains_changed);
@@ -5497,15 +5838,18 @@ mod tests {
 
     #[test]
     fn consensus_command_display_distinguishes_replace_and_clear() {
+        let empty = StateMachineData::default();
         let replace = ConsensusCommand::ReplaceDomainSchedule {
-            domain: domain("tenant"),
-            expected_schedule: None,
+            inputs: captured_inputs(&empty, "tenant"),
             schedule: Some(Box::new(domain_schedule("tenant"))),
             mutation: None,
         };
+        let scheduled = StateMachineData {
+            schedule: ClusterSchedule::from_iter([domain_schedule("tenant")]).into(),
+            ..Default::default()
+        };
         let clear = ConsensusCommand::ReplaceDomainSchedule {
-            domain: domain("tenant"),
-            expected_schedule: Some(Box::new(domain_schedule("tenant"))),
+            inputs: captured_inputs(&scheduled, "tenant"),
             schedule: None,
             mutation: None,
         };
@@ -5517,9 +5861,9 @@ mod tests {
 
     #[test]
     fn encode_decode_roundtrip_and_invalid_bytes_fail() {
+        let state = StateMachineData::default();
         let command = ConsensusCommand::ReplaceDomainSchedule {
-            domain: domain("tenant"),
-            expected_schedule: None,
+            inputs: captured_inputs(&state, "tenant"),
             schedule: Some(Box::new(domain_schedule("tenant"))),
             mutation: None,
         };
@@ -5548,11 +5892,11 @@ mod tests {
             ..Default::default()
         };
 
+        let alpha_inputs = captured_inputs(&state, "alpha");
         apply_consensus_command(
             &mut state,
             &ConsensusCommand::ReplaceDomainSchedule {
-                domain: domain("alpha"),
-                expected_schedule: None,
+                inputs: alpha_inputs,
                 schedule: Some(Box::new(domain_schedule("alpha"))),
                 mutation: None,
             },
@@ -5567,22 +5911,22 @@ mod tests {
             vec!["alpha", "zeta"]
         );
 
+        let alpha_inputs = captured_inputs(&state, "alpha");
         apply_consensus_command(
             &mut state,
             &ConsensusCommand::ReplaceDomainSchedule {
-                domain: domain("alpha"),
-                expected_schedule: Some(Box::new(domain_schedule("alpha"))),
+                inputs: alpha_inputs,
                 schedule: Some(Box::new(domain_schedule("alpha"))),
                 mutation: None,
             },
         );
         assert_eq!(state.schedule.domains.len(), 2);
 
+        let zeta_inputs = captured_inputs(&state, "zeta");
         apply_consensus_command(
             &mut state,
             &ConsensusCommand::ReplaceDomainSchedule {
-                domain: domain("zeta"),
-                expected_schedule: Some(Box::new(domain_schedule("zeta"))),
+                inputs: zeta_inputs,
                 schedule: None,
                 mutation: None,
             },
@@ -5604,12 +5948,12 @@ mod tests {
         let mut domain_state = running_domain_state("tenant");
         domain_state.config.placement = nervix_models::PlacementPolicy::RequireColocation;
         let schedule = domain_schedule("tenant");
+        let inputs = captured_inputs(&state, "tenant");
 
         apply_consensus_command(
             &mut state,
             &ConsensusCommand::PutDomainAndSchedule {
-                expected_domain: None,
-                expected_schedule: None,
+                inputs,
                 domain: Box::new(domain_state.clone()),
                 schedule: Some(Box::new(schedule.clone())),
                 mutation: None,
@@ -5627,12 +5971,12 @@ mod tests {
             schedule: ClusterSchedule::from_iter([committed.clone()]).into(),
             ..Default::default()
         };
+        let stale = captured_inputs(&StateMachineData::default(), "tenant");
 
         let applied = apply_consensus_command(
             &mut state,
             &ConsensusCommand::ReplaceDomainSchedule {
-                domain: domain("tenant"),
-                expected_schedule: None,
+                inputs: stale,
                 schedule: None,
                 mutation: None,
             },
@@ -5647,9 +5991,148 @@ mod tests {
     }
 
     #[test]
+    fn schedule_publication_rejects_changed_cordon_inputs() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut state = StateMachineData::default();
+        let node = ClusterNodeName::parse("node-1")?;
+        let membership = openraft::Membership::new(
+            vec![BTreeSet::from([node.clone()])],
+            BTreeMap::from([(node.clone(), crate::Node::new("https://node-1.invalid"))]),
+        )?;
+        state.last_membership =
+            triomphe::Arc::new(openraft::StoredMembership::new(None, membership));
+        let stale = captured_inputs(&state, "tenant");
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::SetNodeCordoned {
+                node_id: node,
+                cordoned: true,
+            },
+        );
+
+        let applied = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::ReplaceDomainSchedule {
+                inputs: stale,
+                schedule: Some(Box::new(domain_schedule("tenant"))),
+                mutation: None,
+            },
+        );
+
+        assert_eq!(
+            applied.response,
+            ConsensusResponse::Conflict("domain 'tenant' node eligibility changed".to_string())
+        );
+        assert!(state.schedule.domain(&domain("tenant")).is_none());
+        assert!(!applied.schedule_changed);
+        Ok(())
+    }
+
+    #[test]
+    fn schedule_publication_rejects_changed_membership_inputs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = StateMachineData::default();
+        let stale = captured_inputs(&state, "tenant");
+        let node = ClusterNodeName::parse("node-1")?;
+        let membership = openraft::Membership::new(
+            vec![BTreeSet::from([node.clone()])],
+            BTreeMap::from([(node, crate::Node::new("https://node-1.invalid"))]),
+        )?;
+        state.last_membership =
+            triomphe::Arc::new(openraft::StoredMembership::new(None, membership));
+
+        let applied = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::ReplaceDomainSchedule {
+                inputs: stale,
+                schedule: Some(Box::new(domain_schedule("tenant"))),
+                mutation: None,
+            },
+        );
+
+        assert_eq!(
+            applied.response,
+            ConsensusResponse::Conflict("domain 'tenant' membership changed".to_string())
+        );
+        assert!(state.schedule.domain(&domain("tenant")).is_none());
+        assert!(!applied.schedule_changed);
+        Ok(())
+    }
+
+    #[test]
+    fn schedule_publication_accepts_the_pause_derived_from_its_captured_state() {
+        let tenant = domain("tenant");
+        let mut state = StateMachineData::default();
+        state
+            .domains
+            .insert(tenant.clone(), running_domain_state("tenant"));
+        let inputs = state.domain_planning_inputs(&tenant).after_domain_pause();
+        let pause = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::PauseDomain {
+                domain_id: tenant.clone(),
+                mutation: None,
+            },
+        );
+        assert_eq!(pause.response, ConsensusResponse::Applied);
+
+        let applied = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::ReplaceDomainSchedule {
+                inputs: Box::new(inputs),
+                schedule: Some(Box::new(domain_schedule("tenant"))),
+                mutation: None,
+            },
+        );
+
+        assert_eq!(applied.response, ConsensusResponse::Applied);
+        assert!(state.schedule.domain(&tenant).is_some());
+    }
+
+    #[test]
+    fn kafka_metadata_can_advance_under_domain_ownership_and_fences_the_broader_plan() {
+        let mut state = StateMachineData::default();
+        let stale = captured_inputs(&state, "tenant");
+        let owner = super::DomainMutationOwner::transaction("transaction".to_string());
+        let lease = super::DomainMutationAdmission::decide(
+            None,
+            &owner,
+            super::DomainMutationRecoveryFence::at_revision(7),
+        )
+        .into_admitted()
+        .assured("an unowned domain admits the transaction");
+        state.domain_mutations.insert(domain("tenant"), lease);
+
+        let kafka_update = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::UpdateKafkaPartitionSchedule {
+                inputs: stale.clone(),
+                schedule: Box::new(domain_schedule("tenant")),
+            },
+        );
+        assert_eq!(kafka_update.response, ConsensusResponse::Applied);
+
+        let mutation = state.domain_mutations.get(&domain("tenant")).cloned();
+        let broader = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::ReplaceDomainSchedule {
+                inputs: stale,
+                schedule: None,
+                mutation: mutation.map(Box::new),
+            },
+        );
+        assert_eq!(
+            broader.response,
+            ConsensusResponse::Conflict("domain 'tenant' schedule changed".to_string())
+        );
+        assert!(state.schedule.domain(&domain("tenant")).is_some());
+    }
+
+    #[test]
     fn automatic_schedule_publication_rejects_a_stale_leader_tenure() {
         let proposed = domain_schedule("tenant");
         let mut state = StateMachineData::default();
+        let inputs = captured_inputs(&state, "tenant");
         let applied = apply_consensus_command_at(
             &mut state,
             &ConsensusCommand::ApplyAutomaticDomainSchedule {
@@ -5659,16 +6142,11 @@ mod tests {
                             .assured("the test node name is valid"),
                         term: 7,
                     },
-                    input_revision: Some(40),
                 },
-                domain: domain("tenant"),
-                expected_schedule: None,
+                inputs,
                 schedule: Some(Box::new(proposed)),
             },
-            AppliedEntryContext {
-                leader_term: 8,
-                input_revision: Some(40),
-            },
+            AppliedEntryContext { leader_term: 8 },
         );
 
         assert_eq!(
@@ -5682,9 +6160,26 @@ mod tests {
     }
 
     #[test]
-    fn automatic_schedule_publication_rejects_a_stale_input_revision() {
+    fn automatic_schedule_publication_ignores_an_unrelated_state_change() {
         let proposed = domain_schedule("tenant");
         let mut state = StateMachineData::default();
+        let inputs = captured_inputs(&state, "tenant");
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::CreateUser {
+                user: Box::new(UserCredentials {
+                    name: UserName::parse("unrelated_user").assured("the test user name is valid"),
+                    password_hash: "hash".to_string(),
+                }),
+            },
+        );
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::SetNodeCordoned {
+                node_id: ClusterNodeName::parse("nonmember").assured("the test node name is valid"),
+                cordoned: true,
+            },
+        );
         let applied = apply_consensus_command_at(
             &mut state,
             &ConsensusCommand::ApplyAutomaticDomainSchedule {
@@ -5694,32 +6189,23 @@ mod tests {
                             .assured("the test node name is valid"),
                         term: 7,
                     },
-                    input_revision: Some(40),
                 },
-                domain: domain("tenant"),
-                expected_schedule: None,
+                inputs,
                 schedule: Some(Box::new(proposed)),
             },
-            AppliedEntryContext {
-                leader_term: 7,
-                input_revision: Some(41),
-            },
+            AppliedEntryContext { leader_term: 7 },
         );
 
-        assert_eq!(
-            applied.response,
-            ConsensusResponse::Conflict(
-                "automatic schedule decision input revision changed".to_string()
-            )
-        );
-        assert_eq!(state.schedule.domains.len(), 0);
-        assert!(!applied.schedule_changed);
+        assert_eq!(applied.response, ConsensusResponse::Applied);
+        assert_eq!(state.schedule.domains.len(), 1);
+        assert!(applied.schedule_changed);
     }
 
     #[test]
     fn automatic_schedule_publication_applies_a_current_fence() {
         let proposed = domain_schedule("tenant");
         let mut state = StateMachineData::default();
+        let inputs = captured_inputs(&state, "tenant");
         let applied = apply_consensus_command_at(
             &mut state,
             &ConsensusCommand::ApplyAutomaticDomainSchedule {
@@ -5729,16 +6215,11 @@ mod tests {
                             .assured("the test node name is valid"),
                         term: 7,
                     },
-                    input_revision: Some(40),
                 },
-                domain: domain("tenant"),
-                expected_schedule: None,
+                inputs,
                 schedule: Some(Box::new(proposed.clone())),
             },
-            AppliedEntryContext {
-                leader_term: 7,
-                input_revision: Some(40),
-            },
+            AppliedEntryContext { leader_term: 7 },
         );
 
         assert_eq!(applied.response, ConsensusResponse::Applied);
@@ -5771,11 +6252,11 @@ mod tests {
         state.record_runtime_revision(42, &user_change);
         assert_eq!(state.runtime_revision, 41);
 
+        let schedule_inputs = captured_inputs(&state, "tenant");
         let schedule_change = apply_consensus_command(
             &mut state,
             &ConsensusCommand::ReplaceDomainSchedule {
-                domain: domain("tenant"),
-                expected_schedule: None,
+                inputs: schedule_inputs,
                 schedule: Some(Box::new(domain_schedule("tenant"))),
                 mutation: None,
             },
@@ -5974,11 +6455,11 @@ mod tests {
             blocked_lifecycle.response,
             ConsensusResponse::Conflict(_)
         ));
+        let schedule_inputs = captured_inputs(&state, "tenant");
         let blocked_schedule = apply_consensus_command(
             &mut state,
             &ConsensusCommand::ReplaceDomainSchedule {
-                domain: tenant.clone(),
-                expected_schedule: None,
+                inputs: schedule_inputs,
                 schedule: Some(Box::new(domain_schedule("tenant"))),
                 mutation: None,
             },
@@ -6095,7 +6576,7 @@ mod tests {
             "tx-append".to_string(),
             domain_id.clone(),
             owner.clone(),
-            Timestamp::from_unix_nanos(1),
+            transaction_activity(1),
         );
         let limits = TransactionQueueLimits {
             max_statements: 4,
@@ -6112,7 +6593,8 @@ mod tests {
             .queue(
                 &owner,
                 &domain_id,
-                Timestamp::from_unix_nanos(2),
+                transaction_activity(2),
+                2,
                 first.clone(),
                 limits,
             )
@@ -6121,13 +6603,17 @@ mod tests {
             .queue(
                 &owner,
                 &domain_id,
-                Timestamp::from_unix_nanos(3),
+                transaction_activity(3),
+                3,
                 first.clone(),
                 limits,
             )
             .assured("an exact duplicate joins the append already admitted above");
         assert_eq!(transaction.statements.len(), 1);
-        assert_eq!(transaction.last_activity_at, Timestamp::from_unix_nanos(2));
+        assert_eq!(
+            transaction.last_activity_at(),
+            Timestamp::from_unix_nanos(2)
+        );
         assert_eq!(
             transaction
                 .queue_admission(&owner, &domain_id, &first.request, limits)
@@ -6141,13 +6627,17 @@ mod tests {
             transaction.queue(
                 &owner,
                 &domain_id,
-                Timestamp::from_unix_nanos(4),
+                transaction_activity(4),
+                4,
                 changed,
                 limits,
             ),
             Err(TransactionMutationError::RequestConflict { .. })
         ));
-        assert_eq!(transaction.last_activity_at, Timestamp::from_unix_nanos(2));
+        assert_eq!(
+            transaction.last_activity_at(),
+            Timestamp::from_unix_nanos(2)
+        );
 
         let mut second = TransactionStatement::test_admitted(TransactionStatementRequest {
             request_reference: nervix_models::CommandExecutionReference::parse("append-2")
@@ -6160,7 +6650,8 @@ mod tests {
             transaction.queue(
                 &owner,
                 &domain_id,
-                Timestamp::from_unix_nanos(5),
+                transaction_activity(5),
+                5,
                 second.clone(),
                 limits,
             ),
@@ -6170,18 +6661,60 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(transaction.last_activity_at, Timestamp::from_unix_nanos(2));
+        assert_eq!(
+            transaction.last_activity_at(),
+            Timestamp::from_unix_nanos(2)
+        );
         second.request.expected_position = 1;
         transaction
             .queue(
                 &owner,
                 &domain_id,
-                Timestamp::from_unix_nanos(6),
+                transaction_activity(6),
+                6,
                 second,
                 limits,
             )
             .assured("the corrected append uses the current position and a new reference");
         assert_eq!(transaction.statements.len(), 2);
+    }
+
+    #[test]
+    fn transaction_tombstone_retention_starts_at_the_terminal_decision_inclusively() {
+        let owner =
+            UserName::parse("app_user").assured("the test owner is an identifier-shaped literal");
+        let mut transaction = ReplicatedTransaction::open(
+            "retained".to_string(),
+            domain("tenant"),
+            owner.clone(),
+            transaction_activity(1),
+        );
+        transaction
+            .revert(&owner, transaction_activity(2), 7)
+            .assured("the open test transaction can be reverted");
+        let TransactionState::Finished(finished) = &transaction.state else {
+            panic!("revert must make the test transaction terminal");
+        };
+        assert_eq!(finished.finished_at, Timestamp::from_unix_nanos(2));
+
+        let mut state = StateMachineData::default();
+        state
+            .transactions
+            .insert(transaction.id.clone(), transaction);
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::RemoveFinishedTransactions {
+                finished_before: Timestamp::from_unix_nanos(1),
+            },
+        );
+        assert!(state.transactions.contains_key("retained"));
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::RemoveFinishedTransactions {
+                finished_before: Timestamp::from_unix_nanos(2),
+            },
+        );
+        assert!(!state.transactions.contains_key("retained"));
     }
 
     #[test]
@@ -6199,7 +6732,7 @@ mod tests {
             "tx-1".to_string(),
             domain_id.clone(),
             owner.clone(),
-            nervix_models::Timestamp::from_unix_nanos(1),
+            transaction_activity(1),
         );
         apply_consensus_command(
             &mut state,
@@ -6223,7 +6756,7 @@ mod tests {
                     id: "tx-1".to_string(),
                     owner: owner.clone(),
                     domain: domain_id.clone(),
-                    at: nervix_models::Timestamp::from_unix_nanos(
+                    activity: transaction_activity(
                         i64::try_from(at)
                             .unwrap_or_default()
                             .checked_add(2)
@@ -6252,10 +6785,11 @@ mod tests {
             &ConsensusCommand::StartTransactionCommit {
                 id: "tx-1".to_string(),
                 owner,
-                at: nervix_models::Timestamp::from_unix_nanos(4),
+                activity: transaction_activity(4),
             },
         );
 
+        let inputs = captured_inputs(&state, "tenant");
         let first_step = ConsensusCommand::AdvanceTransactionCommit {
             id: "tx-1".to_string(),
             expected_next_statement: 0,
@@ -6271,8 +6805,7 @@ mod tests {
                 },
             }),
             effect: Some(Box::new(TransactionStepEffect::StartDomain {
-                domain_id: domain_id.clone(),
-                expected_start_version: 0,
+                inputs,
                 start: DomainStartPoint::Resume,
                 clock: None,
                 authority: None,

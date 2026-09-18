@@ -3,9 +3,9 @@ use std::sync::Arc as StdArc;
 use arch_into::ArchInto as _;
 use arrow_array::{
     BooleanArray, Float64Array, Int8Array, Int32Array, Int64Array, ListArray, StringArray,
-    UInt32Array, types::Int64Type,
+    TimestampNanosecondArray, UInt32Array, types::Int64Type,
 };
-use arrow_schema::{DataType, Field, Schema};
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
@@ -13,7 +13,7 @@ use nervix_approx_into::ApproxInto as _;
 use nervix_models::Timestamp;
 use nervix_vm::{
     CompileBinding, CompileOptions, CompiledProgram, ExecutionContext, OutputMode, RuntimeError,
-    SPAWN_BLOCKING_ROW_THRESHOLD, SemanticNamespaces, TypedArray, TypedBatch,
+    SPAWN_BLOCKING_ROW_THRESHOLD, SemanticScopePolicy, TypedArray, TypedBatch,
     compile_program_with_options_for_bindings, execute_program_in_context,
     lower_route_construction,
     program::{Program, SpannedNode},
@@ -46,17 +46,17 @@ async fn execute_benchmark_program(
 }
 
 fn parse_program(source: &str) -> BenchmarkProgramResult<SpannedNode<Program>> {
-    parse_program_with_namespaces(source, SemanticNamespaces::new("input", "input"))
+    parse_program_with_namespaces(source, SemanticScopePolicy::read_write("input", "input"))
 }
 
 fn parse_program_with_namespaces(
     source: &str,
-    namespaces: SemanticNamespaces<'_>,
+    scope_policy: SemanticScopePolicy<'_>,
 ) -> BenchmarkProgramResult<SpannedNode<Program>> {
     let construction = nervix_nspl::parse_route_construction(source).map_err(|error| {
         Report::new(BenchmarkProgramError::ParseRouteConstruction).attach_printable(error)
     })?;
-    lower_route_construction(&construction, namespaces)
+    lower_route_construction(&construction, scope_policy)
         .change_context(BenchmarkProgramError::LowerRouteConstruction)
 }
 
@@ -648,7 +648,7 @@ fn compile_key_projection() -> Arc<CompiledProgram> {
 fn compile_window_aggregate_input() -> Arc<CompiledProgram> {
     let program = parse_program_with_namespaces(
         "SET demand_0 = input.amount, demand_1 = input.sequence, demand_2 = input.amount * 2.0",
-        SemanticNamespaces::new("input", "window_input"),
+        SemanticScopePolicy::read_write("input", "window_input"),
     )
     .expect("window aggregate input benchmark program must parse");
     compile_program_with_options_for_bindings(
@@ -1471,6 +1471,332 @@ fn numeric_kernel_benches(c: &mut Criterion) {
     group.finish();
 }
 
+/// Rows in a datetime kernel batch, which stays at the inline execution threshold like a numeric
+/// kernel batch.
+const DATETIME_KERNEL_ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+
+fn datetime_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new("occurred_at", datetime_type(), true),
+        Field::new("origin", datetime_type(), true),
+        Field::new("amount", DataType::Int64, true),
+        Field::new("epoch_ms", DataType::Int64, true),
+    ]))
+}
+
+fn datetime_type() -> DataType {
+    DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into()))
+}
+
+/// A datetime program measured on its own: its benchmark name, its source, and the type of every
+/// field it sets. Each program holds one builtin family, so a measurement is that family's kernels.
+struct DatetimeProgram {
+    name: &'static str,
+    source: &'static str,
+    outputs: Vec<(&'static str, DataType)>,
+}
+
+fn datetime_programs() -> [DatetimeProgram; 5] {
+    [
+        DatetimeProgram {
+            name: "date_part_time_of_day",
+            source: "SET hour = date_part('hour', input.occurred_at), millisecond = \
+                     date_part('millisecond', input.occurred_at)",
+            outputs: vec![("hour", DataType::Int64), ("millisecond", DataType::Int64)],
+        },
+        DatetimeProgram {
+            name: "date_part_calendar",
+            source: "SET year = date_part('year', input.occurred_at), day_of_year = \
+                     date_part('day_of_year', input.occurred_at), iso_week = \
+                     date_part('iso_week', input.occurred_at)",
+            outputs: vec![
+                ("year", DataType::Int64),
+                ("day_of_year", DataType::Int64),
+                ("iso_week", DataType::Int64),
+            ],
+        },
+        DatetimeProgram {
+            name: "truncate_and_bin",
+            source: "SET minute_start = date_trunc('minute', input.occurred_at), week_start = \
+                     date_trunc('week', input.occurred_at), quarter_hour = date_bin('minute', 15, \
+                     input.occurred_at, input.origin)",
+            outputs: vec![
+                ("minute_start", datetime_type()),
+                ("week_start", datetime_type()),
+                ("quarter_hour", datetime_type()),
+            ],
+        },
+        DatetimeProgram {
+            name: "add_and_diff",
+            source: "SET shifted = date_add('millisecond', input.amount, input.occurred_at), \
+                     elapsed = date_diff('second', input.origin, input.occurred_at)",
+            outputs: vec![("shifted", datetime_type()), ("elapsed", DataType::Int64)],
+        },
+        DatetimeProgram {
+            name: "unix_conversion",
+            source: "SET unix_ms = to_unix('millisecond', input.occurred_at), restored = \
+                     from_unix('millisecond', input.epoch_ms)",
+            outputs: vec![("unix_ms", DataType::Int64), ("restored", datetime_type())],
+        },
+    ]
+}
+
+/// Instants spread from 1938 to 2038, so extraction crosses years and the epoch. A failing row adds
+/// the largest millisecond amount, whose instant lies past the DATETIME range.
+fn datetime_batch(program: &CompiledProgram, failures: FailureDensity) -> TypedBatch {
+    let rows = 0..DATETIME_KERNEL_ROWS;
+    let occurred_at = TimestampNanosecondArray::from_iter_values(
+        rows.clone()
+            .map(|row| benchmark_row_i64(row) * 3_083_000_000_000_017 - 1_000_000_000_000_000_000),
+    )
+    .with_timezone_utc();
+    let origin =
+        TimestampNanosecondArray::from_value(946_685_220_000_000_000, DATETIME_KERNEL_ROWS)
+            .with_timezone_utc();
+    let amount = Int64Array::from_iter_values(rows.clone().map(|row| {
+        if failures.fails(row) {
+            i64::MAX
+        } else {
+            benchmark_row_i64(row % 2_001) - 1_000
+        }
+    }));
+    let epoch_ms = Int64Array::from_iter_values(
+        occurred_at
+            .values()
+            .iter()
+            .map(|nanoseconds| nanoseconds / 1_000_000),
+    );
+    TypedBatch::try_new(
+        program.input_schema.clone(),
+        vec![
+            TypedArray::Datetime(occurred_at),
+            TypedArray::Datetime(origin),
+            TypedArray::Int64(amount),
+            TypedArray::Int64(epoch_ms),
+        ],
+    )
+    .expect("datetime benchmark batch must build")
+}
+
+/// Datetime builtins over one inline batch. Every family runs without failures, and addition also
+/// runs with failing rows, which exercises its range check and error reporting.
+fn datetime_kernel_benches(c: &mut Criterion) {
+    let runtime = benchmark_runtime();
+    let mut group = c.benchmark_group("datetime_kernels");
+    group.throughput(Throughput::Elements(DATETIME_KERNEL_ROWS.arch_into()));
+    for program in datetime_programs() {
+        let compiled = compile_numeric_program(program.source, datetime_schema(), &program.outputs);
+        let densities: &[FailureDensity] = if program.name == "add_and_diff" {
+            &FailureDensity::ALL
+        } else {
+            &[FailureDensity::None]
+        };
+        for failures in densities {
+            let batch = datetime_batch(&compiled, *failures);
+            group.bench_with_input(
+                BenchmarkId::new(program.name, failures.label()),
+                &batch,
+                |b, batch| {
+                    b.iter(|| {
+                        runtime.block_on(execute_benchmark_program(
+                            black_box(&compiled),
+                            black_box(batch),
+                        ))
+                    })
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
+/// A calendar, time zone or format program measured on its own, over instants from 1938 to 2038
+/// and their texts.
+struct CalendarProgram {
+    name: &'static str,
+    source: &'static str,
+    outputs: Vec<(&'static str, DataType)>,
+    /// How the `text` operand writes each instant.
+    texts: CalendarTexts,
+}
+
+/// The texts a calendar benchmark batch reads.
+#[derive(Clone, Copy)]
+enum CalendarTexts {
+    /// RFC 3339 with nanoseconds and a numeric offset, `2024-07-04T12:30:00.123456789+00:00`.
+    OffsetTimestamps,
+    /// Local wall-clock time in New York without an offset, `2024-07-04 08:30:00`.
+    NewYorkWallClock,
+}
+
+fn calendar_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new("occurred_at", datetime_type(), true),
+        Field::new("origin", datetime_type(), true),
+        Field::new("amount", DataType::Int64, true),
+        Field::new("text", DataType::Utf8, true),
+    ]))
+}
+
+fn calendar_programs() -> [CalendarProgram; 9] {
+    [
+        CalendarProgram {
+            name: "zoned_date_parts",
+            source: "SET hour = date_part('hour', input.occurred_at, 'America/New_York'), \
+                     day_of_year = date_part('day_of_year', input.occurred_at, 'America/New_York')",
+            outputs: vec![("hour", DataType::Int64), ("day_of_year", DataType::Int64)],
+            texts: CalendarTexts::OffsetTimestamps,
+        },
+        CalendarProgram {
+            name: "offset_truncation",
+            source: "SET hour_start = date_trunc('hour', input.occurred_at, '+05:30'), day_start \
+                     = date_trunc('day', input.occurred_at, '+05:30')",
+            outputs: vec![
+                ("hour_start", datetime_type()),
+                ("day_start", datetime_type()),
+            ],
+            texts: CalendarTexts::OffsetTimestamps,
+        },
+        CalendarProgram {
+            name: "zoned_truncation",
+            source: "SET day_start = date_trunc('day', input.occurred_at, 'America/New_York'), \
+                     month_start = date_trunc('month', input.occurred_at, 'America/New_York')",
+            outputs: vec![
+                ("day_start", datetime_type()),
+                ("month_start", datetime_type()),
+            ],
+            texts: CalendarTexts::OffsetTimestamps,
+        },
+        CalendarProgram {
+            name: "calendar_add_and_diff",
+            source: "SET renewed = date_add('month', input.amount, input.occurred_at), months = \
+                     date_diff('month', input.origin, input.occurred_at)",
+            outputs: vec![("renewed", datetime_type()), ("months", DataType::Int64)],
+            texts: CalendarTexts::OffsetTimestamps,
+        },
+        CalendarProgram {
+            name: "zoned_add_and_diff",
+            source: "SET next_day = date_add('day', input.amount, input.occurred_at, \
+                     'America/New_York'), days = date_diff('day', input.origin, \
+                     input.occurred_at, 'America/New_York')",
+            outputs: vec![("next_day", datetime_type()), ("days", DataType::Int64)],
+            texts: CalendarTexts::OffsetTimestamps,
+        },
+        CalendarProgram {
+            name: "format_fixed_width",
+            source: "SET text_out = format_datetime('%Y-%m-%dT%H:%M:%S.%f%:z', input.occurred_at)",
+            outputs: vec![("text_out", DataType::Utf8)],
+            texts: CalendarTexts::OffsetTimestamps,
+        },
+        CalendarProgram {
+            name: "format_zoned_names",
+            source: "SET text_out = format_datetime('%a %d %b %Y %H:%M:%S%.f %Z', \
+                     input.occurred_at, 'America/New_York')",
+            outputs: vec![("text_out", DataType::Utf8)],
+            texts: CalendarTexts::OffsetTimestamps,
+        },
+        CalendarProgram {
+            name: "parse_offset",
+            source: "SET parsed = parse_datetime('%Y-%m-%dT%H:%M:%S%.f%:z', input.text)",
+            outputs: vec![("parsed", datetime_type())],
+            texts: CalendarTexts::OffsetTimestamps,
+        },
+        CalendarProgram {
+            name: "parse_zoned_wall_clock",
+            source: "SET parsed = parse_datetime('%F %T', input.text, 'America/New_York', \
+                     'compatible')",
+            outputs: vec![("parsed", datetime_type())],
+            texts: CalendarTexts::NewYorkWallClock,
+        },
+    ]
+}
+
+/// Instants spread from 1938 to 2038 with their texts. A failing row adds more months than the
+/// DATETIME range holds, and its text does not match the format.
+fn calendar_batch(
+    program: &CompiledProgram,
+    texts: CalendarTexts,
+    failures: FailureDensity,
+) -> TypedBatch {
+    let rows = 0..DATETIME_KERNEL_ROWS;
+    let occurred_at = TimestampNanosecondArray::from_iter_values(
+        rows.clone()
+            .map(|row| benchmark_row_i64(row) * 3_083_000_000_000_017 - 1_000_000_000_000_000_000),
+    )
+    .with_timezone_utc();
+    let origin =
+        TimestampNanosecondArray::from_value(946_685_220_000_000_000, DATETIME_KERNEL_ROWS)
+            .with_timezone_utc();
+    let amount = Int64Array::from_iter_values(rows.clone().map(|row| {
+        if failures.fails(row) {
+            i64::MAX
+        } else {
+            benchmark_row_i64(row % 25) - 12
+        }
+    }));
+    let new_york_standard_offset =
+        chrono::FixedOffset::west_opt(5 * 3_600).expect("five hours west of UTC is a valid offset");
+    let text = StringArray::from_iter_values(occurred_at.values().iter().enumerate().map(
+        |(row, nanoseconds)| {
+            if failures.fails(row) {
+                return "not a timestamp".to_string();
+            }
+            let instant = chrono::DateTime::from_timestamp_nanos(*nanoseconds);
+            match texts {
+                CalendarTexts::OffsetTimestamps => {
+                    instant.format("%Y-%m-%dT%H:%M:%S%.9f%:z").to_string()
+                }
+                CalendarTexts::NewYorkWallClock => instant
+                    .with_timezone(&new_york_standard_offset)
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string(),
+            }
+        },
+    ));
+    TypedBatch::try_new(
+        program.input_schema.clone(),
+        vec![
+            TypedArray::Datetime(occurred_at),
+            TypedArray::Datetime(origin),
+            TypedArray::Int64(amount),
+            TypedArray::Utf8(text),
+        ],
+    )
+    .expect("calendar benchmark batch must build")
+}
+
+/// Calendar, time zone and format builtins over one inline batch. Every family runs without
+/// failures, and calendar arithmetic and parsing also run with failing rows, which exercises their
+/// range checks and error reporting.
+fn calendar_kernel_benches(c: &mut Criterion) {
+    let runtime = benchmark_runtime();
+    let mut group = c.benchmark_group("calendar_kernels");
+    group.throughput(Throughput::Elements(DATETIME_KERNEL_ROWS.arch_into()));
+    for program in calendar_programs() {
+        let compiled = compile_numeric_program(program.source, calendar_schema(), &program.outputs);
+        let densities: &[FailureDensity] = match program.name {
+            "calendar_add_and_diff" | "parse_offset" => &FailureDensity::ALL,
+            _ => &[FailureDensity::None],
+        };
+        for failures in densities {
+            let batch = calendar_batch(&compiled, program.texts, *failures);
+            group.bench_with_input(
+                BenchmarkId::new(program.name, failures.label()),
+                &batch,
+                |b, batch| {
+                    b.iter(|| {
+                        runtime.block_on(execute_benchmark_program(
+                            black_box(&compiled),
+                            black_box(batch),
+                        ))
+                    })
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
 fn benchmark_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .build()
@@ -1684,6 +2010,8 @@ criterion_group!(
     benches,
     execute_benches,
     batch_size_sweep_benches,
-    numeric_kernel_benches
+    numeric_kernel_benches,
+    datetime_kernel_benches,
+    calendar_kernel_benches
 );
 criterion_main!(benches);

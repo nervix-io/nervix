@@ -251,6 +251,7 @@ pub(crate) enum ResourceMutationError {
 }
 
 impl ResourceRecords {
+    #[cfg(test)]
     pub(crate) fn is_declared(&self, domain: &DomainName, identifier: &ResourceName) -> bool {
         self.counters
             .contains_key(&ResourceCatalogKey::new(domain, identifier))

@@ -107,6 +107,12 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   Its scope includes mappings and lifecycle generations, authority selection and fencing, local
   installation and reads, progress delivery, execution snapshots, admission, logical and physical
   deadline ownership, recovery, and distributed-time guarantees.
+- [Data-Plane Concurrency](docs/src/data-plane-concurrency.md) is the authoritative architecture
+  reference for synchronization on record, batch, remote-frame, and acknowledgement paths. Any
+  change to hot-path state publication, task or branch ownership, delivery or assignment fences,
+  or the data-plane lock ratchet must keep that chapter current in the same change. Its scope
+  includes the contentionless rule, published and pre-resolved state, mutable execution state,
+  bounded synchronization, and review classification for new lock sites.
 - [Shutdown And Recovery](docs/src/shutdown.md) is the authoritative architecture reference for
   stopping a node and recovering from a forced ending. Any change to shutdown phases, the shutdown
   or drain deadline, termination signals, terminating placement eligibility, intake stop, graph
@@ -440,8 +446,22 @@ build and the existing tests, and nothing in it changes behavior.
   to save a binding, a single line performing several unrelated steps. Name each step with a
   binding and write the steps in the order they happen. This removes density only; the abstraction
   that owns the shared logic stays exactly where the preceding rule put it.
-- Model internal special cases with typed variants or internal-only structures, never magic or
-  reserved user-visible identifiers that can collide with user-defined names.
+- Absence is `Option`, and distinct semantic states are enum variants with their own data. Do not
+  encode either with `0`, an empty string or collection, a numeric extremum, an all-zero hash, or
+  a reserved identifier. A named constant does not repair a type that cannot express its states.
+  Keep related state and data together so callers cannot construct contradictory combinations.
+- Model unavailable expression scopes and internal special cases with typed variants or
+  internal-only structures, never fabricated names that flow through user-name resolution.
+  Diagnostic labels and display strings describe a typed state; they must not select behavior.
+- A default must be a valid value with the intended meaning, never a substitute for missing
+  required state, failed conversion, or a type mismatch. Validate at the owning boundary and
+  propagate a typed error; do not make invalid input look like an ordinary value.
+- Genuine zero counts, empty content, documented scalar-function results, and format signatures
+  remain ordinary values. A required external encoding or packed atomic representation may use
+  raw tags only inside its owning boundary, behind an API that exposes typed states and enforces
+  valid transitions and bounds.
+  Document that encoding there; do not leak its sentinels into Models, plans, or callers, or add
+  locks merely to replace an atomic encoding with an enum.
 - A structure that can hold a value together with a contradicting description of it — a string
   payload labeled as an integer, a wire schema paired with a format that reads another kind — is
   structurally wrong. Fix the type so the contradiction cannot be represented: put the kind and its

@@ -1,18 +1,23 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The typed program vocabulary consumed by the expression compiler and runtime.
-//! - **Depends on.** Primitive Rust and Arrow value types.
+//! - **Depends on.** Primitive Rust and Arrow value types, and the datetime constants a call
+//!   resolves when it is lowered: time zones and compiled datetime formats.
 //! - **Must not know.** NSPL tokens, parser diagnostics, Models, or the execution graph.
 
 use std::{
     cmp::Ordering,
     fmt,
     hash::{Hash, Hasher},
+    num::NonZeroU64,
     ops::{Deref, DerefMut, Range},
 };
 
 use arrow_schema::DataType;
-use strum::{AsRefStr, EnumString};
+use meticulous::OptionExt as _;
+use strum::{AsRefStr, EnumString, IntoStaticStr, VariantNames};
+
+pub use crate::datetime::{DatetimeFormat, DatetimeParser, Zone};
 
 /// Identifies one semantic operation in a lowered VM program.
 ///
@@ -370,6 +375,7 @@ pub enum FunctionName {
     RegexpLike,
     RegexpReplace,
     RegexpSubstr,
+    Datetime(DatetimeFunction),
     LeakSensitive,
     LookupHashMap,
     ReadHeader,
@@ -378,6 +384,278 @@ pub enum FunctionName {
     WindowAggregate(WindowAggregateInvocation),
     Udf(String),
     Unknown(String),
+}
+
+/// A datetime builtin with the constant arguments that select what it computes.
+///
+/// A call names its unit, date part, bin width, time zone, format and disambiguation with
+/// literals. The frontend reads those literals once, when it lowers the call, into units, resolved
+/// time zones and compiled formats, so the call keeps only the arguments that vary by row and
+/// execution never interprets text or looks a zone up.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DatetimeFunction {
+    /// `date_part(part, value[, zone])`.
+    DatePart { part: DatePart, zone: Zone },
+    /// `date_trunc(unit, value[, zone])`.
+    DateTrunc { unit: DatetimeUnit, zone: Zone },
+    /// `date_bin(unit, width, value, origin)`.
+    DateBin(DateBinWidth),
+    /// `date_add(unit, amount, value[, zone])`.
+    DateAdd { unit: DatetimeUnit, zone: Zone },
+    /// `date_diff(unit, start, end[, zone])`.
+    DateDiff { unit: DatetimeUnit, zone: Zone },
+    /// `to_unix(unit, value)`.
+    ToUnix(FixedTimeUnit),
+    /// `from_unix(unit, count)`.
+    FromUnix(FixedTimeUnit),
+    /// `format_datetime(format, value[, zone])`.
+    FormatDatetime { format: DatetimeFormat, zone: Zone },
+    /// `parse_datetime(format, text[, zone[, disambiguation]])`.
+    ParseDatetime(DatetimeParser),
+}
+
+impl DatetimeFunction {
+    pub const fn name(&self) -> DatetimeFunctionName {
+        match self {
+            Self::DatePart { .. } => DatetimeFunctionName::DatePart,
+            Self::DateTrunc { .. } => DatetimeFunctionName::DateTrunc,
+            Self::DateBin(_) => DatetimeFunctionName::DateBin,
+            Self::DateAdd { .. } => DatetimeFunctionName::DateAdd,
+            Self::DateDiff { .. } => DatetimeFunctionName::DateDiff,
+            Self::ToUnix(_) => DatetimeFunctionName::ToUnix,
+            Self::FromUnix(_) => DatetimeFunctionName::FromUnix,
+            Self::FormatDatetime { .. } => DatetimeFunctionName::FormatDatetime,
+            Self::ParseDatetime(_) => DatetimeFunctionName::ParseDatetime,
+        }
+    }
+}
+
+/// The name of a datetime builtin, before its constant arguments are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, IntoStaticStr, strum::Display)]
+#[strum(ascii_case_insensitive, serialize_all = "snake_case")]
+pub enum DatetimeFunctionName {
+    DatePart,
+    DateTrunc,
+    DateBin,
+    DateAdd,
+    DateDiff,
+    ToUnix,
+    FromUnix,
+    FormatDatetime,
+    ParseDatetime,
+}
+
+const NANOSECONDS_PER_MICROSECOND: i64 = 1_000;
+const NANOSECONDS_PER_MILLISECOND: i64 = 1_000 * NANOSECONDS_PER_MICROSECOND;
+const NANOSECONDS_PER_SECOND: i64 = 1_000 * NANOSECONDS_PER_MILLISECOND;
+const NANOSECONDS_PER_MINUTE: i64 = 60 * NANOSECONDS_PER_SECOND;
+const NANOSECONDS_PER_HOUR: i64 = 60 * NANOSECONDS_PER_MINUTE;
+const NANOSECONDS_PER_DAY: i64 = 24 * NANOSECONDS_PER_HOUR;
+const NANOSECONDS_PER_WEEK: i64 = 7 * NANOSECONDS_PER_DAY;
+
+/// A unit of fixed length that datetime arithmetic counts in.
+///
+/// A DATETIME is a UTC instant without leap seconds, so every UTC day is exactly 86,400 seconds and
+/// every UTC week exactly seven days. A calendar month, quarter or year has no fixed length and is a
+/// [`CalendarUnit`] instead.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    EnumString,
+    VariantNames,
+    strum::Display,
+)]
+#[strum(ascii_case_insensitive, serialize_all = "snake_case")]
+pub enum FixedTimeUnit {
+    Nanosecond,
+    Microsecond,
+    Millisecond,
+    Second,
+    Minute,
+    Hour,
+    Day,
+    Week,
+}
+
+impl FixedTimeUnit {
+    /// The exact length of one unit in nanoseconds.
+    pub const fn nanoseconds(self) -> i64 {
+        match self {
+            Self::Nanosecond => 1,
+            Self::Microsecond => NANOSECONDS_PER_MICROSECOND,
+            Self::Millisecond => NANOSECONDS_PER_MILLISECOND,
+            Self::Second => NANOSECONDS_PER_SECOND,
+            Self::Minute => NANOSECONDS_PER_MINUTE,
+            Self::Hour => NANOSECONDS_PER_HOUR,
+            Self::Day => NANOSECONDS_PER_DAY,
+            Self::Week => NANOSECONDS_PER_WEEK,
+        }
+    }
+}
+
+/// A calendar unit, whose length depends on the calendar month it counts from.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    EnumString,
+    VariantNames,
+    strum::Display,
+)]
+#[strum(ascii_case_insensitive, serialize_all = "snake_case")]
+pub enum CalendarUnit {
+    Month,
+    Quarter,
+    Year,
+}
+
+impl CalendarUnit {
+    /// How many calendar months one unit spans.
+    pub const fn months(self) -> i64 {
+        match self {
+            Self::Month => 1,
+            Self::Quarter => 3,
+            Self::Year => 12,
+        }
+    }
+}
+
+/// A unit `date_trunc`, `date_add` and `date_diff` count in: a unit of fixed length, or a calendar
+/// unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, strum::Display)]
+pub enum DatetimeUnit {
+    #[strum(to_string = "{0}")]
+    Fixed(FixedTimeUnit),
+    #[strum(to_string = "{0}")]
+    Calendar(CalendarUnit),
+}
+
+impl std::str::FromStr for DatetimeUnit {
+    type Err = strum::ParseError;
+
+    /// Reads a unit name, without regard to letter case.
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        if let Ok(unit) = name.parse::<FixedTimeUnit>() {
+            return Ok(Self::Fixed(unit));
+        }
+        name.parse::<CalendarUnit>().map(Self::Calendar)
+    }
+}
+
+/// How `parse_datetime` chooses an instant for a local date and time that its time zone skips or
+/// repeats.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    EnumString,
+    VariantNames,
+    strum::Display,
+)]
+#[strum(ascii_case_insensitive, serialize_all = "snake_case")]
+pub enum Disambiguation {
+    /// The earlier instant of a repeated time, and the time moved past a skipped span by the span's
+    /// length, as calendar arithmetic moves local times.
+    Compatible,
+    /// The earlier of the two instants the local time could mean.
+    Earlier,
+    /// The later of the two instants the local time could mean.
+    Later,
+    /// No instant: a skipped or repeated local time fails its row.
+    Reject,
+}
+
+/// A part of the local date and time `date_part` reads from a DATETIME in a time zone.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    EnumString,
+    VariantNames,
+    strum::Display,
+)]
+#[strum(ascii_case_insensitive, serialize_all = "snake_case")]
+pub enum DatePart {
+    /// The proleptic Gregorian year.
+    Year,
+    /// The quarter of the year, from 1 to 4.
+    Quarter,
+    /// The month, from 1 to 12.
+    Month,
+    /// The day of the month, from 1 to 31.
+    Day,
+    /// The hour of the day, from 0 to 23.
+    Hour,
+    /// The minute of the hour, from 0 to 59.
+    Minute,
+    /// The whole seconds of the minute, from 0 to 59.
+    Second,
+    /// The whole milliseconds past the second, from 0 to 999.
+    Millisecond,
+    /// The whole microseconds past the second, from 0 to 999,999.
+    Microsecond,
+    /// The nanoseconds past the second, from 0 to 999,999,999.
+    Nanosecond,
+    /// The day of the week, from Sunday as 0 to Saturday as 6.
+    DayOfWeek,
+    /// The day of the year, from 1 to 366.
+    DayOfYear,
+    /// The ISO 8601 week-numbering year the ISO week belongs to.
+    IsoYear,
+    /// The ISO 8601 week, from 1 to 53.
+    IsoWeek,
+    /// The ISO 8601 day of the week, from Monday as 1 to Sunday as 7.
+    IsoDayOfWeek,
+}
+
+/// The width of the bins `date_bin` places datetimes in: a positive count of one fixed unit, no
+/// longer than `i64::MAX` nanoseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DateBinWidth {
+    count: NonZeroU64,
+    unit: FixedTimeUnit,
+}
+
+impl DateBinWidth {
+    /// The width of `count` units, or `None` when it is longer than `i64::MAX` nanoseconds.
+    pub fn new(count: NonZeroU64, unit: FixedTimeUnit) -> Option<Self> {
+        let width = Self { count, unit };
+        // A width exists exactly when its length in nanoseconds does.
+        width.checked_nanoseconds()?;
+        Some(width)
+    }
+
+    /// The exact width in nanoseconds.
+    pub fn nanoseconds(self) -> i64 {
+        self.checked_nanoseconds()
+            .assured("construction rejected every width longer than i64::MAX nanoseconds")
+    }
+
+    fn checked_nanoseconds(self) -> Option<i64> {
+        let count = i64::try_from(self.count.get()).ok()?;
+        count.checked_mul(self.unit.nanoseconds())
+    }
 }
 
 /// Every aggregate a window route can compute over the rows its window retains.
@@ -663,6 +941,7 @@ impl FunctionName {
             Self::RegexpLike => "regexp_like",
             Self::RegexpReplace => "regexp_replace",
             Self::RegexpSubstr => "regexp_substr",
+            Self::Datetime(function) => function.name().into(),
             Self::LeakSensitive => "leak_sensitive",
             Self::LookupHashMap => "lookup_hash_map",
             Self::ReadHeader => "read_header",

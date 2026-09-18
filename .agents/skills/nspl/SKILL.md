@@ -159,6 +159,26 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   from 0. Outside window processors, `count`, `sum`, `first`, `last`, and `nth` take one `ARRAY` or
   `VEC` value; inside a window processor route, `count`, `sum`, `first`, and `last` are window
   aggregates over retained input rows.
+- Write datetime units, date parts, `date_bin` widths, time zones, formats, and disambiguations as
+  literals. Units from `nanosecond` to `week` have fixed lengths; `month`, `quarter`, and `year` are
+  calendar units that only `date_trunc`, `date_add`, and `date_diff` accept. `date_trunc`,
+  `date_bin`, and `to_unix` round toward negative infinity, including before the epoch; `date_diff`
+  rounds toward zero; a week starts on Monday; and `date_bin` always takes an explicit origin. A
+  result outside the `DATETIME` range fails only that message with an `overflow` error. Datetime
+  functions compute only from their arguments; pass `now()` for the execution-local domain time.
+- Name a zone explicitly for local calendars: `date_part`, `date_trunc`, `date_add`, `date_diff`, and
+  `format_datetime` take an optional trailing `'UTC'`, IANA name, or `'+HH:MM'` offset, read in UTC
+  without one, and always return UTC instants. Zone rules come from the IANA database bundled into
+  Nervix, never from the host. In an IANA zone a `day` or `week` is a local calendar day, a month
+  moved past a shorter month lands on its last day, and a calendar `date_diff` counts whole units
+  from `start`.
+- Read external timestamps with `parse_datetime(format, text[, zone[, disambiguation]])` using
+  strftime-style directives such as `%Y-%m-%dT%H:%M:%S%.f%:z`. Reading is strict and never guesses:
+  there are no two-digit years or locale formats, and a format must read a complete date. A format
+  with `%z`, `%:z`, `%::z`, or `%s` takes no zone; any other format requires one, and a local time
+  the zone skips or repeats fails its message unless `'earlier'`, `'later'`, or `'compatible'` is
+  given. Give such routes an `ON MESSAGE ERROR` policy for `cast_failed` and `invalid_argument`
+  failures. Formats describe values of at most 256 bytes.
 - Treat arithmetic and numeric functions as checked at the operands' exact type: integer overflow,
   a zero divisor, and a float or math result that is NaN or infinite fail only that message with a
   per-message error. Give a route whose operands can reach those values an `ON MESSAGE ERROR`

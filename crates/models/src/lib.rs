@@ -22,6 +22,7 @@ mod expression;
 mod message_error;
 mod model_index;
 mod names;
+mod node_endpoint;
 mod node_ref;
 mod quiesce;
 mod remote;
@@ -31,6 +32,7 @@ mod schema;
 mod statement;
 mod timestamp;
 mod udf;
+mod wasm_state_generation;
 
 pub use canonical::{
     CanonicalNsplError, alter_avro_wire_schema_to_canonical_nspl,
@@ -62,6 +64,9 @@ pub use names::{
     QueueGroupName, QueueName, ReingestorName, RelayName, ReordererName, ResourceName, SchemaName,
     SignalingProtocolName, SubjectName, SubscriptionName, TableName, TopicName, UdfName, UserName,
     VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
+};
+pub use node_endpoint::{
+    NodeEndpoint, NodeEndpointParseError, NodeServiceUrl, NodeServiceUrlParseError,
 };
 pub use node_ref::{DomainNodeRef, NodeRef};
 pub use quiesce::{
@@ -154,3 +159,6 @@ pub use statement::{
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};
+pub use wasm_state_generation::{
+    InvalidWasmStateGeneration, WasmStateGeneration, WasmStateGenerations,
+};

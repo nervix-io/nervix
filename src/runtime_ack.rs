@@ -3,8 +3,8 @@
 //! Layer: data plane.
 //!
 //! - **Owns.** The root tracker per ingestor and per domain, the sets a batch fans out into, the
-//!   guard that holds a message waiting on materialized state, and the outcome each root resolves
-//!   to.
+//!   guard that holds a message waiting on materialized state, the one-word encoding of each
+//!   root's ownership-handoff tracking, and the outcome each root resolves to.
 //! - **Depends on.** The standard library and `triomphe`.
 //! - **Must not know.** What is being acknowledged. It counts outstanding work, and ack state is
 //!   hot-path memory that is never persisted.
@@ -21,9 +21,11 @@ use shuttle::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::{oneshot, watch};
 use triomphe::Arc;
 
-const HANDOFF_TRACKING_COMPLETE: usize = usize::MAX;
 const ACK_SHARES_FIT_IN_MEMORY: &str =
     "every pending ACK share has an in-memory owner, so their count fits in usize";
+const ACK_ACTIVE_SHARES_FIT_IN_ENCODING: &str = "every active ACK share has an in-memory owner, \
+                                                 so their count stays below the word the handoff \
+                                                 encoding reserves";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AckOutcome {
@@ -69,18 +71,70 @@ enum AckShareResolution {
     Complete,
 }
 
+/// What one root's ownership-handoff tracking holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AckHandoffState {
+    /// The root still tracks shares. No active share means every share it still holds is parked on
+    /// `REQUIRED WAIT`, which an ownership handoff does not wait for.
+    Tracking { active_shares: usize },
+    /// The root resolved, so nothing it tracked is outstanding and nothing may make it active
+    /// again.
+    Complete,
+}
+
+/// What publishing active shares did to one root's tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AckHandoffPublication {
+    /// The shares made an idle root active, so an ownership handoff waits for it once more.
+    Activated,
+    /// The shares joined a root an ownership handoff already waits for.
+    Joined,
+    /// The root resolved before the shares were published, so it tracks none of them.
+    AlreadyComplete,
+}
+
+/// What removing one active share did to one root's tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AckHandoffRemoval {
+    /// The share left and active shares remain.
+    Removed,
+    /// The last active share left, so an ownership handoff no longer waits for this root.
+    WentIdle,
+    /// The root resolved, so it holds no share to remove.
+    AlreadyComplete,
+    /// The root tracks no active share, so the caller owned none to remove.
+    NoActiveShare,
+}
+
+/// The [`AckHandoffState`] of one root, in one word.
+///
+/// An attachment, a wait release, and a completion race one another, so each transition is one
+/// atomic operation on this word rather than a flag beside a count or a lock around both. The
+/// encoding reserves the word's top value for [`AckHandoffState::Complete`] and holds the active
+/// share count below it, and the reserved value never leaves this type.
+#[derive(Debug)]
+struct AckHandoffTracking(AtomicUsize);
+
 #[derive(Debug)]
 struct AckState {
     /// Zero is terminal. Attaching a share reserves it here before publishing it as active below.
+    /// An attachment that finds zero reserves nothing, yet still returns a handle to this root.
     pending: AtomicUsize,
-    /// Pending shares that are not parked on `REQUIRED WAIT`. `usize::MAX` closes the counter once
-    /// the root completes, so a racing wait release or attachment cannot reactivate it.
+    /// The pending shares that are not parked on `REQUIRED WAIT`. Completing the root closes this
+    /// tracking, so a racing wait release or attachment cannot reactivate it.
     ///
-    /// The root trackers count roots rather than shares. A zero-to-positive transition therefore
-    /// reserves one tracker count before publishing the active share count. A positive-to-zero
-    /// transition publishes zero before releasing the tracker count. The tracker may briefly
-    /// overcount either transition, but it never lets an ownership handoff miss active work.
-    handoff_active: AtomicUsize,
+    /// Only a handle that owns a share removes one from this tracking. An acknowledgement resolves
+    /// its share in `pending` before it removes the share here, and a share parks only while
+    /// `pending` is above zero. A handle whose attachment reserved nothing finds `pending` at zero
+    /// on both paths, so it cannot remove an active share that another handle still owns before
+    /// the terminal transition closes this tracking.
+    ///
+    /// The root trackers count roots rather than shares. Publishing onto an idle root therefore
+    /// reserves one tracker count before publishing the active share count, and removing the last
+    /// active share publishes the idle count before releasing the tracker count. The tracker may
+    /// briefly overcount either transition, but it never lets an ownership handoff miss active
+    /// work.
+    handoff: AckHandoffTracking,
     alive_counter: AtomicU64,
     alive_tx: watch::Sender<u64>,
     sender: Mutex<Option<oneshot::Sender<AckOutcome>>>,
@@ -91,6 +145,142 @@ struct OwnershipHandoffTrackerReservation<'a> {
     handle: &'a AckHandle,
     release_on_drop: bool,
 }
+
+impl AckHandoffState {
+    /// Whether an ownership handoff must still wait for this root.
+    fn holds_active_shares(self) -> bool {
+        match self {
+            Self::Tracking { active_shares } => active_shares != 0,
+            Self::Complete => false,
+        }
+    }
+}
+
+impl AckHandoffRemoval {
+    /// Whether this removal took the caller's share off the active count.
+    fn removed_share(self) -> bool {
+        match self {
+            Self::Removed | Self::WentIdle => true,
+            Self::AlreadyComplete | Self::NoActiveShare => false,
+        }
+    }
+}
+
+impl AckHandoffTracking {
+    /// The word this encoding reserves for [`AckHandoffState::Complete`].
+    const COMPLETE: usize = usize::MAX;
+    /// The greatest active-share count this encoding holds, directly below the reserved word.
+    const MAX_ACTIVE_SHARES: usize = Self::COMPLETE - 1;
+
+    fn tracking(active_shares: usize) -> Self {
+        Self(AtomicUsize::new(Self::encode(AckHandoffState::Tracking {
+            active_shares,
+        })))
+    }
+
+    fn state(&self) -> AckHandoffState {
+        Self::decode(self.0.load(Ordering::Acquire))
+    }
+
+    /// Publishes the `shares` the caller owns as active shares of a root that has not resolved.
+    fn publish_shares(&self, shares: usize) -> AckHandoffPublication {
+        debug_assert_ne!(
+            shares, 0,
+            "a caller publishes only shares it owns, and owning none publishes nothing"
+        );
+        let mut word = self.0.load(Ordering::Acquire);
+        loop {
+            let AckHandoffState::Tracking { active_shares } = Self::decode(word) else {
+                return AckHandoffPublication::AlreadyComplete;
+            };
+            let published = Self::total_active_shares(active_shares, shares)
+                .assured(ACK_ACTIVE_SHARES_FIT_IN_ENCODING);
+            let next = Self::encode(AckHandoffState::Tracking {
+                active_shares: published,
+            });
+            match self
+                .0
+                .compare_exchange_weak(word, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) if active_shares == 0 => return AckHandoffPublication::Activated,
+                Ok(_) => return AckHandoffPublication::Joined,
+                Err(observed) => word = observed,
+            }
+        }
+    }
+
+    /// Removes the one active share the caller owns.
+    fn remove_share(&self) -> AckHandoffRemoval {
+        let mut word = self.0.load(Ordering::Acquire);
+        loop {
+            let AckHandoffState::Tracking { active_shares } = Self::decode(word) else {
+                return AckHandoffRemoval::AlreadyComplete;
+            };
+            let Some(remaining) = active_shares.checked_sub(1) else {
+                debug_assert_ne!(
+                    active_shares, 0,
+                    "a handle removes an active ACK share only while it owns one"
+                );
+                return AckHandoffRemoval::NoActiveShare;
+            };
+            let next = Self::encode(AckHandoffState::Tracking {
+                active_shares: remaining,
+            });
+            match self
+                .0
+                .compare_exchange_weak(word, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) if remaining == 0 => return AckHandoffRemoval::WentIdle,
+                Ok(_) => return AckHandoffRemoval::Removed,
+                Err(observed) => word = observed,
+            }
+        }
+    }
+
+    /// Closes tracking for good and reports the state that closing replaced.
+    fn complete(&self) -> AckHandoffState {
+        Self::decode(
+            self.0
+                .swap(Self::encode(AckHandoffState::Complete), Ordering::AcqRel),
+        )
+    }
+
+    /// The total of `active_shares` and `published`, or `None` when that total would not stay
+    /// below the reserved word.
+    fn total_active_shares(active_shares: usize, published: usize) -> Option<usize> {
+        let total = active_shares.checked_add(published)?;
+        if total > Self::MAX_ACTIVE_SHARES {
+            return None;
+        }
+        Some(total)
+    }
+
+    fn decode(word: usize) -> AckHandoffState {
+        if word == Self::COMPLETE {
+            return AckHandoffState::Complete;
+        }
+        AckHandoffState::Tracking {
+            active_shares: word,
+        }
+    }
+
+    fn encode(state: AckHandoffState) -> usize {
+        match state {
+            AckHandoffState::Tracking { active_shares } => {
+                debug_assert!(
+                    active_shares <= Self::MAX_ACTIVE_SHARES,
+                    "an active ACK share count stays below the word the encoding reserves"
+                );
+                active_shares
+            }
+            AckHandoffState::Complete => Self::COMPLETE,
+        }
+    }
+}
+
+// The reserved word sits above every active-share count the encoding admits, so a count reaching
+// it would read back as a completed root.
+const _: () = assert!(AckHandoffTracking::MAX_ACTIVE_SHARES < AckHandoffTracking::COMPLETE);
 
 impl AckRootTracker {
     pub fn outstanding(&self) -> usize {
@@ -162,10 +352,13 @@ impl AckHandle {
     fn new_root(root_trackers: Vec<Arc<AckRootTracker>>) -> (Self, AckCompletion) {
         let (sender, receiver) = oneshot::channel();
         let (alive_tx, alive_rx) = watch::channel(0);
+        // A tracked root starts with its own share active. An untracked root tracks no handoff
+        // share at all, so it starts idle and stays idle.
+        let active_shares = usize::from(!root_trackers.is_empty());
         (
             Self(Arc::new(AckState {
                 pending: AtomicUsize::new(1),
-                handoff_active: AtomicUsize::new(usize::from(!root_trackers.is_empty())),
+                handoff: AckHandoffTracking::tracking(active_shares),
                 alive_counter: AtomicU64::new(0),
                 alive_tx,
                 sender: Mutex::new(Some(sender)),
@@ -250,88 +443,50 @@ impl AckHandle {
         self.0.pending.swap(0, Ordering::AcqRel) != 0
     }
 
+    /// Publishes `shares` the caller reserved a tracker count for, releasing that reservation
+    /// unless the shares are what an ownership handoff now waits for.
     fn publish_handoff_shares(
         &self,
         shares: usize,
         reservation: OwnershipHandoffTrackerReservation<'_>,
-    ) -> bool {
-        let mut current = self.0.handoff_active.load(Ordering::Acquire);
-        loop {
-            if current == HANDOFF_TRACKING_COMPLETE {
-                return false;
-            }
-            let next = current.checked_add(shares);
-            let next = match next {
-                Some(HANDOFF_TRACKING_COMPLETE) | None => None,
-                Some(next) => Some(next),
-            };
-            let next = next.assured(ACK_SHARES_FIT_IN_MEMORY);
-            match self.0.handoff_active.compare_exchange_weak(
-                current,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    if current == 0 {
-                        reservation.retain();
-                    }
-                    return true;
-                }
-                Err(observed) => current = observed,
-            }
+    ) {
+        match self.0.handoff.publish_shares(shares) {
+            AckHandoffPublication::Activated => reservation.retain(),
+            AckHandoffPublication::Joined | AckHandoffPublication::AlreadyComplete => {}
         }
     }
 
+    /// Removes one active share, and reports whether the caller's share was the one removed.
     fn remove_handoff_share(&self) -> bool {
-        let mut current = self.0.handoff_active.load(Ordering::Acquire);
-        loop {
-            if current == HANDOFF_TRACKING_COMPLETE {
-                return false;
-            }
-            if current == 0 {
-                debug_assert!(
-                    current > 0,
-                    "an active ACK share must exist before it leaves"
-                );
-                return false;
-            }
-            let next = current
-                .checked_sub(1)
-                .assured("a positive active ACK share count can be decremented");
-            match self.0.handoff_active.compare_exchange_weak(
-                current,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    if next == 0 {
-                        self.decrement_ownership_handoff_trackers();
-                    }
-                    return true;
-                }
-                Err(observed) => current = observed,
-            }
+        let removal = self.0.handoff.remove_share();
+        match removal {
+            AckHandoffRemoval::WentIdle => self.decrement_ownership_handoff_trackers(),
+            AckHandoffRemoval::Removed
+            | AckHandoffRemoval::AlreadyComplete
+            | AckHandoffRemoval::NoActiveShare => {}
         }
+        removal.removed_share()
     }
 
     fn finish_handoff_tracking(&self) {
-        let active = self
-            .0
-            .handoff_active
-            .swap(HANDOFF_TRACKING_COMPLETE, Ordering::AcqRel);
+        let previous = self.0.handoff.complete();
         debug_assert_ne!(
-            active, HANDOFF_TRACKING_COMPLETE,
+            previous,
+            AckHandoffState::Complete,
             "ACK handoff tracking must complete only once"
         );
-        if active != 0 && active != HANDOFF_TRACKING_COMPLETE {
+        if previous.holds_active_shares() {
             self.decrement_ownership_handoff_trackers();
         }
     }
 
     fn mark_required_wait(&self) -> bool {
         if self.0.root_trackers.is_empty() {
+            return false;
+        }
+        // Pending shares never return from zero, so a resolved root holds no share to park,
+        // including for a handle whose attachment found it already resolved.
+        if self.is_resolved() {
             return false;
         }
         self.remove_handoff_share()
@@ -358,16 +513,18 @@ impl AckHandle {
     }
 
     fn ack_success_tracked(&self) {
-        if !self.remove_handoff_share() {
-            return;
-        }
         match self.resolve_pending_share() {
             AckShareResolution::Complete => {
                 self.finish_handoff_tracking();
                 self.release_root_trackers();
                 self.finish_completion(AckOutcome::Ack);
             }
-            AckShareResolution::AlreadyComplete | AckShareResolution::Pending => {}
+            AckShareResolution::Pending => {
+                // The share was pending, so it is still active unless a concurrent terminal
+                // transition closed handoff tracking, which leaves nothing to remove.
+                self.remove_handoff_share();
+            }
+            AckShareResolution::AlreadyComplete => {}
         }
     }
 
@@ -397,8 +554,13 @@ impl AckHandle {
         self.clone()
     }
 
+    /// Whether every share of this root has resolved, which is terminal.
+    fn is_resolved(&self) -> bool {
+        self.0.pending.load(Ordering::Acquire) == 0
+    }
+
     pub fn ack_alive(&self) {
-        if self.0.pending.load(Ordering::Acquire) == 0 {
+        if self.is_resolved() {
             return;
         }
 
@@ -435,10 +597,10 @@ impl AckHandle {
 impl Drop for AckState {
     fn drop(&mut self) {
         if self.pending.load(Ordering::Acquire) != 0 && !self.root_trackers.is_empty() {
-            let handoff_active = self.handoff_active.load(Ordering::Acquire);
+            let handoff = self.handoff.state();
             for tracker in &self.root_trackers {
                 tracker.outstanding.fetch_sub(1, Ordering::AcqRel);
-                if handoff_active != 0 && handoff_active != HANDOFF_TRACKING_COMPLETE {
+                if handoff.holds_active_shares() {
                     tracker
                         .ownership_handoff_outstanding
                         .fetch_sub(1, Ordering::AcqRel);
@@ -845,24 +1007,196 @@ mod tests {
 
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
+    use meticulous::{OptionExt as _, ResultExt as _};
     use shuttle::thread;
+    use tokio::sync::oneshot::error::TryRecvError;
     use triomphe::Arc;
 
-    use super::{AckRequiredWaitGuard, AckRootTracker, AckSet, HANDOFF_TRACKING_COMPLETE};
-    use crate::shuttle_test::check_dfs;
+    use super::{
+        AckCompletion, AckHandle, AckHandoffState, AckOutcome, AckRequiredWaitGuard,
+        AckRootTracker, AckSet, Ordering,
+    };
+    use crate::shuttle_test::{check_dfs, check_pct};
 
-    fn assert_tracker_matches_root(root: &AckSet, tracker: &AckRootTracker) {
-        let handle = &root.handles[0];
-        let pending = handle.0.pending.load(super::Ordering::Acquire);
-        let handoff_active = handle.0.handoff_active.load(super::Ordering::Acquire);
-        let expected_outstanding = usize::from(pending != 0);
-        let expected_handoff_outstanding =
-            usize::from(handoff_active != 0 && handoff_active != HANDOFF_TRACKING_COMPLETE);
+    // Models with more than three tasks have too many interleavings to enumerate, so they sample
+    // schedules that need up to `PCT_DEPTH` ordering constraints to fail.
+    const PCT_ITERATIONS: usize = 1_000;
+    const PCT_DEPTH: usize = 3;
 
-        assert_eq!(tracker.outstanding(), expected_outstanding);
+    const JOINED: &str =
+        "a modeled thread's panic fails the Shuttle execution before its joiner resumes";
+    const STOPPED_WHILE_WAITING: &str =
+        "node stopped while waiting for required materialized state";
+
+    /// One acknowledgement root, observed through a handle that owns none of its shares.
+    struct ObservedRoot {
+        observer: AckHandle,
+        completion: AckCompletion,
+        /// The outcome the completion receiver delivered, once a quiescent point observed it.
+        outcome: Option<AckOutcome>,
+    }
+
+    /// The trackers of one domain with two ingestors. Every root counts against the domain and
+    /// against the ingestor that created it, as the runtime tracks ingested payloads.
+    struct DomainTrackers {
+        domain: Arc<AckRootTracker>,
+        first_ingestor: Arc<AckRootTracker>,
+        second_ingestor: Arc<AckRootTracker>,
+    }
+
+    impl ObservedRoot {
+        /// Creates a root counted against `trackers` and returns its root share beside it.
+        fn tracked(trackers: Vec<Arc<AckRootTracker>>) -> (AckSet, Self) {
+            let (root, completion) = AckSet::tracked_roots(trackers);
+            let observer = root
+                .handles
+                .first()
+                .assured("a root set holds the handle of the root it creates")
+                .clone();
+            let observed = Self {
+                observer,
+                completion,
+                outcome: None,
+            };
+            (root, observed)
+        }
+
+        fn pending_shares(&self) -> usize {
+            self.observer.0.pending.load(Ordering::Acquire)
+        }
+
+        fn handoff_state(&self) -> AckHandoffState {
+            self.observer.0.handoff.state()
+        }
+
+        fn is_outstanding(&self) -> bool {
+            !self.observer.is_resolved()
+        }
+
+        fn holds_ownership_handoff(&self) -> bool {
+            self.handoff_state().holds_active_shares()
+        }
+
+        /// The outcome a quiescent point observed this root deliver.
+        fn outcome(&self) -> Option<&AckOutcome> {
+            self.outcome.as_ref()
+        }
+
+        /// Asserts this root where no operation on it is in flight, while `parked_shares` of its
+        /// pending shares wait on `REQUIRED WAIT`.
+        ///
+        /// An unresolved root tracks exactly its pending shares that are not parked as active and
+        /// has delivered no outcome. A resolved root won one terminal transition: it closed handoff
+        /// tracking, and its receiver delivered one outcome and nothing after it.
+        fn assert_quiescent(&mut self, parked_shares: usize) {
+            let pending = self.pending_shares();
+            let handoff = self.handoff_state();
+            if pending == 0 {
+                assert_eq!(
+                    handoff,
+                    AckHandoffState::Complete,
+                    "a resolved root must have closed handoff tracking"
+                );
+                self.observe_single_outcome();
+                return;
+            }
+
+            assert!(
+                pending >= parked_shares,
+                "a parked share stays pending until it is resolved, but {pending} shares are \
+                 pending while {parked_shares} are parked"
+            );
+            let active_shares = pending
+                .checked_sub(parked_shares)
+                .verified("the assertion above bounds parked shares by pending shares");
+            assert_eq!(
+                handoff,
+                AckHandoffState::Tracking { active_shares },
+                "an unresolved root must track exactly its pending shares that are not parked as \
+                 active"
+            );
+            assert_eq!(
+                self.completion.receiver.try_recv(),
+                Err(TryRecvError::Empty),
+                "an unresolved root must not deliver an outcome"
+            );
+        }
+
+        fn observe_single_outcome(&mut self) {
+            if self.outcome.is_none() {
+                match self.completion.receiver.try_recv() {
+                    Ok(outcome) => self.outcome = Some(outcome),
+                    Err(error) => panic!(
+                        "a resolved root must deliver its outcome, but its receiver reported \
+                         {error:?}"
+                    ),
+                }
+            }
+            assert_eq!(
+                self.completion.receiver.try_recv(),
+                Err(TryRecvError::Closed),
+                "a resolved root must deliver exactly one outcome"
+            );
+        }
+    }
+
+    impl DomainTrackers {
+        fn new() -> Self {
+            Self {
+                domain: Arc::new(AckRootTracker::default()),
+                first_ingestor: Arc::new(AckRootTracker::default()),
+                second_ingestor: Arc::new(AckRootTracker::default()),
+            }
+        }
+
+        fn first_ingestor_root(&self) -> (AckSet, ObservedRoot) {
+            ObservedRoot::tracked(vec![self.domain.clone(), self.first_ingestor.clone()])
+        }
+
+        fn second_ingestor_root(&self) -> (AckSet, ObservedRoot) {
+            ObservedRoot::tracked(vec![self.domain.clone(), self.second_ingestor.clone()])
+        }
+
+        /// Asserts at a quiescent point that the domain counts every root and that each ingestor
+        /// counts exactly the roots it created.
+        fn assert_counts(
+            &self,
+            first_ingestor_roots: &[&ObservedRoot],
+            second_ingestor_roots: &[&ObservedRoot],
+        ) {
+            let domain_roots = first_ingestor_roots
+                .iter()
+                .chain(second_ingestor_roots)
+                .copied()
+                .collect::<Vec<_>>();
+            assert_tracker_counts(&self.domain, &domain_roots);
+            assert_tracker_counts(&self.first_ingestor, first_ingestor_roots);
+            assert_tracker_counts(&self.second_ingestor, second_ingestor_roots);
+        }
+    }
+
+    /// Asserts at a quiescent point that `tracker` counts exactly `roots`, the roots it tracks:
+    /// each unresolved root is outstanding once, and each root holding an active share holds
+    /// ownership handoff once. A count released twice wraps the tracker below zero, so an
+    /// undercount fails here as loudly as an overcount.
+    fn assert_tracker_counts(tracker: &AckRootTracker, roots: &[&ObservedRoot]) {
+        let outstanding = roots
+            .iter()
+            .map(|root| usize::from(root.is_outstanding()))
+            .sum::<usize>();
+        let ownership_handoff = roots
+            .iter()
+            .map(|root| usize::from(root.holds_ownership_handoff()))
+            .sum::<usize>();
+        assert_eq!(
+            tracker.outstanding(),
+            outstanding,
+            "a tracker must count each unresolved root it tracks once"
+        );
         assert_eq!(
             tracker.outstanding_for_ownership_handoff(),
-            expected_handoff_outstanding
+            ownership_handoff,
+            "a tracker must hold ownership handoff once for each root with an active share"
         );
     }
 
@@ -871,21 +1205,21 @@ mod shuttle_tests {
         check_dfs(
             || {
                 let tracker = Arc::new(AckRootTracker::default());
-                let (root, completion) = AckSet::tracked_root(tracker.clone());
+                let (root, mut observed) = ObservedRoot::tracked(vec![tracker.clone()]);
                 let attachment_source = root.clone();
-                let observer = root.clone();
 
                 let attach_thread = thread::spawn(move || attachment_source.attached());
                 let ack_thread = thread::spawn(move || root.ack_success());
 
-                let attached = attach_thread.join().expect("attachment thread should join");
-                ack_thread.join().expect("ack thread should join");
-                assert_tracker_matches_root(&observer, &tracker);
+                let attached = attach_thread.join().assured(JOINED);
+                ack_thread.join().assured(JOINED);
+                observed.assert_quiescent(0);
+                assert_tracker_counts(&tracker, &[&observed]);
 
                 attached.ack_success();
-                assert_tracker_matches_root(&observer, &tracker);
-                assert_eq!(tracker.outstanding(), 0);
-                drop(completion);
+                observed.assert_quiescent(0);
+                assert_tracker_counts(&tracker, &[&observed]);
+                assert_eq!(observed.outcome(), Some(&AckOutcome::Ack));
             },
             None,
         );
@@ -896,28 +1230,32 @@ mod shuttle_tests {
         check_dfs(
             || {
                 let tracker = Arc::new(AckRootTracker::default());
-                let (root, completion) = AckSet::tracked_root(tracker.clone());
+                let (root, mut observed) = ObservedRoot::tracked(vec![tracker.clone()]);
                 let attached = root.attached();
                 let waiting = root.clone();
-                let observer = root.clone();
 
                 let wait_thread = thread::spawn(move || AckRequiredWaitGuard::new([&waiting]));
                 let ack_thread = thread::spawn(move || attached.ack_success());
 
-                let required_wait = wait_thread.join().expect("wait thread should join");
-                ack_thread.join().expect("ack thread should join");
-                assert_tracker_matches_root(&observer, &tracker);
+                let required_wait = wait_thread.join().assured(JOINED);
+                ack_thread.join().assured(JOINED);
+                observed.assert_quiescent(1);
+                assert_tracker_counts(&tracker, &[&observed]);
                 assert_eq!(tracker.outstanding(), 1);
                 assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
 
                 drop(required_wait);
-                assert_tracker_matches_root(&observer, &tracker);
+                observed.assert_quiescent(0);
+                assert_tracker_counts(&tracker, &[&observed]);
                 assert_eq!(tracker.outstanding_for_ownership_handoff(), 1);
 
-                observer.no_ack("test completion");
-                assert_tracker_matches_root(&observer, &tracker);
-                assert_eq!(tracker.outstanding(), 0);
-                drop(completion);
+                root.no_ack("test completion");
+                observed.assert_quiescent(0);
+                assert_tracker_counts(&tracker, &[&observed]);
+                assert_eq!(
+                    observed.outcome(),
+                    Some(&AckOutcome::NoAck("test completion".to_string()))
+                );
             },
             None,
         );
@@ -928,22 +1266,21 @@ mod shuttle_tests {
         check_dfs(
             || {
                 let tracker = Arc::new(AckRootTracker::default());
-                let (root, completion) = AckSet::tracked_root(tracker.clone());
+                let (root, mut observed) = ObservedRoot::tracked(vec![tracker.clone()]);
                 let required_wait = AckRequiredWaitGuard::new([&root]);
-                let observer = root.clone();
 
                 let release_thread = thread::spawn(move || drop(required_wait));
                 let completion_thread = thread::spawn(move || root.no_ack("test completion"));
 
-                release_thread.join().expect("release thread should join");
-                completion_thread
-                    .join()
-                    .expect("completion thread should join");
+                release_thread.join().assured(JOINED);
+                completion_thread.join().assured(JOINED);
 
-                assert_tracker_matches_root(&observer, &tracker);
-                assert_eq!(tracker.outstanding(), 0);
-                assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
-                drop(completion);
+                observed.assert_quiescent(0);
+                assert_tracker_counts(&tracker, &[&observed]);
+                assert_eq!(
+                    observed.outcome(),
+                    Some(&AckOutcome::NoAck("test completion".to_string()))
+                );
             },
             None,
         );
@@ -954,22 +1291,314 @@ mod shuttle_tests {
         check_dfs(
             || {
                 let tracker = Arc::new(AckRootTracker::default());
-                let (root, completion) = AckSet::tracked_root(tracker.clone());
+                let (root, mut observed) = ObservedRoot::tracked(vec![tracker.clone()]);
                 let competing = root.clone();
-                let observer = root.clone();
 
                 let ack_thread = thread::spawn(move || root.ack_success());
                 let no_ack_thread = thread::spawn(move || competing.no_ack("test failure"));
 
-                ack_thread.join().expect("ack thread should join");
-                no_ack_thread.join().expect("no-ack thread should join");
+                ack_thread.join().assured(JOINED);
+                no_ack_thread.join().assured(JOINED);
 
-                assert_tracker_matches_root(&observer, &tracker);
-                assert_eq!(tracker.outstanding(), 0);
-                assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
-                drop(completion);
+                observed.assert_quiescent(0);
+                assert_tracker_counts(&tracker, &[&observed]);
+                match observed.outcome() {
+                    Some(AckOutcome::Ack) => {}
+                    Some(AckOutcome::NoAck(reason)) => assert_eq!(reason, "test failure"),
+                    None => panic!("both terminal transitions ran, so the root must be resolved"),
+                }
             },
             None,
+        );
+    }
+
+    /// A processor attaches an output to its active share while another share of the root, parked
+    /// on `REQUIRED WAIT`, is negatively acknowledged, as a node stopping during the wait does.
+    /// When the failure claims the root first, the attachment reserves no share, so acknowledging
+    /// its output must not remove the active share the processor still owns.
+    #[test]
+    fn attachment_losing_its_reservation_to_completion_resolves_no_share() {
+        check_dfs(
+            || {
+                let tracker = Arc::new(AckRootTracker::default());
+                let (processing, mut observed) = ObservedRoot::tracked(vec![tracker.clone()]);
+                let waiting = processing.attached();
+                let required_wait = AckRequiredWaitGuard::new([&waiting]);
+
+                let stopping = thread::spawn(move || waiting.no_ack(STOPPED_WHILE_WAITING));
+                let processor = thread::spawn(move || {
+                    let output = processing.attached();
+                    output.ack_success();
+                    processing.ack_success();
+                });
+
+                stopping.join().assured(JOINED);
+                processor.join().assured(JOINED);
+                observed.assert_quiescent(0);
+                assert_tracker_counts(&tracker, &[&observed]);
+
+                drop(required_wait);
+                observed.assert_quiescent(0);
+                assert_tracker_counts(&tracker, &[&observed]);
+                assert_eq!(
+                    observed.outcome(),
+                    Some(&AckOutcome::NoAck(STOPPED_WHILE_WAITING.to_string()))
+                );
+            },
+            None,
+        );
+    }
+
+    /// The same race as above, where the output's consumer parks on `REQUIRED WAIT` before the
+    /// processor acknowledges its own share. An attachment that reserved no share must park none.
+    #[test]
+    fn attachment_losing_its_reservation_to_completion_parks_no_share() {
+        check_dfs(
+            || {
+                let tracker = Arc::new(AckRootTracker::default());
+                let (processing, mut observed) = ObservedRoot::tracked(vec![tracker.clone()]);
+                let waiting = processing.attached();
+                let required_wait = AckRequiredWaitGuard::new([&waiting]);
+
+                let stopping = thread::spawn(move || waiting.no_ack(STOPPED_WHILE_WAITING));
+                let processor = thread::spawn(move || {
+                    let output = processing.attached();
+                    let output_wait = AckRequiredWaitGuard::new([&output]);
+                    processing.ack_success();
+                    (output, output_wait)
+                });
+
+                stopping.join().assured(JOINED);
+                let (output, output_wait) = processor.join().assured(JOINED);
+                observed.assert_quiescent(0);
+                assert_tracker_counts(&tracker, &[&observed]);
+
+                drop(output_wait);
+                output.ack_success();
+                drop(required_wait);
+                observed.assert_quiescent(0);
+                assert_tracker_counts(&tracker, &[&observed]);
+                assert_eq!(
+                    observed.outcome(),
+                    Some(&AckOutcome::NoAck(STOPPED_WHILE_WAITING.to_string()))
+                );
+            },
+            None,
+        );
+    }
+
+    /// A parked share leaves `REQUIRED WAIT` while the root's only active share is acknowledged,
+    /// so the root goes idle whenever the acknowledgement removes its share before the released
+    /// share is published again.
+    #[test]
+    fn wait_release_racing_the_last_active_ack_holds_domain_and_ingestor_handoff_once() {
+        check_dfs(
+            || {
+                let trackers = DomainTrackers::new();
+                let (active, mut observed) = trackers.first_ingestor_root();
+                let waiting = active.attached();
+                let required_wait = AckRequiredWaitGuard::new([&waiting]);
+
+                let release = thread::spawn(move || drop(required_wait));
+                let acknowledgement = thread::spawn(move || active.ack_success());
+
+                release.join().assured(JOINED);
+                acknowledgement.join().assured(JOINED);
+                observed.assert_quiescent(0);
+                trackers.assert_counts(&[&observed], &[]);
+                assert_eq!(trackers.domain.outstanding_for_ownership_handoff(), 1);
+
+                waiting.ack_success();
+                observed.assert_quiescent(0);
+                trackers.assert_counts(&[&observed], &[]);
+                assert_eq!(observed.outcome(), Some(&AckOutcome::Ack));
+            },
+            None,
+        );
+    }
+
+    /// A share is attached while the root's only active share parks on `REQUIRED WAIT`, so the
+    /// root goes idle whenever the share parks before the attachment publishes.
+    #[test]
+    fn attachment_racing_the_last_active_share_into_wait_publishes_one_active_share() {
+        check_dfs(
+            || {
+                let trackers = DomainTrackers::new();
+                let (root, mut observed) = trackers.first_ingestor_root();
+                let attachment_source = root.clone();
+                let waiting = root.clone();
+
+                let attachment = thread::spawn(move || attachment_source.attached());
+                let wait = thread::spawn(move || AckRequiredWaitGuard::new([&waiting]));
+
+                let attached = attachment.join().assured(JOINED);
+                let required_wait = wait.join().assured(JOINED);
+                observed.assert_quiescent(1);
+                trackers.assert_counts(&[&observed], &[]);
+                assert_eq!(
+                    trackers.first_ingestor.outstanding_for_ownership_handoff(),
+                    1
+                );
+
+                drop(required_wait);
+                attached.ack_success();
+                root.ack_success();
+                observed.assert_quiescent(0);
+                trackers.assert_counts(&[&observed], &[]);
+                assert_eq!(observed.outcome(), Some(&AckOutcome::Ack));
+            },
+            None,
+        );
+    }
+
+    /// One domain ingests from two ingestors. A processor batches a message of every root and fans
+    /// its output out to two consumers, one of which waits on required state. Meanwhile another
+    /// message of the first payload waits on required state, and the root of the second ingestor
+    /// fails while it waits, as a node stopping during the wait fails it.
+    #[test]
+    fn fan_out_across_ingestors_with_a_failing_root_resolves_each_root_once_with_exact_counts() {
+        check_pct(
+            || {
+                let trackers = DomainTrackers::new();
+                let (first_payload, mut first) = trackers.first_ingestor_root();
+                let (second_payload, mut second) = trackers.first_ingestor_root();
+                let (failing_payload, mut failing) = trackers.second_ingestor_root();
+
+                let mut first_messages = Vec::new();
+                first_payload.split_into(2, &mut first_messages);
+                let waiting_message = first_messages
+                    .pop()
+                    .assured("splitting a payload into two shares appends two sets");
+                let batched_message = first_messages
+                    .pop()
+                    .assured("splitting a payload into two shares appends two sets");
+                let batch =
+                    AckSet::merged([batched_message, second_payload, failing_payload.attached()]);
+
+                let processor = thread::spawn(move || {
+                    let output = batch.attached_for_receivers(2);
+                    let waiting_consumer_share = output.clone();
+                    let waiting_consumer = thread::spawn(move || {
+                        let required_wait = AckRequiredWaitGuard::new([&waiting_consumer_share]);
+                        drop(required_wait);
+                        waiting_consumer_share.ack_success();
+                    });
+                    let consumer = thread::spawn(move || output.ack_success());
+                    batch.ack_success();
+                    waiting_consumer.join().assured(JOINED);
+                    consumer.join().assured(JOINED);
+                });
+                let waiting = thread::spawn(move || {
+                    let required_wait = AckRequiredWaitGuard::new([&waiting_message]);
+                    drop(required_wait);
+                    waiting_message.ack_success();
+                });
+                let stopping = thread::spawn(move || {
+                    let required_wait = AckRequiredWaitGuard::new([&failing_payload]);
+                    failing_payload.no_ack(STOPPED_WHILE_WAITING);
+                    drop(required_wait);
+                });
+
+                processor.join().assured(JOINED);
+                waiting.join().assured(JOINED);
+                stopping.join().assured(JOINED);
+
+                first.assert_quiescent(0);
+                second.assert_quiescent(0);
+                failing.assert_quiescent(0);
+                trackers.assert_counts(&[&first, &second], &[&failing]);
+                assert_eq!(first.outcome(), Some(&AckOutcome::Ack));
+                assert_eq!(second.outcome(), Some(&AckOutcome::Ack));
+                assert_eq!(
+                    failing.outcome(),
+                    Some(&AckOutcome::NoAck(STOPPED_WHILE_WAITING.to_string()))
+                );
+            },
+            PCT_ITERATIONS,
+            PCT_DEPTH,
+        );
+    }
+
+    /// Three roots from two ingestors first park and fan out concurrently, then concurrently
+    /// resolve, leave their wait and fail twice over.
+    #[test]
+    fn parked_and_fanned_out_roots_hold_exact_counts_at_every_quiescent_point() {
+        check_pct(
+            || {
+                let trackers = DomainTrackers::new();
+                let (batched_payload, mut batched) = trackers.first_ingestor_root();
+                let (failing_payload, mut failing) = trackers.second_ingestor_root();
+                let (fanned_payload, mut fanned) = trackers.first_ingestor_root();
+
+                let rejected_by_sink = failing_payload.attached();
+                let rejected_by_route = failing_payload.attached();
+                let batch = AckSet::merged([batched_payload, failing_payload]);
+                let fan_out_source = fanned_payload.attached();
+
+                let processor = thread::spawn(move || {
+                    let output = batch.attached();
+                    batch.ack_success();
+                    output
+                });
+                let parking = thread::spawn(move || {
+                    let required_wait = AckRequiredWaitGuard::new([&fanned_payload]);
+                    (fanned_payload, required_wait)
+                });
+                let fan_out = thread::spawn(move || {
+                    let consumer_share = fan_out_source.attached_for_receivers(2);
+                    fan_out_source.ack_success();
+                    consumer_share
+                });
+
+                let output = processor.join().assured(JOINED);
+                let (parked_message, required_wait) = parking.join().assured(JOINED);
+                let first_consumer_share = fan_out.join().assured(JOINED);
+                let second_consumer_share = first_consumer_share.clone();
+                batched.assert_quiescent(0);
+                failing.assert_quiescent(0);
+                fanned.assert_quiescent(1);
+                trackers.assert_counts(&[&batched, &fanned], &[&failing]);
+
+                let output_consumer = thread::spawn(move || output.ack_success());
+                let sink =
+                    thread::spawn(move || rejected_by_sink.no_ack("sink rejected the message"));
+                let route = thread::spawn(move || {
+                    rejected_by_route.no_ack("error route rejected the message");
+                });
+                let release = thread::spawn(move || {
+                    drop(required_wait);
+                    parked_message.ack_success();
+                });
+                let first_consumer = thread::spawn(move || first_consumer_share.ack_success());
+                let second_consumer = thread::spawn(move || second_consumer_share.ack_success());
+
+                output_consumer.join().assured(JOINED);
+                sink.join().assured(JOINED);
+                route.join().assured(JOINED);
+                release.join().assured(JOINED);
+                first_consumer.join().assured(JOINED);
+                second_consumer.join().assured(JOINED);
+                batched.assert_quiescent(0);
+                failing.assert_quiescent(0);
+                fanned.assert_quiescent(0);
+                trackers.assert_counts(&[&batched, &fanned], &[&failing]);
+                assert_eq!(batched.outcome(), Some(&AckOutcome::Ack));
+                assert_eq!(fanned.outcome(), Some(&AckOutcome::Ack));
+                match failing.outcome() {
+                    Some(AckOutcome::NoAck(reason)) => assert!(
+                        reason == "sink rejected the message"
+                            || reason == "error route rejected the message",
+                        "the failing root must resolve with one of its two rejections, not \
+                         {reason:?}"
+                    ),
+                    other => panic!(
+                        "both rejections ran, so the failing root must resolve negatively, not \
+                         {other:?}"
+                    ),
+                }
+            },
+            PCT_ITERATIONS,
+            PCT_DEPTH,
         );
     }
 }

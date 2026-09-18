@@ -26,7 +26,7 @@ use nervix_models::{
 };
 use nervix_recovery::Discarded as _;
 use rkyv::{Archive, Deserialize, Serialize};
-use strum::{FromRepr, IntoStaticStr};
+use strum::IntoStaticStr;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
@@ -34,8 +34,12 @@ mod connection;
 mod identity;
 mod observation;
 mod operation;
+mod peer_target;
 mod pool;
 mod request;
+mod runtime_state;
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_test;
 mod wire;
 
 pub use connection::{
@@ -48,6 +52,7 @@ pub use observation::{
     StreamResetReason, TransferDirection, TransportCounters, TransportSnapshot,
 };
 pub use operation::{RemoteOperationFailure, RemoteOperationSubject};
+pub use peer_target::PeerTarget;
 pub use pool::PoolClass;
 pub use request::{
     ApplicationHealthProbe, ApplicationRevisionRequest, ApplicationRevisionResponse,
@@ -56,6 +61,11 @@ pub use request::{
     StreamHandlerError, StreamingResponse,
 };
 use request::{RequestEnvelope, RequestState, ResponseEnvelope};
+pub use runtime_state::{
+    OwnershipHandoffCheckpoint, RuntimeState, RuntimeStateKind, StateCheckpointAvailable,
+    StatePlacementEnvelope, StateReplicationAck, StateSnapshotEnvelope, StateSyncRequest,
+    StateSyncResponse,
+};
 
 const DEFAULT_MAX_PEERS: usize = 64;
 const DEFAULT_MAX_CONNECTIONS: usize = 768;
@@ -177,22 +187,6 @@ impl TransportOptions {
     }
 }
 
-/// One advertised address and the certificate name expected there.
-#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PeerTarget {
-    pub addr: SocketAddr,
-    pub server_name: String,
-}
-
-impl PeerTarget {
-    pub fn new(addr: SocketAddr, server_name: impl Into<String>) -> Self {
-        Self {
-            addr,
-            server_name: server_name.into(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum Envelope {
     RelayPayload(RelayPayload),
@@ -295,94 +289,6 @@ pub struct RuntimeErrorEvent {
 pub struct DomainClockProgressRequest {
     pub domain_id: DomainName,
     pub progress: DomainClockProgress,
-}
-
-macro_rules! declare_runtime_state_kinds {
-    ($($Kind:ident = $tag:literal,)+) => {
-        /// The kinds of runtime state a node persists, and the byte each one occupies in a
-        /// storage key.
-        #[derive(
-            Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq, Hash, FromRepr,
-            IntoStaticStr,
-        )]
-        #[repr(u8)]
-        #[strum(serialize_all = "snake_case")]
-        pub enum RuntimeStateKind {
-            $($Kind = $tag,)+
-        }
-
-        impl RuntimeStateKind {
-            /// This kind's name, as diagnostics and remote operation subjects spell it.
-            pub fn as_str(self) -> &'static str {
-                self.into()
-            }
-        }
-
-        impl From<RuntimeStateKind> for u8 {
-            fn from(value: RuntimeStateKind) -> Self {
-                match value {
-                    $(RuntimeStateKind::$Kind => $tag,)+
-                }
-            }
-        }
-    };
-}
-
-declare_runtime_state_kinds! {
-    BranchAggregated = 0,
-    Correlator = 1,
-    Deduplicator = 2,
-    KafkaOffset = 3,
-    MaterializedRelay = 4,
-    WasmProcessor = 5,
-    WindowProcessor = 6,
-    BranchLru = 7,
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
-pub struct StatePlacementEnvelope {
-    pub domain: DomainName,
-    pub state: RuntimeStateKind,
-    pub kind: ModelKind,
-    pub identifier: ModelName,
-    pub schema_fingerprint: [u8; 32],
-    pub branch_key: Option<Vec<RemoteRuntimeField>>,
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub struct StateSnapshotEnvelope {
-    pub lsm: u64,
-    pub schema_fingerprint: [u8; 32],
-    pub payload: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
-pub struct StateSyncRequest {
-    pub placement: StatePlacementEnvelope,
-    pub after_lsm: Option<u64>,
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub struct StateSyncResponse {
-    pub result: Result<Option<StateSnapshotEnvelope>, RemoteOperationFailure>,
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
-pub struct StateReplicationAck {
-    pub placement: StatePlacementEnvelope,
-    pub lsm: u64,
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
-pub struct StateCheckpointAvailable {
-    pub placement: StatePlacementEnvelope,
-    pub lsm: u64,
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
-pub struct OwnershipHandoffCheckpoint {
-    pub placement: StatePlacementEnvelope,
-    pub snapshot: StateSnapshotEnvelope,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -710,14 +616,6 @@ pub struct LookupRequest {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub struct LookupResponse {
     pub result: Result<Option<Vec<u8>>, RemoteOperationFailure>,
-}
-
-impl InterconnectRequest for StateSyncRequest {
-    type Response = StateSyncResponse;
-
-    const NAME: &'static str = "state_sync";
-    const CLASS: PoolClass = PoolClass::Replication;
-    const TIMEOUT: Duration = Duration::from_secs(5);
 }
 
 impl InterconnectRequest for DataflowNodeStatusRequest {

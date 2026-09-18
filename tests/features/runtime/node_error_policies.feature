@@ -147,6 +147,73 @@ Feature: Runtime node error policies
       | 1            | 0             |
       | 3            | 0             |
 
+  Scenario Outline: Route filter evaluation errors retain their structured operation
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA calculation (
+        id STRING,
+        numerator I64,
+        denominator I64
+      );
+      CREATE SCHEMA calculation_error (
+        source_id STRING,
+        operation STRING
+      );
+      CREATE WIRE JSON SCHEMA calculation_wire MODE STRICT (
+        id string,
+        numerator integer,
+        denominator integer
+      );
+      CREATE CODEC calculation_codec
+        FROM WIRE JSON SCHEMA calculation_wire
+        TO SCHEMA calculation;
+      CREATE RELAY calculations SCHEMA calculation UNBRANCHED;
+      CREATE RELAY accepted_calculations SCHEMA calculation UNBRANCHED;
+      CREATE RELAY calculation_errors SCHEMA calculation_error UNBRANCHED;
+      CREATE VHOST edge filter-operation-{{test_id}}.example.com;
+      CREATE ENDPOINT calculation_ingress ON edge PATH '/calculations' TYPE HTTP;
+      CREATE INGESTOR calculation_source
+        FROM ENDPOINT calculation_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec
+        TO calculations
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE JUNCTION filter_calculations
+        FROM calculations
+        UNBRANCHED
+        TO accepted_calculations
+          INHERIT ALL
+          WHERE output.numerator / output.denominator > 0
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR SEND TO calculation_errors
+            SET source_id = input.id,
+                operation = error.operation;
+      CREATE SUBSCRIPTION calculation_errors_subscription TO calculation_errors;
+      START;
+      """
+    And http payload is posted to node "node-1" with host "filter-operation-{{test_id}}.example.com" path "/calculations"
+      """
+      {"id":"divide-by-zero","numerator":10,"denominator":0}
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      "source_id":"divide-by-zero" | "operation":"route_where"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
   Scenario Outline: Attached emitter message errors can be ignored without replaying the source message
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
