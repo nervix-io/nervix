@@ -27,6 +27,7 @@ shuttle = [
   "dep:shuttle-tokio-util",
   "nervix-client-core/shuttle",
   "nervix-connector/shuttle",
+  "nervix-connector-kafka/shuttle",
   "nervix-consensus/shuttle",
   "nervix-execution/shuttle",
   "nervix-interconnect/shuttle",
@@ -110,6 +111,7 @@ nervix-approx-into = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-client-wire = { workspace = true }
 nervix-connector = { workspace = true }
+nervix-connector-kafka = { workspace = true }
 nervix-consensus = { workspace = true }
 nervix-dataflow-graph = { workspace = true }
 nervix-execution = { workspace = true }
@@ -265,6 +267,7 @@ members = [
   "crates/client-core",
   "crates/client-wire",
   "crates/connector",
+  "crates/connectors/kafka",
   "crates/consensus",
   "crates/dataflow-graph",
   "crates/execution",
@@ -411,6 +414,7 @@ nervix-approx-into = { package = "nervix-approx-into", path = "crates/approx-int
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-client-wire = { package = "nervix-client-wire", path = "crates/client-wire" }
 nervix-connector = { package = "nervix-connector", path = "crates/connector" }
+nervix-connector-kafka = { package = "nervix-connector-kafka", path = "crates/connectors/kafka" }
 nervix-consensus = { package = "nervix-consensus", path = "crates/consensus" }
 nervix-dataflow-graph = { package = "nervix-dataflow-graph", path = "crates/dataflow-graph" }
 nervix-execution = { package = "nervix-execution", path = "crates/execution" }

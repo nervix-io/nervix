@@ -38,7 +38,7 @@ type NatsConfirmation =
     Pin<Box<dyn Future<Output = Result<PublishAck, JetStreamPublishError>> + Send>>;
 
 struct PendingNatsConfirmation {
-    position: BrokerRecordPosition,
+    position: SinkRecordPosition,
     deadline: Instant,
     confirmation: NatsConfirmation,
 }

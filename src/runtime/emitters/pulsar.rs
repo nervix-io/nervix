@@ -14,7 +14,7 @@ pub(in crate::runtime) struct PulsarEmitter {
 }
 
 struct PendingPulsarConfirmation {
-    position: BrokerRecordPosition,
+    position: SinkRecordPosition,
     acks: AckSet,
     deadline: Instant,
     confirmation: PulsarSendFuture,

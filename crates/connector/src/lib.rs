@@ -36,6 +36,7 @@ mod ingest_metadata;
 // declares stays the only file in this crate that names the capability constructor and UTC read.
 pub mod physical_time;
 mod service_url;
+mod sink;
 mod tls;
 
 pub use client_config::{
@@ -49,4 +50,11 @@ pub use ingest_metadata::{
     IngestMessageHeaders, IngestMetadataRow, NoIngestHeaders, RetainedIngestHeaders,
 };
 pub use service_url::{ServiceUrl, ServiceUrlError};
+pub use sink::{
+    AckConfirmation, BrokerPublishingMode, MappedSinkRows, PerRecordOutcome, PerRecordOutcomeParts,
+    RecordSink, RejectedSinkRecord, RowSink, SinkAcknowledgementServices, SinkAcknowledgements,
+    SinkDeadline, SinkEventReporter, SinkGeneralErrorHandler, SinkHost, SinkHostServices,
+    SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordPosition,
+    SinkStagingDirectory, SinkStartError, SinkStartResult, SinkTransientErrorStatus,
+};
 pub use tls::{RustlsClientConfigSource, TlsClientConfigError};

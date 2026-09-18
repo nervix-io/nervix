@@ -4,33 +4,24 @@
 //!
 //! - **Owns.** Readiness probe outcomes, the single owned node task, its terminal outcome, and the
 //!   diagnostic produced when startup does not reach readiness.
-//! - **Depends on.** The session client used for readiness, the application error returned by the
-//!   in-process server, Tokio task ownership, and wall-clock test deadlines.
+//! - **Depends on.** The bounded status request used for readiness, the application error returned
+//!   by the in-process server, Tokio task ownership, and the phase deadline of a startup attempt.
 //! - **Must not know.** Production retry policy, production session internals, or scenario state.
 
-use std::{
-    fmt,
-    future::Future,
-    io,
-    time::{Duration, Instant},
-};
+use std::{fmt, future::Future, time::Duration};
 
 use error_stack::Report;
-use nervix_client_core::{ClientError, CommandOutcomeKind, Diagnostic};
+use nervix_client_core::{CommandOutcomeKind, Diagnostic};
 use nervix_models::ClusterNodeName;
 use nervix_server::application::AppError;
 use thiserror::Error;
 use tokio::{task::JoinHandle, time::timeout};
 use triomphe::Arc;
 
-/// A failure that prevented the readiness probe from creating its authenticated client session.
-#[derive(Debug, Error)]
-pub(crate) enum ReadinessConnectionFailure {
-    #[error("failed to prepare client connection options")]
-    Options(#[source] io::Error),
-    #[error("failed to create the client session")]
-    Session(#[source] ClientError),
-}
+use super::{
+    phase_deadline::PhaseDeadline,
+    status_request::{StatusEndpoint, StatusRequestError},
+};
 
 /// Everything one readiness probe can observe.
 #[derive(Debug)]
@@ -38,8 +29,9 @@ pub(crate) enum ReadinessProbeOutcome {
     Ready {
         response_kind: CommandOutcomeKind,
     },
-    ConnectionFailed(ReadinessConnectionFailure),
-    CommandFailed(ClientError),
+    /// The status request ended without a command result, including the operation its deadline
+    /// interrupted when the deadline passed.
+    RequestFailed(Report<StatusRequestError>),
     UnsuccessfulResponse {
         response_kind: CommandOutcomeKind,
         message: String,
@@ -48,6 +40,26 @@ pub(crate) enum ReadinessProbeOutcome {
 }
 
 impl ReadinessProbeOutcome {
+    /// Asks the node for its cluster status within `phase`. A node that is not the leader is ready
+    /// too, because it answered an authenticated command.
+    pub(crate) async fn probe(endpoint: &StatusEndpoint, phase: PhaseDeadline) -> Self {
+        let outcome = match endpoint.request(phase).await {
+            Ok(outcome) => outcome,
+            Err(error) => return Self::RequestFailed(error),
+        };
+        if outcome.success || outcome.kind == CommandOutcomeKind::NotLeader {
+            Self::Ready {
+                response_kind: outcome.kind,
+            }
+        } else {
+            Self::UnsuccessfulResponse {
+                response_kind: outcome.kind,
+                message: outcome.message,
+                diagnostics: outcome.diagnostics,
+            }
+        }
+    }
+
     pub(crate) fn is_ready(&self) -> bool {
         matches!(self, Self::Ready { .. })
     }
@@ -59,12 +71,7 @@ impl fmt::Display for ReadinessProbeOutcome {
             Self::Ready { response_kind } => {
                 write!(formatter, "ready response ({response_kind:?})")
             }
-            Self::ConnectionFailed(error) => {
-                write!(formatter, "connection/session creation failed: {error}")
-            }
-            Self::CommandFailed(error) => {
-                write!(formatter, "readiness command failed: {error}")
-            }
+            Self::RequestFailed(error) => write!(formatter, "status request failed: {error:#}"),
             Self::UnsuccessfulResponse {
                 response_kind,
                 message,
@@ -289,7 +296,7 @@ impl NodeStartupError {
     fn report(
         node: &ClusterNodeName,
         attempt: usize,
-        started_at: Instant,
+        deadline: PhaseDeadline,
         failure: NodeStartupFailure,
         task_state: NodeTaskState,
         last_readiness: LastReadinessOutcome,
@@ -297,7 +304,7 @@ impl NodeStartupError {
         Report::new(Self {
             node: node.clone(),
             attempt,
-            elapsed: started_at.elapsed(),
+            elapsed: deadline.elapsed(),
             failure,
             task_state,
             last_readiness,
@@ -306,70 +313,65 @@ impl NodeStartupError {
 }
 
 impl OwnedNodeTask {
-    /// Poll readiness until it succeeds, the task terminates, or the startup deadline expires.
+    /// Poll readiness until it succeeds, the task terminates, or the startup deadline passes.
+    ///
+    /// Every probe receives `deadline` and must finish by it, so a probe that never replies ends
+    /// the wait at the deadline and becomes the last readiness outcome the failure reports.
     pub(crate) async fn wait_until_ready<P, Probe>(
         &mut self,
         node: &ClusterNodeName,
         attempt: usize,
-        startup_timeout: Duration,
+        deadline: PhaseDeadline,
         poll_interval: Duration,
         mut probe: P,
     ) -> error_stack::Result<(), NodeStartupError>
     where
-        P: FnMut() -> Probe,
+        P: FnMut(PhaseDeadline) -> Probe,
         Probe: Future<Output = ReadinessProbeOutcome>,
     {
-        let started_at = Instant::now();
         let mut last_readiness = LastReadinessOutcome::NoCompletedProbe;
-        let polling = async {
-            loop {
-                tokio::task::consume_budget().await;
-                let task_state = self.inspect().await;
-                if !matches!(task_state, NodeTaskState::Running) {
-                    return Err((NodeStartupFailure::TaskTerminated, task_state));
-                }
-
-                let outcome = probe().await;
-                let ready = outcome.is_ready();
-                last_readiness = LastReadinessOutcome::Observed(outcome);
-
-                let task_state = self.inspect().await;
-                match task_state {
-                    NodeTaskState::Running if ready => return Ok(()),
-                    NodeTaskState::Running => tokio::time::sleep(poll_interval).await,
-                    NodeTaskState::NotStarted | NodeTaskState::Terminal(_) => {
-                        return Err((NodeStartupFailure::TaskTerminated, task_state));
-                    }
-                }
-            }
-        };
-
-        match timeout(startup_timeout, polling).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err((failure, task_state))) => Err(NodeStartupError::report(
-                node,
-                attempt,
-                started_at,
-                failure,
-                task_state,
-                last_readiness,
-            )),
-            Err(_) => {
-                let task_state = self.inspect().await;
-                let failure = match task_state {
-                    NodeTaskState::Running => NodeStartupFailure::DeadlineExpired,
-                    NodeTaskState::NotStarted | NodeTaskState::Terminal(_) => {
-                        NodeStartupFailure::TaskTerminated
-                    }
-                };
-                Err(NodeStartupError::report(
+        loop {
+            tokio::task::consume_budget().await;
+            let task_state = self.inspect().await;
+            if !matches!(task_state, NodeTaskState::Running) {
+                return Err(NodeStartupError::report(
                     node,
                     attempt,
-                    started_at,
-                    failure,
+                    deadline,
+                    NodeStartupFailure::TaskTerminated,
                     task_state,
                     last_readiness,
-                ))
+                ));
+            }
+            if deadline.has_passed() {
+                return Err(NodeStartupError::report(
+                    node,
+                    attempt,
+                    deadline,
+                    NodeStartupFailure::DeadlineExpired,
+                    task_state,
+                    last_readiness,
+                ));
+            }
+
+            let outcome = probe(deadline).await;
+            let ready = outcome.is_ready();
+            last_readiness = LastReadinessOutcome::Observed(outcome);
+
+            let task_state = self.inspect().await;
+            match task_state {
+                NodeTaskState::Running if ready => return Ok(()),
+                NodeTaskState::Running => deadline.pause(poll_interval).await,
+                NodeTaskState::NotStarted | NodeTaskState::Terminal(_) => {
+                    return Err(NodeStartupError::report(
+                        node,
+                        attempt,
+                        deadline,
+                        NodeStartupFailure::TaskTerminated,
+                        task_state,
+                        last_readiness,
+                    ));
+                }
             }
         }
     }

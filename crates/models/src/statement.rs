@@ -1945,6 +1945,33 @@ pub enum SqsFifoGroup {
     Expression(crate::Expression),
 }
 
+/// The behavior a sink exposes to expression validation and its connector host.
+///
+/// This lives in the vocabulary so the registry can validate an emitter without naming the
+/// connector crate that implements its sink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SinkCapabilities {
+    writes_headers: bool,
+}
+
+impl SinkCapabilities {
+    pub const fn without_headers() -> Self {
+        Self {
+            writes_headers: false,
+        }
+    }
+
+    pub const fn with_headers() -> Self {
+        Self {
+            writes_headers: true,
+        }
+    }
+
+    pub const fn writes_headers(self) -> bool {
+        self.writes_headers
+    }
+}
+
 #[derive(
     Debug,
     Clone,
@@ -2050,6 +2077,27 @@ pub enum EmitSink {
 }
 
 impl EmitSink {
+    pub const fn capabilities(&self) -> SinkCapabilities {
+        match self {
+            Self::Kafka { .. }
+            | Self::Pulsar { .. }
+            | Self::RabbitMq { .. }
+            | Self::Nats { .. }
+            | Self::Sqs { .. } => SinkCapabilities::with_headers(),
+            Self::Redis { .. }
+            | Self::Mqtt { .. }
+            | Self::ZeroMq { .. }
+            | Self::Sentry { .. }
+            | Self::Syslog { .. }
+            | Self::Otel { .. }
+            | Self::ClickHouse { .. }
+            | Self::Postgres { .. }
+            | Self::MySql { .. }
+            | Self::MongoDb { .. }
+            | Self::Iceberg { .. } => SinkCapabilities::without_headers(),
+        }
+    }
+
     pub fn transport_label(&self) -> &'static str {
         self.into()
     }
