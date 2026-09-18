@@ -13,6 +13,7 @@ use std::{collections::BTreeSet, num::NonZeroU64};
 use ahash::{HashMap, HashSet};
 use meticulous::OptionExt as _;
 use nervix_client_core::Client as NervixClient;
+use nervix_connector_kafka::TopicPartitionInspector;
 use nervix_consensus::{
     CommandExecution, ConsensusError, DomainMutationLease, DomainPlanningInputs,
 };
@@ -38,11 +39,7 @@ use super::{
     session_service::SessionServiceImpl,
     shutdown::{ShutdownDeadline, ShutdownPhaseOutcome},
 };
-use crate::{
-    proto::CommandResult,
-    registry::ActiveGraph,
-    runtime::{LocalGraphDrainOutcome, TopicPartitionInspector},
-};
+use crate::{proto::CommandResult, registry::ActiveGraph, runtime::LocalGraphDrainOutcome};
 
 pub(in crate::application) const LEADER_KAFKA_PARTITION_WATCH_INTERVAL: Duration =
     Duration::from_secs(1);
@@ -1993,23 +1990,24 @@ impl SessionServiceImpl {
                 let mut last_observed = None::<Vec<i32>>;
                 loop {
                     tokio::task::consume_budget().await;
-                    let mut partitions = match inspector.partitions(spec_for_task.topic.as_str()) {
-                        Ok(partitions) => partitions,
-                        Err(error) => {
-                            service.broadcast_error(format!(
-                                "failed to inspect Kafka partitions for ingestor '{}' in domain \
-                                 '{}': {}",
-                                spec_for_task.ingestor.as_str(),
-                                spec_for_task.domain.as_str(),
-                                error
-                            ));
-                            tokio::select! {
-                                _ = service.inner.drain_support_shutdown.cancelled() => break,
-                                _ = cancel_child.cancelled() => break,
-                                _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => continue,
+                    let mut partitions =
+                        match inspector.partitions(spec_for_task.topic.as_str()).await {
+                            Ok(partitions) => partitions,
+                            Err(error) => {
+                                service.broadcast_error(format!(
+                                    "failed to inspect Kafka partitions for ingestor '{}' in \
+                                     domain '{}': {}",
+                                    spec_for_task.ingestor.as_str(),
+                                    spec_for_task.domain.as_str(),
+                                    error
+                                ));
+                                tokio::select! {
+                                    _ = service.inner.drain_support_shutdown.cancelled() => break,
+                                    _ = cancel_child.cancelled() => break,
+                                    _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => continue,
+                                }
                             }
-                        }
-                    };
+                        };
                     partitions.sort_unstable();
                     if last_observed.as_ref() != Some(&partitions) {
                         if let Err(error) = service

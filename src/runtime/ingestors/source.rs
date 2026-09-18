@@ -348,6 +348,7 @@ pub(super) async fn run_source_instance<C>(
                     host.clear_transient_error();
                 }
                 Ok(SourceResume::Waiting { retry_after }) => {
+                    ready = false;
                     host.mark_unready();
                     if !wait_for_retry(&mut host, &mut shutdown, retry_after).await {
                         break;
@@ -390,6 +391,11 @@ pub(super) async fn run_source_instance<C>(
 
         let messages = match batch {
             Ok(SourceBatch::Messages(messages)) => messages,
+            Ok(SourceBatch::ResumeRequired) => {
+                ready = false;
+                host.mark_unready();
+                continue;
+            }
             Ok(SourceBatch::Closed) => break,
             Err(error) => {
                 host.record_transient_error(error.to_string(), SOURCE_ERROR_RETRY);
@@ -583,6 +589,7 @@ mod tests {
         acknowledged: Vec<Vec<u64>>,
         rejected: Vec<Vec<u64>>,
         ack_waits: usize,
+        resumes: usize,
         ready: usize,
         unready: usize,
     }
@@ -618,6 +625,7 @@ mod tests {
 
     struct FakeSource {
         messages: VecDeque<FakeMessage>,
+        resume_required: bool,
         observations: Arc<Mutex<SourceLoopObservations>>,
     }
 
@@ -636,6 +644,10 @@ mod tests {
             request: SourceBatchRequest,
         ) -> SourceResult<SourceBatch<Self::Message>> {
             self.observations.lock().requests.push(request);
+            if self.resume_required {
+                self.resume_required = false;
+                return Ok(SourceBatch::ResumeRequired);
+            }
             if self.messages.is_empty() {
                 return Ok(SourceBatch::Closed);
             }
@@ -662,6 +674,11 @@ mod tests {
         async fn reject(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
             self.observations.lock().rejected.push(positions.to_vec());
             Ok(())
+        }
+
+        async fn resume(&mut self) -> SourceResult<SourceResume> {
+            self.observations.lock().resumes += 1;
+            Ok(SourceResume::Ready)
         }
     }
 
@@ -744,7 +761,10 @@ mod tests {
         }
     }
 
-    async fn run_policy(policy: SourceAckPolicy) -> Arc<Mutex<SourceLoopObservations>> {
+    async fn run_policy_with_refresh(
+        policy: SourceAckPolicy,
+        resume_required: bool,
+    ) -> Arc<Mutex<SourceLoopObservations>> {
         let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
         let source = FakeSource {
             messages: (0..3)
@@ -755,6 +775,7 @@ mod tests {
                     ],
                 })
                 .collect(),
+            resume_required,
             observations: observations.clone(),
         };
         let host = SourceHost::new(FakeHost {
@@ -764,6 +785,10 @@ mod tests {
         run_source_instance(source, host, policy, shutdown_rx).await;
         drop(shutdown_tx);
         observations
+    }
+
+    async fn run_policy(policy: SourceAckPolicy) -> Arc<Mutex<SourceLoopObservations>> {
+        run_policy_with_refresh(policy, false).await
     }
 
     fn retry_policy() -> nervix_connector::ParsedRetryPolicy {
@@ -825,5 +850,16 @@ mod tests {
             Some(Duration::from_millis(10))
         );
         assert!(observations.rejected.is_empty());
+    }
+
+    #[tokio::test]
+    async fn source_loop_resumes_after_connector_configuration_changes() {
+        let observations = run_policy_with_refresh(SourceAckPolicy::None, true).await;
+        let observations = observations.lock();
+        assert_eq!(observations.resumes, 2);
+        assert_eq!(observations.ready, 2);
+        assert_eq!(observations.unready, 2);
+        assert_eq!(observations.intake.len(), 3);
+        assert_eq!(observations.acknowledged, vec![vec![0], vec![1], vec![2]]);
     }
 }

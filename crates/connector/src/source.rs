@@ -139,6 +139,7 @@ pub struct SourceBatchRequest {
 /// One source poll result.
 pub enum SourceBatch<M> {
     Messages(Vec<M>),
+    ResumeRequired,
     Closed,
 }
 
