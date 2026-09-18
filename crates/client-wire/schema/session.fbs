@@ -446,6 +446,7 @@ enum ModelChangeAspect : ubyte {
   ClientConfig,
   VhostHostnames,
   VhostTls,
+  VhostTlsVersion,
   EndpointDefinition,
   SignalingProtocolDefinition,
   LookupDefinition,
@@ -596,7 +597,8 @@ table OwnershipMoveImpact {
 
 enum ActivationAction : ubyte {
   Activate,
-  Deactivate
+  Deactivate,
+  RefreshHttpsListener
 }
 
 table ActivationImpact {

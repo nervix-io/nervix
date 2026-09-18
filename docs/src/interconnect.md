@@ -561,6 +561,23 @@ authority, and fence checks before retaining the frontier. A stale, duplicate, r
 superseded report cannot replace the mapping or move logical time backward. See
 [Domains And Time](./domains-and-time.md) for clock semantics outside the transport boundary.
 
+## HTTPS Listener Installation
+
+Every node's HTTPS listener presents the TLS VHOST certificates of the runtime revision that node
+applied, and it installs them before it reports that revision prepared. A command that creates,
+changes, or drops a VHOST confirms the installation with the typed management request
+`https_listener_installation`, which uses the reserved progress subquota and a two-second deadline.
+The leader answers for itself in process and asks every other live process incarnation for its
+latest installation at or after the command's runtime revision. The answer names the answering
+incarnation and reports the installed revision, a failure with that node's own description, or that
+the revision is still pending.
+
+An answer from another incarnation, a transport failure, and a pending answer all leave that
+incarnation pending, and it is asked again every 250 milliseconds until the command's completion
+deadline. A failed installation ends the wait at once, so the command reports the failing node
+without waiting for the deadline. The request reads installation state and changes nothing, so a
+repeated or late request is harmless.
+
 ## Application Health And Availability
 
 An established HTTP/2 connection and a successful transport `PING` show that bytes can move; they
@@ -679,8 +696,8 @@ bulk-transfer bytes. Interconnect memory, worker queues, reactor delay, and cons
 whether pressure originates in transport, execution, or the protocol using it.
 
 Typed-request observations identify application health as operation `liveness` and replaceable
-domain-clock delivery as operation `progress`, so their request counts, outcomes, latency, and quota
-failures can be evaluated independently.
+domain-clock delivery and HTTPS listener installation probes as operation `progress`, so their
+request counts, outcomes, latency, and quota failures can be evaluated independently.
 
 Metric labels are bounded dimensions such as traffic class, direction, operation, outcome, and
 reason. They do not include peer, domain, relay, branch, delivery identity, or payload values.

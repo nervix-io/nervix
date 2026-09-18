@@ -7,7 +7,7 @@
 //! - **Depends on.** The runtime's endpoint dispatch and its signaling protocols.
 //! - **Must not know.** Transactions, scheduling or how an ingested payload is processed.
 
-use std::{convert::Infallible, sync::Arc as StdArc};
+use std::convert::Infallible;
 
 use error_stack::{Report, ResultExt};
 use futures_util::SinkExt;
@@ -27,8 +27,6 @@ use hyper_util::rt::TokioIo;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{IngestMessageHeaders, RetainedIngestHeaders};
 use nervix_recovery::NoReceiver;
-use parking_lot::RwLock;
-use rustls::ServerConfig;
 use tokio::{net::TcpListener, task::JoinSet, time::Duration};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{
@@ -41,9 +39,8 @@ use tokio_tungstenite::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
-use triomphe::Arc;
 
-use super::{AppError, service_tasks::ServiceTasks};
+use super::{AppError, service_tasks::ServiceTasks, tls::HttpsListenerCertificates};
 use crate::runtime::{Runtime, SignalingDataSink, WebsocketSignalingSession};
 
 fn empty_body() -> Empty<Bytes> {
@@ -395,7 +392,7 @@ pub(in crate::application) async fn serve_http(
 pub(in crate::application) async fn serve_https(
     runtime: Runtime,
     request_tasks: ServiceTasks,
-    http_tls_server_config: Arc<RwLock<Option<StdArc<ServerConfig>>>>,
+    certificates: HttpsListenerCertificates,
     listener: TcpListener,
     shutdown: CancellationToken,
 ) -> Result<(), Report<AppError>> {
@@ -417,9 +414,9 @@ pub(in crate::application) async fn serve_https(
         let runtime = runtime.clone();
         let request_tasks = request_tasks.clone();
         let request_shutdown = shutdown.clone();
-        let http_tls_server_config = http_tls_server_config.clone();
+        let certificates = certificates.clone();
         connection_tasks.spawn(async move {
-            let Some(tls_config) = http_tls_server_config.read().clone() else {
+            let Some(tls_config) = certificates.server_config() else {
                 warn!("https connection rejected because no VHOST TLS configuration is loaded");
                 return;
             };

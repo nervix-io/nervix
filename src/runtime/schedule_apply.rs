@@ -1706,6 +1706,9 @@ impl Runtime {
                     self.set_relay_capacity(domain, relay, *capacity);
                 }
                 nervix_models::DynamicModelUpdate::Processor { .. } => {}
+                // Endpoint routing reads only a VHOST's hostnames. The certificate belongs to the
+                // HTTPS listener, which installs it from the same admitted state on every node.
+                nervix_models::DynamicModelUpdate::VhostTlsVersion { .. } => {}
                 nervix_models::DynamicModelUpdate::Emitter { emitter, config } => {
                     let commands = if let Some(execution) = self.inner.executions.get(domain)
                         && let Some(task) = execution.emitter_tasks.get(&NodeRef {

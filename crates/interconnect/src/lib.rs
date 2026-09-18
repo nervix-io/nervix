@@ -65,7 +65,8 @@ pub use peer_target::PeerTarget;
 pub use pool::PoolClass;
 pub use request::{
     ApplicationHealthProbe, ApplicationRevisionRequest, ApplicationRevisionResponse,
-    HandlerRegistrationError, InterconnectDuplexRequest, InterconnectRequest,
+    HandlerRegistrationError, HttpsListenerInstallation, HttpsListenerInstallationRequest,
+    HttpsListenerInstallationResponse, InterconnectDuplexRequest, InterconnectRequest,
     InterconnectStreamRequest, RemoteRequestFailure, RequestContext, RequestError, RequestSubquota,
     StreamHandlerError, StreamingResponse,
 };

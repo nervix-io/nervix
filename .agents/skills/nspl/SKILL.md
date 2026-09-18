@@ -53,7 +53,10 @@ Build configuration in dependency order:
    Use `REBIND RESOURCE <name> TO VERSION <n>|LATEST` to move every existing usage atomically, or
    add `FOR <kind> <name>, ...` to select exact kind-qualified usages. Every selected member must
    already bind the resource. The target and all replacements validate together; `LATEST` is
-   provisional at queue admission and resolved again at `COMMIT`.
+   provisional at queue admission and resolved again at `COMMIT`. Rotating a VHOST certificate
+   this way is dynamic: every node's HTTPS listener presents the new bundle and ingestion does not
+   pause. Changing VHOST hostnames, adding or removing `WITH TLS`, or binding another TLS resource
+   pauses the domain.
 3. Define internal schemas, branch-key schemas, branches, wire schemas, and codecs.
 4. Define clients, signaling protocols, virtual hosts/endpoints, lookup models, and trusted Roto
    UDFs as needed.
