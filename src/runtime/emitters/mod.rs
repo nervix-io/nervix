@@ -5255,11 +5255,15 @@ mod tests {
     async fn retry_schedule_heartbeats_acks_added_by_a_force_drain() {
         let (existing, mut existing_completion) = AckSet::root();
         let (force_drained, mut force_completion) = AckSet::root();
+        let (sink_retained, mut sink_completion) = AckSet::root();
         let mut retry = EmitterRetrySchedule::default();
         retry
             .schedule(Duration::from_secs(30), existing, false)
             .expect("the fixture backoff fits the monotonic clock range");
-        retry.include_acks(force_drained);
+        retry.include_acks(EmitterAcknowledgements {
+            runtime: force_drained,
+            sink: Some(SinkAcknowledgements::new(sink_retained)),
+        });
         retry.ack_alive_at = Some(
             PhysicalDeadlineCapability::operational()
                 .after(Duration::ZERO)
@@ -5274,6 +5278,10 @@ mod tests {
         );
         assert_eq!(
             force_completion.wait_for_progress().await,
+            AckProgress::Alive
+        );
+        assert_eq!(
+            sink_completion.wait_for_progress().await,
             AckProgress::Alive
         );
     }
@@ -5731,6 +5739,80 @@ mod tests {
         assert!(messages[1].contains("failed to publish nats message"));
         assert!(messages[2].contains("failed to flush nats rows"));
         assert!(messages[3].contains("invalid flush_each 'not-a-duration'"));
+    }
+
+    #[tokio::test]
+    async fn sink_host_delegates_runtime_services_and_general_error_policy() {
+        let context = sink_context();
+        let host = context.sink_host();
+        let mut events = context.runtime.events().subscribe();
+
+        host.record_transient_error(
+            "broker temporarily unavailable".to_string(),
+            Duration::from_millis(25),
+        );
+        assert_eq!(
+            context
+                .runtime
+                .emitter_transient_error(&context.domain, &context.emitter),
+            Some("broker temporarily unavailable".to_string())
+        );
+        assert!(
+            context
+                .runtime
+                .emitter_reconnect_backoff(&context.domain, &context.emitter)
+                .is_some()
+        );
+        host.clear_transient_error();
+        assert_eq!(
+            context
+                .runtime
+                .emitter_transient_error(&context.domain, &context.emitter),
+            None
+        );
+
+        host.report_error("connector background error".to_string());
+        let RuntimeEvent::Error(message) = events
+            .recv()
+            .await
+            .expect("the host must publish the event");
+        assert_eq!(message, "connector background error");
+        assert_eq!(host.staging_directory(), context.runtime.temp_dir());
+
+        let (logged_acks, logged_completion) = AckSet::root();
+        let logged_acks = SinkAcknowledgements::new(logged_acks);
+        host.handle_general_error(&logged_acks, "publish failed".to_string());
+        let RuntimeEvent::Error(message) = events
+            .recv()
+            .await
+            .expect("the logged general error must publish an event");
+        assert!(message.contains("publish failed"));
+        assert_eq!(
+            logged_completion.wait().await,
+            AckOutcome::NoAck("publish failed".to_string())
+        );
+
+        let mut ignored_context = sink_context();
+        ignored_context.error_policies.general = GeneralErrorPolicy::Ignore;
+        let (ignored_acks, ignored_completion) = AckSet::root();
+        ignored_context.sink_host().handle_general_error(
+            &SinkAcknowledgements::new(ignored_acks),
+            "ignored failure".to_string(),
+        );
+        assert_eq!(ignored_completion.wait().await, AckOutcome::Ack);
+    }
+
+    #[tokio::test]
+    async fn sink_acknowledgement_handle_preserves_ack_lifecycle() {
+        let (acks, mut completion) = AckSet::root();
+        let acks = SinkAcknowledgements::new(acks);
+
+        assert!(!acks.is_empty());
+        acks.keep_alive();
+        assert_eq!(completion.wait_for_progress().await, AckProgress::Alive);
+        acks.acknowledge();
+        assert_eq!(completion.wait().await, AckOutcome::Ack);
+        assert!(SinkAcknowledgements::new(AckSet::empty()).is_empty());
     }
 
     #[test]
