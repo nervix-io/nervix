@@ -46,10 +46,10 @@ Build configuration in dependency order:
    is rejected until a selected domain exists.
 2. Register and upload resources before statements that reference their versions or mounted files.
    Resources are domain-owned, so declare and upload them in the domain that references them.
-   VHOST TLS, protobuf codec, protobuf signaling protocol, inferencer, and WASM processor bindings
-   require `VERSION <n>` or `VERSION LATEST`. `LATEST` resolves to the highest completed version
-   when the statement is applied (at `COMMIT` for queued statements) and the model stores that
-   number; a later upload never moves a binding.
+   VHOST TLS, protobuf codec, protobuf signaling protocol, inferencer, WASM processor, hash map, and
+   client mount bindings require `VERSION <n>` or `VERSION LATEST`. `LATEST` resolves to the highest
+   completed version when the statement is applied (at `COMMIT` for queued statements) and the
+   model stores that number; a later upload never moves a binding.
    Use `REBIND RESOURCE <name> TO VERSION <n>|LATEST` to move every existing usage atomically, or
    add `FOR <kind> <name>, ...` to select exact kind-qualified usages. Every selected member must
    already bind the resource. The target and all replacements validate together; `LATEST` is
