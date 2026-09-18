@@ -8,6 +8,7 @@ Use it for:
 - domain-clock mapping, authority, lifecycle, progress, and execution-time semantics
 - cluster interconnect security, traffic isolation, and delivery semantics
 - [consensus durability, replication pacing, log retention, and snapshot recovery](./consensus-storage-and-replication.md)
+- [resource versions, pinned bindings, `LATEST` resolution, rebinding, and the HTTPS listener refresh](./resource-versions.md)
 - shutdown phases, drain guarantees, and crash recovery
 - runtime semantics that are easier to understand from the implementation side
 - relay/state internals

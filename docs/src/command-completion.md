@@ -19,9 +19,11 @@ record remains present. Reusing it with changed content, credentials, owner, or 
 Repeating the same request joins the applying execution or returns the retained terminal result.
 An expired reference remains a tombstone and cannot start a new effect.
 
-Resource uploads use the same rule with a domain-owned upload identity and the verified archive
-digest. Transaction appends additionally carry their expected queue position. This makes a replay
-an exact append check rather than a request to append another copy.
+Resource uploads follow the same replay rule with an upload identity instead. It is scoped to the
+user, domain, and resource, bound to the verified archive digest, and retained without expiry; see
+[Resource Versions And Bindings](./resource-versions.md#assignment). Transaction appends
+additionally carry their expected queue position. This makes a replay an exact append check rather
+than a request to append another copy.
 
 ```mermaid
 stateDiagram-v2
@@ -50,8 +52,9 @@ flowchart LR
     Raft --> Runtime[Per-node runtime application]
     Raft --> Resources[Per-node resource installation]
     Runtime --> Gossip[Revision + incarnation acknowledgements]
-    Resources --> Gossip
+    Resources --> Replicas[Replicated per-incarnation replica records]
     Gossip --> Barrier[Command-scoped completion barrier]
+    Replicas --> Barrier
     Barrier --> Outcome[Replicated terminal outcome]
     Outcome --> Client
 ```
@@ -63,7 +66,8 @@ subscription delivery, and transport control frames continue while a command wai
 `REBIND RESOURCE` completes only after its entire selected model set has been validated, committed,
 and activated under this same barrier. The successful response is therefore the boundary at which
 every selected usage observes the new pinned version. A validation or activation failure cannot
-report a partially rebound set.
+report a partially rebound set. [Resource Versions And Bindings](./resource-versions.md#rebinding)
+defines the rebinding contract.
 
 ## All-live-node barriers
 
@@ -182,7 +186,9 @@ runtime revision before it reports that revision prepared, and the command then 
 installation on every live process incarnation. A failed installation fails the command. A batch
 that did not pause is rolled back by the same record that stores the failure, and the command waits
 until every listener presents the restored certificates; a paused batch keeps its committed models
-like any other activation failure.
+like any other activation failure. See
+[The `DYNAMIC` TLS Refresh](./resource-versions.md#the-dynamic-tls-refresh) for what the listener
+presents and when.
 
 An upload is complete after the entire declared body is admitted, its archive and manifest verify,
 and the exact digest is atomically installed on every live node incarnation. A complete admitted
@@ -190,6 +196,9 @@ upload continues after caller disconnect. An interrupted partial body has not ad
 and may be retransmitted with its identity. The final result reports one assigned version and the
 same upload identity. Resource descriptions expose current per-incarnation installation diagnostics
 for observation, rather than serving as an extra completion step.
+[Resource Versions And Bindings](./resource-versions.md#version-lifecycle) defines how the live
+set is derived, how nodes that join while an upload applies are included, and what a completed
+version may be bound to.
 
 Cordon and uncordon wait for the eligibility change to become authoritative. Drain and relocation
 wait for ownership transfer, destination activation, source drain, and handoff release. Node removal
