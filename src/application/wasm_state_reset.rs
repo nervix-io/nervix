@@ -533,12 +533,16 @@ impl SessionServiceImpl {
         scope: WasmStateResetScope,
         phase: WasmStateResetPhase,
     ) -> bool {
-        schedule
-            .and_then(|schedule| schedule.nodes.get(entity))
-            .and_then(|node| node.wasm_state_reset())
-            .is_some_and(|reset| {
-                reset.request() == request && reset.scope() == &scope && reset.phase() == phase
-            })
+        let Some(schedule) = schedule else {
+            return false;
+        };
+        let Some(node) = schedule.nodes.get(entity) else {
+            return false;
+        };
+        let Some(reset) = node.wasm_state_reset() else {
+            return false;
+        };
+        reset.request() == request && reset.scope() == &scope && reset.phase() == phase
     }
 
     async fn abort_unpublished_wasm_state_reset(
@@ -780,7 +784,7 @@ impl SessionServiceImpl {
     /// prepared and ready revision observations.
     async fn apply_committed_wasm_state_reset_schedule_locally(
         &self,
-    ) -> Result<(), crate::runtime::RuntimeError> {
+    ) -> error_stack::Result<(), crate::runtime::RuntimeError> {
         let state = self.inner.consensus.current_runtime_state().await;
         self.inner
             .runtime
@@ -792,5 +796,6 @@ impl SessionServiceImpl {
                 &state.schedule,
             )
             .await
+            .map_err(Report::new)
     }
 }
