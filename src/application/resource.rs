@@ -233,18 +233,22 @@ pub(in crate::application) fn completed_resource_version_suggestions(
     suggestions
 }
 
-/// The resource a version completion belongs to. `DESCRIBE RESOURCE` and every resource binding
-/// write the resource name immediately before the `VERSION` keyword, so the name is the last word
-/// before the last `VERSION` ahead of the cursor.
+/// The resource a version completion belongs to. Resource bindings write the resource immediately
+/// before `VERSION`; `REBIND RESOURCE` inserts `TO` between them.
 pub(in crate::application) fn resource_named_before_version(
     input: &str,
     cursor: usize,
 ) -> Option<ResourceName> {
-    let raw_prefix = input.get(..cursor.min(input.len()))?;
-    let upper = raw_prefix.to_ascii_uppercase();
-    let version_index = upper.rfind(" VERSION ")?;
-    let before_version = raw_prefix.get(..version_index)?.trim_end();
-    let identifier = before_version.rsplit(char::is_whitespace).next()?;
+    let prefix = input.get(..cursor.min(input.len()))?;
+    let words = prefix.split_whitespace().collect::<Vec<_>>();
+    let version_index = words
+        .iter()
+        .rposition(|word| word.eq_ignore_ascii_case("VERSION"))?;
+    let mut words = words.get(..version_index)?.iter().rev();
+    let mut identifier = words.next()?;
+    if identifier.eq_ignore_ascii_case("TO") {
+        identifier = words.next()?;
+    }
     ResourceName::parse(identifier).ok()
 }
 
@@ -1230,6 +1234,8 @@ mod tests {
             "CREATE VHOST edge api.example.com WITH TLS proto VERSION ",
             "CREATE CODEC c FROM PROTOBUF USING RESOURCE proto VERSION 1",
             "CREATE INFERENCER i FROM features USING RESOURCE proto VERSION ",
+            "REBIND RESOURCE proto TO VERSION ",
+            "REBIND\nRESOURCE\tproto\nTO\tVERSION ",
         ] {
             assert_eq!(
                 resource_named_before_version(input, input.len()),

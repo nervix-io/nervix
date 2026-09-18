@@ -7,6 +7,10 @@
 
 use std::{borrow::Cow, future};
 
+use nervix_connector::{
+    IngestMessageHeaders, IngestMetadataRow, ParsedRetryPolicy, next_retry_delay,
+    physical_time::actual_utc_now,
+};
 use rdkafka::{
     config::ClientConfig,
     consumer::{CommitMode, Consumer, StreamConsumer},
@@ -15,7 +19,6 @@ use rdkafka::{
 };
 
 use super::super::*;
-use crate::runtime::physical_time::actual_utc_now;
 
 pub(crate) struct KafkaIngestor;
 

@@ -153,6 +153,17 @@ uploaded resource version 1
 
 See [Resources](resources.md#lifecycle) for what a resource version contains.
 
+Use `--command` for an atomic resource rebinding just like any other server statement:
+
+```bash
+nervix-cli --domain production --command \
+  "REBIND RESOURCE order_model TO VERSION LATEST FOR INFERENCER score_orders;"
+```
+
+The command prints the resolved target, changed and selected usage counts, quiesce level, and a
+sorted line for every selected model. In a transaction, the queued response is a provisional plan;
+`COMMIT` resolves `LATEST` again before applying the atomic model step.
+
 ## Streaming A Relay
 
 The `subscribe` subcommand opens a read-only session subscription and prints events until

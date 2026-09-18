@@ -5,14 +5,15 @@
 //! - **Depends on.** Typed HTTP plans, connector clients and installed domain cadence.
 //! - **Must not know.** NSPL parsing, registry validation or placement computation.
 
+use nervix_connector::{
+    ClientConfigResult, HttpClientConfig, HttpClientConfigError, IngestMessageHeaders,
+    RetainedIngestHeaders, client_config_value, optional_client_config_value,
+    physical_time::actual_utc_now,
+};
 use reqwest::Client as HttpClient;
 use tokio_util::sync::CancellationToken;
 
 use super::super::*;
-use crate::runtime::{
-    client_config::ClientConfigResult, http_client::HttpClientConfigError,
-    physical_time::actual_utc_now,
-};
 
 pub(in crate::runtime) struct HttpIngestor;
 

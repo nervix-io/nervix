@@ -49,6 +49,14 @@ The runtime then instantiates that schedule:
 - junctions, deduplicators, and reingestors transform or route records between relays
 - emitters encode records and publish them externally
 
+Ingestors and emitters that reach an external system are connectors. The values that cross between
+a connector and the runtime hosting it are defined once, in the connector contract: a client's
+resolved configuration and the resource mounts it reads files from, the TLS, HTTP client, and
+service-URL settings built from that configuration, physical deadlines and the actual-UTC read a
+source stamps arrival with, and the transport headers and typed metadata a source message carries.
+The runtime resolves resource mounts and projects metadata into its own columns; the contract
+carries only the results.
+
 Clock ownership follows the same one-way conversion. NSPL parsing turns `PERIOD`, `SKEW`, start
 timestamps, and rates into validated vocabulary values. The control plane commits one mapping and
 fenced authority for a paced `START`. Each data-plane execution binds a capability for the exact
@@ -56,8 +64,8 @@ domain and generation and obtains one timestamp snapshot before calling an expre
 WASM guest. Engines accept that timestamp as input and cannot read actual UTC. Logical deadlines
 carry their domain and generation; operational deadlines are a separate process-monotonic type
 whose construction is limited to timeout, retry, and external-I/O owners. Actual UTC enters the
-data plane through one physical-time owner and is projected into logical time or used by an
-explicit external observation contract.
+data plane through one physical-time owner in the connector contract and is projected into logical
+time or used by an explicit external observation contract.
 
 The [Domain Clock](./domain-clock.md) chapter defines the mapping, lifecycle generation,
 authority fence, progress delivery, local installation, execution snapshots, admission arithmetic,

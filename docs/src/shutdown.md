@@ -453,12 +453,34 @@ releases the node's storage.
 Consensus stops Raft and then waits for its storage to reach an idle barrier, which proves every
 earlier durable write has returned and released the store, before its dedicated database handle is
 dropped. The registry and runtime database is released separately after the services that hold its
-handles. Terminal teardown does not finish until both database locks have been released.
+handles. Terminal teardown does not finish until both database locks have been released. See
+[Consensus Storage And Replication](./consensus-storage-and-replication.md) for the write, replay,
+retention, and snapshot contracts behind this barrier.
 
 The interconnect rejects new admission, cancels pool and operation waiters, and begins a graceful
 HTTP/2 shutdown, giving active transport work up to ten seconds before closing the remaining
 connections and handlers. A forced ending skips this entirely, so peers observe the connections
 ending exactly as they do when a process crashes.
+
+### Consensus Work At The Ending Boundary
+
+Consensus remains live through stop admission and drain support. A terminating node can still append
+and apply control-plane entries during those phases, answer peer heartbeats, and carry replication.
+The boundary below begins when terminal teardown stops Raft.
+
+| Work in progress | Graceful `SIGINT` or `SIGTERM` | Repeated signal, expired deadline, or `SIGKILL` |
+| --- | --- | --- |
+| Append batch | A storage job already admitted to the ordered worker completes before the idle barrier can pass. Its complete atomic batch is synchronized before the database closes. An append alone is not a client acknowledgement. | There is no idle barrier. Recovery finds the last complete synchronized batch or its predecessor; Raft may commit or truncate an uncommitted tail. |
+| Applied range | A write already submitted completes atomically with its final applied position. Entries committed but not yet submitted remain in the log and are replayed on restart. | Recovery finds the last complete applied range and streams every later committed entry from the log. A response can be lost after durable application, so client silence remains an uncertain outcome. |
+| Snapshot build or transfer | Completed section writes remain durable. A generation with no published manifest stays inactive and is reclaimed later. A published installation marker is finished on restart if teardown did not reach its final publication. | The same durable boundaries decide recovery. Partial section writes are absent; staged unpublished generations stay inactive; a marked installation is redone in full. |
+
+Stopping Raft ends each append-stream generation while the interconnect is still running. The
+stream stops accepting new submissions, releases its charged follower batches, and its peer observes
+a normal stream end or failure and resumes from its last confirmed progress if another leader path
+exists. The terminating node is still a Raft member and does not transfer leadership as part of
+shutdown, so peers otherwise react to its silence through the ordinary heartbeat and election
+rules. Interconnect shutdown follows and records any remaining reset with `reason="shutdown"`.
+A forced ending skips the protocol close; peers see an abrupt stream or connection loss.
 
 ## What Survives
 
@@ -468,7 +490,7 @@ strongly consistent, selected runtime state is checkpointed, and the hot path is
 | State | Graceful shutdown | Forced ending or `SIGKILL` |
 | --- | --- | --- |
 | Committed control-plane state: models, schedules, domain lifecycle, cordons, users, resources | Reopens from the committed generation | Reopens from the last committed generation; nothing acknowledged is lost |
-| Published consensus snapshots | Reopen from the published generation | Reopen from the last fully published generation; an interrupted install finishes on the next start |
+| Published consensus snapshots | Reopen from the current manifest; a marked installation is finished before state is exposed | Reopen from the current manifest; a marked installation is redone before state is exposed |
 | Durable handoff and forced-recovery preparations | Preserved, then reconciled or activated | Preserved, then reconciled or activated |
 | Runtime-state checkpoints: Kafka domain offsets, deduplicator and window state, materialized relay records | Flushed again as runtime tasks stop | Reopen at the last completed periodic checkpoint |
 | WASM guest-state checkpoints | Every checkpoint that released an acknowledgement is already synchronized | Reopen at the newest checkpoint on the node's storage, which covers every acknowledged input |
@@ -479,7 +501,8 @@ Durability is not uniform across those rows, and the difference is operationally
 
 - Consensus acknowledges a vote, an appended batch, or an applied range only after synchronizing
   both data and filesystem metadata, so committed control-plane state survives host power loss on a
-  device that honors those requests. Synchronization is per batch rather than per entry.
+  device that honors those requests. Synchronization is per reservation-bounded batch or applied
+  range rather than per entry.
 - Every handoff and forced-recovery preparation, activation, and discard is synchronized the same
   way.
 - Periodic runtime checkpoints are written to the operating system without forcing a synchronization
@@ -522,9 +545,12 @@ process-start admission proof only: connectivity lost after admission does not r
 Installing a consensus snapshot publishes the manifest and a marker naming the generation whose
 records still have to replace the state machine, then replaces those records and clears the marker.
 A node that stops anywhere between the two finds the marker on its next start and redoes the
-replacement in full, however far the interrupted attempt had got. It publishes nothing until that
-recovery finishes, and a start also deletes every stored generation the published manifest does not
-name, so interrupted builds and abandoned transfers leave nothing behind.
+replacement in full, however far the interrupted attempt had got. It publishes no recovered state
+until that replacement finishes. Sections staged before any manifest was published never become
+active; startup marks every generation the current manifest does not name as unreferenced, and a
+later durable consensus batch removes it. See
+[Transfer And Installation](./consensus-storage-and-replication.md#transfer-and-installation) for
+the section, marker, and final-publication boundaries.
 
 ### Replayed Forced Recovery
 

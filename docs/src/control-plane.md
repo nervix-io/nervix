@@ -30,42 +30,26 @@ In practice, the control plane covers:
 
 This is the part of Nervix where Raft-backed consistency matters. It keeps cluster-wide definitions coherent.
 
-## Durability and recovery
+## Durability And Recovery
 
-Consensus acknowledges votes, appended log entries, and applied administrative writes only after
-synchronizing both data and filesystem metadata. The storage device and filesystem must honor
-these synchronization requests. This uses Fjall's
-[full synchronization contract](https://docs.rs/fjall/latest/fjall/enum.PersistMode.html#variant.SyncAll).
-Consensus has a dedicated Fjall database and journal under `<db-path>/consensus`; the registry and
-runtime-state keyspaces remain in the node database at `<db-path>`. A consensus synchronization
-therefore neither flushes data-plane writes nor waits behind their journal writes, and journal
-rotation and its memtable flushes stay isolated between those databases.
-Durable log entries, votes, state-machine records, snapshot manifests, and snapshot sections use
-Nervix-owned `rkyv` shapes. Recovery validates each archive before converting it into OpenRaft or
-semantic state.
+A control-plane mutation returns its semantic result only after Raft has committed it and the
+leader has durably applied it. The applied write stores the changed semantic records together with
+its final log position, membership, transaction progress, and revision. Recovery therefore finds a
+complete applied range or replays its committed entries; it never reconstructs an acknowledged
+command from a partial state-machine update.
 
-Consecutive committed commands are applied by one atomic write that stores their changed semantic
-records with the applied position, membership, transaction progress, and revision the last of them
-leaves behind. A write takes further commands until the next one's changes would exceed its
-admitted byte budget, so a run of commands shares one synchronization, and recovery finds every
-command of a write or none of them. Domain configuration and schedule changes within one command
-therefore recover together. Transaction effects recover with the corresponding commit
-progress. Updating a resource replica writes that replica and application metadata; it does not
-rewrite unrelated domains or schedules. Log purging atomically stores its deletion boundary with
-the deleted entries. Catch-up and replay read committed log ranges in bounded chunks, stopping at
-one command-sized target or 1,024 entries before yielding the storage worker and applying that
-chunk. A backlog may span any number of chunks without being materialized as one reader allocation.
+Consensus uses a dedicated database and journal under `<db-path>/consensus`. Registry and runtime
+state remain in the node database at `<db-path>`, so consensus synchronization does not flush or
+wait behind data-plane journal writes. The full durability boundary, append-stream pacing, log
+reader bounds, retention policy, snapshot lifecycle, storage layout, and operator settings are
+defined in [Consensus Storage And Replication](./consensus-storage-and-replication.md).
 
 Observers see a coherent state revision only after durable success. Change notifications identify
 committed revisions and may coalesce intermediate revisions; readers retrieve a coherent current
-view. A storage failure stops that node's consensus writes and returns an error. An error does not
-prove that the command was uncommitted: the durable write may have completed before the failure
-was reported. On restart, recovery loads complete durable state and replays committed log entries.
-Persistent administrative requests carry stable execution references. Clients retain the same
-reference across an uncertain transport outcome and join the admitted execution or retrieve its
-retained terminal result. Persisted consensus records have exactly one current complete storage
-shape. A malformed archive, an archive that fails current-shape validation, or incomplete stored
-state fails startup with a recreation error; recovery never defaults or reinterprets it.
+view. A storage or transport error can arrive after the durable write completed, so it does not
+prove that the command was uncommitted. Persistent administrative requests keep the same execution
+reference across an uncertain result and join the admitted execution or retrieve its retained
+terminal result.
 
 Each node applies a published cluster revision once. A revision at or below the one it has already
 applied carries nothing newer and is ignored, and the first revision a node sees always applies. No
@@ -73,53 +57,6 @@ revision value is reserved to mean that a node has applied nothing yet, so every
 can publish, including the largest one, still suppresses the stale revisions that follow it. A
 revision whose application fails is not recorded as applied, so the node applies that revision again
 instead of treating the failed attempt as its current state.
-
-## Replication And Log Retention
-
-The leader replicates to each follower over one ordered append stream, separate from the
-management connection that carries heartbeats and votes. Batches are submitted and acknowledged in
-order, with at most 16 batches and 16 MiB outstanding per follower and a one-command target batch
-size; the node's aggregate transient memory bounds the sum across followers. A batch carries whole
-commands, so one command is never split into parts that could commit separately. A conflict, a
-higher vote, a partially accepted batch, a stalled stream, or a broken stream stops new submissions
-and delivers that first result; nothing later on that stream can advance past it, and replication
-resumes from the progress consensus confirmed.
-
-A follower answers a batch only after appending it durably, so slow follower storage delays answers
-without ending the stream. A stream stalls only when a batch is outstanding and, for five seconds,
-no answer arrives and the follower accepts none of the leader's bytes. That bound does not depend
-on the heartbeat interval, and a stream with nothing outstanding stays open however long it idles.
-Opening a stream has its own five-second deadline, while heartbeats keep a deadline derived from
-the heartbeat interval. The leader skips a follower's heartbeat when that follower has already
-acknowledged replication sent within the last heartbeat interval. That window never exceeds half of
-the gap between the heartbeat interval and the minimum election timeout, so a follower still hears
-from the leader before its election timer can expire.
-
-A node snapshots its replicated state automatically after 10,000 committed entries
-(`--raft-snapshot-entry-threshold`) or 64 MiB of appended entries since its last completed snapshot
-(`--raft-snapshot-byte-threshold`), whichever comes first, with one build at a time. The byte
-threshold asks for at most one build per completed snapshot, and a node that has completed no
-snapshot yet is a state of its own rather than one standing at snapshot index zero, so the threshold
-can ask again as soon as a snapshot completes. A snapshot is sealed as bounded sections of keyed
-records rather than one aggregate value, so a larger cluster state becomes more sections instead of
-a snapshot that no longer fits. The builder pins one consistent database view, then reads, encodes,
-and synchronizes one section per consensus storage turn under the bulk-memory budget. State-machine
-writes may proceed between sections without changing that pinned view. The sections are written and
-synchronized first; the manifest naming the generation, its applied position, and its membership is
-published afterwards in one atomic write. A node interrupted between the two finishes the
-replacement on its next start, and a start also deletes every stored generation the published
-manifest does not name. A node keeps the newest snapshot and at most one older one, held only while
-a transfer is still reading it; a transfer that would hold a second older snapshot is cancelled and
-restarts from the newest.
-
-The node then keeps at most 1,000 snapshot-covered entries
-(`--raft-covered-log-entries-retained`) or 64 MiB of covered suffix
-(`--raft-covered-log-bytes-retained`), whichever bound is reached first. Entries a durable snapshot
-does not cover are never purged, so a failed or incomplete snapshot build leaves everything the
-node still needs in place. A follower whose next entries were already purged catches up by
-receiving the current snapshot instead. Once the retained log reaches
-`--raft-retained-log-cap` (1 GiB by default), new administrative writes wait for reclamation and
-fail with a retention error if it does not arrive; reads, health, and recovery continue throughout.
 
 ## Replicated NSPL Transactions
 
@@ -156,6 +93,7 @@ transaction.
 Only the bound domain's replicated configuration effects may be queued:
 
 - model `CREATE`, supported model `ALTER`, and model `DROP` statements;
+- `REBIND RESOURCE`, as one atomic model-mutation batch;
 - `ALTER DOMAIN`, `START`, and `STOP`;
 - `CREATE RESOURCE`.
 
@@ -165,6 +103,8 @@ own transaction defines and is no longer offered a model whose `DROP` it has que
 create and drop sequence decides a name, so an intermediate configuration that does not yet resolve
 still completes. Sessions that are not bound to the transaction, including other sessions of the
 same user, are offered committed configuration alone.
+For a `REBIND RESOURCE ... FOR` list, completion further limits each kind to queued-result models
+that bind the named resource.
 
 Read-only `SHOW`, `DESCRIBE`, and `LOOKUP` statements are rejected at queue time. `CREATE DOMAIN`
 and `CREATE USER` are rejected too: neither belongs to a domain, so neither is transaction content.
@@ -181,6 +121,9 @@ configuration, a missing `ALTER` target or field, invalid domain lifecycle, inva
 bindings, and invalid UDF or schedule inputs before the statement is replicated. A successfully
 queued model mutation reports the effective quiesce level of its complete consecutive model run at
 that prefix. Extending the run can raise that level or make cancelling changes a no-op.
+`REBIND RESOURCE` resolves its target and usages from that same prefix. `LATEST` and its impact are
+provisional at admission and are planned again from the captured commit basis. All selected models
+pass ordinary creation and external-resource validation before the one model step can commit.
 A rejected statement does not change the pending count or the transaction's activity time, so the
 client can correct it and continue the same transaction. The admitted result is stored with the
 statement; an exact retry with the same request reference, source, semantic statement, and expected

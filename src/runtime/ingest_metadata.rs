@@ -2,8 +2,11 @@
 //!
 //! Layer: data plane.
 //! - **Owns.** Connector metadata columns and VM namespaces for accepted input batches.
-//! - **Depends on.** Arrow arrays, connector metadata and explicit execution timestamps.
+//! - **Depends on.** Arrow arrays, the connector contract's metadata rows and header trait, and
+//!   explicit execution timestamps.
 //! - **Must not know.** NSPL parsing, source-client lifecycle or persisted control state.
+
+use nervix_connector::IngestMetadataRow;
 
 use super::*;
 
@@ -123,77 +126,13 @@ impl IngestMetadataKind {
     }
 }
 
-/// Transport headers of one source message, visited in arrival order.
-///
-/// Connectors implement this over their own borrowed message so a group's header builders
-/// are appended from the source directly, without an owned header vector per message.
-pub(crate) trait IngestMessageHeaders: Send + Sync {
-    fn visit(&self, visit: &mut dyn FnMut(&str, &str));
-}
-
-/// A source message that carries no transport headers.
-pub(in crate::runtime) struct NoIngestHeaders;
-
-impl IngestMessageHeaders for NoIngestHeaders {
-    fn visit(&self, _visit: &mut dyn FnMut(&str, &str)) {}
-}
-
-/// Transport headers copied out of a source message so they outlive it.
-///
-/// Only the paths that append after their source message is gone retain headers: the
-/// quiesce buffer replays payloads long after the message was dropped, and a WebSocket
-/// session carries its handshake headers into every later frame. Every other connector
-/// appends from the borrowed message instead.
-#[derive(Clone, Debug)]
-pub(crate) struct RetainedIngestHeaders(pub(super) Vec<(String, String)>);
-
-impl RetainedIngestHeaders {
-    /// Copies the headers a source message carries right now.
-    pub(crate) fn capture(headers: &dyn IngestMessageHeaders) -> Self {
-        let mut retained = Vec::new();
-        headers.visit(&mut |name, value| retained.push((name.to_string(), value.to_string())));
-        Self(retained)
-    }
-
-    /// The headers of a source that carries none.
-    pub(in crate::runtime) fn none() -> Self {
-        Self(Vec::new())
-    }
-}
-
-impl IngestMessageHeaders for RetainedIngestHeaders {
-    fn visit(&self, visit: &mut dyn FnMut(&str, &str)) {
-        for (name, value) in &self.0 {
-            visit(name, value);
-        }
-    }
-}
-
-/// One message's ingest metadata, read from its source message.
-///
-/// The variant must match the kind the ingestor started with; the fields borrow the source
-/// message so appending a row copies bytes into Arrow buffers and nothing else.
-pub(in crate::runtime) enum IngestMetadataRow<'a> {
-    Kafka {
-        topic: &'a str,
-        partition: i32,
-        offset: i64,
-        headers: &'a dyn IngestMessageHeaders,
-    },
-    Syslog {
-        peer_addr: std::net::SocketAddr,
-    },
-    Headers {
-        headers: &'a dyn IngestMessageHeaders,
-    },
-}
-
-impl IngestMetadataRow<'_> {
-    pub(super) fn kind(&self) -> IngestMetadataKind {
-        match self {
-            Self::Kafka { .. } => IngestMetadataKind::Kafka,
-            Self::Syslog { .. } => IngestMetadataKind::Syslog,
-            Self::Headers { .. } => IngestMetadataKind::Headers,
+/// The one builder kind a connector's metadata row can be appended into.
+impl From<&IngestMetadataRow<'_>> for IngestMetadataKind {
+    fn from(row: &IngestMetadataRow<'_>) -> Self {
+        match row {
+            IngestMetadataRow::Kafka { .. } => Self::Kafka,
+            IngestMetadataRow::Syslog { .. } => Self::Syslog,
+            IngestMetadataRow::Headers { .. } => Self::Headers,
         }
     }
 }
@@ -309,7 +248,7 @@ impl IngestMetadataBuilders {
             (_, row) => {
                 return Err(Report::new(IngestMetadataError::BuilderKindMismatch {
                     builders: self.kind,
-                    row: row.kind(),
+                    row: IngestMetadataKind::from(row),
                 }));
             }
         };
@@ -596,6 +535,7 @@ mod tests {
 
     use ahash::HashMap;
     use arrow_array::Array;
+    use nervix_connector::NoIngestHeaders;
     use nervix_models::{
         CodecWireFormat, CreateCodec, CreateSchema, CreateWireSchema, IngestSource, JsonType,
         MessageErrorOperation, ModelKind, ModelName, ParseAsType, ResolvedCodecWireFormat,

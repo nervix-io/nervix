@@ -172,7 +172,6 @@ mod branch_instance_registry;
 mod branch_key;
 mod branch_lru_state;
 mod branch_runtime;
-mod client_config;
 mod correlator;
 mod deduplicator;
 mod domain_clock;
@@ -190,7 +189,6 @@ mod filter_map;
 mod force_flush;
 mod forced_recovery_decision;
 mod generator;
-mod http_client;
 mod inferencer;
 mod inferencer_output;
 mod ingest_group;
@@ -213,7 +211,6 @@ mod node;
 mod node_settings;
 mod observability;
 mod ownership_handoff_error;
-mod physical_time;
 mod planning;
 mod processor_branch_task;
 mod processor_output;
@@ -238,7 +235,6 @@ mod schedule_apply;
 mod snapshot_staging;
 
 mod scheduled_node;
-mod service_url;
 mod shared_clients;
 mod state_replication;
 mod state_snapshot_exchange;
@@ -269,11 +265,6 @@ use branch_runtime::{
     PendingMaterializedBatch, branch_lru_placement, flush_branch_junction,
     internal_processor_error_policies, output_error_policies, persist_branch_instance_lru_snapshot,
     publish_branch_instance_lru_snapshot,
-};
-use client_config::{
-    ParsedRetryPolicy, client_config_entries, client_config_value, client_tls_paths,
-    next_retry_delay, optional_bool_client_config_value, optional_client_config_value,
-    read_tls_file, render_client_config_template,
 };
 use correlator::{
     CorrelatorMatchedBatch, CorrelatorOutputCompileContext, CorrelatorOutputContext,
@@ -324,7 +315,6 @@ use force_flush::{
     IngestorAckRootTrackers,
 };
 use generator::{GeneratorTaskRouteSpec, GeneratorTaskSpec};
-use http_client::HttpClientConfig;
 use inferencer_output::flush_branch_inferencer_output;
 use ingest_group::{
     BranchedEntrypointInput, IngestGroupDispatch, IngestRouteCollector, IngestorDependencies,
@@ -335,12 +325,10 @@ use ingest_group::{
 pub(in crate::runtime) use ingest_group::{
     INGEST_FLUSH_FAILURES_ARE_HANDLED, INGEST_GROUP_MAX_ROWS,
 };
+pub(in crate::runtime) use ingest_metadata::IngestMetadataKind;
 use ingest_metadata::{
     BRANCH_NAMESPACE, INGEST_METADATA_NAMESPACE, IngestHeaderFunctionInjector,
     IngestMetadataBuilders, emit_sink_supports_headers, ingest_source_supports_headers,
-};
-pub(in crate::runtime) use ingest_metadata::{
-    IngestMetadataKind, IngestMetadataRow, NoIngestHeaders,
 };
 pub(in crate::runtime) use ingestor_quiesce::{
     BufferedIngestMetadata, BufferedIngestPayload, IngestorQuiesceCause, IngestorQuiesceControl,
@@ -449,7 +437,6 @@ use scheduled_node::{
     EmitterTaskBuildDeps, EmitterTaskDeps, ExecutionBuildDeps, ScheduledNodePlacement,
     ScheduledNodeTask,
 };
-use service_url::ServiceUrl;
 pub(in crate::runtime) use shared_clients::{
     OpenClientError, SharedClientError, SharedClientLease,
 };
@@ -485,7 +472,6 @@ use test_fixtures::{
     wasm_test_generated_output, wasm_test_output, window_aggregate, window_outputs, window_plan,
     with_inherit_all,
 };
-use tls::RustlsClientConfigSource;
 pub(in crate::runtime) use vm_compile::{
     CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders, KeyProjectionKind,
     MaterializedFieldInterest, MaterializedLookupKeyMode, compile_emitter_filter_map_program,
@@ -537,7 +523,6 @@ use window_state::{
     WindowAccumulatorSnapshot, WindowEntrySnapshot, WindowProcessorStateSnapshot,
 };
 
-mod tls;
 mod vm_compile;
 mod vm_input;
 mod wasm_checkpoint;
@@ -554,7 +539,6 @@ mod window_state;
 
 #[doc(hidden)]
 pub use branch_key::BranchKey;
-pub(crate) use client_config::{ClientResourceMounts, ResolvedClientConfig};
 pub(crate) use domain_clock::DomainExecutionSnapshot;
 pub(crate) use domain_execution::LookupRuntime;
 /// Opaque runtime-state handle types exposed only so compile-fail tests can prove that forbidden
@@ -573,15 +557,12 @@ pub mod state_capability_compile_tests {
     };
 }
 
-/// Opaque clock and deadline capabilities exposed only so compile-fail tests can prove that
-/// logical and physical deadlines cannot be interchanged.
+/// Opaque logical clock and deadline capabilities exposed only so compile-fail tests can prove
+/// that they cannot be interchanged with the physical deadlines of the connector contract.
 #[cfg(feature = "testing")]
 #[doc(hidden)]
 pub mod clock_capability_compile_tests {
-    pub use super::{
-        domain_clock::{DomainClock, LogicalDeadline},
-        physical_time::{PhysicalDeadline, PhysicalDeadlineCapability},
-    };
+    pub use super::domain_clock::{DomainClock, LogicalDeadline};
 }
 
 /// The opaque subscription predicate exposed only so compile-fail tests can prove that general VM
@@ -601,9 +582,7 @@ pub(crate) use entity_gate::{
 };
 pub(crate) use error::RuntimeError;
 pub(crate) use events::RuntimeEvent;
-pub(crate) use ingest_metadata::{
-    IngestFilterMapMetadata, IngestMessageHeaders, RetainedIngestHeaders,
-};
+pub(crate) use ingest_metadata::IngestFilterMapMetadata;
 pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;
 pub(crate) use ingestors::kafka::KafkaIngestor;
 pub(crate) use local_drain::LocalGraphDrainOutcome;
