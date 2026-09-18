@@ -106,7 +106,7 @@ pub fn read_tls_file(path: &PathBuf, label: &str) -> ClientConfigResult<Vec<u8>>
     })
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParsedRetryPolicy {
     pub backoff: Duration,
     pub max_backoff: Duration,
@@ -136,18 +136,6 @@ impl ClientResourceMounts {
             _root: root,
             _aliases: aliases,
         }
-    }
-}
-
-/// The entries a client connects with: the resolved ones once the control plane has rendered
-/// them, and the entries written on the model until then.
-pub fn client_config_entries<'a>(
-    resolved: Option<&'a ResolvedClientConfig>,
-    declared: &'a [nervix_models::ClientConfigEntry],
-) -> &'a [nervix_models::ClientConfigEntry] {
-    match resolved {
-        Some(resolved) => resolved.entries.as_slice(),
-        None => declared,
     }
 }
 

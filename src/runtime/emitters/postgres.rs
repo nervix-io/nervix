@@ -1,4 +1,4 @@
-use nervix_connector::{ResolvedClientConfig, client_tls_paths, optional_client_config_value};
+use nervix_connector::{client_tls_paths, optional_client_config_value};
 use nervix_models::TableName;
 pub(in crate::runtime) use sqlx::postgres::PgPool;
 use sqlx::{
@@ -238,21 +238,18 @@ impl PostgresEmitter {
     }
 
     pub(in crate::runtime) async fn new(
-        model: &Model,
-        client: &nervix_models::CreateClientPostgres,
-        resolved: Option<&ResolvedClientConfig>,
+        plan: &PostgresSinkPlan,
         context: &EmitterSinkContext,
-        values: &[PostgresValueMapping],
         input_schema: StdArc<arrow_schema::Schema>,
     ) -> Self {
         let client = match context
             .runtime
-            .lease_shared_client(&context.domain, &client.name, model, resolved)
+            .lease_shared_client(&context.domain, &plan.client, plan.pooled_client())
             .await
         {
             Ok(lease) => Some(PostgresEmitterClient {
                 lease,
-                client: client.name.clone(),
+                client: plan.client.name.clone(),
                 runtime: context.runtime.clone(),
                 waiter: DomainNodeRef::node_in(
                     context.domain.clone(),
@@ -268,7 +265,7 @@ impl PostgresEmitter {
         let program = match compile_postgres_values_program(
             &context.domain,
             &context.emitter,
-            values,
+            &plan.values,
             input_schema,
             context.udfs.as_ref(),
         ) {

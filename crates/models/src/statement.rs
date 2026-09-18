@@ -1954,7 +1954,7 @@ pub enum SqsFifoGroup {
     Archive,
     RkyvSerialize,
     RkyvDeserialize,
-    AsRefStr,
+    IntoStaticStr,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum EmitSink {
@@ -2049,8 +2049,8 @@ pub enum EmitSink {
 }
 
 impl EmitSink {
-    pub fn transport_label(&self) -> &str {
-        self.as_ref()
+    pub fn transport_label(&self) -> &'static str {
+        self.into()
     }
 
     pub fn client(&self) -> &ClientName {

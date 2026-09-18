@@ -6,7 +6,7 @@ use lapin::{
     tcp::OwnedTLSConfig,
     types::{AMQPValue, FieldTable},
 };
-use nervix_connector::{ResolvedClientConfig, client_config_entries, client_tls_paths};
+use nervix_connector::client_tls_paths;
 use nervix_models::QueueName;
 
 use super::*;
@@ -24,18 +24,12 @@ struct PendingRabbitMqConfirmation {
 }
 
 impl RabbitMqEmitter {
-    pub(in crate::runtime) async fn new(
-        client: &CreateClientRabbitMq,
-        resolved: Option<&ResolvedClientConfig>,
-        queue: &QueueName,
-        mode: BrokerPublishingMode,
-    ) -> EmitterRuntimeResult<Self> {
-        let channel =
-            Self::channel_from_config(client_config_entries(resolved, client.config.as_slice()))
-                .await?;
+    pub(in crate::runtime) async fn new(plan: &RabbitMqSinkPlan) -> EmitterRuntimeResult<Self> {
+        let mode = plan.mode;
+        let channel = Self::channel_from_config(&plan.client.config.entries).await?;
         channel
             .queue_declare(
-                queue.as_str().into(),
+                plan.queue.as_str().into(),
                 QueueDeclareOptions {
                     passive: true,
                     ..Default::default()
