@@ -246,6 +246,7 @@ Feature: Coordinated WASM processor state reset
       key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
       """
 
+  @exclusive
   Scenario: A reset survives owner failover and cannot be resurrected by the former owner
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
     And the production sticky scheduler is configured
@@ -257,7 +258,7 @@ Feature: Coordinated WASM processor state reset
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "wasm_processor" "counting_guest" is saved as placeholder "former_owner"
-    And a node other than placeholder "former_owner" is saved as placeholder "query_node"
+    And the first replica for scheduled "wasm_processor" "counting_guest" in the last cluster status is saved as placeholder "promoted_replica"
     When http payload is posted to node "{{former_owner}}" with host "wasm-reset-{{test_id}}.example.com" path "/events"
       """
       {"tenant":"alpha","sequence":1}
@@ -267,19 +268,7 @@ Feature: Coordinated WASM processor state reset
       {"tenant":"beta","sequence":1}
       """
     Then the relay subscription does not receive a payload within "1500ms"
-    When WASM processor "counting_guest" state is reset for branch
-      """
-      {"tenant":"alpha"}
-      """
-    And node "{{former_owner}}" is stopped
-    Then node "{{query_node}}" eventually observes a stable leader
-    And within "60s" node "{{query_node}}" eventually reports scheduled "wasm_processor" "counting_guest" owner different from placeholder "former_owner"
-    And the last cluster status owner for scheduled "wasm_processor" "counting_guest" is saved as placeholder "failover_owner"
-    When these NSPL commands are executed on node "{{query_node}}"
-      """
-      CREATE SUBSCRIPTION counted_events_subscription TO counted_events;
-      """
-    And http payload is posted to node "{{query_node}}" with host "wasm-reset-{{test_id}}.example.com" path "/events"
+    When http payload is posted to node "{{former_owner}}" with host "wasm-reset-{{test_id}}.example.com" path "/events"
       """
       {"tenant":"beta","sequence":2}
       """
@@ -287,37 +276,52 @@ Feature: Coordinated WASM processor state reset
       """
       key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
       """
-    When http payload is posted to node "{{query_node}}" with host "wasm-reset-{{test_id}}.example.com" path "/events"
+    When WASM processor "counting_guest" state is reset for branch
+      """
+      {"tenant":"alpha"}
+      """
+    And node "{{former_owner}}" is stopped
+    Then node "{{promoted_replica}}" eventually observes a stable leader
+    And within "60s" node "{{promoted_replica}}" eventually reports scheduled "wasm_processor" "counting_guest" owner equals placeholder "promoted_replica"
+    When http payload is posted to node "{{promoted_replica}}" with host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":3}
+      """
+    And http payload is posted to node "{{promoted_replica}}" with host "wasm-reset-{{test_id}}.example.com" path "/events"
       """
       {"tenant":"alpha","sequence":2}
       """
     Then the relay subscription does not receive a payload within "1500ms"
-    When http payload is posted to node "{{query_node}}" with host "wasm-reset-{{test_id}}.example.com" path "/events"
+    When http payload is posted to node "{{promoted_replica}}" with host "wasm-reset-{{test_id}}.example.com" path "/events"
       """
       {"tenant":"alpha","sequence":3}
+      """
+    And http payload is posted to node "{{promoted_replica}}" with host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":4}
       """
     Then within "10s" the relay subscription receives payloads containing all fragments
       """
       key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
       """
-    When http payload is posted to node "{{query_node}}" with host "wasm-reset-{{test_id}}.example.com" path "/events"
-      """
-      {"tenant":"beta","sequence":3}
-      """
-    Then the relay subscription does not receive a payload within "1500ms"
     When node "{{former_owner}}" is started
-    Then node "{{query_node}}" eventually observes a stable leader
-    And within "60s" node "{{query_node}}" eventually reports scheduled "wasm_processor" "counting_guest" owner different from placeholder "former_owner"
-    When http payload is posted to node "{{query_node}}" with host "wasm-reset-{{test_id}}.example.com" path "/events"
+    Then node "{{promoted_replica}}" eventually observes a stable leader
+    And within "60s" node "{{promoted_replica}}" eventually reports scheduled "wasm_processor" "counting_guest" owner equals placeholder "promoted_replica"
+    When http payload is posted to node "{{promoted_replica}}" with host "wasm-reset-{{test_id}}.example.com" path "/events"
       """
       {"tenant":"alpha","sequence":4}
       """
+    And http payload is posted to node "{{promoted_replica}}" with host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":5}
+      """
     Then the relay subscription does not receive a payload within "1500ms"
-    When http payload is posted to node "{{query_node}}" with host "wasm-reset-{{test_id}}.example.com" path "/events"
+    When http payload is posted to node "{{promoted_replica}}" with host "wasm-reset-{{test_id}}.example.com" path "/events"
       """
-      {"tenant":"beta","sequence":4}
+      {"tenant":"beta","sequence":6}
       """
-    And http payload is posted to node "{{query_node}}" with host "wasm-reset-{{test_id}}.example.com" path "/events"
+    And http payload is posted to node "{{promoted_replica}}" with host "wasm-reset-{{test_id}}.example.com" path "/events"
       """
       {"tenant":"alpha","sequence":5}
       """
