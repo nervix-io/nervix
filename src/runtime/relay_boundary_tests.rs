@@ -809,7 +809,10 @@ async fn owner_ingress_touches_expiring_stream_state() {
     let runtime = Runtime::default();
     let domain = DomainName::parse("default").expect("valid domain");
     let relay_id = RelayName::parse("notifications").expect("valid identifier");
-    let expiring_state = runtime.expiring_stream_state(&domain, &relay_id);
+    publish_state_identity(&runtime, &domain, ModelKind::Relay, &relay_id);
+    let expiring_state = runtime
+        .expiring_stream_state(&domain, &relay_id)
+        .expect("the relay's state identity is published");
     let registry = expiring_state.registry.clone();
     let services = test_relay_boundary_services();
     let (shutdown, _) = watch::channel(false);
@@ -1042,7 +1045,10 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
     let domain = domain("default");
     let relay = named("notifications");
     let branch = string_branch_key("tenant", "acme");
-    let expiring_state = runtime.expiring_stream_state(&domain, &relay);
+    publish_state_identity(&runtime, &domain, ModelKind::Relay, &relay);
+    let expiring_state = runtime
+        .expiring_stream_state(&domain, &relay)
+        .expect("the relay's state identity is published");
     expiring_state
         .registry
         .touch(&branch, Timestamp::from_unix_nanos(1));
@@ -1088,10 +1094,11 @@ async fn relay_state_shutdown_drains_every_ready_batch() {
         .replicated_materialized_stream_state(
             RuntimeStatePlacement {
                 domain: domain.clone(),
-                state: RuntimeState::MaterializedRelay,
+                state: RuntimeState::MaterializedRelay {
+                    schema: SchemaFingerprint::from_digest([7; 32]),
+                },
                 kind: ModelKind::Relay,
                 identifier: ModelName::from(&relay.clone()),
-                schema_fingerprint: [0; 32],
                 branch_key: None,
             },
             schema.arrow_schema(),

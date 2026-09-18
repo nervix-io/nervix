@@ -20,7 +20,7 @@ use nervix_models::{
     DomainPace, DomainState, DomainStatus, ErrorPolicies, Expression, FieldName, FieldReference,
     FieldScope, IngestQuiesceMode, IngestorName, MessageErrorPolicy, ModelKind, ModelName,
     OutputBranch, ParseAsType, ProcessorOutput, ProcessorOutputs, RelayName, ScheduledNode,
-    SchemaField, SchemaName, Timestamp,
+    SchemaField, SchemaFingerprint, SchemaName, Timestamp,
 };
 use nervix_vm::window::lower_window_assignments;
 use nervix_wasm::{
@@ -401,6 +401,28 @@ pub(super) fn install_unpaced_test_domain(runtime: &super::Runtime, domain: &Dom
     );
 }
 
+/// Publish the runtime-state identity of the `kind` node `identifier` in `domain`, as a committed
+/// schedule carrying that node does, so its schema-bound state can be placed. A WASM processor also
+/// gets the first guest-state generation of every branch.
+pub(super) fn publish_state_identity(
+    runtime: &super::Runtime,
+    domain: &DomainName,
+    kind: ModelKind,
+    identifier: impl Into<ModelName>,
+) {
+    let mut wasm_state_generations = None;
+    if kind == ModelKind::WasmProcessor {
+        wasm_state_generations = Some(nervix_models::WasmStateGenerations::first());
+    }
+    runtime.inner.state_identities.insert(
+        nervix_models::DomainNodeRef::node_in(domain.clone(), kind, identifier.into()),
+        super::ScheduledStateIdentity {
+            schema_fingerprint: SchemaFingerprint::from_digest([7; 32]),
+            wasm_state_generations,
+        },
+    );
+}
+
 pub(super) fn test_domain_clock_authority() -> nervix_models::DomainClockAuthority {
     nervix_models::DomainClockAuthority::assigned(
         nervix_models::DomainClockAuthorityRevision::INITIAL,
@@ -621,7 +643,7 @@ pub(super) fn wasm_guest_stream(schema: StdArc<ArrowSchema>, batches: &[RecordBa
 }
 
 pub(super) fn scheduled_model(model: nervix_models::Model) -> ScheduledNode {
-    ScheduledNode::new(model).placed_on(
+    ScheduledNode::new(model, SchemaFingerprint::from_digest([1; 32])).placed_on(
         Some(ClusterNodeName::parse("node-1").expect("valid name")),
         vec![ClusterNodeName::parse("node-1").expect("valid name")],
     )

@@ -9,7 +9,9 @@
 
 use std::time::Duration;
 
-use nervix_models::{DomainName, ModelKind, ModelName, RemoteRuntimeField, WasmStateGeneration};
+use nervix_models::{
+    DomainName, ModelKind, ModelName, RemoteRuntimeField, SchemaFingerprint, WasmStateGeneration,
+};
 use rkyv::{Archive, Deserialize, Serialize};
 use strum::{FromRepr, IntoStaticStr};
 
@@ -59,48 +61,70 @@ declare_runtime_state_kinds! {
 
 /// One runtime state a placement names, together with the lifetime that state belongs to.
 ///
-/// Every kind but WASM processor guest state lives as long as its entity's definition and schema.
-/// WASM guest state also names the generation it was saved in, so a placement of an earlier lifetime
-/// never addresses the current state.
+/// Branch-aggregated metrics and Kafka offsets depend on no schema: they name nothing beyond their
+/// kind and live as long as their entity does. Every other kind is laid out by the schemas its
+/// entity depends on and names the fingerprint of those schemas, so a placement written under a
+/// replaced schema never addresses the current state. WASM guest state also names the generation it
+/// was saved in, so a placement of an earlier lifetime never addresses the current state.
 #[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum RuntimeState {
     BranchAggregated,
-    Correlator,
-    Deduplicator,
+    Correlator {
+        schema: SchemaFingerprint,
+    },
+    Deduplicator {
+        schema: SchemaFingerprint,
+    },
     KafkaOffset,
-    MaterializedRelay,
-    WasmProcessor { generation: WasmStateGeneration },
-    WindowProcessor,
-    BranchLru,
+    MaterializedRelay {
+        schema: SchemaFingerprint,
+    },
+    WasmProcessor {
+        schema: SchemaFingerprint,
+        generation: WasmStateGeneration,
+    },
+    WindowProcessor {
+        schema: SchemaFingerprint,
+    },
+    BranchLru {
+        schema: SchemaFingerprint,
+    },
+}
+
+/// Whether one runtime state's encoding depends on the schemas of its entity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateSchema {
+    /// The state names no schema, so it outlives every schema change of its entity.
+    Independent,
+    /// The state is laid out by the schemas this fingerprint covers, and is current only under it.
+    Fingerprinted(SchemaFingerprint),
 }
 
 impl RuntimeState {
-    /// The state of `kind` when that kind has a single lifetime, or `None` for WASM guest state,
-    /// whose placement also names the generation it belongs to.
-    pub const fn single_lifetime(kind: RuntimeStateKind) -> Option<Self> {
-        match kind {
-            RuntimeStateKind::BranchAggregated => Some(Self::BranchAggregated),
-            RuntimeStateKind::Correlator => Some(Self::Correlator),
-            RuntimeStateKind::Deduplicator => Some(Self::Deduplicator),
-            RuntimeStateKind::KafkaOffset => Some(Self::KafkaOffset),
-            RuntimeStateKind::MaterializedRelay => Some(Self::MaterializedRelay),
-            RuntimeStateKind::WasmProcessor => None,
-            RuntimeStateKind::WindowProcessor => Some(Self::WindowProcessor),
-            RuntimeStateKind::BranchLru => Some(Self::BranchLru),
-        }
-    }
-
     /// The kind of runtime state this names.
     pub const fn kind(self) -> RuntimeStateKind {
         match self {
             Self::BranchAggregated => RuntimeStateKind::BranchAggregated,
-            Self::Correlator => RuntimeStateKind::Correlator,
-            Self::Deduplicator => RuntimeStateKind::Deduplicator,
+            Self::Correlator { .. } => RuntimeStateKind::Correlator,
+            Self::Deduplicator { .. } => RuntimeStateKind::Deduplicator,
             Self::KafkaOffset => RuntimeStateKind::KafkaOffset,
-            Self::MaterializedRelay => RuntimeStateKind::MaterializedRelay,
+            Self::MaterializedRelay { .. } => RuntimeStateKind::MaterializedRelay,
             Self::WasmProcessor { .. } => RuntimeStateKind::WasmProcessor,
-            Self::WindowProcessor => RuntimeStateKind::WindowProcessor,
-            Self::BranchLru => RuntimeStateKind::BranchLru,
+            Self::WindowProcessor { .. } => RuntimeStateKind::WindowProcessor,
+            Self::BranchLru { .. } => RuntimeStateKind::BranchLru,
+        }
+    }
+
+    /// The schemas this state's encoding depends on.
+    pub const fn schema(self) -> StateSchema {
+        match self {
+            Self::BranchAggregated | Self::KafkaOffset => StateSchema::Independent,
+            Self::Correlator { schema }
+            | Self::Deduplicator { schema }
+            | Self::MaterializedRelay { schema }
+            | Self::WasmProcessor { schema, .. }
+            | Self::WindowProcessor { schema }
+            | Self::BranchLru { schema } => StateSchema::Fingerprinted(schema),
         }
     }
 }
@@ -111,14 +135,14 @@ pub struct StatePlacementEnvelope {
     pub state: RuntimeState,
     pub kind: ModelKind,
     pub identifier: ModelName,
-    pub schema_fingerprint: [u8; 32],
     pub branch_key: Option<Vec<RemoteRuntimeField>>,
 }
 
+/// One checkpoint of the state a placement names. It travels only beside that placement, which
+/// alone says what the payload is laid out by.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StateSnapshotEnvelope {
     pub lsm: u64,
-    pub schema_fingerprint: [u8; 32],
     pub payload: Vec<u8>,
 }
 

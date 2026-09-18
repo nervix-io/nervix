@@ -86,7 +86,7 @@ use nervix_models::{
     PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName,
     RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResourceId,
     ResourceName, RetryPolicy, RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes,
-    SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
+    SchemaFingerprint, SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
     StructuredMessageError, SubscriptionName, Timestamp,
 };
 #[cfg(test)]
@@ -462,7 +462,7 @@ pub(in crate::runtime) use state_store::{
     ForcedRuntimeStateRecoveryTransition, RuntimeState, RuntimeStateHandoffTransition,
     RuntimeStateKind, RuntimeStateOperationError, RuntimeStateResult, RuntimeStateStore,
     ScheduledStateIdentity, StateAssignmentAuthority, StateAssignmentToken, StateAuthorityError,
-    StateCapability, StateGenerationError, StateReplicationRoles,
+    StateCapability, StateIdentityError, StateReplicationRoles,
 };
 #[cfg(test)]
 pub(in crate::runtime) use test_fixtures::STUPID_CHANNEL_CAPACITY_REMOVE_ME;
@@ -473,14 +473,14 @@ use test_fixtures::{
     execute_filter_map_for_test, expression, ingest_metadata_for_test,
     install_test_domain_execution, install_unpaced_test_domain, junction_branch_template,
     key_label, named, nonzero_capacity, paced_domain_state, processor_branched_by,
-    quiesce_test_batch, row_value, scheduled_model, string_branch_key, test_domain_clock,
-    test_domain_clock_authority, test_ingestor_quiesce_control, test_optional_schema,
-    test_relay_boundary_services, test_schema, u32_branch_key, unpaced_domain_state,
-    validate_wasm_test_output_groups, validate_wasm_test_outputs, vm_input_from_test_rows,
-    wait_for_persisted_runtime_state_lsm, wasm_generated_pool, wasm_guest_column,
-    wasm_guest_stream, wasm_input_acks, wasm_input_for_records, wasm_input_for_values,
-    wasm_test_generated_output, wasm_test_output, window_aggregate, window_outputs, window_plan,
-    with_inherit_all,
+    publish_state_identity, quiesce_test_batch, row_value, scheduled_model, string_branch_key,
+    test_domain_clock, test_domain_clock_authority, test_ingestor_quiesce_control,
+    test_optional_schema, test_relay_boundary_services, test_schema, u32_branch_key,
+    unpaced_domain_state, validate_wasm_test_output_groups, validate_wasm_test_outputs,
+    vm_input_from_test_rows, wait_for_persisted_runtime_state_lsm, wasm_generated_pool,
+    wasm_guest_column, wasm_guest_stream, wasm_input_acks, wasm_input_for_records,
+    wasm_input_for_values, wasm_test_generated_output, wasm_test_output, window_aggregate,
+    window_outputs, window_plan, with_inherit_all,
 };
 use tls::RustlsClientConfigSource;
 pub(in crate::runtime) use vm_compile::{

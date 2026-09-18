@@ -325,11 +325,6 @@ impl Runtime {
                 "runtime state replica assignment changed during synchronization",
             ));
         }
-        if snapshot.schema_fingerprint != placement.schema_fingerprint {
-            return Err(RuntimeStateOperationError::replication(
-                "runtime state checkpoint schema fingerprint does not match its placement",
-            ));
-        }
         self.validate_ownership_handoff_snapshot(placement, &snapshot)
             .map_err(|error| RuntimeStateOperationError::replication(error.to_string()))?;
         if placement.branch_key.is_some() && !self.replica_branch_is_current(placement)? {
@@ -387,13 +382,18 @@ impl Runtime {
         &self,
         placement: &RuntimeStatePlacement,
     ) -> RuntimeStateResult<bool> {
-        let branch_lru = self.state_placement(
-            &placement.domain,
-            RuntimeState::BranchLru,
-            placement.kind,
-            placement.identifier.clone(),
-            None,
-        );
+        let branch_lru = self
+            .state_placement(
+                &placement.domain,
+                RuntimeStateKind::BranchLru,
+                placement.kind,
+                placement.identifier.clone(),
+                None,
+            )
+            .change_context_lazy(|| RuntimeStateOperationError::StateIdentity {
+                kind: placement.kind,
+                identifier: placement.identifier.clone(),
+            })?;
         let snapshot = match self.inner.replicated_branch_lru_snapshots.get(&branch_lru) {
             Some(snapshot) => Some(snapshot.clone()),
             None => match self.inner.state_store.as_ref() {
@@ -783,13 +783,18 @@ impl Runtime {
             }
         }
         if Self::node_has_branch_lifecycle(entity.kind) {
-            let branch_lru = self.state_placement(
-                domain,
-                RuntimeState::BranchLru,
-                entity.kind,
-                entity.identifier.clone(),
-                None,
-            );
+            let branch_lru = self
+                .state_placement(
+                    domain,
+                    RuntimeStateKind::BranchLru,
+                    entity.kind,
+                    entity.identifier.clone(),
+                    None,
+                )
+                .change_context_lazy(|| OwnershipHandoffError::StatePlacement {
+                    kind: entity.kind,
+                    identifier: entity.identifier.clone(),
+                })?;
             match final_branch_lru {
                 Some(snapshot) => checkpoints.push((branch_lru.clone(), snapshot)),
                 None => {
@@ -814,12 +819,10 @@ impl Runtime {
                     .iter()
                     .any(|(placement, _)| placement == &branch_lru)
             {
-                let schema_fingerprint = branch_lru.schema_fingerprint;
                 checkpoints.push((
                     branch_lru,
                     PersistedRuntimeStateEntry {
                         lsm: 0,
-                        schema_fingerprint,
                         payload: encode_branch_lru_snapshot(&[]).map_err(|error| {
                             OwnershipHandoffError::checkpoint(error.to_string())
                         })?,
@@ -885,7 +888,6 @@ impl Runtime {
                     placement: placement.to_remote(),
                     snapshot: nervix_interconnect::StateSnapshotEnvelope {
                         lsm: snapshot.lsm,
-                        schema_fingerprint: snapshot.schema_fingerprint,
                         payload: snapshot.payload,
                     },
                 },
@@ -914,10 +916,8 @@ impl Runtime {
                     .map_err(OwnershipHandoffError::persistence)?
                     .payload
             }
-            RuntimeStateKind::MaterializedRelay => {
-                empty_sealed_container(placement.schema_fingerprint)
-                    .map_err(|error| OwnershipHandoffError::state(error.to_string()))?
-            }
+            RuntimeStateKind::MaterializedRelay => empty_sealed_container()
+                .map_err(|error| OwnershipHandoffError::state(error.to_string()))?,
             RuntimeStateKind::BranchLru => encode_branch_lru_snapshot(&[])
                 .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?,
             RuntimeStateKind::Correlator
@@ -931,11 +931,7 @@ impl Runtime {
                 )));
             }
         };
-        Ok(PersistedRuntimeStateEntry {
-            lsm: 0,
-            schema_fingerprint: placement.schema_fingerprint,
-            payload,
-        })
+        Ok(PersistedRuntimeStateEntry { lsm: 0, payload })
     }
 
     pub(crate) async fn prepare_forced_ownership_recovery(
@@ -980,13 +976,18 @@ impl Runtime {
         let mut resets = BTreeMap::new();
 
         let branch_entries = if Self::node_has_branch_lifecycle(scheduled.kind()) {
-            let placement = self.state_placement(
-                domain,
-                RuntimeState::BranchLru,
-                scheduled.kind(),
-                scheduled.identifier.clone(),
-                None,
-            );
+            let placement = self
+                .state_placement(
+                    domain,
+                    RuntimeStateKind::BranchLru,
+                    scheduled.kind(),
+                    scheduled.identifier.clone(),
+                    None,
+                )
+                .change_context_lazy(|| OwnershipHandoffError::StatePlacement {
+                    kind: scheduled.kind(),
+                    identifier: scheduled.identifier.clone(),
+                })?;
             let recovered = self
                 .forced_recovery_checkpoint(&placement, &recovery_sources, deadline)
                 .await;
@@ -1018,13 +1019,18 @@ impl Runtime {
 
         for (component, state) in Self::global_recovery_state_components(&scheduled) {
             tokio::task::consume_budget().await;
-            let placement = self.state_placement(
-                domain,
-                state,
-                scheduled.kind(),
-                scheduled.identifier.clone(),
-                None,
-            );
+            let placement = self
+                .state_placement(
+                    domain,
+                    state,
+                    scheduled.kind(),
+                    scheduled.identifier.clone(),
+                    None,
+                )
+                .change_context_lazy(|| OwnershipHandoffError::StatePlacement {
+                    kind: scheduled.kind(),
+                    identifier: scheduled.identifier.clone(),
+                })?;
             let recovered = self
                 .forced_recovery_checkpoint(&placement, &recovery_sources, deadline)
                 .await;
@@ -1046,7 +1052,7 @@ impl Runtime {
             for (branch_key, _) in entries {
                 tokio::task::consume_budget().await;
                 let placement = self
-                    .branch_state_placement(
+                    .state_placement(
                         domain,
                         state,
                         scheduled.kind(),
@@ -1127,13 +1133,13 @@ impl Runtime {
 
     fn global_recovery_state_components(
         scheduled: &ScheduledNode,
-    ) -> Vec<(OwnershipStateComponent, RuntimeState)> {
+    ) -> Vec<(OwnershipStateComponent, RuntimeStateKind)> {
         let mut components = Vec::new();
         for component in scheduled.ownership_state_components() {
             let state = match component {
-                OwnershipStateComponent::BranchAggregated => RuntimeState::BranchAggregated,
-                OwnershipStateComponent::KafkaOffsets => RuntimeState::KafkaOffset,
-                OwnershipStateComponent::MaterializedRelay => RuntimeState::MaterializedRelay,
+                OwnershipStateComponent::BranchAggregated => RuntimeStateKind::BranchAggregated,
+                OwnershipStateComponent::KafkaOffsets => RuntimeStateKind::KafkaOffset,
+                OwnershipStateComponent::MaterializedRelay => RuntimeStateKind::MaterializedRelay,
                 OwnershipStateComponent::BranchLifecycle
                 | OwnershipStateComponent::Deduplicator
                 | OwnershipStateComponent::WasmProcessor
@@ -1197,7 +1203,6 @@ impl Runtime {
             }
             RuntimeStateKind::WasmProcessor => Ok(PersistedRuntimeStateEntry {
                 lsm: 0,
-                schema_fingerprint: placement.schema_fingerprint,
                 payload: Vec::new(),
             }),
             _ => Err(OwnershipHandoffError::state(format!(
@@ -1390,18 +1395,10 @@ impl Runtime {
                 .map(BranchKey::as_str)
                 .cmp(&right.as_ref().map(BranchKey::as_str))
         });
-        let placement = self.state_placement(
-            domain,
-            RuntimeState::BranchLru,
-            entity.kind,
-            entity.identifier.clone(),
-            None,
-        );
         Ok(Some(PersistedRuntimeStateEntry {
             lsm: lsm.checked_add(1).ok_or_else(|| {
                 OwnershipHandoffError::checkpoint("branch lifecycle checkpoint revision overflowed")
             })?,
-            schema_fingerprint: placement.schema_fingerprint,
             payload: encode_branch_lru_snapshot(&entries)
                 .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?,
         }))
@@ -1466,26 +1463,29 @@ impl Runtime {
         node: &ScheduledNode,
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
     ) -> OwnershipHandoffResult<HashSet<RuntimeStatePlacement>> {
+        let unplaceable = || OwnershipHandoffError::StatePlacement {
+            kind: node.kind(),
+            identifier: node.identifier.clone(),
+        };
         let mut expected = HashSet::default();
         for (_, state) in Self::global_recovery_state_components(node) {
-            expected.insert(self.state_placement(
-                domain,
-                state,
-                node.kind(),
-                node.identifier.clone(),
-                None,
-            ));
+            let placement = self
+                .state_placement(domain, state, node.kind(), node.identifier.clone(), None)
+                .change_context_lazy(unplaceable)?;
+            expected.insert(placement);
         }
         if !Self::node_has_branch_lifecycle(node.kind()) {
             return Ok(expected);
         }
-        let branch_lru = self.state_placement(
-            domain,
-            RuntimeState::BranchLru,
-            node.kind(),
-            node.identifier.clone(),
-            None,
-        );
+        let branch_lru = self
+            .state_placement(
+                domain,
+                RuntimeStateKind::BranchLru,
+                node.kind(),
+                node.identifier.clone(),
+                None,
+            )
+            .change_context_lazy(unplaceable)?;
         let snapshot = checkpoints
             .iter()
             .find_map(|(placement, snapshot)| (placement == &branch_lru).then_some(snapshot))
@@ -1508,17 +1508,14 @@ impl Runtime {
                 .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?
             {
                 let placement = self
-                    .branch_state_placement(
+                    .state_placement(
                         domain,
                         state_kind,
                         node.kind(),
                         node.identifier.clone(),
                         branch_key,
                     )
-                    .change_context_lazy(|| OwnershipHandoffError::StatePlacement {
-                        kind: node.kind(),
-                        identifier: node.identifier.clone(),
-                    })?;
+                    .change_context_lazy(unplaceable)?;
                 expected.insert(placement);
             }
         }
@@ -1584,15 +1581,8 @@ impl Runtime {
             }
             let snapshot = PersistedRuntimeStateEntry {
                 lsm: checkpoint.snapshot.lsm,
-                schema_fingerprint: checkpoint.snapshot.schema_fingerprint,
                 payload: checkpoint.snapshot.payload,
             };
-            if snapshot.schema_fingerprint != placement.schema_fingerprint {
-                return Err(OwnershipHandoffError::state(format!(
-                    "checkpoint fingerprint does not match {:?} state placement",
-                    placement.state
-                )));
-            }
             if !self.runtime_state_placement_is_current(&placement) {
                 return Err(OwnershipHandoffError::state(format!(
                     "checkpoint for {:?} state has a stale model or schema fingerprint",
@@ -2461,7 +2451,6 @@ impl Runtime {
         })?;
         Ok(snapshot.map(|snapshot| PersistedRuntimeStateEntry {
             lsm: snapshot.lsm,
-            schema_fingerprint: snapshot.schema_fingerprint,
             payload: snapshot.payload,
         }))
     }
@@ -2701,7 +2690,6 @@ impl Runtime {
         let restored = RestoredMaterializedSnapshot::open(
             &self.inner.executor,
             schema,
-            placement.schema_fingerprint,
             SealedSource::memory(sealed),
         )
         .await

@@ -463,13 +463,18 @@ impl Runtime {
             if let Some(relay) = materialized_relay.as_ref()
                 && let Some(schema) = materialized_schema.as_ref()
             {
-                let state_placement = self.state_placement(
-                    domain,
-                    RuntimeState::MaterializedRelay,
-                    ModelKind::Relay,
-                    relay,
-                    None,
-                );
+                let state_placement = self
+                    .state_placement(
+                        domain,
+                        RuntimeStateKind::MaterializedRelay,
+                        ModelKind::Relay,
+                        relay,
+                        None,
+                    )
+                    .map_err(|error| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: error.to_string(),
+                    })?;
                 self.prepare_materialized_stream_restore(&state_placement, schema)
                     .await
                     .map_err(|error| RuntimeError::BuildDomainExecution {
@@ -482,13 +487,18 @@ impl Runtime {
                 && let Some(relay) = materialized_relay.as_ref()
                 && let Some(previous_owner) = previous_owner.as_ref()
             {
-                let state_placement = self.state_placement(
-                    domain,
-                    RuntimeState::MaterializedRelay,
-                    ModelKind::Relay,
-                    relay,
-                    None,
-                );
+                let state_placement = self
+                    .state_placement(
+                        domain,
+                        RuntimeStateKind::MaterializedRelay,
+                        ModelKind::Relay,
+                        relay,
+                        None,
+                    )
+                    .map_err(|error| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: error.to_string(),
+                    })?;
                 let local_replica = self
                     .inner
                     .replicated_materialized_stream_states
@@ -1748,15 +1758,21 @@ impl Runtime {
                 .into_iter()
                 .cloned()
                 .collect::<Vec<_>>();
+            let state_placement = self
+                .state_placement(
+                    domain,
+                    RuntimeStateKind::MaterializedRelay,
+                    ModelKind::Relay,
+                    &relay.name,
+                    None,
+                )
+                .map_err(|error| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: error.to_string(),
+                })?;
             let mut assignment = self
                 .replicated_materialized_stream_state(
-                    self.state_placement(
-                        domain,
-                        RuntimeState::MaterializedRelay,
-                        ModelKind::Relay,
-                        &relay.name,
-                        None,
-                    ),
+                    state_placement,
                     schema,
                     execution_node.clone(),
                     replica_nodes,
@@ -1815,13 +1831,13 @@ impl Runtime {
             let required_replica_acks = replica_nodes.len();
             let mut assignment = self
                 .replicated_kafka_offset_state(
-                    self.state_placement(
-                        domain,
-                        RuntimeState::KafkaOffset,
-                        node.kind(),
-                        &node.identifier,
-                        None,
-                    ),
+                    RuntimeStatePlacement {
+                        domain: domain.clone(),
+                        state: RuntimeState::KafkaOffset,
+                        kind: node.kind(),
+                        identifier: node.identifier.clone(),
+                        branch_key: None,
+                    },
                     node.primary_node.clone(),
                     replica_nodes,
                     required_replica_acks,
@@ -1883,13 +1899,13 @@ impl Runtime {
             let required_replica_acks = aggregate_replica_nodes.len();
             let state = self
                 .replicated_branch_aggregated_state(
-                    self.state_placement(
-                        domain,
-                        RuntimeState::BranchAggregated,
-                        node.kind(),
-                        &node.identifier,
-                        None,
-                    ),
+                    RuntimeStatePlacement {
+                        domain: domain.clone(),
+                        state: RuntimeState::BranchAggregated,
+                        kind: node.kind(),
+                        identifier: node.identifier.clone(),
+                        branch_key: None,
+                    },
                     aggregate_primary_node.clone(),
                     aggregate_primary_node.unwrap_or_else(|| local_node_id.clone()),
                     aggregate_replica_nodes,
@@ -1908,11 +1924,16 @@ impl Runtime {
                 placement.tasks.push(task);
             }
         }
-        if assigned_locally
-            && !node.is_primary_on(local_node_id)
-            && let Some(task) = self.spawn_branch_state_replica_poll_task(shutdown_tx, domain, node)
-        {
-            placement.tasks.push(task);
+        if assigned_locally && !node.is_primary_on(local_node_id) {
+            let task = self
+                .spawn_branch_state_replica_poll_task(shutdown_tx, domain, node)
+                .map_err(|error| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: error.to_string(),
+                })?;
+            if let Some(task) = task {
+                placement.tasks.push(task);
+            }
         }
         if node.kind() != ModelKind::Relay || executes_locally {
             self.inner.metrics.register_global_node(
@@ -2014,15 +2035,18 @@ mod tests {
         let schedule = ClusterSchedule::from_iter([DomainSchedule::new(
             domain.clone(),
             vec![
-                ScheduledNode::new(nervix_models::Model::Schema(CreateSchema {
-                    name: schema.clone(),
-                    fields: vec![SchemaField {
-                        name: named("value"),
-                        ty: ParseAsType::I64,
-                        optional: false,
-                        sensitive: false,
-                    }],
-                })),
+                ScheduledNode::new(
+                    nervix_models::Model::Schema(CreateSchema {
+                        name: schema.clone(),
+                        fields: vec![SchemaField {
+                            name: named("value"),
+                            ty: ParseAsType::I64,
+                            optional: false,
+                            sensitive: false,
+                        }],
+                    }),
+                    SchemaFingerprint::from_digest([1; 32]),
+                ),
                 scheduled_model(nervix_models::Model::Relay(CreateRelay {
                     name: relay.clone(),
                     schema,
@@ -2657,7 +2681,7 @@ mod tests {
             .values_mut()
             .find(|node| node.kind() == ModelKind::Deduplicator)
             .expect("schedule must contain the processor");
-        processor_node.schema_fingerprint = [7; 32];
+        processor_node.schema_fingerprint = SchemaFingerprint::from_digest([7; 32]);
         let nervix_models::Model::Deduplicator(config) = processor_node.config.as_mut() else {
             panic!("scheduled processor must contain a deduplicator model");
         };
@@ -2683,7 +2707,7 @@ mod tests {
             .map(|entry| entry.value().schema_fingerprint);
         assert_eq!(
             installed,
-            Some([7; 32]),
+            Some(SchemaFingerprint::from_digest([7; 32])),
             "an entity swap must reinstall the schedule's state schema fingerprints so persisted \
              runtime state is not stranded under the pre-swap fingerprint"
         );

@@ -62,6 +62,101 @@ Feature: Altering relay materialized state
       | 1            |
       | 3            |
 
+  @relay_materialized_state_schema_change
+  Scenario Outline: A schema change recreates materialized state and a restart restores only the recreated state
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the active domain is "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( tenant STRING, seq I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE SCHEMA tenant_branch_schema ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_branch_schema TTL 5m;
+      CREATE RELAY events SCHEMA event BRANCHED BY by_tenant
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE VHOST edge http-{{test_id}}-materialized-schema.example.com;
+      CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR event_source
+        FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO events INHERIT ALL
+        BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}-materialized-schema.example.com" path "/events"
+      """
+      {"tenant":"acme","seq":1}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}-materialized-schema.example.com" path "/events"
+      """
+      {"tenant":"initech","seq":2}
+      """
+    Then within "5s" node "node-1" eventually reports materialized state for relay "events" containing
+      """
+      key={"tenant":"acme"} payload={"seq":1,"tenant":"acme"}
+      """
+    And within "5s" node "node-1" eventually reports materialized state for relay "events" containing
+      """
+      key={"tenant":"initech"} payload={"seq":2,"tenant":"initech"}
+      """
+    When this NSPL command request is executed on the leader node
+      """
+      BEGIN;
+      ALTER WIRE JSON SCHEMA event_wire ADD FIELD note string OPTIONAL;
+      ALTER SCHEMA event ADD FIELD note STRING OPTIONAL;
+      COMMIT;
+      """
+    Then the last command output contains
+      """
+      quiesce level: DOMAIN_PAUSE
+      """
+    And within "5s" node "node-1" eventually reports materialized state for relay "events" containing
+      """
+      relay 'events' materialized state is empty
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}-materialized-schema.example.com" path "/events"
+      """
+      {"tenant":"acme","seq":3,"note":"recreated"}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}-materialized-schema.example.com" path "/events"
+      """
+      {"tenant":"globex","seq":4,"note":"recreated"}
+      """
+    Then within "5s" node "node-1" eventually reports materialized state for relay "events" containing
+      """
+      key={"tenant":"acme"} payload={"note":"recreated","seq":3,"tenant":"acme"}
+      """
+    And within "5s" node "node-1" eventually reports materialized state for relay "events" containing
+      """
+      key={"tenant":"globex"} payload={"note":"recreated","seq":4,"tenant":"globex"}
+      """
+    When the cluster is restarted
+    Then within "30s" node "node-1" eventually reports materialized state for relay "events" containing
+      """
+      key={"tenant":"acme"} payload={"note":"recreated","seq":3,"tenant":"acme"}
+      """
+    And within "30s" node "node-1" eventually reports materialized state for relay "events" containing
+      """
+      key={"tenant":"globex"} payload={"note":"recreated","seq":4,"tenant":"globex"}
+      """
+    And the last command output does not contain
+      """
+      "tenant":"initech"
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @relay_materialized_state_drop
   Scenario Outline: Dropping materialized state purges state without interrupting relay flow
     Given entity gate deadline is configured as "5s"
