@@ -59,6 +59,7 @@ pub enum Identifier {
     Cordon,
     Uncordon,
     Drain,
+    Rebind,
     Relocate,
     Relocation,
     Use,

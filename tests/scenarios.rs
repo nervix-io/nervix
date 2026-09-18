@@ -4129,6 +4129,29 @@ async fn given_node_has_resource_directory_containing(
         .insert(placeholder, resource_dir.display().to_string());
 }
 
+#[given(expr = "resource directory {string} additionally contains")]
+async fn given_resource_directory_additionally_contains(
+    world: &mut ScenarioWorld,
+    placeholder: String,
+    #[step] step: &Step,
+) {
+    let resource_dir = world
+        .placeholders
+        .get(&placeholder)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("resource directory placeholder '{placeholder}' must exist"));
+    let files: BTreeMap<String, String> =
+        serde_json::from_str(docstring(step)).expect("fixture docstring must be valid JSON");
+    for (relative_path, contents) in files {
+        let destination = resource_dir.join(PathBuf::from(relative_path));
+        let parent = destination
+            .parent()
+            .expect("fixture file must have a parent directory");
+        std::fs::create_dir_all(parent).expect("fixture parent directory should be created");
+        std::fs::write(destination, contents).expect("fixture file should be written");
+    }
+}
+
 #[given(expr = "node {string} has resource directory {string} with file {string} of {int} MiB")]
 async fn given_node_has_large_resource_file(
     world: &mut ScenarioWorld,

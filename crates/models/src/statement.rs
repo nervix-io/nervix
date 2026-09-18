@@ -27,10 +27,11 @@ use crate::{
     CreateUdf, DeduplicatorName, DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName,
     DomainTimeRate, EmitterName, EndpointName, FieldName, GeneratorName, InferencerName,
     IngestorName, JsonType, JunctionName, LookupName, ModelName, NodeRef, ParseAsType,
-    PlacementName, PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName, RelayName,
-    ReordererName, RequestedResourceVersion, ResourceName, SchemaName, SignalingProtocolName,
-    SubjectName, SubscriptionName, TableName, Timestamp, TopicName, UdfName, UserName, VhostName,
-    WasmProcessorName, WasmStateGenerations, WindowProcessorName, WireSchemaName,
+    PlacementName, PulsarSubscriptionName, QueueGroupName, QueueName, RebindResource,
+    ReingestorName, RelayName, ReordererName, RequestedResourceVersion, ResourceName, SchemaName,
+    SignalingProtocolName, SubjectName, SubscriptionName, TableName, Timestamp, TopicName, UdfName,
+    UserName, VhostName, WasmProcessorName, WasmStateGenerations, WindowProcessorName,
+    WireSchemaName,
 };
 
 #[derive(
@@ -41,6 +42,7 @@ pub enum Statement {
     AlterDomain(AlterDomain),
     CreateUser(CreateStatement<CreateUser>),
     CreateResource(CreateStatement<CreateResource>),
+    RebindResource(RebindResource),
     UploadResource(UploadResource),
     StartDomain(StartDomain),
     StopDomain(StopDomain),
@@ -120,6 +122,7 @@ impl Statement {
             | Self::AlterReingestor(_)
             | Self::AlterGenerator(_)
             | Self::AlterPlacement(_)
+            | Self::RebindResource(_)
             | Self::Drop(_) => true,
             Self::CreateDomain(_)
             | Self::AlterDomain(_)

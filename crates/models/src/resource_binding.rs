@@ -21,6 +21,13 @@ use crate::{
     VhostTlsResource,
 };
 
+/// One stored Model rebuilt with a different version of the resource it binds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceRebinding {
+    pub model: Model,
+    pub previous_version: u64,
+}
+
 impl<Version> ClientResourceMount<Version> {
     fn try_map_version<Next, Error, Map>(
         self,
@@ -324,5 +331,61 @@ impl From<Model> for Model<RequestedResourceVersion> {
             .try_map_resource_versions(|_, version| Ok(RequestedResourceVersion::Number(version)));
         let Ok(written) = written;
         written
+    }
+}
+
+impl Model {
+    /// Returns the concrete version of `resource` this model binds, when it binds that resource.
+    pub fn resource_version(&self, resource: &ResourceName) -> Option<u64> {
+        let mut version = None;
+        let mapped: Result<Model, Infallible> =
+            self.clone()
+                .try_map_resource_versions(|bound_resource, bound_version| {
+                    if bound_resource == resource {
+                        version = Some(bound_version);
+                    }
+                    Ok(bound_version)
+                });
+        let Ok(_) = mapped;
+        version
+    }
+
+    /// Rebuilds this model with `resource` bound to `version`.
+    pub fn rebind_resource(
+        &self,
+        resource: &ResourceName,
+        version: u64,
+    ) -> Option<ResourceRebinding> {
+        let mut previous_version = None;
+        let rebound: Result<Model, Infallible> =
+            self.clone()
+                .try_map_resource_versions(|bound_resource, bound_version| {
+                    if bound_resource == resource {
+                        previous_version = Some(bound_version);
+                        Ok(version)
+                    } else {
+                        Ok(bound_version)
+                    }
+                });
+        let Ok(model) = rebound;
+        previous_version.map(|previous_version| ResourceRebinding {
+            model,
+            previous_version,
+        })
+    }
+}
+
+impl<Version: Clone> Model<Version> {
+    /// Whether this model binds `resource`, independent of the version representation.
+    pub fn binds_resource(&self, resource: &ResourceName) -> bool {
+        let mut binds = false;
+        let mapped: Result<Model<Version>, Infallible> =
+            self.clone()
+                .try_map_resource_versions(|bound_resource, version| {
+                    binds |= bound_resource == resource;
+                    Ok(version)
+                });
+        let Ok(_) = mapped;
+        binds
     }
 }
