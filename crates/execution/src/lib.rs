@@ -27,6 +27,15 @@
 //! there. Reserving threads per class would isolate them physically, at the cost of a pool per
 //! class; the node deliberately does not do that.
 
+#[cfg(feature = "shuttle")]
+extern crate shuttle_dashmap as dashmap;
+#[cfg(feature = "shuttle")]
+extern crate shuttle_parking_lot as parking_lot;
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio_util as tokio_util;
+
 mod cancellation;
 mod limits;
 mod memory;

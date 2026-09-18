@@ -9,6 +9,11 @@
 //! - **Must not know.** The registry, the runtime, or anything else inside the server. Everything
 //!   it learns arrives over the session API.
 
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio_stream as tokio_stream;
+
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
