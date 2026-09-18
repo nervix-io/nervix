@@ -6,6 +6,7 @@ use lapin::{
     tcp::OwnedTLSConfig,
     types::{AMQPValue, FieldTable},
 };
+use nervix_connector::{ResolvedClientConfig, client_config_entries, client_tls_paths};
 use nervix_models::QueueName;
 
 use super::*;

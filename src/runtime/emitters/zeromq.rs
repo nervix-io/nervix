@@ -1,4 +1,5 @@
 use ::zeromq::{PushSocket, Socket, SocketSend};
+use nervix_connector::{ResolvedClientConfig, client_config_entries, optional_client_config_value};
 
 use super::*;
 

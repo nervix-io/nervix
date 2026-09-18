@@ -8,6 +8,10 @@
 use std::{borrow::Cow, num::NonZeroU64};
 
 use error_stack::ResultExt as _;
+use nervix_connector::{
+    IngestMetadataRow, NoIngestHeaders, ParsedRetryPolicy, client_config_value, client_tls_paths,
+    next_retry_delay, optional_client_config_value, physical_time::actual_utc_now, read_tls_file,
+};
 use rumqttc::{
     AckMode, AsyncClient, BrokerSessionResumePolicy, Event, Incoming, MqttOptions, Publish, QoS,
     SessionMode, SubscribeReasonCode, TlsConfiguration, Transport as MqttTransport,
@@ -15,7 +19,6 @@ use rumqttc::{
 use url::{Host, Url};
 
 use super::super::*;
-use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct MqttIngestor;
 
@@ -1338,6 +1341,7 @@ impl MqttIngestor {
 mod tests {
     use std::time::Duration;
 
+    use nervix_connector::{ParsedRetryPolicy, next_retry_delay};
     use nervix_models::{ClientConfigEntry, CreateClientMqtt, MqttSession};
     use nonzero_ext::nonzero;
     use rumqttc::BrokerSessionResumePolicy;
@@ -1346,7 +1350,7 @@ mod tests {
         MQTT_INSTANCE_PLACEHOLDER, MqttClientSettings, MqttIngestor, MqttIngestorAddr,
         MqttIngestorError,
     };
-    use crate::runtime::{ParsedRetryPolicy, named, next_retry_delay};
+    use crate::runtime::named;
 
     fn config_with_client_id(client_id: &str) -> Vec<ClientConfigEntry> {
         vec![ClientConfigEntry {
@@ -1514,8 +1518,8 @@ mod tests {
         assert_eq!(err.current_context(), &MqttIngestorError::ClientConfig);
         assert!(
             matches!(
-                err.downcast_ref::<crate::runtime::client_config::ClientConfigError>(),
-                Some(crate::runtime::client_config::ClientConfigError::MissingRequired {
+                err.downcast_ref::<nervix_connector::ClientConfigError>(),
+                Some(nervix_connector::ClientConfigError::MissingRequired {
                     connector: "MQTT",
                     key,
                 }) if key == "addr"

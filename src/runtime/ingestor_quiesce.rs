@@ -5,6 +5,8 @@
 //! - **Depends on.** Typed ingestor policy, observed input timestamps and runtime task handles.
 //! - **Must not know.** NSPL parsing, consensus decisions or persisted payload state.
 
+use nervix_connector::{IngestMetadataRow, RetainedIngestHeaders};
+
 use super::*;
 
 pub(super) const DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL: Duration = Duration::from_secs(1);

@@ -14,9 +14,12 @@ use aws_sdk_sqs::{
     types::{Message as SqsMessage, MessageAttributeValue},
 };
 use error_stack::{AttachmentKind, FrameKind, ResultExt as _};
+use nervix_connector::{
+    IngestMessageHeaders, IngestMetadataRow, client_config_value, client_tls_paths,
+    optional_client_config_value, physical_time::actual_utc_now, read_tls_file,
+};
 
 use super::super::*;
-use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct SqsIngestor;
 

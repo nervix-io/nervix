@@ -5,6 +5,9 @@ use aws_sdk_sqs::{
     Client as SqsClient,
     types::{MessageAttributeValue, SendMessageBatchRequestEntry},
 };
+use nervix_connector::{
+    ResolvedClientConfig, client_config_entries, client_tls_paths, optional_client_config_value,
+};
 
 use super::*;
 

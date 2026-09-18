@@ -6,12 +6,15 @@
 //! - **Must not know.** NSPL parsing, registry validation or placement policy.
 
 use error_stack::{AttachmentKind, FrameKind, Report, ResultExt as _};
+use nervix_connector::{
+    ParsedRetryPolicy, ResolvedClientConfig, ServiceUrl, client_config_value,
+    optional_bool_client_config_value,
+    physical_time::{PhysicalDeadline, PhysicalDeadlineCapability, actual_utc_now},
+    read_tls_file,
+};
 use thiserror::Error;
 
-use super::{
-    physical_time::{PhysicalDeadline, PhysicalDeadlineCapability, actual_utc_now},
-    *,
-};
+use super::*;
 
 pub(in crate::runtime) mod clickhouse;
 mod iceberg;
@@ -1168,7 +1171,7 @@ impl EmitterRetrySchedule {
         acks: AckSet,
         waiting_for_stall_clear: bool,
     ) -> EmitterRuntimeResult<()> {
-        let retry_at = PhysicalDeadlineCapability::new()
+        let retry_at = PhysicalDeadlineCapability::operational()
             .after(delay)
             .change_context(EmitterRuntimeError::RetryTiming)?;
         self.retry_at = Some(retry_at);
@@ -1193,7 +1196,7 @@ impl EmitterRetrySchedule {
     }
 
     fn next_ack_alive_at(retry_at: PhysicalDeadline) -> PhysicalDeadline {
-        let keepalive = PhysicalDeadlineCapability::new()
+        let keepalive = PhysicalDeadlineCapability::operational()
             .after(RETRY_ACK_ALIVE_EACH)
             .assured("the acknowledgement keepalive interval is a fixed hundred milliseconds");
         // The last keepalive of a wait lands on the retry itself rather than after it.
@@ -1217,7 +1220,7 @@ impl EmitterRetrySchedule {
         let Some(retry_at) = self.retry_at else {
             return true;
         };
-        let physical_time = PhysicalDeadlineCapability::new();
+        let physical_time = PhysicalDeadlineCapability::operational();
         if physical_time.is_reached(retry_at) {
             self.retry_at = None;
             self.ack_alive_at = None;
@@ -5738,7 +5741,7 @@ mod tests {
             .expect("the fixture backoff fits the monotonic clock range");
         retry.include_acks(force_drained);
         retry.ack_alive_at = Some(
-            PhysicalDeadlineCapability::new()
+            PhysicalDeadlineCapability::operational()
                 .after(Duration::ZERO)
                 .expect("an immediate keepalive fits the monotonic clock range"),
         );
