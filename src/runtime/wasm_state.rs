@@ -264,10 +264,9 @@ impl WasmGuestState {
         })
     }
 
-    fn snapshot(&self, placement: &RuntimeStatePlacement) -> PersistedRuntimeStateEntry {
+    fn snapshot(&self) -> PersistedRuntimeStateEntry {
         PersistedRuntimeStateEntry {
             lsm: self.revision,
-            schema_fingerprint: placement.schema_fingerprint,
             payload: self.bytes.clone(),
         }
     }
@@ -365,7 +364,7 @@ impl ReplicatedWasmProcessorState {
 
     /// The committed checkpoint, as an ownership handoff transfers it.
     pub(super) fn latest_snapshot(&self) -> PersistedRuntimeStateEntry {
-        self.committed.load_full().snapshot(&self.placement)
+        self.committed.load_full().snapshot()
     }
 
     /// The newest checkpoint on this node's stable storage when its revision is after `after_lsm`,
@@ -380,7 +379,7 @@ impl ReplicatedWasmProcessorState {
         {
             return None;
         }
-        Some(published.snapshot(&self.placement))
+        Some(published.snapshot())
     }
 
     /// Record that `node` reported holding revision `lsm` on its stable storage.
@@ -428,7 +427,9 @@ impl ReplicatedWasmProcessorState {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{DomainName, FieldName, ModelKind, ModelName, WasmStateGeneration};
+    use nervix_models::{
+        DomainName, FieldName, ModelKind, ModelName, SchemaFingerprint, WasmStateGeneration,
+    };
 
     use super::*;
     use crate::{
@@ -440,11 +441,11 @@ mod tests {
         RuntimeStatePlacement {
             domain: DomainName::parse("test").expect("valid domain"),
             state: RuntimeState::WasmProcessor {
+                schema: SchemaFingerprint::from_digest([7; 32]),
                 generation: WasmStateGeneration::FIRST,
             },
             kind: ModelKind::WasmProcessor,
             identifier: ModelName::parse("filter").expect("valid identifier"),
-            schema_fingerprint: [0; 32],
             branch_key: BranchKey::from_fields([(
                 FieldName::parse("tenant").expect("valid identifier"),
                 RuntimeValue::String("acme".to_string()),
@@ -505,7 +506,6 @@ mod tests {
     fn a_checkpoint_restores_raw_guest_bytes() {
         let initial = PersistedRuntimeStateEntry {
             lsm: 7,
-            schema_fingerprint: placement().schema_fingerprint,
             payload: vec![9, 8, 7],
         };
         let state = ReplicatedWasmProcessorState::new(placement(), Some(initial));

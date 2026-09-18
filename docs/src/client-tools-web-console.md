@@ -174,11 +174,16 @@ empties the scrollback.
 
 ![The resource dialog after uploading a version](images/console-resource-dialog.png)
 
-Selecting a resource in the sidebar opens its version list. Files or a whole directory can be
-uploaded from the browser as a new version of that resource in the selected domain. The successful
-upload result arrives after every current live node has verified and installed the version. Version
-contents and how nodes consume them are covered in
-[Resources](resources.md).
+The sidebar shows each resource's highest completed version, such as `v2`, or `catalog` while no
+upload has completed. Selecting a resource opens its version list, read from the same
+`DESCRIBE RESOURCE` description the REPL prints: every version with its files, and under each
+version the models bound to it, listed by kind and name, or `none`.
+
+Files or a whole directory can be uploaded from the browser as a new version of that resource in
+the selected domain. The successful upload result arrives after every current live node has
+verified and installed the version. An upload moves no binding: models keep the version they pin
+until [`REBIND RESOURCE`](resources.md#rebinding-existing-models) moves them. Version contents and
+how nodes consume them are covered in [Resources](resources.md).
 
 ## Domain Lifecycle
 

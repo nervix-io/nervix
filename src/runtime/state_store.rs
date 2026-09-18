@@ -1,5 +1,5 @@
 #[cfg(not(feature = "shuttle"))]
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::{collections::BTreeSet, fmt, str::FromStr, sync::Arc as StdArc};
 
 use ahash::HashMap;
@@ -10,24 +10,32 @@ use nervix_execution::{
     Executor, MemoryClass, StorageClass,
     sync::{ArcSwap, Guard},
 };
-pub(crate) use nervix_interconnect::{RuntimeState, RuntimeStateKind};
+pub(crate) use nervix_interconnect::{RuntimeState, RuntimeStateKind, StateSchema};
 use nervix_models::{
     BranchKeyFingerprint, ClusterNodeIncarnation, ClusterNodeName, CoordinationIdentity,
-    DomainName, DomainNodeRef, ModelKind, ModelName, NodeRef, WasmStateGeneration,
-    WasmStateGenerations,
+    DomainName, DomainNodeRef, ModelKind, ModelName, NodeRef, SchemaFingerprint,
+    WasmStateGeneration, WasmStateGenerations,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 #[cfg(feature = "shuttle")]
-use shuttle::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use shuttle::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use thiserror::Error;
-use tokio::sync::Notify;
 use triomphe::Arc;
 
 use super::{BranchKey, WasmGuestState};
 
+mod durability;
+
+use durability::DurabilityBarrier;
+
 /// The byte that opens the generation segment of a WASM guest state key. A key without it was not
 /// written in the current shape and fails to decode instead of addressing the current lifetime.
 const STATE_GENERATION_KEY_MARKER: u8 = b'g';
+
+/// The byte that opens the schema fingerprint segment of a schema-bound state key. Every key of
+/// schema-bound state carries it and no other key does, so a key without it fails to decode as
+/// schema-bound state instead of addressing state laid out by some schema.
+const STATE_SCHEMA_KEY_MARKER: u8 = b's';
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RuntimeStatePlacement {
@@ -35,7 +43,6 @@ pub(crate) struct RuntimeStatePlacement {
     pub(crate) state: RuntimeState,
     pub(crate) kind: ModelKind,
     pub(crate) identifier: ModelName,
-    pub(in crate::runtime) schema_fingerprint: [u8; 32],
     pub(in crate::runtime) branch_key: Option<BranchKey>,
 }
 
@@ -51,7 +58,7 @@ impl fmt::Display for RuntimeStatePlacement {
             "{branch_scope} {} state",
             self.state.kind().as_str()
         )?;
-        if let RuntimeState::WasmProcessor { generation } = self.state {
+        if let RuntimeState::WasmProcessor { generation, .. } = self.state {
             write!(formatter, " generation {generation}")?;
         }
         write!(
@@ -64,39 +71,33 @@ impl fmt::Display for RuntimeStatePlacement {
     }
 }
 
-/// What the committed schedule keys one node's runtime state by: the schema fingerprint its state
-/// is written under and, for a WASM processor, the generation of every branch's guest state.
+/// What the committed schedule keys one node's runtime state by: the fingerprint of the schemas its
+/// schema-bound state is laid out by and, for a WASM processor, the generation of every branch's
+/// guest state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::runtime) struct ScheduledStateIdentity {
-    pub(in crate::runtime) schema_fingerprint: [u8; 32],
+    pub(in crate::runtime) schema_fingerprint: SchemaFingerprint,
     pub(in crate::runtime) wasm_state_generations: Option<WasmStateGenerations>,
 }
 
 impl ScheduledStateIdentity {
-    /// Whether runtime state of `state` for `branch`, written under `schema_fingerprint`, is the
-    /// state this identity currently names.
+    /// Whether `state` for `branch` is the state this identity currently names.
     ///
-    /// WASM guest state is current only in the generation the schedule names for its branch, so a
-    /// snapshot of an earlier lifetime is never current, whatever revision it carries.
+    /// State that depends on no schema is current for as long as its node is scheduled. Every other
+    /// kind is current only under this identity's schema fingerprint, and WASM guest state only in
+    /// the generation this identity names for its branch, so a snapshot of an earlier lifetime is
+    /// never current, whatever revision it carries.
     pub(in crate::runtime) fn names(
         &self,
         state: RuntimeState,
-        schema_fingerprint: [u8; 32],
         branch: Option<&BranchKeyFingerprint>,
     ) -> bool {
-        let expected_fingerprint = match state.kind() {
-            RuntimeStateKind::BranchAggregated | RuntimeStateKind::KafkaOffset => [0; 32],
-            RuntimeStateKind::Correlator
-            | RuntimeStateKind::Deduplicator
-            | RuntimeStateKind::MaterializedRelay
-            | RuntimeStateKind::WasmProcessor
-            | RuntimeStateKind::WindowProcessor
-            | RuntimeStateKind::BranchLru => self.schema_fingerprint,
-        };
-        if schema_fingerprint != expected_fingerprint {
+        if let StateSchema::Fingerprinted(schema) = state.schema()
+            && schema != self.schema_fingerprint
+        {
             return false;
         }
-        let RuntimeState::WasmProcessor { generation } = state else {
+        let RuntimeState::WasmProcessor { generation, .. } = state else {
             return true;
         };
         let Some(generations) = self.wasm_state_generations.as_ref() else {
@@ -105,13 +106,31 @@ impl ScheduledStateIdentity {
         generations.of_branch(branch) == generation
     }
 
-    /// The generation the guest state of `branch` is written in, when this node is a WASM processor.
-    pub(in crate::runtime) fn wasm_state_generation(
+    /// The state of `kind` for `branch` in the lifetime this identity names, or `None` for WASM
+    /// guest state when this identity names no guest-state generation.
+    pub(in crate::runtime) fn state_of(
         &self,
+        kind: RuntimeStateKind,
         branch: Option<&BranchKeyFingerprint>,
-    ) -> Option<WasmStateGeneration> {
-        let generations = self.wasm_state_generations.as_ref()?;
-        Some(generations.of_branch(branch))
+    ) -> Option<RuntimeState> {
+        let schema = self.schema_fingerprint;
+        let state = match kind {
+            RuntimeStateKind::BranchAggregated => RuntimeState::BranchAggregated,
+            RuntimeStateKind::KafkaOffset => RuntimeState::KafkaOffset,
+            RuntimeStateKind::Correlator => RuntimeState::Correlator { schema },
+            RuntimeStateKind::Deduplicator => RuntimeState::Deduplicator { schema },
+            RuntimeStateKind::MaterializedRelay => RuntimeState::MaterializedRelay { schema },
+            RuntimeStateKind::WasmProcessor => {
+                let generations = self.wasm_state_generations.as_ref()?;
+                RuntimeState::WasmProcessor {
+                    schema,
+                    generation: generations.of_branch(branch),
+                }
+            }
+            RuntimeStateKind::WindowProcessor => RuntimeState::WindowProcessor { schema },
+            RuntimeStateKind::BranchLru => RuntimeState::BranchLru { schema },
+        };
+        Some(state)
     }
 }
 
@@ -498,16 +517,27 @@ pub(in crate::runtime) struct StateAuthorityError {
     operation: StateCapability,
 }
 
-/// Why guest state of a WASM processor cannot be placed in a lifetime.
+/// Why runtime state cannot be placed in the identity the committed schedule publishes for its node.
 #[derive(Debug, Error)]
-pub(in crate::runtime) enum StateGenerationError {
+pub(in crate::runtime) enum StateIdentityError {
+    #[error(
+        "{} '{}' in domain '{}' has no published schema fingerprint",
+        .kind.as_str(),
+        .identifier.as_str(),
+        .domain.as_str()
+    )]
+    SchemaFingerprintUnpublished {
+        domain: DomainName,
+        kind: ModelKind,
+        identifier: ModelName,
+    },
     #[error(
         "{} '{}' in domain '{}' has no published guest-state generation",
         .kind.as_str(),
         .identifier.as_str(),
         .domain.as_str()
     )]
-    Unpublished {
+    GenerationUnpublished {
         domain: DomainName,
         kind: ModelKind,
         identifier: ModelName,
@@ -524,6 +554,15 @@ pub(in crate::runtime) enum RuntimeStateOperationError {
     Checkpoint(String),
     #[error("runtime state replication failed: {0}")]
     Replication(String),
+    #[error(
+        "runtime state of {} '{}' cannot be placed in its published identity",
+        .kind.as_str(),
+        .identifier.as_str()
+    )]
+    StateIdentity {
+        kind: ModelKind,
+        identifier: ModelName,
+    },
 }
 
 pub(in crate::runtime) type RuntimeStateResult<T> = Result<T, Report<RuntimeStateOperationError>>;
@@ -548,10 +587,11 @@ impl From<Report<StateAuthorityError>> for RuntimeStateOperationError {
     }
 }
 
+/// One checkpoint of the state a placement names. It is stored under that placement and carried
+/// beside it, and the placement alone says what the payload is laid out by.
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub(crate) struct PersistedRuntimeStateEntry {
     pub(crate) lsm: u64,
-    pub(crate) schema_fingerprint: [u8; 32],
     pub(crate) payload: Vec<u8>,
 }
 
@@ -576,11 +616,6 @@ pub(crate) enum RuntimePersistenceError {
     EncodeState(String),
     #[error("failed to decode runtime state: {0}")]
     DecodeState(String),
-    #[error("persisted runtime state for {kind} '{identifier}' has a stale schema fingerprint")]
-    SchemaFingerprintMismatch {
-        kind: &'static str,
-        identifier: String,
-    },
     #[error("prepared ownership handoff state is unavailable")]
     MissingHandoffPreparation,
     #[error("prepared ownership handoff state does not match the acknowledged checkpoint")]
@@ -621,81 +656,6 @@ pub(in crate::runtime) struct RuntimeStateStore {
     executor: Executor,
 }
 
-/// Makes the writes a store already applied durable, sharing one synchronization among every
-/// writer that asks while it runs or before it starts.
-///
-/// A writer applies its write and then takes a ticket. A synchronization covers every ticket issued
-/// before it starts, because each of those writes was applied before its ticket was taken. At most
-/// one writer runs a synchronization at a time; the others wait for it, and one of them runs the
-/// next synchronization when the finished one did not cover them. Every branch that checkpoints at
-/// the same time therefore shares a synchronization of the node's storage instead of queuing one
-/// each behind the storage workers.
-#[derive(Debug)]
-struct DurabilityBarrier {
-    /// The last ticket issued.
-    issued: AtomicU64,
-    /// Every ticket at or below this is covered by a synchronization that succeeded.
-    synchronized: AtomicU64,
-    /// Set when a synchronization fails. The operating system may drop the writes it failed to
-    /// flush, so a later synchronization cannot prove they reached storage, and the database
-    /// refuses every later one anyway: from then on no write is reported durable.
-    failed: AtomicBool,
-    /// Whether one writer is running a synchronization.
-    running: AtomicBool,
-    /// How many synchronizations have run.
-    rounds: AtomicU64,
-    /// Signals the end of every synchronization.
-    finished: Notify,
-}
-
-impl DurabilityBarrier {
-    fn new() -> Self {
-        Self {
-            issued: AtomicU64::new(0),
-            synchronized: AtomicU64::new(0),
-            failed: AtomicBool::new(false),
-            running: AtomicBool::new(false),
-            rounds: AtomicU64::new(0),
-            finished: Notify::new(),
-        }
-    }
-
-    /// The ticket of a write the caller has just applied.
-    fn issue(&self) -> u64 {
-        self.issued
-            .fetch_add(1, Ordering::SeqCst)
-            .checked_add(1)
-            .assured("a store cannot issue 2^64 synchronization tickets in the lifetime of a node")
-    }
-
-    /// Claim the one synchronization the barrier runs at a time, or `None` while another writer
-    /// runs it.
-    fn claim(&self) -> Option<DurabilitySynchronization<'_>> {
-        if self
-            .running
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return None;
-        }
-        Some(DurabilitySynchronization { barrier: self })
-    }
-}
-
-/// The one synchronization a barrier runs at a time. Dropping it frees the slot and wakes the
-/// waiting writers, also when the writer running it is cancelled, so they elect another runner
-/// instead of waiting for one that is gone.
-struct DurabilitySynchronization<'a> {
-    barrier: &'a DurabilityBarrier,
-}
-
-impl Drop for DurabilitySynchronization<'_> {
-    fn drop(&mut self) {
-        self.barrier.running.store(false, Ordering::SeqCst);
-        self.barrier.finished.notify_waiters();
-    }
-}
-
 /// The handles one latest-snapshot write needs, cloned into the storage job that performs it.
 struct LatestSnapshotWriter {
     db: Database,
@@ -713,7 +673,6 @@ impl LatestSnapshotWriter {
     ) -> error_stack::Result<(), RuntimePersistenceError> {
         let entry = PersistedRuntimeStateEntry {
             lsm,
-            schema_fingerprint: placement.schema_fingerprint,
             payload: payload.to_vec(),
         };
         let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&entry)
@@ -919,9 +878,12 @@ impl RuntimeStatePlacement {
         key.push(0);
         key.extend_from_slice(self.identifier.as_str().as_bytes());
         key.push(0);
-        key.extend_from_slice(&self.schema_fingerprint);
-        key.push(0);
-        if let RuntimeState::WasmProcessor { generation } = self.state {
+        if let StateSchema::Fingerprinted(schema) = self.state.schema() {
+            key.push(STATE_SCHEMA_KEY_MARKER);
+            key.extend_from_slice(schema.as_digest());
+            key.push(0);
+        }
+        if let RuntimeState::WasmProcessor { generation, .. } = self.state {
             key.push(STATE_GENERATION_KEY_MARKER);
             key.extend_from_slice(&u64::from(generation).to_be_bytes());
             key.push(0);
@@ -943,7 +905,7 @@ impl RuntimeStatePlacement {
         self,
         generations: Option<&WasmStateGenerations>,
     ) -> Self {
-        let RuntimeState::WasmProcessor { .. } = self.state else {
+        let RuntimeState::WasmProcessor { schema, .. } = self.state else {
             return self;
         };
         let Some(generations) = generations else {
@@ -952,6 +914,7 @@ impl RuntimeStatePlacement {
         let branch = self.branch_key.as_ref().map(BranchKey::fingerprint);
         Self {
             state: RuntimeState::WasmProcessor {
+                schema,
                 generation: generations.of_branch(branch.as_ref()),
             },
             ..self
@@ -971,7 +934,6 @@ impl RuntimeStatePlacement {
             state: self.state,
             kind: self.kind,
             identifier: self.identifier.clone(),
-            schema_fingerprint: self.schema_fingerprint,
             branch_key: BranchKey::to_remote_key(&self.branch_key),
         }
     }
@@ -993,7 +955,6 @@ impl RuntimeStatePlacement {
             state: placement.state,
             kind: placement.kind,
             identifier: placement.identifier,
-            schema_fingerprint: placement.schema_fingerprint,
             branch_key,
         })
     }
@@ -1470,7 +1431,7 @@ impl RuntimeStateStore {
                     .key()
                     .map(|key| key.as_ref().to_vec())
                     .map_err(|_| RuntimePersistenceError::ReadValue)?;
-                let stored = stored_placement_schema(&key)
+                let stored = stored_placement(&key)
                     .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
                 Ok((stored.kind == transition.entity.kind()
                     && stored.identifier == *transition.entity.identifier())
@@ -1603,77 +1564,6 @@ impl RuntimeStateStore {
         self.synchronize().await
     }
 
-    /// Return once every write this store applied before the call is on stable storage.
-    ///
-    /// Callers waiting at the same time share synchronizations, and a synchronization runs on the
-    /// storage workers, never on the async worker that awaits it.
-    pub(in crate::runtime) async fn synchronize(
-        &self,
-    ) -> error_stack::Result<(), RuntimePersistenceError> {
-        let barrier = &self.durability;
-        let ticket = barrier.issue();
-        loop {
-            tokio::task::consume_budget().await;
-            let finished = barrier.finished.notified();
-            tokio::pin!(finished);
-            finished.as_mut().enable();
-            if barrier.synchronized.load(Ordering::SeqCst) >= ticket {
-                return Ok(());
-            }
-            if barrier.failed.load(Ordering::SeqCst) {
-                return Err(Report::new(RuntimePersistenceError::Synchronize));
-            }
-            let Some(synchronization) = barrier.claim() else {
-                finished.await;
-                continue;
-            };
-            let round = self.synchronize_storage().await;
-            match round {
-                Ok(covered) => {
-                    barrier.synchronized.fetch_max(covered, Ordering::SeqCst);
-                }
-                Err(error) => {
-                    if let RuntimePersistenceError::Synchronize = error.current_context() {
-                        barrier.failed.store(true, Ordering::SeqCst);
-                    }
-                    return Err(error);
-                }
-            }
-            drop(synchronization);
-        }
-    }
-
-    /// Synchronize the database on a storage worker, and return the last ticket that
-    /// synchronization covers.
-    async fn synchronize_storage(&self) -> error_stack::Result<u64, RuntimePersistenceError> {
-        let db = self.db.clone();
-        let barrier = self.durability.clone();
-        let reservation = self
-            .executor
-            .reserve(MemoryClass::Bulk, 1)
-            .await
-            .change_context(RuntimePersistenceError::StorageAdmission)?;
-        self.executor
-            .run_storage(
-                StorageClass::Filesystem,
-                reservation,
-                move |_charge, _cancellation| {
-                    // Every ticket issued so far belongs to a write that was applied before it was
-                    // issued, so reading the last one just before the synchronization starts is
-                    // what lets the synchronization cover it.
-                    let covered = barrier.issued.load(Ordering::SeqCst);
-                    barrier.rounds.fetch_add(1, Ordering::SeqCst);
-                    db.persist(PersistMode::SyncAll).map_err(|error| {
-                        Report::new(RuntimePersistenceError::Synchronize)
-                            .attach_printable(error.to_string())
-                    })?;
-                    Ok(covered)
-                },
-            )
-            .await
-            .change_context(RuntimePersistenceError::StorageExecution)?
-    }
-
     fn replace_entity_snapshots(
         &self,
         domain: &DomainName,
@@ -1691,7 +1581,7 @@ impl RuntimeStateStore {
                     .key()
                     .map(|key| key.as_ref().to_vec())
                     .map_err(|_| RuntimePersistenceError::ReadValue)?;
-                let stored = stored_placement_schema(&key)
+                let stored = stored_placement(&key)
                     .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
                 Ok((stored.kind == kind && stored.identifier == *identifier).then_some(key))
             })
@@ -1788,15 +1678,8 @@ impl RuntimeStateStore {
             rkyv::rancor::Error,
         >(raw.as_ref())
         .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
-        if archived.schema_fingerprint != placement.schema_fingerprint {
-            return Err(RuntimePersistenceError::SchemaFingerprintMismatch {
-                kind: placement.kind.as_str(),
-                identifier: placement.identifier.as_str().to_string(),
-            });
-        }
         Ok(Some(PersistedRuntimeStateEntry {
             lsm: archived.lsm.into(),
-            schema_fingerprint: archived.schema_fingerprint,
             payload: archived.payload.as_slice().to_vec(),
         }))
     }
@@ -1898,8 +1781,9 @@ impl RuntimeStateStore {
     }
 
     /// Remove every stored state of `domain` that `current` no longer names: state of a node the
-    /// schedule dropped, state written under another schema fingerprint, and WASM guest state of a
-    /// generation the committed schedule has moved past.
+    /// schedule dropped, schema-bound state written under another schema fingerprint, and WASM guest
+    /// state of a generation the committed schedule has moved past. State that depends on no schema
+    /// stays for as long as its node is scheduled.
     pub(in crate::runtime) fn purge_stale_state_identities(
         &self,
         domain: &DomainName,
@@ -1913,17 +1797,13 @@ impl RuntimeStateStore {
                 .key()
                 .map(|key| key.as_ref().to_vec())
                 .map_err(|_| RuntimePersistenceError::ReadValue)?;
-            let stored = stored_placement_schema(&key)?;
+            let stored = stored_placement(&key)?;
             let node = NodeRef {
                 kind: stored.kind,
                 identifier: stored.identifier,
             };
             let is_current = match current.get(&node) {
-                Some(identity) => identity.names(
-                    stored.state,
-                    stored.schema_fingerprint,
-                    stored.branch.as_ref(),
-                ),
+                Some(identity) => identity.names(stored.state, stored.branch.as_ref()),
                 None => false,
             };
             if !is_current {
@@ -1963,19 +1843,16 @@ impl RuntimeStateStore {
     }
 }
 
-/// The placement a stored runtime-state key encodes: which state and lifetime it is, which model
-/// owns it, the schema fingerprint the state was written under, and the branch it belongs to.
-struct StoredPlacementSchema {
+/// The placement a stored runtime-state key encodes: which state and lifetime it is, including the
+/// schema fingerprint of schema-bound state, which model owns it, and the branch it belongs to.
+struct StoredPlacement {
     state: RuntimeState,
     kind: ModelKind,
     identifier: ModelName,
-    schema_fingerprint: [u8; 32],
     branch: Option<BranchKeyFingerprint>,
 }
 
-fn stored_placement_schema(
-    key: &[u8],
-) -> Result<StoredPlacementSchema, Report<RuntimePersistenceError>> {
+fn stored_placement(key: &[u8]) -> Result<StoredPlacement, Report<RuntimePersistenceError>> {
     let domain_end = key.iter().position(|byte| *byte == 0).ok_or_else(|| {
         RuntimePersistenceError::DecodeState(
             "runtime state key has no domain separator".to_string(),
@@ -2037,28 +1914,25 @@ fn stored_placement_schema(
             "runtime state key has an invalid identifier".to_string(),
         )
     })?;
-    let fingerprint_start = identifier_end
+    let lifetime_start = identifier_end
         .checked_add(1)
         .verified("the identifier separator position is an index into this key");
-    let fingerprint = fingerprint_start
-        .checked_add(32)
-        .and_then(|fingerprint_end| key.get(fingerprint_start..fingerprint_end));
-    let Some(fingerprint) = fingerprint else {
-        return Err(Report::new(RuntimePersistenceError::DecodeState(
-            "runtime state key has a truncated schema fingerprint".to_string(),
-        )));
-    };
-    let mut schema_fingerprint = [0; 32];
-    schema_fingerprint.copy_from_slice(fingerprint);
-    let scope_start = fingerprint_start
-        .checked_add(33)
-        .verified("the schema fingerprint slice above ended inside this key");
-    let (state, branch_start) = match RuntimeState::single_lifetime(state_kind) {
-        Some(state) => (state, scope_start),
-        None => stored_state_generation(key, scope_start)?,
-    };
+    let StoredRuntimeState {
+        state,
+        branch_start,
+    } = stored_runtime_state(key, state_kind, lifetime_start)?;
     let branch = match key.get(branch_start) {
-        Some(0) => None,
+        Some(0) => {
+            let scope_end = branch_start
+                .checked_add(1)
+                .verified("the branch flag read above is inside this key");
+            if key.len() != scope_end {
+                return Err(Report::new(RuntimePersistenceError::DecodeState(
+                    "runtime state key continues after its unbranched scope".to_string(),
+                )));
+            }
+            None
+        }
         Some(1) => {
             let text_start = branch_start
                 .checked_add(1)
@@ -2076,13 +1950,117 @@ fn stored_placement_schema(
             )));
         }
     };
-    Ok(StoredPlacementSchema {
+    Ok(StoredPlacement {
         state,
         kind,
         identifier,
-        schema_fingerprint,
         branch,
     })
+}
+
+/// The runtime state a stored key names, and where the key's branch scope begins after it.
+struct StoredRuntimeState {
+    state: RuntimeState,
+    branch_start: usize,
+}
+
+/// The runtime state of `kind` a key names from `start`: nothing more for state that depends on no
+/// schema, the schema fingerprint of every other kind, and after it the generation of WASM guest
+/// state.
+fn stored_runtime_state(
+    key: &[u8],
+    kind: RuntimeStateKind,
+    start: usize,
+) -> Result<StoredRuntimeState, Report<RuntimePersistenceError>> {
+    let stored = match kind {
+        RuntimeStateKind::BranchAggregated => StoredRuntimeState {
+            state: RuntimeState::BranchAggregated,
+            branch_start: start,
+        },
+        RuntimeStateKind::KafkaOffset => StoredRuntimeState {
+            state: RuntimeState::KafkaOffset,
+            branch_start: start,
+        },
+        RuntimeStateKind::Correlator => {
+            let (schema, branch_start) = stored_schema_fingerprint(key, start)?;
+            StoredRuntimeState {
+                state: RuntimeState::Correlator { schema },
+                branch_start,
+            }
+        }
+        RuntimeStateKind::Deduplicator => {
+            let (schema, branch_start) = stored_schema_fingerprint(key, start)?;
+            StoredRuntimeState {
+                state: RuntimeState::Deduplicator { schema },
+                branch_start,
+            }
+        }
+        RuntimeStateKind::MaterializedRelay => {
+            let (schema, branch_start) = stored_schema_fingerprint(key, start)?;
+            StoredRuntimeState {
+                state: RuntimeState::MaterializedRelay { schema },
+                branch_start,
+            }
+        }
+        RuntimeStateKind::WasmProcessor => {
+            let (schema, generation_start) = stored_schema_fingerprint(key, start)?;
+            let (generation, branch_start) = stored_state_generation(key, generation_start)?;
+            StoredRuntimeState {
+                state: RuntimeState::WasmProcessor { schema, generation },
+                branch_start,
+            }
+        }
+        RuntimeStateKind::WindowProcessor => {
+            let (schema, branch_start) = stored_schema_fingerprint(key, start)?;
+            StoredRuntimeState {
+                state: RuntimeState::WindowProcessor { schema },
+                branch_start,
+            }
+        }
+        RuntimeStateKind::BranchLru => {
+            let (schema, branch_start) = stored_schema_fingerprint(key, start)?;
+            StoredRuntimeState {
+                state: RuntimeState::BranchLru { schema },
+                branch_start,
+            }
+        }
+    };
+    Ok(stored)
+}
+
+/// The schema fingerprint segment a key of schema-bound state carries at `start`, and where the
+/// segment after it begins.
+fn stored_schema_fingerprint(
+    key: &[u8],
+    start: usize,
+) -> Result<(SchemaFingerprint, usize), Report<RuntimePersistenceError>> {
+    if key.get(start) != Some(&STATE_SCHEMA_KEY_MARKER) {
+        return Err(Report::new(RuntimePersistenceError::DecodeState(
+            "runtime state key has no schema fingerprint".to_string(),
+        )));
+    }
+    let fingerprint_start = start
+        .checked_add(1)
+        .verified("the schema marker read above is inside this key");
+    let fingerprint_end = fingerprint_start
+        .checked_add(32)
+        .assured("a key index is below isize::MAX, so 32 more bytes stay within usize");
+    let Some(fingerprint) = key.get(fingerprint_start..fingerprint_end) else {
+        return Err(Report::new(RuntimePersistenceError::DecodeState(
+            "runtime state key has a truncated schema fingerprint".to_string(),
+        )));
+    };
+    let fingerprint = <[u8; 32]>::try_from(fingerprint)
+        .verified("the fingerprint slice above is exactly 32 bytes long");
+    if key.get(fingerprint_end) != Some(&0) {
+        return Err(Report::new(RuntimePersistenceError::DecodeState(
+            "runtime state key has no schema fingerprint separator".to_string(),
+        )));
+    }
+    let next = fingerprint_end
+        .checked_add(1)
+        .verified("the separator read above is inside this key");
+    Ok((SchemaFingerprint::from_digest(fingerprint), next))
 }
 
 /// The generation segment a WASM guest state key carries at `start`, and where its branch scope
@@ -2090,7 +2068,7 @@ fn stored_placement_schema(
 fn stored_state_generation(
     key: &[u8],
     start: usize,
-) -> Result<(RuntimeState, usize), Report<RuntimePersistenceError>> {
+) -> Result<(WasmStateGeneration, usize), Report<RuntimePersistenceError>> {
     if key.get(start) != Some(&STATE_GENERATION_KEY_MARKER) {
         return Err(Report::new(RuntimePersistenceError::DecodeState(
             "runtime state key has no state generation".to_string(),
@@ -2123,7 +2101,7 @@ fn stored_state_generation(
     let branch_start = generation_end
         .checked_add(1)
         .verified("the generation separator read above is inside this key");
-    Ok((RuntimeState::WasmProcessor { generation }, branch_start))
+    Ok((generation, branch_start))
 }
 
 #[cfg(test)]
@@ -2245,17 +2223,17 @@ mod tests {
         let destination_incarnation = ClusterNodeIncarnation::new(42);
         let placement = RuntimeStatePlacement {
             domain: domain.clone(),
-            state: RuntimeState::MaterializedRelay,
+            state: RuntimeState::MaterializedRelay {
+                schema: SchemaFingerprint::from_digest([7; 32]),
+            },
             kind: ModelKind::Relay,
             identifier: identifier.clone(),
-            schema_fingerprint: [7; 32],
             branch_key: None,
         };
-        let payload = crate::runtime::empty_sealed_container(placement.schema_fingerprint)
+        let payload = crate::runtime::empty_sealed_container()
             .expect("an empty materialized generation should seal");
         let prepared = PersistedRuntimeStateEntry {
             lsm: 5,
-            schema_fingerprint: placement.schema_fingerprint,
             payload: payload.clone(),
         };
         let operation_id = "handoff-operation";
@@ -2339,17 +2317,17 @@ mod tests {
         let destination_incarnation = ClusterNodeIncarnation::new(42);
         let placement = RuntimeStatePlacement {
             domain: domain.clone(),
-            state: RuntimeState::MaterializedRelay,
+            state: RuntimeState::MaterializedRelay {
+                schema: SchemaFingerprint::from_digest([7; 32]),
+            },
             kind: ModelKind::Relay,
             identifier: identifier.clone(),
-            schema_fingerprint: [7; 32],
             branch_key: None,
         };
-        let payload = crate::runtime::empty_sealed_container(placement.schema_fingerprint)
+        let payload = crate::runtime::empty_sealed_container()
             .expect("an empty materialized generation should seal");
         let prepared = PersistedRuntimeStateEntry {
             lsm: 5,
-            schema_fingerprint: placement.schema_fingerprint,
             payload: payload.clone(),
         };
         let operation_id = "handoff-operation";
@@ -2436,17 +2414,17 @@ mod tests {
         let destination_incarnation = ClusterNodeIncarnation::new(42);
         let placement = RuntimeStatePlacement {
             domain: domain.clone(),
-            state: RuntimeState::MaterializedRelay,
+            state: RuntimeState::MaterializedRelay {
+                schema: SchemaFingerprint::from_digest([7; 32]),
+            },
             kind: ModelKind::Relay,
             identifier: identifier.clone(),
-            schema_fingerprint: [7; 32],
             branch_key: None,
         };
-        let payload = crate::runtime::empty_sealed_container(placement.schema_fingerprint)
+        let payload = crate::runtime::empty_sealed_container()
             .expect("an empty materialized generation should seal");
         let prepared = PersistedRuntimeStateEntry {
             lsm: 5,
-            schema_fingerprint: placement.schema_fingerprint,
             payload: payload.clone(),
         };
         let operation_id = "handoff-operation";
@@ -2535,20 +2513,24 @@ mod tests {
         WasmStateGeneration::try_from(value).expect("test generations are non-zero")
     }
 
+    fn guest_schema() -> SchemaFingerprint {
+        SchemaFingerprint::from_digest([4; 32])
+    }
+
     fn wasm_guest_placement(tenant: &str, value: u64) -> RuntimeStatePlacement {
         RuntimeStatePlacement {
             domain: DomainName::parse("testing").expect("valid domain name"),
             state: RuntimeState::WasmProcessor {
+                schema: guest_schema(),
                 generation: generation(value),
             },
             kind: ModelKind::WasmProcessor,
             identifier: ModelName::parse("counting_guest").expect("valid model name"),
-            schema_fingerprint: [4; 32],
             branch_key: Some(tenant_branch(tenant)),
         }
     }
 
-    fn open_store(dir: &tempfile::TempDir) -> RuntimeStateStore {
+    pub(super) fn open_store(dir: &tempfile::TempDir) -> RuntimeStateStore {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should open");
@@ -2564,7 +2546,7 @@ mod tests {
                 ModelName::parse("counting_guest").expect("valid model name"),
             ),
             ScheduledStateIdentity {
-                schema_fingerprint: [4; 32],
+                schema_fingerprint: guest_schema(),
                 wasm_state_generations: Some(generations),
             },
         )])
@@ -2594,8 +2576,8 @@ mod tests {
             (restored.lsm, restored.payload.as_slice()),
             (1, b"current".as_slice())
         );
-        let decoded = stored_placement_schema(&current.as_storage_key())
-            .expect("a current-shape WASM key decodes");
+        let decoded =
+            stored_placement(&current.as_storage_key()).expect("a current-shape WASM key decodes");
         assert_eq!(decoded.state, current.state);
         assert_eq!(decoded.branch, Some(tenant_branch("acme").fingerprint()));
     }
@@ -2669,7 +2651,7 @@ mod tests {
             .persist_wasm_checkpoint(&placement, captured.saved())
             .await
             .expect("the guest checkpoint should reach stable storage");
-        assert_eq!(store.durability.rounds.load(Ordering::SeqCst), 1);
+        assert_eq!(store.durability.rounds(), 1);
         let stored = store
             .latest_snapshot(&placement)
             .expect("guest state should load")
@@ -2678,7 +2660,6 @@ mod tests {
 
         let older = PersistedRuntimeStateEntry {
             lsm: 1,
-            schema_fingerprint: placement.schema_fingerprint,
             payload: vec![9],
         };
         assert_eq!(
@@ -2690,7 +2671,6 @@ mod tests {
         );
         let newer = PersistedRuntimeStateEntry {
             lsm: 5,
-            schema_fingerprint: placement.schema_fingerprint,
             payload: vec![7],
         };
         let installed = store
@@ -2699,72 +2679,10 @@ mod tests {
             .expect("the replica installation should run");
         assert_eq!(installed, Some(newer));
         assert_eq!(
-            store.durability.rounds.load(Ordering::SeqCst),
+            store.durability.rounds(),
             2,
             "only the installation that wrote a checkpoint synchronizes"
         );
-    }
-
-    /// Writers that ask for durability at the same time share synchronizations instead of each
-    /// queuing one behind the storage workers. A writer that asks while a synchronization runs is
-    /// covered by the next one at the latest.
-    #[tokio::test]
-    async fn concurrent_writers_share_synchronizations() {
-        let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
-        let store = open_store(&dir);
-        let writers = (0..16).map(|_| store.synchronize()).collect::<Vec<_>>();
-
-        for outcome in futures_util::future::join_all(writers).await {
-            outcome.expect("every writer should be synchronized");
-        }
-
-        let rounds = store.durability.rounds.load(Ordering::SeqCst);
-        assert!(
-            (1..=2).contains(&rounds),
-            "sixteen concurrent writers needed {rounds} synchronizations"
-        );
-        assert_eq!(store.durability.synchronized.load(Ordering::SeqCst), 16);
-    }
-
-    /// A synchronization that fails leaves every write it covered, and every later one, without a
-    /// durability promise: the database refuses later synchronizations, and none of them could
-    /// prove that writes the failed one did not flush reached storage.
-    #[tokio::test]
-    async fn a_failed_synchronization_refuses_every_later_durability_promise() {
-        let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
-        let store = open_store(&dir);
-        store
-            .synchronize()
-            .await
-            .expect("the first synchronization should succeed");
-        store.durability.failed.store(true, Ordering::SeqCst);
-
-        let refused = store
-            .synchronize()
-            .await
-            .expect_err("a write after a failed synchronization is never reported durable");
-        assert!(matches!(
-            refused.current_context(),
-            RuntimePersistenceError::Synchronize
-        ));
-    }
-
-    /// Cancelling the writer that runs a synchronization frees the barrier for the others: the next
-    /// writer runs its own synchronization instead of waiting for one nobody will finish.
-    #[tokio::test]
-    async fn a_cancelled_synchronization_frees_the_barrier() {
-        let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
-        let store = open_store(&dir);
-        let abandoned = store
-            .durability
-            .claim()
-            .expect("nothing else runs a synchronization");
-        drop(abandoned);
-
-        tokio::time::timeout(std::time::Duration::from_secs(5), store.synchronize())
-            .await
-            .expect("a freed barrier must not keep writers waiting")
-            .expect("the synchronization should succeed");
     }
 
     /// Activating a forced recovery publishes the checkpoints it staged in the generation the
@@ -2776,7 +2694,6 @@ mod tests {
         let staged = wasm_guest_placement("acme", 1);
         let snapshot = PersistedRuntimeStateEntry {
             lsm: 6,
-            schema_fingerprint: staged.schema_fingerprint,
             payload: vec![2],
         };
         let entity = DomainNodeRef::node_in(
@@ -2844,7 +2761,7 @@ mod tests {
         key.push(0);
         key.push(u8::from(RuntimeStateKind::Deduplicator));
 
-        let error = stored_placement_schema(&key)
+        let error = stored_placement(&key)
             .err()
             .expect("a key that ends inside the state-kind prefix must not decode");
 
@@ -2852,6 +2769,170 @@ mod tests {
             matches!(error.current_context(), RuntimePersistenceError::DecodeState(message)
                 if message.contains("model-kind separator")),
             "unexpected error for a truncated state key: {error:?}"
+        );
+    }
+
+    fn orders_placement(
+        state: RuntimeState,
+        branch_key: Option<BranchKey>,
+    ) -> RuntimeStatePlacement {
+        RuntimeStatePlacement {
+            domain: DomainName::parse("testing").expect("valid domain name"),
+            state,
+            kind: ModelKind::Deduplicator,
+            identifier: ModelName::parse("orders").expect("valid model name"),
+            branch_key,
+        }
+    }
+
+    /// Every runtime state keeps its whole identity in its storage key: state that depends on no
+    /// schema is keyed by its kind alone, schema-bound state also by its schema fingerprint, and
+    /// WASM guest state also by its generation, for unbranched execution and a concrete branch.
+    #[test]
+    fn every_runtime_state_round_trips_through_its_storage_key() {
+        let schema = SchemaFingerprint::from_digest([3; 32]);
+        let states = [
+            RuntimeState::BranchAggregated,
+            RuntimeState::KafkaOffset,
+            RuntimeState::Correlator { schema },
+            RuntimeState::Deduplicator { schema },
+            RuntimeState::MaterializedRelay { schema },
+            RuntimeState::WasmProcessor {
+                schema,
+                generation: generation(2),
+            },
+            RuntimeState::WindowProcessor { schema },
+            RuntimeState::BranchLru { schema },
+        ];
+        for state in states {
+            for branch_key in [None, Some(tenant_branch("acme"))] {
+                let placement = orders_placement(state, branch_key.clone());
+
+                let decoded = stored_placement(&placement.as_storage_key())
+                    .expect("a current-shape runtime state key decodes");
+
+                assert_eq!(decoded.state, state);
+                assert_eq!(decoded.kind, placement.kind);
+                assert_eq!(decoded.identifier, placement.identifier);
+                assert_eq!(
+                    decoded.branch,
+                    branch_key.as_ref().map(BranchKey::fingerprint)
+                );
+            }
+        }
+    }
+
+    /// A schema change starts a new lifetime for schema-bound state and leaves state that depends on
+    /// no schema where it is: purging against the new identity removes only the checkpoints written
+    /// under the replaced fingerprint, and everything that remains loads again after a restart.
+    #[test]
+    fn a_schema_change_replaces_only_schema_bound_state() {
+        let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
+        let replaced = SchemaFingerprint::from_digest([1; 32]);
+        let current = SchemaFingerprint::from_digest([2; 32]);
+        let independent = [RuntimeState::BranchAggregated, RuntimeState::KafkaOffset];
+        let replaced_branch = orders_placement(
+            RuntimeState::Deduplicator { schema: replaced },
+            Some(tenant_branch("acme")),
+        );
+        let current_branch = orders_placement(
+            RuntimeState::Deduplicator { schema: current },
+            Some(tenant_branch("beta")),
+        );
+        {
+            let store = open_store(&dir);
+            for state in independent {
+                store
+                    .persist_latest_snapshot(&orders_placement(state, None), 3, b"kept")
+                    .expect("schema-independent state should persist");
+            }
+            store
+                .persist_latest_snapshot(&replaced_branch, 4, b"replaced")
+                .expect("state of the replaced schema should persist");
+            store
+                .persist_latest_snapshot(&current_branch, 5, b"current")
+                .expect("state of the current schema should persist");
+            store
+                .purge_stale_state_identities(
+                    &current_branch.domain,
+                    &HashMap::from_iter([(
+                        NodeRef::new(ModelKind::Deduplicator, current_branch.identifier.clone()),
+                        ScheduledStateIdentity {
+                            schema_fingerprint: current,
+                            wasm_state_generations: None,
+                        },
+                    )]),
+                )
+                .expect("state of the replaced schema should purge");
+        }
+
+        let store = open_store(&dir);
+        let loaded = |placement: &RuntimeStatePlacement| {
+            store
+                .latest_snapshot(placement)
+                .expect("runtime state should load")
+        };
+        for state in independent {
+            assert_eq!(
+                loaded(&orders_placement(state, None)),
+                Some(PersistedRuntimeStateEntry {
+                    lsm: 3,
+                    payload: b"kept".to_vec(),
+                })
+            );
+        }
+        assert_eq!(loaded(&replaced_branch), None);
+        assert_eq!(
+            loaded(&current_branch),
+            Some(PersistedRuntimeStateEntry {
+                lsm: 5,
+                payload: b"current".to_vec(),
+            })
+        );
+    }
+
+    /// Schema-bound state is addressed only through its whole fingerprint, so a key that ends
+    /// inside the fingerprint reports a decode error instead of naming some other state.
+    #[test]
+    fn a_key_that_ends_inside_its_schema_fingerprint_does_not_decode() {
+        let placement = orders_placement(
+            RuntimeState::Deduplicator {
+                schema: SchemaFingerprint::from_digest([3; 32]),
+            },
+            None,
+        );
+        let mut key = placement.as_storage_key();
+        let inside_fingerprint = key
+            .len()
+            .checked_sub(20)
+            .expect("the key is longer than the tail of its fingerprint");
+        key.truncate(inside_fingerprint);
+
+        let error = stored_placement(&key)
+            .err()
+            .expect("a key that ends inside its schema fingerprint must not decode");
+
+        assert!(
+            matches!(error.current_context(), RuntimePersistenceError::DecodeState(message)
+                if message.contains("truncated schema fingerprint")),
+            "unexpected error for a truncated schema fingerprint: {error:?}"
+        );
+    }
+
+    /// An unbranched key ends with its scope, so bytes after it are refused rather than ignored.
+    #[test]
+    fn an_unbranched_key_that_continues_after_its_scope_does_not_decode() {
+        let mut key = orders_placement(RuntimeState::KafkaOffset, None).as_storage_key();
+        key.push(7);
+
+        let error = stored_placement(&key)
+            .err()
+            .expect("an unbranched key with trailing bytes must not decode");
+
+        assert!(
+            matches!(error.current_context(), RuntimePersistenceError::DecodeState(message)
+                if message.contains("continues after its unbranched scope")),
+            "unexpected error for trailing key bytes: {error:?}"
         );
     }
 

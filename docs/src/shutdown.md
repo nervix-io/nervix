@@ -540,6 +540,19 @@ owns the work.
 This is the fence that prevents crash recovery from reviving an obsolete owner. It is a
 process-start admission proof only: connectivity lost after admission does not revoke execution.
 
+### Checkpoint Identity
+
+A restart reopens a runtime-state checkpoint only under the identity the committed schedule
+publishes for its entity. Kafka domain offsets and the metric summaries behind `DESCRIBE` output
+depend on no schema: they are keyed by their entity alone and survive a restart whatever schemas
+changed while the node was down. Every other checkpoint, including deduplicator, window, and
+materialized relay state, branch lifecycle records, and WASM guest state, is keyed by the
+fingerprint of the schemas its entity lays records out by, and WASM guest state also by its
+generation. A checkpoint written under a replaced fingerprint is never restored as the new layout,
+served, replicated, handed over, or selected by a forced recovery, and applying the committed
+schedule of a running domain removes it. Until the node has applied a schedule that names an entity,
+it has no fingerprint for that entity's schema-bound state and does not place that state at all.
+
 ### Interrupted Snapshot Installation
 
 Installing a consensus snapshot publishes the manifest and a marker naming the generation whose

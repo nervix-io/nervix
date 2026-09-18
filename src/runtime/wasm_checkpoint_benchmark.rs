@@ -8,7 +8,9 @@ use std::path::Path;
 use fjall::Database;
 use meticulous::ResultExt as _;
 use nervix_execution::{Executor, MemoryClass, StorageClass};
-use nervix_models::{DomainName, FieldName, ModelKind, ModelName, WasmStateGeneration};
+use nervix_models::{
+    DomainName, FieldName, ModelKind, ModelName, SchemaFingerprint, WasmStateGeneration,
+};
 use tempfile::TempDir;
 use triomphe::Arc;
 
@@ -57,11 +59,11 @@ impl WasmCheckpointBenchmark {
                 let placement = RuntimeStatePlacement {
                     domain: domain.clone(),
                     state: RuntimeState::WasmProcessor {
+                        schema: SchemaFingerprint::from_digest([0; 32]),
                         generation: WasmStateGeneration::FIRST,
                     },
                     kind: ModelKind::WasmProcessor,
                     identifier: processor.clone(),
-                    schema_fingerprint: [0; 32],
                     branch_key: Some(key),
                 };
                 ReplicatedWasmProcessorState::new(placement, None)

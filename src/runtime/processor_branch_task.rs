@@ -388,14 +388,9 @@ pub(super) async fn run_processor_node_runtime(
             RelayInteractionEvent::Wake => {}
             RelayInteractionEvent::Command(command) => match command {
                 ProcessorNodeCommand::Checkpoint { response } => {
-                    let result = checkpoint_all_processor_branch_instances(
-                        &runtime_handle,
-                        &domain,
-                        processor.clone(),
-                        &template,
-                        &instances,
-                    )
-                    .await;
+                    let result =
+                        checkpoint_all_processor_branch_instances(processor.clone(), &instances)
+                            .await;
                     response
                         .send(result)
                         .means_peer_left("processor lifecycle checkpoint requester");
@@ -1041,10 +1036,7 @@ pub(super) async fn stop_processor_branch_task(
 }
 
 pub(super) async fn checkpoint_all_processor_branch_instances(
-    runtime: &Runtime,
-    domain: &DomainName,
     processor: impl Into<ModelName>,
-    template: &BranchInstanceTemplate,
     instances: &BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
 ) -> OwnershipHandoffResult<PersistedRuntimeStateEntry> {
     let processor = processor.into();
@@ -1069,12 +1061,10 @@ pub(super) async fn checkpoint_all_processor_branch_instances(
             ))
         })??;
     }
-    let placement = branch_lru_placement(runtime, domain, template);
     let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())
         .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?;
     Ok(PersistedRuntimeStateEntry {
         lsm: instances.version(),
-        schema_fingerprint: placement.schema_fingerprint,
         payload,
     })
 }
@@ -1210,7 +1200,8 @@ pub(super) fn restore_processor_branch_lru_snapshot(
     template: &BranchInstanceTemplate,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
 ) -> error_stack::Result<u64, ProcessorBranchTaskError> {
-    let placement = branch_lru_placement(runtime, domain, template);
+    let placement = branch_lru_placement(runtime, domain, template)
+        .change_context(ProcessorBranchTaskError::ReadLruSnapshot)?;
     let snapshot = runtime
         .take_restorable_branch_lru_snapshot(&placement)
         .change_context(ProcessorBranchTaskError::ReadLruSnapshot)?;
@@ -1263,6 +1254,12 @@ mod tests {
         let runtime = Runtime::default();
         let domain = domain("default");
         install_unpaced_test_domain(&runtime, &domain);
+        publish_state_identity(
+            &runtime,
+            &domain,
+            ModelKind::Deduplicator,
+            named::<ModelName>("dedup_users"),
+        );
         let graph: SharedActiveGraph = StdArc::new(ArcSwapOption::from(None));
         let schema = Arc::new(compile_schema(&CreateSchema {
             name: named("notification"),

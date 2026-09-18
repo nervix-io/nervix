@@ -820,11 +820,11 @@ mod tests {
         RuntimeStatePlacement {
             domain: DomainName::parse("events").expect("valid domain"),
             state: RuntimeState::WasmProcessor {
+                schema: SchemaFingerprint::from_digest([7; 32]),
                 generation: WasmStateGeneration::FIRST,
             },
             kind: ModelKind::WasmProcessor,
             identifier: ModelName::parse("sessionizer").expect("valid identifier"),
-            schema_fingerprint: [0; 32],
             branch_key: tenant_branch("alpha"),
         }
     }
@@ -1236,8 +1236,8 @@ mod tests {
             "a module the node already compiled must not be compiled again"
         );
 
-        let mut scheduled = ScheduledNode::new(nervix_models::Model::WasmProcessor(
-            nervix_models::CreateWasmProcessor {
+        let mut scheduled = ScheduledNode::new(
+            nervix_models::Model::WasmProcessor(nervix_models::CreateWasmProcessor {
                 name: nervix_models::WasmProcessorName::parse("sessionizer")
                     .expect("valid identifier"),
                 from: nervix_models::ProcessorInputs::single(
@@ -1258,8 +1258,9 @@ mod tests {
                 mode: AckMode::Attached,
                 filter_where: None,
                 materialized_state: Vec::new(),
-            },
-        ));
+            }),
+            SchemaFingerprint::from_digest([7; 32]),
+        );
         scheduled.primary_node = Some(local_node.clone());
         scheduled.assigned_nodes = vec![local_node.clone()];
         let mut assigned = ClusterSchedule::default();

@@ -203,14 +203,13 @@ impl Runtime {
         if kind == ModelKind::Relay {
             return;
         }
-        let identifier = identifier.into();
-        let placement = self.state_placement(
-            domain,
-            RuntimeState::BranchAggregated,
+        let placement = RuntimeStatePlacement {
+            domain: domain.clone(),
+            state: RuntimeState::BranchAggregated,
             kind,
-            identifier,
-            None,
-        );
+            identifier: identifier.into(),
+            branch_key: None,
+        };
         if let Some(state) = self
             .inner
             .replicated_branch_aggregated_states
@@ -504,13 +503,13 @@ impl Runtime {
                 state.restore_persisted_snapshot(&self.inner.metrics, snapshot)?;
             }
         }
-        let placement = self.state_placement(
-            domain,
-            RuntimeState::BranchAggregated,
+        let placement = RuntimeStatePlacement {
+            domain: domain.clone(),
+            state: RuntimeState::BranchAggregated,
             kind,
-            identifier.clone(),
-            None,
-        );
+            identifier: identifier.clone(),
+            branch_key: None,
+        };
         if !self
             .inner
             .metrics
@@ -788,7 +787,6 @@ mod tests {
             state: RuntimeState::BranchAggregated,
             kind: ModelKind::Ingestor,
             identifier: ModelName::from(&ingestor.clone()),
-            schema_fingerprint: [0; 32],
             branch_key: None,
         };
         {
@@ -855,7 +853,6 @@ mod tests {
             state: RuntimeState::BranchAggregated,
             kind: ModelKind::Ingestor,
             identifier: ModelName::from(&ingestor.clone()),
-            schema_fingerprint: [0; 32],
             branch_key: None,
         };
         let db = Database::builder(dir.path())
@@ -937,7 +934,6 @@ mod tests {
             state: RuntimeState::BranchAggregated,
             kind: ModelKind::Ingestor,
             identifier: ModelName::from(&ingestor.clone()),
-            schema_fingerprint: [0; 32],
             branch_key: None,
         };
         let db = Database::builder(dir.path())
