@@ -1,3 +1,8 @@
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio_util as tokio_util;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,

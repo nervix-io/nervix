@@ -58,6 +58,7 @@
   - [Domain Clock](./domain-clock.md)
   - [Cluster Interconnect](./interconnect.md)
   - [Control Plane](./control-plane.md)
+  - [Consensus Storage And Replication](./consensus-storage-and-replication.md)
   - [Command Completion](./command-completion.md)
   - [Data Plane](./data-plane.md)
   - [Data-Plane Concurrency](./data-plane-concurrency.md)

@@ -957,6 +957,7 @@ mod tests {
 
     use arch_into::ArchInto as _;
     use meticulous::ResultExt as _;
+    use nervix_connector::physical_time::PhysicalDeadlineCapability;
     use nervix_models::{
         CreateSchema, FieldName, ModelName, ParseAsType, RelayName, SchemaName, Timestamp,
     };
@@ -965,8 +966,7 @@ mod tests {
     use crate::{
         runtime::{
             BranchKey, NodeQuiesceCounters, RelayBroadcast, RelayRecordBatch, RelayRuntimeFanIn,
-            RuntimeInputCollectPolicy, domain, force_flush::DomainForceFlush,
-            physical_time::PhysicalDeadlineCapability, test_domain_clock,
+            RuntimeInputCollectPolicy, domain, force_flush::DomainForceFlush, test_domain_clock,
         },
         runtime_ack::{AckOutcome, AckSet},
         runtime_schema::{CompiledSchema, RuntimeValue, compile_schema, test_runtime_row},
@@ -1097,7 +1097,7 @@ mod tests {
 
     fn wake_in(timeout: tokio::time::Duration) -> RuntimeWake {
         RuntimeWake::never().with_physical(
-            PhysicalDeadlineCapability::new()
+            PhysicalDeadlineCapability::operational()
                 .after(timeout)
                 .assured("a fixture timeout fits the monotonic clock range"),
         )

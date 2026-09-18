@@ -1,5 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
+use nervix_connector::{ResolvedClientConfig, client_config_entries};
 use rustls_pki_types::ServerName;
 use thiserror::Error;
 use tokio::{

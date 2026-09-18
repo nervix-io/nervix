@@ -482,24 +482,32 @@ bulk class. Receivers stage and validate the owning artifact while releasing HTT
 chunk. The whole transfer may exceed the 32 MiB bulk-memory budget because only bounded chunks and
 the active decoded section are resident at once.
 
-A runtime-state placement names exactly the state it addresses: the domain, entity, state kind,
-schema fingerprint, and concrete branch, and for WASM processor guest state the generation the
-committed schedule names for that branch. A node answers a synchronization request, and acts on a
-checkpoint announcement or a handoff checkpoint, only while the placement is current on that node,
-so an owner never serves, and a replica never installs, guest state of a generation that has been
-replaced. A replication acknowledgement counts only toward the placement it names, so an
-acknowledgement for a replaced generation never satisfies the replica quorum of the current one.
-The schedule fingerprint an ownership handoff or forced recovery is bound to covers those
-generations, so a preparation staged against an earlier generation cannot activate after a later one
-is committed.
+A runtime-state placement names exactly the state it addresses: the domain, entity, state kind, and
+concrete branch; for every kind of state except branch-aggregated metrics and Kafka domain offsets,
+the fingerprint of the schemas the state is laid out by; and for WASM processor guest state the
+generation the committed schedule names for that branch. Branch-aggregated metrics and Kafka domain
+offsets depend on no schema, so their placements carry no fingerprint and stay current across every
+schema change of their entity. A checkpoint carries no identity of its own: a synchronization reply,
+a handoff checkpoint, and a forced-recovery preparation each carry it beside the placement that
+names it. A node answers a synchronization request, and acts on a checkpoint announcement or a
+handoff checkpoint, only while the placement is current on that node, so an owner never serves, and
+a replica never installs, state written under a replaced schema fingerprint or guest state of a
+generation that has been replaced. A node that has not applied a schedule naming the entity has no
+fingerprint to place its schema-bound state under, and refuses to place it rather than address the
+state under an assumed identity. A replication acknowledgement counts only toward the placement it
+names, so an acknowledgement for a replaced generation never satisfies the replica quorum of the
+current one.
+The schedule fingerprint an ownership handoff or forced recovery is bound to covers those schema
+fingerprints and generations, so a preparation staged against an earlier schema or generation cannot
+activate after a later one is committed.
 
 Runtime-state synchronization replies and materialized-snapshot descriptions carry the shared
 typed remote-operation failure envelope. Rejection, absence, temporary unreadiness, and execution
 failure remain distinct across the node boundary, and the requester keeps that classification in
 its local replication or snapshot-exchange error. Only an execution failure includes the serving
 node's opaque diagnostic text. A materialized snapshot is streamed only after a successful typed
-description identifies its exact length, digest, schema fingerprint, revision, fence, and branch
-generation.
+description identifies its exact length, digest, revision, fence, and branch generation; the
+placement that the request names supplies its schema fingerprint.
 
 A materialized dependency reader may observe the committed destination just before that node
 activates its prepared state, or the previous destination just after it leaves the assignment. A

@@ -10,6 +10,13 @@
 //! - **Must not know.** What the replicated state means. Domain lifecycle, transactions, validation
 //!   and scheduling belong above; this crate agrees on values and hands them back.
 
+#[cfg(feature = "shuttle")]
+extern crate shuttle_parking_lot as parking_lot;
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio_util as tokio_util;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
@@ -6794,7 +6801,10 @@ mod tests {
         });
         DomainSchedule::new(
             domain(raw),
-            vec![nervix_models::ScheduledNode::new(vhost)],
+            vec![nervix_models::ScheduledNode::new(
+                vhost,
+                nervix_models::SchemaFingerprint::from_digest([1; 32]),
+            )],
             Vec::new(),
         )
     }

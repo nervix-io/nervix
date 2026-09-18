@@ -5,6 +5,7 @@
 //! - **Depends on.** Validated emitter plans, Arrow batches and the Sentry HTTP protocol.
 //! - **Must not know.** NSPL parsing, placement decisions or control-plane transactions.
 
+use nervix_connector::{HttpClientConfig, ResolvedClientConfig, client_config_entries};
 use reqwest::{
     Client as HttpClient, StatusCode,
     header::{CONTENT_TYPE, HeaderValue, RETRY_AFTER},
@@ -12,7 +13,6 @@ use reqwest::{
 use sentry_types::{Dsn, protocol::v7::Event};
 
 use super::*;
-use crate::runtime::http_client::HttpClientConfig;
 
 const SENTRY_AUTH_HEADER: &str = "x-sentry-auth";
 const SENTRY_ENVELOPE_CONTENT_TYPE: &str = "application/x-sentry-envelope";
@@ -108,7 +108,7 @@ impl SentryEmitter {
                     .headers()
                     .get(SENTRY_RATE_LIMITS_HEADER)
                     .and_then(|value| value.to_str().ok()),
-                crate::runtime::physical_time::actual_utc_now().into_datetime(),
+                nervix_connector::physical_time::actual_utc_now().into_datetime(),
             );
             let error = format!("Sentry envelope request returned HTTP status {status}");
             outcome.fail(match retry_delay {

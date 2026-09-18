@@ -634,7 +634,7 @@ mod tests {
     use nervix_interconnect::HttpsListenerInstallation;
     use nervix_models::{
         ClusterSchedule, CreateVhost, DomainName, DomainSchedule, Model, ResourceId, ScheduledNode,
-        VhostTlsResource,
+        SchemaFingerprint, VhostTlsResource,
     };
 
     use super::{
@@ -660,7 +660,9 @@ mod tests {
         let mut schedules = BTreeMap::new();
         for (domain, models) in domains {
             let domain = DomainName::parse(domain).expect("the fixture domain is valid");
-            let nodes = models.into_iter().map(ScheduledNode::new);
+            let nodes = models
+                .into_iter()
+                .map(|model| ScheduledNode::new(model, SchemaFingerprint::from_digest([1; 32])));
             schedules.insert(
                 domain.clone(),
                 DomainSchedule::new(domain, nodes, Vec::new()),

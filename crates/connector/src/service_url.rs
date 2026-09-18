@@ -1,24 +1,32 @@
+//! The service address a connector dials, read as a URL.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Parsing a configured service address with the URL parser and reading its scheme.
+//! - **Depends on.** The `url` crate.
+//! - **Must not know.** Which connector dials the address, or what a scheme selects in its driver.
+
+use error_stack::Report;
+use thiserror::Error;
 use url::Url;
 
-use super::*;
-
 #[derive(Debug, Error)]
-pub(in crate::runtime) enum ServiceUrlError {
+pub enum ServiceUrlError {
     #[error("invalid {label}")]
     Invalid { label: &'static str },
 }
 
-pub(in crate::runtime) struct ServiceUrl<'a> {
+pub struct ServiceUrl<'a> {
     raw: &'a str,
     label: &'static str,
 }
 
 impl<'a> ServiceUrl<'a> {
-    pub(in crate::runtime) fn new(raw: &'a str, label: &'static str) -> Self {
+    pub fn new(raw: &'a str, label: &'static str) -> Self {
         Self { raw, label }
     }
 
-    pub(in crate::runtime) fn scheme(&self) -> Result<String, Report<ServiceUrlError>> {
+    pub fn scheme(&self) -> Result<String, Report<ServiceUrlError>> {
         let url = Url::parse(self.raw).map_err(|source| {
             Report::new(ServiceUrlError::Invalid { label: self.label })
                 .attach_printable(source.to_string())
@@ -26,10 +34,7 @@ impl<'a> ServiceUrl<'a> {
         Ok(url.scheme().to_string())
     }
 
-    pub(in crate::runtime) fn has_scheme(
-        &self,
-        expected_scheme: &str,
-    ) -> Result<bool, Report<ServiceUrlError>> {
+    pub fn has_scheme(&self, expected_scheme: &str) -> Result<bool, Report<ServiceUrlError>> {
         Ok(self.scheme()? == expected_scheme)
     }
 }
