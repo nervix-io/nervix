@@ -63,6 +63,7 @@ wire_enum!(ALL_DOMAIN_LIFECYCLE_ACTIONS: DomainLifecycleAction => wire::DomainLi
 wire_enum!(ALL_ACTIVATION_ACTIONS: ActivationAction => wire::ActivationAction {
     Activate,
     Deactivate,
+    RefreshHttpsListener,
 });
 
 wire_enum!(ALL_REBUILD_REASONS: RebuildReason => wire::RebuildReason {
@@ -144,6 +145,7 @@ wire_enum!(ALL_MODEL_CHANGE_ASPECTS: ModelChangeAspect => wire::ModelChangeAspec
     ClientConfig,
     VhostHostnames,
     VhostTls,
+    VhostTlsVersion,
     EndpointDefinition,
     SignalingProtocolDefinition,
     LookupDefinition,

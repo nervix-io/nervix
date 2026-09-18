@@ -2049,7 +2049,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                             id: "transaction".into(),
                             expected_next_statement: 0,
                             at,
-                            application_failure: None,
+                            outcome: crate::TransactionApplicationOutcome::Applied,
                         },
                     )
                     .await?;

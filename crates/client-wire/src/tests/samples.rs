@@ -399,6 +399,11 @@ fn full_effects() -> ImpactEffects {
                 action: ActivationAction::Deactivate,
                 attribution: attribution(2, 2),
             },
+            ActivationImpact {
+                node: ImpactNodeCoverage::configuration(node(ModelKind::Vhost, "edge")),
+                action: ActivationAction::RefreshHttpsListener,
+                attribution: attribution(1, 2),
+            },
         ]),
         rebuilds: [
             RebuildReason::Configuration,

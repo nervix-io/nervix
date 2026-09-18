@@ -17,20 +17,20 @@ use error_stack::{Report, ResultExt};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
     ConsensusError, ConsensusTransactionError, DomainPlanningInputs, ReplicatedTransaction,
-    TransactionActivity, TransactionApplyingStep, TransactionCommandResult,
-    TransactionCommitAdmissionFailure, TransactionCommitAdmissionPlan, TransactionCommitAdvance,
-    TransactionDiagnostic, TransactionOutcome, TransactionQueueAdmission, TransactionQueueLimits,
-    TransactionQueueRequest, TransactionReportArchive, TransactionScheduleEligibility,
-    TransactionState, TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
-    TransactionStepResult,
+    TransactionActivity, TransactionApplicationOutcome, TransactionApplyingStep,
+    TransactionCommandResult, TransactionCommitAdmissionFailure, TransactionCommitAdmissionPlan,
+    TransactionCommitAdvance, TransactionDiagnostic, TransactionOutcome, TransactionQueueAdmission,
+    TransactionQueueLimits, TransactionQueueRequest, TransactionReportArchive,
+    TransactionScheduleEligibility, TransactionState, TransactionStatement,
+    TransactionStatementRequest, TransactionStepEffect, TransactionStepResult,
 };
 use nervix_models::{
     ActualExecutionStepImpact, CanonicalImpactSet, CommandExecutionReference, DomainName,
     DomainSchedule, DomainState, DomainStatus, ExecutionStepImpactReport, ImpactNodeCoverage,
-    ImpactPlanningBasis, Model, ModelIndex, OwnershipMoveImpact, RequestedResourceVersion,
-    ResourceId, ResourceName, ResourceUploads, Statement, TransactionCommitStepKind,
-    TransactionOperationAdmission, TransactionOperationNumber, TransactionPreviewIdentity,
-    TransactionResolvedDomainStart, UserName,
+    ImpactPlanningBasis, Model, ModelIndex, ModelKind, OwnershipMoveImpact, QuiesceLevel,
+    RequestedResourceVersion, ResourceId, ResourceName, ResourceUploads, Statement,
+    TransactionCommitStepKind, TransactionOperationAdmission, TransactionOperationNumber,
+    TransactionPreviewIdentity, TransactionResolvedDomainStart, UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
 use parking_lot::Mutex as ParkingMutex;
@@ -2146,6 +2146,74 @@ impl SessionServiceImpl {
         )))
     }
 
+    /// How an applying step that found no other failure ends. A successful model step that
+    /// creates, changes, or drops a VHOST first waits until every live HTTPS listener installed its
+    /// runtime revision. When one could not, a step that did not pause is rolled back by the entry
+    /// that records its failure, and a paused step, which has already resumed, keeps its committed
+    /// models like any other activation failure.
+    async fn https_listener_outcome(
+        &self,
+        transaction: &ReplicatedTransaction,
+        applying: &TransactionApplyingStep,
+    ) -> TransactionApplicationOutcome {
+        let Some(TransactionStepEffect::ReplaceDomainSchedule { .. }) = &applying.effect else {
+            return TransactionApplicationOutcome::Applied;
+        };
+        let planned = applying.result.impact.planned();
+        if !applying.result.result.success
+            || !planned.effects.changes_configuration_of(ModelKind::Vhost)
+        {
+            return TransactionApplicationOutcome::Applied;
+        }
+        let Err(failure) =
+            Box::pin(self.wait_for_https_listener_installation(applying.effect_revision)).await
+        else {
+            return TransactionApplicationOutcome::Applied;
+        };
+        let domain = &transaction.domain;
+        let error = format!(
+            "committed transaction model step in domain '{}' failed HTTPS listener activation: \
+             {failure}",
+            domain.as_str()
+        );
+        self.broadcast_error(error.clone());
+        if planned.pause.level() != QuiesceLevel::Dynamic {
+            return TransactionApplicationOutcome::Failed { error };
+        }
+        let inputs = Box::pin(self.inner.consensus.domain_planning_inputs(domain)).await;
+        TransactionApplicationOutcome::RolledBack {
+            error: format!("{error}; the model batch was rolled back"),
+            inputs: Box::new(inputs),
+        }
+    }
+
+    /// Makes the schedule a rolled-back step restored usable: every node applies it, and every
+    /// HTTPS listener presents the restored certificates again. The failure is already recorded,
+    /// so a node that cannot follow is reported rather than changing the outcome.
+    async fn apply_rolled_back_transaction_step(&self, domain: &DomainName) {
+        let restored_revision = self.inner.consensus.current_runtime_revision().await;
+        if let Err(error) = self.apply_current_cluster_state().await {
+            self.broadcast_error(format!(
+                "failed to apply the models restored in domain '{}': {error}",
+                domain.as_str()
+            ));
+            return;
+        }
+        if let Err(error) = self
+            .wait_for_https_listener_installation(restored_revision)
+            .await
+        {
+            self.broadcast_error(format!(
+                "the HTTPS listener TLS configuration restored in domain '{}' did not install: \
+                 {error}",
+                domain.as_str()
+            ));
+        }
+    }
+
+    /// Records how the applying step of `transaction` ended. A step without an application failure
+    /// is settled by its HTTPS listeners first, so a VHOST change that no listener could install
+    /// is never recorded as applied.
     pub(in crate::application) async fn record_transaction_application_completion(
         &self,
         transaction: &ReplicatedTransaction,
@@ -2160,6 +2228,11 @@ impl SessionServiceImpl {
                 id: transaction.id.clone(),
             })
         })?;
+        let outcome = match application_failure {
+            Some(error) => TransactionApplicationOutcome::Failed { error },
+            None => Box::pin(self.https_listener_outcome(transaction, applying)).await,
+        };
+        let rolls_back = matches!(outcome, TransactionApplicationOutcome::RolledBack { .. });
         let completed = self
             .inner
             .consensus
@@ -2167,10 +2240,13 @@ impl SessionServiceImpl {
                 transaction.id.clone(),
                 applying.result.first_statement(),
                 current_timestamp(),
-                application_failure,
+                outcome,
             )
             .await
             .map_err(|error| Report::new(TransactionCommitError::Proposal(error)))?;
+        if rolls_back {
+            Box::pin(self.apply_rolled_back_transaction_step(&transaction.domain)).await;
+        }
 
         if let TransactionState::Finished(finished) = &completed.state {
             loop {

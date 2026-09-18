@@ -156,6 +156,8 @@ rebuild raises it to a domain pause before activation begins. A domain pause cov
 node in the before and after graphs. Changed, paused, force-flushed, ownership-moved, activated,
 rebuilt, and state-reset nodes remain separate effects in the report; because engaging any entity
 gate requests a domain-wide force flush, that flush effect covers the full current execution graph.
+A VHOST TLS version change is reported as an HTTPS listener refresh activation of that VHOST, with
+no paused subgraph and no rebuilt node.
 Commit uses the gate plan and schedule delta captured for this report, so execution cannot silently
 widen the planned scope with a second decision.
 
@@ -198,8 +200,12 @@ names the same content instead of being copied into one growing transaction valu
 
 A new leader automatically resumes every `COMMITTING` transaction from its recorded applying step.
 Completed effects are not repeated, and a failed remaining step records its statement number and
-error while preserving the applied prefix. Repeating the outstanding `COMMIT` joins this execution
-and waits for the retained terminal result. Atomicity still does not span the whole transaction.
+error while preserving the applied prefix. A model step that did not pause and whose VHOSTs an HTTPS
+listener could not install is the one step whose failure removes its own effect: the record of that
+failure also restores the schedule the step replaced, so the applied prefix ends before it. Both
+the first attempt and a resuming leader apply this rule. Repeating the outstanding `COMMIT` joins
+this execution and waits for the retained terminal result. Atomicity still does not span the whole
+transaction.
 
 Finished transactions remain as small tombstones containing the outcome, step progress, errors,
 and executed quiesce levels. Their final report revision remains available for committed, failed,
@@ -299,10 +305,17 @@ operator `PAUSE` or `RESUME` statement.
 
 - `DYNAMIC` changes do not pause ingestion. Relay capacity; processor filters, source predicates,
   collection, route construction, route flush, and same-target message-error policies;
-  deduplicator/reorderer `MAX TIME`; emitter flush policy; and placement definitions are
-  hot-applied while retaining buffered and branch-local state when ownership stays fixed. A
-  placement definition is a dynamic model change, but its effective command level rises to
-  `ENTITY_PAUSE` when the resulting schedule moves a running runtime node.
+  deduplicator/reorderer `MAX TIME`; emitter flush policy; placement definitions; and a VHOST
+  moving to another version of the TLS resource it already binds are hot-applied while retaining
+  buffered and branch-local state when ownership stays fixed. A placement definition is a dynamic
+  model change, but its effective command level rises to `ENTITY_PAUSE` when the resulting schedule
+  moves a running runtime node. A VHOST TLS version change is applied as an HTTPS listener refresh:
+  every live node installs the new certificate from the committed revision before the command
+  succeeds, established connections keep the session they negotiated, and new handshakes present
+  the new bundle. No execution node pauses or restarts, and the refresh applies to a stopped domain
+  too, because the listener serves its VHOSTs while it is stopped. If the listener of any node
+  cannot install the change, the batch fails and restores the previous models, and every listener
+  installs the restored certificates again.
 - `ENTITY_PAUSE` changes gate only the affected relays on every live node, force-flush affected
   work, and wait for the owner buffers, fixed dispatch slots, and target-node work counters to
   drain before commit.
@@ -337,10 +350,10 @@ operator `PAUSE` or `RESUME` statement.
   work before commit. Relay schema or branching changes and schema or wire-schema definition
   changes use this level. Changing the membership of an emitter's `FROM` relay list also uses this
   level because it changes graph topology. Configuration entities use this level too: codec,
-  client, endpoint, signaling-protocol, hash-map, and UDF definitions, vhost hostnames and TLS
-  bindings, and branch schema, TTL, and eviction settings. Their consumers read that configuration
-  when they are built, so the domain rebuilds around the new models rather than reconfiguring in
-  place.
+  client, endpoint, signaling-protocol, hash-map, and UDF definitions, vhost hostnames, adding or
+  removing a vhost's TLS, binding a vhost to another TLS resource, and branch schema, TTL, and
+  eviction settings. Their consumers read that configuration when they are built, so the domain
+  rebuilds around the new models rather than reconfiguring in place.
 
 An entity-paused model change also gates everything downstream of the affected model, so a
 dependent node cannot observe a half-applied change through its input relay.
@@ -518,8 +531,13 @@ the effective level and target schedule from the complete candidate at commit ti
 For an immediate model alteration, local registry persistence and schedule publication are
 separate steps. If schedule publication fails, Nervix restores the previous models and republishes
 the previous schedule at every quiesce level; a domain-paused batch additionally resumes the
-domain. During a replicated transaction commit, the new schedule and transaction progress become
-visible in one Raft operation. The leader rolls back an unpublished local registry candidate, and
+domain. A model batch that creates, changes, or drops a VHOST also waits until the HTTPS listener
+of every live node has installed the resulting certificates, and fails with the node and reason
+when one cannot. A batch that did not pause is then rolled back, and the command waits until every
+listener presents the restored certificates before it reports the failure. A paused batch has
+already resumed by then, so it keeps its committed models like any other failure after activation.
+During a replicated transaction commit, the new schedule and transaction progress become visible in
+one Raft operation. The leader rolls back an unpublished local registry candidate, and
 every node synchronizes its registry cache from the committed schedule across leadership changes.
 
 What it does not do is provide transactional semantics for the actual records flowing through the graph. Message batches and ACK state are data-plane hot-path state and are never persisted by the control plane.

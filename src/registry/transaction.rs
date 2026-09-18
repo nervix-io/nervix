@@ -1570,7 +1570,7 @@ fn add_schedule_impact(
     match delta {
         ScheduleDelta::Unchanged => {}
         ScheduleDelta::Dynamic(updates) => {
-            for node in dynamic_update_nodes(updates) {
+            for (node, action) in dynamic_update_activations(updates) {
                 let attribution = attribution_for_node(
                     &node,
                     touched_by_node,
@@ -1588,7 +1588,7 @@ fn add_schedule_impact(
                 if let Some(coverage) = after_impact.nodes.iter().next().cloned() {
                     activations.push(ActivationImpact {
                         node: coverage,
-                        action: ActivationAction::Activate,
+                        action,
                         attribution: attribution.clone(),
                     });
                 }
@@ -1640,7 +1640,7 @@ fn add_schedule_impact(
                     );
                 }
             }
-            for node in dynamic_update_nodes(dynamic_updates) {
+            for (node, action) in dynamic_update_activations(dynamic_updates) {
                 if entities.contains(&node) || reassignments.contains(&node) {
                     continue;
                 }
@@ -1654,7 +1654,7 @@ fn add_schedule_impact(
                 if let Some(coverage) = after_impact.nodes.iter().next().cloned() {
                     activations.push(ActivationImpact {
                         node: coverage,
-                        action: ActivationAction::Activate,
+                        action,
                         attribution: attribution.clone(),
                     });
                 }
@@ -1748,20 +1748,13 @@ fn add_activation_pair(
     }
 }
 
-fn dynamic_update_nodes(updates: &[DynamicModelUpdate]) -> BTreeSet<NodeRef> {
+/// Every node a set of dynamic updates changes in place, with the activation each one reports.
+fn dynamic_update_activations(
+    updates: &[DynamicModelUpdate],
+) -> BTreeMap<NodeRef, ActivationAction> {
     updates
         .iter()
-        .map(|update| match update {
-            DynamicModelUpdate::RelayCapacity { relay, .. } => {
-                NodeRef::new(nervix_models::ModelKind::Relay, relay.clone())
-            }
-            DynamicModelUpdate::Processor { kind, processor } => {
-                NodeRef::new(*kind, processor.clone())
-            }
-            DynamicModelUpdate::Emitter { emitter, .. } => {
-                NodeRef::new(nervix_models::ModelKind::Emitter, emitter.clone())
-            }
-        })
+        .map(|update| (update.node(), update.activation()))
         .collect()
 }
 
@@ -2059,7 +2052,7 @@ mod tests {
         }
     }
 
-    fn scheduled_snapshot(
+    pub(super) fn scheduled_snapshot(
         status: DomainStatus,
         models: impl IntoIterator<Item = Model>,
     ) -> TransactionPlanningSnapshot {

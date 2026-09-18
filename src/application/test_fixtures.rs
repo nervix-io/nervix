@@ -29,7 +29,6 @@ use nervix_models::{
     ProcessorInputs, ProcessorOutputs, ScheduledNode, SchemaFingerprint, WasmProcessorLimits,
 };
 use nonzero_ext::nonzero;
-use parking_lot::RwLock;
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
     SanType,
@@ -45,6 +44,7 @@ use super::{
     Args,
     session_service::{SessionEvents, SessionServiceImpl, SessionServiceInner},
     subscription::SessionSubscriptions,
+    tls::HttpsListenerCertificates,
     transaction::{
         DEFAULT_TRANSACTION_IDLE_TIMEOUT, DEFAULT_TRANSACTION_MAX_OPEN,
         DEFAULT_TRANSACTION_MAX_SOURCE_BYTES, DEFAULT_TRANSACTION_MAX_STATEMENTS,
@@ -52,7 +52,7 @@ use super::{
     },
 };
 use crate::{
-    cluster,
+    ConfiguredFaultInjection, cluster,
     proto::{
         CommandRequest, CommandResult, SessionResponse, SuggestRequest,
         TransactionState as ApiTransactionState,
@@ -216,6 +216,11 @@ fn test_session_service(
     resource_store: StdArc<ResourceStore>,
     interconnect: Transport,
 ) -> SessionServiceImpl {
+    let https_certificates = HttpsListenerCertificates::new(
+        &resource_store,
+        &ConfiguredFaultInjection::default(),
+        &cluster,
+    );
     SessionServiceImpl {
         inner: Arc::new(SessionServiceInner {
             cluster,
@@ -223,7 +228,7 @@ fn test_session_service(
             consensus_administrator: consensus.administrator(),
             registry,
             resource_store,
-            http_tls_server_config: Arc::new(RwLock::new(None)),
+            https_certificates,
             runtime: Runtime::new(),
             runtime_admission: Arc::new(super::runtime_admission::RuntimeAdmission::new()),
             replica_count: 0,

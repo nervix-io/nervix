@@ -662,7 +662,9 @@ CREATE IF NOT EXISTS VHOST edge api.example.com, ws.example.com
 ```
 
 Either way the VHOST stores one concrete version and keeps presenting that certificate after later
-uploads; `SHOW CREATE VHOST` renders the number it bound.
+uploads; `SHOW CREATE VHOST` renders the number it bound. Rotate the certificate by uploading a new
+version and moving the VHOST to it with `REBIND RESOURCE`, which refreshes the HTTPS listener on
+every node without pausing ingestion. See [Resources](./resources.md#rebinding-existing-models).
 
 The referenced resource bundle must contain:
 

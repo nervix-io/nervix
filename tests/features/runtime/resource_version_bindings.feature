@@ -829,7 +829,7 @@ Feature: Resource version bindings
       """
     And the last command output contains
       """
-      quiesce level: DOMAIN_PAUSE
+      quiesce level: DYNAMIC
       """
     When these NSPL commands are executed on the leader node
       """

@@ -8,12 +8,11 @@
 //! - **Must not know.** How a validated model is scheduled or executed.
 
 use ahash::{HashMap, HashSet};
-use error_stack::{Report, ResultExt as _};
+use error_stack::ResultExt as _;
 use meticulous::OptionExt as _;
 use nervix_models::{
     CreateInferencer, CreateLookup, DomainName, DomainPace, InferencerTensorDimension,
     InferencerTensorSchema, LookupName, Model, ModelKind, ResourceId, ResourceName,
-    VhostTlsResource,
 };
 use ort::{
     session::Session,
@@ -211,12 +210,15 @@ impl SessionServiceImpl {
                     }
                 }
                 Model::Vhost(vhost) => {
+                    // Planning already resolved the pinned version against the completed versions
+                    // of the domain; this proves that version's material loads.
                     if let Some(tls) = vhost.tls.as_ref() {
-                        self.validate_vhost_tls_binding(domain, tls)
+                        let id = ResourceId::new(domain.clone(), tls.resource.clone(), tls.version);
+                        load_vhost_tls_materials(&self.inner.resource_store, &id)
                             .await
                             .map_err(|error| {
                                 format!(
-                                    "invalid TLS resource for VHOST '{}': {error}",
+                                    "invalid TLS resource for VHOST '{}': {error:#}",
                                     vhost.name.as_str()
                                 )
                             })?;
@@ -276,18 +278,6 @@ impl SessionServiceImpl {
             .map_err(|error| format!("invalid UDF '{}': {error}", changed_udfs.join(", ")))
     }
 
-    /// Proves the TLS material of the version the VHOST pins loads. Planning already resolved that
-    /// version against the completed versions of the domain.
-    async fn validate_vhost_tls_binding(
-        &self,
-        domain: &DomainName,
-        tls: &VhostTlsResource,
-    ) -> Result<(), String> {
-        let id = ResourceId::new(domain.clone(), tls.resource.clone(), tls.version);
-        load_vhost_tls_materials(&self.inner.resource_store, &id).await?;
-        Ok(())
-    }
-
     async fn validate_lookup_binding(
         &self,
         domain: &DomainName,
@@ -309,16 +299,15 @@ impl SessionServiceImpl {
                 version: lookup.resource_version,
                 path: lookup.path.clone(),
             })?;
-        ensure_file_exists(&path, "lookup").await.map_err(|error| {
-            Report::new(LookupBindingValidationError::FileUnavailable {
+        ensure_file_exists(&path, "lookup").await.change_context(
+            LookupBindingValidationError::FileUnavailable {
                 domain: domain.clone(),
                 lookup: lookup.name.clone(),
                 resource: lookup.resource.clone(),
                 version: lookup.resource_version,
                 path: lookup.path.clone(),
-            })
-            .attach_printable(error)
-        })
+            },
+        )
     }
 
     async fn validate_inferencer_binding(
@@ -343,7 +332,9 @@ impl SessionServiceImpl {
             .resource_store
             .resolve_content_path(&id, &processor.file)
             .map_err(|error| error.to_string())?;
-        ensure_file_exists(&path, "ONNX model").await?;
+        ensure_file_exists(&path, "ONNX model")
+            .await
+            .map_err(|error| error.to_string())?;
         if path.extension().and_then(|extension| extension.to_str()) != Some("onnx") {
             return Err(format!(
                 "model file '{}' must have .onnx extension",
