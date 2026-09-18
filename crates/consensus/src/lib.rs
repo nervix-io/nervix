@@ -3269,11 +3269,12 @@ impl Proposer {
     pub async fn fail_transaction_commit_admission(
         &self,
         failure: TransactionCommitAdmissionFailure,
-    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+    ) -> error_stack::Result<ReplicatedTransaction, ConsensusTransactionError> {
         self.write_transaction(ConsensusCommand::FailTransactionCommitAdmission {
             failure: Box::new(failure),
         })
         .await
+        .map_err(Report::new)
     }
 
     pub async fn advance_transaction_commit(
@@ -5087,7 +5088,10 @@ fn apply_consensus_command_at(
             ) {
                 Ok(decision) => decision,
                 Err(error) => {
-                    return AppliedConsensusCommand::transaction(Err(error), changes);
+                    return AppliedConsensusCommand::transaction(
+                        Err(error.current_context().clone()),
+                        changes,
+                    );
                 }
             };
             match failure_decision {

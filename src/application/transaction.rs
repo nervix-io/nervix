@@ -213,9 +213,10 @@ fn transaction_planning_error_message(error: &Report<TransactionPlanningError>) 
 }
 
 fn transaction_commit_error_message(error: &Report<TransactionCommitError>) -> String {
-    let context = error
-        .downcast_ref::<TransactionPlanningError>()
-        .map_or_else(|| error.to_string(), ToString::to_string);
+    let context = match error.downcast_ref::<TransactionPlanningError>() {
+        Some(planning_error) => planning_error.to_string(),
+        None => error.to_string(),
+    };
     match error.downcast_ref::<String>() {
         Some(message) => format!("{context}: {message}"),
         None => context,
@@ -719,6 +720,21 @@ impl SessionServiceImpl {
         }
     }
 
+    async fn transaction_consensus_report_response(
+        &self,
+        error: Report<ConsensusTransactionError>,
+    ) -> CommandResult {
+        let message = error.to_string();
+        match error.current_context() {
+            ConsensusTransactionError::Consensus(error) => {
+                self.consensus_error_response(error, message).await
+            }
+            ConsensusTransactionError::Mutation(_) | ConsensusTransactionError::InvalidResponse => {
+                command_error(message)
+            }
+        }
+    }
+
     pub(in crate::application) async fn command_with_transaction_status(
         &self,
         mut result: CommandResult,
@@ -1151,7 +1167,7 @@ impl SessionServiceImpl {
                             }
                             Ok(None) => return command_error(message),
                             Err(error) => {
-                                return self.transaction_consensus_error_response(error).await;
+                                return self.transaction_consensus_report_response(error).await;
                             }
                         }
                     }
@@ -1520,7 +1536,7 @@ impl SessionServiceImpl {
         transaction: &ReplicatedTransaction,
         owner: &UserName,
         failure: &Report<TransactionCommitError>,
-    ) -> Result<Option<ReplicatedTransaction>, ConsensusTransactionError> {
+    ) -> Result<Option<ReplicatedTransaction>, Report<ConsensusTransactionError>> {
         let statements = transaction
             .statements
             .iter()
@@ -1679,7 +1695,7 @@ impl SessionServiceImpl {
                         Ok(Some(transaction)) => transaction,
                         Ok(None) => return command_error(message),
                         Err(error) => {
-                            return self.transaction_consensus_error_response(error).await;
+                            return self.transaction_consensus_report_response(error).await;
                         }
                     }
                 }

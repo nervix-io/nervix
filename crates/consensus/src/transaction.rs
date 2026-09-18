@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use arch_into::ArchInto as _;
+use error_stack::Report;
 use meticulous::OptionExt as _;
 #[cfg(test)]
 use meticulous::ResultExt as _;
@@ -758,8 +759,8 @@ impl ReplicatedTransaction {
         preview: &TransactionPreviewIdentity,
         failing_step: usize,
         error: &str,
-    ) -> Result<TransactionCommitFailureDecision, TransactionMutationError> {
-        self.ensure_owner(owner)?;
+    ) -> error_stack::Result<TransactionCommitFailureDecision, TransactionMutationError> {
+        self.ensure_owner(owner).map_err(Report::new)?;
         if self.matches_commit_admission_failure(preview, failing_step, error) {
             return Ok(TransactionCommitFailureDecision::Existing);
         }
@@ -768,17 +769,17 @@ impl ReplicatedTransaction {
             OpenActivityDecision::Expired => {
                 return Ok(TransactionCommitFailureDecision::Expired);
             }
-            OpenActivityDecision::NotOpen => return Err(self.not_open_error()),
+            OpenActivityDecision::NotOpen => return Err(Report::new(self.not_open_error())),
         }
         if failing_step >= self.statements.len() {
-            return Err(TransactionMutationError::InvalidProgress {
+            return Err(Report::new(TransactionMutationError::InvalidProgress {
                 id: self.id.clone(),
                 next: failing_step,
                 statement_count: self.statements.len(),
-            });
+            }));
         }
         let TransactionState::Open(current) = &mut self.state else {
-            return Err(self.not_open_error());
+            return Err(Report::new(self.not_open_error()));
         };
         current.renew(activity);
         let finished_at = current.last_activity_at();
