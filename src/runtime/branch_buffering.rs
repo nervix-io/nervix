@@ -14,13 +14,13 @@ use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use meticulous::OptionExt as _;
 #[cfg(test)]
 use meticulous::ResultExt as _;
+use nervix_connector::physical_time::{PhysicalDeadline, PhysicalDeadlineCapability};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use super::{
     DomainClock, DomainExecutionSnapshot, LogicalDeadline, RelayRecordBatch,
     checked_add_duration_to_timestamp,
-    physical_time::{PhysicalDeadline, PhysicalDeadlineCapability},
 };
 use crate::runtime_ack::AckSet;
 
@@ -109,7 +109,7 @@ impl RuntimeWake {
 
     /// The wake of a consumer whose only deadline is a monotonic maintenance timeout.
     pub(super) fn after(timeout: Duration) -> BranchBufferTimingResult<Self> {
-        let deadline = PhysicalDeadlineCapability::new()
+        let deadline = PhysicalDeadlineCapability::operational()
             .after(timeout)
             .change_context(BranchBufferTimingError::PhysicalRange)?;
         Ok(Self::never().with_physical(deadline))
@@ -154,7 +154,7 @@ impl RuntimeWake {
         }
         Ok(self
             .physical
-            .is_some_and(|deadline| PhysicalDeadlineCapability::new().is_reached(deadline)))
+            .is_some_and(|deadline| PhysicalDeadlineCapability::operational().is_reached(deadline)))
     }
 
     /// Waits for the first deadline in the set, or forever when the set is empty.
@@ -166,13 +166,15 @@ impl RuntimeWake {
             }
             (Some(logical), None) => logical.wait().await,
             (None, Some(physical)) => {
-                PhysicalDeadlineCapability::new().wait_until(physical).await;
+                PhysicalDeadlineCapability::operational()
+                    .wait_until(physical)
+                    .await;
                 Ok(())
             }
             (Some(logical), Some(physical)) => {
                 tokio::select! {
                     result = logical.wait() => result,
-                    () = PhysicalDeadlineCapability::new().wait_until(physical) => Ok(()),
+                    () = PhysicalDeadlineCapability::operational().wait_until(physical) => Ok(()),
                 }
             }
         }
@@ -233,7 +235,7 @@ impl BranchBufferTimer {
                 BranchBufferDeadline::Logical(clock.deadline_at(due_at))
             }
             RuntimeFlushPolicy::Immediate => {
-                let physical = PhysicalDeadlineCapability::new()
+                let physical = PhysicalDeadlineCapability::operational()
                     .after(RuntimeFlushPolicy::IMMEDIATE_MINIMUM_TIMEOUT)
                     .change_context(BranchBufferTimingError::PhysicalRange)?;
                 BranchBufferDeadline::Physical(physical)
@@ -255,7 +257,7 @@ impl BranchBufferTimer {
                 .deadline_reached(deadline, snapshot)
                 .change_context(BranchBufferTimingError::LogicalDeadline),
             BranchBufferDeadline::Physical(deadline) => {
-                Ok(PhysicalDeadlineCapability::new().is_reached(*deadline))
+                Ok(PhysicalDeadlineCapability::operational().is_reached(*deadline))
             }
         }
     }
@@ -387,7 +389,9 @@ pub(super) async fn wait_for_branch_buffer_deadline(
                 .change_context(BranchBufferTimingError::LogicalDeadline)?;
         }
         BranchBufferDeadline::Physical(deadline) => {
-            PhysicalDeadlineCapability::new().wait_until(deadline).await;
+            PhysicalDeadlineCapability::operational()
+                .wait_until(deadline)
+                .await;
         }
     }
     Ok(())
@@ -479,7 +483,7 @@ mod tests {
         let deadline = logical
             .deadline()
             .assured("arming a logical timer leaves a deadline");
-        let physical = PhysicalDeadlineCapability::new()
+        let physical = PhysicalDeadlineCapability::operational()
             .after(Duration::from_secs(1))
             .assured("the fixture timeout fits the monotonic clock range");
         let wake = RuntimeWake::never()

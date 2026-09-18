@@ -1,4 +1,5 @@
 use futures_util::FutureExt;
+use nervix_connector::{ResolvedClientConfig, client_config_entries};
 use nervix_models::TopicName;
 use rdkafka::{
     config::ClientConfig,

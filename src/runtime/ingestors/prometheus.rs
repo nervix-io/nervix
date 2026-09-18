@@ -5,15 +5,17 @@
 //! - **Depends on.** Typed Prometheus plans, HTTP clients and installed domain cadence.
 //! - **Must not know.** NSPL parsing, registry validation or placement computation.
 
+#[cfg(test)]
+use nervix_connector::HttpClientConfigError;
+use nervix_connector::{
+    ClientConfigResult, HttpClientConfig, client_config_value, physical_time::actual_utc_now,
+};
 use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::super::*;
-#[cfg(test)]
-use crate::runtime::http_client::HttpClientConfigError;
-use crate::runtime::{client_config::ClientConfigResult, physical_time::actual_utc_now};
 
 pub(in crate::runtime) struct PrometheusIngestor;
 
@@ -508,6 +510,23 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
+
+    #[test]
+    fn prometheus_client_validates_timeout_configuration() {
+        let err = ingestors::prometheus::PrometheusIngestor::client_from_config_for_test(
+            &CreateClientPrometheus::<u64> {
+                name: named("prom"),
+                mount: None,
+                config: vec![ClientConfigEntry {
+                    key: "timeout_ms".to_string(),
+                    value: "oops".to_string(),
+                }],
+            }
+            .config,
+        )
+        .expect_err("invalid prometheus timeout");
+        assert!(err.to_string().contains("Prometheus timeout_ms"));
+    }
 
     #[test]
     fn prometheus_helpers_render_payload_and_validate_inputs() {

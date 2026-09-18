@@ -3,6 +3,10 @@ use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
     rt::TokioExecutor as HyperTokioExecutor,
 };
+use nervix_connector::{
+    ResolvedClientConfig, RustlsClientConfigSource, client_config_entries,
+    optional_client_config_value,
+};
 use nervix_models::TableName;
 
 use super::*;

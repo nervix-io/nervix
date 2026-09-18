@@ -7,3 +7,35 @@ version.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+default = []
+shuttle = ["dep:shuttle-tokio", "shuttle-tokio/shuttle"]
+
+[dependencies]
+error-stack = { workspace = true }
+nervix-models = { workspace = true }
+nervix-recovery = { workspace = true }
+reqwest = { workspace = true }
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
+rustls-pki-types = { workspace = true }
+serde = { workspace = true }
+shuttle-tokio = { workspace = true, features = [
+  "macros",
+  "rt",
+  "test-util",
+  "time",
+], optional = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+tracing = { workspace = true }
+triomphe = { workspace = true }
+upon = { workspace = true }
+url = { workspace = true }
+webpki-roots = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }

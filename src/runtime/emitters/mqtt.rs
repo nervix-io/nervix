@@ -1,6 +1,10 @@
 use std::{future::Future, pin::Pin};
 
 use futures_util::FutureExt;
+use nervix_connector::{
+    ParsedRetryPolicy, ResolvedClientConfig, client_config_entries, client_tls_paths,
+    optional_client_config_value,
+};
 use nervix_models::TopicName;
 use rumqttc::{
     AsyncClient, ClientError as MqttClientError, Event, MqttOptions,

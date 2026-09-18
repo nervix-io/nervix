@@ -6,10 +6,12 @@
 //! - **Must not know.** NSPL parsing, registry validation or placement computation.
 
 use error_stack::ResultExt as _;
+use nervix_connector::{
+    ServiceUrl, client_config_value, client_tls_paths, physical_time::actual_utc_now, read_tls_file,
+};
 use redis::{Client as RedisClient, ClientTlsConfig, TlsCertificates as RedisTlsCertificates};
 
 use super::super::*;
-use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct RedisPubSubIngestor;
 

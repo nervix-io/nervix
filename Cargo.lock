@@ -6620,6 +6620,26 @@ dependencies = [
 [[package]]
 name = "nervix-connector"
 version = "0.1.0-dev"
+dependencies = [
+ "error-stack",
+ "nervix-models",
+ "nervix-recovery",
+ "reqwest 0.13.4",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "shuttle-tokio",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "triomphe",
+ "upon",
+ "url",
+ "webpki-roots 1.0.9",
+]
 
 [[package]]
 name = "nervix-consensus"
@@ -6919,6 +6939,7 @@ dependencies = [
  "nervix-approx-into",
  "nervix-client-core",
  "nervix-client-wire",
+ "nervix-connector",
  "nervix-consensus",
  "nervix-dataflow-graph",
  "nervix-execution",
@@ -6961,7 +6982,6 @@ dependencies = [
  "rstest",
  "rumqttc-next",
  "rustls",
- "rustls-native-certs",
  "rustls-pki-types",
  "sentry-types",
  "serde",

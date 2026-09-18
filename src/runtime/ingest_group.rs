@@ -11,6 +11,7 @@ use ahash::RandomState;
 use bytes::Bytes;
 use error_stack::ResultExt as _;
 use indexmap::{Equivalent, IndexMap};
+use nervix_connector::IngestMetadataRow;
 
 use super::{ingestors::kafka::KafkaOffsetInitialization, *};
 
