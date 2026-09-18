@@ -51,7 +51,7 @@ use super::{
         command_ok, command_ok_already_existed, parse_request_domain, quiesce_level_message,
         rebind_resource_message,
     },
-    ownership_handoff::{mark_complete_ownership_transitions, planned_ownership_moves},
+    ownership_handoff::planned_ownership_moves,
     schedule_planning::DomainSchedulePlanningSnapshot,
     session_service::SessionServiceImpl,
     subscription::{PendingSessionCommand, SessionSubscriptions},
@@ -1544,9 +1544,23 @@ impl SessionServiceImpl {
             .change_context(TransactionCommitError::PreparePlan {
                 id: transaction.id.clone(),
             })?;
-        let commit_plan = captured
+        let ownership_transition_ids = captured
             .plan
-            .commit_plan(transaction.id.clone(), &resolved_starts);
+            .steps()
+            .iter()
+            .filter(|step| !step.impact.planned().effects.ownership_moves.is_empty())
+            .map(|step| {
+                (
+                    step.impact.operations().first(),
+                    uuid::Uuid::now_v7().to_string(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let commit_plan = captured.plan.commit_plan(
+            transaction.id.clone(),
+            &ownership_transition_ids,
+            &resolved_starts,
+        );
         let eligibility = captured.schedule_inputs.transaction_eligibility();
         let commit_plan =
             TransactionCommitAdmissionPlan::capture(commit_plan, captured.inputs, eligibility)
@@ -2508,14 +2522,8 @@ impl SessionServiceImpl {
                         None,
                     )
                 } else {
-                    let mut schedule = plan.schedule;
+                    let schedule = plan.schedule;
                     let ownership_gate = plan.ownership_gate;
-                    if let Some(schedule) = schedule.as_mut() {
-                        mark_complete_ownership_transitions(
-                            plan.expected_schedule.as_ref(),
-                            schedule,
-                        );
-                    }
                     let handoff = if relocations > 0 {
                         self.begin_planned_ownership_handoff_with_exact_gate(
                             domain_id,

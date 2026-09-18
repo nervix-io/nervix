@@ -461,16 +461,16 @@ Feature: NSPL transactions
       CREATE RESOURCE transaction_commit_conflict;
       """
     Then client "owner" transaction id is saved as placeholder "transaction_id"
-    When client "observer" executes these NSPL commands
-      """
-      CREATE RESOURCE transaction_commit_conflict;
-      """
     Given transaction commit on node "{{old_leader}}" pauses after 1 statement
     When client "owner" begins executing these NSPL commands in the background
       """
       COMMIT;
       """
     Then the transaction commit pause on node "{{old_leader}}" after 1 statement is reached
+    When client "observer" executes these NSPL commands
+      """
+      CREATE RESOURCE transaction_commit_conflict;
+      """
     When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then node "{{new_leader}}" eventually reports leader "{{new_leader}}"
     And transaction "{{transaction_id}}" eventually has state "FAILED"

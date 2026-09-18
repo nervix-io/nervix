@@ -2006,7 +2006,7 @@ mod rebind_tests;
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use nervix_models::{
         AckMode, AlterJunction, AlterProcessorOperation, AlterRelay, AlterRelayOperation,
@@ -2340,11 +2340,37 @@ mod tests {
             .first_step()
             .verified("the relay alteration produces one execution step");
         assert_eq!(step.impact.planned().pause, PauseRequirement::NoPause);
-        let PlannedTransactionStepKind::Models { plan } = &step.kind else {
+        let PlannedTransactionStepKind::Models { plan: model_plan } = &step.kind else {
             unreachable!("the relay alteration produces a model step");
         };
-        assert_eq!(plan.ownership_gate.affected_entities(), &[expected_moved]);
-        assert_eq!(plan.ownership_gate.relays(), &[named("events")]);
+        assert_eq!(
+            model_plan.ownership_gate.affected_entities(),
+            std::slice::from_ref(&expected_moved)
+        );
+        assert_eq!(model_plan.ownership_gate.relays(), &[named("events")]);
+
+        let ownership_transition_ids =
+            BTreeMap::from([(step.impact.operations().first(), "transition-1".to_string())]);
+        let commit = plan.commit_plan(
+            "tx".to_string(),
+            &ownership_transition_ids,
+            &BTreeMap::new(),
+        );
+        let TransactionCommitStepKind::Models { schedule, .. } = &commit.steps[0].kind else {
+            unreachable!("the relay alteration commits one model step");
+        };
+        let schedule = schedule
+            .as_deref()
+            .verified("the scheduled relay alteration retains its target schedule");
+        let transition = schedule
+            .nodes
+            .get(&expected_moved)
+            .and_then(|node| node.ownership_transition.as_ref())
+            .verified("the admitted target schedule freezes its ownership transition");
+        assert_eq!(transition.source.as_str(), "node-a");
+        assert_eq!(transition.destination.as_str(), "node-b");
+        assert_eq!(transition.state_recovery.as_ref(), "complete");
+        assert_eq!(transition.id, "transition-1");
     }
 
     #[test]

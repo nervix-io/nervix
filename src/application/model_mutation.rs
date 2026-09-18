@@ -1227,7 +1227,9 @@ impl SessionServiceImpl {
                 }
             };
             let requires_domain_pause = classified_level.requires_domain_pause();
-            if let Some(prepared_schedule) = prepared_schedule.as_mut() {
+            if transaction_step.is_none()
+                && let Some(prepared_schedule) = prepared_schedule.as_mut()
+            {
                 mark_complete_ownership_transitions(expected_schedule.as_ref(), prepared_schedule);
             }
             let model_gate = match &transaction_decision {
