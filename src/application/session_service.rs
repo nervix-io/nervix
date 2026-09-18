@@ -30,8 +30,6 @@ use nervix_nspl::{
     schema::{Diagnostic as ParseDiagnostic, ParseFromSourceError},
 };
 use nervix_recovery::{Discarded, NoReceiver};
-use parking_lot::RwLock;
-use rustls::ServerConfig;
 use sorted_vec::SortedSet;
 use tokio::{
     sync::{Mutex as AsyncMutex, broadcast, mpsc},
@@ -57,6 +55,7 @@ use super::{
     scheduling::RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
     service_tasks::ServiceTasks,
     subscription::{SessionSubscriptions, SubscriptionInterestKey},
+    tls::HttpsListenerCertificates,
     transaction::TransactionRecovery,
 };
 use crate::{
@@ -146,8 +145,9 @@ pub(in crate::application) struct SessionServiceInner {
     pub(in crate::application) registry: Arc<Registry>,
     /// Also held by the application startup that opened it, and published by the runtime.
     pub(in crate::application) resource_store: StdArc<ResourceStore>,
-    /// Also held by the HTTPS server, which reads the current certificate on every accept.
-    pub(in crate::application) http_tls_server_config: Arc<RwLock<Option<StdArc<ServerConfig>>>>,
+    /// Also held by the HTTPS server, which reads the current certificate on every accept, and by
+    /// the schedule task that installs every admitted revision.
+    pub(in crate::application) https_certificates: HttpsListenerCertificates,
     pub(in crate::application) runtime: Runtime,
     /// Also held by the initial schedule reconciliation task until process shutdown.
     pub(in crate::application) runtime_admission: Arc<RuntimeAdmission>,
@@ -595,17 +595,34 @@ impl SessionService for SessionServiceImpl {
     }
 }
 
+/// The node-local handles that install the newest admitted runtime state.
+#[derive(Clone, Copy)]
+pub(in crate::application) struct RuntimeStateApplication<'a> {
+    pub(in crate::application) runtime: &'a Runtime,
+    pub(in crate::application) https_certificates: &'a HttpsListenerCertificates,
+    pub(in crate::application) cluster: &'a cluster::ClusterHandle,
+    pub(in crate::application) interconnect: &'a Transport,
+    pub(in crate::application) registry: &'a Registry,
+    pub(in crate::application) consensus: &'a Observer,
+    pub(in crate::application) admission: &'a RuntimeAdmission,
+    pub(in crate::application) shutdown: &'a CancellationToken,
+}
+
 /// Apply the newest admitted runtime state with a heap-backed future so command execution keeps a
 /// bounded stack regardless of the preparation and readiness paths active inside this operation.
-pub(in crate::application) fn apply_current_cluster_runtime_state<'a>(
-    runtime: &'a Runtime,
-    cluster: &'a cluster::ClusterHandle,
-    interconnect: &'a Transport,
-    registry: &'a Registry,
-    consensus: &'a Observer,
-    admission: &'a RuntimeAdmission,
-    shutdown: &'a CancellationToken,
-) -> BoxFuture<'a, Result<(), crate::runtime::RuntimeError>> {
+pub(in crate::application) fn apply_current_cluster_runtime_state(
+    application: RuntimeStateApplication<'_>,
+) -> BoxFuture<'_, Result<(), crate::runtime::RuntimeError>> {
+    let RuntimeStateApplication {
+        runtime,
+        https_certificates,
+        cluster,
+        interconnect,
+        registry,
+        consensus,
+        admission,
+        shutdown,
+    } = application;
     Box::pin(async move {
         let local_node_id = consensus.local_node_id();
         loop {
@@ -624,7 +641,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state<'a>(
             if let Err(error) = registry.synchronize_cluster_schedule(&state.schedule) {
                 warn!(error = %error, "failed to synchronize registry from admitted cluster schedule");
             }
-            runtime
+            let runtime_application = runtime
                 .apply_cluster_state(
                     local_node_id,
                     state.revision,
@@ -632,7 +649,22 @@ pub(in crate::application) fn apply_current_cluster_runtime_state<'a>(
                     &state.domain_clock_authorities,
                     &state.schedule,
                 )
-                .await?;
+                .await;
+            // The listener presents the certificates of the same revision before this node reports
+            // it prepared. A failed installation keeps the certificates already presented and is
+            // reported to the command that changed them through its installation barrier.
+            if let Err(error) = https_certificates
+                .install(state.revision, &state.schedule)
+                .await
+            {
+                warn!(
+                    %local_node_id,
+                    revision = state.revision,
+                    error = format!("{error:#}"),
+                    "failed to install the HTTPS listener TLS configuration"
+                );
+            }
+            runtime_application?;
             cluster
                 .set_local_runtime_revision_prepared(state.revision)
                 .await;
@@ -989,15 +1021,16 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn apply_current_cluster_state(
         &self,
     ) -> Result<(), crate::runtime::RuntimeError> {
-        apply_current_cluster_runtime_state(
-            &self.inner.runtime,
-            &self.inner.cluster,
-            &self.inner.interconnect,
-            &self.inner.registry,
-            &self.inner.consensus,
-            &self.inner.runtime_admission,
-            &self.inner.drain_support_shutdown,
-        )
+        apply_current_cluster_runtime_state(RuntimeStateApplication {
+            runtime: &self.inner.runtime,
+            https_certificates: &self.inner.https_certificates,
+            cluster: &self.inner.cluster,
+            interconnect: &self.inner.interconnect,
+            registry: &self.inner.registry,
+            consensus: &self.inner.consensus,
+            admission: &self.inner.runtime_admission,
+            shutdown: &self.inner.drain_support_shutdown,
+        })
         .await
     }
 

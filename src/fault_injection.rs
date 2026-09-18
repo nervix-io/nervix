@@ -70,6 +70,8 @@ struct FaultInjectionState {
     transaction_binding_drops: DashMap<ClusterNodeName, (), RandomState>,
     /// One-shot installation failures, consumed by the next resource version a node installs.
     failed_resource_installations: DashMap<ClusterNodeName, (), RandomState>,
+    /// One-shot failures, consumed by the next HTTPS listener configuration a node installs.
+    failed_https_listener_installations: DashMap<ClusterNodeName, (), RandomState>,
     consensus_probes: DashMap<ClusterNodeName, ConsensusProbeState, RandomState>,
     /// Consensus storage failures armed as each named node builds its storage, before it answers
     /// any Raft traffic.
@@ -194,6 +196,7 @@ impl Default for FaultInjection {
                 forced_entity_drain_timeouts: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
+                failed_https_listener_installations: DashMap::default(),
                 consensus_probes: DashMap::default(),
                 startup_consensus_faults: DashMap::default(),
                 bulk_executions: DashMap::default(),
@@ -445,6 +448,14 @@ impl FaultInjection {
     /// whose archive is present.
     pub fn fail_next_resource_installation_on(&self, node_id: ClusterNodeName) {
         self.inner.failed_resource_installations.insert(node_id, ());
+    }
+
+    /// Fails the next HTTPS listener configuration `node_id` installs, after it loaded the
+    /// certificates and before it replaces the configuration its listener serves.
+    pub fn fail_next_https_listener_installation_on(&self, node_id: ClusterNodeName) {
+        self.inner
+            .failed_https_listener_installations
+            .insert(node_id, ());
     }
 
     /// Fill every bulk worker on `node_id` and return once every occupying job is running.
@@ -952,6 +963,17 @@ impl FaultInjection {
     ) -> bool {
         self.inner
             .failed_resource_installations
+            .remove(node_id)
+            .is_some()
+    }
+
+    /// Consumes an armed listener failure for `node_id` at its next HTTPS listener installation.
+    pub(crate) fn take_armed_https_listener_installation_failure(
+        &self,
+        node_id: &ClusterNodeName,
+    ) -> bool {
+        self.inner
+            .failed_https_listener_installations
             .remove(node_id)
             .is_some()
     }

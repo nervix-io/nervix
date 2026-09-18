@@ -85,8 +85,9 @@ use uuid::Uuid;
 use crate::common::{
     cluster::{
         BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
-        InterconnectCredentialFault, StallableTcpProxy, TEST_AUTH_USERNAME, TestClusterConfig,
-        TestSession, WebsocketExchangeAction, client_connect_options,
+        HttpsPublishLoopOutcome, InterconnectCredentialFault, StallableTcpProxy,
+        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
+        client_connect_options,
     },
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
@@ -150,6 +151,12 @@ struct DurableCatchUpWriter {
     cancellation: CancellationToken,
     prefix: String,
     task: AbortOnDropHandle<Result<usize, String>>,
+}
+
+/// HTTPS posts to every node that keep running until a step collects what the listeners answered.
+struct BackgroundHttpsPublish {
+    stop: CancellationToken,
+    task: AbortOnDropHandle<HttpsPublishLoopOutcome>,
 }
 
 /// A follower's commands-class memory, sampled for the whole time it spends catching up.
@@ -232,6 +239,7 @@ struct ScenarioWorld {
     background_command_result:
         Option<AbortOnDropHandle<std::io::Result<nervix_proto::CommandResult>>>,
     background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
+    background_https_publish: Option<BackgroundHttpsPublish>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
     silent_interconnect_peers: Vec<tokio::net::TcpStream>,
     last_interconnect_attempt_error: Option<String>,
@@ -5889,6 +5897,14 @@ async fn given_resource_installation_failure(world: &mut ScenarioWorld, node_id:
     world
         .fault_injection
         .fail_next_resource_installation_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[given(expr = "the next HTTPS listener installation on node {string} fails")]
+async fn given_https_listener_installation_failure(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .fail_next_https_listener_installation_on(crate::common::cluster::node_name(&node_id));
 }
 
 #[then(expr = "the resource installation pause on node {string} is reached")]
@@ -14976,6 +14992,96 @@ async fn then_leader_https_listener_presents_resource_certificate(
                  '{resource_directory}' for host '{host}': {error}"
             )
         });
+}
+
+/// Connects once to every node: a command that changed the listener's certificate has already
+/// waited for every listener to install it, so the check neither polls nor retries.
+#[then(
+    expr = "the HTTPS listener of every node for host {string} presents the certificate from \
+            resource directory {string}"
+)]
+async fn then_every_https_listener_presents_resource_certificate(
+    world: &mut ScenarioWorld,
+    host: String,
+    resource_directory: String,
+) {
+    let host = expand_placeholders(world, &host);
+    let ca_pem = resource_directory_ca_pem(world, &resource_directory);
+    for node_id in world.cluster().node_ids() {
+        world
+            .cluster()
+            .connect_https(&node_id, &host, &ca_pem)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "node '{node_id}' did not present the certificate trusted by resource \
+                     directory '{resource_directory}' for host '{host}': {error}"
+                )
+            });
+    }
+}
+
+#[when(
+    expr = "https payloads begin posting in the background to every node with host {string} path \
+            {string} trusting resource directories {string} and {string}"
+)]
+async fn when_https_payloads_begin_posting_in_the_background(
+    world: &mut ScenarioWorld,
+    host: String,
+    path: String,
+    first_resource_directory: String,
+    second_resource_directory: String,
+    #[step] step: &Step,
+) {
+    assert!(
+        world.background_https_publish.is_none(),
+        "a background https publish is already active"
+    );
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let trusted_ca_pems = [
+        resource_directory_ca_pem(world, &first_resource_directory),
+        resource_directory_ca_pem(world, &second_resource_directory),
+    ];
+    append_cucumber_log_line(&format!(
+        "https background publish: every node host={host} path={path} payload={payload}"
+    ));
+    let stop = CancellationToken::new();
+    let task = world
+        .cluster()
+        .spawn_https_publish_loop(host, path, payload, &trusted_ca_pems, stop.clone())
+        .expect("failed to prepare the background https publish");
+    world.background_https_publish = Some(BackgroundHttpsPublish {
+        stop,
+        task: AbortOnDropHandle::new(task),
+    });
+}
+
+#[then("the background https publishing accepted every payload")]
+async fn then_the_background_https_publishing_accepted_every_payload(world: &mut ScenarioWorld) {
+    let BackgroundHttpsPublish { stop, task } = world
+        .background_https_publish
+        .take()
+        .expect("a background https publish must be active");
+    stop.cancel();
+    let outcome = tokio::time::timeout(Duration::from_secs(30), task)
+        .await
+        .expect("background https publish did not stop")
+        .expect("background https publish task failed");
+    let node_count = world.cluster().node_ids().len();
+    assert!(
+        outcome.accepted >= node_count,
+        "expected every node to accept at least one background https payload, got {} accepted",
+        outcome.accepted
+    );
+    assert!(
+        outcome.failures.is_empty(),
+        "background https publishing was rejected {} time(s) after {} accepted payload(s): {:?}",
+        outcome.failures.len(),
+        outcome.accepted,
+        outcome.failures
+    );
 }
 
 #[when(expr = "http payload is posted to node {string} with host {string} path {string}")]

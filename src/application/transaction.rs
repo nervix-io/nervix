@@ -17,17 +17,17 @@ use error_stack::{Report, ResultExt};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
     ConsensusError, ConsensusTransactionError, DomainPlanningInputs, ReplicatedTransaction,
-    TransactionActivity, TransactionApplyingStep, TransactionCommandResult,
-    TransactionCommitAdvance, TransactionDiagnostic, TransactionOutcome, TransactionQueueAdmission,
-    TransactionQueueLimits, TransactionState, TransactionStatement, TransactionStatementRequest,
-    TransactionStepEffect, TransactionStepResult,
+    TransactionActivity, TransactionApplicationOutcome, TransactionApplyingStep,
+    TransactionCommandResult, TransactionCommitAdvance, TransactionDiagnostic, TransactionOutcome,
+    TransactionQueueAdmission, TransactionQueueLimits, TransactionState, TransactionStatement,
+    TransactionStatementRequest, TransactionStepEffect, TransactionStepResult,
 };
 use nervix_models::{
     ActualExecutionStepImpact, CanonicalImpactSet, CommandExecutionReference, DomainName,
     DomainSchedule, DomainState, DomainStatus, ExecutionStepImpactReport, ImpactDiagnostic,
     ImpactDiagnosticKind, ImpactNodeCoverage, ImpactPlanningBasis, ImpactReportCompleteness, Model,
-    ModelIndex, OwnershipMoveImpact, PauseRequirement, PlannedExecutionStepImpact,
-    RequestedResourceVersion, ResourceId, ResourceName, ResourceUploads, Statement,
+    ModelIndex, ModelKind, OwnershipMoveImpact, PauseRequirement, PlannedExecutionStepImpact,
+    QuiesceLevel, RequestedResourceVersion, ResourceId, ResourceName, ResourceUploads, Statement,
     TransactionOperationNumber, TransactionOperationRange, UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
@@ -42,6 +42,7 @@ use tonic::Status;
 use tracing::{info, warn};
 
 use super::{
+    completion::CompletionError,
     domain_clock::{current_timestamp, subtract_timestamp_duration},
     domain_lifecycle::DomainAlterError,
     model_mutation::{
@@ -1636,9 +1637,10 @@ impl SessionServiceImpl {
                         None,
                     ))
                     .await?;
-                    return Box::pin(
-                        self.record_transaction_application_completion(&advanced, None),
-                    )
+                    return Box::pin(self.record_transaction_application_completion(
+                        &advanced,
+                        TransactionApplicationOutcome::Applied,
+                    ))
                     .await;
                 }
             };
@@ -1802,8 +1804,12 @@ impl SessionServiceImpl {
                 },
             }
         };
+        let outcome = match application_failure {
+            Some(error) => TransactionApplicationOutcome::Failed { error },
+            None => Box::pin(self.resumed_https_listener_outcome(transaction, applying)).await,
+        };
         let completed = self
-            .record_transaction_application_completion(transaction, application_failure)
+            .record_transaction_application_completion(transaction, outcome)
             .await?;
 
         Ok(TransactionApplicationAttempt::Completed(Box::new(
@@ -1811,10 +1817,89 @@ impl SessionServiceImpl {
         )))
     }
 
+    /// How a resumed step ends once the HTTPS listeners it changed were asked for their
+    /// certificates. Only a successful model step that changed a VHOST waits for them.
+    async fn resumed_https_listener_outcome(
+        &self,
+        transaction: &ReplicatedTransaction,
+        applying: &TransactionApplyingStep,
+    ) -> TransactionApplicationOutcome {
+        let Some(TransactionStepEffect::ReplaceDomainSchedule { .. }) = &applying.effect else {
+            return TransactionApplicationOutcome::Applied;
+        };
+        let planned = applying.result.impact.planned();
+        if !applying.result.result.success
+            || !planned.effects.changes_configuration_of(ModelKind::Vhost)
+        {
+            return TransactionApplicationOutcome::Applied;
+        }
+        let Err(failure) =
+            Box::pin(self.wait_for_https_listener_installation(applying.effect_revision)).await
+        else {
+            return TransactionApplicationOutcome::Applied;
+        };
+        Box::pin(self.https_listener_application_failure(
+            &transaction.domain,
+            &failure,
+            planned.pause.level(),
+        ))
+        .await
+    }
+
+    /// The outcome of a committed model step at `level` whose VHOSTs an HTTPS listener could not
+    /// install. A step that did not pause is rolled back by the entry that records its failure. A
+    /// paused step has already resumed, so it keeps its committed models like any other
+    /// activation failure.
+    pub(in crate::application) async fn https_listener_application_failure(
+        &self,
+        domain: &DomainName,
+        failure: &Report<CompletionError>,
+        level: QuiesceLevel,
+    ) -> TransactionApplicationOutcome {
+        let error = format!(
+            "committed transaction model step in domain '{}' failed HTTPS listener activation: \
+             {failure}",
+            domain.as_str()
+        );
+        self.broadcast_error(error.clone());
+        if level != QuiesceLevel::Dynamic {
+            return TransactionApplicationOutcome::Failed { error };
+        }
+        let inputs = Box::pin(self.inner.consensus.domain_planning_inputs(domain)).await;
+        TransactionApplicationOutcome::RolledBack {
+            error: format!("{error}; the model batch was rolled back"),
+            inputs: Box::new(inputs),
+        }
+    }
+
+    /// Makes the schedule a rolled-back step restored usable: every node applies it, and every
+    /// HTTPS listener presents the restored certificates again. The failure is already recorded,
+    /// so a node that cannot follow is reported rather than changing the outcome.
+    async fn apply_rolled_back_transaction_step(&self, domain: &DomainName) {
+        let restored_revision = self.inner.consensus.current_runtime_revision().await;
+        if let Err(error) = self.apply_current_cluster_state().await {
+            self.broadcast_error(format!(
+                "failed to apply the models restored in domain '{}': {error}",
+                domain.as_str()
+            ));
+            return;
+        }
+        if let Err(error) = self
+            .wait_for_https_listener_installation(restored_revision)
+            .await
+        {
+            self.broadcast_error(format!(
+                "the HTTPS listener TLS configuration restored in domain '{}' did not install: \
+                 {error}",
+                domain.as_str()
+            ));
+        }
+    }
+
     pub(in crate::application) async fn record_transaction_application_completion(
         &self,
         transaction: &ReplicatedTransaction,
-        application_failure: Option<String>,
+        outcome: TransactionApplicationOutcome,
     ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
         let applying = match &transaction.state {
             TransactionState::Committing(progress) => progress.applying.as_ref(),
@@ -1825,6 +1910,7 @@ impl SessionServiceImpl {
                 id: transaction.id.clone(),
             })
         })?;
+        let rolls_back = matches!(outcome, TransactionApplicationOutcome::RolledBack { .. });
         let completed = self
             .inner
             .consensus
@@ -1832,10 +1918,13 @@ impl SessionServiceImpl {
                 transaction.id.clone(),
                 applying.result.first_statement(),
                 current_timestamp(),
-                application_failure,
+                outcome,
             )
             .await
             .map_err(|error| Report::new(TransactionCommitError::Proposal(error)))?;
+        if rolls_back {
+            Box::pin(self.apply_rolled_back_transaction_step(&transaction.domain)).await;
+        }
 
         if let TransactionState::Finished(finished) = &completed.state {
             loop {
@@ -2281,7 +2370,11 @@ impl SessionServiceImpl {
         {
             return Ok(advanced);
         }
-        self.record_transaction_application_completion(&advanced, application_failure)
+        let outcome = match application_failure {
+            Some(error) => TransactionApplicationOutcome::Failed { error },
+            None => TransactionApplicationOutcome::Applied,
+        };
+        self.record_transaction_application_completion(&advanced, outcome)
             .await
     }
 

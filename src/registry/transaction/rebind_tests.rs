@@ -3,13 +3,14 @@
 //! Test harness outside the product layer order.
 
 use nervix_models::{
-    ModelKind, NodeRef, RebindResource, RebindResourceMembers, RebindResourceSelection, ResourceId,
+    ClusterNodeName, ModelKind, NodeRef, RebindResource, RebindResourceMembers,
+    RebindResourceSelection, ResourceId,
 };
 
 use super::{
     tests::{
-        FixtureUploadOutcome, node_ref, preserve_schedule, snapshot, stored_tls_vhost,
-        tls_bundle_uploads,
+        FixtureUploadOutcome, node_ref, preserve_schedule, scheduled_snapshot, snapshot,
+        stored_tls_vhost, tls_bundle_uploads,
     },
     *,
 };
@@ -284,4 +285,52 @@ fn rebind_rejects_a_version_that_has_not_completed() {
             .to_string()
             .contains("resource 'tls_bundle@2' is not a completed version in domain 'default'")
     );
+}
+
+#[test]
+fn a_tls_rebinding_refreshes_the_https_listener_without_pausing_a_running_domain() {
+    let domain = named("default");
+    let node = ClusterNodeName::parse("node-a")
+        .assured("the scheduler fixture node is an identifier-shaped literal");
+    let mut snapshot = scheduled_snapshot(DomainStatus::Running, [stored_tls_vhost("api", 1)]);
+    snapshot.resources.insert(named("tls_bundle"));
+    snapshot.resource_uploads = tls_bundle_uploads(&[
+        (1, FixtureUploadOutcome::Completed),
+        (2, FixtureUploadOutcome::Completed),
+    ]);
+
+    let plan = Registry::plan_transaction(
+        snapshot,
+        &[rebind_tls(RequestedResourceVersion::Number(2), None)],
+        0,
+        false,
+        move |graph, placement, _current, _attribution| TransactionScheduleDecision {
+            schedule: graph.map(|graph| {
+                graph.schedule_for_domain(&domain, std::slice::from_ref(&node), 0, placement)
+            }),
+            ownership_moves: CanonicalImpactSet::default(),
+        },
+    )
+    .assured("the VHOST binding can move to a completed version");
+
+    let step = plan.first_step().verified("the rebind forms one model run");
+    let planned = step.impact.planned();
+    assert_eq!(planned.pause, PauseRequirement::NoPause);
+    assert_eq!(planned.pause.level(), QuiesceLevel::Dynamic);
+    let activations = planned.effects.activations.as_slice();
+    assert_eq!(activations.len(), 1);
+    assert_eq!(
+        activations[0].node,
+        ImpactNodeCoverage::configuration(node_ref(ModelKind::Vhost, "api"))
+    );
+    assert_eq!(
+        activations[0].action,
+        ActivationAction::RefreshHttpsListener
+    );
+    assert!(planned.effects.rebuilds.is_empty());
+    assert!(planned.effects.force_flushes.is_empty());
+    let PlannedTransactionStepKind::Models { plan: model_plan } = &step.kind else {
+        unreachable!("a rebind produces a model plan");
+    };
+    assert!(model_plan.model_gate.affected_entities().is_empty());
 }

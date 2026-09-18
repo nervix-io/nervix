@@ -232,12 +232,13 @@ mod tests {
 
     use nervix_models::{
         AckMode, BranchKeyFingerprint, BranchSelection, ClusterNodeName, CreateEmitter,
-        CreateIngestor, CreateJunction, CreatePlacement, CreateRelay, CreateWasmProcessor,
-        DomainName, DomainSchedule, DynamicModelUpdate, EmitSink, EmitterPublishingMode,
-        EndpointIngestMode, ErrorPolicies, Expression, FlushPolicy, GeneralErrorPolicy,
-        IngestSource, Literal, Model, ModelKind, NodeRef, OutputBranch, PlacementPolicy,
-        ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching, RetryPolicy,
-        RouteConstruction, ScheduledNode, WasmProcessorLimits,
+        CreateIngestor, CreateJunction, CreatePlacement, CreateRelay, CreateVhost,
+        CreateWasmProcessor, DomainName, DomainSchedule, DynamicModelUpdate, EmitSink,
+        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, Expression, FlushPolicy,
+        GeneralErrorPolicy, IngestSource, Literal, Model, ModelKind, NodeRef, OutputBranch,
+        PlacementPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel,
+        RelayBranching, RetryPolicy, RouteConstruction, ScheduledNode, VhostTlsResource,
+        WasmProcessorLimits,
     };
     use nonzero_ext::nonzero;
 
@@ -426,6 +427,39 @@ mod tests {
                 relay: named("events"),
                 capacity: nonzero!(5usize),
             }])
+        );
+    }
+
+    #[test]
+    fn a_tls_version_change_is_a_dynamic_listener_refresh_while_another_bundle_rebuilds() {
+        fn vhost_schedule(resource: &str, version: u64) -> DomainSchedule {
+            DomainSchedule::new(
+                DomainName::parse("testing").expect("valid domain"),
+                vec![ScheduledNode::new(Model::Vhost(CreateVhost {
+                    name: named("edge"),
+                    hostnames: vec!["edge.example.com".to_string()],
+                    tls: Some(VhostTlsResource {
+                        resource: named(resource),
+                        version,
+                    }),
+                }))],
+                Vec::new(),
+            )
+        }
+
+        let existing = vhost_schedule("edge_tls", 1);
+        let rotated = vhost_schedule("edge_tls", 2);
+        let delta = ScheduleDelta::classify(&existing, &rotated);
+        assert_eq!(
+            delta,
+            ScheduleDelta::Dynamic(vec![DynamicModelUpdate::VhostTlsVersion {
+                vhost: named("edge"),
+            }])
+        );
+        assert_eq!(delta.quiesce_level(), QuiesceLevel::Dynamic);
+        assert_eq!(
+            ScheduleDelta::classify(&existing, &vhost_schedule("other_tls", 1)),
+            ScheduleDelta::Rebuild
         );
     }
 

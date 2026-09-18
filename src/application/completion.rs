@@ -2,7 +2,8 @@
 //!
 //! Layer: control plane.
 //!
-//! - **Owns.** The all-live-node visibility barrier for a fixed authoritative revision.
+//! - **Owns.** The all-live-node barriers for a fixed revision: authoritative visibility, runtime
+//!   preparation and readiness, and HTTPS listener installation.
 //! - **Depends on.** Consensus for the committed revision, cluster availability, and authenticated
 //!   incarnation-aware progress observations.
 //! - **Must not know.** Session transports, NSPL syntax, runtime tasks, or data-plane payloads.
@@ -13,7 +14,8 @@ use error_stack::Report;
 use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use nervix_consensus::Observer;
 use nervix_interconnect::{
-    ApplicationRevisionRequest, ApplicationRevisionResponse, HandlerRegistrationError, Transport,
+    ApplicationRevisionRequest, ApplicationRevisionResponse, HandlerRegistrationError,
+    HttpsListenerInstallation, HttpsListenerInstallationRequest, Transport,
 };
 use nervix_models::{ClusterNodeIdentity, ClusterNodeName};
 use thiserror::Error;
@@ -23,6 +25,7 @@ use triomphe::Arc;
 
 use super::{
     scheduling::RUNTIME_REVISION_READINESS_PROPAGATION_BOUND, session_service::SessionServiceImpl,
+    tls::HttpsListenerCertificates,
 };
 use crate::cluster::ClusterHandle;
 
@@ -110,6 +113,61 @@ async fn probe_application_revisions(
         }
     }
     completed_nodes
+}
+
+/// What one live process incarnation answered about its HTTPS listener.
+struct ProbedHttpsListener {
+    identity: ClusterNodeIdentity,
+    installation: HttpsListenerInstallation,
+}
+
+/// Asks every expected incarnation where its HTTPS listener stands against `revision`. The local
+/// incarnation answers in process; a remote incarnation that cannot be reached, or that answers
+/// under another identity, is still pending.
+async fn probe_https_listeners(
+    interconnect: &Transport,
+    certificates: &HttpsListenerCertificates,
+    expected_nodes: &BTreeSet<ClusterNodeIdentity>,
+    local_identity: &ClusterNodeIdentity,
+    revision: u64,
+) -> Vec<ProbedHttpsListener> {
+    let mut probes = FuturesUnordered::new();
+    for expected_identity in expected_nodes {
+        let expected_identity = expected_identity.clone();
+        let is_local = &expected_identity == local_identity;
+        let interconnect = interconnect.clone();
+        let certificates = certificates.clone();
+        probes.push(async move {
+            if is_local {
+                let installation = certificates.installation(revision).await;
+                return ProbedHttpsListener {
+                    identity: expected_identity,
+                    installation,
+                };
+            }
+            let response = interconnect
+                .request(
+                    expected_identity.node_id(),
+                    HttpsListenerInstallationRequest { revision },
+                )
+                .await;
+            let installation = match response {
+                Ok(response) if response.identity == expected_identity => response.installation,
+                Ok(_) | Err(_) => HttpsListenerInstallation::Pending,
+            };
+            ProbedHttpsListener {
+                identity: expected_identity,
+                installation,
+            }
+        });
+    }
+
+    let mut probed = Vec::new();
+    while let Some(listener) = probes.next().await {
+        tokio::task::consume_budget().await;
+        probed.push(listener);
+    }
+    probed
 }
 
 pub(in crate::application) async fn wait_for_application_revision(
@@ -216,12 +274,31 @@ pub(in crate::application) enum CompletionError {
         pending_nodes: Vec<ClusterNodeName>,
     },
     #[error(
-        "cannot represent an authoritative visibility deadline from node-unavailability timeout \
+        "cannot represent a completion deadline from node-unavailability timeout \
          {node_unavailability_timeout:?} and propagation bound {propagation_bound:?}"
     )]
     DeadlineOverflow {
         node_unavailability_timeout: tokio::time::Duration,
         propagation_bound: tokio::time::Duration,
+    },
+    /// The reason is the failing node's own description, because the installation ran inside that
+    /// node's listener.
+    #[error(
+        "failed to install the HTTPS listener TLS configuration on node '{node}' for runtime \
+         revision {revision}: {reason}"
+    )]
+    HttpsListenerInstallation {
+        node: ClusterNodeName,
+        revision: u64,
+        reason: String,
+    },
+    #[error(
+        "timed out waiting for the HTTPS listener TLS configuration of runtime revision \
+         {revision} on nodes {pending_nodes:?}"
+    )]
+    HttpsListenerPending {
+        revision: u64,
+        pending_nodes: Vec<ClusterNodeName>,
     },
 }
 
@@ -272,6 +349,81 @@ impl SessionServiceImpl {
                 pending_nodes: timeout.pending_nodes,
             })
         })
+    }
+
+    /// Waits until the HTTPS listener of every live process incarnation installed the TLS VHOSTs
+    /// of `revision` or of a later runtime revision. The first incarnation that reports a failed
+    /// installation ends the wait with that failure.
+    pub(in crate::application) async fn wait_for_https_listener_installation(
+        &self,
+        revision: u64,
+    ) -> Result<(), Report<CompletionError>> {
+        let node_unavailability_timeout = self.inner.cluster.node_unavailability_timeout();
+        let Some(wait_budget) =
+            node_unavailability_timeout.checked_add(RUNTIME_REVISION_READINESS_PROPAGATION_BOUND)
+        else {
+            return Err(Report::new(CompletionError::DeadlineOverflow {
+                node_unavailability_timeout,
+                propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
+            }));
+        };
+        let Some(deadline) = tokio::time::Instant::now().checked_add(wait_budget) else {
+            return Err(Report::new(CompletionError::DeadlineOverflow {
+                node_unavailability_timeout,
+                propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
+            }));
+        };
+        let local_identity = self.inner.cluster.local_node_identity().await;
+
+        loop {
+            tokio::task::consume_budget().await;
+            let gossip = self.inner.cluster.availability_state().await;
+            let mut expected_nodes = gossip.live_identities();
+            expected_nodes.insert(local_identity.clone());
+            let probed = probe_https_listeners(
+                &self.inner.interconnect,
+                &self.inner.https_certificates,
+                &expected_nodes,
+                &local_identity,
+                revision,
+            )
+            .await;
+
+            let mut pending_nodes = Vec::new();
+            for listener in probed {
+                match listener.installation {
+                    HttpsListenerInstallation::Installed { .. } => {}
+                    HttpsListenerInstallation::Failed {
+                        revision: failed_revision,
+                        reason,
+                    } => {
+                        return Err(Report::new(CompletionError::HttpsListenerInstallation {
+                            node: listener.identity.node_id().clone(),
+                            revision: failed_revision,
+                            reason,
+                        }));
+                    }
+                    HttpsListenerInstallation::Pending => {
+                        pending_nodes.push(listener.identity.node_id().clone());
+                    }
+                }
+            }
+            if pending_nodes.is_empty() {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                pending_nodes.sort();
+                return Err(Report::new(CompletionError::HttpsListenerPending {
+                    revision,
+                    pending_nodes,
+                }));
+            }
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(deadline) => {}
+                _ = tokio::time::sleep(APPLICATION_REVISION_PROBE_RETRY) => {}
+            }
+        }
     }
 
     pub(in crate::application) async fn wait_for_runtime_revision(

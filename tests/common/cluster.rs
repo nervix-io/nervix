@@ -1848,6 +1848,77 @@ impl Cluster {
         })
     }
 
+    /// Posts `payload` to the HTTPS listener of every node in turn until `stop` fires, opening a
+    /// new TLS connection for every post so each one performs its own handshake.
+    pub(crate) fn spawn_https_publish_loop(
+        &self,
+        host: String,
+        path: String,
+        payload: String,
+        trusted_ca_pems: &[String],
+        stop: CancellationToken,
+    ) -> io::Result<JoinHandle<HttpsPublishLoopOutcome>> {
+        struct NodeTarget {
+            node_id: String,
+            uri: String,
+            client: reqwest::Client,
+        }
+
+        let mut targets = Vec::new();
+        for node_id in self.node_ids() {
+            let handle = self
+                .nodes
+                .get(&node_id)
+                .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+            let mut builder = reqwest::Client::builder()
+                .resolve(&host, parse_addr(&handle.spec.https_addr())?)
+                .pool_max_idle_per_host(0);
+            for ca_pem in trusted_ca_pems {
+                let certificate =
+                    reqwest::Certificate::from_pem(ca_pem.as_bytes()).map_err(io::Error::other)?;
+                builder = builder.add_root_certificate(certificate);
+            }
+            let client = builder.build().map_err(io::Error::other)?;
+            targets.push(NodeTarget {
+                uri: handle.spec.https_uri(&host, &path),
+                node_id,
+                client,
+            });
+        }
+
+        Ok(tokio::spawn(async move {
+            let mut outcome = HttpsPublishLoopOutcome::default();
+            while !stop.is_cancelled() {
+                tokio::task::consume_budget().await;
+                for target in &targets {
+                    let response = target
+                        .client
+                        .post(target.uri.as_str())
+                        .body(payload.clone())
+                        .send()
+                        .await;
+                    match response {
+                        Ok(response) if response.status() == reqwest::StatusCode::ACCEPTED => {
+                            outcome.accepted = outcome
+                                .accepted
+                                .checked_add(1)
+                                .expect("a scenario posts fewer than usize::MAX payloads");
+                        }
+                        Ok(response) => outcome.failures.push(format!(
+                            "node '{}' answered with status {}",
+                            target.node_id,
+                            response.status()
+                        )),
+                        Err(error) => outcome
+                            .failures
+                            .push(format!("node '{}' failed: {error}", target.node_id)),
+                    }
+                }
+            }
+            outcome
+        }))
+    }
+
     pub(crate) async fn publish_http_with_headers(
         &self,
         node_id: &str,
@@ -3004,6 +3075,13 @@ async fn publish_websocket(
         .map_err(io::Error::other)?;
     let _ = relay.close(None).await;
     Ok(())
+}
+
+/// What the HTTPS listeners answered while a background publish loop ran.
+#[derive(Debug, Default)]
+pub(crate) struct HttpsPublishLoopOutcome {
+    pub(crate) accepted: usize,
+    pub(crate) failures: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
