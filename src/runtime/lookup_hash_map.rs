@@ -669,7 +669,7 @@ mod tests {
         let plan = plan_filter_map_messages(
             "deduplicator",
             &named::<ModelName>("project_titles"),
-            "FILTER-MAP",
+            MessageErrorOperation::Set,
             &program,
             batch,
             Timestamp::now(),

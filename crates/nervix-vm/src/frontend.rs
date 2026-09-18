@@ -109,6 +109,10 @@ pub enum FrontendErrorKind {
     MessageUnavailableAfterSetOnlyFinalization,
     #[error("input is unavailable after set-only output finalization")]
     InputUnavailableAfterSetOnlyFinalization,
+    #[error("bare field reads are unavailable in this expression context")]
+    BareFieldReadUnavailable,
+    #[error("bare SET targets are unavailable in this construction context")]
+    BareSetTargetUnavailable,
     #[error("required output field '{field}' remains uninitialized")]
     RequiredOutputFieldUninitialized { field: String },
     #[error("required branch field '{field}' remains uninitialized")]
@@ -313,17 +317,62 @@ fn operations_span(assignments: usize, has_filter: bool, invocations: usize) -> 
     (0..end).into()
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct SemanticNamespaces<'a> {
-    pub bare_read: &'a str,
-    pub bare_write: &'a str,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticScopePolicy<'a> {
+    ReadWrite {
+        read_namespace: &'a str,
+        write_namespace: &'a str,
+    },
+    ReadOnly {
+        namespace: &'a str,
+    },
+    WriteOnly {
+        namespace: &'a str,
+    },
+    Unavailable,
 }
 
-impl<'a> SemanticNamespaces<'a> {
-    pub const fn new(bare_read: &'a str, bare_write: &'a str) -> Self {
-        Self {
-            bare_read,
-            bare_write,
+impl<'a> SemanticScopePolicy<'a> {
+    pub const fn read_write(read_namespace: &'a str, write_namespace: &'a str) -> Self {
+        Self::ReadWrite {
+            read_namespace,
+            write_namespace,
+        }
+    }
+
+    pub const fn read_only(namespace: &'a str) -> Self {
+        Self::ReadOnly { namespace }
+    }
+
+    pub const fn write_only(namespace: &'a str) -> Self {
+        Self::WriteOnly { namespace }
+    }
+
+    pub const fn unavailable() -> Self {
+        Self::Unavailable
+    }
+
+    fn read_namespace(self, span: Span) -> FrontendResult<&'a str> {
+        match self {
+            Self::ReadWrite { read_namespace, .. } => Ok(read_namespace),
+            Self::ReadOnly { namespace } => Ok(namespace),
+            Self::WriteOnly { .. } | Self::Unavailable => Err(FrontendError::report(
+                span,
+                FrontendErrorKind::BareFieldReadUnavailable,
+            )),
+        }
+    }
+
+    fn write_namespace(self, span: Span) -> FrontendResult<&'a str> {
+        match self {
+            Self::ReadWrite {
+                write_namespace, ..
+            } => Ok(write_namespace),
+            Self::WriteOnly { namespace } => Ok(namespace),
+            Self::ReadOnly { .. } | Self::Unavailable => Err(FrontendError::report(
+                span,
+                FrontendErrorKind::BareSetTargetUnavailable,
+            )),
         }
     }
 }
@@ -451,7 +500,10 @@ pub fn lower_transforming_route(
             })
         })
         .collect::<FrontendResult<Vec<_>>>()?;
-    lower_route_construction(&normalized, SemanticNamespaces::new("output", "output"))
+    lower_route_construction(
+        &normalized,
+        SemanticScopePolicy::read_write("output", "output"),
+    )
 }
 
 /// Lowers the ordered construction of a new branch key.
@@ -567,7 +619,10 @@ pub fn lower_branch_construction(
         RequiredFieldTarget::Branch,
         operations_span(assignments.len(), false, 0),
     )?;
-    lower_route_construction(&normalized, SemanticNamespaces::new("branch", "branch"))
+    lower_route_construction(
+        &normalized,
+        SemanticScopePolicy::read_write("branch", "branch"),
+    )
 }
 
 /// Lowers a route that starts with an empty output and has no implicit input or generated base.
@@ -658,10 +713,7 @@ pub fn lower_set_only_route(
         })
         .transpose()?;
 
-    lower_route_construction(
-        &normalized,
-        SemanticNamespaces::new("__invalid_bare_read", "output"),
-    )
+    lower_route_construction(&normalized, SemanticScopePolicy::write_only("output"))
 }
 
 /// Lowers a route predicate that runs after a set-only output has been finalized.
@@ -684,7 +736,7 @@ pub fn lower_finalized_output_filter(
             where_clause: Some(resolved),
             ..RouteConstruction::default()
         },
-        SemanticNamespaces::new("output", "__invalid_finalized_output_target"),
+        SemanticScopePolicy::read_only("output"),
     )
 }
 
@@ -776,7 +828,10 @@ pub fn lower_generated_route(
         })
         .transpose()?;
 
-    lower_route_construction(&normalized, SemanticNamespaces::new("generated", "output"))
+    lower_route_construction(
+        &normalized,
+        SemanticScopePolicy::read_write("generated", "output"),
+    )
 }
 
 fn resolve_generated_expression(
@@ -1203,7 +1258,7 @@ fn resolve_expression(
 
 pub fn lower_route_construction(
     construction: &RouteConstruction,
-    namespaces: SemanticNamespaces<'_>,
+    scope_policy: SemanticScopePolicy<'_>,
 ) -> FrontendResult<SpannedNode<Program>> {
     if construction.inherit.is_some() {
         return Err(FrontendError::report(
@@ -1217,8 +1272,9 @@ pub fn lower_route_construction(
         .iter()
         .enumerate()
         .map(|(index, assignment)| {
+            let operation_span = operation_span(index);
             let relay = match assignment.target.scope {
-                AssignmentTargetScope::Bare => namespaces.bare_write,
+                AssignmentTargetScope::Bare => scope_policy.write_namespace(operation_span)?,
                 AssignmentTargetScope::Message => "message",
                 AssignmentTargetScope::Output => "output",
                 AssignmentTargetScope::Branch => "branch",
@@ -1228,11 +1284,7 @@ pub fn lower_route_construction(
                     relay: relay.to_string(),
                     field: assignment.target.field.as_str().to_string(),
                 },
-                lower_expression_with_span(
-                    &assignment.value,
-                    namespaces.bare_read,
-                    operation_span(index),
-                )?,
+                lower_expression_with_span(&assignment.value, scope_policy, operation_span)?,
             ))
         })
         .collect::<FrontendResult<Vec<_>>>()?;
@@ -1242,7 +1294,7 @@ pub fn lower_route_construction(
         .map(|expression| {
             lower_expression_with_span(
                 expression,
-                namespaces.bare_read,
+                scope_policy,
                 operation_span(construction.assignments.len()),
             )
         })
@@ -1268,11 +1320,7 @@ pub fn lower_route_construction(
                         .arguments
                         .iter()
                         .map(|argument| {
-                            lower_expression_with_span(
-                                argument,
-                                namespaces.bare_read,
-                                invocation_span,
-                            )
+                            lower_expression_with_span(argument, scope_policy, invocation_span)
                         })
                         .collect::<FrontendResult<Vec<_>>>()?,
                 },
@@ -1292,15 +1340,15 @@ pub fn lower_route_construction(
 
 pub fn lower_expression(
     expression: &ModelExpression,
-    bare_read_namespace: &str,
+    scope_policy: SemanticScopePolicy<'_>,
 ) -> FrontendResult<SpannedExpr> {
     let span: Span = (0..0).into();
-    lower_expression_with_span(expression, bare_read_namespace, span)
+    lower_expression_with_span(expression, scope_policy, span)
 }
 
 fn lower_expression_with_span(
     expression: &ModelExpression,
-    bare_read_namespace: &str,
+    scope_policy: SemanticScopePolicy<'_>,
     span: Span,
 ) -> FrontendResult<SpannedExpr> {
     let expression = match expression {
@@ -1313,7 +1361,7 @@ fn lower_expression_with_span(
         }),
         ModelExpression::Field(reference) => {
             let relay = match &reference.scope {
-                FieldScope::Bare => bare_read_namespace.to_string(),
+                FieldScope::Bare => scope_policy.read_namespace(span)?.to_string(),
                 FieldScope::Message => "message".to_string(),
                 FieldScope::Input => "input".to_string(),
                 FieldScope::Output => "output".to_string(),
@@ -1340,11 +1388,7 @@ fn lower_expression_with_span(
                 ModelUnaryOperator::Negate => UnaryOp::Neg,
                 ModelUnaryOperator::Not => UnaryOp::Not,
             },
-            expr: Box::new(lower_expression_with_span(
-                expression,
-                bare_read_namespace,
-                span,
-            )?),
+            expr: Box::new(lower_expression_with_span(expression, scope_policy, span)?),
         },
         ModelExpression::Binary {
             operator,
@@ -1366,19 +1410,11 @@ fn lower_expression_with_span(
                 ModelBinaryOperator::And => BinaryOp::And,
                 ModelBinaryOperator::Or => BinaryOp::Or,
             },
-            left: Box::new(lower_expression_with_span(left, bare_read_namespace, span)?),
-            right: Box::new(lower_expression_with_span(
-                right,
-                bare_read_namespace,
-                span,
-            )?),
+            left: Box::new(lower_expression_with_span(left, scope_policy, span)?),
+            right: Box::new(lower_expression_with_span(right, scope_policy, span)?),
         },
         ModelExpression::Cast { expression, target } => Expr::Cast {
-            expr: Box::new(lower_expression_with_span(
-                expression,
-                bare_read_namespace,
-                span,
-            )?),
+            expr: Box::new(lower_expression_with_span(expression, scope_policy, span)?),
             data_type: scalar_data_type(target, span)?,
         },
         ModelExpression::Call {
@@ -1387,7 +1423,7 @@ fn lower_expression_with_span(
         } => {
             let args = arguments
                 .iter()
-                .map(|argument| lower_expression_with_span(argument, bare_read_namespace, span))
+                .map(|argument| lower_expression_with_span(argument, scope_policy, span))
                 .collect::<FrontendResult<Vec<_>>>()?;
             match function.as_str().parse::<DatetimeFunctionName>() {
                 Ok(datetime) => datetime.lower_call(args, span)?,
@@ -1404,7 +1440,7 @@ fn lower_expression_with_span(
             function: FunctionName::Udf(function.as_str().to_string()),
             args: arguments
                 .iter()
-                .map(|argument| lower_expression_with_span(argument, bare_read_namespace, span))
+                .map(|argument| lower_expression_with_span(argument, scope_policy, span))
                 .collect::<FrontendResult<Vec<_>>>()?,
         },
         ModelExpression::Array(_) => {
@@ -1420,12 +1456,12 @@ fn lower_expression_with_span(
         } => Expr::Case {
             operand: None,
             branches: vec![CaseArm {
-                when: lower_expression_with_span(condition, bare_read_namespace, span)?,
-                result: lower_expression_with_span(then_result, bare_read_namespace, span)?,
+                when: lower_expression_with_span(condition, scope_policy, span)?,
+                result: lower_expression_with_span(then_result, scope_policy, span)?,
             }],
             else_result: Some(Box::new(lower_expression_with_span(
                 else_result,
-                bare_read_namespace,
+                scope_policy,
                 span,
             )?)),
         },
@@ -1437,27 +1473,21 @@ fn lower_expression_with_span(
             operand: operand
                 .as_ref()
                 .map(|operand| {
-                    lower_expression_with_span(operand, bare_read_namespace, span).map(Box::new)
+                    lower_expression_with_span(operand, scope_policy, span).map(Box::new)
                 })
                 .transpose()?,
             branches: branches
                 .iter()
                 .map(|branch| {
                     Ok(CaseArm {
-                        when: lower_expression_with_span(&branch.when, bare_read_namespace, span)?,
-                        result: lower_expression_with_span(
-                            &branch.result,
-                            bare_read_namespace,
-                            span,
-                        )?,
+                        when: lower_expression_with_span(&branch.when, scope_policy, span)?,
+                        result: lower_expression_with_span(&branch.result, scope_policy, span)?,
                     })
                 })
                 .collect::<FrontendResult<Vec<_>>>()?,
             else_result: else_result
                 .as_ref()
-                .map(|result| {
-                    lower_expression_with_span(result, bare_read_namespace, span).map(Box::new)
-                })
+                .map(|result| lower_expression_with_span(result, scope_policy, span).map(Box::new))
                 .transpose()?,
         },
     };
@@ -2188,6 +2218,30 @@ mod tests {
             lower_finalized_output_filter(&expression("input.source = 1"), &output),
             FrontendErrorKind::InputUnavailableAfterSetOnlyFinalization,
         );
+
+        let unavailable_bare_read = RouteConstruction {
+            where_clause: Some(expression("source = 1")),
+            ..RouteConstruction::default()
+        };
+        assert_frontend_error(
+            lower_route_construction(
+                &unavailable_bare_read,
+                SemanticScopePolicy::write_only("output"),
+            ),
+            FrontendErrorKind::BareFieldReadUnavailable,
+        );
+
+        let unavailable_bare_target = RouteConstruction {
+            assignments: vec![assignment(AssignmentTargetScope::Bare, "target", "1")],
+            ..RouteConstruction::default()
+        };
+        assert_frontend_error(
+            lower_route_construction(
+                &unavailable_bare_target,
+                SemanticScopePolicy::read_only("output"),
+            ),
+            FrontendErrorKind::BareSetTargetUnavailable,
+        );
     }
 
     #[test]
@@ -2315,12 +2369,18 @@ mod tests {
             ..RouteConstruction::default()
         };
         assert_frontend_error(
-            lower_route_construction(&unexpanded, SemanticNamespaces::new("input", "output")),
+            lower_route_construction(
+                &unexpanded,
+                SemanticScopePolicy::read_write("input", "output"),
+            ),
             FrontendErrorKind::UnexpandedInheritance,
         );
 
         assert_frontend_error(
-            lower_expression(&ModelExpression::Array(Vec::new()), "input"),
+            lower_expression(
+                &ModelExpression::Array(Vec::new()),
+                SemanticScopePolicy::read_only("input"),
+            ),
             FrontendErrorKind::ArrayExpressionOutsideWindow,
         );
 
@@ -2333,7 +2393,7 @@ mod tests {
                     expression: Box::new(ModelExpression::Literal(ModelLiteral::I64(1))),
                     target: target.clone(),
                 },
-                "input",
+                SemanticScopePolicy::read_only("input"),
             ),
             FrontendErrorKind::UnsupportedCollectionCast {
                 expected: CastTargetKind::Scalar,
@@ -2343,8 +2403,9 @@ mod tests {
     }
 
     fn lowered_call(source: &str) -> (FunctionName, Vec<SpannedExpr>) {
-        let lowered = lower_expression(&expression(source), "input")
-            .assured("the test call has valid literal arguments");
+        let lowered =
+            lower_expression(&expression(source), SemanticScopePolicy::read_only("input"))
+                .assured("the test call has valid literal arguments");
         let Expr::Call { function, args } = lowered.inner else {
             panic!("`{source}` lowers to a call");
         };
@@ -2508,7 +2569,10 @@ mod tests {
             ),
         ];
         for (source, kind) in failures {
-            assert_frontend_error(lower_expression(&expression(source), "input"), kind);
+            assert_frontend_error(
+                lower_expression(&expression(source), SemanticScopePolicy::read_only("input")),
+                kind,
+            );
         }
     }
 

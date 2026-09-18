@@ -19,7 +19,7 @@ use nervix_models::{
     RouteConstruction, SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName,
 };
 use nervix_vm::{
-    CompileBinding, CompileOptions, OutputMode, SemanticNamespaces,
+    CompileBinding, CompileOptions, OutputMode, SemanticScopePolicy,
     compile_program_with_options_for_bindings_with_sensitivity, lower_route_construction,
     lower_transforming_route, program::FunctionName,
 };
@@ -634,7 +634,7 @@ pub(in crate::registry) fn validate_ingestor_filter_where_for_internal_schemas(
             where_clause: Some(filter_where.clone()),
             ..RouteConstruction::default()
         },
-        SemanticNamespaces::new("input", "__invalid_filter_target"),
+        SemanticScopePolicy::read_only("input"),
     )
     .map_err(|reason| {
         Report::new(RegistryError::InvalidModel {
@@ -865,7 +865,7 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
     } else {
         lower_route_construction(
             &emitter.construction,
-            SemanticNamespaces::new("input", "__invalid_direct_emitter_output"),
+            SemanticScopePolicy::read_only("input"),
         )
     }
     .map_err(|reason| {

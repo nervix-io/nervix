@@ -250,7 +250,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
             ConsensusCommand::PutDomainAndSchedule {
                 inputs: Box::new(create_inputs),
                 domain: Box::new(domain.clone()),
-                schedule: Some(Box::new(created.clone())),
+                schedule: Some(Box::new(created)),
                 mutation: None,
             },
         )

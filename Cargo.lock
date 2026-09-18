@@ -6748,6 +6748,7 @@ dependencies = [
  "strum 0.26.3",
  "thiserror 2.0.20",
  "triomphe",
+ "url",
  "uuid",
 ]
 
@@ -6904,6 +6905,7 @@ dependencies = [
  "mysql_async",
  "nervix-approx-into",
  "nervix-client-core",
+ "nervix-client-wire",
  "nervix-consensus",
  "nervix-dataflow-graph",
  "nervix-execution",
@@ -9160,7 +9162,7 @@ dependencies = [
 [[package]]
 name = "rdkafka"
 version = "0.39.0"
-source = "git+https://github.com/nervix-io/rust-rdkafka.git?branch=aws-lc#e25f31866d6a0173e08d94f1c2a3584f037aefc9"
+source = "git+https://github.com/nervix-io/rust-rdkafka.git?branch=nervix-aws-lc-fetch-stop#af028e3d8a11ffb8c1d842f036361a3ac74acfa1"
 dependencies = [
  "futures-channel",
  "futures-util",
@@ -9177,7 +9179,7 @@ dependencies = [
 [[package]]
 name = "rdkafka-sys"
 version = "4.10.0+2.12.1"
-source = "git+https://github.com/nervix-io/rust-rdkafka.git?branch=aws-lc#e25f31866d6a0173e08d94f1c2a3584f037aefc9"
+source = "git+https://github.com/nervix-io/rust-rdkafka.git?branch=nervix-aws-lc-fetch-stop#af028e3d8a11ffb8c1d842f036361a3ac74acfa1"
 dependencies = [
  "aws-lc-sys 0.44.0",
  "cmake",

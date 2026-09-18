@@ -103,6 +103,7 @@ multer = { workspace = true }
 mysql_async = { workspace = true, features = ["default-rustls"] }
 nervix-approx-into = { workspace = true }
 nervix-client-core = { workspace = true }
+nervix-client-wire = { workspace = true }
 nervix-consensus = { workspace = true }
 nervix-dataflow-graph = { workspace = true }
 nervix-execution = { workspace = true }
@@ -237,6 +238,11 @@ required-features = ["testing"]
 [[bench]]
 harness = false
 name = "relay_interaction"
+required-features = ["benchmarks"]
+
+[[bench]]
+harness = false
+name = "subscription_row_encoding"
 required-features = ["benchmarks"]
 
 [workspace]
@@ -461,8 +467,8 @@ rcgen = { version = "0.13", default-features = false, features = [
   "aws_lc_rs",
   "pem",
 ] }
-# PR #850 adds AWS-LC support to librdkafka and pins PR #1184, which exports its native library paths.
-rdkafka = { git = "https://github.com/nervix-io/rust-rdkafka.git", branch = "aws-lc", default-features = false }
+# Keep the AWS-LC support from PR #850 and the librdkafka 2.12.1 backport of duplicate FETCH_STOP fix #5574.
+rdkafka = { git = "https://github.com/nervix-io/rust-rdkafka.git", branch = "nervix-aws-lc-fetch-stop", default-features = false }
 redis = { version = "1.1.0", default-features = false, features = [
   "aio",
   "bb8",

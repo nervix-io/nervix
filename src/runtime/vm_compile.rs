@@ -604,7 +604,7 @@ pub(super) fn compile_message_error_set_program(
             assignments: assignments.to_vec(),
             ..RouteConstruction::default()
         },
-        SemanticNamespaces::new("error_output", "error_output"),
+        SemanticScopePolicy::read_write("error_output", "error_output"),
     )
     .change_context(RuntimeVmCompileError::InvalidMessageErrorSet {
         domain: domain.clone(),
@@ -808,7 +808,7 @@ pub(super) fn compile_scoped_filter_program(
                 where_clause: Some(filter.clone()),
                 ..RouteConstruction::default()
             },
-            SemanticNamespaces::new("input", "__invalid_filter_target"),
+            SemanticScopePolicy::read_only("input"),
         ),
         RuntimeFilterScope::FinalizedOutput => lower_finalized_output_filter(filter, &schema),
     }
@@ -1343,7 +1343,7 @@ pub(in crate::runtime) fn compile_emitter_filter_map_program(
     } else {
         lower_route_construction(
             &emitter.construction,
-            SemanticNamespaces::new("input", "__invalid_direct_emitter_output"),
+            SemanticScopePolicy::read_only("input"),
         )
     }
     .map_err(|reason| RuntimeError::BuildDomainExecution {
@@ -1625,7 +1625,7 @@ pub(in crate::runtime) fn compile_key_projection_program(
             assignments,
             ..RouteConstruction::default()
         },
-        SemanticNamespaces::new("input", "input"),
+        SemanticScopePolicy::read_write("input", "input"),
     )
     .change_context(RuntimeVmCompileError::InvalidKeyProjection {
         target: target.clone(),
@@ -1692,7 +1692,7 @@ pub(super) async fn evaluate_constant_expression_vm(
             assignments: vec![assignment],
             ..RouteConstruction::default()
         },
-        SemanticNamespaces::new("input", OUTPUT_NAMESPACE),
+        SemanticScopePolicy::read_write("input", OUTPUT_NAMESPACE),
     )
     .change_context(RuntimeVmCompileError::InvalidConstantExpression)?;
     let empty_schema = StdArc::new(arrow_schema::Schema::empty());
@@ -2511,6 +2511,28 @@ mod tests {
             .await
             .expect("finalized output filter must execute")
             .is_none()
+        );
+
+        let unavailable_input = compile_finalized_output_filter_program(
+            &domain("default"),
+            &named("aggregate_route"),
+            Some(&expression("input.total >= 100")),
+            output_schema.arrow_schema(),
+            VmSchemaSensitivity::default(),
+            RuntimeVmCompileContext {
+                available_materialized_streams: &HashMap::default(),
+                available_lookups: &HashMap::default(),
+                current_branching: &[],
+                current_branch_schema: None,
+                current_branch_sensitivity: None,
+                udfs: None,
+            },
+        )
+        .expect_err("input must be unavailable after set-only output finalization");
+        let rendered = format!("{unavailable_input:#}");
+        assert!(
+            rendered.contains("input is unavailable after set-only output finalization"),
+            "unexpected finalized-output scope error: {rendered}"
         );
     }
 }

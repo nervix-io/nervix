@@ -770,8 +770,9 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
-    use nervix_models::{DomainConfig, DomainPace};
+    use meticulous::{OptionExt as _, ResultExt as _};
+    use nervix_models::{DomainConfig, DomainPace, PlacementPolicy};
+    use nervix_recovery::Discarded as _;
 
     use super::{
         super::test_fixtures::{TestService, build_test_service},
@@ -850,5 +851,41 @@ mod tests {
         assert_eq!(resumed, first);
 
         let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn domain_placement_commit_uses_its_captured_planning_basis() {
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(true).await;
+        let domain = DomainName::parse("default").assured("the test domain name is valid");
+
+        let result = service
+            .alter_domain(
+                &domain,
+                AlterDomain {
+                    policy: PlacementPolicy::RequireColocation,
+                },
+            )
+            .await;
+
+        assert!(result.success, "placement alteration failed: {result:?}");
+        assert_eq!(
+            service
+                .inner
+                .consensus
+                .current_domain(&domain)
+                .await
+                .assured("the altered domain remains present")
+                .config
+                .placement,
+            PlacementPolicy::RequireColocation
+        );
+
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
     }
 }

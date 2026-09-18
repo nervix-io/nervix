@@ -60,6 +60,7 @@
   - [Control Plane](./control-plane.md)
   - [Command Completion](./command-completion.md)
   - [Data Plane](./data-plane.md)
+  - [Data-Plane Concurrency](./data-plane-concurrency.md)
   - [Relay](./relay.md)
   - [Shutdown And Recovery](./shutdown.md)
 - [Developing Nervix](./developing-nervix.md)

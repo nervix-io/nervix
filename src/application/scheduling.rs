@@ -35,7 +35,7 @@ use super::{
         AssignmentRelocation, DrainMove, format_planned_ownership_move,
         mark_complete_ownership_transitions, planned_ownership_moves,
     },
-    peer_grpc::{grpc_client_connect_options, grpc_uri_from_advertise_addr},
+    peer_grpc::grpc_client_connect_options,
     schedule_planning::{DomainSchedulePlanningSnapshot, PreparedDomainSchedule},
     session_service::SessionServiceImpl,
     shutdown::{ShutdownDeadline, ShutdownPhaseOutcome},
@@ -1092,15 +1092,15 @@ impl SessionServiceImpl {
         }
     }
 
+    /// Where the leader's session service is, or `None` while it has not advertised one.
     async fn leader_grpc_uri(&self, leader_id: &ClusterNodeName) -> Option<String> {
-        self.inner
-            .cluster
-            .gossip_state()
-            .await
+        let gossip = self.inner.cluster.gossip_state().await;
+        let leader = gossip
             .live_nodes
             .into_iter()
-            .find(|node| node.node_id == *leader_id)
-            .and_then(|node| grpc_uri_from_advertise_addr(&node.grpc_advertise_addr))
+            .find(|node| node.node_id == *leader_id)?;
+        let client_url = leader.client_url?;
+        Some(client_url.to_string())
     }
 
     #[cfg(test)]
@@ -2066,3 +2066,7 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "scheduling_publication_tests.rs"]
+mod publication_tests;
