@@ -344,7 +344,8 @@ impl Runtime {
                     domain: domain.as_str().to_string(),
                     reason: error.to_string(),
                 })?;
-        self.install_state_identities_from_graph(domain, &graph);
+        let scheduled_nodes = graph.unplaced_schedule_nodes();
+        self.install_state_identities_from_graph(domain, &scheduled_nodes);
 
         let domain_graph = self.domain_graph_handle(domain).await;
         domain_graph.store(Some(StdArc::new(graph.clone())));
@@ -497,9 +498,17 @@ impl Runtime {
                         ),
                     });
                 };
-                let expiring_state = branch_relays
-                    .contains(&relay.name)
-                    .then(|| self.expiring_stream_state(domain, &relay.name));
+                let expiring_state = if branch_relays.contains(&relay.name) {
+                    let state =
+                        self.expiring_stream_state(domain, &relay.name)
+                            .map_err(|error| RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: error.to_string(),
+                            })?;
+                    Some(state)
+                } else {
+                    None
+                };
                 let fanout = self
                     .relay_boundary_fanout_with_capacity(
                         domain,
@@ -903,22 +912,7 @@ impl Runtime {
         self.install_domain_execution(
             domain,
             DomainExecution {
-                schedule: DomainSchedule::new(
-                    domain.clone(),
-                    graph
-                        .nodes()
-                        .into_iter()
-                        .map(|node| {
-                            let fingerprint = graph
-                                .schema_fingerprint(node.kind, &node.identifier)
-                                .unwrap_or([0; 32]);
-                            ScheduledNode::new((*node.config).clone())
-                                .with_resolved_branching(node.resolved_branching)
-                                .with_schema_fingerprint(fingerprint)
-                        })
-                        .collect::<Vec<_>>(),
-                    Vec::new(),
-                ),
+                schedule: DomainSchedule::new(domain.clone(), scheduled_nodes, Vec::new()),
                 start_version,
                 domain_clock,
                 shutdown: shutdown_tx,

@@ -32,6 +32,12 @@ pub(crate) enum MaterializedReadError {
         relay: RelayName,
         branch: Option<BranchKey>,
     },
+    #[error("materialized relay '{relay}' in domain '{domain}' has no published state identity")]
+    StateIdentity {
+        domain: DomainName,
+        relay: RelayName,
+        branch: Option<BranchKey>,
+    },
     #[error("materialized relay '{relay}' is declared more than once in domain '{domain}'")]
     DuplicateDependency {
         domain: DomainName,
@@ -141,13 +147,32 @@ impl Runtime {
             }
         }
         if !found {
-            let placement = self.state_placement(
+            let placement = match self.state_placement(
                 domain,
-                RuntimeState::MaterializedRelay,
+                RuntimeStateKind::MaterializedRelay,
                 ModelKind::Relay,
                 relay,
                 None,
-            );
+            ) {
+                Ok(placement) => placement,
+                // This node has applied no schedule that carries the relay, so it holds no state
+                // for it: the local report is empty.
+                Err(error)
+                    if matches!(
+                        error.current_context(),
+                        StateIdentityError::SchemaFingerprintUnpublished { .. }
+                    ) =>
+                {
+                    return Ok(reports);
+                }
+                Err(error) => {
+                    return Err(error.change_context(MaterializedReadError::StateIdentity {
+                        domain: domain.clone(),
+                        relay: relay.clone(),
+                        branch: None,
+                    }));
+                }
+            };
             if let Some(restored) = self
                 .open_stored_materialized_snapshot(None, &placement)
                 .await?
@@ -178,25 +203,26 @@ impl Runtime {
         relay: &RelayName,
         branch_key: &Option<BranchKey>,
     ) -> error_stack::Result<Option<MaterializedGenerationRecord>, MaterializedReadError> {
-        for placement in self.materialized_record_placements(domain, relay, branch_key) {
+        let placements = self.materialized_record_placements(domain, relay, branch_key)?;
+        for placement in &placements {
             let state = self
                 .inner
                 .replicated_materialized_stream_states
-                .get(&placement)
+                .get(placement)
                 .map(|state| ReplicatedMaterializedRelayState::read(state.value()));
             let Some(state) = state else {
                 continue;
             };
-            if !self.materialized_stream_key_is_visible(Some(routing), &placement, branch_key) {
+            if !self.materialized_stream_key_is_visible(Some(routing), placement, branch_key) {
                 continue;
             }
             if let Some(record) = state.record(branch_key) {
                 return Ok(Some(record));
             }
         }
-        for placement in self.materialized_record_placements(domain, relay, branch_key) {
+        for placement in &placements {
             let Some(restored) = self
-                .open_stored_materialized_snapshot(Some(routing), &placement)
+                .open_stored_materialized_snapshot(Some(routing), placement)
                 .await?
             else {
                 continue;
@@ -221,24 +247,30 @@ impl Runtime {
         domain: &DomainName,
         relay: &RelayName,
         branch_key: &Option<BranchKey>,
-    ) -> Vec<RuntimeStatePlacement> {
-        let relay_scoped = self.state_placement(
-            domain,
-            RuntimeState::MaterializedRelay,
-            ModelKind::Relay,
-            relay,
-            None,
-        );
+    ) -> error_stack::Result<Vec<RuntimeStatePlacement>, MaterializedReadError> {
+        let relay_scoped = self
+            .state_placement(
+                domain,
+                RuntimeStateKind::MaterializedRelay,
+                ModelKind::Relay,
+                relay,
+                None,
+            )
+            .change_context_lazy(|| MaterializedReadError::StateIdentity {
+                domain: domain.clone(),
+                relay: relay.clone(),
+                branch: branch_key.clone(),
+            })?;
         let Some(branch_key) = branch_key.clone() else {
-            return vec![relay_scoped];
+            return Ok(vec![relay_scoped]);
         };
-        vec![
+        Ok(vec![
             RuntimeStatePlacement {
                 branch_key: Some(branch_key),
                 ..relay_scoped.clone()
             },
             relay_scoped,
-        ]
+        ])
     }
 
     /// Open the sealed snapshot this node persisted for a placement, if it has one.
@@ -272,7 +304,6 @@ impl Runtime {
         RestoredMaterializedSnapshot::open(
             &self.inner.executor,
             &schema,
-            placement.schema_fingerprint,
             SealedSource::memory(sealed),
         )
         .await
@@ -457,13 +488,11 @@ impl Runtime {
         if scheduled {
             return true;
         }
-        let expiring_placement = self.state_placement(
-            &placement.domain,
-            RuntimeState::MaterializedRelay,
-            ModelKind::Relay,
-            &placement.identifier,
-            None,
-        );
+        // Expiring branches are tracked for the whole relay, in the same lifetime as the state.
+        let expiring_placement = RuntimeStatePlacement {
+            branch_key: None,
+            ..placement.clone()
+        };
         self.inner
             .expiring_stream_states
             .get(&expiring_placement)
@@ -478,13 +507,19 @@ impl Runtime {
         domain: &DomainName,
         relay: &RelayName,
     ) -> error_stack::Result<Vec<MaterializedRecordReport>, MaterializedReadError> {
-        let placement = self.state_placement(
-            domain,
-            RuntimeState::MaterializedRelay,
-            ModelKind::Relay,
-            relay,
-            None,
-        );
+        let placement = self
+            .state_placement(
+                domain,
+                RuntimeStateKind::MaterializedRelay,
+                ModelKind::Relay,
+                relay,
+                None,
+            )
+            .change_context_lazy(|| MaterializedReadError::StateIdentity {
+                domain: domain.clone(),
+                relay: relay.clone(),
+                branch: None,
+            })?;
         let Some(schema) = self.materialized_relay_schema(None, &placement) else {
             return Ok(Vec::new());
         };
@@ -525,13 +560,19 @@ impl Runtime {
         relay: &RelayName,
     ) -> error_stack::Result<Vec<MaterializedGenerationRecord>, MaterializedReadError> {
         let routing = routing.load().clone();
-        let placement = self.state_placement(
-            domain,
-            RuntimeState::MaterializedRelay,
-            ModelKind::Relay,
-            relay,
-            None,
-        );
+        let placement = self
+            .state_placement(
+                domain,
+                RuntimeStateKind::MaterializedRelay,
+                ModelKind::Relay,
+                relay,
+                None,
+            )
+            .change_context_lazy(|| MaterializedReadError::StateIdentity {
+                domain: domain.clone(),
+                relay: relay.clone(),
+                branch: None,
+            })?;
         let owner = routing
             .materialized_stream_owner_nodes
             .get(relay)
@@ -619,13 +660,19 @@ impl Runtime {
         branch_key: &Option<BranchKey>,
         schema: &StdArc<arrow_schema::Schema>,
     ) -> error_stack::Result<Option<MaterializedGenerationRecord>, MaterializedReadError> {
-        let placement = self.state_placement(
-            domain,
-            RuntimeState::MaterializedRelay,
-            ModelKind::Relay,
-            relay,
-            None,
-        );
+        let placement = self
+            .state_placement(
+                domain,
+                RuntimeStateKind::MaterializedRelay,
+                ModelKind::Relay,
+                relay,
+                None,
+            )
+            .change_context_lazy(|| MaterializedReadError::StateIdentity {
+                domain: domain.clone(),
+                relay: relay.clone(),
+                branch: branch_key.clone(),
+            })?;
         let restored = MaterializedReadError::from_remote_snapshot_result(
             self.fetch_sealed_materialized_snapshot(target_node_id, &placement, schema, None)
                 .await,
@@ -981,14 +1028,15 @@ mod tests {
         let target = ClusterNodeName::parse("node-1").expect("the test node name is valid");
         let domain = domain("default");
         let relay = named::<RelayName>("profiles");
-        let runtime = Runtime::default();
-        let placement = runtime.state_placement(
-            &domain,
-            RuntimeState::MaterializedRelay,
-            ModelKind::Relay,
-            &relay,
-            None,
-        );
+        let placement = RuntimeStatePlacement {
+            domain: domain.clone(),
+            state: RuntimeState::MaterializedRelay {
+                schema: SchemaFingerprint::from_digest([7; 32]),
+            },
+            kind: ModelKind::Relay,
+            identifier: ModelName::from(&relay),
+            branch_key: None,
+        };
 
         assert!(
             MaterializedReadError::from_remote_snapshot_result(
@@ -1044,6 +1092,14 @@ mod tests {
     async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_order() {
         let runtime = Runtime::default();
         let domain = domain("default");
+        for relay in ["profiles", "rules"] {
+            publish_state_identity(
+                &runtime,
+                &domain,
+                ModelKind::Relay,
+                named::<ModelName>(relay),
+            );
+        }
         let state_schema = test_optional_schema(&[
             OptionalTestField {
                 name: "status",

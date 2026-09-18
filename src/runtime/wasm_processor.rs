@@ -784,11 +784,11 @@ mod tests {
         RuntimeStatePlacement {
             domain: DomainName::parse("events").expect("valid domain"),
             state: RuntimeState::WasmProcessor {
+                schema: SchemaFingerprint::from_digest([7; 32]),
                 generation: WasmStateGeneration::FIRST,
             },
             kind: ModelKind::WasmProcessor,
             identifier: ModelName::parse("sessionizer").expect("valid identifier"),
-            schema_fingerprint: [0; 32],
             branch_key: tenant_branch("alpha"),
         }
     }

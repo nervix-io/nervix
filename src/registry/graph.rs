@@ -20,7 +20,8 @@ use nervix_dataflow_graph::{
 use nervix_models::{
     ConcreteBranchCoverage, CreateSchema, DomainName, DomainSchedule, ImpactEdgeKind,
     ImpactNodeCoverage, IngestSource, Model, ModelIndex, ModelKind, ModelName, NodeRef,
-    ParseAsType, PlacementPolicy, RelayName, ResolvedBranching, SchemaField,
+    ParseAsType, PlacementPolicy, RelayName, ResolvedBranching, ScheduledNode, SchemaField,
+    SchemaFingerprint,
 };
 use petgraph::{
     Direction, algo::is_cyclic_directed, graph::DiGraph, prelude::NodeIndex, visit::EdgeRef,
@@ -257,7 +258,12 @@ impl ActiveGraph {
         UnattributedImpactTopology { nodes, edges }
     }
 
-    pub(in crate::registry) fn schema_fingerprint_for_index(&self, index: NodeIndex) -> [u8; 32] {
+    /// The fingerprint of every schema model the node at `index` depends on through its
+    /// configuration, which the runtime keys the node's schema-bound state by.
+    pub(in crate::registry) fn schema_fingerprint_for_index(
+        &self,
+        index: NodeIndex,
+    ) -> SchemaFingerprint {
         /// One schema model that a node's fingerprint covers, encoded so the hash reflects the
         /// exact stored shape rather than the order the graph walk reached it in.
         struct FingerprintedSchema {
@@ -318,17 +324,26 @@ impl ActiveGraph {
             hasher.update(&schema.encoded);
             hasher.update(&[0]);
         }
-        *hasher.finalize().as_bytes()
+        SchemaFingerprint::from_digest(*hasher.finalize().as_bytes())
     }
 
-    pub(crate) fn schema_fingerprint(
-        &self,
-        kind: ModelKind,
-        identifier: &ModelName,
-    ) -> Option<[u8; 32]> {
-        self.indices
-            .get(&NodeRef::new(kind, identifier.clone()))
-            .map(|index| self.schema_fingerprint_for_index(*index))
+    /// Every node of this graph as an unplaced schedule entry, carrying the branching and the
+    /// schema fingerprint the registry resolved for it, before a scheduler decides where it runs.
+    pub(crate) fn unplaced_schedule_nodes(&self) -> Vec<ScheduledNode> {
+        let mut nodes = Vec::with_capacity(self.graph.node_count());
+        for index in self.graph.node_indices() {
+            let node = self
+                .graph
+                .node_weight(index)
+                .verified("this index came from the same graph, which is not modified here");
+            let scheduled = ScheduledNode::new(
+                (*node.config).clone(),
+                self.schema_fingerprint_for_index(index),
+            )
+            .with_resolved_branching(node.resolved_branching.clone());
+            nodes.push(scheduled);
+        }
+        nodes
     }
 
     pub(in crate::registry) fn describe(&self) -> String {

@@ -458,9 +458,18 @@ impl Runtime {
                         ),
                     });
                 };
-                let expiring_state = (node.executes_on(local_node_id)
-                    && branch_relays.contains(&relay.name))
-                .then(|| self.expiring_stream_state(domain, &relay.name));
+                let expiring_state =
+                    if node.executes_on(local_node_id) && branch_relays.contains(&relay.name) {
+                        let state =
+                            self.expiring_stream_state(domain, &relay.name)
+                                .map_err(|error| RuntimeError::BuildDomainExecution {
+                                    domain: domain.as_str().to_string(),
+                                    reason: error.to_string(),
+                                })?;
+                        Some(state)
+                    } else {
+                        None
+                    };
                 let fanout = Box::pin(self.relay_boundary_fanout_with_capacity(
                     domain,
                     &relay.name,
@@ -528,13 +537,18 @@ impl Runtime {
                 _ => None,
             };
             if let Some(schema) = materialized_schema.as_ref() {
-                let state_placement = self.state_placement(
-                    domain,
-                    RuntimeState::MaterializedRelay,
-                    ModelKind::Relay,
-                    RelayName::from(&node.identifier),
-                    None,
-                );
+                let state_placement = self
+                    .state_placement(
+                        domain,
+                        RuntimeStateKind::MaterializedRelay,
+                        ModelKind::Relay,
+                        RelayName::from(&node.identifier),
+                        None,
+                    )
+                    .map_err(|error| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: error.to_string(),
+                    })?;
                 Box::pin(self.prepare_materialized_stream_restore(&state_placement, schema))
                     .await
                     .map_err(|error| RuntimeError::BuildDomainExecution {

@@ -474,14 +474,21 @@ impl RelayProcessorTemplate {
                     deduplicate_on,
                     max_time,
                 } => {
-                    let state = runtime
-                        .replicated_deduplicator_state(runtime.state_placement(
+                    let placement = runtime
+                        .state_placement(
                             domain,
-                            RuntimeState::Deduplicator,
+                            RuntimeStateKind::Deduplicator,
                             self.kind,
                             &self.processor,
                             key.clone(),
-                        ))
+                        )
+                        .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
+                            kind: self.kind,
+                            processor: self.processor.clone(),
+                            branch: key.clone(),
+                        })?;
+                    let state = runtime
+                        .replicated_deduplicator_state(placement)
                         .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
                             kind: self.kind,
                             processor: self.processor.clone(),
@@ -505,14 +512,21 @@ impl RelayProcessorTemplate {
                     plan,
                     compiled_aggregates,
                 } => {
-                    let replicated_state = runtime
-                        .replicated_window_processor_state(runtime.state_placement(
+                    let placement = runtime
+                        .state_placement(
                             domain,
-                            RuntimeState::WindowProcessor,
+                            RuntimeStateKind::WindowProcessor,
                             self.kind,
                             &self.processor,
                             key.clone(),
-                        ))
+                        )
+                        .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
+                            kind: self.kind,
+                            processor: self.processor.clone(),
+                            branch: key.clone(),
+                        })?;
+                    let replicated_state = runtime
+                        .replicated_window_processor_state(placement)
                         .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
                             kind: self.kind,
                             processor: self.processor.clone(),
@@ -628,7 +642,7 @@ impl RelayProcessorTemplate {
                     compiled,
                 } => {
                     let placement = runtime
-                        .branch_state_placement(
+                        .state_placement(
                             domain,
                             RuntimeStateKind::WasmProcessor,
                             self.kind,
@@ -847,6 +861,12 @@ mod tests {
     fn processor_template_refresh_is_not_junction_specific() {
         let runtime = Runtime::default();
         let domain = domain("default");
+        publish_state_identity(
+            &runtime,
+            &domain,
+            ModelKind::Deduplicator,
+            named::<ModelName>("deduplicate_events"),
+        );
         let input = named::<RelayName>("events");
         let output = named::<RelayName>("unique_events");
         let processor = named::<ModelName>("deduplicate_events");
@@ -931,6 +951,12 @@ mod tests {
     fn processor_template_refresh_rejects_other_targets_topologies_and_kinds() {
         let runtime = Runtime::default();
         let domain = domain("default");
+        publish_state_identity(
+            &runtime,
+            &domain,
+            ModelKind::Deduplicator,
+            named::<ModelName>("deduplicate_events"),
+        );
         let input = named::<RelayName>("events");
         let template = RelayProcessorTemplate {
             kind: ModelKind::Deduplicator,

@@ -19,7 +19,7 @@ impl Runtime {
             identifier: &'a ModelName,
             config: &'a Model,
             resolved_branching: &'a Option<ResolvedBranching>,
-            schema_fingerprint: [u8; 32],
+            schema_fingerprint: SchemaFingerprint,
             kafka_partition_schedule: &'a Option<KafkaPartitionSchedule>,
             primary_node: &'a Option<ClusterNodeName>,
             assigned_nodes: &'a [ClusterNodeName],

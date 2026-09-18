@@ -2099,6 +2099,35 @@ button {
   color: var(--text-d);
 }
 
+.resource-usage-list {
+  display: grid;
+  gap: 4px;
+  margin-top: 4px;
+  padding-left: 10px;
+  border-left: 1px solid rgba(34, 197, 94, 0.35);
+}
+
+.resource-usage-list p {
+  margin: 0;
+  color: var(--text-d);
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.resource-usage-row em {
+  color: var(--cyan);
+  font-weight: 700;
+}
+
+.resource-usage-row strong {
+  color: var(--text-c);
+}
+
+.resource-usage-none {
+  color: var(--text-d);
+}
+
 .resource-empty {
   min-height: 52px;
   display: grid;

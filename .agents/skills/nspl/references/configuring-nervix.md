@@ -228,6 +228,9 @@ relay. Do not use them to scan across branches.
   effective `ENTITY_PAUSE`, and `COMMIT` also reports the total planned relocations.
 - Interdependent schema evolution is one transaction, preserves ALTER operation order, and includes
   all wire schema, internal schema, codec, and dependent-node mutations needed by the new graph.
+  Expect it to recreate the runtime state laid out by the altered schemas, such as deduplicator
+  keys, windows, materialized records, and WASM guest state; domain-owned Kafka offsets and node
+  metric summaries carry over.
 - Model-alteration entity holds, domain pauses, and memory-pressure quiescing consult the
   ingestor's mode. Planned drain, placement relocation, and explicit `RELOCATE` ignore that mode:
   they stop new intake only for moved ingestors, drain already admitted ACK work, then switch

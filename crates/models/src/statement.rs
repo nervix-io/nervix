@@ -28,10 +28,10 @@ use crate::{
     DomainTimeRate, EmitterName, EndpointName, FieldName, GeneratorName, InferencerName,
     IngestorName, JsonType, JunctionName, LookupName, ModelName, NodeRef, ParseAsType,
     PlacementName, PulsarSubscriptionName, QueueGroupName, QueueName, RebindResource,
-    ReingestorName, RelayName, ReordererName, RequestedResourceVersion, ResourceName, SchemaName,
-    SignalingProtocolName, SubjectName, SubscriptionName, TableName, Timestamp, TopicName, UdfName,
-    UserName, VhostName, WasmProcessorName, WasmStateGenerations, WindowProcessorName,
-    WireSchemaName,
+    ReingestorName, RelayName, ReordererName, RequestedResourceVersion, ResourceName,
+    SchemaFingerprint, SchemaName, SignalingProtocolName, SubjectName, SubscriptionName, TableName,
+    Timestamp, TopicName, UdfName, UserName, VhostName, WasmProcessorName, WasmStateGenerations,
+    WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
@@ -4427,8 +4427,10 @@ pub struct ScheduledNode {
     pub identifier: ModelName,
     pub config: Box<Model>,
     pub resolved_branching: Option<ResolvedBranching>,
-    #[serde(default)]
-    pub schema_fingerprint: [u8; 32],
+    /// The fingerprint of the schemas this node's records are laid out by, as the registry computed
+    /// it. Every scheduled node carries one; the runtime keys each of the node's schema-bound states
+    /// by it.
+    pub schema_fingerprint: SchemaFingerprint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kafka_partition_schedule: Option<KafkaPartitionSchedule>,
     #[serde(default)]
@@ -4442,8 +4444,9 @@ pub struct ScheduledNode {
 }
 
 impl ScheduledNode {
-    /// An unplaced entry for `config`, before a scheduler decides which cluster nodes run it.
-    pub fn new(config: Model) -> Self {
+    /// An unplaced entry for `config`, whose records are laid out by the schemas `schema_fingerprint`
+    /// covers, before a scheduler decides which cluster nodes run it.
+    pub fn new(config: Model, schema_fingerprint: SchemaFingerprint) -> Self {
         let mut wasm_state_generations = None;
         if let Model::WasmProcessor(_) = &config {
             wasm_state_generations = Some(WasmStateGenerations::first());
@@ -4452,7 +4455,7 @@ impl ScheduledNode {
             identifier: config.name(),
             config: Box::new(config),
             resolved_branching: None,
-            schema_fingerprint: [0; 32],
+            schema_fingerprint,
             kafka_partition_schedule: None,
             primary_node: None,
             assigned_nodes: Vec::new(),
@@ -4465,13 +4468,6 @@ impl ScheduledNode {
     #[must_use]
     pub fn with_resolved_branching(mut self, branching: Option<ResolvedBranching>) -> Self {
         self.resolved_branching = branching;
-        self
-    }
-
-    /// The fingerprint of the schema this node produces, as the registry computed it.
-    #[must_use]
-    pub fn with_schema_fingerprint(mut self, fingerprint: [u8; 32]) -> Self {
-        self.schema_fingerprint = fingerprint;
         self
     }
 
@@ -5321,7 +5317,7 @@ mod tests {
         ClusterNodeName, CreateIngestor, CreateJunction, DomainName, EndpointIngestMode,
         Expression, IngestQuiesceMode, IngestSource, Literal, MaterializedStateDependency,
         MaterializedStatePolicy, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-        SchemaField,
+        SchemaField, SchemaFingerprint,
     };
 
     #[test]
@@ -5444,15 +5440,18 @@ mod tests {
 
     #[test]
     fn scheduled_node_assignment_checks_exact_node_id() {
-        let node = ScheduledNode::new(Model::Schema(CreateSchema {
-            name: named("orders"),
-            fields: vec![SchemaField {
-                name: named("tenant"),
-                ty: ParseAsType::String,
-                optional: false,
-                sensitive: false,
-            }],
-        }))
+        let node = ScheduledNode::new(
+            Model::Schema(CreateSchema {
+                name: named("orders"),
+                fields: vec![SchemaField {
+                    name: named("tenant"),
+                    ty: ParseAsType::String,
+                    optional: false,
+                    sensitive: false,
+                }],
+            }),
+            SchemaFingerprint::from_digest([1; 32]),
+        )
         .with_resolved_branching(Some(ResolvedBranching::unbranched()))
         .placed_on(
             Some(named::<ClusterNodeName>("node-a")),
@@ -5471,15 +5470,18 @@ mod tests {
 
     #[test]
     fn scheduled_node_single_assignment_only_when_exactly_one_node_is_present() {
-        let node = ScheduledNode::new(Model::Schema(CreateSchema {
-            name: named("orders"),
-            fields: vec![SchemaField {
-                name: named("tenant"),
-                ty: ParseAsType::String,
-                optional: false,
-                sensitive: false,
-            }],
-        }))
+        let node = ScheduledNode::new(
+            Model::Schema(CreateSchema {
+                name: named("orders"),
+                fields: vec![SchemaField {
+                    name: named("tenant"),
+                    ty: ParseAsType::String,
+                    optional: false,
+                    sensitive: false,
+                }],
+            }),
+            SchemaFingerprint::from_digest([1; 32]),
+        )
         .placed_on(
             Some(named::<ClusterNodeName>("node-a")),
             vec![named::<ClusterNodeName>("node-a")],
@@ -5512,15 +5514,18 @@ mod tests {
 
     #[test]
     fn scheduled_node_exposes_primary_and_replicas() {
-        let node = ScheduledNode::new(Model::Schema(CreateSchema {
-            name: named("orders"),
-            fields: vec![SchemaField {
-                name: named("tenant"),
-                ty: ParseAsType::String,
-                optional: false,
-                sensitive: false,
-            }],
-        }))
+        let node = ScheduledNode::new(
+            Model::Schema(CreateSchema {
+                name: named("orders"),
+                fields: vec![SchemaField {
+                    name: named("tenant"),
+                    ty: ParseAsType::String,
+                    optional: false,
+                    sensitive: false,
+                }],
+            }),
+            SchemaFingerprint::from_digest([1; 32]),
+        )
         .placed_on(
             Some(named::<ClusterNodeName>("node-a")),
             vec![
@@ -5541,24 +5546,27 @@ mod tests {
 
     #[test]
     fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() {
-        let replicated_junction = ScheduledNode::new(Model::Junction(CreateJunction {
-            name: named("orders_merge"),
-            from: ProcessorInputs::new(
-                vec![named("orders_in_a"), named("orders_in_b")],
-                Vec::new(),
-            ),
-            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                named("orders_out"),
-                FlushPolicy::Each {
-                    interval: "100ms".to_string(),
-                    max_batch_size: "1MiB".to_string(),
-                },
-            )]),
-            branched_by: BranchSelection::unbranched(),
-            mode: AckMode::Attached,
-            filter_where: None,
-            materialized_state: Vec::new(),
-        }))
+        let replicated_junction = ScheduledNode::new(
+            Model::Junction(CreateJunction {
+                name: named("orders_merge"),
+                from: ProcessorInputs::new(
+                    vec![named("orders_in_a"), named("orders_in_b")],
+                    Vec::new(),
+                ),
+                output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                    named("orders_out"),
+                    FlushPolicy::Each {
+                        interval: "100ms".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    },
+                )]),
+                branched_by: BranchSelection::unbranched(),
+                mode: AckMode::Attached,
+                filter_where: None,
+                materialized_state: Vec::new(),
+            }),
+            SchemaFingerprint::from_digest([1; 32]),
+        )
         .placed_on(
             Some(named::<ClusterNodeName>("node-a")),
             vec![
@@ -5566,28 +5574,31 @@ mod tests {
                 named::<ClusterNodeName>("node-b"),
             ],
         );
-        let endpoint_ingestor = ScheduledNode::new(Model::Ingestor(CreateIngestor {
-            name: named("orders_http"),
-            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                named("orders_out"),
-                FlushPolicy::Each {
-                    interval: "100ms".to_string(),
-                    max_batch_size: "1MiB".to_string(),
+        let endpoint_ingestor = ScheduledNode::new(
+            Model::Ingestor(CreateIngestor {
+                name: named("orders_http"),
+                output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                    named("orders_out"),
+                    FlushPolicy::Each {
+                        interval: "100ms".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    },
+                )]),
+                decode_using_codec: named("codec"),
+                timestamp_source: None,
+                source: IngestSource::Endpoint {
+                    endpoint: named("public_http"),
+                    mode: EndpointIngestMode::NoAckSequential,
+                    quiesce: IngestQuiesceMode::EndpointBuffer {
+                        max_size: "1MiB".to_string(),
+                    },
                 },
-            )]),
-            decode_using_codec: named("codec"),
-            timestamp_source: None,
-            source: IngestSource::Endpoint {
-                endpoint: named("public_http"),
-                mode: EndpointIngestMode::NoAckSequential,
-                quiesce: IngestQuiesceMode::EndpointBuffer {
-                    max_size: "1MiB".to_string(),
-                },
-            },
-            general_error_policy: GeneralErrorPolicy::Log,
+                general_error_policy: GeneralErrorPolicy::Log,
 
-            filter_where: None,
-        }))
+                filter_where: None,
+            }),
+            SchemaFingerprint::from_digest([1; 32]),
+        )
         .placed_on(
             Some(named::<ClusterNodeName>("node-a")),
             vec![
@@ -5595,24 +5606,27 @@ mod tests {
                 named::<ClusterNodeName>("node-b"),
             ],
         );
-        let syslog_ingestor = ScheduledNode::new(Model::Ingestor(CreateIngestor {
-            name: named("orders_syslog"),
-            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                named("orders_out"),
-                FlushPolicy::Each {
-                    interval: "100ms".to_string(),
-                    max_batch_size: "1MiB".to_string(),
+        let syslog_ingestor = ScheduledNode::new(
+            Model::Ingestor(CreateIngestor {
+                name: named("orders_syslog"),
+                output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                    named("orders_out"),
+                    FlushPolicy::Each {
+                        interval: "100ms".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    },
+                )]),
+                decode_using_codec: named("codec"),
+                timestamp_source: None,
+                source: IngestSource::Syslog {
+                    client: named("syslog_listener"),
+                    quiesce: IngestQuiesceMode::Suspend,
                 },
-            )]),
-            decode_using_codec: named("codec"),
-            timestamp_source: None,
-            source: IngestSource::Syslog {
-                client: named("syslog_listener"),
-                quiesce: IngestQuiesceMode::Suspend,
-            },
-            general_error_policy: GeneralErrorPolicy::Log,
-            filter_where: None,
-        }))
+                general_error_policy: GeneralErrorPolicy::Log,
+                filter_where: None,
+            }),
+            SchemaFingerprint::from_digest([1; 32]),
+        )
         .placed_on(
             Some(named::<ClusterNodeName>("node-a")),
             vec![

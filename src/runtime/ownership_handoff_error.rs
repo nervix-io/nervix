@@ -33,7 +33,7 @@ pub(crate) enum OwnershipHandoffError {
     #[error("ownership handoff checkpoint failed for wasm processor '{}'", .processor.as_str())]
     WasmCheckpoint { processor: ModelName },
     #[error(
-        "ownership handoff cannot place the branch state of {} '{}'",
+        "ownership handoff cannot place the runtime state of {} '{}'",
         .kind.as_str(),
         .identifier.as_str()
     )]

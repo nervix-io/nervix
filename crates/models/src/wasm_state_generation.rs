@@ -159,7 +159,7 @@ mod tests {
     use super::*;
     use crate::{
         AckMode, BranchSelection, CreateRelay, CreateWasmProcessor, GeneralErrorPolicy, Model,
-        ProcessorInputs, ProcessorOutputs, ScheduledNode, WasmProcessorLimits,
+        ProcessorInputs, ProcessorOutputs, ScheduledNode, SchemaFingerprint, WasmProcessorLimits,
     };
 
     fn branch(byte: u8) -> BranchKeyFingerprint {
@@ -167,23 +167,28 @@ mod tests {
     }
 
     fn wasm_processor(resource_version: u64, max_fuel: NonZeroU64) -> ScheduledNode {
-        ScheduledNode::new(Model::WasmProcessor(CreateWasmProcessor {
-            name: "guest".try_into().expect("valid processor name"),
-            from: ProcessorInputs::single("input".try_into().expect("valid relay name")),
-            output_routes: ProcessorOutputs::single("output".try_into().expect("valid relay name")),
-            branched_by: BranchSelection::unbranched(),
-            resource: "guest_bundle".try_into().expect("valid resource name"),
-            resource_version,
-            file: "processors/guest.wasm".to_string(),
-            limits: WasmProcessorLimits {
-                max_fuel,
-                max_memory_bytes: nonzero!(67_108_864u64),
-            },
-            global_error_policy: GeneralErrorPolicy::Log,
-            mode: AckMode::Attached,
-            filter_where: None,
-            materialized_state: Vec::new(),
-        }))
+        ScheduledNode::new(
+            Model::WasmProcessor(CreateWasmProcessor {
+                name: "guest".try_into().expect("valid processor name"),
+                from: ProcessorInputs::single("input".try_into().expect("valid relay name")),
+                output_routes: ProcessorOutputs::single(
+                    "output".try_into().expect("valid relay name"),
+                ),
+                branched_by: BranchSelection::unbranched(),
+                resource: "guest_bundle".try_into().expect("valid resource name"),
+                resource_version,
+                file: "processors/guest.wasm".to_string(),
+                limits: WasmProcessorLimits {
+                    max_fuel,
+                    max_memory_bytes: nonzero!(67_108_864u64),
+                },
+                global_error_policy: GeneralErrorPolicy::Log,
+                mode: AckMode::Attached,
+                filter_where: None,
+                materialized_state: Vec::new(),
+            }),
+            SchemaFingerprint::from_digest([1; 32]),
+        )
     }
 
     fn generation(value: u64) -> WasmStateGeneration {
@@ -251,13 +256,16 @@ mod tests {
 
     #[test]
     fn only_a_scheduled_wasm_processor_carries_state_generations() {
-        let relay = ScheduledNode::new(Model::Relay(CreateRelay {
-            name: "events".try_into().expect("valid relay name"),
-            schema: "event".try_into().expect("valid schema name"),
-            buffer: nonzero!(1usize),
-            branching: crate::RelayBranching::unbranched(),
-            materialized_state: None,
-        }))
+        let relay = ScheduledNode::new(
+            Model::Relay(CreateRelay {
+                name: "events".try_into().expect("valid relay name"),
+                schema: "event".try_into().expect("valid schema name"),
+                buffer: nonzero!(1usize),
+                branching: crate::RelayBranching::unbranched(),
+                materialized_state: None,
+            }),
+            SchemaFingerprint::from_digest([1; 32]),
+        )
         .with_resolved_branching(Some(crate::ResolvedBranching::unbranched()));
 
         assert_eq!(relay.wasm_state_generations(), None);

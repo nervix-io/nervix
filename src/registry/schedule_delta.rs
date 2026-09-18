@@ -229,7 +229,7 @@ mod tests {
         EndpointIngestMode, ErrorPolicies, Expression, FlushPolicy, GeneralErrorPolicy,
         IngestSource, Literal, Model, ModelKind, NodeRef, OutputBranch, PlacementPolicy,
         ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching, ResolvedBranching,
-        RetryPolicy, RouteConstruction, ScheduledNode, WasmProcessorLimits,
+        RetryPolicy, RouteConstruction, ScheduledNode, SchemaFingerprint, WasmProcessorLimits,
     };
     use nonzero_ext::nonzero;
 
@@ -256,32 +256,36 @@ mod tests {
     }
 
     fn placement_node(policy: PlacementPolicy) -> ScheduledNode {
-        ScheduledNode::new(Model::Placement(
-            CreatePlacement::new(
-                named("keep_local"),
-                vec![named("event_source")],
-                vec![named("events")],
-                policy,
-                Some(nonzero!(1u64)),
-            )
-            .expect("valid placement"),
-        ))
-        .with_schema_fingerprint([1; 32])
+        ScheduledNode::new(
+            Model::Placement(
+                CreatePlacement::new(
+                    named("keep_local"),
+                    vec![named("event_source")],
+                    vec![named("events")],
+                    policy,
+                    Some(nonzero!(1u64)),
+                )
+                .expect("valid placement"),
+            ),
+            SchemaFingerprint::from_digest([1; 32]),
+        )
     }
 
     fn schedule(capacity: NonZeroUsize) -> DomainSchedule {
         DomainSchedule::new(
             DomainName::parse("testing").expect("valid domain"),
             vec![
-                ScheduledNode::new(Model::Relay(CreateRelay {
-                    name: named("events"),
-                    schema: named("event"),
-                    buffer: capacity,
-                    branching: RelayBranching::unbranched(),
-                    materialized_state: None,
-                }))
+                ScheduledNode::new(
+                    Model::Relay(CreateRelay {
+                        name: named("events"),
+                        schema: named("event"),
+                        buffer: capacity,
+                        branching: RelayBranching::unbranched(),
+                        materialized_state: None,
+                    }),
+                    SchemaFingerprint::from_digest([1; 32]),
+                )
                 .with_resolved_branching(Some(ResolvedBranching::unbranched()))
-                .with_schema_fingerprint([1; 32])
                 .placed_on(
                     Some(ClusterNodeName::parse("node-1").expect("valid name")),
                     vec![ClusterNodeName::parse("node-1").expect("valid name")],
@@ -295,28 +299,30 @@ mod tests {
         DomainSchedule::new(
             DomainName::parse("testing").expect("valid domain"),
             vec![
-                ScheduledNode::new(Model::Ingestor(CreateIngestor {
-                    name: named("event_source"),
-                    output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
-                        relay: named("events"),
-                        construction: RouteConstruction::default(),
-                        flush_policy: Some(FlushPolicy::Immediate),
-                        message_error_policy: nervix_models::MessageErrorPolicy::Log,
-                        branch: Some(OutputBranch::Unbranched),
-                    }]),
-                    decode_using_codec: named("event_codec"),
-                    timestamp_source: None,
-                    source: IngestSource::Endpoint {
-                        endpoint: named(endpoint),
-                        mode: EndpointIngestMode::NoAckSequential,
-                        quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
-                            max_size: "1MiB".to_string(),
+                ScheduledNode::new(
+                    Model::Ingestor(CreateIngestor {
+                        name: named("event_source"),
+                        output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
+                            relay: named("events"),
+                            construction: RouteConstruction::default(),
+                            flush_policy: Some(FlushPolicy::Immediate),
+                            message_error_policy: nervix_models::MessageErrorPolicy::Log,
+                            branch: Some(OutputBranch::Unbranched),
+                        }]),
+                        decode_using_codec: named("event_codec"),
+                        timestamp_source: None,
+                        source: IngestSource::Endpoint {
+                            endpoint: named(endpoint),
+                            mode: EndpointIngestMode::NoAckSequential,
+                            quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                                max_size: "1MiB".to_string(),
+                            },
                         },
-                    },
-                    general_error_policy: GeneralErrorPolicy::Log,
-                    filter_where: None,
-                }))
-                .with_schema_fingerprint([1; 32])
+                        general_error_policy: GeneralErrorPolicy::Log,
+                        filter_where: None,
+                    }),
+                    SchemaFingerprint::from_digest([1; 32]),
+                )
                 .placed_on(
                     Some(ClusterNodeName::parse("node-1").expect("valid name")),
                     vec![ClusterNodeName::parse("node-1").expect("valid name")],
@@ -330,24 +336,26 @@ mod tests {
         DomainSchedule::new(
             DomainName::parse("testing").expect("valid domain"),
             vec![
-                ScheduledNode::new(Model::WasmProcessor(CreateWasmProcessor {
-                    name: named("counting_guest"),
-                    from: ProcessorInputs::single(named("events")),
-                    output_routes: ProcessorOutputs::single(named("counted_events")),
-                    branched_by: BranchSelection::unbranched(),
-                    resource: named("counting_bundle"),
-                    resource_version: 1,
-                    file: "processors/counting.wasm".to_string(),
-                    limits: WasmProcessorLimits {
-                        max_fuel: nonzero!(1_000_000u64),
-                        max_memory_bytes: nonzero!(67_108_864u64),
-                    },
-                    global_error_policy: GeneralErrorPolicy::Log,
-                    mode: AckMode::Attached,
-                    filter_where: None,
-                    materialized_state: Vec::new(),
-                }))
-                .with_schema_fingerprint([1; 32])
+                ScheduledNode::new(
+                    Model::WasmProcessor(CreateWasmProcessor {
+                        name: named("counting_guest"),
+                        from: ProcessorInputs::single(named("events")),
+                        output_routes: ProcessorOutputs::single(named("counted_events")),
+                        branched_by: BranchSelection::unbranched(),
+                        resource: named("counting_bundle"),
+                        resource_version: 1,
+                        file: "processors/counting.wasm".to_string(),
+                        limits: WasmProcessorLimits {
+                            max_fuel: nonzero!(1_000_000u64),
+                            max_memory_bytes: nonzero!(67_108_864u64),
+                        },
+                        global_error_policy: GeneralErrorPolicy::Log,
+                        mode: AckMode::Attached,
+                        filter_where: None,
+                        materialized_state: Vec::new(),
+                    }),
+                    SchemaFingerprint::from_digest([1; 32]),
+                )
                 .placed_on(
                     Some(ClusterNodeName::parse(owner).expect("valid name")),
                     vec![
@@ -435,7 +443,7 @@ mod tests {
         );
 
         let mut fingerprint_change = schedule(nonzero!(1usize));
-        fingerprint_change.nodes[0].schema_fingerprint = [2; 32];
+        fingerprint_change.nodes[0].schema_fingerprint = SchemaFingerprint::from_digest([2; 32]);
         assert_eq!(
             ScheduleDelta::classify(&existing, &fingerprint_change),
             ScheduleDelta::Rebuild
@@ -462,13 +470,15 @@ mod tests {
         let existing = DomainSchedule::new(
             DomainName::parse("testing").expect("valid domain"),
             vec![
-                ScheduledNode::new(Model::Junction(junction.clone()))
-                    .with_resolved_branching(Some(ResolvedBranching::unbranched()))
-                    .with_schema_fingerprint([1; 32])
-                    .placed_on(
-                        Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                        vec![ClusterNodeName::parse("node-1").expect("valid name")],
-                    ),
+                ScheduledNode::new(
+                    Model::Junction(junction.clone()),
+                    SchemaFingerprint::from_digest([1; 32]),
+                )
+                .with_resolved_branching(Some(ResolvedBranching::unbranched()))
+                .placed_on(
+                    Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                    vec![ClusterNodeName::parse("node-1").expect("valid name")],
+                ),
             ],
             Vec::new(),
         );
@@ -506,7 +516,7 @@ mod tests {
     fn ingestor_changes_swap_even_when_schedule_placement_residue_changes() {
         let existing = ingestor_schedule("ingress_a");
         let mut desired = ingestor_schedule("ingress_b");
-        desired.nodes[0].schema_fingerprint = [2; 32];
+        desired.nodes[0].schema_fingerprint = SchemaFingerprint::from_digest([2; 32]);
         desired.nodes[0].primary_node = Some(ClusterNodeName::parse("node-2").expect("valid name"));
         desired.nodes[0].assigned_nodes =
             vec![ClusterNodeName::parse("node-2").expect("valid name")];
@@ -553,13 +563,15 @@ mod tests {
         let existing = DomainSchedule::new(
             DomainName::parse("testing").expect("valid domain"),
             vec![
-                ScheduledNode::new(Model::Emitter(emitter.clone()))
-                    .with_resolved_branching(Some(ResolvedBranching::unbranched()))
-                    .with_schema_fingerprint([1; 32])
-                    .placed_on(
-                        Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                        vec![ClusterNodeName::parse("node-1").expect("valid name")],
-                    ),
+                ScheduledNode::new(
+                    Model::Emitter(emitter.clone()),
+                    SchemaFingerprint::from_digest([1; 32]),
+                )
+                .with_resolved_branching(Some(ResolvedBranching::unbranched()))
+                .placed_on(
+                    Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                    vec![ClusterNodeName::parse("node-1").expect("valid name")],
+                ),
             ],
             Vec::new(),
         );
@@ -582,7 +594,7 @@ mod tests {
         });
         let mut swapped = existing.clone();
         *swapped.nodes[0].config = Model::Emitter(swapped_emitter);
-        swapped.nodes[0].schema_fingerprint = [2; 32];
+        swapped.nodes[0].schema_fingerprint = SchemaFingerprint::from_digest([2; 32]);
         assert_eq!(
             ScheduleDelta::classify(&existing, &swapped),
             ScheduleDelta::EntitySwap {
