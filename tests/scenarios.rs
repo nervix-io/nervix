@@ -3891,6 +3891,26 @@ async fn given_runtime_state_replica_polling_is_paused(world: &mut ScenarioWorld
     world.fault_injection.pause_state_replica_polling();
 }
 
+#[when("WASM guest-state checkpoints fail to reach stable storage on every node")]
+async fn when_wasm_checkpoints_fail_to_reach_stable_storage(world: &mut ScenarioWorld) {
+    world.fault_injection.fail_wasm_checkpoint_storage();
+}
+
+#[when("WASM guest-state checkpoints reach stable storage again on every node")]
+async fn when_wasm_checkpoints_reach_stable_storage_again(world: &mut ScenarioWorld) {
+    world.fault_injection.restore_wasm_checkpoint_storage();
+}
+
+#[when("runtime state replica installations fail on every node")]
+async fn when_runtime_state_replica_installations_fail(world: &mut ScenarioWorld) {
+    world.fault_injection.fail_state_replica_installation();
+}
+
+#[when("runtime state replica installations succeed again on every node")]
+async fn when_runtime_state_replica_installations_succeed_again(world: &mut ScenarioWorld) {
+    world.fault_injection.restore_state_replica_installation();
+}
+
 #[given(expr = "the transaction idle timeout is configured as {string}")]
 async fn given_transaction_idle_timeout_is_configured(world: &mut ScenarioWorld, timeout: String) {
     assert!(

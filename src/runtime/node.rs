@@ -58,6 +58,10 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<MessageErrorRouteKey, Arc<MessageErrorRouteRuntime>, RandomState>,
     pub(in crate::runtime) compiled_domain_udfs:
         DashMap<DomainName, CompiledDomainUdfs, RandomState>,
+    /// The WASM modules this node compiled for the processors the schedule assigns to it, kept
+    /// so that restoring a processor's guests never waits for a compilation.
+    pub(in crate::runtime) compiled_wasm_modules:
+        DashMap<WasmModuleFile, WasmCompiledBranchProcessor, RandomState>,
     /// Serializes schedule application on this node, and holds what it has applied. Ingestor
     /// starts and persisted ownership-handoff activation take the same lock so they observe a
     /// schedule that is not half applied.

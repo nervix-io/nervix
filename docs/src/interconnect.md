@@ -501,6 +501,21 @@ The schedule fingerprint an ownership handoff or forced recovery is bound to cov
 fingerprints and generations, so a preparation staged against an earlier schema or generation cannot
 activate after a later one is committed.
 
+A replica acknowledges a branch-state checkpoint — WASM guest state, deduplicator and window state,
+and the branch lifecycle that names the branches — only after it has written the checkpoint to its
+own stable storage and synchronized it, never on receipt. A replica that already holds the announced
+revision, or a newer one, synchronizes and acknowledges what it holds again, so an acknowledgement
+lost in transit is replaced by the next announcement instead of stranding the owner. A node without
+stable storage acknowledges nothing. The owner of a WASM processor branch releases the source
+acknowledgements a guest checkpoint covers only once every replica the committed schedule assigns
+has acknowledged that checkpoint's revision; a replica that is unreachable, lagging, or failing to
+install stops those acknowledgements from being released rather than letting them through, and the
+checkpoint fails after its ten-second deadline. The owner announces a WASM processor's new branch to
+its replicas as soon as the branch appears. A replica that receives a checkpoint of a branch its
+replicated branch lifecycle does not name yet first synchronizes the owner's branch lifecycle, and
+refuses the checkpoint only when that lifecycle does not name the branch either, as for a branch the
+owner has evicted.
+
 Runtime-state synchronization replies and materialized-snapshot descriptions carry the shared
 typed remote-operation failure envelope. Rejection, absence, temporary unreadiness, and execution
 failure remain distinct across the node boundary, and the requester keeps that classification in

@@ -24,6 +24,10 @@ use triomphe::Arc;
 
 use super::{BranchKey, WasmGuestState};
 
+mod durability;
+
+use durability::DurabilityBarrier;
+
 /// The byte that opens the generation segment of a WASM guest state key. A key without it was not
 /// written in the current shape and fails to decode instead of addressing the current lifetime.
 const STATE_GENERATION_KEY_MARKER: u8 = b'g';
@@ -630,6 +634,8 @@ pub(crate) enum RuntimePersistenceError {
     StorageAdmission,
     #[error("runtime state storage job did not complete")]
     StorageExecution,
+    #[error("failed to synchronize runtime state to stable storage")]
+    Synchronize,
 }
 
 pub(in crate::runtime) struct RuntimeStateStore {
@@ -643,6 +649,9 @@ pub(in crate::runtime) struct RuntimeStateStore {
     /// Held by every replica installation, which compares with the stored snapshot before it
     /// replaces it. The storage job that installs a replica holds its own handle.
     replica_installs: Arc<parking_lot::Mutex<()>>,
+    /// Makes applied writes durable, one synchronization for every writer waiting at once. The
+    /// storage job that synchronizes holds its own handle.
+    durability: Arc<DurabilityBarrier>,
     /// Runs the writes that must not occupy an async worker.
     executor: Executor,
 }
@@ -717,7 +726,6 @@ impl LatestSnapshotWriter {
             return Ok(None);
         }
         self.write_latest_snapshot(placement, snapshot.lsm, &snapshot.payload)?;
-        self.persist(PersistMode::Buffer)?;
         Ok(Some(snapshot))
     }
 }
@@ -996,6 +1004,7 @@ impl RuntimeStateStore {
             forced_recovery_preparations,
             forced_recovery_completions,
             replica_installs: Arc::new(parking_lot::Mutex::new(())),
+            durability: Arc::new(DurabilityBarrier::new()),
             executor,
         })
     }
@@ -1523,12 +1532,14 @@ impl RuntimeStateStore {
             .map_err(|error| error.current_context().clone())
     }
 
-    /// Persist the guest state a WASM processor branch saved under `placement`.
+    /// Write the guest state a WASM processor branch checkpointed under `placement`, and return
+    /// once it is on stable storage.
     ///
-    /// A branch saves after every batch, so the write runs on the storage workers instead of the
-    /// async worker driving the branch. The job shares the saved buffer rather than receiving a copy
-    /// of it.
-    pub(in crate::runtime) async fn persist_wasm_guest_state(
+    /// A branch checkpoints after every guest callback, so the write runs on the storage workers
+    /// instead of the async worker driving the branch, and shares the saved buffer rather than
+    /// receiving a copy of it. Its synchronization is shared with every other durable write in
+    /// flight on this node.
+    pub(in crate::runtime) async fn persist_wasm_checkpoint(
         &self,
         placement: &RuntimeStatePlacement,
         saved: StdArc<WasmGuestState>,
@@ -1545,12 +1556,12 @@ impl RuntimeStateStore {
                 StorageClass::Filesystem,
                 reservation,
                 move |_charge, _cancellation| {
-                    writer.write_latest_snapshot(&placement, saved.revision(), saved.bytes())?;
-                    writer.persist(PersistMode::Buffer)
+                    writer.write_latest_snapshot(&placement, saved.revision(), saved.bytes())
                 },
             )
             .await
-            .change_context(RuntimePersistenceError::StorageExecution)?
+            .change_context(RuntimePersistenceError::StorageExecution)??;
+        self.synchronize().await
     }
 
     fn replace_entity_snapshots(
@@ -1621,8 +1632,9 @@ impl RuntimeStateStore {
     }
 
     /// Persist a replicated checkpoint unless the stored one is at least as new, and hand back the
-    /// checkpoint when it was written. The comparison and the write run together on the storage
-    /// workers.
+    /// checkpoint when it was written, once it is on stable storage. The comparison and the write
+    /// run together on the storage workers; the synchronization is shared with every other durable
+    /// write in flight on this node.
     pub(in crate::runtime) async fn persist_replica_snapshot_if_newer(
         &self,
         placement: &RuntimeStatePlacement,
@@ -1635,14 +1647,19 @@ impl RuntimeStateStore {
             .reserve(MemoryClass::Bulk, 1)
             .await
             .change_context(RuntimePersistenceError::StorageAdmission)?;
-        self.executor
+        let installed = self
+            .executor
             .run_storage(
                 StorageClass::Filesystem,
                 reservation,
                 move |_charge, _cancellation| writer.install_replica_if_newer(&placement, snapshot),
             )
             .await
-            .change_context(RuntimePersistenceError::StorageExecution)?
+            .change_context(RuntimePersistenceError::StorageExecution)??;
+        if installed.is_some() {
+            self.synchronize().await?;
+        }
+        Ok(installed)
     }
 
     pub(in crate::runtime) fn latest_snapshot(
@@ -2513,7 +2530,7 @@ mod tests {
         }
     }
 
-    fn open_store(dir: &tempfile::TempDir) -> RuntimeStateStore {
+    pub(super) fn open_store(dir: &tempfile::TempDir) -> RuntimeStateStore {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should open");
@@ -2615,27 +2632,30 @@ mod tests {
         assert_eq!(loaded("beta", 1), None);
     }
 
-    /// Guest saves and replica installations go through the store's storage workers. A replica
-    /// installation hands back the checkpoint it wrote, and refuses one that is not newer than the
-    /// checkpoint already stored for that generation.
+    /// Guest checkpoints and replica installations go through the store's storage workers and
+    /// return only once a synchronization covered them. A replica installation hands back the
+    /// checkpoint it wrote, and refuses one that is not newer than the checkpoint already stored for
+    /// that generation.
     #[tokio::test]
-    async fn guest_saves_and_replica_installs_are_written_by_the_storage_workers() {
+    async fn guest_checkpoints_and_replica_installs_return_once_synchronized() {
         let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
         let store = open_store(&dir);
         let placement = wasm_guest_placement("acme", 1);
-        let guest =
-            super::super::ReplicatedWasmProcessorState::new(placement.clone(), Vec::new(), 0, None)
-                .expect("guest state should initialize");
-        let saved = guest.replace_guest_state(vec![1, 2, 3]);
+        let guest = super::super::ReplicatedWasmProcessorState::new(placement.clone(), None);
+        let captured = guest.capture(
+            vec![1, 2, 3],
+            super::super::WasmCheckpointBoundary::LocalStorage,
+        );
 
         store
-            .persist_wasm_guest_state(&placement, saved)
+            .persist_wasm_checkpoint(&placement, captured.saved())
             .await
-            .expect("guest state should persist");
+            .expect("the guest checkpoint should reach stable storage");
+        assert_eq!(store.durability.rounds(), 1);
         let stored = store
             .latest_snapshot(&placement)
             .expect("guest state should load")
-            .expect("the saved guest state is stored");
+            .expect("the checkpointed guest state is stored");
         assert_eq!((stored.lsm, stored.payload), (1, vec![1, 2, 3]));
 
         let older = PersistedRuntimeStateEntry {
@@ -2658,6 +2678,11 @@ mod tests {
             .await
             .expect("the replica installation should run");
         assert_eq!(installed, Some(newer));
+        assert_eq!(
+            store.durability.rounds(),
+            2,
+            "only the installation that wrote a checkpoint synchronizes"
+        );
     }
 
     /// Activating a forced recovery publishes the checkpoints it staged in the generation the

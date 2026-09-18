@@ -451,6 +451,13 @@ Guest initialization, input processing, requested-timeout callbacks, quiesce flu
 save, load, or reset each receive the snapshot selected for that operation. The guest cannot ask
 the engine for wall time or execute without an explicit snapshot.
 
+A WASM processor acknowledges an input only after the guest-state checkpoint that covers it is on
+the stable storage of the branch's owner and of every replica the schedule assigns the processor.
+A checkpoint that cannot get there negatively acknowledges what it covers and recreates the branch's
+guest from its last completed checkpoint. `DESCRIBE WASM PROCESSOR` reports how many of the answering
+node's branch checkpoints are awaiting local storage, awaiting replicas, or failed. See
+[Checkpoints And Acknowledgements](wasm-processor-guests.md#checkpoints-and-acknowledgements).
+
 ## Correlator
 
 Correlators use explicit sides and have no default input scope:

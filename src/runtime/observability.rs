@@ -154,6 +154,45 @@ pub(crate) struct DataflowNodeTransientState {
     pub(crate) reconnect_wait_millis: Option<u64>,
 }
 
+/// How many branches of one WASM processor have their latest guest-state checkpoint at each stage.
+#[derive(Debug, Default)]
+struct WasmCheckpointProgressCounts {
+    branches: usize,
+    awaiting_local_storage: usize,
+    awaiting_replicas: usize,
+    failed: usize,
+}
+
+impl WasmCheckpointProgressCounts {
+    fn count(&mut self, progress: WasmCheckpointProgress) {
+        Self::tally(&mut self.branches);
+        match progress {
+            WasmCheckpointProgress::Committed => {}
+            WasmCheckpointProgress::Captured => Self::tally(&mut self.awaiting_local_storage),
+            WasmCheckpointProgress::LocallyDurable => Self::tally(&mut self.awaiting_replicas),
+            WasmCheckpointProgress::Failed => Self::tally(&mut self.failed),
+        }
+    }
+
+    fn tally(count: &mut usize) {
+        *count = count
+            .checked_add(1)
+            .assured("every counted branch state is held in memory, so the count fits in usize");
+    }
+
+    fn describe(&self) -> Vec<String> {
+        vec![
+            format!("state structures: {}", self.branches),
+            format!(
+                "checkpoints awaiting local storage: {}",
+                self.awaiting_local_storage
+            ),
+            format!("checkpoints awaiting replicas: {}", self.awaiting_replicas),
+            format!("failed checkpoints: {}", self.failed),
+        ]
+    }
+}
+
 impl Runtime {
     pub(in crate::runtime) fn mark_branch_aggregated_metrics_updated(
         &self,
@@ -234,9 +273,7 @@ impl Runtime {
         processor: impl Into<ModelName>,
     ) -> Vec<String> {
         let processor = processor.into();
-        let mut branch_count = 0_usize;
-        let mut dirty_count = 0_usize;
-        let mut pending_replica_count = 0_usize;
+        let mut progress = WasmCheckpointProgressCounts::default();
         for state in self.inner.replicated_wasm_processor_states.iter() {
             let placement = &state.placement;
             if &placement.domain != domain
@@ -245,19 +282,9 @@ impl Runtime {
             {
                 continue;
             }
-            branch_count += 1;
-            if state.is_dirty() {
-                dirty_count += 1;
-            }
-            if !state.replica_quorum_satisfied(state.saved_revision()) {
-                pending_replica_count += 1;
-            }
+            progress.count(state.progress());
         }
-        vec![
-            format!("state structures: {branch_count}"),
-            format!("dirty state structures: {dirty_count}"),
-            format!("replica pending state structures: {pending_replica_count}"),
-        ]
+        progress.describe()
     }
 
     pub(crate) fn describe_domain_statistics(&self, domain: &DomainName) -> Vec<String> {
