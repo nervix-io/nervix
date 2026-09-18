@@ -994,6 +994,12 @@ table again after a sibling emitter fails.
 This sibling-retry case assumes a source mode that retries when an attached ACK fails or is lost. A
 no-ACK source cannot create that retry duplicate, but it can lose the record instead.
 
+A WASM processor on the path adds one more retry of the same kind. It dispatches a guest callback's
+output before the checkpoint of the guest's state completes and holds back only the source ACK, so
+a checkpoint that fails negatively acknowledges records whose output a sink may already have
+published, and the source redelivers them. See
+[Recovery, Replay And Duplicates](wasm-processor-guests.md#recovery-replay-and-duplicates).
+
 Every `DETACHED` path has a common loss window: a process can fail after relay fan-out acknowledges
 upstream but before the emitter reaches its declared sink completion point. The table below calls
 out the additional mode- and transport-specific duplicate and loss conditions.

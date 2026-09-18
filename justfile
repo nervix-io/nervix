@@ -280,12 +280,18 @@ test-coverage: tests-deps
 bench *args:
     cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
     cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
+    cargo bench --package nervix-server --bench wasm_checkpoint --features benchmarks -- {{ args }}
     cargo bench --package nervix-vm --bench vm -- {{ args }}
 
 # Compare direct Arrow-to-Row encoding with the protobuf/keyed-JSON wire construction it replaces.
 # The suite reports encoded bytes before Criterion measures CPU; its unit probe measures allocations.
 bench-subscription-rows *args:
     cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
+
+# Measure durable WASM guest-state checkpoints against unsynchronized writes of the same states. The
+# store lives under the crate target directory, so the synchronization cost is that of its storage.
+bench-wasm-checkpoint *args:
+    cargo bench --package nervix-server --bench wasm_checkpoint --features benchmarks -- {{ args }}
 
 # Run only the expression VM Criterion suite. Extra arguments are forwarded to Criterion, so a
 # group filter and `--save-baseline` or `--baseline` compare VM kernels without the relay suite.

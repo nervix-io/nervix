@@ -45,6 +45,14 @@ impl ConfiguredFaultInjection {
         false
     }
 
+    pub(in crate::runtime) fn wasm_checkpoint_storage_fails(&self) -> bool {
+        false
+    }
+
+    pub(in crate::runtime) fn state_replica_installation_fails(&self) -> bool {
+        false
+    }
+
     pub(in crate::runtime) fn branch_instance_expiration_scan_interval(&self) -> Option<Duration> {
         None
     }

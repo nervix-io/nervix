@@ -92,6 +92,7 @@ impl Runtime {
                 domain_routings: DashMap::default(),
                 message_error_routes: DashMap::default(),
                 compiled_domain_udfs: DashMap::default(),
+                compiled_wasm_modules: DashMap::default(),
                 schedule_application: Mutex::new(ScheduleApplication::default()),
                 domain_instantiation_errors: DashMap::default(),
                 domains: DashMap::default(),
@@ -485,6 +486,7 @@ impl Runtime {
         }
         self.inner.endpoint_bindings.clear();
         self.inner.compiled_domain_udfs.clear();
+        self.inner.compiled_wasm_modules.clear();
         self.inner.ingestor_readiness.clear();
         self.inner.remote_ack_watcher_shutdown.cancel();
         self.inner.remote_ack_watcher_tasks.close();

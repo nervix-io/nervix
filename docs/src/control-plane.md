@@ -300,8 +300,8 @@ operator `PAUSE` or `RESUME` statement.
   flushing pending route output.
   Correlator, window-processor, inferencer, and WASM-processor structural changes use this level
   as well. A WASM processor participates like every other stateful node: the host gates its input
-  relays, asks the guest to release what it buffers, snapshots it, and restores that snapshot into
-  the replacement instance.
+  relays, asks the guest to release what it buffers, checkpoints it, and restores that checkpoint
+  into the replacement instance.
 - A schedule change that only adjusts replica roles is `DYNAMIC`. A planned primary-owner change
   uses `ENTITY_PAUSE`, even when no model changed. `RELOCATE` is classified this way: it reports
   `ENTITY_PAUSE` when it moves at least one runtime node in a running domain, and `DYNAMIC` when it

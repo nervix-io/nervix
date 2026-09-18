@@ -2091,101 +2091,85 @@ impl RelayProcessorNode {
                         return;
                     };
                     let output_key = branch.key.clone();
+                    // Every timeout callback is completed by its own checkpoint, so a later
+                    // callback that ends the instance never takes the decisions of an earlier one,
+                    // which no checkpoint has covered yet, down with it.
                     for timeout in due_timeouts {
-                        let timeout_result = instance
-                            .as_mut()
-                            .verified(
-                                "the let-else above returned unless this branch holds an instance",
-                            )
+                        tokio::task::consume_budget().await;
+                        let Some(live) = instance.as_mut() else {
+                            // A callback before this one ended the instance, and the timeouts it
+                            // had requested ended with it.
+                            break;
+                        };
+                        let timeout_result = live
                             .guest
                             .on_timeout_in_context(
                                 timeout.handle,
                                 nervix_wasm::WasmExecutionContext::new(now),
                             )
                             .await;
-                        let outputs = match timeout_result {
-                            Ok(outputs) => outputs,
-                            Err(error) => {
-                                let resource_limit_exceeded =
-                                    error.current_context().is_resource_limit_exceeded();
-                                let failure = instance
-                                    .as_ref()
-                                    .verified(
-                                        "the let-else above returned unless this branch holds an \
-                                         instance",
-                                    )
-                                    .module
-                                    .guest_failure(error, None);
-                                branch.runtime.handle_general_error_for_acks(
-                                    &branch.domain,
-                                    self.kind,
-                                    &self.processor,
-                                    &self.error_policies,
-                                    ack_map.values().map(|context| &context.acks),
-                                    format!("{failure:#}"),
-                                );
-                                ack_map.clear();
-                                if resource_limit_exceeded {
-                                    *instance = None;
+                        let mut holds = WasmCheckpointHolds::default();
+                        match timeout_result {
+                            Ok(outputs) => {
+                                let dispatch = dispatch_wasm_output_envelopes(
+                                    WasmOutputContext {
+                                        graph,
+                                        branch: &mut *branch,
+                                        node_kind: self.kind,
+                                        processor: &self.processor,
+                                        error_policies: &self.error_policies,
+                                        output_routes: &mut *output_routes,
+                                        input_relays: &self.input_relays,
+                                        input_schema: &schemas.input,
+                                        output_schemas: &schemas.outputs,
+                                        key: &output_key,
+                                        module: &instance
+                                            .as_ref()
+                                            .verified(
+                                                "the let-else above found this branch's instance, \
+                                                 and only a completed callback ends it",
+                                            )
+                                            .module,
+                                        dispatch_error: "failed to forward timeout output",
+                                        execution_now: now,
+                                    },
+                                    outputs,
+                                    ack_map,
+                                    &mut holds,
+                                )
+                                .await;
+                                if let Err(error) = dispatch {
+                                    branch.runtime.handle_internal_processor_error_for_acks(
+                                        &branch.domain,
+                                        self.kind,
+                                        &self.processor,
+                                        &self.error_policies,
+                                        holds.acks(),
+                                        format!("{error:#}"),
+                                    );
                                 }
-                                return;
                             }
-                        };
-                        let dispatch = dispatch_wasm_output_envelopes(
-                            WasmOutputContext {
-                                graph,
-                                branch,
-                                node_kind: self.kind,
-                                processor: &self.processor,
-                                error_policies: &self.error_policies,
-                                output_routes,
-                                input_relays: &self.input_relays,
-                                input_schema: &schemas.input,
-                                output_schemas: &schemas.outputs,
-                                key: &output_key,
-                                module: &instance
-                                    .as_ref()
-                                    .verified(
-                                        "the let-else above returned unless this branch holds an \
-                                         instance",
-                                    )
-                                    .module,
-                                dispatch_error: "failed to forward timeout output",
-                                execution_now: now,
-                            },
-                            outputs,
-                            ack_map,
-                        )
-                        .await;
-                        if let Err(error) = dispatch {
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind,
-                                &self.processor,
-                                &self.error_policies,
-                                std::iter::empty::<&AckSet>(),
-                                format!("{error:#}"),
-                            );
-                            return;
+                            Err(error) => {
+                                let reporting = WasmCallbackReporting {
+                                    runtime: &branch.runtime,
+                                    domain: &branch.domain,
+                                    node_kind: self.kind,
+                                    processor: &self.processor,
+                                    error_policies: &self.error_policies,
+                                };
+                                reporting.fail_callback(error, instance, ack_map, &mut holds);
+                            }
                         }
-                    }
-                    if let Err(error) = persist_wasm_guest_state(
-                        &branch.runtime,
-                        &self.processor,
-                        replicated_state,
-                        instance,
-                        now,
-                    )
-                    .await
-                    {
-                        branch.runtime.handle_internal_processor_error_for_acks(
-                            &branch.domain,
-                            self.kind,
-                            &self.processor,
-                            &self.error_policies,
-                            std::iter::empty::<&AckSet>(),
-                            format!("{error:#}"),
-                        );
+                        let reporting = WasmCallbackReporting {
+                            runtime: &branch.runtime,
+                            domain: &branch.domain,
+                            node_kind: self.kind,
+                            processor: &self.processor,
+                            error_policies: &self.error_policies,
+                        };
+                        reporting
+                            .complete_callback(replicated_state, instance, ack_map, holds, now)
+                            .await;
                     }
                 }
             }
@@ -2241,6 +2225,7 @@ impl RelayProcessorNode {
             let RelayProcessorOperationNode::WasmProcessor {
                 output_routes,
                 instance,
+                replicated_state,
                 ack_map,
                 ..
             } = &mut self.operation
@@ -2268,72 +2253,73 @@ impl RelayProcessorNode {
                 .guest
                 .flush_in_context(nervix_wasm::WasmExecutionContext::new(execution_now))
                 .await;
-            let outputs = match flush_result {
-                Ok(outputs) => outputs,
-                Err(error) => {
-                    let resource_limit_exceeded =
-                        error.current_context().is_resource_limit_exceeded();
-                    let failure = instance
-                        .as_ref()
-                        .verified(
-                            "the is_none check above returned unless this branch holds an instance",
-                        )
-                        .module
-                        .guest_failure(error, None);
-                    branch.runtime.handle_general_error_for_acks(
-                        &branch.domain,
-                        self.kind,
-                        &self.processor,
-                        &self.error_policies,
-                        ack_map.values().map(|context| &context.acks),
-                        format!("{failure:#}"),
-                    );
-                    ack_map.clear();
-                    if resource_limit_exceeded {
-                        *instance = None;
+            let mut holds = WasmCheckpointHolds::default();
+            match flush_result {
+                // A flush that emits nothing decides no input, so no acknowledgement waits for a
+                // checkpoint of it. Draining asks every branch to flush again and again, and a
+                // checkpoint of each empty flush would synchronize storage for nothing.
+                Ok(outputs) if outputs.is_empty() => return,
+                Ok(outputs) => {
+                    let output_key = branch.key.clone();
+                    let dispatch = dispatch_wasm_output_envelopes(
+                        WasmOutputContext {
+                            graph,
+                            branch: &mut *branch,
+                            node_kind: self.kind,
+                            processor: &self.processor,
+                            error_policies: &self.error_policies,
+                            output_routes,
+                            input_relays: &self.input_relays,
+                            input_schema: &schemas.input,
+                            output_schemas: &schemas.outputs,
+                            key: &output_key,
+                            module: &instance
+                                .as_ref()
+                                .verified(
+                                    "the is_none check above returned unless this branch holds an \
+                                     instance",
+                                )
+                                .module,
+                            dispatch_error: "failed to forward quiesce flush output",
+                            execution_now,
+                        },
+                        outputs,
+                        ack_map,
+                        &mut holds,
+                    )
+                    .await;
+                    if let Err(error) = dispatch {
+                        branch.runtime.handle_internal_processor_error_for_acks(
+                            &branch.domain,
+                            self.kind,
+                            &self.processor,
+                            &self.error_policies,
+                            holds.acks(),
+                            format!("{error:#}"),
+                        );
                     }
-                    return;
                 }
+                Err(error) => {
+                    let reporting = WasmCallbackReporting {
+                        runtime: &branch.runtime,
+                        domain: &branch.domain,
+                        node_kind: self.kind,
+                        processor: &self.processor,
+                        error_policies: &self.error_policies,
+                    };
+                    reporting.fail_callback(error, instance, ack_map, &mut holds);
+                }
+            }
+            let reporting = WasmCallbackReporting {
+                runtime: &branch.runtime,
+                domain: &branch.domain,
+                node_kind: self.kind,
+                processor: &self.processor,
+                error_policies: &self.error_policies,
             };
-            if outputs.is_empty() {
-                return;
-            }
-            let output_key = branch.key.clone();
-            let dispatch = dispatch_wasm_output_envelopes(
-                WasmOutputContext {
-                    graph,
-                    branch,
-                    node_kind: self.kind,
-                    processor: &self.processor,
-                    error_policies: &self.error_policies,
-                    output_routes,
-                    input_relays: &self.input_relays,
-                    input_schema: &schemas.input,
-                    output_schemas: &schemas.outputs,
-                    key: &output_key,
-                    module: &instance
-                        .as_ref()
-                        .verified(
-                            "the is_none check above returned unless this branch holds an instance",
-                        )
-                        .module,
-                    dispatch_error: "failed to forward quiesce flush output",
-                    execution_now,
-                },
-                outputs,
-                ack_map,
-            )
-            .await;
-            if let Err(error) = dispatch {
-                branch.runtime.handle_internal_processor_error_for_acks(
-                    &branch.domain,
-                    self.kind,
-                    &self.processor,
-                    &self.error_policies,
-                    std::iter::empty::<&AckSet>(),
-                    format!("{error:#}"),
-                );
-            }
+            reporting
+                .complete_callback(replicated_state, instance, ack_map, holds, execution_now)
+                .await;
         })
     }
 
@@ -2409,14 +2395,14 @@ impl RelayProcessorNode {
                 replicated_state,
                 ..
             } => {
-                if instance.is_none() {
+                let Some(live) = instance.as_mut() else {
                     return Ok(());
-                }
+                };
                 checkpoint_wasm_guest_state(
                     &branch.runtime,
                     &self.processor,
                     replicated_state,
-                    instance,
+                    live,
                     execution_now,
                 )
                 .await
