@@ -415,8 +415,7 @@ impl RelayProcessorNode {
                 .relay_branchings
                 .get(incoming_relay)
                 .cloned()
-                .unwrap_or_default();
-            let current_branch_schema = relay_branch_schema_for_routing(routing, incoming_relay);
+                .assured("the validated processor input relay has branch routing");
             let filter_scope = match kind {
                 ProcessorInputFilterKind::FromWhere => self.source_filter_scope(incoming_relay),
                 ProcessorInputFilterKind::FilterWhere => RuntimeFilterScope::Source {
@@ -440,8 +439,6 @@ impl RelayProcessorNode {
                     available_materialized_streams: materialized_stream_specs,
                     available_lookups: &routing.lookups,
                     current_branching: &current_branching,
-                    current_branch_schema: current_branch_schema.as_ref(),
-                    current_branch_sensitivity: None,
                     udfs: Some(&routing.udfs),
                 },
                 filter_scope,
@@ -1410,9 +1407,7 @@ impl RelayProcessorNode {
                         .relay_branchings
                         .get(left_relay)
                         .cloned()
-                        .unwrap_or_default();
-                    let current_branch_schema =
-                        relay_branch_schema_for_routing(routing, left_relay);
+                        .assured("the validated correlator input relay has branch routing");
                     for (output_index, compiled_output_program) in compiled_output_programs
                         .iter_mut()
                         .enumerate()
@@ -1473,8 +1468,6 @@ impl RelayProcessorNode {
                                 available_materialized_streams: &routing.materialized_stream_specs,
                                 available_lookups: &routing.lookups,
                                 current_branching: &current_branching,
-                                current_branch_schema: current_branch_schema.as_ref(),
-                                current_branch_sensitivity: None,
                                 udfs: Some(&routing.udfs),
                             },
                         }

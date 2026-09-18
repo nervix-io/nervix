@@ -22,8 +22,8 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     ClusterNodeName, CommandExecutionReference, DomainName, DomainSchedule, DomainStatus,
-    ModelKind, ModelName, NodeRef, RelayName, RemoteRuntimeField, WasmStateResetPhase,
-    WasmStateResetScope,
+    ModelKind, ModelName, NodeRef, RelayName, RemoteRuntimeField, ResolvedBranching,
+    WasmStateResetPhase, WasmStateResetScope,
 };
 #[cfg(feature = "testing")]
 use nervix_recovery::NoReceiver as _;
@@ -289,7 +289,7 @@ impl SessionServiceImpl {
         let (scope, branch_key) = Self::resolve_wasm_state_reset_target(
             domain,
             processor,
-            node.effective_branching.as_deref(),
+            node.resolved_branching.as_ref(),
             target,
         )?;
         let mut published = false;
@@ -334,7 +334,7 @@ impl SessionServiceImpl {
     fn resolve_wasm_state_reset_target(
         domain: &DomainName,
         processor: &ModelName,
-        branching: Option<&[nervix_models::FieldName]>,
+        branching: Option<&ResolvedBranching>,
         target: WasmStateResetTarget,
     ) -> error_stack::Result<
         (WasmStateResetScope, Option<Vec<RemoteRuntimeField>>),
@@ -345,20 +345,25 @@ impl SessionServiceImpl {
             processor: processor.clone(),
         };
         match (branching, target) {
-            (Some([]), WasmStateResetTarget::Unbranched) => {
+            (Some(ResolvedBranching::Unbranched), WasmStateResetTarget::Unbranched) => {
                 Ok((WasmStateResetScope::Unbranched, None))
             }
-            (Some(fields), WasmStateResetTarget::AllBranches) if !fields.is_empty() => {
-                Ok((WasmStateResetScope::AllBranches, None))
-            }
-            (Some(expected), WasmStateResetTarget::Branch(fields)) if !expected.is_empty() => {
+            (
+                Some(ResolvedBranching::Branched { schema, .. }),
+                WasmStateResetTarget::AllBranches,
+            ) if !schema.fields.is_empty() => Ok((WasmStateResetScope::AllBranches, None)),
+            (
+                Some(ResolvedBranching::Branched { schema, .. }),
+                WasmStateResetTarget::Branch(fields),
+            ) if !schema.fields.is_empty() => {
                 let supplied = fields
                     .iter()
                     .map(|field| field.name.as_str())
                     .collect::<BTreeSet<_>>();
-                let expected = expected
+                let expected = schema
+                    .fields
                     .iter()
-                    .map(|field| field.as_str())
+                    .map(|field| field.name.as_str())
                     .collect::<BTreeSet<_>>();
                 if supplied.len() != fields.len() || supplied != expected {
                     return Err(Report::new(invalid()));

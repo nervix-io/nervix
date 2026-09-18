@@ -783,7 +783,9 @@ impl Runtime {
                             RuntimeMaterializedRelaySpec::new(
                                 schema.arrow_schema(),
                                 schema.vm_sensitivity(),
-                                desired_node.effective_branching.clone().unwrap_or_default(),
+                                desired_node.resolved_branching.clone().assured(
+                                    "the schedule resolves every relay branch declaration",
+                                ),
                             ),
                         );
                         execution.materialized_stream_owner_nodes.insert(
@@ -1376,16 +1378,13 @@ impl Runtime {
                                     desired_generator.materialized_relay.as_str()
                                 ),
                             })?;
-                        let source_branch_schema = execution
-                            .relay_branching_schemas
-                            .get(&desired_generator.materialized_relay)
-                            .cloned()
-                            .flatten();
                         let source_branching = execution
                             .relay_branchings
                             .get(&desired_generator.materialized_relay)
                             .cloned()
-                            .unwrap_or_default();
+                            .assured("the generator's validated source relay has branch routing");
+                        let source_branch_schema =
+                            RuntimeVmSchema::from_branching(&source_branching);
                         let mut routes =
                             Vec::with_capacity(desired_generator.output_routes.routes.len());
                         for output in desired_generator.output_routes.outputs() {
@@ -1427,9 +1426,14 @@ impl Runtime {
                                 &desired_generator,
                                 output,
                                 GeneratorSetProgramSchemas {
-                                    output: output_schema.arrow_schema(),
-                                    output_sensitivity: output_schema.vm_sensitivity(),
-                                    source: source_schema.arrow_schema(),
+                                    output: RuntimeVmSchema {
+                                        schema: output_schema.arrow_schema(),
+                                        sensitivity: output_schema.vm_sensitivity(),
+                                    },
+                                    source: RuntimeVmSchema {
+                                        schema: source_schema.arrow_schema(),
+                                        sensitivity: source_schema.vm_sensitivity(),
+                                    },
                                     branch: source_branch_schema.clone(),
                                 },
                                 Some(&execution.udfs),
@@ -1448,7 +1452,6 @@ impl Runtime {
                                 desired_generator.clone(),
                                 source_schema,
                                 source_branching,
-                                source_branch_schema,
                                 routes,
                             ),
                         )

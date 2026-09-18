@@ -2667,6 +2667,60 @@ impl BranchSelection {
     }
 }
 
+/// The branch contract after the registry has resolved every referenced model.
+///
+/// A branched declaration retains both identities and the complete key schema so execution does
+/// not have to reconstruct branch semantics from parallel fields or model lookups.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum ResolvedBranching {
+    Unbranched,
+    Branched {
+        branch: BranchName,
+        schema: CreateSchema,
+    },
+}
+
+impl ResolvedBranching {
+    pub fn unbranched() -> Self {
+        Self::Unbranched
+    }
+
+    pub fn branched(branch: BranchName, schema: CreateSchema) -> Self {
+        Self::Branched { branch, schema }
+    }
+
+    pub fn branch(&self) -> Option<&BranchName> {
+        match self {
+            Self::Unbranched => None,
+            Self::Branched { branch, .. } => Some(branch),
+        }
+    }
+
+    pub fn schema(&self) -> Option<&CreateSchema> {
+        match self {
+            Self::Unbranched => None,
+            Self::Branched { schema, .. } => Some(schema),
+        }
+    }
+
+    pub fn fields(&self) -> &[crate::SchemaField] {
+        match self {
+            Self::Unbranched => &[],
+            Self::Branched { schema, .. } => &schema.fields,
+        }
+    }
+
+    pub fn field_names(&self) -> impl Iterator<Item = &FieldName> {
+        self.fields().iter().map(|field| &field.name)
+    }
+
+    pub fn is_unbranched(&self) -> bool {
+        matches!(self, Self::Unbranched)
+    }
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -4421,8 +4475,7 @@ impl KafkaPartitionSchedule {
 pub struct ScheduledNode {
     pub identifier: ModelName,
     pub config: Box<Model>,
-    pub effective_branching: Option<Vec<FieldName>>,
-    pub effective_branching_schema: Option<SchemaName>,
+    pub resolved_branching: Option<ResolvedBranching>,
     /// The fingerprint of the schemas this node's records are laid out by, as the registry computed
     /// it. Every scheduled node carries one; the runtime keys each of the node's schema-bound states
     /// by it.
@@ -4453,8 +4506,7 @@ impl ScheduledNode {
         Self {
             identifier: config.name(),
             config: Box::new(config),
-            effective_branching: None,
-            effective_branching_schema: None,
+            resolved_branching: None,
             schema_fingerprint,
             kafka_partition_schedule: None,
             primary_node: None,
@@ -4465,15 +4517,10 @@ impl ScheduledNode {
         }
     }
 
-    /// The branch fields and branch schema the registry resolved for this node.
+    /// The complete branch declaration the registry resolved for this node.
     #[must_use]
-    pub fn with_effective_branching(
-        mut self,
-        fields: Option<Vec<FieldName>>,
-        schema: Option<SchemaName>,
-    ) -> Self {
-        self.effective_branching = fields;
-        self.effective_branching_schema = schema;
+    pub fn with_resolved_branching(mut self, branching: Option<ResolvedBranching>) -> Self {
+        self.resolved_branching = branching;
         self
     }
 
@@ -5360,7 +5407,7 @@ mod tests {
         ErrorPolicies, FlushPolicy, GeneralErrorPolicy, InferencerTensorDimension,
         InferencerTensorElementType, InferencerTensorRepresentation, InferencerTensorSchema,
         KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind, PlacementPolicy,
-        RelayBranching, RetryPolicy, ScheduledNode,
+        RelayBranching, ResolvedBranching, RetryPolicy, ScheduledNode,
     };
     use crate::{
         ClusterNodeName, CreateIngestor, CreateJunction, DomainName, EndpointIngestMode,
@@ -5501,7 +5548,7 @@ mod tests {
             }),
             SchemaFingerprint::from_digest([1; 32]),
         )
-        .with_effective_branching(Some(vec![named("tenant")]), None)
+        .with_resolved_branching(Some(ResolvedBranching::unbranched()))
         .placed_on(
             Some(named::<ClusterNodeName>("node-a")),
             vec![named::<ClusterNodeName>("node-a")],
