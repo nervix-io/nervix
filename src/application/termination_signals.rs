@@ -447,9 +447,68 @@ impl ForcedExit {
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::mpsc, time::Instant};
+
+    use nervix_recovery::NoReceiver as _;
     use signal_hook::consts::SIGHUP;
 
     use super::*;
+
+    /// How long a test waits for a forced exit to report how its thread stopped. Only a stalled
+    /// test waits it out, because every wait ends as soon as the report arrives.
+    const FORCED_EXIT_WAIT: Duration = Duration::from_secs(60);
+
+    /// How one thread that went through a forced exit stopped.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ThreadEnding {
+        /// The thread ended the process with this status.
+        Exited(c_int),
+        /// The thread found the process already claimed and parked behind that exit.
+        Parked,
+    }
+
+    /// A process whose exits stop only the calling thread: each reports how the thread stopped,
+    /// then unwinds it, so a forced exit runs to its end without ending the test binary.
+    struct UnwindingProcess {
+        endings: mpsc::Sender<ThreadEnding>,
+    }
+
+    impl UnwindingProcess {
+        fn with_endings() -> (Self, mpsc::Receiver<ThreadEnding>) {
+            let (endings, reported) = mpsc::channel();
+            (Self { endings }, reported)
+        }
+
+        fn stop(&self, ending: ThreadEnding) -> ! {
+            // A watchdog can fire after the test that started its forced exit has returned.
+            self.endings
+                .send(ending)
+                .means_peer_left("the test that already observed the endings it asserts on");
+            std::panic::resume_unwind(Box::new(ending))
+        }
+    }
+
+    impl ProcessExit for UnwindingProcess {
+        fn exit(&self, status: c_int) -> ! {
+            self.stop(ThreadEnding::Exited(status))
+        }
+
+        fn park_until_exit(&self) -> ! {
+            self.stop(ThreadEnding::Parked)
+        }
+    }
+
+    /// Runs `forced_exit` on a thread of its own, which the forced exit stops, and returns how that
+    /// thread stopped.
+    fn ending_of(forced_exit: impl FnOnce() + Send + 'static) -> ThreadEnding {
+        let joined = std::thread::spawn(forced_exit).join();
+        let Err(unwound) = joined else {
+            panic!("a forced exit must not return to its thread");
+        };
+        *unwound
+            .downcast::<ThreadEnding>()
+            .expect("an unwinding process stops a thread with how it stopped")
+    }
 
     #[test]
     fn the_first_signal_requests_graceful_shutdown() {
@@ -557,6 +616,101 @@ mod tests {
             assert_eq!(TerminationSignal::from_repr(signal.number()), Some(signal));
         }
         assert_eq!(TerminationSignal::from_repr(SIGHUP), None);
+    }
+
+    #[test]
+    fn the_forced_exit_that_claims_the_process_exits_with_its_status_and_a_later_one_parks() {
+        let (process, _endings) = UnwindingProcess::with_endings();
+        let claim = ForcedExitClaim::new(process);
+        let deadline_expired = ForcedExit {
+            cause: ForcedExitCause::DeadlineExpired,
+            phase: ShutdownPhase::DrainSupport,
+        };
+        let repeated_signal = ForcedExit {
+            cause: ForcedExitCause::RepeatedSignal {
+                first: TerminationSignal::Interrupt,
+                repeated: TerminationSignal::Terminate,
+            },
+            phase: ShutdownPhase::DrainSupport,
+        };
+
+        let winner_claim = claim.clone();
+        let winner = ending_of(move || {
+            deadline_expired.exit(&winner_claim);
+        });
+        let loser = ending_of(move || {
+            repeated_signal.exit(&claim);
+        });
+
+        assert_eq!(winner, ThreadEnding::Exited(DEADLINE_EXPIRED_EXIT_STATUS));
+        assert_eq!(loser, ThreadEnding::Parked);
+    }
+
+    #[test]
+    fn the_forced_exit_watchdog_exits_with_the_same_status_once_the_report_budget_passes() {
+        let (process, endings) = UnwindingProcess::with_endings();
+        let claim = ForcedExitClaim::new(process);
+        let forced_exit = ForcedExit {
+            cause: ForcedExitCause::RepeatedSignal {
+                first: TerminationSignal::Terminate,
+                repeated: TerminationSignal::Interrupt,
+            },
+            phase: ShutdownPhase::StopRequested,
+        };
+        let started = Instant::now();
+
+        let claimant = ending_of(move || {
+            forced_exit.exit(&claim);
+        });
+        let first_report = endings
+            .recv_timeout(FORCED_EXIT_WAIT)
+            .expect("the claimant and its watchdog both report their exit");
+        let second_report = endings
+            .recv_timeout(FORCED_EXIT_WAIT)
+            .expect("the claimant and its watchdog both report their exit");
+
+        assert_eq!(claimant, ThreadEnding::Exited(INTERRUPT_EXIT_STATUS));
+        assert_eq!(first_report, ThreadEnding::Exited(INTERRUPT_EXIT_STATUS));
+        assert_eq!(second_report, ThreadEnding::Exited(INTERRUPT_EXIT_STATUS));
+        assert!(
+            started.elapsed() >= FORCED_EXIT_REPORT_BUDGET,
+            "the watchdog must wait out the report budget before it exits"
+        );
+    }
+
+    #[test]
+    fn a_repeated_signal_ends_the_process_with_the_status_of_the_repeated_signal() {
+        let (process, _endings) = UnwindingProcess::with_endings();
+        let shutdown = ShutdownCoordinator::default();
+        let mut supervision =
+            SignalSupervision::new(shutdown.clone(), ForcedExitClaim::new(process));
+
+        let ending = ending_of(move || {
+            supervision.deliver(TerminationSignal::Terminate);
+            supervision.deliver(TerminationSignal::Interrupt);
+        });
+
+        assert_eq!(ending, ThreadEnding::Exited(INTERRUPT_EXIT_STATUS));
+        assert_eq!(shutdown.phase(), ShutdownPhase::StopRequested);
+    }
+
+    #[test]
+    fn the_deadline_supervisor_forces_an_exit_once_the_deadline_of_the_stop_request_passes() {
+        let (process, _endings) = UnwindingProcess::with_endings();
+        let shutdown = ShutdownCoordinator::new(Duration::from_millis(50));
+        let deadline = DeadlineSupervision::new(shutdown.clone(), ForcedExitClaim::new(process))
+            .expect("a current-thread Tokio runtime builds without a driver");
+        let ShutdownRequestOutcome::Accepted(request) = shutdown.request_stop() else {
+            panic!("the first stop request must start shutdown");
+        };
+
+        let ending = ending_of(move || deadline.enforce());
+
+        assert_eq!(ending, ThreadEnding::Exited(DEADLINE_EXPIRED_EXIT_STATUS));
+        assert!(
+            request.deadline().has_passed(),
+            "the deadline supervisor must not force an exit before the deadline passes"
+        );
     }
 }
 
