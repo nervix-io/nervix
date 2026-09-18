@@ -208,7 +208,6 @@ impl StateMachineData {
 
     /// Apply one committed entry: its log position, the membership it carries and its command.
     fn apply_entry(&mut self, entry: &EntryOf<TypeConfig>) -> AppliedConsensusCommand {
-        let input_revision = self.last_applied_log_id.as_ref().map(|log_id| log_id.index);
         self.last_applied_log_id = Some(entry.log_id.clone());
         if let Some(membership) = entry.get_membership() {
             self.last_membership = Arc::new(StoredMembership::new(
@@ -224,7 +223,6 @@ impl StateMachineData {
             command,
             AppliedEntryContext {
                 leader_term: entry.log_id.leader_id.term,
-                input_revision,
             },
         );
         self.record_runtime_revision(entry.log_id.index, &applied);

@@ -228,7 +228,7 @@ Feature: Client wire failure regressions
     When the transaction commit pause on node "node-1" after 1 statement is released
     Then the background NSPL execution succeeds
 
-  @client_wire_expected_failure @client_wire_stale_relocation
+  @client_wire_stale_relocation
   Scenario: A relocation planned before a schedule revision cannot overwrite that revision
     Given Kafka is running
     Given runtime replication is configured with replica count 2 and snapshot interval "10m"

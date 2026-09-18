@@ -11,7 +11,7 @@
 use std::collections::BTreeSet;
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_consensus::{ConsensusError, TransactionStepEffect};
+use nervix_consensus::{ConsensusError, DomainPlanningInputs, TransactionStepEffect};
 use nervix_interconnect::EntityGatePurpose;
 use nervix_models::{
     DomainName, DomainSchedule, DomainStatus, ModelKind, ModelName, OperationImpactReason,
@@ -27,6 +27,7 @@ use super::{
     cluster_status::render_cluster_status,
     domain_lifecycle::DomainAlterError,
     ownership_handoff::{mark_complete_ownership_transitions, planned_ownership_moves},
+    schedule_planning::DomainSchedulePlanningSnapshot,
     scheduling::ScheduleTransition,
     session_service::{SessionServiceImpl, create_registry_error_response, find_identifier_span},
     subscription::SessionSubscriptions,
@@ -53,6 +54,8 @@ struct TransactionModelDecision {
 struct DirectModelPlan {
     step: crate::registry::PlannedTransactionStep,
     operations: Vec<OperationImpactReport>,
+    inputs: DomainPlanningInputs,
+    schedule_inputs: DomainSchedulePlanningSnapshot,
 }
 
 /// One statement of a model-mutation batch that reached the registry: which statement it was,
@@ -834,21 +837,23 @@ impl SessionServiceImpl {
                 .iter()
                 .any(|statement| matches!(statement, Statement::RebindResource(_)))
         {
-            let plan =
+            let captured =
                 match Box::pin(self.plan_transaction_statements(&domain, &statements, 0, false))
                     .await
                 {
-                    Ok(plan) => plan,
+                    Ok(captured) => captured,
                     Err(error) => return command_error(transaction_planning_error_message(&error)),
                 };
-            let Some(step) = plan.first_step().cloned() else {
+            let Some(step) = captured.plan.first_step().cloned() else {
                 return command_error(
                     "resource rebind planning produced no model step".to_string(),
                 );
             };
             Some(DirectModelPlan {
                 step,
-                operations: plan.operations().to_vec(),
+                operations: captured.plan.operations().to_vec(),
+                inputs: captured.inputs,
+                schedule_inputs: captured.schedule_inputs,
             })
         } else {
             None
@@ -1094,21 +1099,31 @@ impl SessionServiceImpl {
                 expected_schedule,
                 mut prepared_schedule,
                 planned_relocations,
+                mut inputs,
+                planning,
             } = if let Some(decision) = &transaction_decision {
                 if is_noop {
                     ScheduleTransition::default()
                 } else {
+                    let captured_inputs = match (&transaction_step, &direct_plan) {
+                        (Some(step), _) => Some(step.inputs.clone()),
+                        (None, Some(plan)) => Some(plan.inputs.clone()),
+                        (None, None) => None,
+                    };
+                    let captured_schedule_inputs = match (&transaction_step, &direct_plan) {
+                        (Some(step), _) => Some(step.schedule_inputs.clone()),
+                        (None, Some(plan)) => Some(plan.schedule_inputs.clone()),
+                        (None, None) => None,
+                    };
                     ScheduleTransition {
                         expected_schedule: decision.expected_schedule.clone(),
                         prepared_schedule: decision.schedule.clone(),
                         planned_relocations: decision.planned_relocations,
+                        inputs: captured_inputs,
+                        planning: captured_schedule_inputs,
                     }
                 }
             } else if !is_noop {
-                let expected_schedule = Box::pin(self.inner.consensus.current_schedule())
-                    .await
-                    .domain(&domain)
-                    .cloned();
                 match Box::pin(self.prepare_domain_schedule(
                     &domain,
                     planned.candidate_graph(),
@@ -1117,15 +1132,29 @@ impl SessionServiceImpl {
                 .await
                 {
                     Ok(prepared) => ScheduleTransition {
-                        expected_schedule,
+                        expected_schedule: prepared.inputs.schedule().cloned(),
                         prepared_schedule: prepared.schedule,
                         planned_relocations: prepared.relocations,
+                        inputs: Some(prepared.inputs),
+                        planning: Some(prepared.planning),
                     },
                     Err(error) => return command_error(error),
                 }
             } else {
                 ScheduleTransition::default()
             };
+            if !is_noop
+                && let Some(inputs) = inputs.as_ref()
+                && let Err(error) = self.validate_domain_planning_inputs(inputs).await
+            {
+                return command_error(error.to_string());
+            }
+            if !is_noop
+                && let Some(planning) = planning.as_ref()
+                && let Err(error) = planning.validate_eligibility(self).await
+            {
+                return command_error(error.to_string());
+            }
             let schedule_delta =
                 ScheduleDelta::between(expected_schedule.as_ref(), prepared_schedule.as_ref());
             let classified_level = match &transaction_decision {
@@ -1191,10 +1220,6 @@ impl SessionServiceImpl {
                     )
                 }
             };
-            let transaction_schedule = transaction_step
-                .is_some()
-                .then(|| (expected_schedule.clone(), prepared_schedule.clone()));
-
             if is_noop {
                 info!(
                     domain = domain.as_str(),
@@ -1232,6 +1257,13 @@ impl SessionServiceImpl {
                     )));
                 }
                 return response;
+            }
+            if !is_noop && requires_domain_pause {
+                let paused_inputs = inputs
+                    .take()
+                    .verified("a model plan that pauses its domain carries publication inputs")
+                    .after_domain_pause();
+                inputs = Some(paused_inputs);
             }
             if !is_noop && !model_gate.affected_entities().is_empty() {
                 let relays = model_gate.relays();
@@ -1345,24 +1377,10 @@ impl SessionServiceImpl {
                         },
                     );
                     let effect = TransactionStepEffect::ReplaceDomainSchedule {
-                        domain: domain.clone(),
-                        expected_schedule: transaction_schedule
-                            .as_ref()
-                            .verified(
-                                "the schedule is prepared exactly when a transaction step is \
-                                 present, and this branch has one",
-                            )
-                            .0
-                            .clone()
-                            .map(Box::new),
-                        schedule: transaction_schedule
-                            .clone()
-                            .verified(
-                                "the schedule is prepared exactly when a transaction step is \
-                                 present, and this branch has one",
-                            )
-                            .1
-                            .map(Box::new),
+                        inputs: Box::new(inputs.clone().verified(
+                            "a transaction model plan carries its captured publication inputs",
+                        )),
+                        schedule: prepared_schedule.clone().map(Box::new),
                     };
                     match Box::pin(self.record_transaction_step(
                         transaction_step.transaction,
@@ -1479,9 +1497,11 @@ impl SessionServiceImpl {
                         }
                     }
                 } else {
+                    let inputs = inputs.clone().verified(
+                        "a non-noop model plan captures authoritative publication inputs",
+                    );
                     if let Err(error) = Box::pin(self.inner.consensus.replace_domain_schedule(
-                        domain.clone(),
-                        expected_schedule.clone(),
+                        inputs,
                         prepared_schedule.clone(),
                         domain_mutation.as_ref(),
                     ))

@@ -239,14 +239,20 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
         materialized_state: Vec::new(),
     }));
     let created = DomainSchedule::new(domain.id.clone(), [processor.clone()], vec![]);
+    let inputs = Box::new(
+        harness
+            .store
+            .inner
+            .state()
+            .domain_planning_inputs(&domain.id),
+    );
     harness
         .apply(
             1,
             ConsensusCommand::PutDomainAndSchedule {
-                expected_domain: None,
-                expected_schedule: None,
+                inputs,
                 domain: Box::new(domain.clone()),
-                schedule: Some(Box::new(created.clone())),
+                schedule: Some(Box::new(created)),
                 mutation: None,
             },
         )
@@ -291,23 +297,35 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
     transitioned.begin_wasm_state_generation();
     let every_branch_schedule =
         DomainSchedule::new(domain.id.clone(), [transitioned.clone()], vec![]);
+    let inputs = Box::new(
+        harness
+            .store
+            .inner
+            .state()
+            .domain_planning_inputs(&domain.id),
+    );
     harness
         .apply(
             3,
             ConsensusCommand::ReplaceDomainSchedule {
-                domain: domain.id.clone(),
-                expected_schedule: Some(Box::new(created)),
+                inputs,
                 schedule: Some(Box::new(branch_schedule.clone())),
                 mutation: Some(Box::new(lease.clone())),
             },
         )
         .await?;
+    let inputs = Box::new(
+        harness
+            .store
+            .inner
+            .state()
+            .domain_planning_inputs(&domain.id),
+    );
     harness
         .apply(
             4,
             ConsensusCommand::ReplaceDomainSchedule {
-                domain: domain.id.clone(),
-                expected_schedule: Some(Box::new(branch_schedule.clone())),
+                inputs,
                 schedule: Some(Box::new(every_branch_schedule.clone())),
                 mutation: None,
             },
@@ -318,12 +336,18 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
         Some(&branch_schedule),
         "a generation transition published without the domain mutation lease must not apply"
     );
+    let inputs = Box::new(
+        harness
+            .store
+            .inner
+            .state()
+            .domain_planning_inputs(&domain.id),
+    );
     harness
         .apply(
             5,
             ConsensusCommand::ReplaceDomainSchedule {
-                domain: domain.id.clone(),
-                expected_schedule: Some(Box::new(branch_schedule)),
+                inputs,
                 schedule: Some(Box::new(every_branch_schedule.clone())),
                 mutation: Some(Box::new(lease)),
             },
@@ -356,12 +380,18 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
         let mut harness = Harness::new().await?;
         let domain = Harness::domain("tenant");
         let schedule = DomainSchedule::new(domain.id.clone(), [], vec![]);
+        let inputs = Box::new(
+            harness
+                .store
+                .inner
+                .state()
+                .domain_planning_inputs(&domain.id),
+        );
         harness
             .apply(
                 1,
                 ConsensusCommand::PutDomainAndSchedule {
-                    expected_domain: None,
-                    expected_schedule: None,
+                    inputs,
                     domain: Box::new(domain.clone()),
                     schedule: Some(Box::new(schedule.clone())),
                     mutation: None,
@@ -373,9 +403,15 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
         let schedule_watch = harness.store.inner.schedule_tx.subscribe();
         let mut changed_domain = domain.clone();
         changed_domain.status = DomainStatus::Running;
+        let inputs = Box::new(
+            harness
+                .store
+                .inner
+                .state()
+                .domain_planning_inputs(&domain.id),
+        );
         let command = ConsensusCommand::PutDomainAndSchedule {
-            expected_domain: Some(Box::new(domain)),
-            expected_schedule: Some(Box::new(schedule)),
+            inputs,
             domain: Box::new(changed_domain.clone()),
             schedule: None,
             mutation: None,
@@ -1642,6 +1678,13 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
             .ok_or("committing transaction mutation lease missing")?;
         assert_eq!(mutation.recovery_fence().revision(), 4);
         assert_eq!(preceding.domain_mutations.get(&domain.id), Some(&mutation));
+        let inputs = Box::new(
+            harness
+                .store
+                .inner
+                .state()
+                .domain_planning_inputs(&domain.id),
+        );
         let command = ConsensusCommand::AdvanceTransactionCommit {
             id: "transaction".into(),
             expected_next_statement: 0,
@@ -1657,8 +1700,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                 },
             }),
             effect: Some(Box::new(TransactionStepEffect::StartDomain {
-                domain_id: domain.id.clone(),
-                expected_start_version: 0,
+                inputs,
                 start: DomainStartPoint::Resume,
                 clock: None,
                 authority: None,

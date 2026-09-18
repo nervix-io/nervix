@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use meticulous::OptionExt as _;
-use nervix_consensus::DomainMutationLease;
+use nervix_consensus::{DomainMutationLease, DomainPlanningInputs};
 use nervix_models::{
     ClusterNodeName, DomainName, DomainSchedule, DomainStatus, Model, NodeRef, PlacementPolicy,
     QuiesceLevel, RelayName, Relocation, RelocationPreferenceStrategy, ScheduledNode,
@@ -21,6 +21,7 @@ use super::{
     domain_lifecycle::DomainAlterError,
     model_mutation::{command_error, command_ok, quiesce_level_message},
     ownership_handoff::mark_complete_ownership_transitions,
+    schedule_planning::DomainSchedulePlanningSnapshot,
     session_service::SessionServiceImpl,
 };
 use crate::{
@@ -45,6 +46,8 @@ struct RelocationPlanMember {
 
 /// The plan `DESCRIBE RELOCATION` shows and `RELOCATE` executes.
 struct RelocationPlan {
+    inputs: DomainPlanningInputs,
+    planning: DomainSchedulePlanningSnapshot,
     destination: ClusterNodeName,
     level: QuiesceLevel,
     gated_relays: Vec<RelayName>,
@@ -176,8 +179,21 @@ impl SessionServiceImpl {
             .runtime
             .pause_relocation_publication_if_armed(domain)
             .await;
-        let current_schedule = self.inner.consensus.current_schedule().await;
-        let current_domain_schedule = current_schedule.domain(domain).cloned();
+        if let Err(error) = self.validate_domain_planning_inputs(&plan.inputs).await {
+            return command_error(format!(
+                "failed to commit the relocation onto node '{}' for domain '{}': {error}",
+                plan.destination,
+                domain.as_str()
+            ));
+        }
+        if let Err(error) = plan.planning.validate_eligibility(self).await {
+            return command_error(format!(
+                "failed to commit the relocation onto node '{}' for domain '{}': {error}",
+                plan.destination,
+                domain.as_str()
+            ));
+        }
+        let current_domain_schedule = plan.inputs.schedule().cloned();
         mark_complete_ownership_transitions(
             current_domain_schedule.as_ref(),
             &mut planned_schedule,
@@ -200,12 +216,7 @@ impl SessionServiceImpl {
         if let Err(error) = self
             .inner
             .consensus
-            .replace_domain_schedule(
-                domain.clone(),
-                current_domain_schedule,
-                Some(planned_schedule),
-                mutation,
-            )
+            .replace_domain_schedule(plan.inputs.clone(), Some(planned_schedule), mutation)
             .await
         {
             if let Some(handoff) = handoff.take() {
@@ -270,7 +281,8 @@ impl SessionServiceImpl {
         domain: &DomainName,
         relocation: &Relocation,
     ) -> Result<RelocationPlan, String> {
-        let Some(domain_state) = self.inner.consensus.current_domain(domain).await else {
+        let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
+        let Some(domain_state) = inputs.state() else {
             return Err(format!("domain '{}' does not exist", domain.as_str()));
         };
         if let DomainStatus::Paused = domain_state.status {
@@ -285,8 +297,7 @@ impl SessionServiceImpl {
                 domain.as_str()
             ));
         };
-        let cluster_schedule = self.inner.consensus.current_schedule().await;
-        let Some(current) = cluster_schedule.domain(domain) else {
+        let Some(current) = inputs.schedule() else {
             return Err(format!(
                 "domain '{}' has no active schedule",
                 domain.as_str()
@@ -305,15 +316,15 @@ impl SessionServiceImpl {
 
         // Failover reassigns from the same liveness signal, so a relocation must read it the same
         // way or it would plan a handoff from an owner failover is already taking over.
-        let availability = self.inner.cluster.availability_state().await;
-        let live_nodes = availability.live_node_ids();
-        let placement_candidate_nodes = availability.placement_candidate_node_ids();
-        let schedulable_nodes = self
-            .inner
-            .consensus
-            .schedulable_live_voter_ids(placement_candidate_nodes.iter().cloned())
-            .await
-            .into_iter()
+        let planning = self
+            .capture_domain_schedule_planning_snapshot(&inputs)
+            .await;
+        let live_nodes = planning.live_node_ids();
+        let placement_candidate_nodes = planning.placement_candidate_node_ids();
+        let schedulable_nodes = planning
+            .cluster_nodes()
+            .iter()
+            .cloned()
             .collect::<BTreeSet<_>>();
 
         let mut owners = Vec::with_capacity(unit.members.len());
@@ -324,12 +335,12 @@ impl SessionServiceImpl {
             );
         }
 
-        self.validate_relocation_destination(
+        Self::validate_relocation_destination(
             &relocation.destination,
+            &inputs,
             &live_nodes,
             &placement_candidate_nodes,
-        )
-        .await?;
+        )?;
 
         let moved = unit
             .members
@@ -412,6 +423,8 @@ impl SessionServiceImpl {
         );
 
         Ok(RelocationPlan {
+            inputs,
+            planning,
             destination: relocation.destination.clone(),
             level,
             gated_relays,
@@ -423,34 +436,22 @@ impl SessionServiceImpl {
     }
 
     /// The destination must be a cluster node the scheduler could choose for a new assignment.
-    async fn validate_relocation_destination(
-        &self,
+    fn validate_relocation_destination(
         destination: &ClusterNodeName,
+        inputs: &DomainPlanningInputs,
         live_nodes: &BTreeSet<ClusterNodeName>,
         placement_candidate_nodes: &BTreeSet<ClusterNodeName>,
     ) -> Result<(), String> {
-        let membership = self.inner.consensus.membership_nodes().await;
-        if !membership.contains_key(destination) {
+        if !inputs.topology().members().contains(destination) {
             return Err(format!("node '{destination}' is not a raft member"));
         }
-        let live_voters = self
-            .inner
-            .consensus
-            .live_voter_ids(live_nodes.iter().cloned())
-            .await;
-        if !live_voters.iter().any(|voter| voter == destination) {
+        if !inputs.topology().voters().contains(destination) || !live_nodes.contains(destination) {
             return Err(format!("node '{destination}' is not a live raft voter"));
         }
         if !placement_candidate_nodes.contains(destination) {
             return Err(format!("node '{destination}' is terminating"));
         }
-        if self
-            .inner
-            .consensus
-            .cordoned_node_ids()
-            .await
-            .contains(destination)
-        {
+        if inputs.topology().cordoned().contains(destination) {
             return Err(format!("node '{destination}' is cordoned"));
         }
         Ok(())
