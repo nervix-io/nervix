@@ -54,7 +54,16 @@ Feature: NSPL transactions
     When the cluster is restarted
     Given client "resumed" is connected to the leader node
     When client "resumed" attaches to transaction "{{transaction_id}}"
-    And client "resumed" executes these NSPL commands
+    And client "resumed" fails to execute these NSPL commands
+      """
+      COMMIT;
+      """
+    Then the last command error contains
+      """
+      transaction preview is stale
+      """
+    And transaction "{{transaction_id}}" eventually has state "OPEN"
+    When client "resumed" executes these NSPL commands
       """
       COMMIT;
       """
