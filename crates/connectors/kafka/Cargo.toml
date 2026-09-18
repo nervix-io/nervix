@@ -36,6 +36,9 @@ rdkafka = { workspace = true, features = [
 shuttle-tokio = { workspace = true, features = [
   "macros",
   "rt",
+  "sync",
   "time",
 ], optional = true }
-tokio = { workspace = true, features = ["macros", "rt", "time"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+triomphe = { workspace = true }

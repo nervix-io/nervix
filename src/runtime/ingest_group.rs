@@ -13,7 +13,7 @@ use error_stack::ResultExt as _;
 use indexmap::{Equivalent, IndexMap};
 use nervix_connector::IngestMetadataRow;
 
-use super::{ingestors::kafka::KafkaOffsetInitialization, *};
+use super::*;
 
 /// Why an ingestor that keeps running discards the summary a flush returns.
 ///
@@ -61,22 +61,6 @@ pub(in crate::runtime) enum IngestMetadataOperation {
     Finish,
     #[strum(serialize = "select ingest metadata")]
     Select,
-}
-
-#[derive(Debug, Clone, Copy, strum::Display)]
-pub(in crate::runtime) enum KafkaOffsetInitializationOperation {
-    #[strum(serialize = "read paced domain time")]
-    ReadDomainTime,
-    #[strum(serialize = "resolve resume offsets")]
-    ResolveResumeOffsets,
-    #[strum(serialize = "resolve timestamp offsets")]
-    ResolveTimestampOffsets,
-    #[strum(serialize = "assign offsets")]
-    AssignOffsets,
-    #[strum(serialize = "resolve concrete offsets")]
-    ResolveConcreteOffsets,
-    #[strum(serialize = "reset replicated offsets")]
-    ResetOffsets,
 }
 
 #[derive(Debug, Clone, Copy, strum::Display)]
@@ -244,20 +228,6 @@ pub(in crate::runtime) enum IngestGroupError {
     MissingBranchDeclaration {
         ingestor: IngestorName,
         relay: RelayName,
-    },
-    #[error("domain '{domain}' is not installed")]
-    DomainNotInstalled { domain: DomainName },
-    #[error("domain '{domain}' has an unresolved START AT NOW")]
-    UnresolvedStartNow { domain: DomainName },
-    #[error(
-        "failed to {operation} for Kafka ingestor '{ingestor}' topic '{topic}' in domain \
-         '{domain}'"
-    )]
-    KafkaOffsets {
-        operation: KafkaOffsetInitializationOperation,
-        domain: DomainName,
-        ingestor: IngestorName,
-        topic: String,
     },
     #[error("failed to decode a payload for ingestor '{ingestor}'")]
     DecodePayload { ingestor: IngestorName },
@@ -1837,116 +1807,6 @@ impl Runtime {
             })
             .await;
         }
-    }
-
-    pub(in crate::runtime) async fn initialize_domain_kafka_consumer_offsets(
-        &self,
-        domain: &DomainName,
-        ingestor: &IngestorName,
-        initialization: KafkaOffsetInitialization<'_>,
-    ) -> error_stack::Result<(u64, bool), IngestGroupError> {
-        let KafkaOffsetInitialization {
-            topic,
-            consumer,
-            consumer_assignment,
-            state,
-            instance_idx,
-        } = initialization;
-        let (start_version, last_start) = if let Some(domain_state) = self.inner.domains.get(domain)
-        {
-            (domain_state.start_version, domain_state.last_start.clone())
-        } else {
-            return Err(Report::new(IngestGroupError::DomainNotInstalled {
-                domain: domain.clone(),
-            }));
-        };
-        let scheduled_partition_schedule = if let Some(execution) =
-            self.inner.executions.get(domain)
-            && let Some(node) = execution.schedule.nodes.get(&NodeRef::new(
-                ModelKind::Ingestor,
-                ModelName::from(ingestor),
-            )) {
-            node.kafka_partition_schedule.clone()
-        } else {
-            None
-        };
-
-        let offsets = if let nervix_models::DomainStartPoint::Resume = &last_start {
-            let missing_partition_timestamp = self
-                .current_paced_domain_time(domain)
-                .change_context(IngestGroupError::KafkaOffsets {
-                    operation: KafkaOffsetInitializationOperation::ReadDomainTime,
-                    domain: domain.clone(),
-                    ingestor: ingestor.clone(),
-                    topic: topic.to_string(),
-                })?;
-            KafkaIngestor::resume_offsets_from_state(
-                consumer,
-                topic,
-                state.read(),
-                missing_partition_timestamp,
-            )
-            .change_context(IngestGroupError::KafkaOffsets {
-                operation: KafkaOffsetInitializationOperation::ResolveResumeOffsets,
-                domain: domain.clone(),
-                ingestor: ingestor.clone(),
-                topic: topic.to_string(),
-            })?
-        } else {
-            let timestamp = match &last_start {
-                nervix_models::DomainStartPoint::Now { .. } => {
-                    return Err(Report::new(IngestGroupError::UnresolvedStartNow {
-                        domain: domain.clone(),
-                    }));
-                }
-                nervix_models::DomainStartPoint::At { timestamp, .. } => *timestamp,
-                nervix_models::DomainStartPoint::Resume => unreachable!("handled above"),
-            };
-            KafkaIngestor::offsets_by_timestamp(consumer, topic, timestamp).change_context(
-                IngestGroupError::KafkaOffsets {
-                    operation: KafkaOffsetInitializationOperation::ResolveTimestampOffsets,
-                    domain: domain.clone(),
-                    ingestor: ingestor.clone(),
-                    topic: topic.to_string(),
-                },
-            )?
-        };
-        let has_assignment = KafkaIngestor::assign_offsets_for_instance(
-            consumer,
-            topic,
-            &offsets,
-            scheduled_partition_schedule.as_ref(),
-            instance_idx,
-            consumer_assignment,
-        )
-        .change_context(IngestGroupError::KafkaOffsets {
-            operation: KafkaOffsetInitializationOperation::AssignOffsets,
-            domain: domain.clone(),
-            ingestor: ingestor.clone(),
-            topic: topic.to_string(),
-        })?;
-
-        if let nervix_models::DomainStartPoint::Resume = &last_start {
-            return Ok((start_version, has_assignment));
-        }
-
-        let concrete_offsets =
-            KafkaIngestor::concrete_next_offsets_from_assignment(consumer, topic, &offsets)
-                .change_context(IngestGroupError::KafkaOffsets {
-                    operation: KafkaOffsetInitializationOperation::ResolveConcreteOffsets,
-                    domain: domain.clone(),
-                    ingestor: ingestor.clone(),
-                    topic: topic.to_string(),
-                })?;
-        self.reset_domain_kafka_offsets(state, concrete_offsets)
-            .await
-            .change_context(IngestGroupError::KafkaOffsets {
-                operation: KafkaOffsetInitializationOperation::ResetOffsets,
-                domain: domain.clone(),
-                ingestor: ingestor.clone(),
-                topic: topic.to_string(),
-            })?;
-        Ok((start_version, has_assignment))
     }
 
     pub(in crate::runtime) async fn dispatch_raw_ingest_payload(

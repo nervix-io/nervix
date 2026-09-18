@@ -6657,7 +6657,9 @@ dependencies = [
  "nervix-models",
  "rdkafka",
  "shuttle-tokio",
+ "thiserror 2.0.20",
  "tokio",
+ "triomphe",
 ]
 
 [[package]]

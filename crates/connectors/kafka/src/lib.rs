@@ -12,6 +12,8 @@
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
 
+mod source;
+
 use std::{collections::VecDeque, time::Duration};
 
 use async_trait::async_trait;
@@ -29,6 +31,11 @@ use rdkafka::{
     error::{KafkaError, RDKafkaErrorCode},
     message::{Header as KafkaHeader, OwnedHeaders},
     producer::{DeliveryFuture, FutureProducer, FutureRecord, Producer},
+};
+pub use source::{
+    KafkaDomainOffsetError, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
+    KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaDomainOffsetStart,
+    KafkaOffsetPosition, KafkaSourceOffsetMode, KafkaSourcePlan,
 };
 use tokio::time::{Instant, sleep};
 
