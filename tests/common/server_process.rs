@@ -19,6 +19,7 @@
 use std::{
     fs::OpenOptions,
     io,
+    net::{Ipv4Addr, SocketAddr},
     os::unix::process::ExitStatusExt as _,
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
@@ -43,11 +44,17 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
-use super::cluster::{
-    InterconnectTestCa, TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestCertificateValidity,
-    TestSession, next_port, open_raw_session, probe_server_readiness,
-    publish_http_uri_with_headers, release_test_ports, run_command_via_client,
-    test_basic_authorization,
+use super::{
+    cluster::{
+        InterconnectTestCa, TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestCertificateValidity,
+        TestSession, next_port, open_raw_session, publish_http_uri_with_headers,
+        release_test_ports, run_command_via_client, test_basic_authorization,
+    },
+    node_liveness::{LastReadinessOutcome, ReadinessProbeOutcome},
+    phase_deadline::PhaseDeadline,
+    status_request::{
+        STATUS_REQUEST_TIMEOUT, STATUS_REQUESTS_PER_STARTUP, StatusEndpoint, StatusTransport,
+    },
 };
 
 /// The identity the process runs as and its certificate names. Each process forms its own
@@ -55,6 +62,13 @@ use super::cluster::{
 const CLUSTER_ID: &str = "cucumber";
 const NODE_ID: &str = "node-1";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
+const _: () = assert!(
+    match STATUS_REQUEST_TIMEOUT.checked_mul(STATUS_REQUESTS_PER_STARTUP) {
+        Some(requests) => requests.as_nanos() <= STARTUP_TIMEOUT.as_nanos(),
+        None => false,
+    },
+    "a server process startup must outlast its stalled readiness requests"
+);
 /// Waiting ends as soon as the process exits, so this bound only has to hold on a machine running
 /// many scenarios at once.
 const EXIT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -347,35 +361,45 @@ impl ServerProcess {
     }
 
     /// Waits until the server answers an authenticated command, which also proves that its
-    /// configured default user exists.
+    /// configured default user exists. Every readiness probe receives only the time left before
+    /// the startup deadline, so a server that never answers ends the wait at that deadline.
     pub(crate) async fn wait_until_ready(&mut self) -> io::Result<()> {
-        let ready = timeout(STARTUP_TIMEOUT, self.poll_until_ready()).await;
-        match ready {
-            Ok(result) => result,
-            Err(_) => Err(io::Error::other(format!(
-                "nervix-server did not accept commands within {}\n{}",
-                humantime::format_duration(STARTUP_TIMEOUT),
-                self.log_tail()
-            ))),
-        }
-    }
-
-    async fn poll_until_ready(&mut self) -> io::Result<()> {
-        let grpc_uri = self.grpc_uri();
+        let deadline = PhaseDeadline::after(STARTUP_TIMEOUT);
+        let endpoint = self.status_endpoint();
+        let mut last_readiness = LastReadinessOutcome::NoCompletedProbe;
         loop {
             tokio::task::consume_budget().await;
             if let Some(status) = self.observe_exit()? {
                 return Err(io::Error::other(format!(
-                    "nervix-server exited during startup with {}\n{}",
+                    "nervix-server exited during startup with {}; last readiness outcome: \
+                     {last_readiness}\n{}",
                     describe_exit(status),
                     self.log_tail()
                 )));
             }
-            if probe_server_readiness(&grpc_uri).await.is_ready() {
+            if deadline.has_passed() {
+                return Err(io::Error::other(format!(
+                    "nervix-server did not accept commands within {}; last readiness outcome: \
+                     {last_readiness}\n{}",
+                    humantime::format_duration(STARTUP_TIMEOUT),
+                    self.log_tail()
+                )));
+            }
+            let outcome = ReadinessProbeOutcome::probe(&endpoint, deadline).await;
+            if outcome.is_ready() {
                 return Ok(());
             }
-            sleep(POLL_INTERVAL).await;
+            last_readiness = LastReadinessOutcome::Observed(outcome);
+            deadline.pause(POLL_INTERVAL).await;
         }
+    }
+
+    fn status_endpoint(&self) -> StatusEndpoint {
+        StatusEndpoint::new(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, self.configuration.ports.grpc)),
+            StatusTransport::Plaintext,
+            test_basic_authorization(),
+        )
     }
 
     /// Runs NSPL through an authenticated session whose active domain is `domain`.

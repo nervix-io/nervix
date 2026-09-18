@@ -53,8 +53,8 @@ test-scenarios *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --test scenarios -- {{ args }}
 
-test-harness-liveness: tests-deps
-    cargo test --features testing --test harness_liveness
+test-harness-liveness *args: tests-deps
+    cargo test --features testing --test harness_liveness -- {{ args }}
 
 test-scenarios-reuse *args: tests-deps
     #!/usr/bin/env bash
