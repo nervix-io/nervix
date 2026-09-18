@@ -629,7 +629,7 @@ impl HttpsListenerCertificates {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, sync::Arc as StdArc};
+    use std::{collections::BTreeMap, path::PathBuf, sync::Arc as StdArc};
 
     use nervix_interconnect::HttpsListenerInstallation;
     use nervix_models::{
@@ -641,8 +641,9 @@ mod tests {
         super::test_fixtures::{
             TestService, build_test_service, named, node_named, test_tls_files,
         },
-        ListenerVhostKey, ListenerVhosts, VHOST_TLS_CA_PATH, VHOST_TLS_CERT_PATH,
-        VHOST_TLS_KEY_PATH,
+        HttpsListenerError, ListenerVhostKey, ListenerVhosts, ResourceFileError, ResourceStore,
+        TlsMaterialError, VHOST_TLS_CA_PATH, VHOST_TLS_CERT_PATH, VHOST_TLS_KEY_PATH,
+        load_vhost_tls_materials,
     };
 
     fn vhost(name: &str, hostname: &str, tls_version: Option<u64>) -> Model {
@@ -669,6 +670,25 @@ mod tests {
             );
         }
         ClusterSchedule { domains: schedules }
+    }
+
+    /// Writes a usable bundle, whose certificate names `localhost`, into `version` of the `orders`
+    /// domain's `tls_bundle` resource and returns that version's content directory.
+    fn write_test_bundle(resource_store: &ResourceStore, version: u64) -> PathBuf {
+        let bundle = test_tls_files("test", &node_named("node-a"));
+        let content = resource_store.content_root(&ResourceId::new(
+            named("orders"),
+            named("tls_bundle"),
+            version,
+        ));
+        std::fs::create_dir_all(&content).expect("the fixture bundle directory is created");
+        std::fs::copy(&bundle.ca, content.join(VHOST_TLS_CA_PATH))
+            .expect("the fixture CA is copied");
+        std::fs::copy(&bundle.certificate, content.join(VHOST_TLS_CERT_PATH))
+            .expect("the fixture certificate is copied");
+        std::fs::copy(&bundle.private_key, content.join(VHOST_TLS_KEY_PATH))
+            .expect("the fixture private key is copied");
+        content
     }
 
     #[test]
@@ -716,19 +736,7 @@ mod tests {
      {
         let TestService { service, path, .. } = build_test_service(false).await;
         let certificates = service.inner.https_certificates.clone();
-        let bundle = test_tls_files("test", &node_named("node-a"));
-        let content = service.inner.resource_store.content_root(&ResourceId::new(
-            named("orders"),
-            named("tls_bundle"),
-            1,
-        ));
-        std::fs::create_dir_all(&content).expect("the fixture bundle directory is created");
-        std::fs::copy(&bundle.ca, content.join(VHOST_TLS_CA_PATH))
-            .expect("the fixture CA is copied");
-        std::fs::copy(&bundle.certificate, content.join(VHOST_TLS_CERT_PATH))
-            .expect("the fixture certificate is copied");
-        std::fs::copy(&bundle.private_key, content.join(VHOST_TLS_KEY_PATH))
-            .expect("the fixture private key is copied");
+        write_test_bundle(&service.inner.resource_store, 1);
         let first = cluster_schedule(vec![("orders", vec![vhost("edge", "localhost", Some(1))])]);
         let second = cluster_schedule(vec![("orders", vec![vhost("edge", "localhost", Some(2))])]);
 
@@ -783,16 +791,7 @@ mod tests {
             .install(6, &first)
             .await
             .expect("an older runtime state is ignored");
-        let second_content = service.inner.resource_store.content_root(&ResourceId::new(
-            named("orders"),
-            named("tls_bundle"),
-            2,
-        ));
-        std::fs::create_dir_all(&second_content).expect("the second bundle directory is created");
-        for file in [VHOST_TLS_CA_PATH, VHOST_TLS_CERT_PATH, VHOST_TLS_KEY_PATH] {
-            std::fs::copy(content.join(file), second_content.join(file))
-                .expect("the second bundle is copied");
-        }
+        write_test_bundle(&service.inner.resource_store, 2);
         certificates
             .install(7, &second)
             .await
@@ -817,6 +816,163 @@ mod tests {
             .server_config()
             .expect("the second version is presented");
         assert!(!StdArc::ptr_eq(&presented, &replaced));
+
+        drop(service);
+        std::fs::remove_dir_all(&path).expect("the test database directory is removed");
+    }
+
+    #[tokio::test]
+    async fn unusable_tls_material_is_classified_by_what_is_wrong_with_it() {
+        let TestService { service, path, .. } = build_test_service(false).await;
+        let resource_store = &service.inner.resource_store;
+        let content = write_test_bundle(resource_store, 1);
+        let bundle = ResourceId::new(named("orders"), named("tls_bundle"), 1);
+        let usable_key = std::fs::read(content.join(VHOST_TLS_KEY_PATH))
+            .expect("the fixture private key is read");
+        let usable_ca =
+            std::fs::read(content.join(VHOST_TLS_CA_PATH)).expect("the fixture CA is read");
+
+        std::fs::write(content.join(VHOST_TLS_KEY_PATH), "not a private key")
+            .expect("the key without PEM items is written");
+        let error = load_vhost_tls_materials(resource_store, &bundle)
+            .await
+            .expect_err("a key file without PEM items is unusable");
+        assert!(
+            matches!(
+                error.current_context(),
+                TlsMaterialError::NoPemItems { path } if path.ends_with(VHOST_TLS_KEY_PATH)
+            ),
+            "{error:?}"
+        );
+
+        std::fs::write(
+            content.join(VHOST_TLS_KEY_PATH),
+            "-----BEGIN PRIVATE KEY-----\n!!!!\n-----END PRIVATE KEY-----\n",
+        )
+        .expect("the malformed key is written");
+        let error = load_vhost_tls_materials(resource_store, &bundle)
+            .await
+            .expect_err("a PEM item that is not base64 is unusable");
+        assert!(
+            matches!(
+                error.current_context(),
+                TlsMaterialError::Pem { path, .. } if path.ends_with(VHOST_TLS_KEY_PATH)
+            ),
+            "{error:?}"
+        );
+
+        std::fs::write(content.join(VHOST_TLS_KEY_PATH), &usable_key)
+            .expect("the usable key is restored");
+        std::fs::write(
+            content.join(VHOST_TLS_CA_PATH),
+            "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        )
+        .expect("the CA that is not a certificate is written");
+        let error = load_vhost_tls_materials(resource_store, &bundle)
+            .await
+            .expect_err("a CA that is not a certificate is unusable");
+        assert!(
+            matches!(
+                error.current_context(),
+                TlsMaterialError::CaCertificate { path, .. } if path.ends_with(VHOST_TLS_CA_PATH)
+            ),
+            "{error:?}"
+        );
+
+        std::fs::write(content.join(VHOST_TLS_CA_PATH), &usable_ca)
+            .expect("the usable CA is restored");
+        std::fs::remove_file(content.join(VHOST_TLS_CERT_PATH))
+            .expect("the certificate file is removed");
+        std::fs::create_dir(content.join(VHOST_TLS_CERT_PATH))
+            .expect("a directory takes the certificate's place");
+        let error = load_vhost_tls_materials(resource_store, &bundle)
+            .await
+            .expect_err("a certificate path that is a directory is unusable");
+        assert!(
+            matches!(error.current_context(), TlsMaterialError::Unavailable),
+            "{error:?}"
+        );
+        assert!(
+            matches!(
+                error.downcast_ref::<ResourceFileError>(),
+                Some(ResourceFileError::NotAFile {
+                    label: "tls certificate",
+                    ..
+                })
+            ),
+            "{error:?}"
+        );
+
+        drop(service);
+        std::fs::remove_dir_all(&path).expect("the test database directory is removed");
+    }
+
+    #[tokio::test]
+    async fn a_hostname_the_certificate_does_not_name_fails_the_installation() {
+        let TestService { service, path, .. } = build_test_service(false).await;
+        let certificates = service.inner.https_certificates.clone();
+        write_test_bundle(&service.inner.resource_store, 1);
+        let schedule = cluster_schedule(vec![(
+            "orders",
+            vec![vhost("edge", "orders.example.com", Some(1))],
+        )]);
+
+        let error = certificates
+            .install(3, &schedule)
+            .await
+            .expect_err("the certificate names only localhost");
+
+        assert!(
+            matches!(
+                error.current_context(),
+                HttpsListenerError::Hostname { hostname, .. } if hostname == "orders.example.com"
+            ),
+            "{error:?}"
+        );
+        let HttpsListenerInstallation::Failed { revision, reason } =
+            certificates.installation(3).await
+        else {
+            panic!("the installation of revision 3 failed");
+        };
+        assert_eq!(revision, 3);
+        assert!(
+            reason.contains(
+                "failed to present TLS hostname 'orders.example.com' for VHOST 'edge' in domain \
+                 'orders'"
+            ),
+            "{reason}"
+        );
+        assert!(certificates.server_config().is_none());
+
+        drop(service);
+        std::fs::remove_dir_all(&path).expect("the test database directory is removed");
+    }
+
+    #[tokio::test]
+    async fn a_runtime_state_without_tls_vhosts_stops_presenting_certificates() {
+        let TestService { service, path, .. } = build_test_service(false).await;
+        let certificates = service.inner.https_certificates.clone();
+        write_test_bundle(&service.inner.resource_store, 1);
+        let with_tls =
+            cluster_schedule(vec![("orders", vec![vhost("edge", "localhost", Some(1))])]);
+        let without_tls =
+            cluster_schedule(vec![("orders", vec![vhost("edge", "localhost", None)])]);
+
+        certificates
+            .install(1, &with_tls)
+            .await
+            .expect("the bundle loads");
+        assert!(certificates.server_config().is_some());
+        certificates
+            .install(2, &without_tls)
+            .await
+            .expect("a VHOST without TLS needs no certificate");
+
+        assert!(certificates.server_config().is_none());
+        assert_eq!(
+            certificates.installation(2).await,
+            HttpsListenerInstallation::Installed { revision: 2 }
+        );
 
         drop(service);
         std::fs::remove_dir_all(&path).expect("the test database directory is removed");

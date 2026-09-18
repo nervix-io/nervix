@@ -42,7 +42,6 @@ use tonic::Status;
 use tracing::{info, warn};
 
 use super::{
-    completion::CompletionError,
     domain_clock::{current_timestamp, subtract_timestamp_duration},
     domain_lifecycle::DomainAlterError,
     model_mutation::{
@@ -1637,10 +1636,9 @@ impl SessionServiceImpl {
                         None,
                     ))
                     .await?;
-                    return Box::pin(self.record_transaction_application_completion(
-                        &advanced,
-                        TransactionApplicationOutcome::Applied,
-                    ))
+                    return Box::pin(
+                        self.record_transaction_application_completion(&advanced, None),
+                    )
                     .await;
                 }
             };
@@ -1804,12 +1802,8 @@ impl SessionServiceImpl {
                 },
             }
         };
-        let outcome = match application_failure {
-            Some(error) => TransactionApplicationOutcome::Failed { error },
-            None => Box::pin(self.resumed_https_listener_outcome(transaction, applying)).await,
-        };
         let completed = self
-            .record_transaction_application_completion(transaction, outcome)
+            .record_transaction_application_completion(transaction, application_failure)
             .await?;
 
         Ok(TransactionApplicationAttempt::Completed(Box::new(
@@ -1817,9 +1811,12 @@ impl SessionServiceImpl {
         )))
     }
 
-    /// How a resumed step ends once the HTTPS listeners it changed were asked for their
-    /// certificates. Only a successful model step that changed a VHOST waits for them.
-    async fn resumed_https_listener_outcome(
+    /// How an applying step that found no other failure ends. A successful model step that
+    /// creates, changes, or drops a VHOST first waits until every live HTTPS listener installed its
+    /// runtime revision. When one could not, a step that did not pause is rolled back by the entry
+    /// that records its failure, and a paused step, which has already resumed, keeps its committed
+    /// models like any other activation failure.
+    async fn https_listener_outcome(
         &self,
         transaction: &ReplicatedTransaction,
         applying: &TransactionApplyingStep,
@@ -1838,31 +1835,14 @@ impl SessionServiceImpl {
         else {
             return TransactionApplicationOutcome::Applied;
         };
-        Box::pin(self.https_listener_application_failure(
-            &transaction.domain,
-            &failure,
-            planned.pause.level(),
-        ))
-        .await
-    }
-
-    /// The outcome of a committed model step at `level` whose VHOSTs an HTTPS listener could not
-    /// install. A step that did not pause is rolled back by the entry that records its failure. A
-    /// paused step has already resumed, so it keeps its committed models like any other
-    /// activation failure.
-    pub(in crate::application) async fn https_listener_application_failure(
-        &self,
-        domain: &DomainName,
-        failure: &Report<CompletionError>,
-        level: QuiesceLevel,
-    ) -> TransactionApplicationOutcome {
+        let domain = &transaction.domain;
         let error = format!(
             "committed transaction model step in domain '{}' failed HTTPS listener activation: \
              {failure}",
             domain.as_str()
         );
         self.broadcast_error(error.clone());
-        if level != QuiesceLevel::Dynamic {
+        if planned.pause.level() != QuiesceLevel::Dynamic {
             return TransactionApplicationOutcome::Failed { error };
         }
         let inputs = Box::pin(self.inner.consensus.domain_planning_inputs(domain)).await;
@@ -1896,10 +1876,13 @@ impl SessionServiceImpl {
         }
     }
 
+    /// Records how the applying step of `transaction` ended. A step without an application failure
+    /// is settled by its HTTPS listeners first, so a VHOST change that no listener could install
+    /// is never recorded as applied.
     pub(in crate::application) async fn record_transaction_application_completion(
         &self,
         transaction: &ReplicatedTransaction,
-        outcome: TransactionApplicationOutcome,
+        application_failure: Option<String>,
     ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
         let applying = match &transaction.state {
             TransactionState::Committing(progress) => progress.applying.as_ref(),
@@ -1910,6 +1893,10 @@ impl SessionServiceImpl {
                 id: transaction.id.clone(),
             })
         })?;
+        let outcome = match application_failure {
+            Some(error) => TransactionApplicationOutcome::Failed { error },
+            None => Box::pin(self.https_listener_outcome(transaction, applying)).await,
+        };
         let rolls_back = matches!(outcome, TransactionApplicationOutcome::RolledBack { .. });
         let completed = self
             .inner
@@ -2370,11 +2357,7 @@ impl SessionServiceImpl {
         {
             return Ok(advanced);
         }
-        let outcome = match application_failure {
-            Some(error) => TransactionApplicationOutcome::Failed { error },
-            None => TransactionApplicationOutcome::Applied,
-        };
-        self.record_transaction_application_completion(&advanced, outcome)
+        self.record_transaction_application_completion(&advanced, application_failure)
             .await
     }
 

@@ -13,8 +13,7 @@ use std::collections::BTreeSet;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
-    ConsensusError, DomainMutationLease, DomainPlanningInputs, TransactionApplicationOutcome,
-    TransactionStepEffect,
+    ConsensusError, DomainMutationLease, DomainPlanningInputs, TransactionStepEffect,
 };
 use nervix_interconnect::EntityGatePurpose;
 use nervix_models::{
@@ -965,7 +964,7 @@ impl SessionServiceImpl {
         // one debug poll frame.
         let mut completed_result = None;
         let mut recorded_transaction = None;
-        let mut transaction_application_outcome = TransactionApplicationOutcome::Applied;
+        let mut transaction_application_failure = None;
         let mut transaction_application_deferred = false;
         if !applied.is_empty() {
             let error_target = applied
@@ -1360,8 +1359,8 @@ impl SessionServiceImpl {
             }
 
             let mut rollback_plan = None;
-            // The runtime revision whose HTTPS listener installation this batch confirms, once its
-            // models are committed.
+            // The runtime revision whose HTTPS listener installation a direct batch confirms, once
+            // its models are committed.
             let mut listener_revision = None;
             if !is_noop {
                 rollback_plan = Some(planned.clone());
@@ -1437,22 +1436,16 @@ impl SessionServiceImpl {
                         Ok(transaction) => {
                             self.pause_transaction_commit_if_armed(&transaction).await;
                             recorded_transaction = Some(transaction);
-                            listener_revision = Some(
-                                Box::pin(self.inner.consensus.current_runtime_revision()).await,
-                            );
                             let activation_error =
                                 Box::pin(self.apply_current_cluster_state()).await.err();
                             if let Some(handoff) = ownership_handoff.take() {
                                 if let Some(error) = &activation_error {
-                                    transaction_application_outcome =
-                                        TransactionApplicationOutcome::Failed {
-                                            error: format!(
-                                                "committed transaction model step in domain '{}' \
-                                                 failed runtime activation before ownership \
-                                                 handoff completion: {error}",
-                                                domain.as_str()
-                                            ),
-                                        };
+                                    transaction_application_failure = Some(format!(
+                                        "committed transaction model step in domain '{}' failed \
+                                         runtime activation before ownership handoff completion: \
+                                         {error}",
+                                        domain.as_str()
+                                    ));
                                     self.defer_planned_ownership_handoff_release(
                                         &domain, handoff, error,
                                     );
@@ -1462,14 +1455,11 @@ impl SessionServiceImpl {
                                     )
                                     .await
                                     {
-                                        transaction_application_outcome =
-                                            TransactionApplicationOutcome::Failed {
-                                                error: format!(
-                                                    "committed transaction model step in domain \
-                                                     '{}' failed ownership activation: {error}",
-                                                    domain.as_str()
-                                                ),
-                                            };
+                                        transaction_application_failure = Some(format!(
+                                            "committed transaction model step in domain '{}' \
+                                             failed ownership activation: {error}",
+                                            domain.as_str()
+                                        ));
                                         self.broadcast_error(format!(
                                             "failed to confirm ownership state activation for \
                                              committed transaction model step in domain '{}': \
@@ -1480,7 +1470,7 @@ impl SessionServiceImpl {
                                 }
                             }
                             if let Some(error) = activation_error {
-                                if transaction_application_outcome.is_applied()
+                                if transaction_application_failure.is_none()
                                     && matches!(
                                         error,
                                         RuntimeError::RuntimeRevisionPreparation { .. }
@@ -1488,15 +1478,12 @@ impl SessionServiceImpl {
                                     )
                                 {
                                     transaction_application_deferred = true;
-                                } else if transaction_application_outcome.is_applied() {
-                                    transaction_application_outcome =
-                                        TransactionApplicationOutcome::Failed {
-                                            error: format!(
-                                                "committed transaction model step in domain '{}' \
-                                                 failed runtime activation: {error}",
-                                                domain.as_str()
-                                            ),
-                                        };
+                                } else if transaction_application_failure.is_none() {
+                                    transaction_application_failure = Some(format!(
+                                        "committed transaction model step in domain '{}' failed \
+                                         runtime activation: {error}",
+                                        domain.as_str()
+                                    ));
                                 }
                                 self.broadcast_error(format!(
                                     "failed to reconcile committed transaction model step in \
@@ -1679,14 +1666,11 @@ impl SessionServiceImpl {
                 if requires_domain_pause {
                     if let Err(error) = Box::pin(self.wait_for_paused_domain_drain(&domain)).await {
                         if transaction_step.is_some() {
-                            transaction_application_outcome =
-                                TransactionApplicationOutcome::Failed {
-                                    error: format!(
-                                        "committed transaction model step in domain '{}' failed \
-                                         to drain its pause: {error}",
-                                        domain.as_str()
-                                    ),
-                                };
+                            transaction_application_failure = Some(format!(
+                                "committed transaction model step in domain '{}' failed to drain \
+                                 its pause: {error}",
+                                domain.as_str()
+                            ));
                             self.broadcast_error(format!(
                                 "committed transaction model step in domain '{}' is waiting for \
                                  quiescence recovery: {error}",
@@ -1713,14 +1697,11 @@ impl SessionServiceImpl {
                             .await
                     {
                         if transaction_step.is_some() {
-                            transaction_application_outcome =
-                                TransactionApplicationOutcome::Failed {
-                                    error: format!(
-                                        "committed transaction model step in domain '{}' failed \
-                                         to release its pause: {error}",
-                                        domain.as_str()
-                                    ),
-                                };
+                            transaction_application_failure = Some(format!(
+                                "committed transaction model step in domain '{}' failed to \
+                                 release its pause: {error}",
+                                domain.as_str()
+                            ));
                             self.broadcast_error(format!(
                                 "failed to release transaction-owned pause in domain '{}': {error}",
                                 domain.as_str()
@@ -1747,13 +1728,11 @@ impl SessionServiceImpl {
                 && let Err(error) = Box::pin(self.release_cluster_entity_gates_and_wait(gate)).await
             {
                 if transaction_step.is_some() {
-                    transaction_application_outcome = TransactionApplicationOutcome::Failed {
-                        error: format!(
-                            "committed transaction model step in domain '{}' failed to release \
-                             its entity gate: {error}",
-                            domain.as_str()
-                        ),
-                    };
+                    transaction_application_failure = Some(format!(
+                        "committed transaction model step in domain '{}' failed to release its \
+                         entity gate: {error}",
+                        domain.as_str()
+                    ));
                 } else {
                     return command_error(format!(
                         "committed models in domain '{}', but their entity gate did not release: \
@@ -1762,25 +1741,17 @@ impl SessionServiceImpl {
                     ));
                 }
             }
+
             // Every live HTTPS listener must present the certificates of the committed VHOSTs. A
-            // batch that did not pause is rolled back with its failure; a paused batch has already
-            // resumed, so it keeps its committed models like any other activation failure.
+            // direct batch that did not pause is rolled back with its failure; a paused batch has
+            // already resumed, so it keeps its committed models like any other activation failure.
+            // A transaction step confirms its listeners when it records its application outcome.
             if changes_vhosts
-                && !transaction_application_deferred
-                && transaction_application_outcome.is_applied()
                 && let Some(revision) = listener_revision
                 && let Err(failure) =
                     Box::pin(self.wait_for_https_listener_installation(revision)).await
             {
-                if transaction_step.is_some() {
-                    transaction_application_outcome =
-                        Box::pin(self.https_listener_application_failure(
-                            &domain,
-                            &failure,
-                            classified_level,
-                        ))
-                        .await;
-                } else if classified_level == QuiesceLevel::Dynamic {
+                if classified_level == QuiesceLevel::Dynamic {
                     return Box::pin(self.roll_back_uninstalled_https_listener(
                         HttpsListenerRollback {
                             domain: &domain,
@@ -1793,14 +1764,12 @@ impl SessionServiceImpl {
                         },
                     ))
                     .await;
-                } else {
-                    return command_error(format!(
-                        "committed models in domain '{}', but {failure}",
-                        domain.as_str()
-                    ));
                 }
+                return command_error(format!(
+                    "committed models in domain '{}', but {failure}",
+                    domain.as_str()
+                ));
             }
-
             if let Some(operation_impacts) = operation_impacts {
                 for impact in operation_impacts {
                     let TransactionOperation::RebindResource {
@@ -1894,7 +1863,7 @@ impl SessionServiceImpl {
             } else {
                 match Box::pin(self.record_transaction_application_completion(
                     &transaction,
-                    transaction_application_outcome,
+                    transaction_application_failure,
                 ))
                 .await
                 {

@@ -303,6 +303,26 @@ pub(in crate::application) enum CompletionError {
 }
 
 impl SessionServiceImpl {
+    /// When a completion barrier started now stops waiting: a node that cannot answer leaves the
+    /// live set within the node-unavailability timeout, and a live node answers within the
+    /// propagation bound.
+    fn completion_deadline(&self) -> Result<tokio::time::Instant, Report<CompletionError>> {
+        let node_unavailability_timeout = self.inner.cluster.node_unavailability_timeout();
+        let overflow = CompletionError::DeadlineOverflow {
+            node_unavailability_timeout,
+            propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
+        };
+        let Some(wait_budget) =
+            node_unavailability_timeout.checked_add(RUNTIME_REVISION_READINESS_PROPAGATION_BOUND)
+        else {
+            return Err(Report::new(overflow));
+        };
+        let Some(deadline) = tokio::time::Instant::now().checked_add(wait_budget) else {
+            return Err(Report::new(overflow));
+        };
+        Ok(deadline)
+    }
+
     pub(in crate::application) async fn wait_for_authoritative_visibility(
         &self,
     ) -> Result<(), Report<CompletionError>> {
@@ -319,21 +339,7 @@ impl SessionServiceImpl {
             .set_local_authoritative_revision(revision)
             .await;
 
-        let node_unavailability_timeout = self.inner.cluster.node_unavailability_timeout();
-        let Some(wait_budget) =
-            node_unavailability_timeout.checked_add(RUNTIME_REVISION_READINESS_PROPAGATION_BOUND)
-        else {
-            return Err(Report::new(CompletionError::DeadlineOverflow {
-                node_unavailability_timeout,
-                propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
-            }));
-        };
-        let Some(deadline) = tokio::time::Instant::now().checked_add(wait_budget) else {
-            return Err(Report::new(CompletionError::DeadlineOverflow {
-                node_unavailability_timeout,
-                propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
-            }));
-        };
+        let deadline = self.completion_deadline()?;
 
         wait_for_application_revision(
             &self.inner.cluster,
@@ -358,21 +364,7 @@ impl SessionServiceImpl {
         &self,
         revision: u64,
     ) -> Result<(), Report<CompletionError>> {
-        let node_unavailability_timeout = self.inner.cluster.node_unavailability_timeout();
-        let Some(wait_budget) =
-            node_unavailability_timeout.checked_add(RUNTIME_REVISION_READINESS_PROPAGATION_BOUND)
-        else {
-            return Err(Report::new(CompletionError::DeadlineOverflow {
-                node_unavailability_timeout,
-                propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
-            }));
-        };
-        let Some(deadline) = tokio::time::Instant::now().checked_add(wait_budget) else {
-            return Err(Report::new(CompletionError::DeadlineOverflow {
-                node_unavailability_timeout,
-                propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
-            }));
-        };
+        let deadline = self.completion_deadline()?;
         let local_identity = self.inner.cluster.local_node_identity().await;
 
         loop {
@@ -464,5 +456,35 @@ impl SessionServiceImpl {
                 pending_nodes: timeout.pending_nodes,
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures_util::FutureExt as _;
+    use nervix_models::ClusterSchedule;
+
+    use super::super::test_fixtures::{TestService, build_test_service};
+
+    #[tokio::test]
+    async fn the_https_listener_barrier_waits_until_the_listener_installs_the_revision() {
+        let TestService { service, path, .. } = build_test_service(false).await;
+        let certificates = service.inner.https_certificates.clone();
+        let mut barrier = Box::pin(service.wait_for_https_listener_installation(4));
+
+        assert!(
+            barrier.as_mut().now_or_never().is_none(),
+            "no listener installed revision 4 yet"
+        );
+        certificates
+            .install(4, &ClusterSchedule::default())
+            .await
+            .expect("a runtime state without TLS VHOSTs installs");
+        barrier
+            .await
+            .expect("the barrier completes once the listener installed revision 4");
+
+        drop(service);
+        std::fs::remove_dir_all(&path).expect("the test database directory is removed");
     }
 }

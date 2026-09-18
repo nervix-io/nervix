@@ -952,10 +952,6 @@ pub enum TransactionApplicationOutcome {
 }
 
 impl TransactionApplicationOutcome {
-    pub const fn is_applied(&self) -> bool {
-        matches!(self, Self::Applied)
-    }
-
     /// The failure the step's result reports, absent when the step applied.
     pub fn error(&self) -> Option<&str> {
         match self {
