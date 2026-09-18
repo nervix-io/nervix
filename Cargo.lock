@@ -6621,6 +6621,8 @@ dependencies = [
 name = "nervix-connector"
 version = "0.1.0-dev"
 dependencies = [
+ "arrow-array",
+ "async-trait",
  "error-stack",
  "nervix-models",
  "nervix-recovery",
@@ -6638,6 +6640,7 @@ dependencies = [
  "triomphe",
  "upon",
  "url",
+ "uuid",
  "webpki-roots 1.0.9",
 ]
 

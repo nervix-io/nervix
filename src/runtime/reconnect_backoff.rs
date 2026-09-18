@@ -2,6 +2,16 @@ use nervix_connector::ParsedRetryPolicy;
 
 use super::*;
 
+pub(in crate::runtime) trait AcknowledgementKeepalive {
+    fn keep_alive(&self);
+}
+
+impl AcknowledgementKeepalive for AckSet {
+    fn keep_alive(&self) {
+        self.ack_alive();
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(in crate::runtime) struct RuntimeReconnectBackoff {
     pub(super) initial: Duration,
@@ -59,7 +69,7 @@ impl RuntimeReconnectBackoff {
     pub(in crate::runtime) async fn wait_with_ack_alive(
         &mut self,
         shutdown_rx: &mut watch::Receiver<bool>,
-        acks: &AckSet,
+        acks: &(impl AcknowledgementKeepalive + ?Sized),
     ) -> bool {
         let delay = self.take_next_delay();
         Self::wait_duration_with_ack_alive(delay, shutdown_rx, acks).await
@@ -68,12 +78,12 @@ impl RuntimeReconnectBackoff {
     pub(in crate::runtime) async fn wait_duration_with_ack_alive(
         delay: Duration,
         shutdown_rx: &mut watch::Receiver<bool>,
-        acks: &AckSet,
+        acks: &(impl AcknowledgementKeepalive + ?Sized),
     ) -> bool {
         let deadline = Instant::now() + delay;
         loop {
             tokio::task::consume_budget().await;
-            acks.ack_alive();
+            acks.keep_alive();
             let remaining = deadline
                 .checked_duration_since(Instant::now())
                 .unwrap_or(Duration::ZERO);

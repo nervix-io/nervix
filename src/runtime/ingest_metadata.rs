@@ -519,14 +519,7 @@ pub(super) fn ingest_source_supports_headers(source: &IngestSource) -> bool {
 }
 
 pub(super) fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
-    matches!(
-        sink,
-        EmitSink::Kafka { .. }
-            | EmitSink::Pulsar { .. }
-            | EmitSink::RabbitMq { .. }
-            | EmitSink::Nats { .. }
-            | EmitSink::Sqs { .. }
-    )
+    sink.capabilities().writes_headers()
 }
 
 #[cfg(test)]

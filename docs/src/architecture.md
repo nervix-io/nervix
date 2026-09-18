@@ -57,6 +57,14 @@ source stamps arrival with, and the transport headers and typed metadata a sourc
 The runtime resolves resource mounts and projects metadata into its own columns; the contract
 carries only the results.
 
+On the sink side, the contract separates codec records from mapped Arrow rows. A record sink
+receives one batch of encoded keys, payloads, headers, and host positions; a row sink receives a
+mapped Arrow batch, its target columns, selected rows, and host-derived chunk ranges. Both return
+per-record delivery or structured-rejection outcomes and at most one infrastructure failure. The
+runtime retains batching, retry cadence, acknowledgement keepalive, stop deadlines, and fault
+injection. Connectors reach transient status, events, staging storage, and general-error handling
+only through an opaque host handle, so neither runtime types nor ACK maps cross the boundary.
+
 Clock ownership follows the same one-way conversion. NSPL parsing turns `PERIOD`, `SKEW`, start
 timestamps, and rates into validated vocabulary values. The control plane commits one mapping and
 fenced authority for a paced `START`. Each data-plane execution binds a capability for the exact

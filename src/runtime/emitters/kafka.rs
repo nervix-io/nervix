@@ -1,135 +1,119 @@
+use std::{collections::VecDeque, time::Duration};
+
+use async_trait::async_trait;
+use error_stack::Report;
 use futures_util::FutureExt;
-use nervix_models::TopicName;
+use meticulous::OptionExt as _;
+use nervix_connector::{
+    AckConfirmation, BrokerPublishingMode, PerRecordOutcome, RecordSink, RejectedSinkRecord,
+    SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordPosition,
+    SinkStartError, SinkStartResult,
+};
+use nervix_models::{ClientConfigEntry, Timestamp, TopicName};
 use rdkafka::{
     config::ClientConfig,
     error::{KafkaError, RDKafkaErrorCode},
     message::{Header as KafkaHeader, OwnedHeaders},
     producer::{DeliveryFuture, FutureProducer, FutureRecord, Producer},
 };
+use tokio::time::{Instant, sleep};
 
-use super::*;
+const KAFKA: &str = "kafka";
 
-pub(in crate::runtime) struct KafkaEmitter {
-    producer: Option<FutureProducer>,
+pub(in crate::runtime) struct KafkaSinkConfig {
+    pub(in crate::runtime) config: Vec<ClientConfigEntry>,
+    pub(in crate::runtime) topic: TopicName,
+    pub(in crate::runtime) mode: BrokerPublishingMode,
+}
+
+pub(in crate::runtime) struct KafkaSink {
+    producer: FutureProducer,
+    topic: TopicName,
     mode: BrokerPublishingMode,
 }
 
 struct PendingKafkaConfirmation {
-    position: BrokerRecordPosition,
-    acks: AckSet,
+    position: SinkRecordPosition,
+    occurred_at: Timestamp,
     deadline: Instant,
     confirmation: DeliveryFuture,
 }
 
-impl KafkaEmitter {
-    pub(super) fn new(plan: &KafkaSinkPlan) -> EmitterRuntimeResult<Self> {
-        let producer = Self::producer_from_config(&plan.client.config.entries)?;
+impl KafkaSink {
+    pub(in crate::runtime) fn new(
+        config: KafkaSinkConfig,
+        _host: SinkHost,
+    ) -> SinkStartResult<Self> {
+        let producer = Self::producer_from_config(&config.config)?;
         Ok(Self {
-            producer: Some(producer),
-            mode: plan.mode,
+            producer,
+            topic: config.topic,
+            mode: config.mode,
         })
     }
 
-    fn producer_from_config(
-        config: &[nervix_models::ClientConfigEntry],
-    ) -> EmitterRuntimeResult<FutureProducer> {
+    fn producer_from_config(config: &[ClientConfigEntry]) -> SinkStartResult<FutureProducer> {
         let mut client_config = ClientConfig::new();
         for entry in config {
             client_config.set(&entry.key, &entry.value);
         }
-        client_config.create().map_err(emitter_init_error)
+        client_config.create().map_err(|source| {
+            Report::new(SinkStartError::Initialize { sink: KAFKA }).attach_printable(source)
+        })
     }
 
-    pub(super) async fn publish(
-        &self,
-        topic: &TopicName,
-        records: Vec<EncodedBrokerRecord>,
-    ) -> PerRecordPublishOutcome {
-        let mut outcome = PerRecordPublishOutcome::empty();
-        let Some(producer) = self.producer.as_ref() else {
-            outcome.fail(
-                Report::new(EmitterRuntimeError::SinkNotInitialized)
-                    .attach_printable("no initialized kafka sink client"),
-            );
-            return outcome;
-        };
-
-        outcome.delivered.reserve(records.len());
-        match self.mode {
-            BrokerPublishingMode::NoAck => {
-                Self::publish_unconfirmed(producer, topic, records, &mut outcome).await;
-            }
-            BrokerPublishingMode::Ack(confirmation) => {
-                Self::publish_confirmed(producer, topic, records, confirmation, &mut outcome).await;
-            }
-        }
-        outcome
-    }
-
-    /// `MODE NO_ACK`: a record is delivered once the producer accepts it, and the delivery report
-    /// it would have produced is dropped rather than awaited.
-    async fn publish_unconfirmed(
-        producer: &FutureProducer,
-        topic: &TopicName,
-        records: Vec<EncodedBrokerRecord>,
-        outcome: &mut PerRecordPublishOutcome,
-    ) {
+    async fn publish_unconfirmed(&self, records: Vec<SinkRecord>, outcome: &mut PerRecordOutcome) {
         for record in records {
             tokio::task::consume_budget().await;
-            record.acks.ack_alive();
-            let position = record.position();
-            match Self::enqueue(producer, topic, &record) {
+            match self.enqueue(&record) {
                 Ok(confirmation) => {
                     drop(confirmation);
-                    outcome.deliver(position);
+                    outcome.deliver(record.position);
                 }
                 Err(error) if Self::is_record_rejection(&error) => {
-                    outcome.reject(position, format!("kafka rejected record: {error}"));
+                    outcome.reject(record.rejected(format!("kafka rejected record: {error}")));
                 }
                 Err(error) => {
-                    outcome.fail(emitter_publish_error(error));
+                    outcome.fail(Self::publish_error(error));
                     return;
                 }
             }
         }
     }
 
-    /// `MODE ACK`: at most `max_in_flight` delivery reports are outstanding at once, and every one
-    /// is awaited before the batch finishes. The window carries the confirmation settings, so the
-    /// drain below never has to ask a mode that has no confirmations what its timeout is.
     async fn publish_confirmed(
-        producer: &FutureProducer,
-        topic: &TopicName,
-        records: Vec<EncodedBrokerRecord>,
+        &self,
+        records: Vec<SinkRecord>,
         AckConfirmation {
             max_in_flight,
             timeout,
         }: AckConfirmation,
-        outcome: &mut PerRecordPublishOutcome,
+        outcome: &mut PerRecordOutcome,
     ) {
         let mut pending: VecDeque<PendingKafkaConfirmation> = VecDeque::new();
         for record in records {
             tokio::task::consume_budget().await;
-            for confirmation in &pending {
-                confirmation.acks.ack_alive();
-            }
-            record.acks.ack_alive();
-            let position = record.position();
-            let confirmation = match Self::enqueue(producer, topic, &record) {
+            let confirmation = match self.enqueue(&record) {
                 Ok(confirmation) => confirmation,
                 Err(error) if Self::is_record_rejection(&error) => {
-                    outcome.reject(position, format!("kafka rejected record: {error}"));
+                    outcome.reject(record.rejected(format!("kafka rejected record: {error}")));
                     continue;
                 }
                 Err(error) => {
-                    outcome.fail(emitter_publish_error(error));
+                    outcome.fail(Self::publish_error(error));
                     return;
                 }
             };
+            let Some(deadline) = Instant::now().checked_add(timeout) else {
+                outcome.fail(Self::publish_error(
+                    "kafka ACK TIMEOUT exceeds the monotonic clock range",
+                ));
+                return;
+            };
             pending.push_back(PendingKafkaConfirmation {
-                position,
-                acks: record.acks,
-                deadline: Instant::now() + timeout,
+                position: record.position,
+                occurred_at: record.occurred_at,
+                deadline,
                 confirmation,
             });
             if pending.len() >= max_in_flight.get()
@@ -148,13 +132,9 @@ impl KafkaEmitter {
         }
     }
 
-    fn enqueue(
-        producer: &FutureProducer,
-        topic: &TopicName,
-        message: &EncodedBrokerRecord,
-    ) -> Result<DeliveryFuture, KafkaError> {
+    fn enqueue(&self, message: &SinkRecord) -> Result<DeliveryFuture, KafkaError> {
         let mut record =
-            FutureRecord::<str, [u8]>::to(topic.as_str()).payload(message.payload.as_slice());
+            FutureRecord::<str, [u8]>::to(self.topic.as_str()).payload(message.payload.as_slice());
         if let Some(key) = message.key.as_deref() {
             record = record.key(key);
         }
@@ -170,7 +150,7 @@ impl KafkaEmitter {
             );
             record = record.headers(owned_headers);
         }
-        producer
+        self.producer
             .send_result(record)
             .map_err(|(source, _record)| source)
     }
@@ -178,74 +158,69 @@ impl KafkaEmitter {
     async fn confirm_oldest(
         pending: &mut VecDeque<PendingKafkaConfirmation>,
         timeout: Duration,
-        outcome: &mut PerRecordPublishOutcome,
-    ) -> EmitterRuntimeResult<()> {
-        loop {
-            tokio::task::consume_budget().await;
-            for confirmation in pending.iter() {
-                confirmation.acks.ack_alive();
+        outcome: &mut PerRecordOutcome,
+    ) -> SinkPublishResult<()> {
+        let Some(oldest) = pending.front_mut() else {
+            return Err(Self::publish_error(
+                "kafka acknowledgment window unexpectedly became empty",
+            ));
+        };
+        let remaining = oldest
+            .deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::ZERO);
+        if remaining.is_zero() {
+            Self::harvest_ready_after_oldest_failure(pending, outcome);
+            return Err(Self::publish_error(format!(
+                "kafka delivery report exceeded ACK TIMEOUT {}",
+                humantime::format_duration(timeout)
+            )));
+        }
+        let result = tokio::select! {
+            biased;
+            result = &mut oldest.confirmation => Some(result),
+            _ = sleep(remaining) => None,
+        };
+        let Some(result) = result else {
+            Self::harvest_ready_after_oldest_failure(pending, outcome);
+            return Err(Self::publish_error(format!(
+                "kafka delivery report exceeded ACK TIMEOUT {}",
+                humantime::format_duration(timeout)
+            )));
+        };
+        let position = oldest.position;
+        let occurred_at = oldest.occurred_at;
+        match result {
+            Ok(Ok(_delivery)) => {
+                pending.pop_front();
+                outcome.deliver(position);
+                Ok(())
             }
-            let Some(oldest) = pending.front_mut() else {
-                return Err(emitter_publish_error(
-                    "kafka acknowledgment window unexpectedly became empty",
+            Ok(Err((source, _message))) if Self::is_record_rejection(&source) => {
+                pending.pop_front();
+                outcome.reject(RejectedSinkRecord::external(
+                    position,
+                    occurred_at,
+                    format!("kafka rejected record: {source}"),
                 ));
-            };
-            let remaining = oldest
-                .deadline
-                .checked_duration_since(Instant::now())
-                .unwrap_or(Duration::ZERO);
-            if remaining.is_zero() {
-                Self::harvest_ready_after_oldest_failure(pending, outcome);
-                return Err(emitter_publish_error(format!(
-                    "kafka delivery report exceeded ACK TIMEOUT {}",
-                    humantime::format_duration(timeout)
-                )));
+                Ok(())
             }
-            let wait = remaining.min(REMOTE_ACK_ALIVE_INTERVAL);
-            let result = tokio::select! {
-                biased;
-                result = &mut oldest.confirmation => Some(result),
-                _ = sleep(wait) => None,
-            };
-            let Some(result) = result else {
-                continue;
-            };
-            let position = oldest.position;
-            match result {
-                Ok(Ok(_delivery)) => {
-                    pending.pop_front();
-                    outcome.deliver(position);
-                    return Ok(());
-                }
-                Ok(Err((source, _message))) if Self::is_record_rejection(&source) => {
-                    pending.pop_front();
-                    outcome.reject(position, format!("kafka rejected record: {source}"));
-                    return Ok(());
-                }
-                Ok(Err((source, _message))) => {
-                    Self::harvest_ready_after_oldest_failure(pending, outcome);
-                    return Err(emitter_publish_error(source));
-                }
-                Err(source) => {
-                    Self::harvest_ready_after_oldest_failure(pending, outcome);
-                    return Err(emitter_publish_error(format!(
-                        "kafka delivery report channel closed: {source}"
-                    )));
-                }
+            Ok(Err((source, _message))) => {
+                Self::harvest_ready_after_oldest_failure(pending, outcome);
+                Err(Self::publish_error(source))
+            }
+            Err(source) => {
+                Self::harvest_ready_after_oldest_failure(pending, outcome);
+                Err(Self::publish_error(format!(
+                    "kafka delivery report channel closed: {source}"
+                )))
             }
         }
     }
 
-    /// Collects the records behind the oldest one whose confirmation already resolved.
-    ///
-    /// The caller reached here because the oldest record failed or timed out, and it is about to
-    /// return that failure for the whole publish. Records behind it that already succeeded or were
-    /// individually rejected are recorded so the retry does not send them again. Anything else is
-    /// deliberately left in neither list: its failure is the same infrastructure failure the
-    /// caller is returning, and classifying it per record would report one outage many times.
     fn harvest_ready_after_oldest_failure(
         pending: &mut VecDeque<PendingKafkaConfirmation>,
-        outcome: &mut PerRecordPublishOutcome,
+        outcome: &mut PerRecordOutcome,
     ) {
         let mut index = 1;
         while index < pending.len() {
@@ -262,11 +237,13 @@ impl KafkaEmitter {
             );
             match result {
                 Ok(Ok(_delivery)) => outcome.deliver(confirmation.position),
-                Ok(Err((source, _message))) if Self::is_record_rejection(&source) => outcome
-                    .reject(
+                Ok(Err((source, _message))) if Self::is_record_rejection(&source) => {
+                    outcome.reject(RejectedSinkRecord::external(
                         confirmation.position,
+                        confirmation.occurred_at,
                         format!("kafka rejected record: {source}"),
-                    ),
+                    ));
+                }
                 Ok(Err(_)) | Err(_) => {}
             }
         }
@@ -286,29 +263,54 @@ impl KafkaEmitter {
         )
     }
 
-    pub(super) async fn flush_local_queue(&self, deadline: Instant) -> EmitterRuntimeResult<()> {
-        let Some(producer) = self.producer.as_ref().cloned() else {
-            return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
-                .attach_printable("no initialized kafka sink client"));
-        };
+    fn publish_error(error: impl std::fmt::Display) -> Report<SinkPublishError> {
+        Report::new(SinkPublishError::Publish { sink: KAFKA }).attach_printable(error.to_string())
+    }
+}
+
+#[async_trait]
+impl SinkLifecycle for KafkaSink {
+    async fn finish(&mut self, deadline: Instant) -> SinkPublishResult<()> {
+        let producer = self.producer.clone();
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .unwrap_or(Duration::ZERO);
         if remaining.is_zero() {
-            return Err(emitter_publish_error(
-                "kafka local producer queue drain deadline elapsed",
-            ));
+            return Err(Report::new(SinkPublishError::Finish { sink: KAFKA })
+                .attach_printable("kafka local producer queue drain deadline elapsed"));
         }
         tokio::task::spawn_blocking(move || producer.flush(remaining))
             .await
             .map_err(|source| {
-                emitter_publish_error(format!("kafka producer queue drain task failed: {source}"))
+                Report::new(SinkPublishError::Finish { sink: KAFKA })
+                    .attach_printable(format!("kafka producer queue drain task failed: {source}"))
             })?
             .map_err(|source| {
-                emitter_publish_error(format!(
+                Report::new(SinkPublishError::Finish { sink: KAFKA }).attach_printable(format!(
                     "kafka local producer queue did not drain before shutdown: {source}"
                 ))
             })
+    }
+
+    fn keeps_client_on_publish_failure(&self) -> bool {
+        true
+    }
+}
+
+#[async_trait]
+impl RecordSink for KafkaSink {
+    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome {
+        let mut outcome = PerRecordOutcome::with_capacity(records.len());
+        match self.mode {
+            BrokerPublishingMode::NoAck => {
+                self.publish_unconfirmed(records, &mut outcome).await;
+            }
+            BrokerPublishingMode::Ack(confirmation) => {
+                self.publish_confirmed(records, confirmation, &mut outcome)
+                    .await;
+            }
+        }
+        outcome
     }
 }
 
@@ -325,7 +327,7 @@ mod tests {
             RDKafkaErrorCode::InvalidTimestamp,
             RDKafkaErrorCode::InvalidRecord,
         ] {
-            assert!(KafkaEmitter::is_record_rejection(
+            assert!(KafkaSink::is_record_rejection(
                 &KafkaError::MessageProduction(code)
             ));
         }
@@ -339,7 +341,7 @@ mod tests {
             RDKafkaErrorCode::AllBrokersDown,
             RDKafkaErrorCode::MessageTimedOut,
         ] {
-            assert!(!KafkaEmitter::is_record_rejection(
+            assert!(!KafkaSink::is_record_rejection(
                 &KafkaError::MessageProduction(code)
             ));
         }
