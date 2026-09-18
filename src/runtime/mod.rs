@@ -81,9 +81,10 @@ use nervix_models::{
     OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
     PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
     RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
-    RemoteRuntimeField, ResourceId, ResourceName, RetryPolicy, RouteConstruction, ScheduledModel,
-    ScheduledNode, ScheduledNodes, SchemaFingerprint, SignalingProtocolName, SignalingWireFormat,
-    SqsFifoGroup, SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp,
+    RemoteRuntimeField, ResolvedBranching, ResourceId, ResourceName, RetryPolicy,
+    RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes, SchemaFingerprint,
+    SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
+    StructuredMessageError, SubscriptionName, Timestamp,
 };
 #[cfg(test)]
 use nervix_models::{
@@ -291,7 +292,7 @@ use domain_execution::{
     RuntimeDomainState,
 };
 pub(crate) use domain_execution::{DomainRoutingCache, SharedDomainRouting};
-use domain_rebuild::{branch_relays_from_branched_specs, relay_branching_schema_for_runtime};
+use domain_rebuild::branch_relays_from_branched_specs;
 use domain_wire_schemas::DomainWireSchemas;
 use emitter_start_plan::*;
 use emitter_supervision::{
@@ -374,7 +375,7 @@ use message_error_delivery::{
 };
 use nervix_models::{
     CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, DeduplicatorName,
-    ReingestorName, ResolvedCodecWireFormat, SchemaName, WireSchemaLookup, WireSchemaName,
+    ReingestorName, ResolvedCodecWireFormat, WireSchemaLookup, WireSchemaName,
 };
 pub(in crate::runtime) use node::{RuntimeInner, SharedActiveGraph};
 #[cfg(test)]
@@ -468,13 +469,13 @@ use test_fixtures::{
     install_test_domain_execution, install_unpaced_test_domain, junction_branch_template,
     key_label, named, nonzero_capacity, paced_domain_state, processor_branched_by,
     publish_state_identity, quiesce_test_batch, row_value, scheduled_model, string_branch_key,
-    test_domain_clock, test_domain_clock_authority, test_ingestor_quiesce_control,
-    test_optional_schema, test_relay_boundary_services, test_schema, u32_branch_key,
-    unpaced_domain_state, validate_wasm_test_output_groups, validate_wasm_test_outputs,
-    vm_input_from_test_rows, wait_for_persisted_runtime_state_lsm, wasm_generated_pool,
-    wasm_guest_column, wasm_guest_stream, wasm_input_acks, wasm_input_for_records,
-    wasm_input_for_values, wasm_test_generated_output, wasm_test_output, window_aggregate,
-    window_outputs, window_plan, with_inherit_all,
+    test_branching, test_domain_clock, test_domain_clock_authority, test_ingestor_quiesce_control,
+    test_named_branching, test_optional_schema, test_relay_boundary_services, test_schema,
+    u32_branch_key, unpaced_domain_state, validate_wasm_test_output_groups,
+    validate_wasm_test_outputs, vm_input_from_test_rows, wait_for_persisted_runtime_state_lsm,
+    wasm_generated_pool, wasm_guest_column, wasm_guest_stream, wasm_input_acks,
+    wasm_input_for_records, wasm_input_for_values, wasm_test_generated_output, wasm_test_output,
+    window_aggregate, window_outputs, window_plan, with_inherit_all,
 };
 pub(in crate::runtime) use vm_compile::{
     CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders, KeyProjectionKind,

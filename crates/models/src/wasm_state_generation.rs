@@ -265,7 +265,8 @@ mod tests {
                 materialized_state: None,
             }),
             SchemaFingerprint::from_digest([1; 32]),
-        );
+        )
+        .with_resolved_branching(Some(crate::ResolvedBranching::unbranched()));
 
         assert_eq!(relay.wasm_state_generations(), None);
         assert_eq!(

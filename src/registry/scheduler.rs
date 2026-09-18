@@ -494,7 +494,7 @@ impl ActiveGraph {
                 (*node.config).clone(),
                 self.schema_fingerprint_for_index(index),
             )
-            .with_effective_branching(node.effective_branching, node.effective_branching_schema)
+            .with_resolved_branching(node.resolved_branching)
             .placed_on(primary_node, assigned_nodes);
             scheduled_nodes.insert(scheduled_node.identity(), scheduled_node);
         }

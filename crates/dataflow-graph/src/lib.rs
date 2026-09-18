@@ -26,6 +26,17 @@ pub struct DataflowGraph {
     pub edges: Vec<DataflowEdge>,
 }
 
+/// A graph shape before an edge attaches the domain identity required by the public wire form.
+///
+/// Registry-only ASCII descriptions use this projection directly, so they never fabricate a
+/// domain string merely to reuse the renderer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DataflowGraphProjection {
+    pub statistics: DataflowStatistics,
+    pub nodes: Vec<DataflowNode>,
+    pub edges: Vec<DataflowEdge>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DataflowNode {
     pub id: String,
@@ -271,37 +282,55 @@ impl DataflowGraph {
     }
 
     pub fn render_ascii(&self) -> String {
-        if self.nodes.is_empty() {
-            return "(empty)".to_string();
-        }
-
-        let mut ids = BTreeMap::new();
-        let labels = self
-            .nodes
-            .iter()
-            .map(DataflowNode::ascii_label)
-            .collect::<Vec<_>>();
-        let mut dag = Graph::new();
-        for (index, (node, label)) in self.nodes.iter().zip(labels.iter()).enumerate() {
-            ids.insert(node.id.as_str(), index);
-            dag.add_node(index, label.as_str());
-        }
-
-        for edge in &self.edges {
-            if let (Some(source), Some(target)) =
-                (ids.get(edge.source.as_str()), ids.get(edge.target.as_str()))
-            {
-                dag.add_edge(*source, *target, None);
-            }
-        }
-
-        let mut config = LayoutConfig::quality();
-        config.node_spacing = 6;
-        config.level_spacing = 3;
-        config.render_mode = RenderMode::Vertical;
-
-        dag.compute_layout_with_config(&config).render_scanline()
+        render_ascii(&self.nodes, &self.edges)
     }
+}
+
+impl DataflowGraphProjection {
+    pub fn into_graph(self, domain: impl Into<String>) -> DataflowGraph {
+        DataflowGraph {
+            domain: domain.into(),
+            statistics: self.statistics,
+            nodes: self.nodes,
+            edges: self.edges,
+        }
+    }
+
+    pub fn render_ascii(&self) -> String {
+        render_ascii(&self.nodes, &self.edges)
+    }
+}
+
+fn render_ascii(nodes: &[DataflowNode], edges: &[DataflowEdge]) -> String {
+    if nodes.is_empty() {
+        return "(empty)".to_string();
+    }
+
+    let mut ids = BTreeMap::new();
+    let labels = nodes
+        .iter()
+        .map(DataflowNode::ascii_label)
+        .collect::<Vec<_>>();
+    let mut dag = Graph::new();
+    for (index, (node, label)) in nodes.iter().zip(labels.iter()).enumerate() {
+        ids.insert(node.id.as_str(), index);
+        dag.add_node(index, label.as_str());
+    }
+
+    for edge in edges {
+        if let (Some(source), Some(target)) =
+            (ids.get(edge.source.as_str()), ids.get(edge.target.as_str()))
+        {
+            dag.add_edge(*source, *target, None);
+        }
+    }
+
+    let mut config = LayoutConfig::quality();
+    config.node_spacing = 6;
+    config.level_spacing = 3;
+    config.render_mode = RenderMode::Vertical;
+
+    dag.compute_layout_with_config(&config).render_scanline()
 }
 
 impl DataflowNode {
@@ -607,6 +636,20 @@ mod tests {
         assert!(rendered.contains("KAFKA:a"), "{rendered}");
         assert!(rendered.contains("RELAY:RELAY:raw"), "{rendered}");
         assert!(rendered.contains("EMITTER:SINK:sink"), "{rendered}");
+    }
+
+    #[test]
+    fn ascii_projection_renders_before_domain_identity_is_attached() {
+        let graph = sample_graph();
+        let expected = graph.render_ascii();
+        let projection = DataflowGraphProjection {
+            statistics: graph.statistics,
+            nodes: graph.nodes,
+            edges: graph.edges,
+        };
+
+        assert_eq!(projection.render_ascii(), expected);
+        assert_eq!(projection.into_graph("prod").domain, "prod");
     }
 
     fn sample_graph() -> DataflowGraph {

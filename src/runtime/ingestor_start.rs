@@ -310,7 +310,7 @@ impl Runtime {
                 codec: ingestor.decode_using_codec.as_str().to_string(),
             });
         };
-        let empty_branching = Vec::new();
+        let empty_branching = ResolvedBranching::unbranched();
         let filter_where = compile_expression_filter_program(
             RuntimeCompileTarget {
                 domain,
@@ -327,8 +327,6 @@ impl Runtime {
                 available_materialized_streams: &execution.materialized_stream_specs,
                 available_lookups: &execution.lookups,
                 current_branching: &empty_branching,
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
                 udfs: Some(&execution.udfs),
             },
         )?;
@@ -365,21 +363,11 @@ impl Runtime {
                 RuntimeVmCompileContext {
                     available_materialized_streams: &execution.materialized_stream_specs,
                     available_lookups: &execution.lookups,
-                    current_branching: &execution
-                        .relay_branchings
-                        .get(&output.relay)
-                        .cloned()
-                        .unwrap_or_default(),
-                    current_branch_schema: None,
-                    current_branch_sensitivity: None,
+                    current_branching: &empty_branching,
                     udfs: Some(&execution.udfs),
                 },
             )?;
-            let target_branch_schema = execution
-                .relay_branching_schemas
-                .get(&output.relay)
-                .cloned()
-                .flatten();
+            let target_branch_schema = relay_branch_schema_for_routing(&execution, &output.relay);
             let compiled_branch_program = compile_output_branch_program(
                 RuntimeCompileTarget {
                     domain,
@@ -399,8 +387,6 @@ impl Runtime {
                     available_materialized_streams: &execution.materialized_stream_specs,
                     available_lookups: &execution.lookups,
                     current_branching: &empty_branching,
-                    current_branch_schema: None,
-                    current_branch_sensitivity: None,
                     udfs: Some(&execution.udfs),
                 },
             )?;

@@ -17,6 +17,8 @@ Current session behavior:
 - subscription names are unique within one connected session and may refer to relays in different domains
 - `DELETE SUBSCRIPTION` resolves only the session-local subscription name, independent of the currently active domain
 - subscribing to a relay collects records from all active branch groups for that relay
+- a branched subscription reports its concrete branch key with each record; sensitive branch-key
+  fields are masked using the same rules as sensitive relay fields
 - subscriptions are read-only views; only an optional `WHERE` predicate is supported, and a
   selected record is delivered without construction or transformation
 - bare fields, `message.<field>`, and `input.<field>` all read the subscribed relay record; the

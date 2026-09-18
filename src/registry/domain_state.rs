@@ -29,10 +29,10 @@ use crate::registry::{
     storage::StoredModelRecord,
     validation::{
         branching::{
-            add_output_branch_dependency_edges, branch_model, branching_schema_fields,
-            ensure_output_branch, infer_stream_branchings, model_branch_selection,
-            relay_declared_branch, relay_declared_branch_schema, resolved_branch_selection,
-            validate_branch_model, validate_processing_branch_selections,
+            add_output_branch_dependency_edges, ensure_output_branch, infer_stream_branchings,
+            model_branch_selection, relay_declared_branch, relay_declared_branch_schema,
+            resolved_branch_selection, validate_branch_model,
+            validate_processing_branch_selections,
         },
         connector::{
             effective_emitter_filter_map_schema, effective_ingestor_output_filter_map_schema,
@@ -117,43 +117,24 @@ impl DomainState {
         let mut indices = HashMap::new();
 
         for (key, model) in models {
-            let (effective_branching, effective_branching_schema) = match model {
-                Model::Relay(relay) => {
-                    if let Some(branch_ref) = relay.branching.branch() {
-                        let branch = branch_model(domain, &key.identifier, models, branch_ref)?;
-                        (
-                            Some(branching_schema_fields(
-                                domain,
-                                &key.identifier,
-                                models,
-                                &branch.schema,
-                            )?),
-                            Some(branch.schema.clone()),
-                        )
-                    } else {
-                        (Some(Vec::new()), None)
-                    }
-                }
-                _ => {
-                    if let Some(branched_by) = model_branch_selection(model) {
-                        let branching = resolved_branch_selection(
-                            domain,
-                            &key.identifier,
-                            models,
-                            branched_by,
-                        )?;
-                        (Some(branching.fields), branching.schema)
-                    } else {
-                        (None, None)
-                    }
-                }
+            let resolved_branching = match model {
+                Model::Relay(relay) => Some(resolved_branch_selection(
+                    domain,
+                    &key.identifier,
+                    models,
+                    &relay.branching,
+                )?),
+                _ => model_branch_selection(model)
+                    .map(|branching| {
+                        resolved_branch_selection(domain, &key.identifier, models, branching)
+                    })
+                    .transpose()?,
             };
             let node = ActiveNode {
                 identifier: key.identifier.clone(),
                 kind: key.kind,
                 config: Arc::new(model.clone()),
-                effective_branching,
-                effective_branching_schema,
+                resolved_branching,
             };
             let index = graph.add_node(node);
             indices.insert(key.clone(), index);
