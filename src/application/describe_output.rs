@@ -16,7 +16,7 @@ use nervix_interconnect::{
 use nervix_models::{
     BranchSelection, ClusterNodeName, CreateCorrelator, CreateDeduplicator, CreateEmitter,
     CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor, CreateReorderer,
-    CreateWindowProcessor, DomainName, EmitSink, FieldName, IcebergCatalog, IngestSource,
+    CreateWindowProcessor, DomainName, EmitSink, IcebergCatalog, IngestSource,
     IngestTimestampSource, KafkaOffsetMode, Model, ModelName, MongoDbConflictAction,
     MySqlConflictAction, NodeRef, PlacementName, PlacementPolicy, PostgresConflictAction,
     ProcessorInputs, ProcessorOutputs, RelayName, RequestedResourceVersion, ScheduledNode,
@@ -362,7 +362,7 @@ pub(in crate::application) fn append_metrics_lines(
 
 pub(in crate::application) fn format_relay_describe_output(
     relay: &nervix_models::CreateRelay,
-    branching: &[FieldName],
+    branching: &nervix_models::ResolvedBranching,
     scheduled_node: Option<&ScheduledNode>,
 ) -> String {
     let mut lines = vec![
@@ -383,11 +383,11 @@ pub(in crate::application) fn format_relay_describe_output(
         }),
         format!(
             "branch fields: {}",
-            if branching.is_empty() {
+            if branching.is_unbranched() {
                 "-".to_string()
             } else {
                 branching
-                    .iter()
+                    .field_names()
                     .map(|name| name.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
@@ -403,7 +403,7 @@ pub(in crate::application) fn format_relay_describe_output(
             }
         ),
     ]);
-    if !branching.is_empty() {
+    if !branching.is_unbranched() {
         lines.push("branch-local describe: use WHERE bindings".to_string());
     }
     lines.join("\n")

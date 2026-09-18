@@ -18,7 +18,7 @@ use nervix_models::{
     CreateSchema, DomainNodeRef, DomainSchedule, DomainStatus, MaterializedRelayState, ModelKind,
     ModelName, NodeRef, OwnershipStateRecoveryOutcome, OwnershipStateReset,
     OwnershipStateResetCause, OwnershipTransition, ParseAsType, RelayBranching, RelayName,
-    ScheduledNode, SchemaField, SchemaName, Timestamp,
+    ResolvedBranching, ScheduledNode, SchemaField, SchemaFingerprint, SchemaName, Timestamp,
 };
 use nonzero_ext::nonzero;
 use tempfile::tempdir;
@@ -71,6 +71,7 @@ impl EmptyRelayHandoffFixture {
             }),
             SchemaFingerprint::from_digest([1; 32]),
         )
+        .with_resolved_branching(Some(ResolvedBranching::unbranched()))
         .placed_on(Some(source.clone()), vec![source.clone()]);
         let base_schedule = DomainSchedule::new(
             domain.clone(),
@@ -489,6 +490,7 @@ async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuil
         }),
         SchemaFingerprint::from_digest([7; 32]),
     )
+    .with_resolved_branching(Some(ResolvedBranching::unbranched()))
     .placed_on(Some(destination.clone()), vec![destination.clone()]);
     scheduled.ownership_transition = Some(OwnershipTransition {
         id: operation_id.to_string(),
@@ -644,6 +646,7 @@ async fn forced_recovery_recreates_state_only_for_a_complete_reset_decision() {
         }),
         SchemaFingerprint::from_digest([7; 32]),
     )
+    .with_resolved_branching(Some(ResolvedBranching::unbranched()))
     .placed_on(Some(destination.clone()), vec![destination.clone()]);
     scheduled.ownership_transition = Some(OwnershipTransition {
         id: "forced-reset".to_string(),
@@ -1967,6 +1970,7 @@ fn reinstalling_schema_fingerprints_never_exposes_a_node_without_one() {
                 }),
                 SchemaFingerprint::from_digest([1; 32]),
             )
+            .with_resolved_branching(Some(ResolvedBranching::unbranched()))
             .placed_on(
                 Some(ClusterNodeName::parse("node-1").expect("valid name")),
                 vec![ClusterNodeName::parse("node-1").expect("valid name")],

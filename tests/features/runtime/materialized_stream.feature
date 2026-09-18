@@ -1,4 +1,65 @@
 Feature: Materialized relay state
+  Scenario Outline: Unbranched materialized reports render the root branch locally and remotely
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the active domain is "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA root_event (
+        value STRING
+      );
+
+      CREATE WIRE JSON SCHEMA root_event_wire MODE STRICT (
+        value string
+      );
+
+      CREATE CODEC root_event_codec
+        FROM WIRE JSON SCHEMA root_event_wire
+        TO SCHEMA root_event;
+
+      CREATE RELAY root_state
+        SCHEMA root_event
+        UNBRANCHED
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+
+      CREATE VHOST edge root-state-{{test_id}}.example.com;
+      CREATE ENDPOINT root_state_ingress
+        ON edge
+        PATH '/state'
+        TYPE HTTP;
+
+      CREATE INGESTOR root_state_source
+        FROM ENDPOINT root_state_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING root_event_codec
+        TO root_state
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+
+      START;
+      """
+    When http payload is posted to node "node-1" with host "root-state-{{test_id}}.example.com" path "/state"
+      """
+      {"value":"root-value"}
+      """
+    Then within "5s" node "<report_node>" eventually reports materialized state for relay "root_state" containing
+      """
+      key=(root) payload={"value":"root-value"}
+      """
+
+    Examples:
+      | cluster_size | report_node |
+      | 1            | node-1      |
+      | 3            | node-1      |
+      | 3            | node-2      |
+      | 3            | node-3      |
+
   Scenario Outline: Materialized relay state is resolved from the current concrete branch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -106,6 +167,15 @@ Feature: Materialized relay state
       {"source":"beta-state","tenant":"beta","user_id":20}
       """
     And the last relay subscription payload contains key fragment '{"tenant":"beta"}'
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"acme","user_id":30,"source":"input"}
+      """
+    Then within "5s" the relay subscription receives a payload
+      """
+      {"source":"acme-state","tenant":"acme","user_id":30}
+      """
+    And the last relay subscription payload contains key fragment '{"tenant":"acme"}'
 
     Examples:
       | cluster_size | replica_count |

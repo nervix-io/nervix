@@ -787,9 +787,7 @@ mod tests {
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
-                current_branching: &[],
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
+                current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
             },
         )
@@ -943,9 +941,7 @@ mod tests {
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
-                current_branching: &[],
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
+                current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
             },
         )
@@ -1085,9 +1081,7 @@ mod tests {
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
-                current_branching: &[],
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
+                current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
             },
         )

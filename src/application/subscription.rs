@@ -108,6 +108,7 @@ pub(in crate::application) enum SessionCommandOperation {
 struct SessionSubscriptionTaskConfig {
     predicate: Option<CompiledSubscriptionPredicate>,
     sensitivity: nervix_vm::SchemaSensitivity,
+    branch_sensitivity: nervix_vm::SchemaSensitivity,
     delivery_behavior: SubscriptionDeliveryBehavior,
     batch_sample_rate: Option<f64>,
     runtime: Runtime,
@@ -235,6 +236,7 @@ impl SessionSubscriptions {
         let SessionSubscriptionTaskConfig {
             predicate,
             sensitivity,
+            branch_sensitivity,
             delivery_behavior,
             batch_sample_rate,
             runtime,
@@ -332,7 +334,11 @@ impl SessionSubscriptions {
                                     if !subscription_sample_passes(batch_sample_rate, &message) {
                                         continue;
                                     }
-                                    let payload = format_stream_message(&message, &sensitivity);
+                                    let payload = format_stream_message(
+                                        &message,
+                                        &sensitivity,
+                                        &branch_sensitivity,
+                                    );
                                     let event = SessionResponse {
                                         event: Some(proto::session_response::Event::Subscription(
                                             proto::SubscriptionEvent {
@@ -459,24 +465,28 @@ impl SessionSubscriptions {
 pub(in crate::application) fn format_stream_message(
     message: &RelayMessage,
     sensitivity: &nervix_vm::SchemaSensitivity,
+    branch_sensitivity: &nervix_vm::SchemaSensitivity,
 ) -> String {
     let payload = message
         .record
         .to_json_string_masking(sensitivity)
         .unwrap_or_else(|error| format!("<invalid Arrow row: {error}>"));
     match message.key.as_ref() {
-        Some(key) => format!("key={} payload={}", key.as_str(), payload),
+        Some(key) => format!(
+            "key={} payload={}",
+            key.to_json_string_masking(branch_sensitivity),
+            payload
+        ),
         None => payload,
     }
 }
 
 pub(in crate::application) fn validate_subscription_bindings(
     relay: &RelayName,
-    branching: &[FieldName],
-    schema: &nervix_models::CreateSchema,
+    branching: &nervix_models::ResolvedBranching,
     bindings: &[SubscriptionBinding],
 ) -> Result<SubscriptionFilter, String> {
-    if branching.is_empty() {
+    if branching.is_unbranched() {
         if bindings.is_empty() {
             return Ok(SubscriptionFilter {
                 bindings: Vec::new(),
@@ -488,11 +498,16 @@ pub(in crate::application) fn validate_subscription_bindings(
         ));
     }
 
+    let schema = branching
+        .schema()
+        .verified("a branched subscription target carries its resolved key schema");
+    let branch_fields = branching.field_names().cloned().collect::<Vec<_>>();
+
     if bindings.is_empty() {
         return Err(format!(
             "stream '{}' requires WHERE bindings for ({})",
             relay.as_str(),
-            branching
+            branch_fields
                 .iter()
                 .map(|name| name.as_str())
                 .collect::<Vec<_>>()
@@ -518,13 +533,13 @@ pub(in crate::application) fn validate_subscription_bindings(
         }
     }
 
-    let expected = SortedSet::from_unsorted(branching.to_vec()).into_vec();
+    let expected = SortedSet::from_unsorted(branch_fields.clone()).into_vec();
     let actual = SortedSet::from_unsorted(bound.keys().cloned().collect::<Vec<_>>()).into_vec();
     if expected != actual {
         return Err(format!(
             "subscription bindings for relay '{}' must exactly match ({})",
             relay.as_str(),
-            branching
+            branch_fields
                 .iter()
                 .map(|name| name.as_str())
                 .collect::<Vec<_>>()
@@ -533,7 +548,7 @@ pub(in crate::application) fn validate_subscription_bindings(
     }
 
     let mut matchers = Vec::new();
-    for field in branching {
+    for field in &branch_fields {
         let ty = fields.get(field).ok_or_else(|| {
             format!(
                 "branch field '{}' is missing from schema '{}'",
@@ -555,14 +570,15 @@ pub(in crate::application) fn validate_subscription_bindings(
 }
 
 pub(in crate::application) fn branch_key_from_filter(
-    branching: &[FieldName],
+    branching: &nervix_models::ResolvedBranching,
     filter: &SubscriptionFilter,
 ) -> Result<Option<crate::runtime::BranchKey>, String> {
-    if branching.is_empty() {
+    if branching.is_unbranched() {
         return Ok(None);
     }
-    let mut fields = Vec::with_capacity(branching.len());
-    for field in branching {
+    let branch_fields = branching.field_names().collect::<Vec<_>>();
+    let mut fields = Vec::with_capacity(branch_fields.len());
+    for field in branch_fields {
         let Some(binding) = filter
             .bindings
             .iter()
@@ -703,7 +719,7 @@ pub(in crate::application) struct SubscriptionInterestKey {
 pub(in crate::application) struct SubscriptionTarget {
     pub(in crate::application) relay: nervix_models::CreateRelay,
     pub(in crate::application) schema: nervix_models::CreateSchema,
-    pub(in crate::application) branching: Vec<FieldName>,
+    pub(in crate::application) branching: nervix_models::ResolvedBranching,
 }
 
 impl SessionServiceImpl {
@@ -965,7 +981,12 @@ impl SessionServiceImpl {
         Ok(Some(SubscriptionTarget {
             relay: ack_model.clone(),
             schema: schema.clone(),
-            branching: relay_node.effective_branching.clone().unwrap_or_default(),
+            branching: relay_node.resolved_branching.clone().ok_or_else(|| {
+                format!(
+                    "stream '{}' has no resolved branch declaration in the schedule",
+                    relay.as_str()
+                )
+            })?,
         }))
     }
 
@@ -1186,6 +1207,29 @@ impl SessionServiceImpl {
             }
         };
 
+        let branch_sensitivity = match self
+            .subscription_target_from_schedule(domain, &subscription.relay)
+            .await
+        {
+            Ok(Some(target)) => match target.branching.schema() {
+                Some(schema) => runtime_schema::compile_schema(schema).vm_sensitivity(),
+                None => nervix_vm::SchemaSensitivity::empty(),
+            },
+            Ok(None) => {
+                return command_error(format!(
+                    "stream '{}' has no scheduled branch declaration in domain '{}'",
+                    subscription.relay.as_str(),
+                    domain.as_str(),
+                ));
+            }
+            Err(error) => {
+                return command_error(format!(
+                    "failed to resolve branch declaration for relay '{}': {error}",
+                    subscription.relay.as_str(),
+                ));
+            }
+        };
+
         let relay = subscription.relay.clone();
         let runtime_revision = self.inner.consensus.current_runtime_state().await.revision;
         if let Err(err) = self.wait_for_runtime_revision(runtime_revision).await {
@@ -1235,6 +1279,7 @@ impl SessionServiceImpl {
             SessionSubscriptionTaskConfig {
                 predicate,
                 sensitivity: subscription_sensitivity,
+                branch_sensitivity,
                 delivery_behavior: subscription.delivery_behavior,
                 batch_sample_rate,
                 runtime: self.inner.runtime.clone(),
@@ -1470,6 +1515,7 @@ mod tests {
             SessionSubscriptionTaskConfig {
                 predicate: None,
                 sensitivity: nervix_vm::SchemaSensitivity::default(),
+                branch_sensitivity: nervix_vm::SchemaSensitivity::default(),
                 delivery_behavior: SubscriptionDeliveryBehavior::Blocking,
                 batch_sample_rate: None,
                 runtime: Runtime::default(),
@@ -1526,6 +1572,7 @@ mod tests {
                 SessionSubscriptionTaskConfig {
                     predicate: None,
                     sensitivity: nervix_vm::SchemaSensitivity::default(),
+                    branch_sensitivity: nervix_vm::SchemaSensitivity::default(),
                     delivery_behavior: SubscriptionDeliveryBehavior::Blocking,
                     batch_sample_rate: None,
                     runtime: Runtime::default(),
@@ -1575,6 +1622,7 @@ mod tests {
             SessionSubscriptionTaskConfig {
                 predicate: None,
                 sensitivity: nervix_vm::SchemaSensitivity::default(),
+                branch_sensitivity: nervix_vm::SchemaSensitivity::default(),
                 delivery_behavior: SubscriptionDeliveryBehavior::Blocking,
                 batch_sample_rate: None,
                 runtime: Runtime::default(),
