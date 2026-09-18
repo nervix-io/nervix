@@ -634,6 +634,9 @@ build and the existing tests, and nothing in it changes behavior.
   required dependencies, environment, and ordering for builds, checks, lints, tests, benchmarks,
   and formatting. When the needed invocation has no recipe, add a focused `justfile` recipe and use
   it instead of running Cargo directly.
+- Keep exactly one canonical `justfile` recipe for each operation. Do not add slightly different
+  copies under new names; adjust the existing recipe and its focused dependencies when its coverage
+  or behavior must change.
 - Use `just validate` for formatting and validation.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, `as`
   casts outside imports and qualified paths, bare `unwrap` and `expect`, outcomes dropped with

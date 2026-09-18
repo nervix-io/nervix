@@ -411,14 +411,17 @@ autoinherit-check:
     cargo autoinherit
     git diff --exit-code
 
-cargo-clippy-all:
+# Lint one workspace package and all of its targets with warnings denied, sharing the workspace
+# lint build directory. Extra arguments are forwarded to Cargo.
+cargo-clippy-package package *args:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-workspace" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --package {{ package }} --all-targets {{ args }}
+
+# Lint the complete workspace matrix in parallel. Shuttle-backed targets require separate valid
+# production and modeled configurations, and the client wire crate also targets the browser.
+cargo-clippy: build-web-console
     #!/usr/bin/env bash
     set -euo pipefail
-    export CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-all"
     export RUSTFLAGS="-Dwarnings {{ rustflags }}"
-    # Shuttle-backed targets require a Shuttle runner and deliberately omit Tokio's process and
-    # runtime-builder APIs. Lint their production targets normally, then lint the modeled library
-    # boundary separately. `test-shuttle` compiles and runs the modeled test targets.
     shuttle_packages=(
         nervix-client-core
         nervix-consensus
@@ -431,45 +434,45 @@ cargo-clippy-all:
     for package in "${shuttle_packages[@]}"; do
         workspace_exclusions+=(--exclude "${package}")
     done
-    cargo clippy --all-features --all-targets --workspace "${workspace_exclusions[@]}"
-    cargo clippy --all-targets --features 'benchmarks testing' --package nervix-server
-    cargo clippy --all-targets --features autocomplete --package nervix-client-core
-    cargo clippy --all-targets --features testing --package nervix-consensus
-    cargo clippy --all-targets \
+    clippy_jobs=()
+    run_clippy() {
+        local target_name="$1"
+        shift
+        CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-${target_name}" cargo clippy "$@" &
+        clippy_jobs+=("$!")
+    }
+    run_clippy workspace \
+        --all-features --all-targets --workspace "${workspace_exclusions[@]}"
+    run_clippy server \
+        --all-targets --features 'benchmarks testing' --package nervix-server --quiet
+    run_clippy client-core \
+        --all-targets --features autocomplete --package nervix-client-core --quiet
+    run_clippy consensus \
+        --all-targets --features testing --package nervix-consensus --quiet
+    run_clippy shuttle-default \
+        --all-targets \
         --package nervix-execution \
         --package nervix-interconnect \
-        --package nervix-wasm
-    cargo clippy --lib --features 'shuttle testing' \
+        --package nervix-wasm \
+        --quiet
+    run_clippy shuttle \
+        --lib --features 'shuttle testing' \
         --package nervix-client-core \
         --package nervix-consensus \
         --package nervix-execution \
         --package nervix-interconnect \
         --package nervix-server \
-        --package nervix-wasm
-
-# Lint one workspace package and all of its targets with warnings denied, sharing the workspace
-# lint build directory. Extra arguments are forwarded to Cargo.
-cargo-clippy-package package *args:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-all" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --package {{ package }} --all-targets {{ args }}
-
-cargo-clippy-server:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-server" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-server -q
-
-cargo-clippy-client:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-client" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-cli -q
-
-cargo-clippy-nspl-format:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-nspl-format" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-nspl-format -q
-
-cargo-clippy-web-console:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-web-console" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-web-console -q
-
-# The browser console decodes session frames, so the wire crate must build for the browser target.
-cargo-clippy-client-wire-wasm:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-client-wire-wasm" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-client-wire --target wasm32-unknown-unknown -q
-
-[parallel]
-cargo-clippy: cargo-clippy-all cargo-clippy-client cargo-clippy-server cargo-clippy-nspl-format cargo-clippy-web-console cargo-clippy-client-wire-wasm
+        --package nervix-wasm \
+        --quiet
+    run_clippy client-wire-wasm \
+        --package nervix-client-wire --target wasm32-unknown-unknown --quiet
+    clippy_status=0
+    for clippy_job in "${clippy_jobs[@]}"; do
+        if ! wait "${clippy_job}"; then
+            clippy_status=1
+        fi
+    done
+    exit "${clippy_status}"
 
 [parallel]
 lint-inner: cargo-clippy proto-lint
