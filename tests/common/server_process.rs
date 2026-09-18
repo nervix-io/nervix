@@ -45,8 +45,9 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use super::cluster::{
     InterconnectTestCa, TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestCertificateValidity,
-    TestSession, next_port, open_raw_session, publish_http_uri_with_headers, release_test_ports,
-    run_command_via_client, server_accepts_commands, test_basic_authorization,
+    TestSession, next_port, open_raw_session, probe_server_readiness,
+    publish_http_uri_with_headers, release_test_ports, run_command_via_client,
+    test_basic_authorization,
 };
 
 /// The identity the process runs as and its certificate names. Each process forms its own
@@ -370,7 +371,7 @@ impl ServerProcess {
                     self.log_tail()
                 )));
             }
-            if server_accepts_commands(&grpc_uri).await? {
+            if probe_server_readiness(&grpc_uri).await.is_ready() {
                 return Ok(());
             }
             sleep(POLL_INTERVAL).await;
