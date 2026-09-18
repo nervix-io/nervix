@@ -1,4 +1,51 @@
 Feature: Explicit branches
+  Scenario Outline: Distinct named branches cannot be substituted when their key schemas match
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands fail with "branch name 'by_output_tenant' does not match relay 'input_notifications' branch name 'by_input_tenant'"
+      """
+      CREATE SCHEMA notification (
+        tenant STRING,
+        message STRING
+      );
+
+      CREATE SCHEMA tenant_branch (
+        tenant STRING
+      );
+
+      CREATE BRANCH by_input_tenant
+        SCHEMA tenant_branch TTL 5m;
+
+      CREATE BRANCH by_output_tenant
+        SCHEMA tenant_branch TTL 5m;
+
+      CREATE RELAY input_notifications
+        SCHEMA notification
+        BRANCHED BY by_input_tenant;
+
+      CREATE RELAY output_notifications
+        SCHEMA notification
+        BRANCHED BY by_output_tenant;
+
+      CREATE DEDUPLICATOR cross_named_branches
+        FROM input_notifications
+        DEDUPLICATE ON input.message
+        MAX TIME 5m
+        BRANCHED BY by_output_tenant
+        TO output_notifications
+          INHERIT ALL
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Explicit branch LRU eviction removes the least recently used concrete branch
     Given branched relay expiration scan interval is configured as "100ms"
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"

@@ -103,7 +103,7 @@ pub(crate) fn scheduled_impact_coverage(node: &ScheduledNode) -> ImpactNodeCover
         Some(branch) => ConcreteBranchCoverage::AllOfBranch {
             branch: branch.clone(),
         },
-        None if node.effective_branching.is_some()
+        None if node.resolved_branching.is_some()
             && matches!(node.kind(), ModelKind::Emitter | ModelKind::Reingestor) =>
         {
             ConcreteBranchCoverage::All
