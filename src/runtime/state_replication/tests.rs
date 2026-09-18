@@ -54,17 +54,23 @@ impl EmptyRelayHandoffFixture {
         let identifier = named::<ModelName>("moving_relay");
         let entity = NodeRef::new(ModelKind::Relay, identifier.clone());
         let schema = SchemaName::from(&identifier);
-        let schema_node = ScheduledNode::new(nervix_models::Model::Schema(CreateSchema {
-            name: schema.clone(),
-            fields: Vec::new(),
-        }));
-        let relay = ScheduledNode::new(nervix_models::Model::Relay(CreateRelay {
-            name: RelayName::from(&identifier),
-            schema,
-            buffer: nonzero!(4usize),
-            branching: RelayBranching::unbranched(),
-            materialized_state: None,
-        }))
+        let schema_node = ScheduledNode::new(
+            nervix_models::Model::Schema(CreateSchema {
+                name: schema.clone(),
+                fields: Vec::new(),
+            }),
+            SchemaFingerprint::from_digest([1; 32]),
+        );
+        let relay = ScheduledNode::new(
+            nervix_models::Model::Relay(CreateRelay {
+                name: RelayName::from(&identifier),
+                schema,
+                buffer: nonzero!(4usize),
+                branching: RelayBranching::unbranched(),
+                materialized_state: None,
+            }),
+            SchemaFingerprint::from_digest([1; 32]),
+        )
         .placed_on(Some(source.clone()), vec![source.clone()]);
         let base_schedule = DomainSchedule::new(
             domain.clone(),
@@ -448,37 +454,41 @@ async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuil
     let operation_id = "forced-recovery";
     let placement = RuntimeStatePlacement {
         domain: domain.clone(),
-        state: RuntimeState::MaterializedRelay,
+        state: RuntimeState::MaterializedRelay {
+            schema: SchemaFingerprint::from_digest([7; 32]),
+        },
         kind: ModelKind::Relay,
         identifier: identifier.clone(),
-        schema_fingerprint: [7; 32],
         branch_key: None,
     };
-    let payload = empty_sealed_container(placement.schema_fingerprint)
-        .expect("empty materialized state should seal");
+    let payload = empty_sealed_container().expect("empty materialized state should seal");
     let prepared = PersistedRuntimeStateEntry {
         lsm: 5,
-        schema_fingerprint: placement.schema_fingerprint,
         payload: payload.clone(),
     };
     let schema = SchemaName::from(&identifier);
-    let schema_node = ScheduledNode::new(nervix_models::Model::Schema(CreateSchema {
-        name: schema.clone(),
-        fields: vec![SchemaField {
-            name: named("order_id"),
-            ty: ParseAsType::I64,
-            optional: false,
-            sensitive: false,
-        }],
-    }));
-    let mut scheduled = ScheduledNode::new(nervix_models::Model::Relay(CreateRelay {
-        name: RelayName::from(&identifier),
-        schema,
-        buffer: nonzero!(4usize),
-        branching: RelayBranching::unbranched(),
-        materialized_state: Some(MaterializedRelayState::LastByTimestamp),
-    }))
-    .with_schema_fingerprint(placement.schema_fingerprint)
+    let schema_node = ScheduledNode::new(
+        nervix_models::Model::Schema(CreateSchema {
+            name: schema.clone(),
+            fields: vec![SchemaField {
+                name: named("order_id"),
+                ty: ParseAsType::I64,
+                optional: false,
+                sensitive: false,
+            }],
+        }),
+        SchemaFingerprint::from_digest([1; 32]),
+    );
+    let mut scheduled = ScheduledNode::new(
+        nervix_models::Model::Relay(CreateRelay {
+            name: RelayName::from(&identifier),
+            schema,
+            buffer: nonzero!(4usize),
+            branching: RelayBranching::unbranched(),
+            materialized_state: Some(MaterializedRelayState::LastByTimestamp),
+        }),
+        SchemaFingerprint::from_digest([7; 32]),
+    )
     .placed_on(Some(destination.clone()), vec![destination.clone()]);
     scheduled.ownership_transition = Some(OwnershipTransition {
         id: operation_id.to_string(),
@@ -546,15 +556,18 @@ async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuil
         let mut domain_state = unpaced_domain_state(domain.as_str());
         domain_state.status = DomainStatus::Stopped;
         runtime.sync_domains(&BTreeMap::from([(domain.clone(), domain_state)]));
-        let unrelated_schema = ScheduledNode::new(nervix_models::Model::Schema(CreateSchema {
-            name: named("unrelated_event"),
-            fields: vec![SchemaField {
-                name: named("event_id"),
-                ty: ParseAsType::I64,
-                optional: false,
-                sensitive: false,
-            }],
-        }));
+        let unrelated_schema = ScheduledNode::new(
+            nervix_models::Model::Schema(CreateSchema {
+                name: named("unrelated_event"),
+                fields: vec![SchemaField {
+                    name: named("event_id"),
+                    ty: ParseAsType::I64,
+                    optional: false,
+                    sensitive: false,
+                }],
+            }),
+            SchemaFingerprint::from_digest([1; 32]),
+        );
         let rebuilt_schedule = DomainSchedule::new(
             domain.clone(),
             vec![schema_node, scheduled, unrelated_schema],
@@ -605,14 +618,14 @@ async fn forced_recovery_recreates_state_only_for_a_complete_reset_decision() {
     attach_loopback_cluster(&runtime, &destination).await;
     let placement = RuntimeStatePlacement {
         domain: domain.clone(),
-        state: RuntimeState::MaterializedRelay,
+        state: RuntimeState::MaterializedRelay {
+            schema: SchemaFingerprint::from_digest([7; 32]),
+        },
         kind: ModelKind::Relay,
         identifier: identifier.clone(),
-        schema_fingerprint: [7; 32],
         branch_key: None,
     };
-    let payload = empty_sealed_container(placement.schema_fingerprint)
-        .expect("empty materialized state should seal");
+    let payload = empty_sealed_container().expect("empty materialized state should seal");
     let store = runtime
         .inner
         .state_store
@@ -621,14 +634,16 @@ async fn forced_recovery_recreates_state_only_for_a_complete_reset_decision() {
     store
         .persist_latest_snapshot(&placement, 6, &payload)
         .expect("current checkpoint should persist");
-    let mut scheduled = ScheduledNode::new(nervix_models::Model::Relay(CreateRelay {
-        name: RelayName::from(&identifier),
-        schema: SchemaName::from(&identifier),
-        buffer: nonzero!(4usize),
-        branching: RelayBranching::unbranched(),
-        materialized_state: Some(MaterializedRelayState::LastByTimestamp),
-    }))
-    .with_schema_fingerprint(placement.schema_fingerprint)
+    let mut scheduled = ScheduledNode::new(
+        nervix_models::Model::Relay(CreateRelay {
+            name: RelayName::from(&identifier),
+            schema: SchemaName::from(&identifier),
+            buffer: nonzero!(4usize),
+            branching: RelayBranching::unbranched(),
+            materialized_state: Some(MaterializedRelayState::LastByTimestamp),
+        }),
+        SchemaFingerprint::from_digest([7; 32]),
+    )
     .placed_on(Some(destination.clone()), vec![destination.clone()]);
     scheduled.ownership_transition = Some(OwnershipTransition {
         id: "forced-reset".to_string(),
@@ -698,7 +713,6 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         state: RuntimeState::KafkaOffset,
         kind: ModelKind::Ingestor,
         identifier: named("orders_source"),
-        schema_fingerprint: [0; 32],
         branch_key: None,
     };
     let kafka_state = Arc::new(
@@ -722,10 +736,11 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         .expect("Kafka offset should update");
     let deduplicator_placement = RuntimeStatePlacement {
         domain: domain.clone(),
-        state: RuntimeState::Deduplicator,
+        state: RuntimeState::Deduplicator {
+            schema: SchemaFingerprint::from_digest([7; 32]),
+        },
         kind: ModelKind::Deduplicator,
         identifier: named("deduplicate_orders"),
-        schema_fingerprint: [7; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
     let sibling_branch_placement = RuntimeStatePlacement {
@@ -782,12 +797,10 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
     };
     let kafka_prepared = PersistedRuntimeStateEntry {
         lsm: 5,
-        schema_fingerprint: kafka_placement.schema_fingerprint,
         payload: kafka_payload.clone(),
     };
     let deduplicator_prepared = PersistedRuntimeStateEntry {
         lsm: 5,
-        schema_fingerprint: deduplicator_placement.schema_fingerprint,
         payload: deduplicator_payload.clone(),
     };
 
@@ -961,10 +974,11 @@ fn forced_recovery_refuses_missing_or_stale_preparation_without_changing_state()
     let destination = named::<ClusterNodeName>("node-2");
     let placement = RuntimeStatePlacement {
         domain: domain.clone(),
-        state: RuntimeState::Deduplicator,
+        state: RuntimeState::Deduplicator {
+            schema: SchemaFingerprint::from_digest([7; 32]),
+        },
         kind: ModelKind::Deduplicator,
         identifier: named("deduplicate_orders"),
-        schema_fingerprint: [7; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
     let sibling_branch = RuntimeStatePlacement {
@@ -1016,7 +1030,6 @@ fn forced_recovery_refuses_missing_or_stale_preparation_without_changing_state()
     ));
     let stale_checkpoint = PersistedRuntimeStateEntry {
         lsm: 5,
-        schema_fingerprint: placement.schema_fingerprint,
         payload: payload.clone(),
     };
     store
@@ -1091,10 +1104,11 @@ fn runtime_state_store_persists_latest_snapshot_with_monotonic_lsm() {
         RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeState::Deduplicator,
+        state: RuntimeState::Deduplicator {
+            schema: unchanged_schema_fingerprint(),
+        },
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        schema_fingerprint: [0; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
 
@@ -1129,10 +1143,11 @@ async fn deduplicator_snapshot_task_persists_published_keys_on_interval() {
         .expect("runtime should open persisted state");
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeState::Deduplicator,
+        state: RuntimeState::Deduplicator {
+            schema: unchanged_schema_fingerprint(),
+        },
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        schema_fingerprint: [0; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
     let state = runtime
@@ -1189,10 +1204,11 @@ async fn deduplicator_snapshot_task_persists_published_keys_after_the_branch_tas
         .expect("runtime should open persisted state");
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeState::Deduplicator,
+        state: RuntimeState::Deduplicator {
+            schema: unchanged_schema_fingerprint(),
+        },
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        schema_fingerprint: [0; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
     let state = runtime
@@ -1246,10 +1262,11 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
         .expect("runtime should open persisted state");
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeState::MaterializedRelay,
+        state: RuntimeState::MaterializedRelay {
+            schema: unchanged_schema_fingerprint(),
+        },
         kind: ModelKind::Relay,
         identifier: named("latest_orders"),
-        schema_fingerprint: [0; 32],
         branch_key: None,
     };
     let schema = test_schema(&[("status", ParseAsType::String)]);
@@ -1325,7 +1342,6 @@ async fn kafka_offset_snapshot_task_owns_persistence() {
         state: RuntimeState::KafkaOffset,
         kind: ModelKind::Ingestor,
         identifier: named("orders_source"),
-        schema_fingerprint: [0; 32],
         branch_key: None,
     };
     let mut assignment = runtime
@@ -1389,10 +1405,11 @@ async fn window_processor_snapshot_task_persists_published_state_on_interval() {
         .expect("runtime should open persisted state");
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeState::WindowProcessor,
+        state: RuntimeState::WindowProcessor {
+            schema: unchanged_schema_fingerprint(),
+        },
         kind: ModelKind::WindowProcessor,
         identifier: named("latency_window"),
-        schema_fingerprint: [0; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
     let state = runtime
@@ -1450,10 +1467,11 @@ async fn window_processor_snapshot_task_persists_published_state_on_interval() {
 fn a_window_state_publication_proceeds_while_a_snapshot_reads_the_previous_one() {
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeState::WindowProcessor,
+        state: RuntimeState::WindowProcessor {
+            schema: unchanged_schema_fingerprint(),
+        },
         kind: ModelKind::WindowProcessor,
         identifier: named("latency_window"),
-        schema_fingerprint: [0; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
     let state = ReplicatedWindowProcessorState::new(placement, None)
@@ -1492,14 +1510,18 @@ fn runtime_state_store_purges_only_stale_schema_fingerprints() {
         RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
     let base = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeState::Deduplicator,
+        state: RuntimeState::Deduplicator {
+            schema: SchemaFingerprint::from_digest([1; 32]),
+        },
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        schema_fingerprint: [1; 32],
         branch_key: None,
     };
+    let current_schema = SchemaFingerprint::from_digest([2; 32]);
     let current = RuntimeStatePlacement {
-        schema_fingerprint: [2; 32],
+        state: RuntimeState::Deduplicator {
+            schema: current_schema,
+        },
         ..base.clone()
     };
     store
@@ -1518,7 +1540,7 @@ fn runtime_state_store_purges_only_stale_schema_fingerprints() {
                     identifier: base.identifier.clone(),
                 },
                 ScheduledStateIdentity {
-                    schema_fingerprint: current.schema_fingerprint,
+                    schema_fingerprint: current_schema,
                     wasm_state_generations: None,
                 },
             )]),
@@ -1551,10 +1573,11 @@ fn runtime_state_store_purges_only_the_requested_domain() {
         RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
     let stopped = RuntimeStatePlacement {
         domain: domain("stopped"),
-        state: RuntimeState::Deduplicator,
+        state: RuntimeState::Deduplicator {
+            schema: SchemaFingerprint::from_digest([1; 32]),
+        },
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        schema_fingerprint: [1; 32],
         branch_key: None,
     };
     let running = RuntimeStatePlacement {
@@ -1598,10 +1621,11 @@ fn runtime_state_store_purges_only_the_requested_entity() {
         RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
     let removed = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeState::MaterializedRelay,
+        state: RuntimeState::MaterializedRelay {
+            schema: SchemaFingerprint::from_digest([1; 32]),
+        },
         kind: ModelKind::Relay,
         identifier: named("events"),
-        schema_fingerprint: [1; 32],
         branch_key: None,
     };
     let retained = RuntimeStatePlacement {
@@ -1653,7 +1677,6 @@ fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
         state: RuntimeState::KafkaOffset,
         kind: ModelKind::Ingestor,
         identifier: named("kafka_notifications"),
-        schema_fingerprint: [0; 32],
         branch_key: None,
     };
     let state = Arc::new(
@@ -1727,7 +1750,6 @@ fn branch_aggregated_state_snapshot_roundtrips_metrics() {
         state: RuntimeState::BranchAggregated,
         kind: ModelKind::Ingestor,
         identifier: named("redis_notifications"),
-        schema_fingerprint: [0; 32],
         branch_key: None,
     };
     let relay = named("notifications");
@@ -1789,10 +1811,11 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
     let runtime = Runtime::default();
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeState::Deduplicator,
+        state: RuntimeState::Deduplicator {
+            schema: unchanged_schema_fingerprint(),
+        },
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        schema_fingerprint: [0; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
     let state = runtime
@@ -1844,10 +1867,11 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
 fn deduplicator_key_reservation_reports_new_and_duplicate_keys() {
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeState::Deduplicator,
+        state: RuntimeState::Deduplicator {
+            schema: unchanged_schema_fingerprint(),
+        },
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        schema_fingerprint: [0; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
     let state = Arc::new(
@@ -1873,18 +1897,20 @@ fn deduplicator_key_reservation_reports_new_and_duplicate_keys() {
 fn runtime_state_placement_storage_key_includes_branch_key() {
     let tenant_beta = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeState::Deduplicator,
+        state: RuntimeState::Deduplicator {
+            schema: SchemaFingerprint::from_digest([1; 32]),
+        },
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        schema_fingerprint: [1; 32],
         branch_key: string_branch_key("tenant", "beta"),
     };
     let tenant = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeState::Deduplicator,
+        state: RuntimeState::Deduplicator {
+            schema: SchemaFingerprint::from_digest([1; 32]),
+        },
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        schema_fingerprint: [1; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
 
@@ -1894,7 +1920,6 @@ fn runtime_state_placement_storage_key_includes_branch_key() {
         state: RuntimeState::BranchAggregated,
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        schema_fingerprint: [0; 32],
         branch_key: None,
     };
     assert_ne!(
@@ -1903,10 +1928,11 @@ fn runtime_state_placement_storage_key_includes_branch_key() {
     );
     let deduplicator_global = RuntimeStatePlacement {
         domain: domain("default"),
-        state: RuntimeState::Deduplicator,
+        state: RuntimeState::Deduplicator {
+            schema: SchemaFingerprint::from_digest([1; 32]),
+        },
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        schema_fingerprint: [1; 32],
         branch_key: None,
     };
     assert_ne!(
@@ -1916,10 +1942,10 @@ fn runtime_state_placement_storage_key_includes_branch_key() {
 }
 
 /// Reinstalling a schedule must never leave a scheduled node without its fingerprint, even
-/// for an instant. `state_placement` keys every runtime state by that fingerprint, so a reader
-/// that resolves a placement while the map is being rebuilt would address a different state
-/// and find it empty. Relocation rebuilds the fingerprints while the relay's own state task is
-/// still running, which is exactly when that read happens.
+/// for an instant. `state_placement` keys every schema-bound runtime state by that fingerprint, so
+/// a reader that resolves a placement while the map is being rebuilt would find no identity for the
+/// node and could not address the state it owns. Relocation rebuilds the fingerprints while the
+/// relay's own state task is still running, which is exactly when that read happens.
 #[test]
 fn reinstalling_schema_fingerprints_never_exposes_a_node_without_one() {
     let runtime = Runtime::default();
@@ -1928,14 +1954,18 @@ fn reinstalling_schema_fingerprints_never_exposes_a_node_without_one() {
     let schedule = DomainSchedule::new(
         domain.clone(),
         vec![
-            ScheduledNode::new(nervix_models::Model::Relay(nervix_models::CreateRelay {
-                name: nervix_models::RelayName::from(&identifier.clone()),
-                schema: nervix_models::SchemaName::from(&identifier.clone()),
-                buffer: nonzero!(4usize),
-                branching: nervix_models::RelayBranching::unbranched(),
-                materialized_state: Some(nervix_models::MaterializedRelayState::LastByTimestamp),
-            }))
-            .with_schema_fingerprint([1; 32])
+            ScheduledNode::new(
+                nervix_models::Model::Relay(nervix_models::CreateRelay {
+                    name: nervix_models::RelayName::from(&identifier.clone()),
+                    schema: nervix_models::SchemaName::from(&identifier.clone()),
+                    buffer: nonzero!(4usize),
+                    branching: nervix_models::RelayBranching::unbranched(),
+                    materialized_state: Some(
+                        nervix_models::MaterializedRelayState::LastByTimestamp,
+                    ),
+                }),
+                SchemaFingerprint::from_digest([1; 32]),
+            )
             .placed_on(
                 Some(ClusterNodeName::parse("node-1").expect("valid name")),
                 vec![ClusterNodeName::parse("node-1").expect("valid name")],
@@ -1947,22 +1977,23 @@ fn reinstalling_schema_fingerprints_never_exposes_a_node_without_one() {
     let resolve = || {
         runtime.state_placement(
             &domain,
-            RuntimeState::MaterializedRelay,
+            RuntimeStateKind::MaterializedRelay,
             ModelKind::Relay,
             &identifier,
             None,
         )
     };
     runtime.install_state_identities(&schedule);
-    let installed = resolve();
+    let installed = resolve().expect("the installed schedule publishes the relay's fingerprint");
 
     let reads_stopped = AtomicBool::new(false);
     let missed = AtomicBool::new(false);
     std::thread::scope(|scope| {
         scope.spawn(|| {
             while !reads_stopped.load(Ordering::Relaxed) {
-                if resolve() != installed {
-                    missed.store(true, Ordering::Relaxed);
+                match resolve() {
+                    Ok(placement) if placement == installed => {}
+                    Ok(_) | Err(_) => missed.store(true, Ordering::Relaxed),
                 }
             }
         });
@@ -1986,63 +2017,54 @@ fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
     let schedule = |fingerprint| {
         DomainSchedule::new(
             domain.clone(),
-            vec![
-                ScheduledNode::new(nervix_models::Model::Deduplicator(
-                    nervix_models::CreateDeduplicator {
-                        name: nervix_models::DeduplicatorName::from(&identifier.clone()),
-                        from: nervix_models::ProcessorInputs::new(Vec::new(), Vec::new()),
-                        output_routes: nervix_models::ProcessorOutputs::new(Vec::new()),
-                        branched_by: nervix_models::BranchSelection::unbranched(),
-                        deduplicate_on: Vec::new(),
-                        max_time: "1m".to_string(),
-                        mode: nervix_models::AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    },
-                ))
-                .with_schema_fingerprint(fingerprint)
-                .placed_on(
-                    Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                    vec![ClusterNodeName::parse("node-1").expect("valid name")],
-                ),
-            ],
+            vec![deduplicator_node(&identifier, fingerprint)],
             Vec::new(),
         )
     };
 
-    runtime.install_state_identities(&schedule([1; 32]));
-    let original_placement = runtime.state_placement(
-        &domain,
-        RuntimeState::Deduplicator,
-        ModelKind::Deduplicator,
-        &identifier,
-        None,
-    );
+    runtime.install_state_identities(&schedule(SchemaFingerprint::from_digest([1; 32])));
+    let original_placement = runtime
+        .state_placement(
+            &domain,
+            RuntimeStateKind::Deduplicator,
+            ModelKind::Deduplicator,
+            &identifier,
+            None,
+        )
+        .expect("the installed schedule publishes the deduplicator's fingerprint");
     let original = runtime
         .replicated_deduplicator_state(original_placement.clone())
         .expect("state should initialize");
 
-    runtime.install_state_identities(&schedule([1; 32]));
+    runtime.install_state_identities(&schedule(SchemaFingerprint::from_digest([1; 32])));
     let unchanged = runtime
-        .replicated_deduplicator_state(runtime.state_placement(
-            &domain,
-            RuntimeState::Deduplicator,
-            ModelKind::Deduplicator,
-            &identifier,
-            None,
-        ))
+        .replicated_deduplicator_state(
+            runtime
+                .state_placement(
+                    &domain,
+                    RuntimeStateKind::Deduplicator,
+                    ModelKind::Deduplicator,
+                    &identifier,
+                    None,
+                )
+                .expect("the installed schedule publishes the deduplicator's fingerprint"),
+        )
         .expect("unchanged state should initialize");
     assert!(Arc::ptr_eq(&original, &unchanged));
 
-    runtime.install_state_identities(&schedule([2; 32]));
+    runtime.install_state_identities(&schedule(SchemaFingerprint::from_digest([2; 32])));
     let changed = runtime
-        .replicated_deduplicator_state(runtime.state_placement(
-            &domain,
-            RuntimeState::Deduplicator,
-            ModelKind::Deduplicator,
-            &identifier,
-            None,
-        ))
+        .replicated_deduplicator_state(
+            runtime
+                .state_placement(
+                    &domain,
+                    RuntimeStateKind::Deduplicator,
+                    ModelKind::Deduplicator,
+                    &identifier,
+                    None,
+                )
+                .expect("the installed schedule publishes the deduplicator's fingerprint"),
+        )
         .expect("changed state should initialize");
     assert!(!Arc::ptr_eq(&original, &changed));
     runtime
@@ -2056,9 +2078,208 @@ fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
     );
 }
 
+/// Materialized relay state belongs to the domain start that began it, so a START resets it. An
+/// execution built from a domain's graph keys that state exactly as the schedule of the same graph
+/// does; otherwise the state one of them writes is purged as stale by the other.
+#[test]
+fn graph_and_schedule_key_materialized_relay_state_alike() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let mut restarted = unpaced_domain_state(domain.as_str());
+    restarted.start_version = 2;
+    runtime.sync_domains(&BTreeMap::from([(domain.clone(), restarted)]));
+    let relay = named::<RelayName>("events");
+    let schema = named::<SchemaName>("event");
+    let models = vec![
+        nervix_models::Model::Schema(CreateSchema {
+            name: schema.clone(),
+            fields: vec![SchemaField {
+                name: named("seq"),
+                ty: ParseAsType::I64,
+                optional: false,
+                sensitive: false,
+            }],
+        }),
+        nervix_models::Model::Relay(CreateRelay {
+            name: relay.clone(),
+            schema,
+            buffer: nonzero!(4usize),
+            branching: RelayBranching::unbranched(),
+            materialized_state: Some(MaterializedRelayState::LastByTimestamp),
+        }),
+    ];
+    let unscheduled = models
+        .into_iter()
+        .map(|model| ScheduledNode::new(model, SchemaFingerprint::from_digest([1; 32])));
+    let graph = ActiveGraph::from_scheduled_models(&DomainSchedule::new(
+        domain.clone(),
+        unscheduled,
+        Vec::new(),
+    ))
+    .expect("a schema and the relay it lays out form a valid graph");
+    let nodes = graph.unplaced_schedule_nodes();
+    let schedule = DomainSchedule::new(domain.clone(), nodes.clone(), Vec::new());
+    let placement = || {
+        runtime
+            .state_placement(
+                &domain,
+                RuntimeStateKind::MaterializedRelay,
+                ModelKind::Relay,
+                &relay,
+                None,
+            )
+            .expect("both installs publish the relay's schema fingerprint")
+    };
+
+    runtime.install_state_identities_from_graph(&domain, &nodes);
+    let from_graph = placement();
+    runtime.install_state_identities(&schedule);
+    let from_schedule = placement();
+
+    assert_eq!(from_graph, from_schedule);
+}
+
+/// Branch-aggregated metrics and Kafka offsets depend on no schema, so they are placed without any
+/// published identity. Every other kind of state is placed only under the schema fingerprint the
+/// committed schedule publishes for its node, and WASM guest state also in the generation it names,
+/// so a node without them reports which one is missing instead of addressing some other state.
+#[test]
+fn schema_bound_state_is_placed_only_under_a_published_identity() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let identifier = named::<ModelName>("counting_guest");
+    let place = |state| {
+        runtime.state_placement(&domain, state, ModelKind::WasmProcessor, &identifier, None)
+    };
+    for (state, placed) in [
+        (
+            RuntimeStateKind::BranchAggregated,
+            RuntimeState::BranchAggregated,
+        ),
+        (RuntimeStateKind::KafkaOffset, RuntimeState::KafkaOffset),
+    ] {
+        let placement = place(state).expect("state that depends on no schema needs no identity");
+        assert_eq!(placement.state, placed);
+    }
+    for state in [
+        RuntimeStateKind::Correlator,
+        RuntimeStateKind::Deduplicator,
+        RuntimeStateKind::MaterializedRelay,
+        RuntimeStateKind::WasmProcessor,
+        RuntimeStateKind::WindowProcessor,
+        RuntimeStateKind::BranchLru,
+    ] {
+        let unpublished = place(state).expect_err("schema-bound state needs a published identity");
+        assert!(matches!(
+            unpublished.current_context(),
+            StateIdentityError::SchemaFingerprintUnpublished { .. }
+        ));
+    }
+
+    let node = wasm_processor_node();
+    runtime.install_state_identities_from_graph(&domain, std::slice::from_ref(&node));
+    let lifecycle = place(RuntimeStateKind::BranchLru).expect("a graph publishes the fingerprint");
+    assert_eq!(
+        lifecycle.state,
+        RuntimeState::BranchLru {
+            schema: node.schema_fingerprint
+        }
+    );
+    let ungenerated = place(RuntimeStateKind::WasmProcessor)
+        .expect_err("a graph publishes no guest-state generation");
+    assert!(matches!(
+        ungenerated.current_context(),
+        StateIdentityError::GenerationUnpublished { .. }
+    ));
+
+    runtime.install_state_identities(&DomainSchedule::new(
+        domain.clone(),
+        vec![node.clone()],
+        Vec::new(),
+    ));
+    let guest = place(RuntimeStateKind::WasmProcessor)
+        .expect("a committed schedule publishes the guest-state generation");
+    assert_eq!(
+        guest.state,
+        RuntimeState::WasmProcessor {
+            schema: node.schema_fingerprint,
+            generation: nervix_models::WasmStateGeneration::FIRST,
+        }
+    );
+}
+
+/// A schema change publishes a new fingerprint for the node, so a checkpoint written under the
+/// replaced one no longer names current state: no replica installs or serves it and no ownership
+/// handoff carries it. State that depends on no schema keeps its placement and stays current.
+#[test]
+fn a_schema_change_leaves_only_schema_bound_checkpoints_stale() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let identifier = named::<ModelName>("dedup_orders");
+    let schedule = |fingerprint| {
+        DomainSchedule::new(
+            domain.clone(),
+            vec![deduplicator_node(&identifier, fingerprint)],
+            Vec::new(),
+        )
+    };
+    let place = |state, branch_key| {
+        runtime
+            .state_placement(
+                &domain,
+                state,
+                ModelKind::Deduplicator,
+                &identifier,
+                branch_key,
+            )
+            .expect("the installed schedule publishes the deduplicator's identity")
+    };
+    let acme = string_branch_key("tenant", "acme");
+
+    runtime.install_state_identities(&schedule(SchemaFingerprint::from_digest([1; 32])));
+    let replaced = place(RuntimeStateKind::Deduplicator, acme.clone());
+    let metrics = place(RuntimeStateKind::BranchAggregated, None);
+    assert!(runtime.runtime_state_placement_is_current(&replaced));
+
+    runtime.install_state_identities(&schedule(SchemaFingerprint::from_digest([2; 32])));
+    let current = place(RuntimeStateKind::Deduplicator, acme);
+
+    assert_ne!(current, replaced);
+    assert!(!runtime.runtime_state_placement_is_current(&replaced));
+    assert!(runtime.runtime_state_placement_is_current(&current));
+    assert_eq!(place(RuntimeStateKind::BranchAggregated, None), metrics);
+    assert!(runtime.runtime_state_placement_is_current(&metrics));
+}
+
+fn deduplicator_node(identifier: &ModelName, fingerprint: SchemaFingerprint) -> ScheduledNode {
+    ScheduledNode::new(
+        nervix_models::Model::Deduplicator(nervix_models::CreateDeduplicator {
+            name: nervix_models::DeduplicatorName::from(identifier),
+            from: nervix_models::ProcessorInputs::new(Vec::new(), Vec::new()),
+            output_routes: nervix_models::ProcessorOutputs::new(Vec::new()),
+            branched_by: nervix_models::BranchSelection::unbranched(),
+            deduplicate_on: Vec::new(),
+            max_time: "1m".to_string(),
+            mode: nervix_models::AckMode::Attached,
+            filter_where: None,
+            materialized_state: Vec::new(),
+        }),
+        fingerprint,
+    )
+    .placed_on(
+        Some(ClusterNodeName::parse("node-1").expect("valid name")),
+        vec![ClusterNodeName::parse("node-1").expect("valid name")],
+    )
+}
+
+/// The fingerprint of a schema a test never changes.
+fn unchanged_schema_fingerprint() -> SchemaFingerprint {
+    SchemaFingerprint::from_digest([7; 32])
+}
+
 fn wasm_processor_node() -> ScheduledNode {
-    ScheduledNode::new(nervix_models::Model::WasmProcessor(
-        nervix_models::CreateWasmProcessor {
+    ScheduledNode::new(
+        nervix_models::Model::WasmProcessor(nervix_models::CreateWasmProcessor {
             name: named("counting_guest"),
             from: nervix_models::ProcessorInputs::single(named("counted_input")),
             output_routes: nervix_models::ProcessorOutputs::single(named("counted_output")),
@@ -2074,9 +2295,9 @@ fn wasm_processor_node() -> ScheduledNode {
             mode: nervix_models::AckMode::Attached,
             filter_where: None,
             materialized_state: Vec::new(),
-        },
-    ))
-    .with_schema_fingerprint([5; 32])
+        }),
+        SchemaFingerprint::from_digest([5; 32]),
+    )
 }
 
 fn guest_state_placement(
@@ -2085,7 +2306,7 @@ fn guest_state_placement(
     branch: Option<BranchKey>,
 ) -> RuntimeStatePlacement {
     runtime
-        .branch_state_placement(
+        .state_placement(
             domain,
             RuntimeStateKind::WasmProcessor,
             ModelKind::WasmProcessor,
@@ -2148,10 +2369,10 @@ fn only_the_committed_generation_of_each_branch_is_current() {
     assert!(runtime.runtime_state_placement_is_current(&third_beta));
 }
 
-/// A branch task that outlives a generation transition must not publish or persist its next save:
-/// nothing restores the lifetime that save describes.
+/// A branch task that outlives a generation transition must not publish or persist its next
+/// checkpoint: nothing restores the lifetime that checkpoint describes.
 #[test]
-fn a_save_of_a_replaced_generation_is_refused_before_it_is_published() {
+fn a_checkpoint_of_a_replaced_generation_is_refused_before_it_is_published() {
     let runtime = Runtime::default();
     let domain = domain("default");
     let mut node = wasm_processor_node();
@@ -2162,24 +2383,27 @@ fn a_save_of_a_replaced_generation_is_refused_before_it_is_published() {
     ));
     let placement = guest_state_placement(&runtime, &domain, string_branch_key("tenant", "acme"));
     let state = runtime
-        .replicated_wasm_processor_state(placement, Vec::new(), 0)
+        .replicated_wasm_processor_state(placement)
         .expect("guest state should initialize");
-    runtime
-        .authorize_wasm_guest_state_save(&state)
-        .expect("a save in the current generation is authorized");
+    assert_eq!(
+        runtime
+            .wasm_checkpoint_boundary(&state)
+            .expect("a checkpoint in the current generation is authorized"),
+        WasmCheckpointBoundary::LocalStorage
+    );
 
     node.begin_wasm_state_generation();
     runtime.install_state_identities(&DomainSchedule::new(domain, vec![node], Vec::new()));
 
     let refused = runtime
-        .authorize_wasm_guest_state_save(&state)
-        .expect_err("a save of a replaced generation must be refused");
+        .wasm_checkpoint_boundary(&state)
+        .expect_err("a checkpoint of a replaced generation must be refused");
     assert!(matches!(
         refused.current_context(),
         StateReplicationError::Superseded { .. }
     ));
     assert!(refused.current_context().is_authority_rejection());
-    assert_eq!(state.saved_revision(), 0);
+    assert_eq!(state.committed_revision(), 0);
 }
 
 /// Forced recovery selects checkpoints only from the generation it recovers. A snapshot of a replaced

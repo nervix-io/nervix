@@ -55,6 +55,40 @@ pub(crate) enum StateReplicationError {
     ReplaceKafkaOffsets { placement: RuntimeStatePlacement },
     #[error("this node no longer holds the lifetime or ownership of {placement}")]
     Superseded { placement: RuntimeStatePlacement },
+    #[error(
+        "timed out waiting for replicas {awaiting} to hold {placement} at lsm {lsm} on their \
+         stable storage"
+    )]
+    ReplicaConfirmation {
+        placement: RuntimeStatePlacement,
+        lsm: u64,
+        awaiting: AwaitedReplicas,
+    },
+    #[error(
+        "the schedule assigns {assigned} replicas to {placement}, but lsm {lsm} was captured for \
+         {required}"
+    )]
+    ReplicaPlanShrunk {
+        placement: RuntimeStatePlacement,
+        lsm: u64,
+        required: usize,
+        assigned: usize,
+    },
+}
+
+/// The replicas a checkpoint was still waiting for, as a diagnostic names them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AwaitedReplicas(pub(crate) BTreeSet<ClusterNodeName>);
+
+impl std::fmt::Display for AwaitedReplicas {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut separator = "";
+        for replica in &self.0 {
+            write!(formatter, "{separator}'{replica}'")?;
+            separator = ", ";
+        }
+        Ok(())
+    }
 }
 
 impl StateReplicationError {

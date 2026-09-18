@@ -57,12 +57,6 @@ pub(in crate::runtime) enum MaterializedSnapshotExchangeError {
         placement: RuntimeStatePlacement,
         failure: RemoteOperationFailure,
     },
-    #[error("node '{target}' offered {placement} with another schema fingerprint")]
-    SchemaMismatch {
-        target: ClusterNodeName,
-        placement: RuntimeStatePlacement,
-        offered: [u8; 32],
-    },
     #[error("failed to open the transfer for {placement} on node '{target}'")]
     OpenTransfer {
         target: ClusterNodeName,
@@ -152,7 +146,6 @@ impl Runtime {
             Ok(Some(sealed)) => Ok(DescribedStateSnapshot::Sealed(SealedSnapshotEnvelope {
                 length: sealed.descriptor.length,
                 digest: sealed.descriptor.digest,
-                schema_fingerprint: sealed.descriptor.schema_fingerprint,
                 revision: sealed.descriptor.revision,
                 fence: sealed.descriptor.fence,
                 branch_generation: sealed.descriptor.branch_generation,
@@ -253,15 +246,6 @@ impl Runtime {
             DescribedStateSnapshot::Current => return Ok(None),
             DescribedStateSnapshot::Sealed(envelope) => envelope,
         };
-        if envelope.schema_fingerprint != placement.schema_fingerprint {
-            return Err(Report::new(
-                MaterializedSnapshotExchangeError::SchemaMismatch {
-                    target: target_node_id.clone(),
-                    placement: placement.clone(),
-                    offered: envelope.schema_fingerprint,
-                },
-            ));
-        }
         let mut body = dispatcher
             .request_stream(
                 target_node_id,
@@ -322,7 +306,6 @@ impl Runtime {
         RestoredMaterializedSnapshot::open(
             &self.inner.executor,
             schema,
-            placement.schema_fingerprint,
             SealedSource::staged(staged),
         )
         .await

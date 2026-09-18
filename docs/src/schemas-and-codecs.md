@@ -173,9 +173,11 @@ A drain timeout rejects the batch and resumes the old graph. On a stopped domain
 and persists the change without a quiesce cycle.
 
 Runtime state whose record layout derives from an altered schema is recreated. Independent
-stateful nodes retain their state. Persisted state carries a schema fingerprint so a stale layout
-is never restored as the new type. Relay subscriptions closed by the rebuild report that they must
-be recreated against the current schema.
+stateful nodes retain their state, and so does state that depends on no schema at all: domain-owned
+Kafka offsets and the counters behind a node's metrics survive a schema change of their own node.
+Persisted schema-bound state is keyed by the fingerprint of the schemas it was written under, so a
+stale layout is never restored as the new type. Relay subscriptions closed by the rebuild report
+that they must be recreated against the current schema.
 
 ## Codecs
 

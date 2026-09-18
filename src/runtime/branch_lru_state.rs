@@ -24,6 +24,8 @@ pub(super) enum BranchLruSnapshotError {
     Decode,
     #[error("branch-LRU entry {entry} carries an invalid branch key")]
     BranchKey { entry: usize },
+    #[error("the branch lifecycle has no placement under the committed schedule")]
+    Unplaced,
 }
 
 pub(super) fn encode_branch_lru_snapshot(

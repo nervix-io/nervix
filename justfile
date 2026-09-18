@@ -26,6 +26,7 @@ test: tests-deps
     # their modeled features separately.
     shuttle_packages=(
         nervix-client-core
+        nervix-connector
         nervix-consensus
         nervix-execution
         nervix-interconnect
@@ -40,6 +41,7 @@ test: tests-deps
     cargo test --all-targets --features testing --package nervix-server
     cargo test --all-targets \
         --package nervix-client-core \
+        --package nervix-connector \
         --package nervix-consensus \
         --package nervix-execution \
         --package nervix-interconnect \
@@ -50,6 +52,9 @@ test-scenarios *args: tests-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --test scenarios -- {{ args }}
+
+test-harness-liveness: tests-deps
+    cargo test --features testing --test harness_liveness
 
 test-scenarios-reuse *args: tests-deps
     #!/usr/bin/env bash
@@ -110,6 +115,11 @@ check-package package *args:
 # Run the unit tests of one workspace package whose tests need no server test dependencies.
 test-package-lib package *args:
     cargo test --package {{ package }} --lib -- {{ args }}
+
+# Run the unit tests in the binary targets of one workspace package, such as the web console's
+# view logic in its `main.rs`.
+test-package-bins package *args:
+    cargo test --package {{ package }} --bins -- {{ args }}
 
 # Run the bounded-execution unit tests, which live in the nervix-execution crate rather than the
 # server lib.
@@ -240,6 +250,7 @@ test-coverage: tests-deps
     # without running modeled synchronization outside a Shuttle runner.
     shuttle_packages=(
         nervix-client-core
+        nervix-connector
         nervix-consensus
         nervix-execution
         nervix-interconnect
@@ -256,6 +267,7 @@ test-coverage: tests-deps
     cargo llvm-cov --no-report --all-targets --features testing --package nervix-server
     cargo llvm-cov --no-report --all-targets \
         --package nervix-client-core \
+        --package nervix-connector \
         --package nervix-consensus \
         --package nervix-execution \
         --package nervix-interconnect \
@@ -268,12 +280,18 @@ test-coverage: tests-deps
 bench *args:
     cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
     cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
+    cargo bench --package nervix-server --bench wasm_checkpoint --features benchmarks -- {{ args }}
     cargo bench --package nervix-vm --bench vm -- {{ args }}
 
 # Compare direct Arrow-to-Row encoding with the protobuf/keyed-JSON wire construction it replaces.
 # The suite reports encoded bytes before Criterion measures CPU; its unit probe measures allocations.
 bench-subscription-rows *args:
     cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
+
+# Measure durable WASM guest-state checkpoints against unsynchronized writes of the same states. The
+# store lives under the crate target directory, so the synchronization cost is that of its storage.
+bench-wasm-checkpoint *args:
+    cargo bench --package nervix-server --bench wasm_checkpoint --features benchmarks -- {{ args }}
 
 # Run only the expression VM Criterion suite. Extra arguments are forwarded to Criterion, so a
 # group filter and `--save-baseline` or `--baseline` compare VM kernels without the relay suite.
@@ -421,6 +439,7 @@ cargo-clippy-all:
     # boundary separately. `test-shuttle` compiles and runs the modeled test targets.
     shuttle_packages=(
         nervix-client-core
+        nervix-connector
         nervix-consensus
         nervix-execution
         nervix-interconnect
@@ -434,6 +453,7 @@ cargo-clippy-all:
     cargo clippy --all-features --all-targets --workspace "${workspace_exclusions[@]}"
     cargo clippy --all-targets --features 'benchmarks testing' --package nervix-server
     cargo clippy --all-targets --features autocomplete --package nervix-client-core
+    cargo clippy --all-targets --package nervix-connector
     cargo clippy --all-targets --features testing --package nervix-consensus
     cargo clippy --all-targets \
         --package nervix-execution \
@@ -441,6 +461,7 @@ cargo-clippy-all:
         --package nervix-wasm
     cargo clippy --lib --features 'shuttle testing' \
         --package nervix-client-core \
+        --package nervix-connector \
         --package nervix-consensus \
         --package nervix-execution \
         --package nervix-interconnect \
@@ -487,31 +508,19 @@ validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries v
 
 validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-shuttle-dependencies
 
-# Production package manifests name only the pass-through synchronization wrappers. The real
-# primitive crates may appear transitively below those wrappers, but never as direct dependencies.
+# Shuttle's runner and synchronization wrappers belong only to modeled builds. Production package
+# graphs use the real synchronization crates directly and contain no Shuttle package.
 validate-shuttle-dependencies:
     #!/usr/bin/env bash
     set -euo pipefail
-    packages=(
-        nervix-client-core
-        nervix-connector
-        nervix-consensus
-        nervix-execution
-        nervix-interconnect
-        nervix-server
-        nervix-wasm
-    )
-    for package in "${packages[@]}"; do
-        direct_dependencies="$(
-            cargo tree --package "${package}" --edges normal --depth 1 \
-                --no-default-features --prefix none
-        )"
-        if printf '%s\n' "${direct_dependencies}" \
-            | grep -E '^(dashmap|parking_lot|tokio|tokio-stream|tokio-util) v'; then
-            echo "${package} names a real synchronization primitive directly" >&2
-            exit 1
-        fi
-    done
+    production_dependencies="$(
+        cargo tree --workspace --edges normal --no-default-features --prefix none
+    )"
+    if printf '%s\n' "${production_dependencies}" \
+        | grep -E '^shuttle([[:space:]-]|$)'; then
+        echo "the production workspace includes a Shuttle package" >&2
+        exit 1
+    fi
 
 validate-clock-boundaries:
     python3 scripts/check_clock_boundaries.py

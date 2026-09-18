@@ -251,6 +251,12 @@ Each domain therefore advances independently through three states:
     Abandoned  ->  remaining work is negatively acknowledged
 ```
 
+A WASM processor branch keeps the acknowledgements of its latest guest callback open until that
+callback's checkpoint reaches stable storage and every assigned replica, so a drain waits for the
+checkpoint as it waits for any other outstanding acknowledgement. The checkpoint's ten-second
+deadline bounds that wait: a checkpoint that cannot complete fails and negatively acknowledges what
+it held.
+
 Two kinds of work deliberately do not hold the drain open:
 
 - **Pending `REQUIRED WAIT` records.** A message suspended on absent materialized state cannot
@@ -352,7 +358,12 @@ same schedule publication, and activation publishes the staged checkpoints in th
 former owner's saves, and those of any replica that missed the recovery, belong to the generation it
 replaced, so a node that restarts or rejoins with them never restores, serves, or supplies them to a
 later recovery. A later owner loss therefore resets a branch whose only surviving checkpoints are of
-an earlier generation instead of reviving them.
+an earlier generation instead of reviving them. When the processor has replicas, a replica holds
+every checkpoint whose acknowledgements the lost owner released, because the owner released them
+only after its replicas had synchronized the checkpoint, so forced recovery continues each branch
+from at least the state its acknowledged inputs produced. The promoted replica restores every
+staged checkpoint into a guest before the schedule is published, from the module it compiled while
+it was a replica, so the recovery does not wait for the module to compile.
 
 ## Topology Cases
 
@@ -481,7 +492,8 @@ strongly consistent, selected runtime state is checkpointed, and the hot path is
 | Committed control-plane state: models, schedules, domain lifecycle, cordons, users, resources | Reopens from the committed generation | Reopens from the last committed generation; nothing acknowledged is lost |
 | Published consensus snapshots | Reopen from the current manifest; a marked installation is finished before state is exposed | Reopen from the current manifest; a marked installation is redone before state is exposed |
 | Durable handoff and forced-recovery preparations | Preserved, then reconciled or activated | Preserved, then reconciled or activated |
-| Runtime-state checkpoints: Kafka domain offsets, deduplicator and window state, materialized relay records, WASM guest state | Flushed again as runtime tasks stop | Reopen at the last completed periodic checkpoint |
+| Runtime-state checkpoints: Kafka domain offsets, deduplicator and window state, materialized relay records | Flushed again as runtime tasks stop | Reopen at the last completed periodic checkpoint |
+| WASM guest-state checkpoints | Every checkpoint that released an acknowledgement is already synchronized | Reopen at the newest checkpoint on the node's storage, which covers every acknowledged input |
 | External source offsets and sink commits | Complete when the drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
 | Relay batches, queued payload attempts, suspended work, ACK guards, ACK tokens, ACK maps, handoff payloads, gate leases, clock progress | The drain tries to resolve them before its deadline | Volatile; lost |
 
@@ -497,6 +509,12 @@ Durability is not uniform across those rows, and the difference is operationally
   on every update. They therefore survive the death of the process, including `SIGKILL`, but a host
   power loss can lose the most recent ones. This is the boundary the crash qualification asserts:
   exact counts are guaranteed only for checkpoints known durable before the kill.
+- A WASM guest-state checkpoint is synchronized, on the branch's owner and on every replica the
+  schedule assigns, before the source acknowledgements it covers are released, so every checkpoint
+  that released an acknowledgement survives a host power loss. Checkpoints that branches take at the
+  same time share one synchronization. See
+  [WASM Processor Guests](wasm-processor-guests.md#recovery-replay-and-duplicates) for what a
+  recovered branch continues from and which inputs its source redelivers.
 
 Branch-local processor state survives only to its latest publication. A branch task aborted after
 exceeding its grace period keeps what it had published and loses the changes it made afterwards.
@@ -521,6 +539,19 @@ owns the work.
 
 This is the fence that prevents crash recovery from reviving an obsolete owner. It is a
 process-start admission proof only: connectivity lost after admission does not revoke execution.
+
+### Checkpoint Identity
+
+A restart reopens a runtime-state checkpoint only under the identity the committed schedule
+publishes for its entity. Kafka domain offsets and the metric summaries behind `DESCRIBE` output
+depend on no schema: they are keyed by their entity alone and survive a restart whatever schemas
+changed while the node was down. Every other checkpoint, including deduplicator, window, and
+materialized relay state, branch lifecycle records, and WASM guest state, is keyed by the
+fingerprint of the schemas its entity lays records out by, and WASM guest state also by its
+generation. A checkpoint written under a replaced fingerprint is never restored as the new layout,
+served, replicated, handed over, or selected by a forced recovery, and applying the committed
+schedule of a running domain removes it. Until the node has applied a schedule that names an entity,
+it has no fingerprint for that entity's schema-bound state and does not place that state at all.
 
 ### Interrupted Snapshot Installation
 

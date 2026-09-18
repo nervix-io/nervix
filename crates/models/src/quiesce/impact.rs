@@ -23,12 +23,12 @@ use strum::AsRefStr;
 use thiserror::Error;
 
 use super::{ModelChangeAspect, QuiesceLevel, StatePurge};
-use crate::{
-    BranchName, ClusterNodeName, DomainName, NodeRef, RelayName, RequestedResourceVersion,
-    ResourceName,
-};
 #[cfg(test)]
-use crate::{ModelKind, ModelName};
+use crate::ModelName;
+use crate::{
+    BranchName, ClusterNodeName, DomainName, ModelKind, NodeRef, RelayName,
+    RequestedResourceVersion, ResourceName,
+};
 
 /// The one-based public identity of an accepted operation in a transaction.
 ///
@@ -1072,6 +1072,15 @@ pub enum ConfigurationTransition {
     Dropped { node: NodeRef },
 }
 
+impl ConfigurationTransition {
+    /// The configuration node the transition creates, changes, or drops.
+    pub const fn node(&self) -> &NodeRef {
+        match self {
+            Self::Created { node } | Self::Changed { node } | Self::Dropped { node } => node,
+        }
+    }
+}
+
 #[derive(
     Debug,
     Clone,
@@ -1237,6 +1246,9 @@ pub struct OwnershipMoveImpact {
 pub enum ActivationAction {
     Activate,
     Deactivate,
+    /// Every live node's HTTPS listener installs the VHOST's new certificate. Established
+    /// connections keep their negotiated session, and no execution node pauses or restarts.
+    RefreshHttpsListener,
 }
 
 #[derive(
@@ -1364,6 +1376,17 @@ pub struct ImpactEffects {
     pub force_flushes: CanonicalImpactSet<ForceFlushImpact>,
     pub resource_catalog: CanonicalImpactSet<ResourceCatalogImpact>,
     pub resource_bindings: CanonicalImpactSet<ResourceBindingImpact>,
+}
+
+impl ImpactEffects {
+    /// Whether these effects create, change, or drop a configuration node of `kind`. The changed
+    /// configuration is one step's own diff, so this walks it once rather than looking a key up.
+    pub fn changes_configuration_of(&self, kind: ModelKind) -> bool {
+        self.changed_configuration
+            .as_slice()
+            .iter()
+            .any(|change| change.transition.node().kind == kind)
+    }
 }
 
 #[derive(

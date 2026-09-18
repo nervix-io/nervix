@@ -314,6 +314,16 @@ impl PlannedMutations {
         self.models_to_persist.is_empty() && self.drops_in_batch.is_empty()
     }
 
+    /// Whether the batch creates, changes, or drops a VHOST, whose hostnames and TLS binding every
+    /// node's HTTPS listener presents. The changed set is the batch's own diff, so this walks it
+    /// once rather than looking a key up.
+    pub(crate) fn changes_vhosts(&self) -> bool {
+        self.quiesce
+            .changed()
+            .iter()
+            .any(|change| change.node.kind == ModelKind::Vhost)
+    }
+
     pub(crate) fn candidate_graph(&self) -> Option<ActiveGraph> {
         self.runtime_changes.graph.clone()
     }

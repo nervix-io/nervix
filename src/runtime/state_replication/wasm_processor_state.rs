@@ -1,10 +1,15 @@
 //! Layer: data plane.
-//! Owns: WASM processor guest state construction, persistence, replica quorum and handoff restore
+//! Owns: WASM processor guest state construction, the boundary a guest-state checkpoint has to
+//! reach, writing a checkpoint to stable storage, waiting for its replicas, and handoff restore
 //! validation.
 //! May depend on: replicated WASM guest state, the state store, compiled WASM modules and schedules.
 //! Must not know: control-plane transactions, NSPL parsing, or edge protocols.
 
 use super::*;
+
+/// How often a checkpoint waiting for its replicas reads the schedule again, so a changed
+/// assignment or owner re-plans or fails the checkpoint without waiting for its deadline.
+const WASM_CHECKPOINT_REPLAN_INTERVAL: Duration = Duration::from_millis(100);
 
 impl Runtime {
     pub(super) async fn prepare_ownership_handoff_wasm_guests(
@@ -112,45 +117,17 @@ impl Runtime {
         Ok(())
     }
 
-    pub(in crate::runtime) async fn wait_for_wasm_processor_replica_quorum(
-        &self,
-        state: &ReplicatedWasmProcessorState,
-        lsm: u64,
-    ) -> error_stack::Result<(), StateReplicationError> {
-        if state.required_replica_acks == 0 {
-            return Ok(());
-        }
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            tokio::task::consume_budget().await;
-            if state.replica_quorum_satisfied(lsm) {
-                return Ok(());
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return Err(Report::new(StateReplicationError::ReplicaQuorum {
-                    placement: state.placement.clone(),
-                    lsm,
-                    required_acks: state.required_replica_acks,
-                }));
-            }
-            tokio::select! {
-                _ = state.replication_notify.notified() => {}
-                _ = sleep_until(deadline) => {}
-            }
-        }
-    }
-
-    /// Refuse a save of guest state whose lifetime or ownership this node no longer holds.
+    /// The boundary a checkpoint of `state` captured now has to reach: this node's stable storage,
+    /// and the stable storage of every replica the committed schedule assigns to the processor.
     ///
     /// A branch task can outlive the schedule it was built from: an owner replacement or a state
-    /// transition publishes a new generation, or another owner, while its last batch is still
-    /// running. Nothing restores the lifetime such a save describes, so it is neither published nor
-    /// persisted.
-    pub(in crate::runtime) fn authorize_wasm_guest_state_save(
+    /// transition publishes a new generation, or another owner, while its last callback is still
+    /// running. Nothing restores the lifetime a checkpoint of such a branch describes, so it is
+    /// refused before anything is persisted or replicated.
+    pub(in crate::runtime) fn wasm_checkpoint_boundary(
         &self,
         state: &ReplicatedWasmProcessorState,
-    ) -> error_stack::Result<(), StateReplicationError> {
+    ) -> error_stack::Result<WasmCheckpointBoundary, StateReplicationError> {
         let placement = &state.placement;
         let superseded = || {
             Report::new(StateReplicationError::Superseded {
@@ -161,9 +138,9 @@ impl Runtime {
             return Err(superseded());
         }
         let dispatcher = self.inner.remote_dispatcher.load();
-        // A runtime that has not joined a cluster executes every node it runs.
+        // A runtime that has not joined a cluster executes every node it runs, with no replicas.
         let Some(dispatcher) = dispatcher.as_deref() else {
-            return Ok(());
+            return Ok(WasmCheckpointBoundary::LocalStorage);
         };
         let Some(execution) = self.inner.executions.get(&placement.domain) else {
             return Err(superseded());
@@ -175,35 +152,112 @@ impl Runtime {
         if !scheduled.executes_on(dispatcher.local_node_id()) {
             return Err(superseded());
         }
-        Ok(())
+        let replicas = scheduled
+            .replica_nodes()
+            .into_iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        Ok(WasmCheckpointBoundary::assigned(replicas))
     }
 
-    /// Persist the guest state a WASM processor branch saved and wait until its replicas hold it.
-    pub(in crate::runtime) async fn persist_wasm_processor_snapshot(
+    /// Write a captured checkpoint to this node's stable storage, and offer it to the replicas its
+    /// boundary names once it is there.
+    pub(in crate::runtime) async fn persist_wasm_checkpoint(
         &self,
         state: &ReplicatedWasmProcessorState,
-        saved: &StdArc<WasmGuestState>,
-    ) -> error_stack::Result<(), StateReplicationError> {
-        if let Some(store) = &self.inner.state_store {
-            store
-                .persist_wasm_guest_state(&state.placement, saved.clone())
-                .await
-                .change_context(StateReplicationError::Persist {
-                    placement: state.placement.clone(),
-                    lsm: saved.revision(),
-                })?;
-            state.record_persisted(saved.revision());
-            self.notify_runtime_state_replicas(&state.placement, saved.revision());
+        captured: CapturedWasmCheckpoint,
+        deadline: Instant,
+    ) -> error_stack::Result<LocallyDurableWasmCheckpoint, StateReplicationError> {
+        let placement = &state.placement;
+        let revision = captured.revision();
+        let failed = || StateReplicationError::Persist {
+            placement: placement.clone(),
+            lsm: revision,
+        };
+        if self.inner.fault_injection.wasm_checkpoint_storage_fails() {
+            return Err(Report::new(failed()));
         }
-        self.wait_for_wasm_processor_replica_quorum(state, saved.revision())
-            .await
+        // A runtime without a state store, which only unit tests construct, has no stable storage
+        // for a checkpoint to reach.
+        if let Some(store) = self.inner.state_store.as_ref() {
+            let written = tokio::time::timeout_at(
+                deadline,
+                store.persist_wasm_checkpoint(placement, captured.saved()),
+            )
+            .await;
+            match written {
+                Ok(written) => written.change_context_lazy(failed)?,
+                Err(_elapsed) => {
+                    return Err(Report::new(failed()).attach_printable(
+                        "the checkpoint deadline passed before its write reached stable storage",
+                    ));
+                }
+            }
+        }
+        let durable = state.record_locally_durable(captured);
+        if let WasmCheckpointBoundary::Replicas(_) = durable.boundary() {
+            self.notify_runtime_state_replicas(placement, revision);
+        }
+        Ok(durable)
+    }
+
+    /// Wait until every replica the checkpoint's boundary names holds it on its stable storage.
+    ///
+    /// The replicas follow the committed schedule while the checkpoint waits, so a replaced replica
+    /// is replaced in the wait, but a checkpoint never completes with fewer replicas than it was
+    /// captured for, and never after this node stopped executing the processor.
+    pub(in crate::runtime) async fn confirm_wasm_checkpoint(
+        &self,
+        state: &ReplicatedWasmProcessorState,
+        durable: LocallyDurableWasmCheckpoint,
+        deadline: Instant,
+    ) -> error_stack::Result<CompletedWasmCheckpoint, StateReplicationError> {
+        let placement = &state.placement;
+        let revision = durable.revision();
+        let WasmCheckpointBoundary::Replicas(captured_replicas) = durable.boundary().clone() else {
+            return Ok(durable.completed());
+        };
+        let mut replicas = captured_replicas;
+        loop {
+            tokio::task::consume_budget().await;
+            let progressed = state.replica_progress_signal().notified();
+            tokio::pin!(progressed);
+            progressed.as_mut().enable();
+            let assigned = self.wasm_checkpoint_boundary(state)?;
+            replicas = replicas.followed(assigned).map_err(|shrunk| {
+                Report::new(StateReplicationError::ReplicaPlanShrunk {
+                    placement: placement.clone(),
+                    lsm: revision,
+                    required: shrunk.required,
+                    assigned: shrunk.assigned,
+                })
+            })?;
+            let awaiting = state.replicas_awaiting(&replicas, revision);
+            if awaiting.is_empty() {
+                return Ok(durable.completed());
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(Report::new(StateReplicationError::ReplicaConfirmation {
+                    placement: placement.clone(),
+                    lsm: revision,
+                    awaiting: AwaitedReplicas(awaiting),
+                }));
+            }
+            let recheck = now
+                .checked_add(WASM_CHECKPOINT_REPLAN_INTERVAL)
+                .assured("a recheck interval of a fraction of a second stays within Instant")
+                .min(deadline);
+            tokio::select! {
+                _ = &mut progressed => {}
+                _ = sleep_until(recheck) => {}
+            }
+        }
     }
 
     pub(in crate::runtime) fn replicated_wasm_processor_state(
         &self,
         placement: RuntimeStatePlacement,
-        replica_nodes: Vec<ClusterNodeName>,
-        required_replica_acks: usize,
     ) -> Result<Arc<ReplicatedWasmProcessorState>, RuntimePersistenceError> {
         let transferred = self.take_transferred_runtime_state_snapshot(&placement);
         if transferred.is_none()
@@ -219,10 +273,8 @@ impl Runtime {
         };
         let state = Arc::new(ReplicatedWasmProcessorState::new(
             placement.clone(),
-            replica_nodes,
-            required_replica_acks,
             initial,
-        )?);
+        ));
         self.inner
             .replicated_wasm_processor_states
             .insert(placement, state.clone());

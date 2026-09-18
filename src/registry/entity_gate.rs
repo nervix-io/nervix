@@ -243,7 +243,9 @@ fn entity_input_relays(model: &Model) -> Vec<RelayName> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{DomainName, ModelName, PlacementGroupSchedule, ScheduledNode};
+    use nervix_models::{
+        DomainName, ModelName, PlacementGroupSchedule, ScheduledNode, SchemaFingerprint,
+    };
 
     use super::*;
     use crate::registry::test_fixtures::{ingestor, junction, named, relay};
@@ -262,18 +264,34 @@ mod tests {
         let schedule = DomainSchedule::new(
             named::<DomainName>("default"),
             [
-                ScheduledNode::new(relay("input", "event_schema")),
-                ScheduledNode::new(relay("middle", "event_schema")),
-                ScheduledNode::new(relay("output", "event_schema")),
-                ScheduledNode::new(ingestor("source", "input", "codec", "client")),
-                ScheduledNode::new(ingestor(
-                    "shared_output_source",
-                    "output",
-                    "codec",
-                    "client",
-                )),
-                ScheduledNode::new(junction("changed", &["input"], "middle")),
-                ScheduledNode::new(junction("downstream", &["middle"], "output")),
+                ScheduledNode::new(
+                    relay("input", "event_schema"),
+                    SchemaFingerprint::from_digest([1; 32]),
+                ),
+                ScheduledNode::new(
+                    relay("middle", "event_schema"),
+                    SchemaFingerprint::from_digest([1; 32]),
+                ),
+                ScheduledNode::new(
+                    relay("output", "event_schema"),
+                    SchemaFingerprint::from_digest([1; 32]),
+                ),
+                ScheduledNode::new(
+                    ingestor("source", "input", "codec", "client"),
+                    SchemaFingerprint::from_digest([1; 32]),
+                ),
+                ScheduledNode::new(
+                    ingestor("shared_output_source", "output", "codec", "client"),
+                    SchemaFingerprint::from_digest([1; 32]),
+                ),
+                ScheduledNode::new(
+                    junction("changed", &["input"], "middle"),
+                    SchemaFingerprint::from_digest([1; 32]),
+                ),
+                ScheduledNode::new(
+                    junction("downstream", &["middle"], "output"),
+                    SchemaFingerprint::from_digest([1; 32]),
+                ),
             ],
             Vec::new(),
         );
@@ -309,13 +327,34 @@ mod tests {
         let schedule = DomainSchedule::new(
             named::<DomainName>("default"),
             [
-                ScheduledNode::new(relay("input", "event_schema")),
-                ScheduledNode::new(relay("middle", "event_schema")),
-                ScheduledNode::new(relay("output", "event_schema")),
-                ScheduledNode::new(relay("terminal", "event_schema")),
-                ScheduledNode::new(junction("first", &["input"], "middle")),
-                ScheduledNode::new(junction("second", &["middle"], "output")),
-                ScheduledNode::new(junction("third", &["output"], "terminal")),
+                ScheduledNode::new(
+                    relay("input", "event_schema"),
+                    SchemaFingerprint::from_digest([1; 32]),
+                ),
+                ScheduledNode::new(
+                    relay("middle", "event_schema"),
+                    SchemaFingerprint::from_digest([1; 32]),
+                ),
+                ScheduledNode::new(
+                    relay("output", "event_schema"),
+                    SchemaFingerprint::from_digest([1; 32]),
+                ),
+                ScheduledNode::new(
+                    relay("terminal", "event_schema"),
+                    SchemaFingerprint::from_digest([1; 32]),
+                ),
+                ScheduledNode::new(
+                    junction("first", &["input"], "middle"),
+                    SchemaFingerprint::from_digest([1; 32]),
+                ),
+                ScheduledNode::new(
+                    junction("second", &["middle"], "output"),
+                    SchemaFingerprint::from_digest([1; 32]),
+                ),
+                ScheduledNode::new(
+                    junction("third", &["output"], "terminal"),
+                    SchemaFingerprint::from_digest([1; 32]),
+                ),
             ],
             vec![
                 PlacementGroupSchedule {

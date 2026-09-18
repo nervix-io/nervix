@@ -232,7 +232,6 @@ impl ReplicatedDeduplicatorState {
     ) -> Result<PersistedRuntimeStateEntry, Report<RuntimePersistenceError>> {
         Ok(PersistedRuntimeStateEntry {
             lsm: published.revision,
-            schema_fingerprint: self.placement.schema_fingerprint,
             payload: encode_deduplicator_snapshot(&published.value)?,
         })
     }
@@ -326,7 +325,7 @@ mod tests {
 
     use meticulous::ResultExt as _;
     use nervix_expiry_map::ExpiryMap;
-    use nervix_models::{DomainName, ModelKind, ModelName, Timestamp};
+    use nervix_models::{DomainName, ModelKind, ModelName, SchemaFingerprint, Timestamp};
     use ordered_float::OrderedFloat;
     use triomphe::Arc;
 
@@ -341,10 +340,11 @@ mod tests {
     fn empty_state() -> Arc<ReplicatedDeduplicatorState> {
         let placement = RuntimeStatePlacement {
             domain: DomainName::parse("test").assured("the domain name is well formed"),
-            state: RuntimeState::Deduplicator,
+            state: RuntimeState::Deduplicator {
+                schema: SchemaFingerprint::from_digest([7; 32]),
+            },
             kind: ModelKind::Deduplicator,
             identifier: ModelName::parse("dedup_orders").assured("the identifier is well formed"),
-            schema_fingerprint: [0; 32],
             branch_key: None,
         };
         Arc::new(

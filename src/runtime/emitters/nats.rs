@@ -11,10 +11,7 @@ use async_nats::{
     message::OutboundMessage,
 };
 use futures_util::{FutureExt, SinkExt};
-use nervix_connector::{
-    ParsedRetryPolicy, ResolvedClientConfig, client_config_entries, client_tls_paths,
-};
-use nervix_models::SubjectName;
+use nervix_connector::{ParsedRetryPolicy, client_tls_paths};
 
 use super::*;
 
@@ -48,18 +45,11 @@ struct PendingNatsConfirmation {
 
 impl NatsEmitter {
     pub(in crate::runtime) async fn new(
-        client: &CreateClientNats,
-        resolved: Option<&ResolvedClientConfig>,
-        subject: &SubjectName,
-        mode: NatsPublishingMode,
+        plan: &NatsSinkPlan,
         retry_policy: ParsedRetryPolicy,
     ) -> EmitterRuntimeResult<Self> {
-        let client = Self::client_from_config(
-            client_config_entries(resolved, client.config.as_slice()),
-            retry_policy,
-        )
-        .await?;
-        let delivery = match mode {
+        let client = Self::client_from_config(&plan.client.config.entries, retry_policy).await?;
+        let delivery = match plan.mode {
             NatsPublishingMode::Core => NatsDelivery::Core,
             NatsPublishingMode::JetStream(confirmation) => NatsDelivery::JetStream {
                 context: Box::new(
@@ -76,7 +66,7 @@ impl NatsEmitter {
         Ok(Self {
             client: Some(client),
             delivery,
-            subject: Subject::from(subject.as_str().to_string()),
+            subject: Subject::from(plan.subject.as_str().to_string()),
         })
     }
 

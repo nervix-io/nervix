@@ -251,11 +251,7 @@ impl KafkaOffsetStateRead {
         self.state.assignment.serialize(|| {
             let lsm = self.state.current_lsm.current();
             let payload = self.state.offsets.load().encode()?;
-            Ok(PersistedRuntimeStateEntry {
-                lsm,
-                schema_fingerprint: self.state.placement.schema_fingerprint,
-                payload,
-            })
+            Ok(PersistedRuntimeStateEntry { lsm, payload })
         })
     }
 
@@ -694,7 +690,6 @@ mod tests {
             kind: ModelKind::Ingestor,
             identifier: ModelName::parse("source")
                 .assured("the test model name satisfies the model-name grammar"),
-            schema_fingerprint: [0; 32],
             branch_key: None,
         }
     }

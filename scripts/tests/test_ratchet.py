@@ -393,6 +393,7 @@ impl Runtime {
                     "src/runtime/emitters.rs": "fn sink(m: Model) { matches!(m, Model::ClientKafka(_)); }\n",
                     "src/runtime/planning.rs": "fn plan(m: Model) { matches!(m, Model::SourceKafka(_)); }\n",
                     "src/runtime/ingestor_start_plan.rs": "fn plan(m: Model) { matches!(m, Model::Ingestor(_)); }\n",
+                    "src/runtime/emitter_start_plan.rs": "fn plan(m: Model) { matches!(m, Model::ClientKafka(_)); }\n",
                     "src/registry/mod.rs": "fn check(m: Model) { matches!(m, Model::Relay(_)); }\n",
                 },
             )

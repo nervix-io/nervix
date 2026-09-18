@@ -7,6 +7,15 @@
 //! - **Depends on.** Execution admission and the vocabulary carried by internal operations.
 //! - **Must not know.** Runtime graphs, schedules, or the semantic outcome of an operation.
 
+#[cfg(feature = "shuttle")]
+extern crate shuttle_dashmap as dashmap;
+#[cfg(feature = "shuttle")]
+extern crate shuttle_parking_lot as parking_lot;
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio_util as tokio_util;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
@@ -56,15 +65,16 @@ pub use peer_target::PeerTarget;
 pub use pool::PoolClass;
 pub use request::{
     ApplicationHealthProbe, ApplicationRevisionRequest, ApplicationRevisionResponse,
-    HandlerRegistrationError, InterconnectDuplexRequest, InterconnectRequest,
+    HandlerRegistrationError, HttpsListenerInstallation, HttpsListenerInstallationRequest,
+    HttpsListenerInstallationResponse, InterconnectDuplexRequest, InterconnectRequest,
     InterconnectStreamRequest, RemoteRequestFailure, RequestContext, RequestError, RequestSubquota,
     StreamHandlerError, StreamingResponse,
 };
 use request::{RequestEnvelope, RequestState, ResponseEnvelope};
 pub use runtime_state::{
     OwnershipHandoffCheckpoint, RuntimeState, RuntimeStateKind, StateCheckpointAvailable,
-    StatePlacementEnvelope, StateReplicationAck, StateSnapshotEnvelope, StateSyncRequest,
-    StateSyncResponse,
+    StatePlacementEnvelope, StateReplicationAck, StateSchema, StateSnapshotEnvelope,
+    StateSyncRequest, StateSyncResponse,
 };
 
 const DEFAULT_MAX_PEERS: usize = 64;

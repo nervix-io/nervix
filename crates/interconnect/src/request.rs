@@ -276,6 +276,52 @@ impl InterconnectRequest for ApplicationRevisionRequest {
     const TIMEOUT: Duration = Duration::from_secs(2);
 }
 
+/// Where one process incarnation's HTTPS listener stands against a requested runtime revision.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub enum HttpsListenerInstallation {
+    /// The listener has not yet installed the TLS VHOSTs of the requested revision or a later one.
+    Pending,
+    /// The listener serves the TLS VHOSTs of `revision`, which is at or after the requested one.
+    Installed { revision: u64 },
+    /// The TLS VHOSTs of `revision`, at or after the requested one, could not be installed, so the
+    /// listener still presents the certificates it presented before. The reason names the VHOST
+    /// and the resource version, never the contents of their files.
+    Failed { revision: u64, reason: String },
+}
+
+impl HttpsListenerInstallation {
+    /// The runtime revision an installation attempt was made for, absent while one is pending.
+    pub const fn revision(&self) -> Option<u64> {
+        match self {
+            Self::Pending => None,
+            Self::Installed { revision } | Self::Failed { revision, .. } => Some(*revision),
+        }
+    }
+}
+
+/// The HTTPS listener installation one process incarnation reports.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HttpsListenerInstallationResponse {
+    pub identity: ClusterNodeIdentity,
+    pub installation: HttpsListenerInstallation,
+}
+
+/// Asks one authenticated node whether its HTTPS listener installed the TLS VHOSTs of a runtime
+/// revision.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HttpsListenerInstallationRequest {
+    pub revision: u64,
+}
+
+impl InterconnectRequest for HttpsListenerInstallationRequest {
+    type Response = HttpsListenerInstallationResponse;
+
+    const NAME: &'static str = "https_listener_installation";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
+    const TIMEOUT: Duration = Duration::from_secs(2);
+}
+
 impl InterconnectRequest for DomainClockProgressRequest {
     type Response = ();
 
@@ -1710,6 +1756,33 @@ mod tests {
         assert_eq!(ApplicationHealthProbe::CLASS, PoolClass::Management);
         assert_eq!(ApplicationHealthProbe::SUBQUOTA, RequestSubquota::Liveness);
         assert_eq!(ApplicationHealthProbe::TIMEOUT, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn https_listener_installation_uses_reserved_management_progress_capacity() {
+        fn assert_installation_response<M>()
+        where
+            M: InterconnectRequest<Response = HttpsListenerInstallationResponse>,
+        {
+        }
+
+        assert_installation_response::<HttpsListenerInstallationRequest>();
+        assert_eq!(
+            HttpsListenerInstallationRequest::NAME,
+            "https_listener_installation"
+        );
+        assert_eq!(
+            HttpsListenerInstallationRequest::CLASS,
+            PoolClass::Management
+        );
+        assert_eq!(
+            HttpsListenerInstallationRequest::SUBQUOTA,
+            RequestSubquota::Progress
+        );
+        assert_eq!(
+            HttpsListenerInstallationRequest::TIMEOUT,
+            Duration::from_secs(2)
+        );
     }
 
     #[test]

@@ -73,10 +73,6 @@ pub(in crate::runtime) enum MaterializedSnapshotError {
     )]
     LengthMismatch { declared: usize, actual: usize },
     #[error(
-        "the sealed snapshot declares schema fingerprint {declared} where {expected} is installed"
-    )]
-    SchemaFingerprintMismatch { declared: String, expected: String },
-    #[error(
         "the ownership assignment changed from fence {captured} to {current} while the snapshot          was being sealed"
     )]
     OwnershipChanged { captured: u64, current: u64 },
@@ -138,8 +134,6 @@ struct SealedSnapshotHeader {
     /// The branch lifecycle generation the capture observed, so an evicted and reappearing branch
     /// cannot be restored from a snapshot taken before it left.
     branch_generation: u64,
-    /// The schema the Arrow sections declare.
-    schema_fingerprint: [u8; 32],
     /// How many records the sections together carry.
     records: u64,
     /// How many groups follow, each an identity record and the Arrow section it describes.
@@ -170,7 +164,6 @@ pub(in crate::runtime) struct MaterializedGeneration {
     revision: u64,
     fence: u64,
     branch_generation: u64,
-    schema_fingerprint: [u8; 32],
     schema: StdArc<ArrowSchema>,
     records: Arc<Vec<MaterializedGenerationRecord>>,
 }
@@ -194,7 +187,6 @@ pub(in crate::runtime) struct SealedMaterializedSnapshot {
 pub(in crate::runtime) struct SealedSnapshotDescriptor {
     pub(in crate::runtime) length: u64,
     pub(in crate::runtime) digest: [u8; 32],
-    pub(in crate::runtime) schema_fingerprint: [u8; 32],
     pub(in crate::runtime) revision: u64,
     pub(in crate::runtime) fence: u64,
     pub(in crate::runtime) branch_generation: u64,
@@ -210,7 +202,6 @@ pub(in crate::runtime) struct SealedSnapshotSummary {
     pub(in crate::runtime) revision: u64,
     pub(in crate::runtime) fence: u64,
     pub(in crate::runtime) branch_generation: u64,
-    pub(in crate::runtime) schema_fingerprint: [u8; 32],
     pub(in crate::runtime) records: u64,
 }
 
@@ -218,14 +209,12 @@ pub(in crate::runtime) struct SealedSnapshotSummary {
 ///
 /// It carries no columns, so it needs no schema. This is what a destination is handed when an
 /// entity moves with no materialized records behind it.
-pub(in crate::runtime) fn empty_sealed_container(
-    schema_fingerprint: [u8; 32],
-) -> Result<Vec<u8>, Report<MaterializedSnapshotError>> {
+pub(in crate::runtime) fn empty_sealed_container()
+-> Result<Vec<u8>, Report<MaterializedSnapshotError>> {
     let header = rkyv::to_bytes::<rkyv::rancor::Error>(&SealedSnapshotHeader {
         revision: 0,
         fence: 0,
         branch_generation: 0,
-        schema_fingerprint,
         records: 0,
         groups: 0,
     })
@@ -299,7 +288,6 @@ pub(in crate::runtime) fn inspect_sealed_container(
         revision: header.revision,
         fence: header.fence,
         branch_generation: header.branch_generation,
-        schema_fingerprint: header.schema_fingerprint,
         records: header.records,
     })
 }
@@ -342,7 +330,6 @@ impl SealedMaterializedSnapshot {
     pub(in crate::runtime) fn into_persisted_entry(self) -> super::PersistedRuntimeStateEntry {
         super::PersistedRuntimeStateEntry {
             lsm: self.descriptor.revision,
-            schema_fingerprint: self.descriptor.schema_fingerprint,
             payload: self.bytes.as_ref().to_vec(),
         }
     }
@@ -353,7 +340,6 @@ impl MaterializedGeneration {
         revision: u64,
         fence: u64,
         branch_generation: u64,
-        schema_fingerprint: [u8; 32],
         schema: StdArc<ArrowSchema>,
         records: Vec<MaterializedGenerationRecord>,
     ) -> Self {
@@ -361,7 +347,6 @@ impl MaterializedGeneration {
             revision,
             fence,
             branch_generation,
-            schema_fingerprint,
             schema,
             records: Arc::new(records),
         }
@@ -401,7 +386,6 @@ impl MaterializedGeneration {
             revision: self.revision,
             fence: self.fence,
             branch_generation: self.branch_generation,
-            schema_fingerprint: self.schema_fingerprint,
             records: self.records.len().arch_into(),
             groups,
         };
@@ -540,7 +524,6 @@ impl RestoredMaterializedSnapshot {
     pub(in crate::runtime) async fn open(
         executor: &Executor,
         schema: &StdArc<ArrowSchema>,
-        schema_fingerprint: [u8; 32],
         source: SealedSource,
     ) -> Result<Self, Report<MaterializedSnapshotError>> {
         let mut cursor = source;
@@ -560,14 +543,6 @@ impl RestoredMaterializedSnapshot {
         }
         let header = cursor.take(header_bytes, "header").await?;
         let header = decode_rkyv::<SealedSnapshotHeader>(executor, header, header_limit).await?;
-        if header.schema_fingerprint != schema_fingerprint {
-            return Err(Report::new(
-                MaterializedSnapshotError::SchemaFingerprintMismatch {
-                    declared: encode_hex(&header.schema_fingerprint),
-                    expected: encode_hex(&schema_fingerprint),
-                },
-            ));
-        }
         let identity_limit = executor.limits().snapshot_record_bytes.as_u64();
         let section_limit = executor.limits().snapshot_section_bytes.as_u64();
         let mut records = Vec::new();
@@ -719,7 +694,6 @@ async fn seal_container(
     sections: Vec<SealedSection>,
 ) -> Result<SealedMaterializedSnapshot, Report<MaterializedSnapshotError>> {
     let header_limit = executor.limits().snapshot_header_bytes.as_u64();
-    let schema_fingerprint = header.schema_fingerprint;
     let revision = header.revision;
     let fence = header.fence;
     let branch_generation = header.branch_generation;
@@ -786,7 +760,6 @@ async fn seal_container(
         descriptor: SealedSnapshotDescriptor {
             length: bytes.len().arch_into(),
             digest: *blake3::hash(bytes.as_ref()).as_bytes(),
-            schema_fingerprint,
             revision,
             fence,
             branch_generation,
@@ -898,10 +871,6 @@ fn estimated_identity_bytes(branch: Option<&BranchKey>) -> u64 {
         .assured("a branch key renders from a bounded batch, far below u64::MAX")
 }
 
-fn encode_hex(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
@@ -977,7 +946,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let schema = records[0].row.arrow_schema();
-        MaterializedGeneration::new(7, 3, 5, [9; 32], schema, records)
+        MaterializedGeneration::new(7, 3, 5, schema, records)
     }
 
     #[tokio::test]
@@ -1040,14 +1009,10 @@ mod tests {
             .await
             .assured("a complete transfer matches the length and digest it declared");
 
-        let restored = RestoredMaterializedSnapshot::open(
-            &executor,
-            &schema,
-            [9; 32],
-            SealedSource::staged(staged),
-        )
-        .await
-        .assured("a staged snapshot opens one bounded section at a time");
+        let restored =
+            RestoredMaterializedSnapshot::open(&executor, &schema, SealedSource::staged(staged))
+                .await
+                .assured("a staged snapshot opens one bounded section at a time");
 
         assert_eq!(restored.revision, 7);
         assert_eq!(restored.fence, 3);

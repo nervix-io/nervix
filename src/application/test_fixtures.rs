@@ -26,10 +26,9 @@ use nervix_models::{
     CreateJunction, CreateSchema, CreateWasmProcessor, DomainConfig, DomainName, DomainPace,
     DomainStartPoint, DomainState, DomainStatus, EmitSink, IngestSource, KafkaOffsetMode, Model,
     ModelKind, ModelName, NodeEndpoint, NodeRef, NodeServiceUrl, PlacementGroupSchedule,
-    ProcessorInputs, ProcessorOutputs, ScheduledNode, WasmProcessorLimits,
+    ProcessorInputs, ProcessorOutputs, ScheduledNode, SchemaFingerprint, WasmProcessorLimits,
 };
 use nonzero_ext::nonzero;
-use parking_lot::RwLock;
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
     SanType,
@@ -39,10 +38,13 @@ use tokio_util::sync::CancellationToken;
 use tonic::Status;
 use triomphe::Arc;
 
+#[cfg(feature = "shuttle")]
+use super::shutdown::{ShutdownCoordinator, ShutdownPhaseOutcome, ShutdownRequest};
 use super::{
     Args,
     session_service::{SessionEvents, SessionServiceImpl, SessionServiceInner},
     subscription::SessionSubscriptions,
+    tls::HttpsListenerCertificates,
     transaction::{
         DEFAULT_TRANSACTION_IDLE_TIMEOUT, DEFAULT_TRANSACTION_MAX_OPEN,
         DEFAULT_TRANSACTION_MAX_SOURCE_BYTES, DEFAULT_TRANSACTION_MAX_STATEMENTS,
@@ -50,7 +52,7 @@ use super::{
     },
 };
 use crate::{
-    cluster,
+    ConfiguredFaultInjection, cluster,
     proto::{
         CommandRequest, CommandResult, SessionResponse, SuggestRequest,
         TransactionState as ApiTransactionState,
@@ -214,6 +216,11 @@ fn test_session_service(
     resource_store: StdArc<ResourceStore>,
     interconnect: Transport,
 ) -> SessionServiceImpl {
+    let https_certificates = HttpsListenerCertificates::new(
+        &resource_store,
+        &ConfiguredFaultInjection::default(),
+        &cluster,
+    );
     SessionServiceImpl {
         inner: Arc::new(SessionServiceInner {
             cluster,
@@ -221,7 +228,7 @@ fn test_session_service(
             consensus_administrator: consensus.administrator(),
             registry,
             resource_store,
-            http_tls_server_config: Arc::new(RwLock::new(None)),
+            https_certificates,
             runtime: Runtime::new(),
             runtime_admission: Arc::new(super::runtime_admission::RuntimeAdmission::new()),
             replica_count: 0,
@@ -376,7 +383,11 @@ pub(in crate::application) fn scheduled_node(
     identifier_raw: &str,
     kind: ModelKind,
 ) -> ScheduledNode {
-    ScheduledNode::new(model_of_kind(identifier_raw, kind)).placed_on(
+    ScheduledNode::new(
+        model_of_kind(identifier_raw, kind),
+        SchemaFingerprint::from_digest([1; 32]),
+    )
+    .placed_on(
         Some(ClusterNodeName::parse("node-1").expect("valid name")),
         vec![ClusterNodeName::parse("node-1").expect("valid name")],
     )
@@ -388,8 +399,11 @@ pub(in crate::application) fn scheduled_node_on(
     node: &str,
 ) -> ScheduledNode {
     let node = ClusterNodeName::parse(node).expect("valid name");
-    ScheduledNode::new(model_of_kind(identifier_raw, kind))
-        .placed_on(Some(node.clone()), vec![node])
+    ScheduledNode::new(
+        model_of_kind(identifier_raw, kind),
+        SchemaFingerprint::from_digest([1; 32]),
+    )
+    .placed_on(Some(node.clone()), vec![node])
 }
 
 pub(in crate::application) fn placement_member(identifier_raw: &str, kind: ModelKind) -> NodeRef {
@@ -584,4 +598,27 @@ pub(in crate::application) async fn queue_in_transaction(
         result.success,
         "queueing {query:?} should succeed: {result:?}"
     );
+}
+
+/// A shutdown timeout no model execution outlives, so a deadline measured from a stop request never
+/// passes while a model runs.
+#[cfg(feature = "shuttle")]
+pub(in crate::application) const FAR_FUTURE_SHUTDOWN_TIMEOUT: Duration =
+    Duration::from_secs(24 * 60 * 60);
+
+/// Moves `shutdown` through its phases in the order the composition root does once a stop has been
+/// requested, and returns that request. Every phase finishes as soon as it begins, so a model
+/// interleaves the phase transitions alone.
+#[cfg(feature = "shuttle")]
+pub(in crate::application) async fn shut_down_in_phase_order(
+    shutdown: ShutdownCoordinator,
+) -> ShutdownRequest {
+    let request = shutdown.requested().await;
+    let deadline = request.deadline();
+    shutdown.stop_admission();
+    shutdown.begin_drain_support(ShutdownPhaseOutcome::Completed.unless_deadline_passed(deadline));
+    shutdown
+        .begin_terminal_teardown(ShutdownPhaseOutcome::Abandoned.unless_deadline_passed(deadline));
+    shutdown.finish(ShutdownPhaseOutcome::Completed.unless_deadline_passed(deadline));
+    request
 }
