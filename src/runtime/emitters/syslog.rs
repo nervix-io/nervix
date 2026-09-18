@@ -1,6 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use nervix_connector::{ResolvedClientConfig, client_config_entries};
 use rustls_pki_types::ServerName;
 use thiserror::Error;
 use tokio::{
@@ -36,15 +35,29 @@ enum SyslogPayloadError {
 }
 
 impl SyslogEmitter {
-    pub(in crate::runtime) async fn new(
-        client: &CreateClientSyslog,
-        resolved: Option<&ResolvedClientConfig>,
-    ) -> EmitterRuntimeResult<Self> {
-        let entries = client_config_entries(resolved, client.config.as_slice());
-        let config = SyslogClientConfig::parse(entries, SyslogDirection::Emit)
-            .map_err(emitter_config_error)?;
+    pub(in crate::runtime) async fn new(plan: &SyslogSinkPlan) -> EmitterRuntimeResult<Self> {
+        let config = Self::client_config(plan)?;
         let sender = Self::connect(&config).await?;
         Ok(Self { config, sender })
+    }
+
+    /// Checks that `plan`'s client configures a usable Syslog transport, loading its TLS material
+    /// when the transport is TLS, so an unusable configuration fails the emitter's start instead
+    /// of every connection attempt.
+    pub(in crate::runtime) fn check_client_config(
+        plan: &SyslogSinkPlan,
+    ) -> EmitterRuntimeResult<()> {
+        let config = Self::client_config(plan)?;
+        if config.protocol == SyslogProtocol::Tls {
+            config.tls_client_config().map_err(emitter_config_error)?;
+        }
+        Ok(())
+    }
+
+    /// The Syslog transport `plan`'s resolved client configuration declares.
+    fn client_config(plan: &SyslogSinkPlan) -> EmitterRuntimeResult<SyslogClientConfig> {
+        SyslogClientConfig::parse(&plan.client.config.entries, SyslogDirection::Emit)
+            .map_err(emitter_config_error)
     }
 
     async fn connect(config: &SyslogClientConfig) -> EmitterRuntimeResult<SyslogSender> {
