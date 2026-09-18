@@ -101,9 +101,15 @@ use triomphe::Arc;
 use uuid::Uuid;
 use zeromq::{PullSocket, PushSocket, Socket, SocketRecv, SocketSend};
 
-use super::dependencies::{
-    DependencyEndpoints, KAFKA_ADDR, MQTT_ADDR, NATS_ADDR, NATS_TLS_ADDR, PULSAR_ADDR,
-    PULSAR_TLS_ADDR, RABBITMQ_ADDR, REDIS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
+use super::{
+    dependencies::{
+        DependencyEndpoints, KAFKA_ADDR, MQTT_ADDR, NATS_ADDR, NATS_TLS_ADDR, PULSAR_ADDR,
+        PULSAR_TLS_ADDR, RABBITMQ_ADDR, REDIS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
+    },
+    node_liveness::{
+        NodeTaskTerminalOutcome, NodeTaskWaitOutcome, OwnedNodeTask, ReadinessConnectionFailure,
+        ReadinessProbeOutcome,
+    },
 };
 
 const HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -888,7 +894,7 @@ impl Cluster {
             .get_mut(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
         handle.start()?;
-        handle.wait_until_ready().await
+        handle.wait_until_ready(1).await
     }
 
     pub(crate) async fn start_node(&mut self, node_id: &str) -> io::Result<()> {
@@ -939,7 +945,7 @@ impl Cluster {
         let mut last_error = None;
         for attempt in 1..=NODE_START_ATTEMPTS {
             handle.start()?;
-            match handle.wait_until_ready().await {
+            match handle.wait_until_ready(attempt).await {
                 Ok(()) => {
                     last_error = None;
                     break;
@@ -975,7 +981,7 @@ impl Cluster {
         let bootstrap_host = self
             .nodes
             .values()
-            .find(|node| node.task.is_some())
+            .find(|node| node.task.is_running())
             .map(|node| node.spec.interconnect_addr())
             .ok_or_else(|| io::Error::other("a running bootstrap node is required"))?;
         let config = self
@@ -1029,7 +1035,10 @@ impl Cluster {
             .nodes
             .get(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
-        handle.failure.lock().clone()
+        handle
+            .task
+            .application_error()
+            .map(|error| format!("{error:?}"))
     }
 
     pub(crate) async fn stop_node(&mut self, node_id: &str) -> io::Result<()> {
@@ -1049,7 +1058,7 @@ impl Cluster {
             .nodes
             .iter()
             .find(|(candidate_id, candidate)| {
-                candidate_id.as_str() != node_id && candidate.task.is_some()
+                candidate_id.as_str() != node_id && candidate.task.is_running()
             })
             .map(|(_, candidate)| candidate.spec.interconnect_addr());
         let handle = self.nodes.get_mut(node_id).ok_or_else(|| {
@@ -2527,14 +2536,6 @@ impl Cluster {
     }
 }
 
-impl Drop for Cluster {
-    fn drop(&mut self) {
-        for handle in self.nodes.values_mut() {
-            handle.abort();
-        }
-    }
-}
-
 /// One node in a test cluster. Every fault is reached through the shared injection handle, so
 /// arming a fault and the node that observes it can never drift apart.
 #[derive(Debug)]
@@ -2542,8 +2543,7 @@ struct NodeHandle {
     spec: NodeSpec,
     fault_injection: FaultInjection,
     config: TestClusterConfig,
-    failure: Arc<Mutex<Option<String>>>,
-    task: Option<JoinHandle<()>>,
+    task: OwnedNodeTask,
     shutdown: Option<ShutdownCoordinator>,
 }
 
@@ -2553,21 +2553,19 @@ impl NodeHandle {
             spec,
             fault_injection,
             config,
-            failure: Arc::new(Mutex::new(None)),
-            task: None,
+            task: OwnedNodeTask::not_started(),
             shutdown: None,
         }
     }
 
     fn start(&mut self) -> io::Result<()> {
-        if self.task.is_some() {
+        if self.task.is_running() {
             return Ok(());
         }
         if self.config.grpc_mode == InternalTransportMode::Https {
             ensure_dev_tls_assets()?;
         }
 
-        *self.failure.lock() = None;
         let shutdown = ShutdownCoordinator::new(self.config.shutdown_timeout);
         let db_path = self.spec.db_path()?;
         let application_builder = Application::builder()
@@ -2618,13 +2616,8 @@ impl NodeHandle {
             .graceful_shutdown_drain(self.config.graceful_shutdown_drain)
             .drain_timeout(self.config.drain_timeout)
             .build();
-        let failure = self.failure.clone();
         self.shutdown = Some(shutdown);
-        self.task = Some(tokio::spawn(async move {
-            if let Err(err) = application.run().await {
-                *failure.lock() = Some(format!("{err:?}"));
-            }
-        }));
+        self.task = OwnedNodeTask::spawn(application.run());
         Ok(())
     }
 
@@ -2664,21 +2657,25 @@ impl NodeHandle {
 
     async fn wait_stopped(&mut self) -> io::Result<()> {
         let shutdown_timeout = self.shutdown_watchdog_timeout()?;
-        let Some(mut task) = self.task.take() else {
-            return Ok(());
-        };
-        let task_result = match timeout(shutdown_timeout, &mut task).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(err)) if err.is_cancelled() => Ok(()),
-            Ok(Err(err)) => Err(io::Error::other(err)),
-            Err(_) => {
-                task.abort();
-                let _ = task.await;
-                Err(io::Error::other(format!(
-                    "timed out after {} waiting for node '{}' shutdown",
-                    humantime::format_duration(shutdown_timeout),
-                    self.spec.node_id
-                )))
+        let task_result = match self.task.wait(shutdown_timeout).await {
+            NodeTaskWaitOutcome::NotStarted => return Ok(()),
+            NodeTaskWaitOutcome::AlreadyObserved(outcome)
+            | NodeTaskWaitOutcome::Joined(outcome) => {
+                if let NodeTaskTerminalOutcome::Panic(_) = outcome.as_ref() {
+                    Err(io::Error::other(NodeShutdownError::Task {
+                        node: node_name(&self.spec.node_id),
+                        outcome,
+                    }))
+                } else {
+                    Ok(())
+                }
+            }
+            NodeTaskWaitOutcome::AbortedAtDeadline(outcome) => {
+                Err(io::Error::other(NodeShutdownError::Deadline {
+                    node: node_name(&self.spec.node_id),
+                    timeout: shutdown_timeout,
+                    outcome,
+                }))
             }
         };
         self.shutdown = None;
@@ -2708,34 +2705,15 @@ impl NodeHandle {
             })
     }
 
-    async fn wait_until_ready(&mut self) -> io::Result<()> {
+    async fn wait_until_ready(&mut self, attempt: usize) -> io::Result<()> {
         let grpc_uri = self.spec.grpc_uri(self.config.grpc_mode);
-        timeout(STARTUP_TIMEOUT, async {
-            loop {
-                tokio::task::consume_budget().await;
-                if self.exited() {
-                    return Err(io::Error::other(format!(
-                        "node '{}' exited during startup\nfailure:\n{}",
-                        self.spec.node_id,
-                        self.failure_message()
-                    )));
-                }
-
-                if server_accepts_commands(&grpc_uri).await? {
-                    return Ok(());
-                }
-
-                sleep(POLL_INTERVAL).await;
-            }
-        })
-        .await
-        .map_err(|_| {
-            io::Error::other(format!(
-                "node '{}' did not become ready in time\nfailure:\n{}",
-                self.spec.node_id,
-                self.failure_message()
-            ))
-        })?
+        let node = node_name(&self.spec.node_id);
+        self.task
+            .wait_until_ready(&node, attempt, STARTUP_TIMEOUT, POLL_INTERVAL, || {
+                probe_server_readiness(&grpc_uri)
+            })
+            .await
+            .map_err(io::Error::other)
     }
 
     async fn show_cluster_status(&self) -> io::Result<ClusterStatus> {
@@ -2747,23 +2725,34 @@ impl NodeHandle {
         Ok(ClusterStatus::parse(output))
     }
 
-    fn exited(&self) -> bool {
-        self.task.as_ref().is_some_and(JoinHandle::is_finished)
-    }
-
-    fn failure_message(&self) -> String {
-        self.failure
-            .lock()
-            .clone()
-            .unwrap_or_else(|| "node task stopped without error details".to_string())
-    }
-
     fn abort(&mut self) {
         self.shutdown = None;
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
+        self.task.abort();
     }
+}
+
+impl Drop for NodeHandle {
+    fn drop(&mut self) {
+        self.abort();
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum NodeShutdownError {
+    #[error("node '{node}' task terminated with {outcome}")]
+    Task {
+        node: ClusterNodeName,
+        outcome: Arc<NodeTaskTerminalOutcome>,
+    },
+    #[error(
+        "timed out after {timeout:?} waiting for node '{node}' shutdown; terminal task outcome: \
+         {outcome}"
+    )]
+    Deadline {
+        node: ClusterNodeName,
+        timeout: Duration,
+        outcome: Arc<NodeTaskTerminalOutcome>,
+    },
 }
 
 #[derive(Debug)]
@@ -3925,22 +3914,38 @@ pub(crate) async fn run_command_via_client(
     }
 }
 
-pub(crate) async fn server_accepts_commands(server: &str) -> io::Result<bool> {
-    let client = match Client::connect_with_options(
-        server,
-        "default".to_string(),
-        client_connect_options(server)?,
-    )
-    .await
-    {
+pub(crate) async fn probe_server_readiness(server: &str) -> ReadinessProbeOutcome {
+    let options = match client_connect_options(server) {
+        Ok(options) => options,
+        Err(error) => {
+            return ReadinessProbeOutcome::ConnectionFailed(ReadinessConnectionFailure::Options(
+                error,
+            ));
+        }
+    };
+    let client = match Client::connect_with_options(server, "default".to_string(), options).await {
         Ok(client) => client,
-        Err(_) => return Ok(false),
+        Err(error) => {
+            return ReadinessProbeOutcome::ConnectionFailed(ReadinessConnectionFailure::Session(
+                error,
+            ));
+        }
     };
     let outcome = match client.execute("SHOW CLUSTER STATUS;".to_string()).await {
         Ok(outcome) => outcome,
-        Err(_) => return Ok(false),
+        Err(error) => return ReadinessProbeOutcome::CommandFailed(error),
     };
-    Ok(outcome.success || outcome.kind == CommandOutcomeKind::NotLeader)
+    if outcome.success || outcome.kind == CommandOutcomeKind::NotLeader {
+        ReadinessProbeOutcome::Ready {
+            response_kind: outcome.kind,
+        }
+    } else {
+        ReadinessProbeOutcome::UnsuccessfulResponse {
+            response_kind: outcome.kind,
+            message: outcome.message,
+            diagnostics: outcome.diagnostics,
+        }
+    }
 }
 
 pub(crate) async fn open_raw_session(server: &str, domain: &str) -> io::Result<TestSession> {
