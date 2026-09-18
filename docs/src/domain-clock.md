@@ -309,8 +309,10 @@ The architecture keeps four time classes distinct:
 
 Logical deadlines and physical deadlines are different types and cannot be interchanged. Actual
 UTC enters the data plane through a dedicated boundary, and expression engines cannot read it
-directly. Repository validation checks these ownership boundaries so a new runtime path must choose
-its time class explicitly.
+directly. That boundary and the capability that arms physical deadlines belong to the connector
+contract, which the runtime and every connector crate share, so a connector stamps arrival time
+through the same owner the runtime uses. Repository validation checks these ownership boundaries
+across the workspace, so a new runtime or connector path must choose its time class explicitly.
 
 ## Recovery And Distributed Guarantees
 

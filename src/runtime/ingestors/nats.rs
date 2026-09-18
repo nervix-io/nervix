@@ -7,9 +7,12 @@
 
 use async_nats::Client as NatsClient;
 use error_stack::ResultExt as _;
+use nervix_connector::{
+    IngestMessageHeaders, RetainedIngestHeaders, ServiceUrl, client_config_value, client_tls_paths,
+    physical_time::actual_utc_now,
+};
 
 use super::super::*;
-use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct NatsIngestor;
 

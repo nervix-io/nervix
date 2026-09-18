@@ -1,15 +1,26 @@
+//! The rustls client configuration a connector's TLS transport is built from.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Building a rustls client configuration from a client's TLS entries: the trust
+//!   anchors, the optional CA file and the optional client identity.
+//! - **Depends on.** The client configuration's TLS paths and PEM files, rustls with its AWS-LC
+//!   provider, and the bundled and host trust stores.
+//! - **Must not know.** Which connector or driver the configuration is built for.
+
 use std::sync::Arc;
 
 use error_stack::{Report, ResultExt as _};
+use nervix_recovery::Discarded as _;
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use thiserror::Error;
 use tracing::warn;
 
-use super::client_config::{client_identity_pem, client_tls_paths, read_tls_file};
+use crate::client_config::{ClientTlsPaths, client_identity_pem, client_tls_paths, read_tls_file};
 
 #[derive(Debug, Error)]
-pub(in crate::runtime) enum TlsClientConfigError {
+pub enum TlsClientConfigError {
     #[error("failed to read TLS CA certificate '{path}'")]
     ReadCaCertificate { path: std::path::PathBuf },
     #[error("failed to read TLS client identity")]
@@ -26,18 +37,16 @@ pub(in crate::runtime) enum TlsClientConfigError {
     ConfigureClientCertificate,
 }
 
-pub(in crate::runtime) struct RustlsClientConfigSource<'a> {
+pub struct RustlsClientConfigSource<'a> {
     entries: &'a [nervix_models::ClientConfigEntry],
 }
 
 impl<'a> RustlsClientConfigSource<'a> {
-    pub(in crate::runtime) fn new(entries: &'a [nervix_models::ClientConfigEntry]) -> Self {
+    pub fn new(entries: &'a [nervix_models::ClientConfigEntry]) -> Self {
         Self { entries }
     }
 
-    pub(in crate::runtime) fn build(
-        &self,
-    ) -> Result<Option<Arc<RustlsClientConfig>>, Report<TlsClientConfigError>> {
+    pub fn build(&self) -> Result<Option<Arc<RustlsClientConfig>>, Report<TlsClientConfigError>> {
         let tls = client_tls_paths(self.entries);
         if tls.is_empty() {
             return Ok(None);
@@ -46,7 +55,7 @@ impl<'a> RustlsClientConfigSource<'a> {
         self.build_config(tls).map(Some)
     }
 
-    pub(in crate::runtime) fn build_with_default_roots(
+    pub fn build_with_default_roots(
         &self,
     ) -> Result<Arc<RustlsClientConfig>, Report<TlsClientConfigError>> {
         self.build_config(client_tls_paths(self.entries))
@@ -54,9 +63,14 @@ impl<'a> RustlsClientConfigSource<'a> {
 
     fn build_config(
         &self,
-        tls: super::client_config::ClientTlsPaths,
+        tls: ClientTlsPaths,
     ) -> Result<Arc<RustlsClientConfig>, Report<TlsClientConfigError>> {
-        nervix_interconnect::install_rustls_crypto_provider();
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .discarded(
+                "a provider the host installed first is the one this connector would have \
+                 installed",
+            );
 
         let mut roots = Self::root_store_with_default_roots();
         if let Some(ca_file) = tls.ca_file.as_ref() {

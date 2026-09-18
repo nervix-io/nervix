@@ -2,6 +2,7 @@ use ::redis::{
     AsyncCommands, Client as RedisClient, ClientTlsConfig, ErrorKind as RedisErrorKind,
     ServerErrorKind, TlsCertificates as RedisTlsCertificates,
 };
+use nervix_connector::{ResolvedClientConfig, client_tls_paths, optional_client_config_value};
 use nervix_models::ChannelName;
 
 use super::*;

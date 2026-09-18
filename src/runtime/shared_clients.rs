@@ -14,6 +14,7 @@
 //! a property of the transport rather than of whoever happened to open a connection first.
 
 use error_stack::Report;
+use nervix_connector::{ClientResourceMounts, ResolvedClientConfig, client_config_entries};
 use url::Url;
 
 use super::*;

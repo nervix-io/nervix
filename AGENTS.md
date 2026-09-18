@@ -101,6 +101,12 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   discovery and topology, wire contracts and exchange forms, pool and quota isolation, limits and
   deadlines, relay delivery and acknowledgements, application health, consensus and bulk traffic,
   connection lifecycle, failure semantics, and observability.
+- [Consensus Storage And Replication](docs/src/consensus-storage-and-replication.md) is the
+  authoritative architecture reference for Raft persistence and catch-up. Any change to consensus
+  durability, replication pacing, log reading or retention, snapshot storage or transfer, or the
+  dedicated consensus database must keep that chapter current in the same change. Its scope
+  includes durable append and apply boundaries, client acknowledgement, stream and memory bounds,
+  learner promotion, recovery, operator tuning, and observability.
 - [Domain Clock](docs/src/domain-clock.md) is the authoritative architecture reference for domain
   time. Any change to the domain-clock architecture, or to domain architecture that changes how
   time is established, propagated, or consumed, must keep that chapter current in the same change.
