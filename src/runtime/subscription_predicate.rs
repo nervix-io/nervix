@@ -58,7 +58,11 @@ pub(crate) fn compile_subscription_predicate(
     expression: &nervix_models::Expression,
     context: SubscriptionPredicateCompileContext<'_>,
 ) -> Result<CompiledSubscriptionPredicate, Report<RuntimeError>> {
-    let expression = nervix_vm::lower_expression(expression, "input").map_err(|reason| {
+    let expression = nervix_vm::lower_expression(
+        expression,
+        nervix_vm::SemanticScopePolicy::read_only("input"),
+    )
+    .map_err(|reason| {
         Report::new(RuntimeError::BuildDomainExecution {
             domain: domain.as_str().to_string(),
             reason: format!(

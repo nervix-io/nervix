@@ -325,14 +325,6 @@ pub(super) fn planned_structured_message_error(
     }
 }
 
-pub(super) fn operation_for_filter_label(label: &str) -> MessageErrorOperation {
-    match label {
-        "FROM WHERE" => MessageErrorOperation::SourceWhere,
-        "FILTER WHERE" => MessageErrorOperation::FilterWhere,
-        _ => MessageErrorOperation::Set,
-    }
-}
-
 pub(super) fn preserved_message_error_branch(
     target_branching: &ResolvedBranching,
     incoming: &Option<BranchKey>,

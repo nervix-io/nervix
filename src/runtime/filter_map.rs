@@ -298,13 +298,20 @@ pub(super) fn expression_reads_sensitive_source(
 pub(super) async fn plan_filter_map_messages(
     processor_kind: &str,
     processor: impl Into<ModelName>,
-    program_label: &str,
+    operation: MessageErrorOperation,
     program: &CompiledProgramWithMaterializedInterest,
     mut batch: RelayRecordBatch,
     execution_now: Timestamp,
     side_inputs: &HashMap<String, RuntimeValue>,
 ) -> Result<FilterMapPlan, PlannedGeneralError> {
     let processor = processor.into();
+    let program_label = match operation {
+        MessageErrorOperation::SourceWhere => "FROM WHERE",
+        MessageErrorOperation::FilterWhere => "FILTER WHERE",
+        MessageErrorOperation::RouteWhere => "ROUTE WHERE",
+        MessageErrorOperation::Set => "FILTER-MAP",
+        _ => operation.as_ref(),
+    };
     let lookup_columns = match compute_lookup_hash_map_columns(
         program,
         &FilterMapBatchInputs {
@@ -460,12 +467,7 @@ pub(super) async fn plan_filter_map_messages(
                     record,
                     acks: std::mem::take(&mut acks[input_row]),
                 },
-                program.structured_side_error(
-                    execution_now,
-                    reason,
-                    side_error.span,
-                    operation_for_filter_label(program_label),
-                ),
+                program.structured_side_error(execution_now, reason, side_error.span, operation),
                 partial_output.and_then(Result::ok),
                 state_snapshot.clone(),
                 execution_now,
@@ -503,7 +505,7 @@ pub(super) async fn plan_filter_map_messages(
                         program_label,
                         "required output fields are uninitialized or null"
                     ),
-                    operation_for_filter_label(program_label),
+                    operation,
                     None,
                     invalid_fields,
                 ),
@@ -1958,7 +1960,7 @@ mod tests {
         let plan = plan_filter_map_messages(
             "deduplicator",
             &named::<ModelName>("project_notifications"),
-            "FILTER-MAP",
+            MessageErrorOperation::Set,
             &program,
             batch,
             Timestamp::now(),
@@ -2055,7 +2057,7 @@ mod tests {
         let plan = plan_filter_map_messages(
             "processor",
             &named::<ModelName>("project_notifications"),
-            "FILTER-MAP",
+            MessageErrorOperation::Set,
             &program,
             batch,
             Timestamp::now(),
@@ -2144,7 +2146,7 @@ mod tests {
         let plan = plan_filter_map_messages(
             "junction",
             &named::<ModelName>("copy_vectors"),
-            "FILTER-MAP",
+            MessageErrorOperation::Set,
             &program,
             batch,
             Timestamp::now(),
@@ -2218,7 +2220,7 @@ mod tests {
         let plan = plan_filter_map_messages(
             "junction",
             &named::<ModelName>("calculate_amount"),
-            "FILTER-MAP",
+            MessageErrorOperation::Set,
             &program,
             batch,
             Timestamp::now(),
@@ -2264,6 +2266,8 @@ mod tests {
             error.error.message
         );
     }
+
+    mod typed_operation_tests;
 
     #[test]
     fn filter_map_rejects_missing_branch_key() {

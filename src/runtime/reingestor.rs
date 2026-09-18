@@ -1070,7 +1070,7 @@ impl Runtime {
         let plan = match plan_filter_map_messages(
             "reingestor",
             reingestor,
-            "FROM WHERE",
+            MessageErrorOperation::SourceWhere,
             &program,
             batch,
             execution_now,
