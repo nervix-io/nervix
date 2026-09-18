@@ -7,8 +7,11 @@
 
 use std::borrow::Cow;
 
+use nervix_connector::{
+    IngestMessageHeaders, RetainedIngestHeaders, physical_time::actual_utc_now,
+};
+
 use super::*;
-use crate::runtime::physical_time::actual_utc_now;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct HttpRouteKey {

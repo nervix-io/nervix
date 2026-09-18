@@ -25,6 +25,7 @@ mod names;
 mod node_endpoint;
 mod node_ref;
 mod quiesce;
+mod rebind_resource;
 mod remote;
 mod resource;
 mod resource_binding;
@@ -85,6 +86,7 @@ pub use quiesce::{
     TransactionInspectionTarget, TransactionOperation, TransactionOperationNumber,
     TransactionOperationRange, TransactionPosition, TransactionPreviewIdentity,
 };
+pub use rebind_resource::{RebindResource, RebindResourceMembers, RebindResourceSelection};
 pub use remote::{
     RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeElementValue,
     RemoteRuntimeField, RemoteRuntimeRecord, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
@@ -96,6 +98,7 @@ pub use resource::{
     ResourceVersionCounter, ResourceVersionKey, ResourceVersionResolutionError,
     ResourceVersionStatus,
 };
+pub use resource_binding::ResourceRebinding;
 pub use schema::{
     AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation,
     AvroType, CborType, CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema,

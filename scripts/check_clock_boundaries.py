@@ -7,9 +7,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# The module that owns actual-UTC observation and physical deadlines for the data plane. Every rule
-# names it through this path, so relocating the module moves every rule that concerns it.
-PHYSICAL_TIME_OWNER = Path("src/runtime/physical_time.rs")
+# The module that owns actual-UTC observation and physical deadlines for the data plane. It lives in
+# the connector contract crate, which the server's runtime and every connector crate share. Every
+# rule names it through this path, so relocating the module moves every rule that concerns it.
+PHYSICAL_TIME_OWNER = Path("crates/connector/src/physical_time.rs")
+
+# The constructor of the physical-deadline capability and the actual-UTC read. The owner is its own
+# crate, so both are public API and Rust visibility cannot confine them to their declared owners;
+# the rules below confine them in every product source instead.
+PHYSICAL_DEADLINE_CONSTRUCTION = "PhysicalDeadlineCapability::operational"
+ACTUAL_UTC_READ = "actual_utc_now"
 
 # The data plane the physical-time rules govern: the server's runtime, the connector contract crate,
 # and every integration crate under `crates/connectors`.
@@ -23,6 +30,22 @@ def physical_time_sources() -> list[Path]:
     for pattern in PHYSICAL_TIME_ROOTS:
         for source_root in sorted(ROOT.glob(pattern)):
             sources.extend(sorted(source_root.rglob("*.rs")))
+    return sources
+
+
+def product_sources() -> list[Path]:
+    """Return every product Rust source in the workspace, without tests, benchmarks or harnesses."""
+
+    excluded_components = {"benchmark", "test-environment", "tests"}
+    sources: list[Path] = []
+    for source_root in (ROOT / "src", ROOT / "crates"):
+        for path in sorted(source_root.rglob("*.rs")):
+            relative = path.relative_to(ROOT)
+            if excluded_components.intersection(relative.parts):
+                continue
+            if path.name.startswith("test_") or path.name.endswith("_tests.rs"):
+                continue
+            sources.append(path)
     return sources
 
 
@@ -55,8 +78,6 @@ def main() -> int:
         ROOT / PHYSICAL_TIME_OWNER,
         ROOT / "src/runtime_schema/syslog.rs",
     }
-    product_roots = [ROOT / "src", ROOT / "crates"]
-    excluded_components = {"benchmark", "test-environment", "tests"}
     wall_time_needles = (
         "Timestamp::now(",
         "Utc::now(",
@@ -64,24 +85,18 @@ def main() -> int:
         "OffsetDateTime::now_utc(",
         "Local::now(",
     )
-    for source_root in product_roots:
-        for path in sorted(source_root.rglob("*.rs")):
-            relative = path.relative_to(ROOT)
-            if excluded_components.intersection(relative.parts):
-                continue
-            if path.name.startswith("test_") or path.name.endswith("_tests.rs"):
-                continue
-            if path in wall_time_owners:
-                continue
-            source = product_source(path)
-            for needle in wall_time_needles:
-                reject(
-                    violations,
-                    path,
-                    source,
-                    needle,
-                    "direct actual-UTC reads are limited to declared operational and external owners",
-                )
+    for path in product_sources():
+        if path in wall_time_owners:
+            continue
+        source = product_source(path)
+        for needle in wall_time_needles:
+            reject(
+                violations,
+                path,
+                source,
+                needle,
+                "direct actual-UTC reads are limited to declared operational and external owners",
+            )
 
     engine_sources = [
         *sorted((ROOT / "crates/nervix-vm/src").rglob("*.rs")),
@@ -127,13 +142,6 @@ def main() -> int:
         runtime_root / "emitters/mod.rs",
         actual_utc_owner,
     }
-    physical_time_source = product_source(actual_utc_owner)
-    if "pub(super) const fn new() -> Self" not in physical_time_source:
-        violations.append(
-            f"{PHYSICAL_TIME_OWNER.as_posix()}: physical deadline construction must remain private "
-            "to its declared runtime owners"
-        )
-
     ownership_contract_sources = {
         ROOT / "crates/models/src/domain_clock.rs",
         ROOT / "crates/models/src/statement.rs",
@@ -179,12 +187,17 @@ def main() -> int:
             "current_timestamp(",
             "data-plane code must name the actual-UTC boundary or use a bound logical clock",
         )
+
+    # The owner's UTC read and capability constructor are public API of its crate, so these two rules
+    # cover every product source, together with the data-plane test files they always covered.
+    for path in sorted({*product_sources(), *physical_time_sources()}):
+        source = product_source(path)
         if path not in actual_utc_consumers and path != actual_utc_owner:
             reject(
                 violations,
                 path,
                 source,
-                "actual_utc_now",
+                ACTUAL_UTC_READ,
                 "actual UTC may enter only a declared projection or external-observation owner",
             )
         if path not in physical_capability_owners:
@@ -192,7 +205,7 @@ def main() -> int:
                 violations,
                 path,
                 source,
-                "PhysicalDeadlineCapability::new",
+                PHYSICAL_DEADLINE_CONSTRUCTION,
                 "physical deadline construction is limited to declared operational owners",
             )
 

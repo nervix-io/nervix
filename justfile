@@ -494,6 +494,7 @@ validate-shuttle-dependencies:
     set -euo pipefail
     packages=(
         nervix-client-core
+        nervix-connector
         nervix-consensus
         nervix-execution
         nervix-interconnect

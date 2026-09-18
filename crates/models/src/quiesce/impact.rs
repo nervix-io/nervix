@@ -909,6 +909,12 @@ pub enum TransactionOperation {
         domain: DomainName,
         resource: ResourceName,
     },
+    RebindResource {
+        domain: DomainName,
+        resource: ResourceName,
+        requested: RequestedResourceVersion,
+        version: u64,
+    },
 }
 
 impl TransactionOperation {
@@ -920,7 +926,8 @@ impl TransactionOperation {
             | Self::AlterDomain { domain }
             | Self::StartDomain { domain }
             | Self::StopDomain { domain }
-            | Self::CreateResource { domain, .. } => domain,
+            | Self::CreateResource { domain, .. }
+            | Self::RebindResource { domain, .. } => domain,
         }
     }
 }
@@ -952,6 +959,12 @@ pub enum OperationImpactReason {
     DomainStop,
     ResourceCatalog {
         resource: ResourceName,
+    },
+    ResourceRebinding {
+        node: NodeRef,
+        resource: ResourceName,
+        from_version: u64,
+        to_version: u64,
     },
 }
 

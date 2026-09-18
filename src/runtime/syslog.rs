@@ -1,13 +1,12 @@
 use std::{num::NonZeroUsize, sync::Arc as StdArc};
 
 use ahash::HashSet;
+use nervix_connector::{RustlsClientConfigSource, client_tls_paths, read_tls_file};
 use nonzero_ext::nonzero;
 use rustls::{RootCertStore, ServerConfig, server::WebPkiClientVerifier};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use thiserror::Error;
 use url::Url;
-
-use super::{RustlsClientConfigSource, client_tls_paths, read_tls_file};
 
 pub(super) const DEFAULT_MAX_MESSAGE_SIZE: NonZeroUsize = nonzero!(131_072usize);
 pub(super) const MAX_UDP_PAYLOAD_SIZE: usize = 65_507;

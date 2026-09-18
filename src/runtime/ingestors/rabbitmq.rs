@@ -14,9 +14,12 @@ use lapin::{
     tcp::OwnedTLSConfig,
     types::{AMQPValue, FieldTable},
 };
+use nervix_connector::{
+    IngestMessageHeaders, IngestMetadataRow, ServiceUrl, client_config_value, client_tls_paths,
+    physical_time::actual_utc_now, read_tls_file,
+};
 
 use super::super::*;
-use crate::runtime::physical_time::actual_utc_now;
 
 pub(in crate::runtime) struct RabbitMqIngestor;
 

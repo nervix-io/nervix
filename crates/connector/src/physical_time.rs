@@ -1,10 +1,15 @@
 //! Physical monotonic deadlines and actual-UTC observation for the data plane.
 //!
-//! Layer: data plane.
+//! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Converting physical timeout policy into monotonic deadlines and waiting for them.
+//! - **Owns.** Converting physical timeout policy into monotonic deadlines and waiting for them,
+//!   and the one read of actual UTC that the runtime and every connector share.
 //! - **Depends on.** The vocabulary timestamp and Tokio's monotonic timer.
 //! - **Must not know.** Domains, logical clock mappings, execution graphs or connector policy.
+//!
+//! The runtime reaches this module across the crate boundary, so its constructor and its UTC read
+//! are public and visibility cannot confine them. `scripts/check_clock_boundaries.py` confines them
+//! instead: it rejects both outside their declared owners anywhere in the workspace.
 
 use std::time::Duration;
 
@@ -14,12 +19,12 @@ use thiserror::Error;
 use tokio::time::{Instant, sleep_until};
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub(in crate::runtime) enum PhysicalDeadlineError {
+pub enum PhysicalDeadlineError {
     #[error("physical deadline exceeds the monotonic clock range")]
     OutOfRange,
 }
 
-pub(in crate::runtime) type PhysicalDeadlineResult<T> = Result<T, Report<PhysicalDeadlineError>>;
+pub type PhysicalDeadlineResult<T> = Result<T, Report<PhysicalDeadlineError>>;
 
 /// A deadline in the process-local monotonic time coordinate.
 ///
@@ -37,14 +42,15 @@ pub struct PhysicalDeadlineCapability {
 }
 
 impl PhysicalDeadlineCapability {
-    pub(super) const fn new() -> Self {
+    /// The capability an operational timeout, retry or cancellation owner waits with.
+    ///
+    /// Only the owners `scripts/check_clock_boundaries.py` declares may call this. The type has no
+    /// `Default` on purpose, because a default could be taken anywhere.
+    pub const fn operational() -> Self {
         Self { _private: () }
     }
 
-    pub(in crate::runtime) fn after(
-        self,
-        timeout: Duration,
-    ) -> PhysicalDeadlineResult<PhysicalDeadline> {
+    pub fn after(self, timeout: Duration) -> PhysicalDeadlineResult<PhysicalDeadline> {
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| Report::new(PhysicalDeadlineError::OutOfRange))?;
@@ -55,14 +61,14 @@ impl PhysicalDeadlineCapability {
         sleep_until(deadline.0).await;
     }
 
-    pub(super) fn is_reached(self, deadline: PhysicalDeadline) -> bool {
+    pub fn is_reached(self, deadline: PhysicalDeadline) -> bool {
         Instant::now() >= deadline.0
     }
 }
 
 /// Actual UTC enters the data plane only through the physical-time owner and is returned in the
 /// vocabulary timestamp type.
-pub(super) fn actual_utc_now() -> Timestamp {
+pub fn actual_utc_now() -> Timestamp {
     Timestamp::now()
 }
 
@@ -72,7 +78,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn physical_deadline_waits_on_the_monotonic_timer() {
-        let capability = PhysicalDeadlineCapability::new();
+        let capability = PhysicalDeadlineCapability::operational();
         let deadline = capability
             .after(Duration::from_secs(2))
             .expect("the fixture timeout fits the monotonic clock");
