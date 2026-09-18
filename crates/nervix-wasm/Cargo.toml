@@ -10,7 +10,12 @@ workspace = true
 
 [features]
 default = []
-shuttle = ["parking_lot/shuttle", "tokio/shuttle"]
+shuttle = [
+  "dep:shuttle-parking-lot",
+  "dep:shuttle-tokio",
+  "shuttle-parking-lot/shuttle",
+  "shuttle-tokio/shuttle",
+]
 
 [dependencies]
 arch-into = { workspace = true }
@@ -22,10 +27,17 @@ nervix-models = { workspace = true }
 nervix-recovery = { workspace = true }
 nervix-wasm-protocol = { workspace = true }
 nonzero_ext = { workspace = true }
-parking_lot = { package = "shuttle-parking_lot", version = "0.12" }
+parking_lot = { workspace = true }
+shuttle-parking-lot = { workspace = true, optional = true }
+shuttle-tokio = { workspace = true, features = [
+  "macros",
+  "rt",
+  "sync",
+  "time",
+], optional = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
-tokio = { package = "shuttle-tokio", version = "1", features = ["rt", "sync"] }
+tokio = { workspace = true, features = ["rt", "sync"] }
 triomphe = { workspace = true }
 wasmtime = { workspace = true }
 
@@ -33,9 +45,4 @@ wasmtime = { workspace = true }
 arrow-array = { workspace = true }
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
-tokio = { package = "shuttle-tokio", version = "1", features = [
-  "macros",
-  "rt",
-  "sync",
-  "time",
-] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
