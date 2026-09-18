@@ -131,6 +131,7 @@ def main() -> int:
         runtime_root / "ingestors/pulsar.rs",
         runtime_root / "ingestors/rabbitmq.rs",
         runtime_root / "ingestors/redis_pubsub.rs",
+        runtime_root / "ingestors/source.rs",
         runtime_root / "ingestors/sqs.rs",
         runtime_root / "ingestors/syslog.rs",
         runtime_root / "ingestors/websockets.rs",

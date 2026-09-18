@@ -346,8 +346,7 @@ use ingestor_quiesce::{
 use ingestor_start_plan::*;
 use kafka_offset_state::{
     KafkaOffsetSnapshotInstaller, KafkaOffsetStateAssignment, KafkaOffsetStateOriginator,
-    KafkaOffsetStatePersistence, KafkaOffsetStateRead, KafkaTopicPartition,
-    ReplicatedKafkaOffsetState,
+    KafkaOffsetStatePersistence, KafkaOffsetStateRead, ReplicatedKafkaOffsetState,
 };
 use local_drain::LocalIntake;
 use lookup_hash_map::{
@@ -373,6 +372,7 @@ use message_error_delivery::{
     MessageErrorDelivery, MessageErrorRouteKey, MessageErrorRouteRuntime, MessageErrorRouteTarget,
     matching_message_error_output,
 };
+use nervix_connector_kafka::KafkaOffsetPosition;
 use nervix_models::{
     CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, DeduplicatorName,
     ReingestorName, ResolvedCodecWireFormat, WireSchemaLookup, WireSchemaName,
@@ -589,7 +589,6 @@ pub(crate) use error::RuntimeError;
 pub(crate) use events::RuntimeEvent;
 pub(crate) use ingest_metadata::IngestFilterMapMetadata;
 pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;
-pub(crate) use ingestors::kafka::KafkaIngestor;
 pub(crate) use local_drain::LocalGraphDrainOutcome;
 pub(crate) use materialized_state::MaterializedRecordReport;
 pub use node::{DEFAULT_TEMP_DIR, Runtime};

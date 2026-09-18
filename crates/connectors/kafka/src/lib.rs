@@ -1,9 +1,9 @@
-//! Kafka sink connector.
+//! Kafka source and sink connector.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Kafka producer configuration, record and header publication, delivery-report
-//!   classification, and producer queue shutdown.
+//! - **Owns.** Kafka consumer and producer configuration, source polling and offset handling,
+//!   record and header publication, delivery-report classification, and producer queue shutdown.
 //! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio, and
 //!   `rust-rdkafka`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -11,6 +11,12 @@
 
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
+
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub use rdkafka as testing_rdkafka;
+
+mod source;
 
 use std::{collections::VecDeque, time::Duration};
 
@@ -29,6 +35,12 @@ use rdkafka::{
     error::{KafkaError, RDKafkaErrorCode},
     message::{Header as KafkaHeader, OwnedHeaders},
     producer::{DeliveryFuture, FutureProducer, FutureRecord, Producer},
+};
+pub use source::{
+    KafkaDomainOffsetError, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
+    KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaDomainOffsetStart,
+    KafkaOffsetPosition, KafkaSource, KafkaSourceError, KafkaSourceMessage, KafkaSourceOffsetMode,
+    KafkaSourcePlan, TopicPartitionInspector,
 };
 use tokio::time::{Instant, sleep};
 

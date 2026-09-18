@@ -9,6 +9,7 @@ pub(in crate::runtime) mod prometheus;
 pub(in crate::runtime) mod pulsar;
 pub(in crate::runtime) mod rabbitmq;
 pub(in crate::runtime) mod redis_pubsub;
+mod source;
 pub(in crate::runtime) mod sqs;
 pub(in crate::runtime) mod syslog;
 pub(in crate::runtime) mod websockets;

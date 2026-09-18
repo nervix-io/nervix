@@ -13,6 +13,7 @@ use std::{collections::BTreeSet, num::NonZeroU64};
 use ahash::{HashMap, HashSet};
 use meticulous::OptionExt as _;
 use nervix_client_core::Client as NervixClient;
+use nervix_connector_kafka::TopicPartitionInspector;
 use nervix_consensus::{
     CommandExecution, ConsensusError, DomainMutationLease, DomainPlanningInputs,
     TransactionScheduleEligibility,
@@ -22,7 +23,6 @@ use nervix_models::{
     KafkaPartitionSchedule, Model, ModelKind, ModelName, NodeRef, PlacementGroupSchedule,
     PlacementPolicy, QuiesceLevel, ScheduledNode,
 };
-use rdkafka::{config::ClientConfig, consumer::StreamConsumer};
 use tokio::time::{Duration, Instant, sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -40,11 +40,7 @@ use super::{
     session_service::SessionServiceImpl,
     shutdown::{ShutdownDeadline, ShutdownPhaseOutcome},
 };
-use crate::{
-    proto::CommandResult,
-    registry::ActiveGraph,
-    runtime::{KafkaIngestor, LocalGraphDrainOutcome},
-};
+use crate::{proto::CommandResult, registry::ActiveGraph, runtime::LocalGraphDrainOutcome};
 
 pub(in crate::application) const LEADER_KAFKA_PARTITION_WATCH_INTERVAL: Duration =
     Duration::from_secs(1);
@@ -1973,22 +1969,15 @@ impl SessionServiceImpl {
                     }
                 };
                 let _mounts = resolved.mounts;
-                let mut client_config = ClientConfig::new();
-                for entry in &resolved.entries {
-                    client_config.set(&entry.key, &entry.value);
-                }
-                client_config.set(
-                    "group.id",
+                let inspector = match TopicPartitionInspector::new(
+                    &resolved.entries,
                     format!(
                         "nervix_schedule_watch_{}_{}",
                         spec_for_task.domain.as_str(),
                         spec_for_task.ingestor.as_str()
                     ),
-                );
-                client_config.set("enable.partition.eof", "false");
-                client_config.set("enable.auto.commit", "false");
-                let consumer: StreamConsumer = match client_config.create() {
-                    Ok(consumer) => consumer,
+                ) {
+                    Ok(inspector) => inspector,
                     Err(error) => {
                         service.broadcast_error(format!(
                             "failed to create Kafka partition watcher for ingestor '{}' in domain \
@@ -2003,26 +1992,24 @@ impl SessionServiceImpl {
                 let mut last_observed = None::<Vec<i32>>;
                 loop {
                     tokio::task::consume_budget().await;
-                    let mut partitions = match KafkaIngestor::topic_partitions(
-                        &consumer,
-                        spec_for_task.topic.as_str(),
-                    ) {
-                        Ok(partitions) => partitions,
-                        Err(error) => {
-                            service.broadcast_error(format!(
-                                "failed to inspect Kafka partitions for ingestor '{}' in domain \
-                                 '{}': {}",
-                                spec_for_task.ingestor.as_str(),
-                                spec_for_task.domain.as_str(),
-                                error
-                            ));
-                            tokio::select! {
-                                _ = service.inner.drain_support_shutdown.cancelled() => break,
-                                _ = cancel_child.cancelled() => break,
-                                _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => continue,
+                    let mut partitions =
+                        match inspector.partitions(spec_for_task.topic.as_str()).await {
+                            Ok(partitions) => partitions,
+                            Err(error) => {
+                                service.broadcast_error(format!(
+                                    "failed to inspect Kafka partitions for ingestor '{}' in \
+                                     domain '{}': {}",
+                                    spec_for_task.ingestor.as_str(),
+                                    spec_for_task.domain.as_str(),
+                                    error
+                                ));
+                                tokio::select! {
+                                    _ = service.inner.drain_support_shutdown.cancelled() => break,
+                                    _ = cancel_child.cancelled() => break,
+                                    _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => continue,
+                                }
                             }
-                        }
-                    };
+                        };
                     partitions.sort_unstable();
                     if last_observed.as_ref() != Some(&partitions) {
                         if let Err(error) = service

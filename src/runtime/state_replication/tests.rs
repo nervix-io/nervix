@@ -729,13 +729,11 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         .take()
         .expect("local Kafka state should grant authoritative access");
     let (_, kafka_payload) = kafka_originator
-        .replace_offsets(HashMap::from_iter([(
-            KafkaTopicPartition {
-                topic: "orders".to_string(),
-                partition: 3,
-            },
-            42,
-        )]))
+        .replace_offsets(vec![KafkaOffsetPosition {
+            topic: "orders".to_string(),
+            partition: 3,
+            offset: 42,
+        }])
         .expect("Kafka offset should update");
     let deduplicator_placement = RuntimeStatePlacement {
         domain: domain.clone(),
@@ -1367,7 +1365,14 @@ async fn kafka_offset_snapshot_task_owns_persistence() {
         .clone();
 
     runtime
-        .commit_domain_kafka_offset(&originator, "orders", 3, 43)
+        .commit_domain_kafka_offset(
+            &originator,
+            KafkaOffsetPosition {
+                topic: "orders".to_string(),
+                partition: 3,
+                offset: 43,
+            },
+        )
         .await
         .expect("the Kafka offset assignment should remain authoritative");
 
@@ -1693,22 +1698,18 @@ fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
         .take()
         .expect("local Kafka state should grant authoritative access");
     let (offset_lsm, offset_payload) = originator
-        .replace_offsets(HashMap::from_iter([
-            (
-                KafkaTopicPartition {
-                    topic: "notifications".to_string(),
-                    partition: 0,
-                },
-                12,
-            ),
-            (
-                KafkaTopicPartition {
-                    topic: "notifications".to_string(),
-                    partition: 1,
-                },
-                18,
-            ),
-        ]))
+        .replace_offsets(vec![
+            KafkaOffsetPosition {
+                topic: "notifications".to_string(),
+                partition: 0,
+                offset: 12,
+            },
+            KafkaOffsetPosition {
+                topic: "notifications".to_string(),
+                partition: 1,
+                offset: 18,
+            },
+        ])
         .expect("offsets should update");
     store
         .persist_latest_snapshot(&placement, offset_lsm, &offset_payload)
