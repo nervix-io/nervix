@@ -12,7 +12,8 @@ use nervix_models::{
     ClusterNodeName, CreateWasmProcessor, DomainConfig, DomainName, DomainPace, DomainSchedule,
     DomainStartPoint, DomainState, DomainStatus, GeneralErrorPolicy, Model, ProcessorInputs,
     ProcessorOutputs, RelayName, ResourceName, ResourceNodeState, ResourceNodeStatus,
-    ResourceReplicaKey, ScheduledNode, WasmProcessorLimits, WasmProcessorName, WasmStateGeneration,
+    ResourceReplicaKey, ScheduledNode, SchemaFingerprint, WasmProcessorLimits, WasmProcessorName,
+    WasmStateGeneration,
 };
 use openraft::{
     entry::RaftEntry as _, storage::RaftLogStorageExt as _, type_config::TypeConfigExt as _,
@@ -221,23 +222,26 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
 -> TestResult {
     let mut harness = Harness::new().await?;
     let domain = Harness::domain("tenant");
-    let processor = ScheduledNode::new(Model::WasmProcessor(CreateWasmProcessor {
-        name: WasmProcessorName::parse("guest")?,
-        from: ProcessorInputs::single(RelayName::parse("input")?),
-        output_routes: ProcessorOutputs::single(RelayName::parse("output")?),
-        branched_by: BranchSelection::unbranched(),
-        resource: ResourceName::parse("guest_bundle")?,
-        resource_version: 1,
-        file: "processors/guest.wasm".to_string(),
-        limits: WasmProcessorLimits {
-            max_fuel: NonZeroU64::MIN,
-            max_memory_bytes: NonZeroU64::MIN,
-        },
-        global_error_policy: GeneralErrorPolicy::Log,
-        mode: AckMode::Attached,
-        filter_where: None,
-        materialized_state: Vec::new(),
-    }));
+    let processor = ScheduledNode::new(
+        Model::WasmProcessor(CreateWasmProcessor {
+            name: WasmProcessorName::parse("guest")?,
+            from: ProcessorInputs::single(RelayName::parse("input")?),
+            output_routes: ProcessorOutputs::single(RelayName::parse("output")?),
+            branched_by: BranchSelection::unbranched(),
+            resource: ResourceName::parse("guest_bundle")?,
+            resource_version: 1,
+            file: "processors/guest.wasm".to_string(),
+            limits: WasmProcessorLimits {
+                max_fuel: NonZeroU64::MIN,
+                max_memory_bytes: NonZeroU64::MIN,
+            },
+            global_error_policy: GeneralErrorPolicy::Log,
+            mode: AckMode::Attached,
+            filter_where: None,
+            materialized_state: Vec::new(),
+        }),
+        SchemaFingerprint::from_digest([1; 32]),
+    );
     let created = DomainSchedule::new(domain.id.clone(), [processor.clone()], vec![]);
     let create_inputs = harness
         .store
@@ -1539,6 +1543,7 @@ async fn replica_update_writes_one_record_and_metadata_amid_unrelated_graphs() -
                     sensitive: false,
                 }],
             }),
+            SchemaFingerprint::from_digest([1; 32]),
         ));
     }
     let graph_domain = DomainName::try_from("tenant_9999")?;

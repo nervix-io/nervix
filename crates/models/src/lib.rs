@@ -30,6 +30,7 @@ mod remote;
 mod resource;
 mod resource_binding;
 mod schema;
+mod schema_fingerprint;
 mod statement;
 mod timestamp;
 mod udf;
@@ -108,6 +109,7 @@ pub use schema::{
     CreateSchema, CreateWireSchema, JsonType, ParseAsType, SchemaField, WireSchemaField,
     WireSchemaStrictness,
 };
+pub use schema_fingerprint::SchemaFingerprint;
 pub use statement::{
     AckMode, AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation, AlterDomain,
     AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterGenerator, AlterGeneratorError,

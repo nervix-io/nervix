@@ -148,7 +148,6 @@ impl ReplicatedWindowProcessorState {
         };
         Ok(PersistedRuntimeStateEntry {
             lsm: published.revision,
-            schema_fingerprint: self.placement.schema_fingerprint,
             payload,
         })
     }
