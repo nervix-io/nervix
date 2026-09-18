@@ -36,6 +36,9 @@ use crate::registry::{
 };
 
 mod commit_plan;
+mod rebind;
+
+use rebind::plan_resource_rebind;
 
 /// Every mutable control-plane input one planning pass may inspect.
 #[derive(Debug, Clone)]
@@ -127,6 +130,10 @@ impl PlannedTransaction {
         self.steps.first()
     }
 
+    pub(crate) fn operations(&self) -> &[OperationImpactReport] {
+        &self.operations
+    }
+
     pub(crate) fn report(
         &self,
     ) -> Result<TransactionImpactReport, Report<TransactionPlanningError>> {
@@ -169,6 +176,25 @@ pub(crate) enum TransactionPlanningError {
     DomainStartGenerationOverflow { domain: DomainName },
     #[error("resource '{resource}' already exists")]
     ResourceAlreadyExists { resource: ResourceName },
+    #[error("resource '{resource}' does not exist")]
+    ResourceNotFound { resource: ResourceName },
+    #[error(
+        "{kind} '{name}' does not exist in domain '{domain}'",
+        kind = node.kind.keyword_phrase(),
+        name = node.identifier.as_str(),
+        domain = domain.as_str()
+    )]
+    RebindMemberNotFound { domain: DomainName, node: NodeRef },
+    #[error(
+        "{kind} '{name}' does not bind resource '{resource}'",
+        kind = node.kind.keyword_phrase(),
+        name = node.identifier.as_str(),
+        resource = resource.as_str()
+    )]
+    RebindMemberDoesNotBind {
+        node: NodeRef,
+        resource: ResourceName,
+    },
     #[error("transaction operation {operation} is not valid transaction content")]
     InvalidOperation {
         operation: TransactionOperationNumber,
@@ -214,6 +240,9 @@ impl TransactionPlanningError {
             | Self::DomainAlreadyStopped { .. }
             | Self::DomainStartGenerationOverflow { .. }
             | Self::ResourceAlreadyExists { .. }
+            | Self::ResourceNotFound { .. }
+            | Self::RebindMemberNotFound { .. }
+            | Self::RebindMemberDoesNotBind { .. }
             | Self::InvalidImpactReport { .. }
             | Self::PlanningBasisEncoding
             | Self::PartialPlanHasNoTransactionReport { .. } => None,
@@ -244,12 +273,20 @@ struct ModelRunPlan {
 struct ModelRunPlanningInput<'a> {
     domain: &'a DomainName,
     domain_state: &'a ControlDomainState,
+    resources: &'a BTreeSet<ResourceName>,
     resource_uploads: &'a ResourceUploads,
     base_models: ModelIndex,
     current_schedule: Option<DomainSchedule>,
     statements: &'a [Statement],
     first_operation_index: usize,
     allow_incomplete: bool,
+}
+
+struct PlannedResourceRebind {
+    operation: TransactionOperation,
+    contribution: ModelContribution,
+    mutations: Vec<RegistryMutation>,
+    bindings: Vec<ResourceBindingImpact>,
 }
 
 #[derive(Default)]
@@ -440,6 +477,7 @@ impl Registry {
                 let input = ModelRunPlanningInput {
                     domain: &domain,
                     domain_state: &domain_state,
+                    resources: &resources,
                     resource_uploads: &resource_uploads,
                     base_models: models,
                     current_schedule,
@@ -707,6 +745,7 @@ impl Registry {
         let ModelRunPlanningInput {
             domain,
             domain_state,
+            resources,
             resource_uploads,
             base_models,
             current_schedule,
@@ -737,6 +776,37 @@ impl Registry {
                 TransactionOperationNumber::from_index(absolute_index).map_err(|error| {
                     Report::new(TransactionPlanningError::InvalidImpactReport { error })
                 })?;
+            if let Statement::RebindResource(rebind) = statement {
+                let planned = plan_resource_rebind(
+                    domain,
+                    resources,
+                    resource_uploads,
+                    &mut prefix_models,
+                    rebind,
+                    number,
+                )?;
+                if planned.contribution.touched_nodes.is_empty() {
+                    no_op_operations.insert(number);
+                }
+                for binding in &planned.bindings {
+                    bindings_by_node.insert(binding.node.clone(), vec![binding.clone()]);
+                }
+                for node in &planned.contribution.touched_nodes {
+                    touched_by_node
+                        .entry(node.clone())
+                        .or_default()
+                        .push(number);
+                }
+                mutations.extend(planned.mutations);
+                pending_operations.push(PendingOperationImpact {
+                    number,
+                    operation: planned.operation,
+                    reasons: planned.contribution.reasons,
+                    contribution: planned.contribution.effects,
+                });
+                continue;
+            }
+
             let operation = model_operation(domain, statement, number)?;
             let is_if_not_exists_noop = match statement {
                 Statement::Create(create) if create.if_not_exists => {
@@ -1939,6 +2009,9 @@ fn operation_report(
 }
 
 #[cfg(test)]
+mod rebind_tests;
+
+#[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
 
@@ -1972,7 +2045,7 @@ mod tests {
         }
     }
 
-    fn snapshot(
+    pub(super) fn snapshot(
         status: DomainStatus,
         models: impl IntoIterator<Item = Model>,
     ) -> TransactionPlanningSnapshot {
@@ -2020,11 +2093,11 @@ mod tests {
         model
     }
 
-    fn node_ref(kind: ModelKind, name: &str) -> NodeRef {
+    pub(super) fn node_ref(kind: ModelKind, name: &str) -> NodeRef {
         NodeRef::new(kind, named::<nervix_models::ModelName>(name))
     }
 
-    fn preserve_schedule(
+    pub(super) fn preserve_schedule(
         _graph: Option<ActiveGraph>,
         _placement: PlacementPolicy,
         current: Option<&DomainSchedule>,
@@ -2698,12 +2771,12 @@ mod tests {
     }
 
     /// The outcome of one fixture upload of the `tls_bundle` resource.
-    enum FixtureUploadOutcome {
+    pub(super) enum FixtureUploadOutcome {
         Completed,
         Applying,
     }
 
-    fn tls_bundle_uploads(uploads: &[(u64, FixtureUploadOutcome)]) -> ResourceUploads {
+    pub(super) fn tls_bundle_uploads(uploads: &[(u64, FixtureUploadOutcome)]) -> ResourceUploads {
         let domain = named::<DomainName>("default");
         let mut records = Vec::new();
         for (version, outcome) in uploads {
@@ -2744,6 +2817,17 @@ mod tests {
             })),
             if_not_exists,
         ))
+    }
+
+    pub(super) fn stored_tls_vhost(name: &str, version: u64) -> Model {
+        Model::Vhost(CreateVhost {
+            name: named(name),
+            hostnames: vec![format!("{name}.example.com")],
+            tls: Some(VhostTlsResource {
+                resource: named("tls_bundle"),
+                version,
+            }),
+        })
     }
 
     fn operation(number: usize) -> TransactionOperationNumber {

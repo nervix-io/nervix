@@ -60,6 +60,11 @@ Commands in different domains and independent resource uploads have separate exe
 Conflicting work in one domain uses that domain's alteration or handoff ownership. Reads, health,
 subscription delivery, and transport control frames continue while a command waits.
 
+`REBIND RESOURCE` completes only after its entire selected model set has been validated, committed,
+and activated under this same barrier. The successful response is therefore the boundary at which
+every selected usage observes the new pinned version. A validation or activation failure cannot
+report a partially rebound set.
+
 ## All-live-node barriers
 
 A completion barrier continuously derives the required set from current effective live membership.

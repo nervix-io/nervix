@@ -11,11 +11,12 @@
 use std::collections::BTreeSet;
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_consensus::{ConsensusError, TransactionStepEffect};
+use nervix_consensus::{ConsensusError, DomainPlanningInputs, TransactionStepEffect};
 use nervix_interconnect::EntityGatePurpose;
 use nervix_models::{
-    DomainName, DomainSchedule, DomainStatus, ModelKind, ModelName, QuiesceLevel,
-    RequestedResourceVersion, ResourceBindingImpact, Statement, TransactionOperationNumber,
+    DomainName, DomainSchedule, DomainStatus, ModelKind, ModelName, OperationImpactReason,
+    OperationImpactReport, QuiesceLevel, RequestedResourceVersion, ResourceBindingImpact,
+    Statement, TransactionOperation, TransactionOperationNumber,
 };
 use nervix_nspl::client_statement::ClientStatement;
 use tokio::sync::mpsc;
@@ -26,10 +27,13 @@ use super::{
     cluster_status::render_cluster_status,
     domain_lifecycle::DomainAlterError,
     ownership_handoff::{mark_complete_ownership_transitions, planned_ownership_moves},
+    schedule_planning::DomainSchedulePlanningSnapshot,
     scheduling::ScheduleTransition,
     session_service::{SessionServiceImpl, create_registry_error_response, find_identifier_span},
     subscription::SessionSubscriptions,
-    transaction::{TransactionCommitError, TransactionModelStepContext},
+    transaction::{
+        TransactionCommitError, TransactionModelStepContext, transaction_planning_error_message,
+    },
 };
 use crate::{
     proto::{CommandResult, CommandResultKind, Diagnostic, SessionResponse},
@@ -47,12 +51,30 @@ struct TransactionModelDecision {
     ownership_gate: EntityGatePlan,
 }
 
+struct DirectModelPlan {
+    step: crate::registry::PlannedTransactionStep,
+    operations: Vec<OperationImpactReport>,
+    inputs: DomainPlanningInputs,
+    schedule_inputs: DomainSchedulePlanningSnapshot,
+}
+
 /// One statement of a model-mutation batch that reached the registry: which statement it was,
 /// the model it changed, and the message its own result reports.
 struct AppliedModelMutation {
     index: usize,
     model: ModelName,
-    message: String,
+    message: AppliedModelMutationMessage,
+}
+
+enum AppliedModelMutationMessage {
+    Standard(String),
+    ResourceRebind(String),
+}
+
+impl From<String> for AppliedModelMutationMessage {
+    fn from(message: String) -> Self {
+        Self::Standard(message)
+    }
 }
 
 struct CollectedModelMutations {
@@ -307,15 +329,38 @@ fn model_mutation_success_result(
     let mut results = existing_results.to_vec();
     let mut first_applied = true;
     for mutation in applied {
-        let mut message = mutation.message.clone();
+        let mut message = match &mutation.message {
+            AppliedModelMutationMessage::Standard(message)
+            | AppliedModelMutationMessage::ResourceRebind(message) => message.clone(),
+        };
         if first_applied {
-            append_command_output(&mut message, &quiesce_level_message(classified_level));
-            append_command_output(
-                &mut message,
-                &format!("planned relocations: {planned_relocations}"),
-            );
-            for resolution in latest_resolutions {
-                append_command_output(&mut message, resolution);
+            match &mutation.message {
+                AppliedModelMutationMessage::ResourceRebind(_) => {
+                    let details = message.find('\n').map(|index| message.split_off(index));
+                    message.push('\n');
+                    message.push_str(&quiesce_level_message(classified_level));
+                    if planned_relocations > 0 {
+                        message.push('\n');
+                        message.push_str(&format!("planned relocations: {planned_relocations}"));
+                    }
+                    for resolution in latest_resolutions {
+                        message.push('\n');
+                        message.push_str(resolution);
+                    }
+                    if let Some(details) = details {
+                        message.push_str(&details);
+                    }
+                }
+                AppliedModelMutationMessage::Standard(_) => {
+                    append_command_output(&mut message, &quiesce_level_message(classified_level));
+                    append_command_output(
+                        &mut message,
+                        &format!("planned relocations: {planned_relocations}"),
+                    );
+                    for resolution in latest_resolutions {
+                        append_command_output(&mut message, resolution);
+                    }
+                }
             }
             first_applied = false;
         }
@@ -352,6 +397,79 @@ fn model_mutation_success_result(
     }
 }
 
+fn resource_usage_kind(kind: ModelKind) -> &'static str {
+    match kind {
+        ModelKind::Lookup => "hash_map",
+        _ => kind.as_str(),
+    }
+}
+
+pub(in crate::application) fn rebind_resource_message(
+    impact: &OperationImpactReport,
+) -> Option<String> {
+    struct Usage<'a> {
+        node: &'a nervix_models::NodeRef,
+        from_version: u64,
+        to_version: u64,
+    }
+
+    let TransactionOperation::RebindResource {
+        resource,
+        requested,
+        version,
+        ..
+    } = &impact.operation
+    else {
+        return None;
+    };
+    let mut usages = impact
+        .reasons
+        .iter()
+        .filter_map(|reason| match reason {
+            OperationImpactReason::ResourceRebinding {
+                node,
+                from_version,
+                to_version,
+                ..
+            } => Some(Usage {
+                node,
+                from_version: *from_version,
+                to_version: *to_version,
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    usages.sort_by(|left, right| left.node.cmp(right.node));
+    let changed = usages
+        .iter()
+        .filter(|usage| usage.from_version != usage.to_version)
+        .count();
+    let latest = match requested {
+        RequestedResourceVersion::Latest => " (latest)",
+        RequestedResourceVersion::Number(_) => "",
+    };
+    let mut message = format!(
+        "rebound {changed} of {} usage(s) of resource '{}' to version {version}{latest}",
+        usages.len(),
+        resource.as_str()
+    );
+    for usage in usages {
+        let unchanged = if usage.from_version == usage.to_version {
+            " unchanged"
+        } else {
+            ""
+        };
+        message.push_str(&format!(
+            "\n- kind={} name={} from={} to={}{unchanged}",
+            resource_usage_kind(usage.node.kind),
+            usage.node.identifier.as_str(),
+            usage.from_version,
+            usage.to_version,
+        ));
+    }
+    Some(message)
+}
+
 pub(in crate::application) fn command_error(message: String) -> CommandResult {
     CommandResult {
         success: false,
@@ -372,6 +490,7 @@ impl SessionServiceImpl {
         statements: Vec<Statement>,
         domain: &DomainName,
         no_op_operations: Option<&BTreeSet<TransactionOperationNumber>>,
+        operation_impacts: Option<&[OperationImpactReport]>,
         first_operation_index: usize,
     ) -> CollectedModelMutations {
         let mut results = vec![None; statements.len()];
@@ -416,7 +535,7 @@ impl SessionServiceImpl {
                     applied.push(AppliedModelMutation {
                         index,
                         model: model_id.clone(),
-                        message: String::new(),
+                        message: String::new().into(),
                     });
                     mutations.push(RegistryMutation::Create(model));
                 }
@@ -429,7 +548,8 @@ impl SessionServiceImpl {
                             "altered schema '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
-                        ),
+                        )
+                        .into(),
                     });
                     mutations.push(RegistryMutation::AlterSchema(alter));
                 }
@@ -442,7 +562,8 @@ impl SessionServiceImpl {
                             "altered JSON wire schema '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
-                        ),
+                        )
+                        .into(),
                     });
                     mutations.push(RegistryMutation::AlterWireJsonSchema(alter));
                 }
@@ -455,7 +576,8 @@ impl SessionServiceImpl {
                             "altered CBOR wire schema '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
-                        ),
+                        )
+                        .into(),
                     });
                     mutations.push(RegistryMutation::AlterWireCborSchema(alter));
                 }
@@ -468,7 +590,8 @@ impl SessionServiceImpl {
                             "altered AVRO wire schema '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
-                        ),
+                        )
+                        .into(),
                     });
                     mutations.push(RegistryMutation::AlterWireAvroSchema(alter));
                 }
@@ -481,7 +604,8 @@ impl SessionServiceImpl {
                             "altered relay '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
-                        ),
+                        )
+                        .into(),
                     });
                     mutations.push(RegistryMutation::AlterRelay(alter));
                 }
@@ -494,7 +618,8 @@ impl SessionServiceImpl {
                             "altered junction '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
-                        ),
+                        )
+                        .into(),
                     });
                     mutations.push(RegistryMutation::AlterJunction(alter));
                 }
@@ -507,7 +632,8 @@ impl SessionServiceImpl {
                             "altered deduplicator '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
-                        ),
+                        )
+                        .into(),
                     });
                     mutations.push(RegistryMutation::AlterDeduplicator(alter));
                 }
@@ -520,7 +646,8 @@ impl SessionServiceImpl {
                             "altered reorderer '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
-                        ),
+                        )
+                        .into(),
                     });
                     mutations.push(RegistryMutation::AlterReorderer(alter));
                 }
@@ -533,7 +660,8 @@ impl SessionServiceImpl {
                             "altered emitter '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
-                        ),
+                        )
+                        .into(),
                     });
                     mutations.push(RegistryMutation::AlterEmitter(alter));
                 }
@@ -546,7 +674,8 @@ impl SessionServiceImpl {
                             "altered ingestor '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
-                        ),
+                        )
+                        .into(),
                     });
                     mutations.push(RegistryMutation::AlterIngestor(alter));
                 }
@@ -559,7 +688,8 @@ impl SessionServiceImpl {
                             "altered reingestor '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
-                        ),
+                        )
+                        .into(),
                     });
                     mutations.push(RegistryMutation::AlterReingestor(alter));
                 }
@@ -572,7 +702,8 @@ impl SessionServiceImpl {
                             "altered generator '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
-                        ),
+                        )
+                        .into(),
                     });
                     mutations.push(RegistryMutation::AlterGenerator(alter));
                 }
@@ -585,7 +716,8 @@ impl SessionServiceImpl {
                             "altered placement '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str(),
-                        ),
+                        )
+                        .into(),
                     });
                     mutations.push(RegistryMutation::AlterPlacement(alter));
                 }
@@ -599,9 +731,47 @@ impl SessionServiceImpl {
                             "dropped model '{}' from domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
-                        ),
+                        )
+                        .into(),
                     });
                     mutations.push(RegistryMutation::Drop(drop));
+                }
+                Statement::RebindResource(rebind) => {
+                    let absolute_index = first_operation_index
+                        .checked_add(index)
+                        .assured("a collected resource rebind is in its transaction step range");
+                    let operation = TransactionOperationNumber::from_index(absolute_index).assured(
+                        "a configured transaction statement limit keeps indices addressable",
+                    );
+                    let impact = operation_impacts.and_then(|impacts| {
+                        impacts.iter().find(|impact| impact.number == operation)
+                    });
+                    let Some(impact) = impact else {
+                        results[index] = Some(command_error(
+                            "REBIND RESOURCE requires a unified transaction plan".to_string(),
+                        ));
+                        continue;
+                    };
+                    refresh_http_tls |= impact.reasons.iter().any(|reason| {
+                        matches!(
+                            reason,
+                            OperationImpactReason::ResourceRebinding {
+                                node,
+                                from_version,
+                                to_version,
+                                ..
+                            } if node.kind == ModelKind::Vhost && from_version != to_version
+                        )
+                    });
+                    applied.push(AppliedModelMutation {
+                        index,
+                        model: ModelName::from(&rebind.resource),
+                        message: AppliedModelMutationMessage::ResourceRebind(
+                            rebind_resource_message(impact).verified(
+                                "a REBIND statement's unified plan carries its rebind operation",
+                            ),
+                        ),
+                    });
                 }
                 _ => unreachable!("model mutation batch contains a non-mutation statement"),
             }
@@ -662,6 +832,33 @@ impl SessionServiceImpl {
             .pause_command_admission_if_armed(self.inner.consensus.local_node_id())
             .await;
 
+        let direct_plan = if transaction_step.is_none()
+            && statements
+                .iter()
+                .any(|statement| matches!(statement, Statement::RebindResource(_)))
+        {
+            let captured =
+                match Box::pin(self.plan_transaction_statements(&domain, &statements, 0, false))
+                    .await
+                {
+                    Ok(captured) => captured,
+                    Err(error) => return command_error(transaction_planning_error_message(&error)),
+                };
+            let Some(step) = captured.plan.steps().first().cloned() else {
+                return command_error(
+                    "resource rebind planning produced no model step".to_string(),
+                );
+            };
+            Some(DirectModelPlan {
+                step,
+                operations: captured.plan.operations().to_vec(),
+                inputs: captured.inputs,
+                schedule_inputs: captured.schedule_inputs,
+            })
+        } else {
+            None
+        };
+
         let _alter_guard = match self.inner.runtime.try_begin_domain_alter(&domain) {
             Some(guard) => guard,
             None => {
@@ -693,8 +890,13 @@ impl SessionServiceImpl {
             applied,
             refresh_http_tls,
         } = {
-            let no_op_operations = match transaction_step.as_ref() {
-                Some(step) => match &step.planned_step.kind {
+            let planned_step = match (&transaction_step, &direct_plan) {
+                (Some(step), _) => Some(&step.planned_step),
+                (None, Some(plan)) => Some(&plan.step),
+                (None, None) => None,
+            };
+            let no_op_operations = match planned_step {
+                Some(step) => match &step.kind {
                     crate::registry::PlannedTransactionStepKind::Models { plan } => {
                         Some(&plan.no_op_operations)
                     }
@@ -706,10 +908,16 @@ impl SessionServiceImpl {
                 Some(step) => step.first_statement,
                 None => 0,
             };
+            let operation_impacts = match (&transaction_step, &direct_plan) {
+                (Some(step), _) => Some(step.operations.as_slice()),
+                (None, Some(plan)) => Some(plan.operations.as_slice()),
+                (None, None) => None,
+            };
             self.collect_model_mutations(
                 statements,
                 &domain,
                 no_op_operations,
+                operation_impacts,
                 first_operation_index,
             )
         };
@@ -720,17 +928,21 @@ impl SessionServiceImpl {
         let mut recorded_transaction = None;
         let mut transaction_application_failure = None;
         let mut transaction_application_deferred = false;
-        if !mutations.is_empty() {
+        if !applied.is_empty() {
             let error_target = applied
                 .first()
                 .map(|mutation| mutation.model.clone())
                 .verified(
                     "every arm that records a mutation records an applied model in the same step",
                 );
-            let transaction_decision = match transaction_step.as_ref() {
+            let planned_step = match (&transaction_step, &direct_plan) {
+                (Some(step), _) => Some(&step.planned_step),
+                (None, Some(plan)) => Some(&plan.step),
+                (None, None) => None,
+            };
+            let transaction_decision = match planned_step {
                 Some(step) => {
-                    let crate::registry::PlannedTransactionStepKind::Models { plan } =
-                        &step.planned_step.kind
+                    let crate::registry::PlannedTransactionStepKind::Models { plan } = &step.kind
                     else {
                         return command_error(
                             "transaction model execution received a non-model plan".to_string(),
@@ -745,30 +957,46 @@ impl SessionServiceImpl {
                         planned,
                         expected_schedule: plan.expected_schedule.clone(),
                         schedule: plan.schedule.clone(),
-                        classified_level: step.planned_step.impact.planned().pause.level(),
-                        planned_relocations: step
-                            .planned_step
-                            .impact
-                            .planned()
-                            .effects
-                            .ownership_moves
-                            .len(),
+                        classified_level: step.impact.planned().pause.level(),
+                        planned_relocations: step.impact.planned().effects.ownership_moves.len(),
                         model_gate: plan.model_gate.clone(),
                         ownership_gate: plan.ownership_gate.clone(),
                     })
                 }
                 None => None,
             };
-            let latest_resolutions = match transaction_step.as_ref() {
-                Some(step) => LatestResolutionReport::Applied.messages(
-                    step.planned_step
-                        .impact
-                        .planned()
-                        .effects
-                        .resource_bindings
-                        .as_slice(),
-                ),
-                None => Vec::new(),
+            let operation_impacts = match (&transaction_step, &direct_plan) {
+                (Some(step), _) => Some(step.operations.as_slice()),
+                (None, Some(plan)) => Some(plan.operations.as_slice()),
+                (None, None) => None,
+            };
+            let latest_resolutions = match (planned_step, operation_impacts) {
+                (Some(step), Some(operation_impacts)) => {
+                    let rebind_operations = operation_impacts
+                        .iter()
+                        .filter_map(|impact| match impact.operation {
+                            TransactionOperation::RebindResource { .. } => Some(impact.number),
+                            _ => None,
+                        })
+                        .collect::<BTreeSet<_>>();
+                    LatestResolutionReport::Applied.messages(
+                        step.impact
+                            .planned()
+                            .effects
+                            .resource_bindings
+                            .as_slice()
+                            .iter()
+                            .filter(|binding| {
+                                !binding
+                                    .attribution
+                                    .operations()
+                                    .iter()
+                                    .any(|operation| rebind_operations.contains(operation))
+                            }),
+                    )
+                }
+                (None, None) => Vec::new(),
+                _ => Vec::new(),
             };
             let planned = match &transaction_decision {
                 Some(decision) => decision.planned.clone(),
@@ -878,12 +1106,22 @@ impl SessionServiceImpl {
                 if is_noop {
                     ScheduleTransition::default()
                 } else {
+                    let captured_inputs = match (&transaction_step, &direct_plan) {
+                        (Some(step), _) => Some(step.inputs.clone()),
+                        (None, Some(plan)) => Some(plan.inputs.clone()),
+                        (None, None) => None,
+                    };
+                    let captured_schedule_inputs = match (&transaction_step, &direct_plan) {
+                        (Some(_), _) => None,
+                        (None, Some(plan)) => Some(plan.schedule_inputs.clone()),
+                        (None, None) => None,
+                    };
                     ScheduleTransition {
                         expected_schedule: decision.expected_schedule.clone(),
                         prepared_schedule: decision.schedule.clone(),
                         planned_relocations: decision.planned_relocations,
-                        inputs: transaction_step.as_ref().map(|step| step.inputs.clone()),
-                        planning: None,
+                        inputs: captured_inputs,
+                        planning: captured_schedule_inputs,
                         transaction_eligibility: transaction_step
                             .as_ref()
                             .map(|step| step.eligibility.clone()),
@@ -1489,6 +1727,45 @@ impl SessionServiceImpl {
                     ));
                 }
             }
+            if let Some(operation_impacts) = operation_impacts {
+                for impact in operation_impacts {
+                    let TransactionOperation::RebindResource {
+                        resource, version, ..
+                    } = &impact.operation
+                    else {
+                        continue;
+                    };
+                    let usage_count = impact
+                        .reasons
+                        .iter()
+                        .filter(|reason| {
+                            matches!(reason, OperationImpactReason::ResourceRebinding { .. })
+                        })
+                        .count();
+                    let rebound_count = impact
+                        .reasons
+                        .iter()
+                        .filter(|reason| {
+                            matches!(
+                                reason,
+                                OperationImpactReason::ResourceRebinding {
+                                    from_version,
+                                    to_version,
+                                    ..
+                                } if from_version != to_version
+                            )
+                        })
+                        .count();
+                    info!(
+                        domain = domain.as_str(),
+                        resource = resource.as_str(),
+                        target_version = *version,
+                        usage_count,
+                        rebound_count,
+                        "rebound resource usages"
+                    );
+                }
+            }
             completed_result = Some(model_mutation_success_result(
                 &results,
                 &applied,
@@ -1710,6 +1987,7 @@ impl SessionServiceImpl {
             | Statement::AlterReingestor(_)
             | Statement::AlterGenerator(_)
             | Statement::AlterPlacement(_)
+            | Statement::RebindResource(_)
             | Statement::Drop(_) => {
                 unreachable!("model mutations are handled before statement dispatch")
             }

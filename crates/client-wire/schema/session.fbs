@@ -358,6 +358,27 @@ table CreateResourceOperation {
   resource: string (required);
 }
 
+/// `VERSION <n>`: exactly this version.
+table ResourceVersionNumber {
+  version: ulong;
+}
+
+/// `VERSION LATEST`: the highest completed version when the statement is applied.
+table LatestResourceVersion {}
+
+/// A resource version as a statement wrote it.
+union RequestedResourceVersion {
+  ResourceVersionNumber,
+  LatestResourceVersion
+}
+
+table RebindResourceOperation {
+  domain: string (required);
+  resource: string (required);
+  requested: RequestedResourceVersion (required);
+  version: ulong;
+}
+
 union TransactionOperation {
   CreateConfigurationOperation,
   AlterConfigurationOperation,
@@ -365,7 +386,8 @@ union TransactionOperation {
   AlterDomainOperation,
   StartDomainOperation,
   StopDomainOperation,
-  CreateResourceOperation
+  CreateResourceOperation,
+  RebindResourceOperation
 }
 
 enum ModelChangeAspect : ubyte {
@@ -460,12 +482,20 @@ table ResourceCatalogReason {
   resource: string (required);
 }
 
+table ResourceRebindingReason {
+  node: NodeRef (required);
+  resource: string (required);
+  previous_version: ulong;
+  target_version: ulong;
+}
+
 union OperationImpactReason {
   ConfigurationReason,
   DomainPlacementReason,
   DomainStartReason,
   DomainStopReason,
-  ResourceCatalogReason
+  ResourceCatalogReason,
+  ResourceRebindingReason
 }
 
 table OperationReason {
@@ -535,20 +565,6 @@ table ResourceCatalogImpact {
   action: ResourceCatalogAction = null;
   /// A non-empty set of operation numbers.
   operations: [ulong] (required);
-}
-
-/// `VERSION <n>`: exactly this version.
-table ResourceVersionNumber {
-  version: ulong;
-}
-
-/// `VERSION LATEST`: the highest completed version when the statement is applied.
-table LatestResourceVersion {}
-
-/// A resource version as a statement wrote it.
-union RequestedResourceVersion {
-  ResourceVersionNumber,
-  LatestResourceVersion
 }
 
 /// The resource version a created or changed node binds.

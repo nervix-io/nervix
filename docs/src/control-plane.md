@@ -156,6 +156,7 @@ transaction.
 Only the bound domain's replicated configuration effects may be queued:
 
 - model `CREATE`, supported model `ALTER`, and model `DROP` statements;
+- `REBIND RESOURCE`, as one atomic model-mutation batch;
 - `ALTER DOMAIN`, `START`, and `STOP`;
 - `CREATE RESOURCE`.
 
@@ -165,6 +166,8 @@ own transaction defines and is no longer offered a model whose `DROP` it has que
 create and drop sequence decides a name, so an intermediate configuration that does not yet resolve
 still completes. Sessions that are not bound to the transaction, including other sessions of the
 same user, are offered committed configuration alone.
+For a `REBIND RESOURCE ... FOR` list, completion further limits each kind to queued-result models
+that bind the named resource.
 
 Read-only `SHOW`, `DESCRIBE`, and `LOOKUP` statements are rejected at queue time. `CREATE DOMAIN`
 and `CREATE USER` are rejected too: neither belongs to a domain, so neither is transaction content.
@@ -181,6 +184,9 @@ configuration, a missing `ALTER` target or field, invalid domain lifecycle, inva
 bindings, and invalid UDF or schedule inputs before the statement is replicated. A successfully
 queued model mutation reports the effective quiesce level of its complete consecutive model run at
 that prefix. Extending the run can raise that level or make cancelling changes a no-op.
+`REBIND RESOURCE` resolves its target and usages from that same prefix. `LATEST` and its impact are
+provisional at admission and are planned again from the captured commit basis. All selected models
+pass ordinary creation and external-resource validation before the one model step can commit.
 A rejected statement does not change the pending count or the transaction's activity time, so the
 client can correct it and continue the same transaction. The admitted result is stored with the
 statement. The same consensus update also stores its stable operation number and the report revision

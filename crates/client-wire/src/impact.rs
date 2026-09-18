@@ -1268,6 +1268,45 @@ fn encode_transaction_operation(
                 operation,
             )
         }
+        TransactionOperation::RebindResource {
+            domain,
+            resource,
+            requested,
+            version,
+        } => {
+            let domain = encoder.text("RebindResourceOperation.domain", domain.as_str())?;
+            let resource = encoder.text("RebindResourceOperation.resource", resource.as_str())?;
+            let requested = match requested {
+                RequestedResourceVersion::Number(version) => EncodedUnion::new(
+                    wire::RequestedResourceVersion::ResourceVersionNumber,
+                    wire::ResourceVersionNumber::create(
+                        encoder.fbb(),
+                        &wire::ResourceVersionNumberArgs { version: *version },
+                    ),
+                ),
+                RequestedResourceVersion::Latest => EncodedUnion::new(
+                    wire::RequestedResourceVersion::LatestResourceVersion,
+                    wire::LatestResourceVersion::create(
+                        encoder.fbb(),
+                        &wire::LatestResourceVersionArgs {},
+                    ),
+                ),
+            };
+            let operation = wire::RebindResourceOperation::create(
+                encoder.fbb(),
+                &wire::RebindResourceOperationArgs {
+                    domain: Some(domain),
+                    resource: Some(resource),
+                    requested_type: requested.discriminant,
+                    requested: Some(requested.value),
+                    version: *version,
+                },
+            );
+            EncodedUnion::new(
+                wire::TransactionOperation::RebindResourceOperation,
+                operation,
+            )
+        }
     };
     Ok(union)
 }
@@ -1315,6 +1354,28 @@ fn decode_transaction_operation(
             resource: decoder.name("CreateResourceOperation.resource", operation.resource())?,
         });
     }
+    if let Some(operation) = report.operation_as_rebind_resource_operation() {
+        let requested = match operation.requested_type() {
+            wire::RequestedResourceVersion::ResourceVersionNumber => {
+                let number = union_member(operation.requested_as_resource_version_number());
+                RequestedResourceVersion::Number(number.version())
+            }
+            wire::RequestedResourceVersion::LatestResourceVersion => {
+                RequestedResourceVersion::Latest
+            }
+            undeclared => {
+                return Err(
+                    decoder.unknown_union("RebindResourceOperation.requested", undeclared.0)
+                );
+            }
+        };
+        return Ok(TransactionOperation::RebindResource {
+            domain: decoder.name("RebindResourceOperation.domain", operation.domain())?,
+            resource: decoder.name("RebindResourceOperation.resource", operation.resource())?,
+            requested,
+            version: operation.version(),
+        });
+    }
     Err(decoder.unknown_union("OperationReport.operation", report.operation_type().0))
 }
 
@@ -1359,6 +1420,28 @@ fn encode_reason<'fbb>(
             );
             EncodedUnion::new(wire::OperationImpactReason::ResourceCatalogReason, catalog)
         }
+        OperationImpactReason::ResourceRebinding {
+            node,
+            resource,
+            from_version,
+            to_version,
+        } => {
+            let node = encode_node_ref(encoder, node)?;
+            let resource = encoder.text("ResourceRebindingReason.resource", resource.as_str())?;
+            let rebinding = wire::ResourceRebindingReason::create(
+                encoder.fbb(),
+                &wire::ResourceRebindingReasonArgs {
+                    node: Some(node),
+                    resource: Some(resource),
+                    previous_version: *from_version,
+                    target_version: *to_version,
+                },
+            );
+            EncodedUnion::new(
+                wire::OperationImpactReason::ResourceRebindingReason,
+                rebinding,
+            )
+        }
     };
     Ok(wire::OperationReason::create(
         encoder.fbb(),
@@ -1383,6 +1466,14 @@ fn decode_reason(
     if let Some(catalog) = reason.reason_as_resource_catalog_reason() {
         return Ok(OperationImpactReason::ResourceCatalog {
             resource: decoder.name("ResourceCatalogReason.resource", catalog.resource())?,
+        });
+    }
+    if let Some(rebinding) = reason.reason_as_resource_rebinding_reason() {
+        return Ok(OperationImpactReason::ResourceRebinding {
+            node: decode_node_ref(decoder, rebinding.node())?,
+            resource: decoder.name("ResourceRebindingReason.resource", rebinding.resource())?,
+            from_version: rebinding.previous_version(),
+            to_version: rebinding.target_version(),
         });
     }
     match reason.reason_type() {

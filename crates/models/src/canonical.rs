@@ -638,6 +638,36 @@ impl Statement {
                     create.body.identifier.as_str()
                 ))
             }
+            Self::RebindResource(rebind) => {
+                let latest = match rebind.version {
+                    crate::RequestedResourceVersion::Number(version) => version.to_string(),
+                    crate::RequestedResourceVersion::Latest => "LATEST".to_string(),
+                };
+                let members = match &rebind.selection {
+                    crate::RebindResourceSelection::All => None,
+                    crate::RebindResourceSelection::Members(members) => Some(
+                        members
+                            .iter()
+                            .map(|member| {
+                                format!(
+                                    "{} {}",
+                                    member.kind.keyword_phrase(),
+                                    member.identifier.as_str()
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                };
+                let for_clause = match members {
+                    Some(members) => format!(" FOR {members}"),
+                    None => String::new(),
+                };
+                Ok(format!(
+                    "REBIND RESOURCE {} TO VERSION {latest}{for_clause};",
+                    rebind.resource.as_str()
+                ))
+            }
             Self::UploadResource(upload) => Ok(format!(
                 "UPLOAD RESOURCE {} VERSION {};",
                 upload.identifier.as_str(),
