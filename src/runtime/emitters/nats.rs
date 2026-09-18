@@ -11,6 +11,9 @@ use async_nats::{
     message::OutboundMessage,
 };
 use futures_util::{FutureExt, SinkExt};
+use nervix_connector::{
+    ParsedRetryPolicy, ResolvedClientConfig, client_config_entries, client_tls_paths,
+};
 use nervix_models::SubjectName;
 
 use super::*;

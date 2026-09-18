@@ -1,3 +1,4 @@
+use nervix_connector::{ResolvedClientConfig, client_tls_paths, optional_client_config_value};
 use nervix_models::TableName;
 pub(in crate::runtime) use sqlx::postgres::PgPool;
 use sqlx::{

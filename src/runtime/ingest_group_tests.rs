@@ -10,6 +10,7 @@
 use std::sync::Arc as StdArc;
 
 use ahash::HashMap;
+use nervix_connector::{IngestMetadataRow, NoIngestHeaders};
 use nervix_execution::sync::ArcSwapOption;
 use nervix_models::{
     AckMode, CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,

@@ -4,6 +4,7 @@ use mysql_async::{
     Params as MySqlParams, PoolConstraints as MySqlPoolConstraints, PoolOpts as MySqlPoolOpts,
     SslOpts as MySqlSslOpts, Value as MySqlValue, prelude::Queryable as MySqlQueryable,
 };
+use nervix_connector::{ResolvedClientConfig, optional_client_config_value};
 use nervix_models::TableName;
 
 use super::*;

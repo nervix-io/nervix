@@ -1,16 +1,24 @@
+//! The shared settings an HTTP-speaking connector builds its client from.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Building an HTTP client from a client's entries: the request timeout, the optional
+//!   CA file and the optional client identity.
+//! - **Depends on.** The client configuration's entries, TLS paths and PEM files, and `reqwest`.
+//! - **Must not know.** Which connector sends requests through the client, or what it sends.
+
 use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
 use reqwest::{Certificate as HttpCertificate, Client as HttpClient, Identity as HttpIdentity};
 use thiserror::Error;
 
-use super::{
-    client_config::{client_identity_pem, client_tls_paths, read_tls_file},
-    optional_client_config_value,
+use crate::client_config::{
+    client_identity_pem, client_tls_paths, optional_client_config_value, read_tls_file,
 };
 
 #[derive(Debug, Error)]
-pub(in crate::runtime) enum HttpClientConfigError {
+pub enum HttpClientConfigError {
     #[error("invalid {label} timeout_ms")]
     InvalidTimeout { label: &'static str },
     #[error("failed to read {label} TLS configuration")]
@@ -23,20 +31,17 @@ pub(in crate::runtime) enum HttpClientConfigError {
     Build { label: &'static str },
 }
 
-pub(in crate::runtime) struct HttpClientConfig<'a> {
+pub struct HttpClientConfig<'a> {
     entries: &'a [nervix_models::ClientConfigEntry],
     label: &'static str,
 }
 
 impl<'a> HttpClientConfig<'a> {
-    pub(in crate::runtime) fn new(
-        entries: &'a [nervix_models::ClientConfigEntry],
-        label: &'static str,
-    ) -> Self {
+    pub fn new(entries: &'a [nervix_models::ClientConfigEntry], label: &'static str) -> Self {
         Self { entries, label }
     }
 
-    pub(in crate::runtime) fn build(&self) -> Result<HttpClient, Report<HttpClientConfigError>> {
+    pub fn build(&self) -> Result<HttpClient, Report<HttpClientConfigError>> {
         self.builder()?.build().map_err(|source| {
             Report::new(HttpClientConfigError::Build { label: self.label })
                 .attach_printable(source.to_string())
@@ -79,13 +84,12 @@ impl<'a> HttpClientConfig<'a> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{ClientConfigEntry, CreateClientPrometheus};
+    use nervix_models::ClientConfigEntry;
 
     use super::*;
-    use crate::runtime::{ingestors, named};
 
     #[test]
-    fn http_and_prometheus_clients_validate_timeout_configuration() {
+    fn http_client_validates_timeout_configuration() {
         let client = HttpClientConfig::new(
             &[ClientConfigEntry {
                 key: "timeout_ms".to_string(),
@@ -106,20 +110,6 @@ mod tests {
         .build()
         .expect_err("invalid timeout");
         assert!(err.to_string().contains("invalid HTTP timeout_ms"));
-
-        let err = ingestors::prometheus::PrometheusIngestor::client_from_config_for_test(
-            &CreateClientPrometheus::<u64> {
-                name: named("prom"),
-                mount: None,
-                config: vec![ClientConfigEntry {
-                    key: "timeout_ms".to_string(),
-                    value: "oops".to_string(),
-                }],
-            }
-            .config,
-        )
-        .expect_err("invalid prometheus timeout");
-        assert!(err.to_string().contains("Prometheus timeout_ms"));
     }
 
     #[test]

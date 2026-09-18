@@ -14,6 +14,10 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, TimeUnit};
 use flate2::{Compression as GzipLevel, write::GzEncoder};
+use nervix_connector::{
+    HttpClientConfig, ResolvedClientConfig, client_config_entries, client_tls_paths,
+    optional_client_config_value, read_tls_file,
+};
 use nervix_models::EmitterName;
 use opentelemetry_proto::tonic::{
     collector::{
@@ -880,7 +884,7 @@ impl OtelEmitter {
 
     fn observation_time_unix_nano() -> Result<u64, OtelRecordError> {
         Self::timestamp_to_unix_nano(
-            crate::runtime::physical_time::actual_utc_now().unix_nanos(),
+            nervix_connector::physical_time::actual_utc_now().unix_nanos(),
             "observed_time",
         )
     }
@@ -1077,7 +1081,7 @@ impl OtelTransport {
                     .headers()
                     .get(RETRY_AFTER)
                     .and_then(|value| value.to_str().ok()),
-                crate::runtime::physical_time::actual_utc_now().into_datetime(),
+                nervix_connector::physical_time::actual_utc_now().into_datetime(),
             );
             let message = format!("OTEL HTTP export returned status {status}");
             return OtelTransportOutcome::Failed(match delay {
@@ -2305,14 +2309,14 @@ mod tests {
     #[test]
     fn observation_timestamp_samples_actual_utc() {
         let before = OtelEmitter::timestamp_to_unix_nano(
-            crate::runtime::physical_time::actual_utc_now().unix_nanos(),
+            nervix_connector::physical_time::actual_utc_now().unix_nanos(),
             "before",
         )
         .expect("actual UTC must be after the Unix epoch");
         let observed = OtelEmitter::observation_time_unix_nano()
             .expect("actual UTC observation time must be after the Unix epoch");
         let after = OtelEmitter::timestamp_to_unix_nano(
-            crate::runtime::physical_time::actual_utc_now().unix_nanos(),
+            nervix_connector::physical_time::actual_utc_now().unix_nanos(),
             "after",
         )
         .expect("actual UTC must be after the Unix epoch");

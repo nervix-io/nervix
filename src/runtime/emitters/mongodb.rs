@@ -11,6 +11,7 @@ use ::mongodb::{
         UpdateOneModel as MongoDbUpdateOneModel, WriteModel as MongoDbWriteModel,
     },
 };
+use nervix_connector::{ResolvedClientConfig, client_config_entries, optional_client_config_value};
 use nervix_models::CollectionName;
 
 use super::*;

@@ -43,6 +43,9 @@ use arrow_select::{concat::concat as concat_arrow_arrays, filter::filter as filt
 use error_stack::{Report, ResultExt};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder};
 use iceberg_storage_opendal::OpenDalStorageFactory;
+use nervix_connector::{
+    ResolvedClientConfig, client_config_entries, physical_time::actual_utc_now,
+};
 use nervix_models::TableName;
 use parquet::file::properties::WriterProperties;
 use thiserror::Error;
