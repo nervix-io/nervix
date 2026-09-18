@@ -18,10 +18,10 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
     ConsensusError, ConsensusTransactionError, DomainPlanningInputs, ReplicatedTransaction,
     TransactionActivity, TransactionApplyingStep, TransactionCommandResult,
-    TransactionCommitAdmissionPlan, TransactionCommitAdvance, TransactionDiagnostic,
-    TransactionOutcome, TransactionQueueAdmission, TransactionQueueLimits, TransactionQueueRequest,
-    TransactionReportArchive, TransactionScheduleEligibility, TransactionState,
-    TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
+    TransactionCommitAdmissionFailure, TransactionCommitAdmissionPlan, TransactionCommitAdvance,
+    TransactionDiagnostic, TransactionOutcome, TransactionQueueAdmission, TransactionQueueLimits,
+    TransactionQueueRequest, TransactionReportArchive, TransactionScheduleEligibility,
+    TransactionState, TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
     TransactionStepResult,
 };
 use nervix_models::{
@@ -206,6 +206,16 @@ fn transaction_planning_basis(
 
 fn transaction_planning_error_message(error: &Report<TransactionPlanningError>) -> String {
     let context = error.to_string();
+    match error.downcast_ref::<String>() {
+        Some(message) => format!("{context}: {message}"),
+        None => context,
+    }
+}
+
+fn transaction_commit_error_message(error: &Report<TransactionCommitError>) -> String {
+    let context = error
+        .downcast_ref::<TransactionPlanningError>()
+        .map_or_else(|| error.to_string(), ToString::to_string);
     match error.downcast_ref::<String>() {
         Some(message) => format!("{context}: {message}"),
         None => context,
@@ -1130,7 +1140,21 @@ impl SessionServiceImpl {
             TransactionState::Open(_) => {
                 let prepared = match self.prepare_transaction_commit(&current).await {
                     Ok(prepared) => prepared,
-                    Err(error) => return command_error(error.to_string()),
+                    Err(error) => {
+                        let message = transaction_commit_error_message(&error);
+                        match self
+                            .fail_incomplete_transaction_commit(&current, &owner, &error)
+                            .await
+                        {
+                            Ok(Some(transaction)) => {
+                                return standalone_transaction_result(&transaction);
+                            }
+                            Ok(None) => return command_error(message),
+                            Err(error) => {
+                                return self.transaction_consensus_error_response(error).await;
+                            }
+                        }
+                    }
                 };
                 match self
                     .inner
@@ -1487,6 +1511,74 @@ impl SessionServiceImpl {
         })
     }
 
+    async fn fail_incomplete_transaction_commit(
+        &self,
+        transaction: &ReplicatedTransaction,
+        owner: &UserName,
+        failure: &Report<TransactionCommitError>,
+    ) -> Result<Option<ReplicatedTransaction>, ConsensusTransactionError> {
+        let statements = transaction
+            .statements
+            .iter()
+            .map(|queued| queued.statement.clone())
+            .collect::<Vec<_>>();
+        let captured = match self
+            .plan_transaction_statements(&transaction.domain, &statements, 0, true)
+            .await
+        {
+            Ok(captured) => captured,
+            Err(_) => return Ok(None),
+        };
+        let report = match captured.plan.report() {
+            Ok(report) => report,
+            Err(_) => return Ok(None),
+        };
+        if report.completeness().is_complete() {
+            return Ok(None);
+        }
+        let planned_operation = failure
+            .downcast_ref::<TransactionPlanningError>()
+            .and_then(TransactionPlanningError::operation);
+        let diagnosed_operation = report
+            .completeness()
+            .diagnostics()
+            .iter()
+            .find_map(|diagnostic| diagnostic.operation);
+        let first_operation = report
+            .execution_steps()
+            .first()
+            .map(|step| step.operations().first());
+        let Some(operation) = planned_operation
+            .or(diagnosed_operation)
+            .or(first_operation)
+        else {
+            return Ok(None);
+        };
+        let report = match TransactionReportArchive::new(transaction.id.clone(), report) {
+            Ok(report) => report,
+            Err(_) => return Ok(None),
+        };
+        let expected_preview = transaction
+            .latest_preview()
+            .cloned()
+            .unwrap_or_else(|| report.identity().clone());
+        let failed = self
+            .inner
+            .consensus
+            .fail_transaction_commit_admission(TransactionCommitAdmissionFailure {
+                id: transaction.id.clone(),
+                owner: owner.clone(),
+                activity: self.transaction_activity(),
+                expected_preview,
+                report,
+                inputs: captured.inputs,
+                operation,
+                error: transaction_commit_error_message(failure),
+            })
+            .await?;
+        Ok(Some(failed))
+    }
+
     fn transaction_registry_mutation(
         statement: &Statement,
     ) -> RegistryMutation<RequestedResourceVersion> {
@@ -1553,28 +1645,41 @@ impl SessionServiceImpl {
             return command_error(format!("transaction '{id}' is unknown"));
         };
         let started = match &current.state {
-            TransactionState::Open(_) => {
-                let prepared = match self.prepare_transaction_commit(&current).await {
-                    Ok(prepared) => prepared,
-                    Err(error) => return command_error(error.to_string()),
-                };
-                match self
-                    .inner
-                    .consensus
-                    .start_transaction_commit(
-                        id.clone(),
-                        subscriptions.user.clone(),
-                        self.transaction_activity(),
-                        prepared.expected_preview,
-                        prepared.report,
-                        prepared.plan,
-                    )
-                    .await
-                {
-                    Ok(transaction) => transaction,
-                    Err(error) => return self.transaction_consensus_error_response(error).await,
+            TransactionState::Open(_) => match self.prepare_transaction_commit(&current).await {
+                Ok(prepared) => {
+                    match self
+                        .inner
+                        .consensus
+                        .start_transaction_commit(
+                            id.clone(),
+                            subscriptions.user.clone(),
+                            self.transaction_activity(),
+                            prepared.expected_preview,
+                            prepared.report,
+                            prepared.plan,
+                        )
+                        .await
+                    {
+                        Ok(transaction) => transaction,
+                        Err(error) => {
+                            return self.transaction_consensus_error_response(error).await;
+                        }
+                    }
                 }
-            }
+                Err(error) => {
+                    let message = transaction_commit_error_message(&error);
+                    match self
+                        .fail_incomplete_transaction_commit(&current, &subscriptions.user, &error)
+                        .await
+                    {
+                        Ok(Some(transaction)) => transaction,
+                        Ok(None) => return command_error(message),
+                        Err(error) => {
+                            return self.transaction_consensus_error_response(error).await;
+                        }
+                    }
+                }
+            },
             TransactionState::Committing(_) => current,
             TransactionState::Finished(_) => {
                 self.release_session_transaction_binding(subscriptions);

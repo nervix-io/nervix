@@ -308,6 +308,28 @@ pub(crate) enum TransactionPlanningError {
     PartialPlanHasNoTransactionReport { first_operation: usize },
 }
 
+impl TransactionPlanningError {
+    pub(crate) const fn operation(&self) -> Option<TransactionOperationNumber> {
+        match self {
+            Self::InvalidOperation { operation }
+            | Self::ResourceVersion { operation, .. }
+            | Self::ModelPreflight { operation, .. }
+            | Self::ExternalModelValidation { operation }
+            | Self::UdfPreparation { operation } => Some(*operation),
+            Self::DomainNotFound { .. }
+            | Self::DomainPaused { .. }
+            | Self::ConcurrentDomainAlter { .. }
+            | Self::DomainAlreadyRunning { .. }
+            | Self::DomainAlreadyStopped { .. }
+            | Self::DomainStartGenerationOverflow { .. }
+            | Self::ResourceAlreadyExists { .. }
+            | Self::InvalidImpactReport { .. }
+            | Self::PlanningBasisEncoding
+            | Self::PartialPlanHasNoTransactionReport { .. } => None,
+        }
+    }
+}
+
 struct ModelContribution {
     reasons: Vec<OperationImpactReason>,
     effects: ImpactEffects,

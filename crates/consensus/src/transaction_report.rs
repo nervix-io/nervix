@@ -14,8 +14,9 @@ use error_stack::Report;
 use fjall::Keyspace;
 use nervix_models::{
     AffectedTopology, AttributedImpactNode, CanonicalImpactSet, DomainName,
-    ExecutionStepImpactReport, ImpactReportCompleteness, ImpactTopology, ImpactTopologyEdge,
-    OperationImpactReport, TransactionImpactReport, TransactionPreviewIdentity,
+    ExecutionStepImpactReport, ExecutionStepOutcome, ImpactDiagnostic, ImpactDiagnosticKind,
+    ImpactReportCompleteness, ImpactTopology, ImpactTopologyEdge, OperationImpactReport,
+    TransactionImpactReport, TransactionOperationNumber, TransactionPreviewIdentity,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -269,6 +270,28 @@ impl TransactionReportArchive {
         self.header.completeness.is_complete()
     }
 
+    pub(crate) fn incomplete_failure_step(
+        &self,
+        operation: TransactionOperationNumber,
+    ) -> Option<usize> {
+        if self.is_complete()
+            || !self
+                .header
+                .completeness
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| {
+                    diagnostic.operation.is_none() || diagnostic.operation == Some(operation)
+                })
+        {
+            return None;
+        }
+        self.execution_steps
+            .iter()
+            .find(|step| step.report.operations().contains(operation))
+            .map(|step| step.report.operations().first_index())
+    }
+
     pub fn matches_commit_plan(&self, plan: &crate::TransactionCommitPlan) -> bool {
         self.header.execution_step_count == plan.steps.len()
             && self
@@ -476,6 +499,54 @@ impl TransactionReportRecords {
             .map_err(|_| Report::new(TransactionReportStoreError::InvalidArchive))?;
         *self = candidate;
         Ok(())
+    }
+
+    pub(crate) fn fail_execution_step(
+        &mut self,
+        identity: &TransactionPreviewIdentity,
+        operation: TransactionOperationNumber,
+        error: &str,
+    ) -> error_stack::Result<usize, TransactionReportStoreError> {
+        let report = self
+            .report(identity)
+            .map_err(|_| Report::new(TransactionReportStoreError::InvalidArchive))?;
+        if !report
+            .completeness()
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| {
+                diagnostic.operation.is_none() || diagnostic.operation == Some(operation)
+            })
+        {
+            return Err(Report::new(TransactionReportStoreError::StepMismatch));
+        }
+        let mut failed = report
+            .execution_steps()
+            .iter()
+            .find(|step| step.operations().contains(operation))
+            .cloned()
+            .ok_or_else(|| Report::new(TransactionReportStoreError::StepMismatch))?;
+        let failing_step = failed.operations().first_index();
+        let diagnostic = ImpactDiagnostic {
+            kind: ImpactDiagnosticKind::Planning,
+            operation: Some(operation),
+            message: error.to_string(),
+        };
+        match &failed.actual().outcome {
+            ExecutionStepOutcome::Unattempted => {
+                failed.actual_mut().outcome = ExecutionStepOutcome::Failed { diagnostic };
+            }
+            ExecutionStepOutcome::Failed {
+                diagnostic: retained,
+            } if retained == &diagnostic => return Ok(failing_step),
+            ExecutionStepOutcome::Applying
+            | ExecutionStepOutcome::Applied
+            | ExecutionStepOutcome::Failed { .. } => {
+                return Err(Report::new(TransactionReportStoreError::StepMismatch));
+            }
+        }
+        self.replace_execution_step(identity, failed)?;
+        Ok(failing_step)
     }
 
     fn validate_archive(

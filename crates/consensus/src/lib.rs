@@ -110,13 +110,13 @@ mod wire;
 
 pub use transaction::{
     FinishedTransaction, ReplicatedTransaction, TransactionActivity, TransactionApplyingStep,
-    TransactionCommandResult, TransactionCommitAdvance, TransactionCommitPlan,
-    TransactionCommitPlanHeader, TransactionCommitPlanStep, TransactionCommitProgress,
-    TransactionCommitStepKind, TransactionDiagnostic, TransactionEntityGatePlan,
-    TransactionModelTransition, TransactionMutationError, TransactionMutationResponse,
-    TransactionOutcome, TransactionQueueAdmission, TransactionQueueLimits, TransactionQueueRequest,
-    TransactionState, TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
-    TransactionStepResult,
+    TransactionCommandResult, TransactionCommitAdmissionFailure, TransactionCommitAdvance,
+    TransactionCommitPlan, TransactionCommitPlanHeader, TransactionCommitPlanStep,
+    TransactionCommitProgress, TransactionCommitStepKind, TransactionDiagnostic,
+    TransactionEntityGatePlan, TransactionModelTransition, TransactionMutationError,
+    TransactionMutationResponse, TransactionOutcome, TransactionQueueAdmission,
+    TransactionQueueLimits, TransactionQueueRequest, TransactionState, TransactionStatement,
+    TransactionStatementRequest, TransactionStepEffect, TransactionStepResult,
 };
 pub use transaction_plan::{
     FrozenTransactionCommitStep, TransactionCommitAdmissionPlan, TransactionCommitPlanBuildError,
@@ -467,6 +467,9 @@ pub enum ConsensusCommand {
         report: Box<TransactionReportArchive>,
         plan: Box<TransactionCommitAdmissionPlan>,
     },
+    FailTransactionCommitAdmission {
+        failure: Box<TransactionCommitAdmissionFailure>,
+    },
     AdvanceTransactionCommit {
         id: String,
         expected_next_statement: usize,
@@ -644,6 +647,9 @@ impl std::fmt::Display for ConsensusCommand {
             Self::TouchTransaction { id, .. } => write!(f, "touch-transaction:{id}"),
             Self::StartTransactionCommit { id, .. } => {
                 write!(f, "start-transaction-commit:{id}")
+            }
+            Self::FailTransactionCommitAdmission { failure } => {
+                write!(f, "fail-transaction-commit-admission:{}", failure.id)
             }
             Self::AdvanceTransactionCommit {
                 id,
@@ -3260,6 +3266,16 @@ impl Proposer {
         .await
     }
 
+    pub async fn fail_transaction_commit_admission(
+        &self,
+        failure: TransactionCommitAdmissionFailure,
+    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+        self.write_transaction(ConsensusCommand::FailTransactionCommitAdmission {
+            failure: Box::new(failure),
+        })
+        .await
+    }
+
     pub async fn advance_transaction_commit(
         &self,
         advance: TransactionCommitAdvance,
@@ -4921,6 +4937,144 @@ fn apply_consensus_command_at(
                     .insert(transaction.domain.clone(), lease);
             }
             state.transactions.insert(id.clone(), transaction.clone());
+            changes.transactions_changed = true;
+            return AppliedConsensusCommand::transaction(Ok(transaction), changes);
+        }
+        ConsensusCommand::FailTransactionCommitAdmission { failure } => {
+            let outcome_revision = match &state.last_applied_log_id {
+                Some(log_id) => log_id.index,
+                None => 0,
+            };
+            let Some(mut transaction) = state.transactions.get(&failure.id).cloned() else {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::Unknown {
+                        id: failure.id.clone(),
+                    }),
+                    changes,
+                );
+            };
+            if let Err(error) = transaction.ensure_owner(&failure.owner) {
+                return AppliedConsensusCommand::transaction(Err(error), changes);
+            }
+            match transaction.expire(failure.activity.last_activity_at(), outcome_revision) {
+                Ok(true) => {
+                    if let Some(preview) = transaction.latest_preview() {
+                        state.transaction_reports.retain_revision(preview);
+                    }
+                    state
+                        .transactions
+                        .insert(failure.id.clone(), transaction.clone());
+                    changes.transactions_changed = true;
+                    return AppliedConsensusCommand::transaction(Ok(transaction), changes);
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    return AppliedConsensusCommand::transaction(Err(error), changes);
+                }
+            }
+            let current_preview = failure.report.identity();
+            let Some(failing_step) = failure.report.incomplete_failure_step(failure.operation)
+            else {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::InvalidCommitFailure {
+                        id: failure.id.clone(),
+                    }),
+                    changes,
+                );
+            };
+            if current_preview.transaction_id != failure.id
+                || failure.report.domain() != &transaction.domain
+                || failure.inputs.domain() != &transaction.domain
+                || current_preview.position.accepted_operations() != transaction.statement_count
+            {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::InvalidCommitFailure {
+                        id: failure.id.clone(),
+                    }),
+                    changes,
+                );
+            }
+            if let Err(reason) = validate_domain_planning_inputs(state, &failure.inputs) {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::PlanningInputsChanged {
+                        id: failure.id.clone(),
+                        reason: reason.to_string(),
+                    }),
+                    changes,
+                );
+            }
+            if failure.expected_preview != *current_preview {
+                let mut transaction_reports = state.transaction_reports.clone();
+                if transaction_reports.insert(failure.report.clone()).is_err() {
+                    return AppliedConsensusCommand::transaction(
+                        Err(TransactionMutationError::ReportConflict {
+                            id: failure.id.clone(),
+                        }),
+                        changes,
+                    );
+                }
+                transaction.set_latest_preview(current_preview.clone());
+                transaction_reports.retain_revision(current_preview);
+                state.transaction_reports = transaction_reports;
+                state
+                    .transactions
+                    .insert(failure.id.clone(), transaction.clone());
+                changes.transactions_changed = true;
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::PreviewStale {
+                        expected: Box::new(failure.expected_preview.clone()),
+                        current: Box::new(current_preview.clone()),
+                    }),
+                    changes,
+                );
+            }
+            let failure_decision = match transaction.fail_commit_admission(
+                &failure.owner,
+                failure.activity,
+                outcome_revision,
+                current_preview,
+                failing_step,
+                &failure.error,
+            ) {
+                Ok(decision) => decision,
+                Err(error) => {
+                    return AppliedConsensusCommand::transaction(Err(error), changes);
+                }
+            };
+            match failure_decision {
+                transaction::TransactionCommitFailureDecision::Existing => {
+                    return AppliedConsensusCommand::transaction(Ok(transaction), changes);
+                }
+                transaction::TransactionCommitFailureDecision::Expired => {
+                    if let Some(preview) = transaction.latest_preview() {
+                        state.transaction_reports.retain_revision(preview);
+                    }
+                    state
+                        .transactions
+                        .insert(failure.id.clone(), transaction.clone());
+                    changes.transactions_changed = true;
+                    return AppliedConsensusCommand::transaction(Ok(transaction), changes);
+                }
+                transaction::TransactionCommitFailureDecision::Failed => {}
+            }
+            let mut transaction_reports = state.transaction_reports.clone();
+            if transaction_reports.insert(failure.report.clone()).is_err()
+                || transaction_reports
+                    .fail_execution_step(current_preview, failure.operation, &failure.error)
+                    .is_err()
+            {
+                return AppliedConsensusCommand::transaction(
+                    Err(TransactionMutationError::ReportConflict {
+                        id: failure.id.clone(),
+                    }),
+                    changes,
+                );
+            }
+            transaction_reports.retain_revision(current_preview);
+            state.transaction_reports = transaction_reports;
+            state
+                .transactions
+                .insert(failure.id.clone(), transaction.clone());
             changes.transactions_changed = true;
             return AppliedConsensusCommand::transaction(Ok(transaction), changes);
         }

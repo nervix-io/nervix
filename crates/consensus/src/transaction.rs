@@ -8,7 +8,8 @@ use nervix_models::{
     ClusterNodeIdentity, CommandExecutionReference, DomainClockState, DomainName, DomainSchedule,
     DomainStartPoint, DomainState, ExecutionStepImpactReport, ExecutionStepOutcome,
     ImpactDiagnostic, ImpactDiagnosticKind, ResourceName, Statement, Timestamp,
-    TransactionOperationAdmission, TransactionOperationRange, TransactionPreviewIdentity, UserName,
+    TransactionOperationAdmission, TransactionOperationNumber, TransactionOperationRange,
+    TransactionPreviewIdentity, UserName,
 };
 pub use nervix_models::{
     TransactionCommitPlan, TransactionCommitPlanHeader, TransactionCommitPlanStep,
@@ -111,6 +112,21 @@ pub struct TransactionQueueRequest {
     pub statement: TransactionStatement,
     pub report: TransactionReportArchive,
     pub limits: TransactionQueueLimits,
+}
+
+/// A complete, side-effect-free planning failure proposed against one identified preview.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct TransactionCommitAdmissionFailure {
+    pub id: String,
+    pub owner: UserName,
+    pub activity: TransactionActivity,
+    pub expected_preview: TransactionPreviewIdentity,
+    pub report: TransactionReportArchive,
+    pub inputs: DomainPlanningInputs,
+    pub operation: TransactionOperationNumber,
+    pub error: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,6 +355,13 @@ enum OpenActivityDecision {
     Active,
     Expired,
     NotOpen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransactionCommitFailureDecision {
+    Failed,
+    Expired,
+    Existing,
 }
 
 impl TransactionState {
@@ -689,6 +712,62 @@ impl ReplicatedTransaction {
             domain_mutation,
         }));
         Ok(())
+    }
+
+    pub(crate) fn fail_commit_admission(
+        &mut self,
+        owner: &UserName,
+        activity: TransactionActivity,
+        outcome_revision: u64,
+        preview: &TransactionPreviewIdentity,
+        failing_step: usize,
+        error: &str,
+    ) -> Result<TransactionCommitFailureDecision, TransactionMutationError> {
+        self.ensure_owner(owner)?;
+        if self.latest_preview.as_ref() == Some(preview)
+            && matches!(
+                &self.state,
+                TransactionState::Finished(FinishedTransaction {
+                    outcome: TransactionOutcome::Failed {
+                        failing_step: retained_step,
+                        error: retained_error,
+                    },
+                    ..
+                }) if *retained_step == failing_step && retained_error == error
+            )
+        {
+            return Ok(TransactionCommitFailureDecision::Existing);
+        }
+        match self.expire_open_if_inactive(activity, outcome_revision) {
+            OpenActivityDecision::Active => {}
+            OpenActivityDecision::Expired => {
+                return Ok(TransactionCommitFailureDecision::Expired);
+            }
+            OpenActivityDecision::NotOpen => return Err(self.not_open_error()),
+        }
+        if failing_step >= self.statements.len() {
+            return Err(TransactionMutationError::InvalidProgress {
+                id: self.id.clone(),
+                next: failing_step,
+                statement_count: self.statements.len(),
+            });
+        }
+        let TransactionState::Open(current) = &mut self.state else {
+            return Err(self.not_open_error());
+        };
+        current.renew(activity);
+        let finished_at = current.last_activity_at();
+        self.latest_preview = Some(preview.clone());
+        self.finish(
+            finished_at,
+            outcome_revision,
+            TransactionOutcome::Failed {
+                failing_step,
+                error: error.to_string(),
+            },
+            Vec::new(),
+        );
+        Ok(TransactionCommitFailureDecision::Failed)
     }
 
     pub(crate) fn touch(
@@ -1058,6 +1137,8 @@ pub enum TransactionMutationError {
     },
     #[error("transaction '{id}' commit plan does not match its complete preview")]
     InvalidCommitPlan { id: String },
+    #[error("transaction '{id}' commit failure does not match its incomplete preview")]
+    InvalidCommitFailure { id: String },
     #[error("transaction '{id}' planning inputs changed before commit admission: {reason}")]
     PlanningInputsChanged { id: String, reason: String },
     #[error(
