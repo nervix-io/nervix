@@ -47,10 +47,11 @@ Feature: Expression function semantics
         TO normalized_greetings
           INHERIT ALL
           SET uppered = upper(input.raw),
-              uppered_again = upper(input.raw),
+              uppered_again = upper(output.uppered),
               lowered = lower(input.raw),
               literal_uppered = upper('Grüßen'),
-              agrees = upper(input.raw) = upper('Grüßen')
+              agrees = output.uppered_again = upper('Grüßen')
+          WHERE output.agrees
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       CREATE SUBSCRIPTION normalized_greetings_subscription TO normalized_greetings;

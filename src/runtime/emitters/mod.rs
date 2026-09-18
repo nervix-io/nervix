@@ -1318,7 +1318,7 @@ fn compile_sql_values_program(
             assignments,
             ..nervix_models::RouteConstruction::default()
         },
-        nervix_vm::SemanticNamespaces::new("input", namespace),
+        nervix_vm::SemanticScopePolicy::read_write("input", namespace),
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
@@ -4747,7 +4747,7 @@ impl EmitterBatchContext<'_> {
         let plan = match plan_filter_map_messages(
             "emitter",
             self.emitter,
-            "FROM WHERE",
+            MessageErrorOperation::SourceWhere,
             program,
             batch,
             execution_now,

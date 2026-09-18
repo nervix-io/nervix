@@ -17,7 +17,7 @@ use nervix_models::{
     ProcessorOutput, ProcessorOutputs, RelayName, RouteConstruction, SchemaField, SchemaName,
 };
 use nervix_vm::{
-    CompileBinding, CompileOptions, OutputMode, SemanticNamespaces,
+    CompileBinding, CompileOptions, OutputMode, SemanticScopePolicy,
     compile_program_with_options_for_bindings_with_sensitivity,
     infer_set_expr_types_for_bindings_with_udfs, lower_finalized_output_filter,
     lower_generated_route, lower_route_construction, lower_set_only_route,
@@ -816,7 +816,7 @@ fn validate_where_program_for_scoped_internal_schemas(
             where_clause: Some(where_program.clone()),
             ..RouteConstruction::default()
         },
-        SemanticNamespaces::new(input_namespace, "__invalid_filter_target"),
+        SemanticScopePolicy::read_only(input_namespace),
     )
     .map_err(|reason| {
         Report::new(RegistryError::InvalidModel {
@@ -1050,7 +1050,7 @@ pub(in crate::registry) fn ensure_deduplicator_key_compiles(
             assignments,
             ..RouteConstruction::default()
         },
-        SemanticNamespaces::new("input", "input"),
+        SemanticScopePolicy::read_write("input", "input"),
     )
     .map_err(|reason| {
         Report::new(RegistryError::InvalidModel {
@@ -1159,10 +1159,7 @@ fn validate_correlate_where_for_internal_schemas(
             where_clause: Some(correlator.correlate_where.clone()),
             ..RouteConstruction::default()
         },
-        SemanticNamespaces::new(
-            "__invalid_correlator_bare_read",
-            "__invalid_correlator_target",
-        ),
+        SemanticScopePolicy::unavailable(),
     )
     .map_err(|reason| {
         Report::new(RegistryError::InvalidModel {
@@ -1233,7 +1230,7 @@ pub(in crate::registry) fn validate_correlator_output(
     }
     let parsed = lower_route_construction(
         &output.construction,
-        SemanticNamespaces::new("__invalid_correlator_bare_read", "output"),
+        SemanticScopePolicy::write_only("output"),
     )
     .map_err(|reason| {
         Report::new(RegistryError::InvalidModel {
@@ -1442,7 +1439,7 @@ pub(in crate::registry) fn ensure_inferencer_input_mappings(
                 }],
                 ..RouteConstruction::default()
             },
-            SemanticNamespaces::new("input", "input"),
+            SemanticScopePolicy::read_write("input", "input"),
         )
         .map_err(|reason| {
             Report::new(RegistryError::InvalidModel {
