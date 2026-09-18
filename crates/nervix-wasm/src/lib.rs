@@ -10,6 +10,11 @@
 //! - **Must not know.** NSPL, the registry, the execution graph, or where a guest's output is
 //!   routed. It calls a guest and returns what the guest produced.
 
+#[cfg(feature = "shuttle")]
+extern crate shuttle_parking_lot as parking_lot;
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+
 use std::{
     convert::Infallible,
     num::NonZeroU64,

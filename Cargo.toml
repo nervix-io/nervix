@@ -20,17 +20,22 @@ benchmarks = []
 # I/O modules remain Tokio's real implementations through the wrapper crates.
 shuttle = [
   "dep:shuttle",
-  "dashmap/shuttle",
+  "dep:shuttle-dashmap",
+  "dep:shuttle-parking-lot",
+  "dep:shuttle-tokio",
+  "dep:shuttle-tokio-stream",
+  "dep:shuttle-tokio-util",
   "nervix-client-core/shuttle",
+  "nervix-connector/shuttle",
   "nervix-consensus/shuttle",
   "nervix-execution/shuttle",
   "nervix-interconnect/shuttle",
   "nervix-wasm/shuttle",
-  "parking_lot/shuttle",
-  "dep:tokio-real",
-  "tokio/shuttle",
-  "tokio-stream/shuttle",
-  "tokio-util/shuttle",
+  "shuttle-dashmap/shuttle",
+  "shuttle-parking-lot/shuttle",
+  "shuttle-tokio/shuttle",
+  "shuttle-tokio-stream/shuttle",
+  "shuttle-tokio-util/shuttle",
 ]
 # Test-only feature used by the standard test recipes for fault injection, random multinode
 # scheduling, and lower intentionally expensive password hashing parameters.
@@ -69,7 +74,7 @@ clap = { workspace = true, features = ["derive", "env"] }
 clap_complete = { workspace = true }
 clickhouse = { workspace = true, features = ["inserter", "chrono"] }
 concurrent-queue = { workspace = true }
-dashmap = { package = "shuttle-dashmap", version = "6" }
+dashmap = { workspace = true }
 error-stack = { workspace = true }
 fastrand = { workspace = true }
 fjall = { workspace = true }
@@ -145,7 +150,7 @@ ort = { workspace = true, features = [
 otel-prost = { workspace = true }
 otel-tonic = { workspace = true }
 otel-tonic-types = { workspace = true }
-parking_lot = { package = "shuttle-parking_lot", version = "0.12" }
+parking_lot = { workspace = true }
 parquet = { workspace = true }
 petgraph = { workspace = true }
 postgres-types = { workspace = true }
@@ -183,6 +188,11 @@ sentry-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 shuttle = { workspace = true, optional = true }
+shuttle-dashmap = { workspace = true, optional = true }
+shuttle-parking-lot = { workspace = true, optional = true }
+shuttle-tokio = { workspace = true, features = ["full"], optional = true }
+shuttle-tokio-stream = { workspace = true, optional = true }
+shuttle-tokio-util = { workspace = true, features = ["rt"], optional = true }
 signal-hook = { workspace = true }
 simd-json = { workspace = true }
 sorted-vec = { workspace = true }
@@ -194,14 +204,11 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 tikv-jemalloc-ctl = { workspace = true }
 tikv-jemallocator = { workspace = true }
-tokio = { package = "shuttle-tokio", version = "1", features = ["full"] }
-tokio-real = { workspace = true, features = ["sync"], optional = true }
+tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
-tokio-stream = { package = "shuttle-tokio-stream", version = "0.1" }
+tokio-stream = { workspace = true }
 tokio-tungstenite = { workspace = true, features = ["__rustls-tls", "connect"] }
-tokio-util = { package = "shuttle-tokio-util", version = "0.7", features = [
-  "rt",
-] }
+tokio-util = { workspace = true, features = ["rt"] }
 tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
@@ -510,6 +517,11 @@ serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
 serde_json = "1.0.149"
 shuttle = "0.9"
+shuttle-dashmap = { package = "shuttle-dashmap", version = "6" }
+shuttle-parking-lot = { package = "shuttle-parking_lot", version = "0.12" }
+shuttle-tokio = { package = "shuttle-tokio", version = "1" }
+shuttle-tokio-stream = { package = "shuttle-tokio-stream", version = "0.1" }
+shuttle-tokio-util = { package = "shuttle-tokio-util", version = "0.7" }
 signal-hook = "0.4"
 simd-json = "0.17.0"
 sorted-vec = "0.8"
@@ -532,7 +544,6 @@ thiserror = "2"
 tikv-jemalloc-ctl = { version = "0.7.0", features = ["stats"] }
 tikv-jemallocator = { version = "0.7.0", features = ["stats"] }
 tokio = "1"
-tokio-real = { package = "tokio", version = "1" }
 # 0.14 adds explicit AWS-LC support; the previous 0.13 line depended on Ring.
 tokio-rustls = "0.26"
 tokio-stream = "0.1"

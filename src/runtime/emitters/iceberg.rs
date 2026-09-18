@@ -43,10 +43,7 @@ use arrow_select::{concat::concat as concat_arrow_arrays, filter::filter as filt
 use error_stack::{Report, ResultExt};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder};
 use iceberg_storage_opendal::OpenDalStorageFactory;
-use nervix_connector::{
-    ResolvedClientConfig, client_config_entries, physical_time::actual_utc_now,
-};
-use nervix_models::TableName;
+use nervix_connector::physical_time::actual_utc_now;
 use parquet::file::properties::WriterProperties;
 use thiserror::Error;
 use triomphe::Arc;
@@ -287,36 +284,10 @@ struct IcebergObjectStoreProperties {
     props: HashMap<String, String>,
 }
 
-struct IcebergEmitterClientInit<'a> {
-    config: &'a [nervix_models::ClientConfigEntry],
-    backend: IcebergStorageBackend,
-    catalog_client: &'a CreateClientIcebergRest,
-    catalog_config: &'a [nervix_models::ClientConfigEntry],
-    context: &'a EmitterSinkContext,
-    table: &'a TableName,
-    location: &'a str,
-    catalog: &'a IcebergCatalog,
-}
-
-pub(in crate::runtime::emitters) enum IcebergEmitterClientConfig<'a> {
-    S3(&'a CreateClientS3),
-    Gcs(&'a CreateClientGcs),
-    AzureBlob(&'a CreateClientAzureBlob),
-}
-
 pub(in crate::runtime::emitters) struct IcebergEmitterInit<'a> {
-    pub(in crate::runtime::emitters) client: IcebergEmitterClientConfig<'a>,
-    pub(in crate::runtime::emitters) resolved: Option<&'a ResolvedClientConfig>,
-    pub(in crate::runtime::emitters) catalog_client: &'a CreateClientIcebergRest,
-    pub(in crate::runtime::emitters) catalog_resolved: Option<&'a ResolvedClientConfig>,
+    pub(in crate::runtime::emitters) plan: &'a IcebergSinkPlan,
     pub(in crate::runtime::emitters) context: &'a EmitterSinkContext,
-    pub(in crate::runtime::emitters) table: &'a TableName,
-    pub(in crate::runtime::emitters) values: &'a [IcebergValueMapping],
-    pub(in crate::runtime::emitters) location: &'a str,
-    pub(in crate::runtime::emitters) catalog: &'a IcebergCatalog,
     pub(in crate::runtime::emitters) flush_policy: &'a FlushPolicy,
-    pub(in crate::runtime::emitters) commit_each: &'a str,
-    pub(in crate::runtime::emitters) max_commit_size: &'a str,
     pub(in crate::runtime::emitters) input_schema: Arc<CompiledSchema>,
     pub(in crate::runtime::emitters) buffered_messages: Arc<EmitterBufferedMessages>,
 }
@@ -342,24 +313,6 @@ impl IcebergStorageBackendExt for IcebergStorageBackend {
             }),
             Self::Gcs => StdArc::new(OpenDalStorageFactory::Gcs),
             Self::AzureBlob => StdArc::new(OpenDalStorageFactory::Azdls),
-        }
-    }
-}
-
-impl IcebergEmitterClientConfig<'_> {
-    fn backend(&self) -> IcebergStorageBackend {
-        match self {
-            Self::S3(_) => IcebergStorageBackend::S3,
-            Self::Gcs(_) => IcebergStorageBackend::Gcs,
-            Self::AzureBlob(_) => IcebergStorageBackend::AzureBlob,
-        }
-    }
-
-    fn config(&self) -> &[nervix_models::ClientConfigEntry] {
-        match self {
-            Self::S3(client) => client.config.as_slice(),
-            Self::Gcs(client) => client.config.as_slice(),
-            Self::AzureBlob(client) => client.config.as_slice(),
         }
     }
 }
@@ -390,18 +343,9 @@ impl IcebergEmitter {
         init: IcebergEmitterInit<'_>,
     ) -> IcebergEmitterResult<Self> {
         let IcebergEmitterInit {
-            client,
-            resolved,
-            catalog_client,
-            catalog_resolved,
+            plan,
             context,
-            table,
-            values,
-            location,
-            catalog,
             flush_policy,
-            commit_each,
-            max_commit_size,
             input_schema,
             buffered_messages,
         } = init;
@@ -414,34 +358,21 @@ impl IcebergEmitter {
         .map_err(|error| {
             Report::new(IcebergEmitterError::InvalidFlushPolicy).attach_printable(error.to_string())
         })?;
-        let commit_policy = Self::parse_commit_policy(context, commit_each, max_commit_size)?;
-        let backend = client.backend();
+        let commit_policy =
+            Self::parse_commit_policy(context, &plan.commit_each, &plan.max_commit_size)?;
         let program = compile_iceberg_values_program(
             &context.domain,
             &context.emitter,
-            values,
+            &plan.values,
             input_schema.arrow_schema(),
             context.udfs.as_ref(),
         )
         .map_err(|error| {
             Report::new(IcebergEmitterError::CompileValues).attach_printable(error.to_string())
         })?;
-        let mapped_schema = Self::mapped_arrow_schema(&program, values)?;
+        let mapped_schema = Self::mapped_arrow_schema(&program, &plan.values)?;
         let staging_dir = Self::create_staging_dir(context.runtime.temp_dir())?;
-        let client_init = IcebergEmitterClientInit {
-            config: client_config_entries(resolved, client.config()),
-            backend,
-            catalog_client,
-            catalog_config: client_config_entries(
-                catalog_resolved,
-                catalog_client.config.as_slice(),
-            ),
-            context,
-            table,
-            location,
-            catalog,
-        };
-        let client = Self::client_from_config(client_init).await?;
+        let client = Self::client_from_config(plan, context).await?;
         Ok(Self {
             client,
             commit_state: IcebergCommitState::default(),
@@ -546,41 +477,23 @@ impl IcebergEmitter {
         data_type.clone()
     }
 
+    /// Opens the REST catalog `plan` commits through and loads its table over the storage client.
     async fn client_from_config(
-        init: IcebergEmitterClientInit<'_>,
+        plan: &IcebergSinkPlan,
+        context: &EmitterSinkContext,
     ) -> IcebergEmitterResult<IcebergEmitterClient> {
-        let IcebergEmitterClientInit {
-            config,
-            backend,
-            catalog_client,
-            catalog_config,
-            context,
-            table,
-            location,
-            catalog,
-        } = init;
-        let IcebergCatalog::Rest {
-            client: catalog_ref,
-        } = catalog;
-        if catalog_ref != &catalog_client.name {
-            return Err(
-                Report::new(IcebergEmitterError::InitializeCatalog).attach_printable(format!(
-                    "emitter catalog reference '{}' resolved to client '{}'",
-                    catalog_ref.as_str(),
-                    catalog_client.name.as_str()
-                )),
-            );
-        }
-        Self::validate_blob_location(backend, "table", location)?;
-        let properties = IcebergObjectStoreProperties::from_entries(backend, config);
+        let location = plan.location.as_str();
+        Self::validate_blob_location(plan.backend, "table", location)?;
+        let properties =
+            IcebergObjectStoreProperties::from_entries(plan.backend, &plan.storage.config.entries);
         let catalog = StdArc::new(
             properties
-                .rest_catalog(catalog_client.name.as_str(), catalog_config)
+                .rest_catalog(plan.catalog.name.as_str(), &plan.catalog.config.entries)
                 .await
                 .change_context(IcebergEmitterError::InitializeCatalog)?,
         );
         let namespace = NamespaceIdent::new(context.domain.as_str().to_string());
-        let table_name = table.as_str().to_string();
+        let table_name = plan.table.as_str().to_string();
         let table_ident = TableIdent::new(namespace, table_name.clone());
         let table = catalog
             .load_table(&table_ident)

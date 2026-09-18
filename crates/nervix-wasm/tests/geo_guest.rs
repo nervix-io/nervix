@@ -9,6 +9,9 @@
 //! cargo test -p nervix-wasm --test geo_guest_smoke -- --ignored --nocapture
 //! ```
 
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+
 use std::{sync::Arc, time::Duration};
 
 use arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray, TimestampNanosecondArray};
