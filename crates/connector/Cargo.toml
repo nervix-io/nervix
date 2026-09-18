@@ -13,6 +13,8 @@ default = []
 shuttle = ["dep:shuttle-tokio", "shuttle-tokio/shuttle"]
 
 [dependencies]
+arrow-array = { workspace = true }
+async-trait = { workspace = true }
 error-stack = { workspace = true }
 nervix-models = { workspace = true }
 nervix-recovery = { workspace = true }
@@ -34,6 +36,7 @@ tracing = { workspace = true }
 triomphe = { workspace = true }
 upon = { workspace = true }
 url = { workspace = true }
+uuid = { workspace = true, features = ["v7"] }
 webpki-roots = { workspace = true }
 
 [dev-dependencies]

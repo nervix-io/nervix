@@ -50,7 +50,7 @@ type SqsRecordResult<T> = Result<T, Report<SqsRecordError>>;
 
 #[derive(Debug)]
 struct PreparedSqsRecord {
-    position: BrokerRecordPosition,
+    position: SinkRecordPosition,
     body: String,
     attributes: HashMap<String, MessageAttributeValue>,
     group_id: Option<String>,
@@ -60,7 +60,7 @@ struct PreparedSqsRecord {
 
 impl PreparedSqsRecord {
     fn new(
-        position: BrokerRecordPosition,
+        position: SinkRecordPosition,
         payload: Vec<u8>,
         headers: EmitterHeaders,
         group_id: Result<Option<String>, SqsMessageGroupError>,
@@ -604,7 +604,7 @@ mod tests {
 
     fn prepared(payload_bytes: usize) -> PreparedSqsRecord {
         PreparedSqsRecord::new(
-            BrokerRecordPosition {
+            SinkRecordPosition {
                 batch_index: 0,
                 row_index: 0,
             },
@@ -618,7 +618,7 @@ mod tests {
 
     fn prepared_in_group(row: usize, group: &str) -> PreparedSqsRecord {
         let mut record = PreparedSqsRecord::new(
-            BrokerRecordPosition {
+            SinkRecordPosition {
                 batch_index: 0,
                 row_index: row,
             },
@@ -628,7 +628,7 @@ mod tests {
             AckSet::empty(),
         )
         .expect("test SQS FIFO record should be valid");
-        record.position = BrokerRecordPosition {
+        record.position = SinkRecordPosition {
             batch_index: 0,
             row_index: row,
         };
@@ -638,7 +638,7 @@ mod tests {
     #[test]
     fn rejects_a_record_larger_than_the_declared_sqs_protocol_limit() {
         let error = PreparedSqsRecord::new(
-            BrokerRecordPosition {
+            SinkRecordPosition {
                 batch_index: 0,
                 row_index: 0,
             },
@@ -660,7 +660,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_sqs_body_and_attribute_shapes_with_typed_errors() {
-        let position = BrokerRecordPosition {
+        let position = SinkRecordPosition {
             batch_index: 0,
             row_index: 0,
         };
@@ -771,7 +771,7 @@ mod tests {
         let headers = vec![(ATTRIBUTE_NAME.to_string(), ATTRIBUTE_VALUE.to_string())];
 
         let record = PreparedSqsRecord::new(
-            BrokerRecordPosition {
+            SinkRecordPosition {
                 batch_index: 0,
                 row_index: 0,
             },
@@ -785,7 +785,7 @@ mod tests {
         assert_eq!(record.encoded_bytes, SQS_MAX_REQUEST_BYTES);
 
         let error = PreparedSqsRecord::new(
-            BrokerRecordPosition {
+            SinkRecordPosition {
                 batch_index: 0,
                 row_index: 0,
             },
@@ -810,7 +810,7 @@ mod tests {
         let mut records = (0..11)
             .map(|row| {
                 let mut record = prepared(1);
-                record.position = BrokerRecordPosition {
+                record.position = SinkRecordPosition {
                     batch_index: 0,
                     row_index: row,
                 };
