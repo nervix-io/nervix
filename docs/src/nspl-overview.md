@@ -654,10 +654,10 @@ CREATE [IF NOT EXISTS] VHOST <name> <hostname>, ...
 ```
 
 Every resource binding names its version: `WITH TLS` on a VHOST, `USING RESOURCE` on a protobuf
-codec, a protobuf signaling protocol, an inferencer, and a WASM processor. `VERSION <n>` binds that
-completed version. `VERSION LATEST` binds the highest completed version when the statement is
-applied, and the stored model keeps that number, so a later upload never moves the binding. See
-[Versioning](resources.md#versioning).
+codec, protobuf signaling protocol, inferencer, or WASM processor, `FROM RESOURCE` on a hash map,
+and `MOUNT` on a client. `VERSION <n>` binds that completed version. `VERSION LATEST` binds the
+highest completed version when the statement is applied, and the stored model keeps that number,
+so a later upload never moves the binding. See [Versioning](resources.md#versioning).
 
 `REBIND RESOURCE` atomically moves all current usages, or an exact kind-qualified `FOR` selection,
 to one completed version. The resource itself is unchanged. Every selected replacement validates
