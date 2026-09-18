@@ -1,5 +1,5 @@
 #[cfg(not(feature = "shuttle"))]
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::{collections::BTreeSet, fmt, str::FromStr, sync::Arc as StdArc};
 
 use ahash::HashMap;
@@ -18,8 +18,9 @@ use nervix_models::{
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 #[cfg(feature = "shuttle")]
-use shuttle::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use shuttle::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use thiserror::Error;
+use tokio::sync::Notify;
 use triomphe::Arc;
 
 use super::{BranchKey, WasmGuestState};
@@ -598,6 +599,8 @@ pub(crate) enum RuntimePersistenceError {
     StorageAdmission,
     #[error("runtime state storage job did not complete")]
     StorageExecution,
+    #[error("failed to synchronize runtime state to stable storage")]
+    Synchronize,
 }
 
 pub(in crate::runtime) struct RuntimeStateStore {
@@ -611,8 +614,86 @@ pub(in crate::runtime) struct RuntimeStateStore {
     /// Held by every replica installation, which compares with the stored snapshot before it
     /// replaces it. The storage job that installs a replica holds its own handle.
     replica_installs: Arc<parking_lot::Mutex<()>>,
+    /// Makes applied writes durable, one synchronization for every writer waiting at once. The
+    /// storage job that synchronizes holds its own handle.
+    durability: Arc<DurabilityBarrier>,
     /// Runs the writes that must not occupy an async worker.
     executor: Executor,
+}
+
+/// Makes the writes a store already applied durable, sharing one synchronization among every
+/// writer that asks while it runs or before it starts.
+///
+/// A writer applies its write and then takes a ticket. A synchronization covers every ticket issued
+/// before it starts, because each of those writes was applied before its ticket was taken. At most
+/// one writer runs a synchronization at a time; the others wait for it, and one of them runs the
+/// next synchronization when the finished one did not cover them. Every branch that checkpoints at
+/// the same time therefore shares a synchronization of the node's storage instead of queuing one
+/// each behind the storage workers.
+#[derive(Debug)]
+struct DurabilityBarrier {
+    /// The last ticket issued.
+    issued: AtomicU64,
+    /// Every ticket at or below this is covered by a synchronization that succeeded.
+    synchronized: AtomicU64,
+    /// Set when a synchronization fails. The operating system may drop the writes it failed to
+    /// flush, so a later synchronization cannot prove they reached storage, and the database
+    /// refuses every later one anyway: from then on no write is reported durable.
+    failed: AtomicBool,
+    /// Whether one writer is running a synchronization.
+    running: AtomicBool,
+    /// How many synchronizations have run.
+    rounds: AtomicU64,
+    /// Signals the end of every synchronization.
+    finished: Notify,
+}
+
+impl DurabilityBarrier {
+    fn new() -> Self {
+        Self {
+            issued: AtomicU64::new(0),
+            synchronized: AtomicU64::new(0),
+            failed: AtomicBool::new(false),
+            running: AtomicBool::new(false),
+            rounds: AtomicU64::new(0),
+            finished: Notify::new(),
+        }
+    }
+
+    /// The ticket of a write the caller has just applied.
+    fn issue(&self) -> u64 {
+        self.issued
+            .fetch_add(1, Ordering::SeqCst)
+            .checked_add(1)
+            .assured("a store cannot issue 2^64 synchronization tickets in the lifetime of a node")
+    }
+
+    /// Claim the one synchronization the barrier runs at a time, or `None` while another writer
+    /// runs it.
+    fn claim(&self) -> Option<DurabilitySynchronization<'_>> {
+        if self
+            .running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return None;
+        }
+        Some(DurabilitySynchronization { barrier: self })
+    }
+}
+
+/// The one synchronization a barrier runs at a time. Dropping it frees the slot and wakes the
+/// waiting writers, also when the writer running it is cancelled, so they elect another runner
+/// instead of waiting for one that is gone.
+struct DurabilitySynchronization<'a> {
+    barrier: &'a DurabilityBarrier,
+}
+
+impl Drop for DurabilitySynchronization<'_> {
+    fn drop(&mut self) {
+        self.barrier.running.store(false, Ordering::SeqCst);
+        self.barrier.finished.notify_waiters();
+    }
 }
 
 /// The handles one latest-snapshot write needs, cloned into the storage job that performs it.
@@ -686,7 +767,6 @@ impl LatestSnapshotWriter {
             return Ok(None);
         }
         self.write_latest_snapshot(placement, snapshot.lsm, &snapshot.payload)?;
-        self.persist(PersistMode::Buffer)?;
         Ok(Some(snapshot))
     }
 }
@@ -963,6 +1043,7 @@ impl RuntimeStateStore {
             forced_recovery_preparations,
             forced_recovery_completions,
             replica_installs: Arc::new(parking_lot::Mutex::new(())),
+            durability: Arc::new(DurabilityBarrier::new()),
             executor,
         })
     }
@@ -1490,12 +1571,14 @@ impl RuntimeStateStore {
             .map_err(|error| error.current_context().clone())
     }
 
-    /// Persist the guest state a WASM processor branch saved under `placement`.
+    /// Write the guest state a WASM processor branch checkpointed under `placement`, and return
+    /// once it is on stable storage.
     ///
-    /// A branch saves after every batch, so the write runs on the storage workers instead of the
-    /// async worker driving the branch. The job shares the saved buffer rather than receiving a copy
-    /// of it.
-    pub(in crate::runtime) async fn persist_wasm_guest_state(
+    /// A branch checkpoints after every guest callback, so the write runs on the storage workers
+    /// instead of the async worker driving the branch, and shares the saved buffer rather than
+    /// receiving a copy of it. Its synchronization is shared with every other durable write in
+    /// flight on this node.
+    pub(in crate::runtime) async fn persist_wasm_checkpoint(
         &self,
         placement: &RuntimeStatePlacement,
         saved: StdArc<WasmGuestState>,
@@ -1512,8 +1595,79 @@ impl RuntimeStateStore {
                 StorageClass::Filesystem,
                 reservation,
                 move |_charge, _cancellation| {
-                    writer.write_latest_snapshot(&placement, saved.revision(), saved.bytes())?;
-                    writer.persist(PersistMode::Buffer)
+                    writer.write_latest_snapshot(&placement, saved.revision(), saved.bytes())
+                },
+            )
+            .await
+            .change_context(RuntimePersistenceError::StorageExecution)??;
+        self.synchronize().await
+    }
+
+    /// Return once every write this store applied before the call is on stable storage.
+    ///
+    /// Callers waiting at the same time share synchronizations, and a synchronization runs on the
+    /// storage workers, never on the async worker that awaits it.
+    pub(in crate::runtime) async fn synchronize(
+        &self,
+    ) -> error_stack::Result<(), RuntimePersistenceError> {
+        let barrier = &self.durability;
+        let ticket = barrier.issue();
+        loop {
+            tokio::task::consume_budget().await;
+            let finished = barrier.finished.notified();
+            tokio::pin!(finished);
+            finished.as_mut().enable();
+            if barrier.synchronized.load(Ordering::SeqCst) >= ticket {
+                return Ok(());
+            }
+            if barrier.failed.load(Ordering::SeqCst) {
+                return Err(Report::new(RuntimePersistenceError::Synchronize));
+            }
+            let Some(synchronization) = barrier.claim() else {
+                finished.await;
+                continue;
+            };
+            let round = self.synchronize_storage().await;
+            match round {
+                Ok(covered) => {
+                    barrier.synchronized.fetch_max(covered, Ordering::SeqCst);
+                }
+                Err(error) => {
+                    if let RuntimePersistenceError::Synchronize = error.current_context() {
+                        barrier.failed.store(true, Ordering::SeqCst);
+                    }
+                    return Err(error);
+                }
+            }
+            drop(synchronization);
+        }
+    }
+
+    /// Synchronize the database on a storage worker, and return the last ticket that
+    /// synchronization covers.
+    async fn synchronize_storage(&self) -> error_stack::Result<u64, RuntimePersistenceError> {
+        let db = self.db.clone();
+        let barrier = self.durability.clone();
+        let reservation = self
+            .executor
+            .reserve(MemoryClass::Bulk, 1)
+            .await
+            .change_context(RuntimePersistenceError::StorageAdmission)?;
+        self.executor
+            .run_storage(
+                StorageClass::Filesystem,
+                reservation,
+                move |_charge, _cancellation| {
+                    // Every ticket issued so far belongs to a write that was applied before it was
+                    // issued, so reading the last one just before the synchronization starts is
+                    // what lets the synchronization cover it.
+                    let covered = barrier.issued.load(Ordering::SeqCst);
+                    barrier.rounds.fetch_add(1, Ordering::SeqCst);
+                    db.persist(PersistMode::SyncAll).map_err(|error| {
+                        Report::new(RuntimePersistenceError::Synchronize)
+                            .attach_printable(error.to_string())
+                    })?;
+                    Ok(covered)
                 },
             )
             .await
@@ -1588,8 +1742,9 @@ impl RuntimeStateStore {
     }
 
     /// Persist a replicated checkpoint unless the stored one is at least as new, and hand back the
-    /// checkpoint when it was written. The comparison and the write run together on the storage
-    /// workers.
+    /// checkpoint when it was written, once it is on stable storage. The comparison and the write
+    /// run together on the storage workers; the synchronization is shared with every other durable
+    /// write in flight on this node.
     pub(in crate::runtime) async fn persist_replica_snapshot_if_newer(
         &self,
         placement: &RuntimeStatePlacement,
@@ -1602,14 +1757,19 @@ impl RuntimeStateStore {
             .reserve(MemoryClass::Bulk, 1)
             .await
             .change_context(RuntimePersistenceError::StorageAdmission)?;
-        self.executor
+        let installed = self
+            .executor
             .run_storage(
                 StorageClass::Filesystem,
                 reservation,
                 move |_charge, _cancellation| writer.install_replica_if_newer(&placement, snapshot),
             )
             .await
-            .change_context(RuntimePersistenceError::StorageExecution)?
+            .change_context(RuntimePersistenceError::StorageExecution)??;
+        if installed.is_some() {
+            self.synchronize().await?;
+        }
+        Ok(installed)
     }
 
     pub(in crate::runtime) fn latest_snapshot(
@@ -2490,27 +2650,30 @@ mod tests {
         assert_eq!(loaded("beta", 1), None);
     }
 
-    /// Guest saves and replica installations go through the store's storage workers. A replica
-    /// installation hands back the checkpoint it wrote, and refuses one that is not newer than the
-    /// checkpoint already stored for that generation.
+    /// Guest checkpoints and replica installations go through the store's storage workers and
+    /// return only once a synchronization covered them. A replica installation hands back the
+    /// checkpoint it wrote, and refuses one that is not newer than the checkpoint already stored for
+    /// that generation.
     #[tokio::test]
-    async fn guest_saves_and_replica_installs_are_written_by_the_storage_workers() {
+    async fn guest_checkpoints_and_replica_installs_return_once_synchronized() {
         let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
         let store = open_store(&dir);
         let placement = wasm_guest_placement("acme", 1);
-        let guest =
-            super::super::ReplicatedWasmProcessorState::new(placement.clone(), Vec::new(), 0, None)
-                .expect("guest state should initialize");
-        let saved = guest.replace_guest_state(vec![1, 2, 3]);
+        let guest = super::super::ReplicatedWasmProcessorState::new(placement.clone(), None);
+        let captured = guest.capture(
+            vec![1, 2, 3],
+            super::super::WasmCheckpointBoundary::LocalStorage,
+        );
 
         store
-            .persist_wasm_guest_state(&placement, saved)
+            .persist_wasm_checkpoint(&placement, captured.saved())
             .await
-            .expect("guest state should persist");
+            .expect("the guest checkpoint should reach stable storage");
+        assert_eq!(store.durability.rounds.load(Ordering::SeqCst), 1);
         let stored = store
             .latest_snapshot(&placement)
             .expect("guest state should load")
-            .expect("the saved guest state is stored");
+            .expect("the checkpointed guest state is stored");
         assert_eq!((stored.lsm, stored.payload), (1, vec![1, 2, 3]));
 
         let older = PersistedRuntimeStateEntry {
@@ -2535,6 +2698,73 @@ mod tests {
             .await
             .expect("the replica installation should run");
         assert_eq!(installed, Some(newer));
+        assert_eq!(
+            store.durability.rounds.load(Ordering::SeqCst),
+            2,
+            "only the installation that wrote a checkpoint synchronizes"
+        );
+    }
+
+    /// Writers that ask for durability at the same time share synchronizations instead of each
+    /// queuing one behind the storage workers. A writer that asks while a synchronization runs is
+    /// covered by the next one at the latest.
+    #[tokio::test]
+    async fn concurrent_writers_share_synchronizations() {
+        let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
+        let store = open_store(&dir);
+        let writers = (0..16).map(|_| store.synchronize()).collect::<Vec<_>>();
+
+        for outcome in futures_util::future::join_all(writers).await {
+            outcome.expect("every writer should be synchronized");
+        }
+
+        let rounds = store.durability.rounds.load(Ordering::SeqCst);
+        assert!(
+            (1..=2).contains(&rounds),
+            "sixteen concurrent writers needed {rounds} synchronizations"
+        );
+        assert_eq!(store.durability.synchronized.load(Ordering::SeqCst), 16);
+    }
+
+    /// A synchronization that fails leaves every write it covered, and every later one, without a
+    /// durability promise: the database refuses later synchronizations, and none of them could
+    /// prove that writes the failed one did not flush reached storage.
+    #[tokio::test]
+    async fn a_failed_synchronization_refuses_every_later_durability_promise() {
+        let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
+        let store = open_store(&dir);
+        store
+            .synchronize()
+            .await
+            .expect("the first synchronization should succeed");
+        store.durability.failed.store(true, Ordering::SeqCst);
+
+        let refused = store
+            .synchronize()
+            .await
+            .expect_err("a write after a failed synchronization is never reported durable");
+        assert!(matches!(
+            refused.current_context(),
+            RuntimePersistenceError::Synchronize
+        ));
+    }
+
+    /// Cancelling the writer that runs a synchronization frees the barrier for the others: the next
+    /// writer runs its own synchronization instead of waiting for one nobody will finish.
+    #[tokio::test]
+    async fn a_cancelled_synchronization_frees_the_barrier() {
+        let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
+        let store = open_store(&dir);
+        let abandoned = store
+            .durability
+            .claim()
+            .expect("nothing else runs a synchronization");
+        drop(abandoned);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), store.synchronize())
+            .await
+            .expect("a freed barrier must not keep writers waiting")
+            .expect("the synchronization should succeed");
     }
 
     /// Activating a forced recovery publishes the checkpoints it staged in the generation the

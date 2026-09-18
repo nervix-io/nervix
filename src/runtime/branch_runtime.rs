@@ -2046,6 +2046,25 @@ pub(super) fn persist_branch_instance_lru_snapshot<V>(
     Ok(())
 }
 
+/// Offer the branch lifecycle of `instances` to the node's replicas at once, without writing it to
+/// storage: the periodic lifecycle snapshot persists it.
+pub(super) fn publish_branch_instance_lru_snapshot<V>(
+    runtime: &Runtime,
+    domain: &DomainName,
+    template: &BranchInstanceTemplate,
+    instances: &BranchInstanceRegistry<Option<BranchKey>, V>,
+) -> error_stack::Result<(), BranchLruSnapshotError> {
+    let placement = branch_lru_placement(runtime, domain, template);
+    let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())?;
+    let snapshot = PersistedRuntimeStateEntry {
+        lsm: instances.version(),
+        schema_fingerprint: placement.schema_fingerprint,
+        payload,
+    };
+    runtime.publish_branch_lru_snapshot(placement, snapshot);
+    Ok(())
+}
+
 pub(super) async fn tick_due_branch_instance_branches(
     graph: &SharedActiveGraph,
     snapshot: &DomainExecutionSnapshot,

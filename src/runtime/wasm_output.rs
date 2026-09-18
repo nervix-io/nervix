@@ -653,10 +653,16 @@ impl WasmOutputValidator<'_> {
     }
 }
 
+/// Dispatch the output one guest callback emitted, and hold back the success of every input the
+/// callback decided until the checkpoint that completes the callback reaches its boundary.
+///
+/// Output that fails validation decides nothing the guest reported: every input the branch holds
+/// goes through the processor's general error policy instead, and nothing is dispatched.
 pub(super) async fn dispatch_wasm_output_envelopes(
     context: WasmOutputContext<'_>,
     outputs: Vec<WasmEnvelope>,
     ack_map: &mut WasmAckMap,
+    holds: &mut WasmCheckpointHolds,
 ) -> error_stack::Result<(), WasmInstanceError> {
     let WasmOutputContext {
         graph,
@@ -684,18 +690,24 @@ pub(super) async fn dispatch_wasm_output_envelopes(
         Ok(outputs) => outputs,
         Err(error) => {
             let failure = module.emission_failure(Report::new(error));
-            branch.runtime.handle_general_error_for_acks(
-                &branch.domain,
+            let reporting = WasmCallbackReporting {
+                runtime: &branch.runtime,
+                domain: &branch.domain,
                 node_kind,
                 processor,
                 error_policies,
-                ack_map.values().map(|context| &context.acks),
-                format!("{failure:#}"),
-            );
-            ack_map.clear();
+            };
+            reporting.fail_held_inputs(ack_map, holds, format!("{failure:#}"));
             return Ok(());
         }
     };
+    for token in wasm_callback_decided_tokens(&validated_outputs) {
+        let context = ack_map.get(&token).verified(
+            "the guest output was validated against this ACK map above, and invalid output \
+             returned early",
+        );
+        holds.hold(&context.acks);
+    }
     let mut token_use_counts = wasm_output_token_use_counts(&validated_outputs);
     for output in validated_outputs {
         let output_route = &output_routes.routes[output.output_route_index];
@@ -1415,98 +1427,6 @@ pub(super) async fn apply_wasm_sidecar_terminal_decisions(
             context.acks.no_ack(nacked.reason.clone());
         }
     }
-}
-
-/// Saves the guest state after the branch processed work, and persists and replicates it.
-///
-/// A save that exhausts an execution limit leaves the guest's store unusable, so the instance is
-/// discarded and the next work recreates it from the state saved last.
-pub(super) async fn persist_wasm_guest_state(
-    runtime: &Runtime,
-    processor: &ModelName,
-    replicated_state: &ReplicatedWasmProcessorState,
-    instance: &mut Option<Box<WasmLiveInstance>>,
-    execution_now: Timestamp,
-) -> error_stack::Result<(), WasmInstanceError> {
-    persist_wasm_guest_state_with_failure_mode(
-        runtime,
-        processor,
-        replicated_state,
-        instance,
-        execution_now,
-        WasmStateSaveFailureMode::InvalidateInstance,
-    )
-    .await
-}
-
-/// Saves, persists, and replicates the guest state an ownership handoff transfers. The instance is
-/// kept whatever happens, because the handoff that asked for the checkpoint decides what becomes
-/// of the branch.
-pub(super) async fn checkpoint_wasm_guest_state(
-    runtime: &Runtime,
-    processor: &ModelName,
-    replicated_state: &ReplicatedWasmProcessorState,
-    instance: &mut Option<Box<WasmLiveInstance>>,
-    execution_now: Timestamp,
-) -> OwnershipHandoffResult<()> {
-    persist_wasm_guest_state_with_failure_mode(
-        runtime,
-        processor,
-        replicated_state,
-        instance,
-        execution_now,
-        WasmStateSaveFailureMode::RetainInstance,
-    )
-    .await
-    .change_context_lazy(|| OwnershipHandoffError::WasmCheckpoint {
-        processor: processor.clone(),
-    })
-}
-
-#[derive(Clone, Copy)]
-enum WasmStateSaveFailureMode {
-    InvalidateInstance,
-    RetainInstance,
-}
-
-async fn persist_wasm_guest_state_with_failure_mode(
-    runtime: &Runtime,
-    processor: &ModelName,
-    replicated_state: &ReplicatedWasmProcessorState,
-    instance: &mut Option<Box<WasmLiveInstance>>,
-    execution_now: Timestamp,
-    failure_mode: WasmStateSaveFailureMode,
-) -> error_stack::Result<(), WasmInstanceError> {
-    let Some(live) = instance.as_mut() else {
-        return Err(Report::new(WasmInstanceError::InstanceUnavailable {
-            processor: processor.clone(),
-        }));
-    };
-    let save_result = live
-        .guest
-        .save_state_in_context(nervix_wasm::WasmExecutionContext::new(execution_now))
-        .await;
-    let guest_state = match save_result {
-        Ok(guest_state) => guest_state,
-        Err(error) => {
-            let resource_limit_exceeded = error.current_context().is_resource_limit_exceeded();
-            let failure = live.module.guest_failure(error, None);
-            if resource_limit_exceeded
-                && let WasmStateSaveFailureMode::InvalidateInstance = failure_mode
-            {
-                *instance = None;
-            }
-            return Err(failure);
-        }
-    };
-    runtime
-        .authorize_wasm_guest_state_save(replicated_state)
-        .map_err(|error| live.module.authority_failure(error))?;
-    let saved = replicated_state.replace_guest_state(guest_state);
-    runtime
-        .persist_wasm_processor_snapshot(replicated_state, &saved)
-        .await
-        .map_err(|error| live.module.persistence_failure(error, saved.revision()))
 }
 
 pub(super) struct WasmOutputAttributionContext<'a> {

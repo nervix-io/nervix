@@ -99,11 +99,13 @@ directly and publishes a complete immutable window generation for persistence, r
 handoff, and restoration. Snapshot encoding reads that generation instead of holding the branch
 runtime while it serializes.
 
-A WASM guest instance likewise belongs to one branch task. After every batch the host asks
-the guest to save its computation state and publishes the returned buffer as the latest save. The
-publication retains that buffer rather than copying it for every persistence or replication reader.
-Input buffered by the guest host and ACK tokens remain execution state and are never included in a
-guest save.
+A WASM guest instance likewise belongs to one branch task. At the end of every guest callback the
+task asks the guest to save its computation state and checkpoints the returned buffer: it writes it
+to stable storage, waits for the replicas the checkpoint names, and only then publishes it as the
+committed checkpoint a recreated instance restores. The branch runs no further callback until that
+checkpoint completes or fails. The publications retain the saved buffer rather than copying it for
+every persistence or replication reader. Input buffered by the guest host and ACK tokens remain
+execution state and are never included in a guest save.
 
 Every branch save is addressed by the guest-state generation in the committed schedule. Forced
 recovery publishes a new generation with the replacement schedule, so a late save, replica
@@ -142,6 +144,11 @@ Root trackers count attempts rather than individual shares. Their transition ord
 overcount but cannot let handoff miss active work. Exactly one terminal transition takes the
 one-shot sender from its slot and releases that guard before notifying the waiter. ACK trees,
 shares, and trackers are volatile hot-path state and are never persisted.
+
+A WASM branch holds back the success of the inputs a guest callback decided with one more attached
+share per input. The branch task owns those shares for the length of the callback's checkpoint and
+resolves them itself: it releases them when the checkpoint completes and negatively acknowledges
+them when it fails. Holding them needs no lock and no shared registry.
 
 ## Ordering Fences
 
@@ -203,6 +210,11 @@ it:
 - one inbound relay attempt serializes its small receipt, admission, rejection, and cancellation
   transition within the interconnect's quotas and deadline
 - snapshot construction and state installation serialize per placement, off the row path
+- a WASM branch waits for its own checkpoint after each guest callback, bounded by the checkpoint
+  deadline. The state store's durability barrier lets one writer at a time run a storage
+  synchronization for every writer waiting, through one atomic runner slot and a ticket watermark;
+  it holds no lock across that wait, and the synchronization runs on the storage workers. Replica
+  progress reaches the waiting branch through its own state's notification.
 - an ACK root locks only its single terminal sender transition
 
 These sites are accepted for the contract and bound named above. A lock that merely makes shared

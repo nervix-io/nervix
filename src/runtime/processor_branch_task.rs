@@ -545,6 +545,21 @@ pub(super) async fn dispatch_processor_node_input(
             )
             .await;
         }
+        // A replica installs a branch's checkpoint only once it knows the branch, and a WASM
+        // branch acknowledges nothing before its replicas hold its checkpoint. Offering the new
+        // branch to them now, rather than on the next lifecycle snapshot, keeps the branch's first
+        // checkpoint from waiting on that snapshot.
+        if template.source_kind == ModelKind::WasmProcessor
+            && let Err(error) =
+                publish_branch_instance_lru_snapshot(runtime_handle, domain, template, instances)
+        {
+            warn!(
+                domain = domain.as_str(),
+                processor = template.source.as_str(),
+                error = %format_args!("{error:#}"),
+                "failed to offer a new processor branch to its replicas"
+            );
+        }
     }
     let input = ProcessorBranchInput {
         relay,

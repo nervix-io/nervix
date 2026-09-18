@@ -260,12 +260,15 @@ use branch_buffering::{
 };
 use branch_instance_registry::BranchInstanceRegistry;
 use branch_key::branch_key_display;
-use branch_lru_state::{decode_branch_lru_snapshot, encode_branch_lru_snapshot};
+use branch_lru_state::{
+    BranchLruSnapshotError, decode_branch_lru_snapshot, encode_branch_lru_snapshot,
+};
 use branch_runtime::{
     BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL, BranchRuntime, BranchRuntimeMetrics,
     IngestorRouteRuntime, MaterializedBatchWaitContext, MaterializedDomainHandles,
     PendingMaterializedBatch, branch_lru_placement, flush_branch_junction,
     internal_processor_error_policies, output_error_policies, persist_branch_instance_lru_snapshot,
+    publish_branch_instance_lru_snapshot,
 };
 use client_config::{
     ParsedRetryPolicy, client_config_entries, client_config_value, client_tls_paths,
@@ -506,14 +509,20 @@ use vm_input::{
     runtime_values_input_column, vm_output_value, vm_typed_batch_selected_rows_to_runtime_batch,
     vm_typed_batch_to_runtime_batch,
 };
-use wasm_output::{
-    WasmOutputContext, checkpoint_wasm_guest_state, dispatch_wasm_output_envelopes,
-    persist_wasm_guest_state,
+use wasm_checkpoint::{
+    WasmCallbackReporting, WasmCheckpointHolds, checkpoint_wasm_guest_state,
+    wasm_callback_decided_tokens,
 };
+use wasm_output::{WasmMaterializedOutput, WasmOutputContext, dispatch_wasm_output_envelopes};
 use wasm_processor::{
-    WasmBranchModule, WasmInstanceError, WasmLiveInstance, flush_branch_wasm_processor,
+    WasmBranchModule, WasmInstanceError, WasmLiveInstance, WasmModuleFile,
+    flush_branch_wasm_processor,
 };
-use wasm_state::{ReplicatedWasmProcessorState, RestorableGuestState, WasmGuestState};
+use wasm_state::{
+    CapturedWasmCheckpoint, CompletedWasmCheckpoint, LocallyDurableWasmCheckpoint,
+    ReplicatedWasmProcessorState, RestorableGuestState, WasmCheckpointBoundary,
+    WasmCheckpointProgress, WasmGuestState,
+};
 pub(in crate::runtime) use websocket_signaling::SignalingProtobufDescriptors;
 use window_accumulator::{
     RetainedWindowRows, WindowAccumulator, WindowAccumulatorPlan, WindowArgumentColumns, WindowRow,
@@ -531,6 +540,10 @@ use window_state::{
 mod tls;
 mod vm_compile;
 mod vm_input;
+mod wasm_checkpoint;
+#[cfg(feature = "benchmarks")]
+#[doc(hidden)]
+pub mod wasm_checkpoint_benchmark;
 mod wasm_output;
 mod wasm_processor;
 mod wasm_state;

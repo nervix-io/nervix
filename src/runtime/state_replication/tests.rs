@@ -2148,10 +2148,10 @@ fn only_the_committed_generation_of_each_branch_is_current() {
     assert!(runtime.runtime_state_placement_is_current(&third_beta));
 }
 
-/// A branch task that outlives a generation transition must not publish or persist its next save:
-/// nothing restores the lifetime that save describes.
+/// A branch task that outlives a generation transition must not publish or persist its next
+/// checkpoint: nothing restores the lifetime that checkpoint describes.
 #[test]
-fn a_save_of_a_replaced_generation_is_refused_before_it_is_published() {
+fn a_checkpoint_of_a_replaced_generation_is_refused_before_it_is_published() {
     let runtime = Runtime::default();
     let domain = domain("default");
     let mut node = wasm_processor_node();
@@ -2162,24 +2162,27 @@ fn a_save_of_a_replaced_generation_is_refused_before_it_is_published() {
     ));
     let placement = guest_state_placement(&runtime, &domain, string_branch_key("tenant", "acme"));
     let state = runtime
-        .replicated_wasm_processor_state(placement, Vec::new(), 0)
+        .replicated_wasm_processor_state(placement)
         .expect("guest state should initialize");
-    runtime
-        .authorize_wasm_guest_state_save(&state)
-        .expect("a save in the current generation is authorized");
+    assert_eq!(
+        runtime
+            .wasm_checkpoint_boundary(&state)
+            .expect("a checkpoint in the current generation is authorized"),
+        WasmCheckpointBoundary::LocalStorage
+    );
 
     node.begin_wasm_state_generation();
     runtime.install_state_identities(&DomainSchedule::new(domain, vec![node], Vec::new()));
 
     let refused = runtime
-        .authorize_wasm_guest_state_save(&state)
-        .expect_err("a save of a replaced generation must be refused");
+        .wasm_checkpoint_boundary(&state)
+        .expect_err("a checkpoint of a replaced generation must be refused");
     assert!(matches!(
         refused.current_context(),
         StateReplicationError::Superseded { .. }
     ));
     assert!(refused.current_context().is_authority_rejection());
-    assert_eq!(state.saved_revision(), 0);
+    assert_eq!(state.committed_revision(), 0);
 }
 
 /// Forced recovery selects checkpoints only from the generation it recovers. A snapshot of a replaced

@@ -23,7 +23,7 @@ The data plane operates in two broad modes:
 1. Pure in-memory stream processing.
    Records traveling through relays and runtime nodes stay in memory while they are being routed and processed. ACK guards, ACK tokens, and ACK maps are part of this hot path and are not persisted.
 2. Snapshot-style replicated runtime state.
-   Selected runtime state such as Kafka domain offsets, deduplicator state, and materialized relay state is snapshotted to persistent storage and replicated to followers.
+   Selected runtime state such as Kafka domain offsets, deduplicator state, and materialized relay state is snapshotted to persistent storage and replicated to followers. WASM guest state is the one kind a source acknowledgement waits for: a WASM processor checkpoints its guest state to stable storage and to every assigned replica before it acknowledges the inputs the checkpoint covers. That checkpoint still does not make the path exactly once; see [Recovery, Replay And Duplicates](wasm-processor-guests.md#recovery-replay-and-duplicates).
 
 The execution graph itself is different: NSPL models and domain schedules are control-plane state and are persisted with strong consistency guarantees before the data plane runs them.
 

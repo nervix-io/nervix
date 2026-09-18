@@ -245,6 +245,11 @@ harness = false
 name = "subscription_row_encoding"
 required-features = ["benchmarks"]
 
+[[bench]]
+harness = false
+name = "wasm_checkpoint"
+required-features = ["benchmarks"]
+
 [workspace]
 members = [
   ".",

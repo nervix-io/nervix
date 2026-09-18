@@ -211,6 +211,7 @@ impl Runtime {
                 self.release_domain_ingestor_quiesce(&domain.domain);
             }
         }
+        self.retain_assigned_wasm_modules(local_node_id, schedule);
 
         Ok(())
     }

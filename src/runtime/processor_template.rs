@@ -641,7 +641,7 @@ impl RelayProcessorTemplate {
                             branch: key.clone(),
                         })?;
                     let replicated_state = runtime
-                        .replicated_wasm_processor_state(placement, Vec::new(), 0)
+                        .replicated_wasm_processor_state(placement)
                         .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
                             kind: self.kind,
                             processor: self.processor.clone(),
