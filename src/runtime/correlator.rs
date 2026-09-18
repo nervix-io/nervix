@@ -62,10 +62,7 @@ pub(super) fn compile_correlator_where_program(
             where_clause: Some(correlate_where.clone()),
             ..RouteConstruction::default()
         },
-        SemanticNamespaces::new(
-            "__invalid_correlator_bare_read",
-            "__invalid_correlator_target",
-        ),
+        SemanticScopePolicy::unavailable(),
     )
     .change_context_lazy(|| ProcessorCompileError::CorrelateWhereInvalid {
         processor: processor.clone(),
@@ -115,11 +112,9 @@ impl CorrelatorOutputCompileContext<'_> {
             processor: self.processor.clone(),
             relay: self.output_relay.clone(),
         };
-        let parsed = lower_route_construction(
-            self.construction,
-            SemanticNamespaces::new("__invalid_correlator_bare_read", "output"),
-        )
-        .change_context_lazy(invalid_output)?;
+        let parsed =
+            lower_route_construction(self.construction, SemanticScopePolicy::write_only("output"))
+                .change_context_lazy(invalid_output)?;
         if !parsed.inner.invoke.is_empty() || parsed.inner.set.is_empty() {
             return Err(Report::new(ProcessorCompileError::CorrelatorOutputShape {
                 processor: self.processor.clone(),

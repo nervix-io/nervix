@@ -13,7 +13,7 @@ use nervix_approx_into::ApproxInto as _;
 use nervix_models::Timestamp;
 use nervix_vm::{
     CompileBinding, CompileOptions, CompiledProgram, ExecutionContext, OutputMode, RuntimeError,
-    SPAWN_BLOCKING_ROW_THRESHOLD, SemanticNamespaces, TypedArray, TypedBatch,
+    SPAWN_BLOCKING_ROW_THRESHOLD, SemanticScopePolicy, TypedArray, TypedBatch,
     compile_program_with_options_for_bindings, execute_program_in_context,
     lower_route_construction,
     program::{Program, SpannedNode},
@@ -46,17 +46,17 @@ async fn execute_benchmark_program(
 }
 
 fn parse_program(source: &str) -> BenchmarkProgramResult<SpannedNode<Program>> {
-    parse_program_with_namespaces(source, SemanticNamespaces::new("input", "input"))
+    parse_program_with_namespaces(source, SemanticScopePolicy::read_write("input", "input"))
 }
 
 fn parse_program_with_namespaces(
     source: &str,
-    namespaces: SemanticNamespaces<'_>,
+    scope_policy: SemanticScopePolicy<'_>,
 ) -> BenchmarkProgramResult<SpannedNode<Program>> {
     let construction = nervix_nspl::parse_route_construction(source).map_err(|error| {
         Report::new(BenchmarkProgramError::ParseRouteConstruction).attach_printable(error)
     })?;
-    lower_route_construction(&construction, namespaces)
+    lower_route_construction(&construction, scope_policy)
         .change_context(BenchmarkProgramError::LowerRouteConstruction)
 }
 
@@ -648,7 +648,7 @@ fn compile_key_projection() -> Arc<CompiledProgram> {
 fn compile_window_aggregate_input() -> Arc<CompiledProgram> {
     let program = parse_program_with_namespaces(
         "SET demand_0 = input.amount, demand_1 = input.sequence, demand_2 = input.amount * 2.0",
-        SemanticNamespaces::new("input", "window_input"),
+        SemanticScopePolicy::read_write("input", "window_input"),
     )
     .expect("window aggregate input benchmark program must parse");
     compile_program_with_options_for_bindings(

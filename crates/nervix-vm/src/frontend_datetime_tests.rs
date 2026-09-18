@@ -12,7 +12,10 @@
 use meticulous::ResultExt as _;
 use nervix_models::Expression as ModelExpression;
 
-use super::{ArgumentCount, DatetimeLiteral, FrontendErrorKind, FrontendResult, lower_expression};
+use super::{
+    ArgumentCount, DatetimeLiteral, FrontendErrorKind, FrontendResult, SemanticScopePolicy,
+    lower_expression,
+};
 use crate::{
     datetime::{
         DatetimeFormat, DatetimeParser, FormatDefect, ParseFormat, TextExpectation, UnreadableText,
@@ -32,7 +35,7 @@ fn zone(written: &str) -> Zone {
 }
 
 fn lowered(source: &str) -> (DatetimeFunction, Vec<String>) {
-    let lowered = lower_expression(&expression(source), "input")
+    let lowered = lower_expression(&expression(source), SemanticScopePolicy::read_only("input"))
         .unwrap_or_else(|error| panic!("`{source}` lowers: {error:?}"));
     let Expr::Call {
         function: FunctionName::Datetime(function),
@@ -277,7 +280,10 @@ fn calendar_zone_and_format_literal_failures_have_semantic_contexts() {
         ),
     ];
     for (source, kind) in failures {
-        assert_failure(lower_expression(&expression(source), "input"), &kind);
+        assert_failure(
+            lower_expression(&expression(source), SemanticScopePolicy::read_only("input")),
+            &kind,
+        );
     }
 }
 
