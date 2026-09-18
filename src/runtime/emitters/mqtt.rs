@@ -21,7 +21,7 @@ pub(in crate::runtime) struct MqttEmitter {
 type MqttConfirmation = Pin<Box<dyn Future<Output = Result<(), PublishNoticeError>> + Send>>;
 
 struct PendingMqttConfirmation {
-    position: BrokerRecordPosition,
+    position: SinkRecordPosition,
     acks: AckSet,
     deadline: Instant,
     confirmation: MqttConfirmation,
@@ -430,7 +430,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(1);
         let mut pending = VecDeque::from([
             PendingMqttConfirmation {
-                position: BrokerRecordPosition {
+                position: SinkRecordPosition {
                     batch_index: 0,
                     row_index: 0,
                 },
@@ -439,7 +439,7 @@ mod tests {
                 confirmation: Box::pin(std::future::pending()),
             },
             PendingMqttConfirmation {
-                position: BrokerRecordPosition {
+                position: SinkRecordPosition {
                     batch_index: 0,
                     row_index: 1,
                 },
@@ -448,7 +448,7 @@ mod tests {
                 confirmation: Box::pin(async { Ok(()) }),
             },
             PendingMqttConfirmation {
-                position: BrokerRecordPosition {
+                position: SinkRecordPosition {
                     batch_index: 0,
                     row_index: 2,
                 },
@@ -461,7 +461,7 @@ mod tests {
                 }),
             },
             PendingMqttConfirmation {
-                position: BrokerRecordPosition {
+                position: SinkRecordPosition {
                     batch_index: 0,
                     row_index: 3,
                 },
@@ -477,7 +477,7 @@ mod tests {
         assert_eq!(pending.len(), 1, "only the unresolved oldest must remain");
         assert_eq!(
             outcome.delivered,
-            vec![BrokerRecordPosition {
+            vec![SinkRecordPosition {
                 batch_index: 0,
                 row_index: 1,
             }]

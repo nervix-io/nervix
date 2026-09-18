@@ -821,14 +821,7 @@ fn ingestor_filter_map_metadata_schema(source: &IngestSource) -> Option<CreateSc
 }
 
 fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
-    matches!(
-        sink,
-        EmitSink::Kafka { .. }
-            | EmitSink::Pulsar { .. }
-            | EmitSink::RabbitMq { .. }
-            | EmitSink::Nats { .. }
-            | EmitSink::Sqs { .. }
-    )
+    sink.capabilities().writes_headers()
 }
 
 pub(in crate::registry) fn effective_emitter_filter_map_schema(

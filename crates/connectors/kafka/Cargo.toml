@@ -1,0 +1,41 @@
+[package]
+description = "The Kafka sink connector for Nervix"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-connector-kafka"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+shuttle = [
+  "dep:shuttle-tokio",
+  "nervix-connector/shuttle",
+  "shuttle-tokio/shuttle",
+]
+
+[dependencies]
+async-trait = { workspace = true }
+error-stack = { workspace = true }
+futures-util = { workspace = true }
+humantime = { workspace = true }
+meticulous = { workspace = true }
+nervix-connector = { workspace = true }
+nervix-models = { workspace = true }
+rdkafka = { workspace = true, features = [
+  "tokio",
+  "curl-static",
+  "curl-rustls",
+  "libz-static",
+  "cmake_build",
+  "static-linking",
+  "aws-lc",
+] }
+shuttle-tokio = { workspace = true, features = [
+  "macros",
+  "rt",
+  "time",
+], optional = true }
+tokio = { workspace = true, features = ["macros", "rt", "time"] }

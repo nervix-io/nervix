@@ -17,7 +17,7 @@ pub(in crate::runtime) struct RabbitMqEmitter {
 }
 
 struct PendingRabbitMqConfirmation {
-    position: BrokerRecordPosition,
+    position: SinkRecordPosition,
     acks: AckSet,
     deadline: Instant,
     confirmation: PublisherConfirm,
