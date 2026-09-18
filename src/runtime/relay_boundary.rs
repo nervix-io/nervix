@@ -1558,26 +1558,28 @@ impl Runtime {
         result
     }
 
+    /// The branch expiration state of `relay`, kept for the relay-wide materialized state in the
+    /// lifetime the committed schedule publishes for it.
     pub(in crate::runtime) fn expiring_stream_state(
         &self,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> Arc<ExpiringRelayState> {
+    ) -> error_stack::Result<Arc<ExpiringRelayState>, StateIdentityError> {
         let placement = self.state_placement(
             domain,
-            RuntimeState::MaterializedRelay,
+            RuntimeStateKind::MaterializedRelay,
             ModelKind::Relay,
             relay,
             None,
-        );
+        )?;
         if let Some(existing) = self.inner.expiring_stream_states.get(&placement) {
-            return existing.clone();
+            return Ok(existing.clone());
         }
         let state = Arc::new(ExpiringRelayState::new());
         self.inner
             .expiring_stream_states
             .insert(placement, state.clone());
-        state
+        Ok(state)
     }
 
     pub(in crate::runtime) fn clear_expiring_stream_states_for_domain(&self, domain: &DomainName) {

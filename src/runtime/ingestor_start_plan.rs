@@ -337,7 +337,6 @@ impl IngestorStartPlan {
                             state: RuntimeState::KafkaOffset,
                             kind: node.kind(),
                             identifier: node.identifier.clone(),
-                            schema_fingerprint: [0; 32],
                             branch_key: None,
                         },
                         primary_node: node.primary_node.clone(),
@@ -642,7 +641,10 @@ mod tests {
             general_error_policy: GeneralErrorPolicy::Log,
             filter_where: None,
         };
-        ScheduledNode::new(Model::Ingestor(ingestor))
+        ScheduledNode::new(
+            Model::Ingestor(ingestor),
+            SchemaFingerprint::from_digest([1; 32]),
+        )
     }
 
     fn instances() -> NonZeroU64 {

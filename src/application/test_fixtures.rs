@@ -26,7 +26,7 @@ use nervix_models::{
     CreateJunction, CreateSchema, CreateWasmProcessor, DomainConfig, DomainName, DomainPace,
     DomainStartPoint, DomainState, DomainStatus, EmitSink, IngestSource, KafkaOffsetMode, Model,
     ModelKind, ModelName, NodeEndpoint, NodeRef, NodeServiceUrl, PlacementGroupSchedule,
-    ProcessorInputs, ProcessorOutputs, ScheduledNode, WasmProcessorLimits,
+    ProcessorInputs, ProcessorOutputs, ScheduledNode, SchemaFingerprint, WasmProcessorLimits,
 };
 use nonzero_ext::nonzero;
 use parking_lot::RwLock;
@@ -378,7 +378,11 @@ pub(in crate::application) fn scheduled_node(
     identifier_raw: &str,
     kind: ModelKind,
 ) -> ScheduledNode {
-    ScheduledNode::new(model_of_kind(identifier_raw, kind)).placed_on(
+    ScheduledNode::new(
+        model_of_kind(identifier_raw, kind),
+        SchemaFingerprint::from_digest([1; 32]),
+    )
+    .placed_on(
         Some(ClusterNodeName::parse("node-1").expect("valid name")),
         vec![ClusterNodeName::parse("node-1").expect("valid name")],
     )
@@ -390,8 +394,11 @@ pub(in crate::application) fn scheduled_node_on(
     node: &str,
 ) -> ScheduledNode {
     let node = ClusterNodeName::parse(node).expect("valid name");
-    ScheduledNode::new(model_of_kind(identifier_raw, kind))
-        .placed_on(Some(node.clone()), vec![node])
+    ScheduledNode::new(
+        model_of_kind(identifier_raw, kind),
+        SchemaFingerprint::from_digest([1; 32]),
+    )
+    .placed_on(Some(node.clone()), vec![node])
 }
 
 pub(in crate::application) fn placement_member(identifier_raw: &str, kind: ModelKind) -> NodeRef {

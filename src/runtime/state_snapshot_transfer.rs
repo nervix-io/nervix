@@ -50,7 +50,6 @@ pub(crate) enum DescribedStateSnapshot {
 pub(crate) struct SealedSnapshotEnvelope {
     pub(in crate::runtime) length: u64,
     pub(in crate::runtime) digest: [u8; 32],
-    pub(in crate::runtime) schema_fingerprint: [u8; 32],
     pub(in crate::runtime) revision: u64,
     pub(in crate::runtime) fence: u64,
     pub(in crate::runtime) branch_generation: u64,

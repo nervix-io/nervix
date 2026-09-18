@@ -63,8 +63,8 @@ pub use request::{
 use request::{RequestEnvelope, RequestState, ResponseEnvelope};
 pub use runtime_state::{
     OwnershipHandoffCheckpoint, RuntimeState, RuntimeStateKind, StateCheckpointAvailable,
-    StatePlacementEnvelope, StateReplicationAck, StateSnapshotEnvelope, StateSyncRequest,
-    StateSyncResponse,
+    StatePlacementEnvelope, StateReplicationAck, StateSchema, StateSnapshotEnvelope,
+    StateSyncRequest, StateSyncResponse,
 };
 
 const DEFAULT_MAX_PEERS: usize = 64;

@@ -316,6 +316,101 @@ Feature: Kafka ingestor domain pacing
       | 3            | 0             |
       | 3            | 1             |
 
+  Scenario Outline: Domain-owned Kafka offsets survive a schema change of the records they deliver
+    Given Kafka is running
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the active domain is "{{domain}}"
+    And Kafka topic "notifications_out_{{test_id}}" is observed
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+        CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
+        CREATE CLIENT kafka_main
+        TYPE KAFKA
+        CONFIG {
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
+        };
+        CREATE INGESTOR kafka_notifications
+        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TIMESTAMP NOW
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_kafka_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE EMITTER kafka_notifications_out FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        START;
+      """
+    When Kafka message is published to topic "notifications_{{test_id}}"
+      """
+      {"user_id":41}
+      """
+    And Kafka message is published to topic "notifications_{{test_id}}"
+      """
+      {"user_id":42}
+      """
+    Then the observed broker receives a payload
+      """
+      "user_id":41
+      """
+    And the observed broker receives a payload
+      """
+      "user_id":42
+      """
+    When this NSPL command request is executed on the leader node
+      """
+      BEGIN;
+      ALTER WIRE JSON SCHEMA notification_wire ADD FIELD note string OPTIONAL;
+      ALTER SCHEMA notification ADD FIELD note STRING OPTIONAL;
+      COMMIT;
+      """
+    Then the last command output contains
+      """
+      quiesce level: DOMAIN_PAUSE
+      """
+    And within "10s" DESCRIBE INGESTOR "kafka_notifications" on the leader node contains
+      """
+      kafka observed partitions: 0
+      """
+    And the observed broker does not receive a payload within "1s"
+    When Kafka message is published to topic "notifications_{{test_id}}"
+      """
+      {"user_id":43,"note":"after the schema change"}
+      """
+    Then the observed broker receives a payload
+      """
+      "user_id":43
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+      | 3            | 1             |
+
   Scenario Outline: Domain-owned Kafka offsets reset on START AT NOW
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
