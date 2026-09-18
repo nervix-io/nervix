@@ -16,11 +16,11 @@ use arch_into::ArchInto;
 use error_stack::{Report, ResultExt};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
-    ConsensusError, ConsensusTransactionError, ReplicatedTransaction, TransactionActivity,
-    TransactionApplyingStep, TransactionCommandResult, TransactionCommitAdvance,
-    TransactionDiagnostic, TransactionOutcome, TransactionQueueAdmission, TransactionQueueLimits,
-    TransactionState, TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
-    TransactionStepResult,
+    ConsensusError, ConsensusTransactionError, DomainPlanningInputs, ReplicatedTransaction,
+    TransactionActivity, TransactionApplyingStep, TransactionCommandResult,
+    TransactionCommitAdvance, TransactionDiagnostic, TransactionOutcome, TransactionQueueAdmission,
+    TransactionQueueLimits, TransactionState, TransactionStatement, TransactionStatementRequest,
+    TransactionStepEffect, TransactionStepResult,
 };
 use nervix_models::{
     ActualExecutionStepImpact, CanonicalImpactSet, CommandExecutionReference, DomainName,
@@ -128,6 +128,11 @@ struct TransactionPlanningBasisInput<'a> {
     resources: Vec<&'a ResourceName>,
     completed_resource_versions: Vec<&'a ResourceId>,
     schedule: Option<&'a DomainSchedule>,
+    members: &'a [nervix_models::ClusterNodeName],
+    voters: &'a [nervix_models::ClusterNodeName],
+    cordoned: &'a [nervix_models::ClusterNodeName],
+    live_identities: Vec<&'a nervix_models::ClusterNodeIdentity>,
+    placement_candidate_identities: Vec<&'a nervix_models::ClusterNodeIdentity>,
     live_voters: &'a [nervix_models::ClusterNodeName],
     cluster_nodes: &'a [nervix_models::ClusterNodeName],
     replica_count: usize,
@@ -141,6 +146,7 @@ struct TransactionPlanningBasisSource<'a> {
     resources: &'a BTreeSet<ResourceName>,
     resource_uploads: &'a ResourceUploads,
     schedule: Option<&'a DomainSchedule>,
+    authoritative_inputs: &'a DomainPlanningInputs,
     schedule_inputs: &'a DomainSchedulePlanningSnapshot,
 }
 
@@ -153,6 +159,7 @@ fn transaction_planning_basis(
         resources,
         resource_uploads,
         schedule,
+        authoritative_inputs,
         schedule_inputs,
     } = source;
     let mut ordered_models = models.models().collect::<Vec<_>>();
@@ -164,6 +171,14 @@ fn transaction_planning_basis(
         resources,
         completed_resource_versions: resource_uploads.completed_versions().collect(),
         schedule,
+        members: authoritative_inputs.topology().members(),
+        voters: authoritative_inputs.topology().voters(),
+        cordoned: authoritative_inputs.topology().cordoned(),
+        live_identities: schedule_inputs.live_identities().iter().collect(),
+        placement_candidate_identities: schedule_inputs
+            .placement_candidate_identities()
+            .iter()
+            .collect(),
         live_voters: schedule_inputs.live_voters(),
         cluster_nodes: schedule_inputs.cluster_nodes(),
         replica_count: schedule_inputs.replica_count(),
@@ -219,8 +234,16 @@ pub(in crate::application) struct TransactionModelStepContext<'a> {
     pub(in crate::application) transaction: &'a ReplicatedTransaction,
     pub(in crate::application) first_statement: usize,
     pub(in crate::application) planned_step: PlannedTransactionStep,
+    pub(in crate::application) inputs: DomainPlanningInputs,
+    pub(in crate::application) schedule_inputs: DomainSchedulePlanningSnapshot,
     pub(in crate::application) outcome:
         &'a ParkingMutex<Option<Result<ReplicatedTransaction, Report<TransactionCommitError>>>>,
+}
+
+struct CapturedTransactionPlan {
+    plan: PlannedTransaction,
+    inputs: DomainPlanningInputs,
+    schedule_inputs: DomainSchedulePlanningSnapshot,
 }
 
 enum TransactionApplicationAttempt {
@@ -1088,7 +1111,7 @@ impl SessionServiceImpl {
         statements: &[Statement],
         first_operation_index: usize,
         allow_incomplete_final_model_run: bool,
-    ) -> Result<PlannedTransaction, Report<TransactionPlanningError>> {
+    ) -> Result<CapturedTransactionPlan, Report<TransactionPlanningError>> {
         let mutates_domain = statements
             .iter()
             .any(Statement::requires_domain_mutation_ownership);
@@ -1100,11 +1123,15 @@ impl SessionServiceImpl {
             ));
         }
         let models = self.inner.registry.transaction_planning_models(domain);
-        let (control, schedule_inputs) = tokio::join!(
-            self.inner.consensus.transaction_control_snapshot(domain),
-            self.capture_domain_schedule_planning_snapshot(),
-        );
-        let domain_state = control.domain.ok_or_else(|| {
+        let control = self
+            .inner
+            .consensus
+            .transaction_control_snapshot(domain)
+            .await;
+        let schedule_inputs = self
+            .capture_domain_schedule_planning_snapshot(&control.planning_inputs)
+            .await;
+        let domain_state = control.planning_inputs.state().cloned().ok_or_else(|| {
             Report::new(TransactionPlanningError::DomainNotFound {
                 domain: domain.clone(),
             })
@@ -1122,7 +1149,8 @@ impl SessionServiceImpl {
             models: &models,
             resources: &resources,
             resource_uploads: &resource_uploads,
-            schedule: control.schedule.as_ref(),
+            schedule: control.planning_inputs.schedule(),
+            authoritative_inputs: &control.planning_inputs,
             schedule_inputs: &schedule_inputs,
         })?;
         let snapshot = TransactionPlanningSnapshot {
@@ -1130,7 +1158,7 @@ impl SessionServiceImpl {
             models,
             resources,
             resource_uploads,
-            schedule: control.schedule,
+            schedule: control.planning_inputs.schedule().cloned(),
             basis,
         };
         let planning_domain = domain.clone();
@@ -1140,7 +1168,13 @@ impl SessionServiceImpl {
             first_operation_index,
             allow_incomplete_final_model_run,
             |graph, placement, current, attribution| {
-                let prepared = schedule_inputs.prepare(&planning_domain, graph, placement, current);
+                let prepared = schedule_inputs.prepare(
+                    &control.planning_inputs,
+                    &planning_domain,
+                    graph,
+                    placement,
+                    current,
+                );
                 let ownership_moves = planned_ownership_moves(current, prepared.schedule.as_ref())
                     .into_iter()
                     .map(|moved| OwnershipMoveImpact {
@@ -1180,7 +1214,11 @@ impl SessionServiceImpl {
                     .attach(message)
                 })?;
         }
-        Ok(plan)
+        Ok(CapturedTransactionPlan {
+            plan,
+            inputs: control.planning_inputs,
+            schedule_inputs,
+        })
     }
 
     fn transaction_admission_result(
@@ -1204,7 +1242,7 @@ impl SessionServiceImpl {
             } => *already_existed,
             PlannedTransactionStepKind::AlterDomain { .. }
             | PlannedTransactionStepKind::StartDomain { .. }
-            | PlannedTransactionStepKind::StopDomain { .. } => false,
+            | PlannedTransactionStepKind::StopDomain => false,
         };
         let mut result = if already_existed {
             let target = match candidate {
@@ -1250,7 +1288,7 @@ impl SessionServiceImpl {
             .map(|queued| queued.statement.clone())
             .collect::<Vec<_>>();
         statements.push(candidate.statement.clone());
-        let plan = self
+        let captured = self
             .plan_transaction_statements(&transaction.domain, &statements, 0, true)
             .await
             .map_err(|error| {
@@ -1259,11 +1297,13 @@ impl SessionServiceImpl {
                     transaction_planning_error_message(&error)
                 )
             })?;
-        plan.report()
+        captured
+            .plan
+            .report()
             .map_err(|error| format!("transaction statement failed preflight: {error}"))?;
         Ok(Self::transaction_admission_result(
             &candidate.statement,
-            &plan,
+            &captured.plan,
             candidate.expected_position,
         ))
     }
@@ -1531,15 +1571,15 @@ impl SessionServiceImpl {
                 .iter()
                 .map(|queued| queued.statement.clone())
                 .collect::<Vec<_>>();
-            let plan = Box::pin(self.plan_transaction_statements(
+            let captured = Box::pin(self.plan_transaction_statements(
                 &transaction.domain,
                 &remaining,
                 first_statement,
                 false,
             ))
             .await;
-            let plan = match plan {
-                Ok(plan) => plan,
+            let captured = match captured {
+                Ok(captured) => captured,
                 Err(error) => {
                     let planning_error = transaction_planning_error_message(&error);
                     let message =
@@ -1562,7 +1602,7 @@ impl SessionServiceImpl {
                     .await;
                 }
             };
-            let planned_step = plan.first_step().cloned().ok_or_else(|| {
+            let planned_step = captured.plan.first_step().cloned().ok_or_else(|| {
                 Report::new(TransactionCommitError::InvalidProgress {
                     id: transaction.id.clone(),
                 })
@@ -1598,6 +1638,8 @@ impl SessionServiceImpl {
                         transaction: &transaction,
                         first_statement,
                         planned_step,
+                        inputs: captured.inputs,
+                        schedule_inputs: captured.schedule_inputs,
                         outcome: &outcome,
                     }),
                 ))
@@ -1638,6 +1680,8 @@ impl SessionServiceImpl {
                 &transaction,
                 first_statement,
                 planned_step,
+                captured.inputs,
+                captured.schedule_inputs,
             ))
             .await?;
             if matches!(advanced.state, TransactionState::Finished(_)) {
@@ -1904,6 +1948,8 @@ impl SessionServiceImpl {
         transaction: &ReplicatedTransaction,
         statement_index: usize,
         planned_step: PlannedTransactionStep,
+        inputs: DomainPlanningInputs,
+        schedule_inputs: DomainSchedulePlanningSnapshot,
     ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
         let queued = transaction.statements.get(statement_index).verified(
             "the caller checked this index against the same statement list before dispatching the \
@@ -1933,6 +1979,22 @@ impl SessionServiceImpl {
         } else {
             None
         };
+        if matches!(planned_kind, PlannedTransactionStepKind::AlterDomain { .. }) {
+            if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {
+                return Err(Report::new(TransactionCommitError::Proposal(
+                    ConsensusTransactionError::Consensus(ConsensusError::Conflict(
+                        error.to_string(),
+                    )),
+                )));
+            }
+            if let Err(error) = schedule_inputs.validate_eligibility(self).await {
+                return Err(Report::new(TransactionCommitError::Proposal(
+                    ConsensusTransactionError::Consensus(ConsensusError::Conflict(
+                        error.to_string(),
+                    )),
+                )));
+            }
+        }
         let (result, effect) = match planned_kind {
             PlannedTransactionStepKind::AlterDomain { plan } => {
                 let placement = plan.next.config.placement;
@@ -1980,8 +2042,7 @@ impl SessionServiceImpl {
                                     quiesce_level_message(quiesce_level)
                                 )),
                                 Some(TransactionStepEffect::PutDomainAndSchedule {
-                                    expected_domain: Box::new(plan.previous),
-                                    expected_schedule: plan.expected_schedule.map(Box::new),
+                                    inputs: Box::new(inputs),
                                     domain: Box::new(plan.next),
                                     schedule: schedule.map(Box::new),
                                 }),
@@ -2007,6 +2068,7 @@ impl SessionServiceImpl {
                     (
                         command_ok(format!("created resource '{}'", resource.as_str())),
                         Some(TransactionStepEffect::CreateResourceCatalog {
+                            inputs: Box::new(inputs),
                             identifier: resource,
                         }),
                     )
@@ -2038,8 +2100,7 @@ impl SessionServiceImpl {
                             Ok(resolved_start) => (
                                 command_ok(format!("starting domain '{}'", domain_id.as_str())),
                                 Some(TransactionStepEffect::StartDomain {
-                                    domain_id: domain_id.clone(),
-                                    expected_start_version: previous.start_version,
+                                    inputs: Box::new(inputs),
                                     start: resolved_start.concrete_start,
                                     clock: previous
                                         .config
@@ -2061,11 +2122,10 @@ impl SessionServiceImpl {
                     Err(message) => (command_error(message), None),
                 }
             }
-            PlannedTransactionStepKind::StopDomain { previous } => (
+            PlannedTransactionStepKind::StopDomain => (
                 command_ok(format!("stopped domain '{}'", domain_id.as_str())),
                 Some(TransactionStepEffect::StopDomain {
-                    domain_id: domain_id.clone(),
-                    expected_start_version: previous.start_version,
+                    inputs: Box::new(inputs),
                 }),
             ),
             PlannedTransactionStepKind::Models { .. } => {
@@ -2336,617 +2396,5 @@ impl SessionServiceImpl {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use meticulous::{OptionExt as _, ResultExt as _};
-    use nervix_consensus::{
-        ReplicatedTransaction, TransactionActivity, TransactionOutcome, TransactionState,
-    };
-    use nervix_models::{
-        CreateRelay, CreateSchema, DomainName, ExecutionStepOutcome, ModelName, Timestamp,
-        TransactionOperationNumber,
-    };
-    use tokio::sync::mpsc;
-
-    use super::{
-        super::{
-            subscription::SessionSubscriptions,
-            test_fixtures::{
-                TestService, build_test_service, command_transaction_state, create_test_domain,
-                named,
-            },
-        },
-        DEFAULT_TRANSACTION_MAX_OPEN,
-    };
-    use crate::{
-        proto,
-        proto::{CommandRequest, TransactionState as ApiTransactionState},
-    };
-
-    #[test]
-    fn planning_error_message_includes_attached_validation_detail() {
-        let operation = TransactionOperationNumber::from_index(0)
-            .assured("the first test transaction operation is addressable");
-        let error =
-            error_stack::Report::new(super::TransactionPlanningError::ExternalModelValidation {
-                operation,
-            })
-            .attach("paced ingestor requires TIMESTAMP NOW".to_string());
-
-        assert_eq!(
-            super::transaction_planning_error_message(&error),
-            "transaction operation 1 failed external model validation: paced ingestor requires \
-             TIMESTAMP NOW"
-        );
-    }
-
-    #[tokio::test]
-    async fn attaching_an_overdue_transaction_atomically_expires_it() {
-        let TestService {
-            service,
-            registry: _registry,
-            path,
-        } = build_test_service(true).await;
-        let mut subscriptions = SessionSubscriptions::new();
-        let id = "overdue-attach".to_string();
-        let activity = TransactionActivity::from_timeout(
-            Timestamp::from_unix_nanos(1),
-            Duration::from_nanos(1),
-        );
-        let transaction = ReplicatedTransaction::open(
-            id.clone(),
-            DomainName::parse("default").assured("the test domain is an accepted literal"),
-            subscriptions.user.clone(),
-            activity,
-        );
-        service
-            .inner
-            .consensus
-            .open_transaction(transaction, DEFAULT_TRANSACTION_MAX_OPEN)
-            .await
-            .assured("the overdue test transaction is unique and below the admission limit");
-        service
-            .inner
-            .transaction_bindings
-            .insert(id.clone(), "former-session".to_string());
-
-        let attached = service
-            .attach_transaction(
-                proto::AttachTransactionRequest { id: id.clone() },
-                &mut subscriptions,
-            )
-            .await;
-
-        assert!(!attached.success);
-        assert!(attached.message.contains("finished with outcome EXPIRED"));
-        assert_eq!(
-            command_transaction_state(&attached),
-            Some(ApiTransactionState::Expired)
-        );
-        assert!(!subscriptions.transaction_active());
-        assert!(!service.inner.transaction_bindings.contains_key(&id));
-        let expired = service
-            .inner
-            .consensus
-            .current_transaction(&id)
-            .await
-            .verified("the expired transaction remains as a retained tombstone");
-        assert!(matches!(
-            expired.finished_outcome(),
-            Some(TransactionOutcome::Expired)
-        ));
-
-        subscriptions.stop_all(&service).await;
-        let _ = std::fs::remove_dir_all(&path);
-    }
-
-    #[test]
-    fn transaction_recovery_rotates_fairly_after_the_last_considered_identity() {
-        let recovery = super::TransactionRecovery::default();
-        let owner = nervix_models::UserName::parse("operator")
-            .assured("the test owner is an accepted literal");
-        let domain = DomainName::parse("default").assured("the test domain is an accepted literal");
-        let mut transactions = std::collections::BTreeMap::new();
-        for id in ["a", "b", "c"] {
-            let activity = TransactionActivity::from_timeout(
-                Timestamp::from_unix_nanos(1),
-                Duration::from_secs(1),
-            );
-            let mut transaction = ReplicatedTransaction::open(
-                id.to_string(),
-                domain.clone(),
-                owner.clone(),
-                activity,
-            );
-            transaction.state = TransactionState::Committing(Box::new(
-                nervix_consensus::TransactionCommitProgress {
-                    last_activity_at: Timestamp::from_unix_nanos(1),
-                    next_statement: 0,
-                    results: Vec::new(),
-                    applying: None,
-                    domain_mutation: None,
-                },
-            ));
-            transactions.insert(id.to_string(), transaction);
-        }
-
-        assert_eq!(recovery.candidates(&transactions), ["a", "b", "c"]);
-        recovery.considered("a".to_string());
-        assert_eq!(recovery.candidates(&transactions), ["b", "c", "a"]);
-        recovery.considered("c".to_string());
-        assert_eq!(recovery.candidates(&transactions), ["a", "b", "c"]);
-        assert_eq!(
-            recovery.permits.available_permits(),
-            super::TRANSACTION_RECOVERY_CONCURRENCY
-        );
-    }
-
-    #[tokio::test]
-    async fn process_command_commits_explicit_transaction_without_trailing_semicolon() {
-        let TestService {
-            service,
-            registry,
-            path,
-        } = build_test_service(false).await;
-        create_test_domain(&service.inner.consensus, "prod").await;
-        let (tx, _rx) = mpsc::channel(16);
-        let mut subscriptions = SessionSubscriptions::new();
-
-        let result = service
-            .process_command(
-                CommandRequest {
-                    query: "BEGIN; CREATE RELAY notifications SCHEMA notification UNBRANCHED; \
-                            CREATE SCHEMA notification ( user_id U32 ); COMMIT"
-                        .to_string(),
-                    domain: "prod".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
-                    expected_transaction_position: None,
-                },
-                &tx,
-                &mut subscriptions,
-            )
-            .await;
-
-        assert!(result.success, "command must succeed: {}", result.message);
-        assert_eq!(
-            command_transaction_state(&result),
-            Some(ApiTransactionState::Committed)
-        );
-        assert!(result.message.contains("quiesce level: DYNAMIC"));
-        let commit = result
-            .results
-            .last()
-            .expect("COMMIT result must be retained");
-        assert_eq!(commit.message, "quiesce level: DYNAMIC");
-        let Some(status) = &result.transaction else {
-            panic!("the committed command must carry its transaction status");
-        };
-        let Some(transaction) = service
-            .inner
-            .consensus
-            .current_transaction(&status.id)
-            .await
-        else {
-            panic!("the committed transaction must remain as a retained tombstone");
-        };
-        let [step] = transaction.commit_results() else {
-            panic!("both consecutive model operations must execute as one atomic step");
-        };
-        assert_eq!(step.operation_range().first().get(), 1);
-        assert_eq!(step.operation_range().last().get(), 2);
-        assert!(step.impact.planned().completeness.is_complete());
-        assert!(matches!(
-            step.impact.actual().outcome,
-            ExecutionStepOutcome::Applied
-        ));
-
-        let schema = registry
-            .get::<CreateSchema>(
-                &DomainName::parse("prod").expect("valid domain"),
-                named::<ModelName>("notification"),
-            )
-            .expect("registry get should succeed");
-        assert!(
-            schema.is_some(),
-            "batch should create schema in prod domain"
-        );
-        let relay = registry
-            .get::<CreateRelay>(
-                &DomainName::parse("prod").expect("valid domain"),
-                named::<ModelName>("notifications"),
-            )
-            .expect("registry get should succeed");
-        assert!(
-            relay.is_some(),
-            "model create batch should resolve relay references atomically"
-        );
-
-        subscriptions.stop_all(&service).await;
-        let _ = std::fs::remove_dir_all(&path);
-    }
-
-    #[tokio::test]
-    async fn process_command_queues_transaction_across_requests_and_reverts() {
-        let TestService {
-            service,
-            registry,
-            path,
-        } = build_test_service(true).await;
-        let (tx, _rx) = mpsc::channel(16);
-        let mut subscriptions = SessionSubscriptions::new();
-
-        let begin = service
-            .process_command(
-                CommandRequest {
-                    query: "BEGIN;".to_string(),
-                    domain: "default".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
-                    expected_transaction_position: None,
-                },
-                &tx,
-                &mut subscriptions,
-            )
-            .await;
-        assert!(begin.success);
-        assert_eq!(
-            command_transaction_state(&begin),
-            Some(ApiTransactionState::Open)
-        );
-
-        let queued = service
-            .process_command(
-                CommandRequest {
-                    query: "CREATE SCHEMA queued_event ( user_id U32 );".to_string(),
-                    domain: "default".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
-                    expected_transaction_position: Some(0),
-                },
-                &tx,
-                &mut subscriptions,
-            )
-            .await;
-        assert!(queued.success);
-        assert_eq!(queued.message, "quiesce level: DYNAMIC");
-        assert_eq!(
-            command_transaction_state(&queued),
-            Some(ApiTransactionState::Open)
-        );
-        assert!(
-            registry
-                .get::<CreateSchema>(
-                    &DomainName::parse("default").expect("valid domain"),
-                    named::<ModelName>("queued_event"),
-                )
-                .expect("registry get should succeed")
-                .is_none(),
-            "queued command must not execute before COMMIT"
-        );
-
-        let reverted = service
-            .process_command(
-                CommandRequest {
-                    query: "REVERT;".to_string(),
-                    domain: "default".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
-                    expected_transaction_position: None,
-                },
-                &tx,
-                &mut subscriptions,
-            )
-            .await;
-        assert!(reverted.success);
-        assert!(
-            reverted
-                .message
-                .starts_with("transaction reverted: dropped 1 command(s); id '")
-        );
-        assert_eq!(
-            command_transaction_state(&reverted),
-            Some(ApiTransactionState::Reverted)
-        );
-        assert!(
-            registry
-                .get::<CreateSchema>(
-                    &DomainName::parse("default").expect("valid domain"),
-                    named::<ModelName>("queued_event"),
-                )
-                .expect("registry get should succeed")
-                .is_none(),
-            "reverted command must not persist"
-        );
-
-        subscriptions.stop_all(&service).await;
-        let _ = std::fs::remove_dir_all(&path);
-    }
-
-    #[tokio::test]
-    async fn process_command_rejects_begin_inside_begin() {
-        let TestService {
-            service,
-            registry: _registry,
-            path,
-        } = build_test_service(true).await;
-        let (tx, _rx) = mpsc::channel(16);
-        let mut subscriptions = SessionSubscriptions::new();
-
-        let begin = service
-            .process_command(
-                CommandRequest {
-                    query: "BEGIN;".to_string(),
-                    domain: "default".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
-                    expected_transaction_position: None,
-                },
-                &tx,
-                &mut subscriptions,
-            )
-            .await;
-        assert!(begin.success);
-        assert_eq!(
-            command_transaction_state(&begin),
-            Some(ApiTransactionState::Open)
-        );
-
-        let nested = service
-            .process_command(
-                CommandRequest {
-                    query: "BEGIN;".to_string(),
-                    domain: "default".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
-                    expected_transaction_position: None,
-                },
-                &tx,
-                &mut subscriptions,
-            )
-            .await;
-        assert!(!nested.success);
-        assert_eq!(nested.message, "transaction is already active");
-        assert_eq!(
-            command_transaction_state(&nested),
-            Some(ApiTransactionState::Open)
-        );
-
-        subscriptions.stop_all(&service).await;
-        let _ = std::fs::remove_dir_all(&path);
-    }
-
-    #[tokio::test]
-    async fn process_command_rejects_domain_and_user_creation_inside_a_transaction() {
-        let TestService {
-            service,
-            registry: _registry,
-            path,
-        } = build_test_service(true).await;
-        let (tx, _rx) = mpsc::channel(16);
-        let mut subscriptions = SessionSubscriptions::new();
-
-        for query in [
-            "BEGIN; CREATE DOMAIN alpha; COMMIT",
-            "BEGIN; CREATE USER alpha WITH PASSWORD 'secret'; COMMIT",
-        ] {
-            let result = service
-                .process_command(
-                    CommandRequest {
-                        query: query.to_string(),
-                        domain: "default".to_string(),
-                        execution_reference: uuid::Uuid::now_v7().to_string(),
-                        expected_transaction_position: None,
-                    },
-                    &tx,
-                    &mut subscriptions,
-                )
-                .await;
-
-            assert!(!result.success, "'{query}' must be rejected");
-            assert!(
-                result.message.contains("cannot be queued in a transaction"),
-                "'{query}' produced: {}",
-                result.message
-            );
-
-            let reverted = service
-                .process_command(
-                    CommandRequest {
-                        query: "REVERT;".to_string(),
-                        domain: "default".to_string(),
-                        execution_reference: uuid::Uuid::now_v7().to_string(),
-                        expected_transaction_position: None,
-                    },
-                    &tx,
-                    &mut subscriptions,
-                )
-                .await;
-            assert!(
-                reverted.success,
-                "revert must succeed: {}",
-                reverted.message
-            );
-        }
-
-        assert!(
-            service
-                .inner
-                .consensus
-                .current_domain(&DomainName::parse("alpha").expect("valid domain"))
-                .await
-                .is_none(),
-            "a rejected CREATE DOMAIN must not reach the control plane"
-        );
-
-        subscriptions.stop_all(&service).await;
-        let _ = std::fs::remove_dir_all(&path);
-    }
-
-    #[tokio::test]
-    async fn process_command_rejects_begin_without_an_existing_domain() {
-        let TestService {
-            service,
-            registry: _registry,
-            path,
-        } = build_test_service(false).await;
-        let (tx, _rx) = mpsc::channel(16);
-        let mut subscriptions = SessionSubscriptions::new();
-
-        let missing = service
-            .process_command(
-                CommandRequest {
-                    query: "BEGIN;".to_string(),
-                    domain: "absent".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
-                    expected_transaction_position: None,
-                },
-                &tx,
-                &mut subscriptions,
-            )
-            .await;
-        assert!(!missing.success);
-        assert_eq!(missing.message, "domain 'absent' does not exist");
-        assert!(!subscriptions.transaction_active());
-
-        let unselected = service
-            .process_command(
-                CommandRequest {
-                    query: "BEGIN;".to_string(),
-                    domain: String::new(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
-                    expected_transaction_position: None,
-                },
-                &tx,
-                &mut subscriptions,
-            )
-            .await;
-        assert!(!unselected.success);
-        assert_eq!(unselected.message, "no active domain selected");
-        assert!(!subscriptions.transaction_active());
-
-        subscriptions.stop_all(&service).await;
-        let _ = std::fs::remove_dir_all(&path);
-    }
-
-    #[tokio::test]
-    async fn process_command_rejects_statements_selecting_another_domain() {
-        let TestService {
-            service,
-            registry: _registry,
-            path,
-        } = build_test_service(true).await;
-        create_test_domain(&service.inner.consensus, "other").await;
-        let (tx, _rx) = mpsc::channel(16);
-        let mut subscriptions = SessionSubscriptions::new();
-
-        let begin = service
-            .process_command(
-                CommandRequest {
-                    query: "BEGIN;".to_string(),
-                    domain: "default".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
-                    expected_transaction_position: None,
-                },
-                &tx,
-                &mut subscriptions,
-            )
-            .await;
-        assert!(begin.success, "begin must succeed: {}", begin.message);
-        assert_eq!(
-            begin
-                .transaction
-                .as_ref()
-                .map(|status| status.domain.as_str()),
-            Some("default")
-        );
-
-        let foreign = service
-            .process_command(
-                CommandRequest {
-                    query: "CREATE SCHEMA foreign_event ( user_id U32 );".to_string(),
-                    domain: "other".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
-                    expected_transaction_position: Some(0),
-                },
-                &tx,
-                &mut subscriptions,
-            )
-            .await;
-        assert!(!foreign.success);
-        assert!(
-            foreign.message.contains("is bound to domain 'default'"),
-            "unexpected message: {}",
-            foreign.message
-        );
-        let transaction = service
-            .inner
-            .consensus
-            .current_transaction(
-                subscriptions
-                    .transaction_id()
-                    .expect("the transaction must stay attached"),
-            )
-            .await
-            .expect("open transaction must remain replicated");
-        assert_eq!(transaction.pending_statement_count(), 0);
-
-        subscriptions.stop_all(&service).await;
-        let _ = std::fs::remove_dir_all(&path);
-    }
-
-    #[tokio::test]
-    async fn attaching_to_committed_transaction_returns_the_recorded_aggregate() {
-        let TestService {
-            service,
-            registry: _registry,
-            path,
-        } = build_test_service(false).await;
-        create_test_domain(&service.inner.consensus, "attach_results").await;
-        let (tx, _rx) = mpsc::channel(16);
-        let mut owner = SessionSubscriptions::new();
-
-        let committed = service
-            .process_command(
-                CommandRequest {
-                    query: "BEGIN; CREATE SCHEMA notification ( user_id U32 ); COMMIT".to_string(),
-                    domain: "attach_results".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
-                    expected_transaction_position: None,
-                },
-                &tx,
-                &mut owner,
-            )
-            .await;
-        assert!(
-            committed.success,
-            "commit must succeed: {}",
-            committed.message
-        );
-        let transaction_id = committed
-            .transaction
-            .as_ref()
-            .expect("commit result must carry transaction status")
-            .id
-            .clone();
-
-        let mut observer = SessionSubscriptions::new();
-        let attached = service
-            .attach_transaction(
-                proto::AttachTransactionRequest { id: transaction_id },
-                &mut observer,
-            )
-            .await;
-
-        assert!(
-            !attached.success,
-            "finished transaction attach must be terminal"
-        );
-        assert_eq!(
-            attached.transaction.as_ref().map(|status| status.state),
-            Some(i32::from(ApiTransactionState::Committed))
-        );
-        assert!(attached.message.contains("finished with outcome COMMITTED"));
-        assert_eq!(attached.results.len(), 1);
-        assert_eq!(attached.results[0].message, "quiesce level: DYNAMIC");
-
-        owner.stop_all(&service).await;
-        observer.stop_all(&service).await;
-        let _ = std::fs::remove_dir_all(&path);
-    }
-}
+#[path = "transaction_tests.rs"]
+mod tests;

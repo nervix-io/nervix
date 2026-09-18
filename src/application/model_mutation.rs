@@ -871,6 +871,8 @@ impl SessionServiceImpl {
                 expected_schedule,
                 mut prepared_schedule,
                 planned_relocations,
+                mut inputs,
+                planning,
             } = if let Some(decision) = &transaction_decision {
                 if is_noop {
                     ScheduleTransition::default()
@@ -879,13 +881,13 @@ impl SessionServiceImpl {
                         expected_schedule: decision.expected_schedule.clone(),
                         prepared_schedule: decision.schedule.clone(),
                         planned_relocations: decision.planned_relocations,
+                        inputs: transaction_step.as_ref().map(|step| step.inputs.clone()),
+                        planning: transaction_step
+                            .as_ref()
+                            .map(|step| step.schedule_inputs.clone()),
                     }
                 }
             } else if !is_noop {
-                let expected_schedule = Box::pin(self.inner.consensus.current_schedule())
-                    .await
-                    .domain(&domain)
-                    .cloned();
                 match Box::pin(self.prepare_domain_schedule(
                     &domain,
                     planned.candidate_graph(),
@@ -894,15 +896,29 @@ impl SessionServiceImpl {
                 .await
                 {
                     Ok(prepared) => ScheduleTransition {
-                        expected_schedule,
+                        expected_schedule: prepared.inputs.schedule().cloned(),
                         prepared_schedule: prepared.schedule,
                         planned_relocations: prepared.relocations,
+                        inputs: Some(prepared.inputs),
+                        planning: Some(prepared.planning),
                     },
                     Err(error) => return command_error(error),
                 }
             } else {
                 ScheduleTransition::default()
             };
+            if !is_noop
+                && let Some(inputs) = inputs.as_ref()
+                && let Err(error) = self.validate_domain_planning_inputs(inputs).await
+            {
+                return command_error(error.to_string());
+            }
+            if !is_noop
+                && let Some(planning) = planning.as_ref()
+                && let Err(error) = planning.validate_eligibility(self).await
+            {
+                return command_error(error.to_string());
+            }
             let schedule_delta =
                 ScheduleDelta::between(expected_schedule.as_ref(), prepared_schedule.as_ref());
             let classified_level = match &transaction_decision {
@@ -968,10 +984,6 @@ impl SessionServiceImpl {
                     )
                 }
             };
-            let transaction_schedule = transaction_step
-                .is_some()
-                .then(|| (expected_schedule.clone(), prepared_schedule.clone()));
-
             if is_noop {
                 info!(
                     domain = domain.as_str(),
@@ -1009,6 +1021,13 @@ impl SessionServiceImpl {
                     )));
                 }
                 return response;
+            }
+            if !is_noop && requires_domain_pause {
+                let paused_inputs = inputs
+                    .take()
+                    .verified("a model plan that pauses its domain carries publication inputs")
+                    .after_domain_pause();
+                inputs = Some(paused_inputs);
             }
             if !is_noop && !model_gate.affected_entities().is_empty() {
                 let relays = model_gate.relays();
@@ -1122,24 +1141,10 @@ impl SessionServiceImpl {
                         },
                     );
                     let effect = TransactionStepEffect::ReplaceDomainSchedule {
-                        domain: domain.clone(),
-                        expected_schedule: transaction_schedule
-                            .as_ref()
-                            .verified(
-                                "the schedule is prepared exactly when a transaction step is \
-                                 present, and this branch has one",
-                            )
-                            .0
-                            .clone()
-                            .map(Box::new),
-                        schedule: transaction_schedule
-                            .clone()
-                            .verified(
-                                "the schedule is prepared exactly when a transaction step is \
-                                 present, and this branch has one",
-                            )
-                            .1
-                            .map(Box::new),
+                        inputs: Box::new(inputs.clone().verified(
+                            "a transaction model plan carries its captured publication inputs",
+                        )),
+                        schedule: prepared_schedule.clone().map(Box::new),
                     };
                     match Box::pin(self.record_transaction_step(
                         transaction_step.transaction,
@@ -1256,9 +1261,11 @@ impl SessionServiceImpl {
                         }
                     }
                 } else {
+                    let inputs = inputs.clone().verified(
+                        "a non-noop model plan captures authoritative publication inputs",
+                    );
                     if let Err(error) = Box::pin(self.inner.consensus.replace_domain_schedule(
-                        domain.clone(),
-                        expected_schedule.clone(),
+                        inputs,
                         prepared_schedule.clone(),
                         domain_mutation.as_ref(),
                     ))

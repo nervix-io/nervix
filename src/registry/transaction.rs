@@ -73,9 +73,7 @@ pub(crate) enum PlannedTransactionStepKind {
     StartDomain {
         previous: ControlDomainState,
     },
-    StopDomain {
-        previous: ControlDomainState,
-    },
+    StopDomain,
     CreateResource {
         resource: ResourceName,
         already_existed: bool,
@@ -504,7 +502,6 @@ impl Registry {
                     operation = TransactionOperation::StopDomain {
                         domain: domain.clone(),
                     };
-                    let previous = domain_state.clone();
                     domain_state.status = DomainStatus::Stopped;
                     domain_state.clock = None;
                     reasons = vec![OperationImpactReason::DomainStop];
@@ -516,7 +513,7 @@ impl Registry {
                         }]),
                         ..ImpactEffects::default()
                     };
-                    kind = PlannedTransactionStepKind::StopDomain { previous };
+                    kind = PlannedTransactionStepKind::StopDomain;
                     pause = PauseRequirement::NoPause;
                 }
                 Statement::CreateResource(create) => {
