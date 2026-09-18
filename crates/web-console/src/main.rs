@@ -172,9 +172,12 @@ struct ResourceDetailView {
     status: String,
 }
 
-#[derive(Clone, Default)]
+/// Everything one version row of the resource dialog shows. A keyed list re-renders a row only
+/// when its key changes, so the dialog keys each row by this whole value: a later description
+/// that changes the row, such as the usages a rebinding moved, replaces it.
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct ResourceVersionView {
-    version: String,
+    version: u64,
     root_checksum: Option<String>,
     manifest_checksum: Option<String>,
     file_count: Option<String>,
@@ -182,14 +185,42 @@ struct ResourceVersionView {
     created_by_node: Option<ClusterNodeName>,
     created_at: Option<String>,
     files: Vec<ResourceFileView>,
+    usages: Vec<ResourceUsageView>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct ResourceFileView {
     path: String,
     entry_type: String,
     size: Option<String>,
     checksum: Option<String>,
+}
+
+/// One model bound to a resource version.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ResourceUsageView {
+    /// The model kind as a statement names it, such as `HASH MAP`.
+    kind: String,
+    name: String,
+}
+
+/// One line of the `usages` section of `DESCRIBE RESOURCE`: a bound model and the version it
+/// pins.
+struct ResourceUsageDetail {
+    version: u64,
+    usage: ResourceUsageView,
+}
+
+/// The part of a `DESCRIBE RESOURCE` description a line belongs to. The version and usage lists
+/// share the `- key=value` line shape, so a line is read by the section that holds it.
+#[derive(Clone, Copy)]
+enum ResourceDescribeSection {
+    /// The `resource`, `latest` and `versions` summary lines.
+    Summary,
+    /// `version_details`: one line per version, each followed by its entries.
+    VersionDetails,
+    /// `usages`: one line per model bound to the resource.
+    Usages,
 }
 
 impl ConsoleConnectionState {
@@ -1544,6 +1575,8 @@ fn domain_list_lines(domains: &[DomainView]) -> Vec<TermLine> {
         .collect()
 }
 
+/// Reads the dialog's versions from the same `DESCRIBE RESOURCE` description the REPL prints,
+/// attaching to each version the usages that pin it.
 fn resource_detail_from_result(result: nervix_proto::CommandResult) -> ResourceDetailView {
     if !result.success {
         return ResourceDetailView {
@@ -1551,51 +1584,77 @@ fn resource_detail_from_result(result: nervix_proto::CommandResult) -> ResourceD
             status: result.message,
         };
     }
-    let versions = parse_resource_versions_from_describe(&result.message);
-    let versions = if versions.is_empty() {
-        let listed = result
-            .message
-            .lines()
-            .find_map(|line| line.strip_prefix("versions: "));
-        match listed {
-            Some("(none)") | None => Vec::new(),
-            Some(listed) => listed
-                .split(',')
-                .map(str::trim)
-                .filter(|version| !version.is_empty())
-                .map(|version| ResourceVersionView {
-                    version: version.to_string(),
-                    ..Default::default()
-                })
-                .collect(),
+    let mut versions = Vec::<ResourceVersionView>::new();
+    let mut usages_by_version = BTreeMap::<u64, Vec<ResourceUsageView>>::new();
+    let mut section = ResourceDescribeSection::Summary;
+    for line in result.message.lines() {
+        if line == "version_details:" {
+            section = ResourceDescribeSection::VersionDetails;
+            continue;
         }
-    } else {
-        versions
-    };
+        if line == "usages:" {
+            section = ResourceDescribeSection::Usages;
+            continue;
+        }
+        match section {
+            ResourceDescribeSection::Summary => {}
+            ResourceDescribeSection::VersionDetails => {
+                if let Some(version) = parse_resource_version_detail(line) {
+                    versions.push(version);
+                } else if let Some(file) = parse_resource_file_detail(line)
+                    && let Some(version) = versions.last_mut()
+                {
+                    version.files.push(file);
+                }
+            }
+            ResourceDescribeSection::Usages => {
+                if let Some(detail) = ResourceUsageDetail::parse(line) {
+                    usages_by_version
+                        .entry(detail.version)
+                        .or_default()
+                        .push(detail.usage);
+                }
+            }
+        }
+    }
+    for version in &mut versions {
+        if let Some(usages) = usages_by_version.remove(&version.version) {
+            version.usages = usages;
+        }
+    }
     ResourceDetailView {
         versions,
         status: "ready".to_string(),
     }
 }
 
-fn parse_resource_versions_from_describe(message: &str) -> Vec<ResourceVersionView> {
-    let mut versions = Vec::new();
-    let mut current = None::<ResourceVersionView>;
-    for line in message.lines() {
-        if let Some(version) = parse_resource_version_detail(line) {
-            if let Some(current) = current.replace(version) {
-                versions.push(current);
+impl ResourceUsageDetail {
+    /// Reads `- kind=<kind> name=<name> version=<n>`. The description spells the kind in
+    /// snake_case, such as `hash_map`; the dialog shows it as a statement names it, `HASH MAP`.
+    fn parse(line: &str) -> Option<Self> {
+        let line = line.strip_prefix("- ")?;
+        let mut kind = None;
+        let mut name = None;
+        let mut version = None;
+        for part in line.split_whitespace() {
+            let Some((key, value)) = part.split_once('=') else {
+                continue;
+            };
+            match key {
+                "kind" => kind = Some(value.replace('_', " ").to_ascii_uppercase()),
+                "name" => name = Some(value.to_string()),
+                "version" => version = value.parse::<u64>().ok(),
+                _ => {}
             }
-        } else if let Some(file) = parse_resource_file_detail(line)
-            && let Some(version) = &mut current
-        {
-            version.files.push(file);
         }
+        Some(Self {
+            version: version?,
+            usage: ResourceUsageView {
+                kind: kind?,
+                name: name?,
+            },
+        })
     }
-    if let Some(current) = current {
-        versions.push(current);
-    }
-    versions
 }
 
 fn parse_resource_version_detail(line: &str) -> Option<ResourceVersionView> {
@@ -1612,7 +1671,7 @@ fn parse_resource_version_detail(line: &str) -> Option<ResourceVersionView> {
             continue;
         };
         match key {
-            "version" => version = Some(value.to_string()),
+            "version" => version = value.parse::<u64>().ok(),
             "root_checksum" => root_checksum = Some(value.to_string()),
             "manifest_checksum" => manifest_checksum = Some(value.to_string()),
             "file_count" => file_count = Some(value.to_string()),
@@ -1631,6 +1690,7 @@ fn parse_resource_version_detail(line: &str) -> Option<ResourceVersionView> {
         created_by_node,
         created_at,
         files: Vec::new(),
+        usages: Vec::new(),
     })
 }
 
@@ -2080,9 +2140,12 @@ fn Sidebar(
                 </Show>
                 <NavHeader title="Resources" count=move || entities_for("resource").len().to_string() kind="resources" open=resources_open />
                 <Show when=move || resources_open.get() fallback=|| ()>
+                    // A resource's detail is its latest completed version, which changes while the
+                    // row is shown. A keyed list re-renders a row only when its key changes, so the
+                    // row is keyed by everything it shows.
                     <For
                         each=move || entities_for("resource")
-                        key=|entity| entity.name.clone()
+                        key=|entity| entity.clone()
                         children={move |entity| {
                             let name = entity.name.clone();
                             let describe_name = entity.name.clone();
@@ -2431,13 +2494,15 @@ fn ResourceDialog(
                                     None => Vec::new(),
                                 }
                             }
-                            key=|version| version.version.clone()
+                            key=|version| version.clone()
                             children=|version| {
                                 let summary = resource_version_summary(&version);
                                 let checksums = resource_version_checksums(&version);
                                 let files = version.files.clone();
+                                let usages = version.usages.clone();
+                                let unbound = version.usages.is_empty();
                                 view! {
-                                    <div class="resource-version-row">
+                                    <div class="resource-version-row" data-version=version.version.to_string()>
                                         <strong>{format!("version {}", version.version)}</strong>
                                         <span>{summary.clone()}</span>
                                         <em>{checksums.clone()}</em>
@@ -2455,6 +2520,25 @@ fn ResourceDialog(
                                                     }
                                                 }
                                             />
+                                        </div>
+                                        <div class="resource-usage-list">
+                                            <p>"usages"</p>
+                                            <For
+                                                each=move || usages.clone()
+                                                key=|usage| usage.clone()
+                                                children=|usage| {
+                                                    view! {
+                                                        <div class="resource-usage-row">
+                                                            <em>{usage.kind}</em>
+                                                            " "
+                                                            <strong>{usage.name}</strong>
+                                                        </div>
+                                                    }
+                                                }
+                                            />
+                                            <Show when=move || unbound fallback=|| ()>
+                                                <div class="resource-usage-row resource-usage-none">"none"</div>
+                                            </Show>
                                         </div>
                                     </div>
                                 }
@@ -5288,7 +5372,7 @@ impl From<nervix_proto::ClusterSummary> for ClusterCounters {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct EntityView {
     kind: String,
     name: String,
@@ -5528,6 +5612,51 @@ mod tests {
         );
 
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn resource_description_lists_each_usage_under_the_version_it_pins() {
+        let message = [
+            "resource: lookup_bundle",
+            "latest: 2",
+            "versions: 1,2",
+            "version_details:",
+            "- version=1 file_count=1 total_bytes=24",
+            "  entries:",
+            "  - type=file path=lookup.jsonl size=24 checksum=first",
+            "- version=2 file_count=1 total_bytes=24",
+            "  entries:",
+            "  - type=file path=lookup.jsonl size=24 checksum=second",
+            "usages:",
+            "- kind=client name=lookup_store version=2",
+            "- kind=hash_map name=lookup_by_id version=2",
+        ]
+        .join("\n");
+
+        let detail = resource_detail_from_result(nervix_proto::CommandResult {
+            success: true,
+            kind: i32::from(nervix_proto::CommandResultKind::Ok),
+            message,
+            ..Default::default()
+        });
+
+        let versions = detail
+            .versions
+            .iter()
+            .map(|version| version.version)
+            .collect::<Vec<_>>();
+        assert_eq!(versions, vec![1, 2]);
+        let first = &detail.versions[0];
+        assert_eq!(first.files.len(), 1);
+        assert!(first.usages.is_empty());
+        let second = &detail.versions[1];
+        assert_eq!(second.files.len(), 1);
+        let usages = second
+            .usages
+            .iter()
+            .map(|usage| format!("{} {}", usage.kind, usage.name))
+            .collect::<Vec<_>>();
+        assert_eq!(usages, vec!["CLIENT lookup_store", "HASH MAP lookup_by_id"]);
     }
 
     #[test]

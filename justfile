@@ -111,6 +111,11 @@ check-package package *args:
 test-package-lib package *args:
     cargo test --package {{ package }} --lib -- {{ args }}
 
+# Run the unit tests in the binary targets of one workspace package, such as the web console's
+# view logic in its `main.rs`.
+test-package-bins package *args:
+    cargo test --package {{ package }} --bins -- {{ args }}
+
 # Run the bounded-execution unit tests, which live in the nervix-execution crate rather than the
 # server lib.
 test-execution *args:
