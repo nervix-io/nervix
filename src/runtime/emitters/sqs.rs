@@ -5,20 +5,12 @@ use aws_sdk_sqs::{
     Client as SqsClient,
     types::{MessageAttributeValue, SendMessageBatchRequestEntry},
 };
-use nervix_connector::{
-    ResolvedClientConfig, client_config_entries, client_tls_paths, optional_client_config_value,
-};
+use nervix_connector::{client_tls_paths, optional_client_config_value};
 
 use super::*;
 
 const SQS_MAX_BATCH_ENTRIES: usize = 10;
 const SQS_MAX_REQUEST_BYTES: usize = 256 * 1024;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SqsPublishingMode {
-    Single,
-    Batch,
-}
 
 pub(in crate::runtime) struct SqsEmitter {
     client: SqsClient,
@@ -154,20 +146,13 @@ impl PreparedSqsRecord {
 }
 
 impl SqsEmitter {
-    pub(in crate::runtime) async fn new(
-        client: &CreateClientSqs,
-        resolved: Option<&ResolvedClientConfig>,
-        queue: &str,
-        mode: SqsPublishingMode,
-    ) -> EmitterRuntimeResult<Self> {
-        let client =
-            Self::client_from_config(client_config_entries(resolved, client.config.as_slice()))
-                .await?;
-        let queue_url = Self::queue_url(&client, queue).await?;
+    pub(in crate::runtime) async fn new(plan: &SqsSinkPlan) -> EmitterRuntimeResult<Self> {
+        let client = Self::client_from_config(&plan.client.config.entries).await?;
+        let queue_url = Self::queue_url(&client, &plan.queue).await?;
         Ok(Self {
             client,
             queue_url,
-            mode,
+            mode: plan.mode,
         })
     }
 

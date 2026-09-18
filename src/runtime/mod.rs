@@ -65,32 +65,34 @@ use nervix_models::{
     AckMode, Assignment, AtomicTimestamp, BranchKeyFingerprint, BranchName, ClickHouseValueMapping,
     ClientConfigEntry, ClientName, ClientPoolBounds, ClientResourceMount, ClusterNodeIncarnation,
     ClusterNodeName, ClusterSchedule, CodecName, CodecWireFormat, CoordinationIdentity,
-    CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateClientAzureBlob, CreateClientGcs,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt, CreateClientNats,
-    CreateClientOtel, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
-    CreateClientSentry, CreateClientSqs, CreateClientSyslog, CreateClientZeroMq, CreateCodec,
-    CreateEmitter, CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay,
-    CreateSignalingProtocol, CreateUdf, DomainClockAuthority, DomainConfig, DomainName,
-    DomainNodeRef, DomainSchedule, DomainState, EmitSink, EmitterAckWindow, EmitterName,
-    EmitterPublishingMode, EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath,
-    FlushPolicy, GeneralErrorPolicy, GeneratorName, IcebergCatalog, IcebergStorageBackend,
-    IcebergValueMapping, InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode,
-    IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode,
-    KafkaOffsetMode, KafkaPartitionSchedule, Literal as ModelLiteral, LookupName,
-    MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model,
-    ModelIndex, ModelKind, ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
-    MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NodeRef,
-    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
-    OtelValueMapping, OutputBranch, OwnershipStateComponent, OwnershipStateRecoveryOutcome,
-    OwnershipStateReset, OwnershipStateResetCause, ParseAsType, PostgresConflictAction,
-    PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName,
-    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResourceId,
-    ResourceName, RetryPolicy, RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes,
-    SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
-    StructuredMessageError, SubscriptionName, Timestamp,
+    CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateCodec, CreateEmitter, CreateGenerator,
+    CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateSignalingProtocol,
+    CreateUdf, DomainClockAuthority, DomainConfig, DomainName, DomainNodeRef, DomainSchedule,
+    DomainState, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName,
+    EndpointType, ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy,
+    GeneratorName, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
+    InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
+    IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode,
+    KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
+    MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind,
+    ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
+    MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality, OtelMetric,
+    OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch, OwnershipStateComponent,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
+    PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
+    RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
+    RemoteRuntimeField, ResourceId, ResourceName, RetryPolicy, RouteConstruction, ScheduledModel,
+    ScheduledNode, ScheduledNodes, SchemaFingerprint, SignalingProtocolName, SignalingWireFormat,
+    SqsFifoGroup, SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp,
 };
 #[cfg(test)]
-use nervix_models::{CreateClientHttp, CreateClientPrometheus, CreateClientWebsockets};
+use nervix_models::{
+    CreateClientAzureBlob, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
+    CreateClientKafka, CreateClientMqtt, CreateClientNats, CreateClientOtel,
+    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
+    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    CreateClientWebsockets, CreateClientZeroMq,
+};
 use nervix_recovery::{Discarded as _, NoReceiver as _, Reported as _};
 use nervix_roto::UdfExecutor;
 #[cfg(test)]
@@ -178,6 +180,7 @@ mod domain_clock;
 mod domain_execution;
 mod domain_rebuild;
 mod domain_wire_schemas;
+mod emitter_start_plan;
 mod emitter_supervision;
 mod emitters;
 mod endpoint;
@@ -256,12 +259,15 @@ use branch_buffering::{
 };
 use branch_instance_registry::BranchInstanceRegistry;
 use branch_key::branch_key_display;
-use branch_lru_state::{decode_branch_lru_snapshot, encode_branch_lru_snapshot};
+use branch_lru_state::{
+    BranchLruSnapshotError, decode_branch_lru_snapshot, encode_branch_lru_snapshot,
+};
 use branch_runtime::{
     BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL, BranchRuntime, BranchRuntimeMetrics,
     IngestorRouteRuntime, MaterializedBatchWaitContext, MaterializedDomainHandles,
     PendingMaterializedBatch, branch_lru_placement, flush_branch_junction,
     internal_processor_error_policies, output_error_policies, persist_branch_instance_lru_snapshot,
+    publish_branch_instance_lru_snapshot,
 };
 use correlator::{
     CorrelatorMatchedBatch, CorrelatorOutputCompileContext, CorrelatorOutputContext,
@@ -287,6 +293,7 @@ use domain_execution::{
 pub(crate) use domain_execution::{DomainRoutingCache, SharedDomainRouting};
 use domain_rebuild::{branch_relays_from_branched_specs, relay_branching_schema_for_runtime};
 use domain_wire_schemas::DomainWireSchemas;
+use emitter_start_plan::*;
 use emitter_supervision::{
     EmitterRetryKind, EmitterRetryStatus, EmitterTaskCommand, ScheduledEmitterTask,
     clear_emitter_stop_signal,
@@ -449,7 +456,7 @@ pub(in crate::runtime) use state_store::{
     ForcedRuntimeStateRecoveryTransition, RuntimeState, RuntimeStateHandoffTransition,
     RuntimeStateKind, RuntimeStateOperationError, RuntimeStateResult, RuntimeStateStore,
     ScheduledStateIdentity, StateAssignmentAuthority, StateAssignmentToken, StateAuthorityError,
-    StateCapability, StateGenerationError, StateReplicationRoles,
+    StateCapability, StateIdentityError, StateReplicationRoles,
 };
 #[cfg(test)]
 pub(in crate::runtime) use test_fixtures::STUPID_CHANNEL_CAPACITY_REMOVE_ME;
@@ -460,14 +467,14 @@ use test_fixtures::{
     execute_filter_map_for_test, expression, ingest_metadata_for_test,
     install_test_domain_execution, install_unpaced_test_domain, junction_branch_template,
     key_label, named, nonzero_capacity, paced_domain_state, processor_branched_by,
-    quiesce_test_batch, row_value, scheduled_model, string_branch_key, test_domain_clock,
-    test_domain_clock_authority, test_ingestor_quiesce_control, test_optional_schema,
-    test_relay_boundary_services, test_schema, u32_branch_key, unpaced_domain_state,
-    validate_wasm_test_output_groups, validate_wasm_test_outputs, vm_input_from_test_rows,
-    wait_for_persisted_runtime_state_lsm, wasm_generated_pool, wasm_guest_column,
-    wasm_guest_stream, wasm_input_acks, wasm_input_for_records, wasm_input_for_values,
-    wasm_test_generated_output, wasm_test_output, window_aggregate, window_outputs, window_plan,
-    with_inherit_all,
+    publish_state_identity, quiesce_test_batch, row_value, scheduled_model, string_branch_key,
+    test_domain_clock, test_domain_clock_authority, test_ingestor_quiesce_control,
+    test_optional_schema, test_relay_boundary_services, test_schema, u32_branch_key,
+    unpaced_domain_state, validate_wasm_test_output_groups, validate_wasm_test_outputs,
+    vm_input_from_test_rows, wait_for_persisted_runtime_state_lsm, wasm_generated_pool,
+    wasm_guest_column, wasm_guest_stream, wasm_input_acks, wasm_input_for_records,
+    wasm_input_for_values, wasm_test_generated_output, wasm_test_output, window_aggregate,
+    window_outputs, window_plan, with_inherit_all,
 };
 pub(in crate::runtime) use vm_compile::{
     CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders, KeyProjectionKind,
@@ -492,14 +499,20 @@ use vm_input::{
     runtime_values_input_column, vm_output_value, vm_typed_batch_selected_rows_to_runtime_batch,
     vm_typed_batch_to_runtime_batch,
 };
-use wasm_output::{
-    WasmOutputContext, checkpoint_wasm_guest_state, dispatch_wasm_output_envelopes,
-    persist_wasm_guest_state,
+use wasm_checkpoint::{
+    WasmCallbackReporting, WasmCheckpointHolds, checkpoint_wasm_guest_state,
+    wasm_callback_decided_tokens,
 };
+use wasm_output::{WasmMaterializedOutput, WasmOutputContext, dispatch_wasm_output_envelopes};
 use wasm_processor::{
-    WasmBranchModule, WasmInstanceError, WasmLiveInstance, flush_branch_wasm_processor,
+    WasmBranchModule, WasmInstanceError, WasmLiveInstance, WasmModuleFile,
+    flush_branch_wasm_processor,
 };
-use wasm_state::{ReplicatedWasmProcessorState, RestorableGuestState, WasmGuestState};
+use wasm_state::{
+    CapturedWasmCheckpoint, CompletedWasmCheckpoint, LocallyDurableWasmCheckpoint,
+    ReplicatedWasmProcessorState, RestorableGuestState, WasmCheckpointBoundary,
+    WasmCheckpointProgress, WasmGuestState,
+};
 pub(in crate::runtime) use websocket_signaling::SignalingProtobufDescriptors;
 use window_accumulator::{
     RetainedWindowRows, WindowAccumulator, WindowAccumulatorPlan, WindowArgumentColumns, WindowRow,
@@ -516,6 +529,10 @@ use window_state::{
 
 mod vm_compile;
 mod vm_input;
+mod wasm_checkpoint;
+#[cfg(feature = "benchmarks")]
+#[doc(hidden)]
+pub mod wasm_checkpoint_benchmark;
 mod wasm_output;
 mod wasm_processor;
 mod wasm_state;

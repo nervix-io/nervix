@@ -56,11 +56,6 @@ pub(super) enum WasmInstanceError {
         file: String,
     },
     #[error(
-        "wasm processor '{}' instance is unavailable while saving guest state",
-        .processor.as_str()
-    )]
-    InstanceUnavailable { processor: ModelName },
-    #[error(
         "wasm processor '{}' {stage} failed ({module}{}{})",
         .module.processor.as_str(),
         WasmGuestExportDetail(*.export),
@@ -476,84 +471,68 @@ pub(super) async fn flush_branch_wasm_processor(
             nervix_wasm::WasmExecutionContext::new(execution_now),
         )
         .await;
-    let outputs = match process_result {
-        Ok(outputs) => outputs,
+    let mut holds = WasmCheckpointHolds::default();
+    match process_result {
+        Ok(outputs) => {
+            let output_branch_key = branch.key.clone();
+            let dispatch = dispatch_wasm_output_envelopes(
+                WasmOutputContext {
+                    graph,
+                    branch,
+                    node_kind,
+                    processor,
+                    error_policies,
+                    output_routes,
+                    input_relays,
+                    input_schema: &input_schema,
+                    output_schemas: &output_schemas,
+                    key: &output_branch_key,
+                    module: &instance
+                        .as_ref()
+                        .verified(
+                            "the is_none check above returned unless this branch holds an instance",
+                        )
+                        .module,
+                    dispatch_error: "failed to forward message",
+                    execution_now,
+                },
+                outputs,
+                ack_map,
+                &mut holds,
+            )
+            .await;
+            if let Err(error) = dispatch {
+                branch.runtime.handle_internal_processor_error_for_acks(
+                    &branch.domain,
+                    node_kind,
+                    processor,
+                    error_policies,
+                    holds.acks(),
+                    format!("{error:#}"),
+                );
+            }
+        }
         Err(error) => {
-            let resource_limit_exceeded = error.current_context().is_resource_limit_exceeded();
-            let failure = instance
-                .as_ref()
-                .verified("the is_none check above returned unless this branch holds an instance")
-                .module
-                .guest_failure(error, None);
-            branch.runtime.handle_general_error_for_acks(
-                &branch.domain,
+            let reporting = WasmCallbackReporting {
+                runtime: &branch.runtime,
+                domain: &branch.domain,
                 node_kind,
                 processor,
                 error_policies,
-                ack_map.values().map(|context| &context.acks),
-                format!("{failure:#}"),
-            );
-            ack_map.clear();
-            if resource_limit_exceeded {
-                *instance = None;
-            }
-            return;
+            };
+            reporting.fail_callback(error, instance, ack_map, &mut holds);
         }
-    };
-
-    let output_branch_key = branch.key.clone();
-    if let Err(error) = dispatch_wasm_output_envelopes(
-        WasmOutputContext {
-            graph,
-            branch,
-            node_kind,
-            processor,
-            error_policies,
-            output_routes,
-            input_relays,
-            input_schema: &input_schema,
-            output_schemas: &output_schemas,
-            key: &output_branch_key,
-            module: &instance
-                .as_ref()
-                .verified("the is_none check above returned unless this branch holds an instance")
-                .module,
-            dispatch_error: "failed to forward message",
-            execution_now,
-        },
-        outputs,
-        ack_map,
-    )
-    .await
-    {
-        branch.runtime.handle_internal_processor_error_for_acks(
-            &branch.domain,
-            node_kind,
-            processor,
-            error_policies,
-            forwarded.acks.iter(),
-            format!("{error:#}"),
-        );
-        return;
     }
-    let persist_result = persist_wasm_guest_state(
-        &branch.runtime,
+    let reporting = WasmCallbackReporting {
+        runtime: &branch.runtime,
+        domain: &branch.domain,
+        node_kind,
         processor,
-        replicated_state,
-        instance,
-        execution_now,
-    )
-    .await;
-    if let Err(error) = persist_result {
-        branch.runtime.handle_internal_processor_error_for_acks(
-            &branch.domain,
-            node_kind,
-            processor,
-            error_policies,
-            std::iter::empty::<&AckSet>(),
-            format!("{error:#}"),
-        );
-    }
+        error_policies,
+    };
+    reporting
+        .complete_callback(replicated_state, instance, ack_map, holds, execution_now)
+        .await;
 }
 
 pub(super) struct WasmInstanceContext<'a> {
@@ -570,9 +549,22 @@ pub(super) struct WasmInstanceContext<'a> {
     pub(super) execution_now: Timestamp,
 }
 
+/// The module file a WASM processor pins: one file of one uploaded resource version.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct WasmModuleFile {
+    resource: ResourceId,
+    file: String,
+}
+
 impl Runtime {
-    /// Compiles the guest module of the resource version a WASM processor pins. The version is
+    /// The compiled guest module of the resource version a WASM processor pins. The version is
     /// part of the processor's model, so compiling never consults the resource catalog.
+    ///
+    /// The cluster assigns every version number of a resource once, so the bytes a pinned version
+    /// names never change. A node therefore compiles each module file once and keeps the module
+    /// while the schedule assigns a processor that pins it to the node: validating the domain,
+    /// starting the processor, preparing an ownership handoff and restoring guests during forced
+    /// recovery all reuse it instead of waiting for a compilation the node already made.
     pub(super) async fn compile_wasm_processor_module(
         &self,
         domain: &DomainName,
@@ -583,6 +575,13 @@ impl Runtime {
     ) -> error_stack::Result<WasmCompiledBranchProcessor, WasmInstanceError> {
         let processor = processor.into();
         let id = ResourceId::new(domain.clone(), resource.clone(), resource_version);
+        let module_file = WasmModuleFile {
+            resource: id.clone(),
+            file: file.to_string(),
+        };
+        if let Some(kept) = self.inner.compiled_wasm_modules.get(&module_file) {
+            return Ok(kept.clone());
+        }
         let Some(resource_store) = self.inner.resource_store.load_full() else {
             return Err(Report::new(WasmInstanceError::ResourceStoreDetached));
         };
@@ -614,14 +613,51 @@ impl Runtime {
                 version: resource_version,
                 file: file.to_string(),
             })?;
-        Ok(WasmCompiledBranchProcessor {
+        let compiled = WasmCompiledBranchProcessor {
             compiled: Arc::new(compiled),
-        })
+        };
+        self.inner
+            .compiled_wasm_modules
+            .insert(module_file, compiled.clone());
+        Ok(compiled)
+    }
+
+    /// Keep the compiled modules of the WASM processors `schedule` assigns to `local_node_id`, as
+    /// their owner or as a replica that may have to restore their guests, and drop every other
+    /// module this node compiled, such as those it only compiled to validate a domain.
+    pub(super) fn retain_assigned_wasm_modules(
+        &self,
+        local_node_id: &ClusterNodeName,
+        schedule: &ClusterSchedule,
+    ) {
+        let mut assigned = HashSet::default();
+        for domain in schedule.domains.values() {
+            for node in domain.nodes.values() {
+                let Some(processor) = node.wasm_processor() else {
+                    continue;
+                };
+                if !node.is_assigned_to(local_node_id) {
+                    continue;
+                }
+                let resource = ResourceId::new(
+                    domain.domain.clone(),
+                    processor.resource.clone(),
+                    processor.resource_version,
+                );
+                assigned.insert(WasmModuleFile {
+                    resource,
+                    file: processor.file.clone(),
+                });
+            }
+        }
+        self.inner
+            .compiled_wasm_modules
+            .retain(|module_file, _| assigned.contains(module_file));
     }
 }
 
-/// Makes sure the branch has a guest instance. The module is compiled at most once per branch
-/// instance, from the resource version the processor pins.
+/// Makes sure the branch has a guest instance, from the compiled module of the resource version the
+/// processor pins.
 pub(super) async fn ensure_wasm_processor_instance(
     context: WasmInstanceContext<'_>,
     compiled: &mut Option<WasmCompiledBranchProcessor>,
@@ -784,11 +820,11 @@ mod tests {
         RuntimeStatePlacement {
             domain: DomainName::parse("events").expect("valid domain"),
             state: RuntimeState::WasmProcessor {
+                schema: SchemaFingerprint::from_digest([7; 32]),
                 generation: WasmStateGeneration::FIRST,
             },
             kind: ModelKind::WasmProcessor,
             identifier: ModelName::parse("sessionizer").expect("valid identifier"),
-            schema_fingerprint: [0; 32],
             branch_key: tenant_branch("alpha"),
         }
     }
@@ -1155,5 +1191,95 @@ mod tests {
         {
             assert!(StdArc::ptr_eq(source, output));
         }
+    }
+
+    /// A node compiles the module a processor pins once, keeps it while the schedule assigns a
+    /// processor that pins it to the node, and drops it once no such processor is left.
+    #[tokio::test]
+    async fn a_pinned_module_is_compiled_once_and_kept_while_assigned() {
+        let domain = DomainName::parse("events").expect("valid domain");
+        let resource = ResourceName::parse("sessionizer").expect("valid identifier");
+        let processor = ModelName::parse("sessionizer").expect("valid identifier");
+        let local_node = ClusterNodeName::parse("node-1").expect("valid node name");
+        let source = tempfile::tempdir().expect("module source directory");
+        // The smallest valid module: the magic number and version 1, and no sections.
+        std::fs::write(source.path().join("sessionizer.wasm"), b"\0asm\x01\0\0\0")
+            .expect("the module file is written");
+        let store_root = tempfile::tempdir().expect("resource store directory");
+        let store = crate::resource::ResourceStore::open(store_root.path(), Executor::default())
+            .expect("the resource store opens");
+        store
+            .install_from_directory(
+                ResourceId::new(domain.clone(), resource.clone(), 3),
+                source.path(),
+                local_node.clone(),
+                Timestamp::from_unix_nanos(0),
+            )
+            .await
+            .expect("the resource version installs");
+        let runtime = Runtime::new();
+        runtime.attach_resource_store(StdArc::new(store));
+        let compile = || {
+            runtime.compile_wasm_processor_module(
+                &domain,
+                processor.clone(),
+                &resource,
+                3,
+                "sessionizer.wasm",
+            )
+        };
+
+        let first = compile().await.expect("the module compiles");
+        let again = compile().await.expect("the kept module is handed out");
+        assert!(
+            Arc::ptr_eq(&first.compiled, &again.compiled),
+            "a module the node already compiled must not be compiled again"
+        );
+
+        let mut scheduled = ScheduledNode::new(
+            nervix_models::Model::WasmProcessor(nervix_models::CreateWasmProcessor {
+                name: nervix_models::WasmProcessorName::parse("sessionizer")
+                    .expect("valid identifier"),
+                from: nervix_models::ProcessorInputs::single(
+                    RelayName::parse("events").expect("valid identifier"),
+                ),
+                output_routes: nervix_models::ProcessorOutputs::single(
+                    RelayName::parse("sessions").expect("valid identifier"),
+                ),
+                branched_by: nervix_models::BranchSelection::unbranched(),
+                resource: resource.clone(),
+                resource_version: 3,
+                file: "sessionizer.wasm".to_string(),
+                limits: nervix_models::WasmProcessorLimits {
+                    max_fuel: nonzero!(1_000_000_000u64),
+                    max_memory_bytes: nonzero!(67_108_864u64),
+                },
+                global_error_policy: GeneralErrorPolicy::Log,
+                mode: AckMode::Attached,
+                filter_where: None,
+                materialized_state: Vec::new(),
+            }),
+            SchemaFingerprint::from_digest([7; 32]),
+        );
+        scheduled.primary_node = Some(local_node.clone());
+        scheduled.assigned_nodes = vec![local_node.clone()];
+        let mut assigned = ClusterSchedule::default();
+        assigned.domains.insert(
+            domain.clone(),
+            DomainSchedule::new(domain.clone(), [scheduled], Vec::new()),
+        );
+        runtime.retain_assigned_wasm_modules(&local_node, &assigned);
+        let kept = compile().await.expect("the kept module is handed out");
+        assert!(
+            Arc::ptr_eq(&first.compiled, &kept.compiled),
+            "the module of a processor assigned to the node must be kept"
+        );
+
+        runtime.retain_assigned_wasm_modules(&local_node, &ClusterSchedule::default());
+        let recompiled = compile().await.expect("the module compiles again");
+        assert!(
+            !Arc::ptr_eq(&first.compiled, &recompiled.compiled),
+            "the module of a processor no longer assigned to the node must be dropped"
+        );
     }
 }

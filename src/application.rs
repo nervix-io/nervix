@@ -86,18 +86,17 @@ use nervix_models::{
 };
 use observability_http::serve_observability_http;
 use ownership_handoff::{FORCED_OWNERSHIP_RECOVERY_BUDGET, ForcedOwnershipRecoveryCoordinator};
-use parking_lot::RwLock;
 use scheduling::{
     KafkaPartitionWatcherKey, KafkaPartitionWatcherTask, LEADER_KAFKA_PARTITION_WATCH_INTERVAL,
 };
 use session_service::{
-    SESSION_EVENT_CAPACITY, SessionEvents, SessionServiceImpl, SessionServiceInner,
-    apply_current_cluster_runtime_state,
+    RuntimeStateApplication, SESSION_EVENT_CAPACITY, SessionEvents, SessionServiceImpl,
+    SessionServiceInner, apply_current_cluster_runtime_state,
 };
 use startup::ApplicationStartup;
 use tls::{
-    InterconnectTlsPaths, load_grpc_tls_server_config, load_web_console_tls_server_config,
-    reload_interconnect_tls,
+    HttpsListenerCertificates, InterconnectTlsPaths, load_grpc_tls_server_config,
+    load_web_console_tls_server_config, reload_interconnect_tls,
 };
 use tokio::{
     net::TcpListener,
@@ -1640,6 +1639,12 @@ impl Application {
             shutdown.clone(),
         ));
 
+        let certificates =
+            HttpsListenerCertificates::new(&resource_store, &fault_injection, &cluster);
+        certificates
+            .register_installation_handler(&interconnect)
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        let certificates_for_schedule = certificates.clone();
         let runtime_for_schedule = runtime.clone();
         let registry_for_schedule = registry.clone();
         let mut schedule_rx = consensus.observer().subscribe_schedule();
@@ -1649,17 +1654,17 @@ impl Application {
         let schedule_shutdown = shutdown.clone();
         let schedule_runtime_admission = runtime_admission.clone();
         background_tasks.push(tokio::spawn(async move {
-            if let Err(error) = apply_current_cluster_runtime_state(
-                &runtime_for_schedule,
-                &cluster_for_schedule,
-                &interconnect_for_schedule,
-                &registry_for_schedule,
-                &consensus_for_schedule,
-                &schedule_runtime_admission,
-                &schedule_shutdown,
-            )
-            .await
-            {
+            let application = RuntimeStateApplication {
+                runtime: &runtime_for_schedule,
+                https_certificates: &certificates_for_schedule,
+                cluster: &cluster_for_schedule,
+                interconnect: &interconnect_for_schedule,
+                registry: &registry_for_schedule,
+                consensus: &consensus_for_schedule,
+                admission: &schedule_runtime_admission,
+                shutdown: &schedule_shutdown,
+            };
+            if let Err(error) = apply_current_cluster_runtime_state(application).await {
                 warn!(error = %error, "failed to apply initial cluster schedule");
             }
             loop {
@@ -1670,17 +1675,7 @@ impl Application {
                         if changed.is_err() {
                             break;
                         }
-                        if let Err(error) = apply_current_cluster_runtime_state(
-                            &runtime_for_schedule,
-                            &cluster_for_schedule,
-                            &interconnect_for_schedule,
-                            &registry_for_schedule,
-                            &consensus_for_schedule,
-                            &schedule_runtime_admission,
-                            &schedule_shutdown,
-                        )
-                        .await
-                        {
+                        if let Err(error) = apply_current_cluster_runtime_state(application).await {
                             warn!(error = %error, "failed to apply updated cluster schedule");
                         }
                     }
@@ -1695,7 +1690,7 @@ impl Application {
                 consensus_administrator: consensus.administrator(),
                 registry,
                 resource_store,
-                http_tls_server_config: Arc::new(RwLock::new(None)),
+                https_certificates: certificates,
                 runtime: runtime.clone(),
                 runtime_admission: runtime_admission.clone(),
                 replica_count,
@@ -1860,7 +1855,6 @@ impl Application {
                         result: snapshot.map(|snapshot| {
                             snapshot.map(|snapshot| nervix_interconnect::StateSnapshotEnvelope {
                                 lsm: snapshot.lsm,
-                                schema_fingerprint: snapshot.schema_fingerprint,
                                 payload: snapshot.payload,
                             })
                         }),
@@ -2376,7 +2370,6 @@ impl Application {
                 }
             }
         }));
-        service.initialize_http_tls_server_config().await;
 
         let domain_apply_service = service.clone();
         let domain_apply_shutdown = shutdown.clone();
@@ -2637,7 +2630,7 @@ impl Application {
         let https_server = serve_https(
             runtime.clone(),
             service.inner.service_tasks.clone(),
-            service.inner.http_tls_server_config.clone(),
+            service.inner.https_certificates.clone(),
             https_listener,
             listener_shutdown.clone(),
         );

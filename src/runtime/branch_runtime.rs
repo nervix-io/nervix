@@ -9,6 +9,8 @@
 //!   persistence.
 //! - **Must not know.** NSPL text, control-plane transactions, consensus, or connector protocols.
 
+use error_stack::ResultExt as _;
+
 use super::*;
 
 pub(super) const BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL: Duration = Duration::from_secs(30);
@@ -294,13 +296,24 @@ impl BranchRuntime {
                 );
                 return;
             };
-            let placement = self.runtime.state_placement(
+            let placement = match self.runtime.state_placement(
                 &self.domain,
-                RuntimeState::MaterializedRelay,
+                RuntimeStateKind::MaterializedRelay,
                 ModelKind::Relay,
                 relay,
                 self.key.clone(),
-            );
+            ) {
+                Ok(placement) => placement,
+                Err(error) => {
+                    warn!(
+                        domain = self.domain.as_str(),
+                        relay = relay.as_str(),
+                        error = %error,
+                        "failed to place the branch-local materialized relay state"
+                    );
+                    return;
+                }
+            };
             if let Err(error) = self
                 .runtime
                 .prepare_materialized_stream_restore(&placement, &schema)
@@ -1653,31 +1666,15 @@ impl BranchExecutionRuntime {
                             checkpoint_requests_open = false;
                             continue;
                         };
-                        let placement = branch_lru_placement(&runtime_handle, &domain, &template);
-                        let result = match encode_branch_lru_snapshot(&instances.snapshot_entries()) {
-                            Ok(payload) => {
-                                let snapshot = PersistedRuntimeStateEntry {
-                                    lsm: instances.version(),
-                                    schema_fingerprint: placement.schema_fingerprint,
-                                    payload,
-                                };
-                                match runtime_handle.persist_branch_lru_snapshot(
-                                    placement.clone(),
-                                    snapshot.clone(),
-                                ) {
-                                    Ok(()) => {
-                                        last_persisted_lru_lsm = snapshot.lsm;
-                                        Ok(snapshot)
-                                    }
-                                    Err(error) => Err(OwnershipHandoffError::persistence(
-                                        error.current_context().clone(),
-                                    )),
-                                }
-                            }
-                            Err(error) => {
-                                Err(OwnershipHandoffError::checkpoint(error.to_string()))
-                            }
-                        };
+                        let result = checkpoint_branch_instance_lru_snapshot(
+                            &runtime_handle,
+                            &domain,
+                            &template,
+                            &instances,
+                        );
+                        if let Ok(snapshot) = &result {
+                            last_persisted_lru_lsm = snapshot.lsm;
+                        }
                         checkpoint
                             .send(result)
                             .means_peer_left("branch lifecycle checkpoint requester");
@@ -1982,10 +1979,10 @@ pub(super) fn branch_lru_placement(
     runtime: &Runtime,
     domain: &DomainName,
     template: &BranchInstanceTemplate,
-) -> RuntimeStatePlacement {
+) -> error_stack::Result<RuntimeStatePlacement, StateIdentityError> {
     runtime.state_placement(
         domain,
-        RuntimeState::BranchLru,
+        RuntimeStateKind::BranchLru,
         template.source_kind,
         &template.source,
         None,
@@ -1998,7 +1995,8 @@ pub(super) fn restore_branch_instance_lru_snapshot(
     template: &BranchInstanceTemplate,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) -> Result<u64, String> {
-    let placement = branch_lru_placement(runtime, domain, template);
+    let placement =
+        branch_lru_placement(runtime, domain, template).map_err(|error| format!("{error:#}"))?;
     let snapshot = runtime
         .take_restorable_branch_lru_snapshot(&placement)
         .map_err(|error| error.to_string())?;
@@ -2018,6 +2016,32 @@ pub(super) fn restore_branch_instance_lru_snapshot(
     Ok(snapshot.lsm)
 }
 
+/// Persist the branch lifecycle checkpoint `instances` form now and hand it to the ownership
+/// handoff that asked for it.
+fn checkpoint_branch_instance_lru_snapshot<V>(
+    runtime: &Runtime,
+    domain: &DomainName,
+    template: &BranchInstanceTemplate,
+    instances: &BranchInstanceRegistry<Option<BranchKey>, V>,
+) -> OwnershipHandoffResult<PersistedRuntimeStateEntry> {
+    let placement = branch_lru_placement(runtime, domain, template).change_context_lazy(|| {
+        OwnershipHandoffError::StatePlacement {
+            kind: template.source_kind,
+            identifier: ModelName::from(&template.source),
+        }
+    })?;
+    let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())
+        .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?;
+    let snapshot = PersistedRuntimeStateEntry {
+        lsm: instances.version(),
+        payload,
+    };
+    runtime
+        .persist_branch_lru_snapshot(placement, snapshot.clone())
+        .map_err(|error| OwnershipHandoffError::persistence(error.current_context().clone()))?;
+    Ok(snapshot)
+}
+
 pub(super) fn persist_branch_instance_lru_snapshot<V>(
     runtime: &Runtime,
     domain: &DomainName,
@@ -2029,20 +2053,36 @@ pub(super) fn persist_branch_instance_lru_snapshot<V>(
     if lsm <= *last_persisted_lsm {
         return Ok(());
     }
-    let placement = branch_lru_placement(runtime, domain, template);
+    let placement =
+        branch_lru_placement(runtime, domain, template).map_err(|error| format!("{error:#}"))?;
     let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())
         .map_err(|error| error.to_string())?;
     runtime
         .persist_branch_lru_snapshot(
             placement.clone(),
-            PersistedRuntimeStateEntry {
-                lsm,
-                schema_fingerprint: placement.schema_fingerprint,
-                payload,
-            },
+            PersistedRuntimeStateEntry { lsm, payload },
         )
         .map_err(|error| error.to_string())?;
     *last_persisted_lsm = lsm;
+    Ok(())
+}
+
+/// Offer the branch lifecycle of `instances` to the node's replicas at once, without writing it to
+/// storage: the periodic lifecycle snapshot persists it.
+pub(super) fn publish_branch_instance_lru_snapshot<V>(
+    runtime: &Runtime,
+    domain: &DomainName,
+    template: &BranchInstanceTemplate,
+    instances: &BranchInstanceRegistry<Option<BranchKey>, V>,
+) -> error_stack::Result<(), BranchLruSnapshotError> {
+    let placement = branch_lru_placement(runtime, domain, template)
+        .change_context(BranchLruSnapshotError::Unplaced)?;
+    let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())?;
+    let snapshot = PersistedRuntimeStateEntry {
+        lsm: instances.version(),
+        payload,
+    };
+    runtime.publish_branch_lru_snapshot(placement, snapshot);
     Ok(())
 }
 

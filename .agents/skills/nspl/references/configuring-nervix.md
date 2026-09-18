@@ -218,7 +218,12 @@ relay. Do not use them to scan across branches.
   `<stage> failed` diagnostic, and treat only `snapshot envelope decoding` and `application state
   restoration` as a verdict on the saved state, which Nervix keeps. Owner loss without a surviving
   checkpoint of the current state generation resets the affected branches; a returning former
-  owner or stale replica never restores older guest state.
+  owner or stale replica never restores older guest state. Treat a WASM processor's input
+  acknowledgement as released only after the guest-state checkpoint covering it reached the owner's
+  stable storage and every replica the schedule assigns; a failed checkpoint negatively
+  acknowledges its inputs and recreates the guest from the last completed checkpoint. Output is
+  dispatched before its checkpoint completes, so a redelivered input can emit again: the path stays
+  at least once, and a guest that must not double-count redelivered input has to recognize it.
 - Paced ingestors declare their timestamp source.
 - External sensitive values use the required explicit leakage operation.
 - Transactions queue only the bound domain's replicated configuration statements. Commit progress
@@ -228,6 +233,9 @@ relay. Do not use them to scan across branches.
   effective `ENTITY_PAUSE`, and `COMMIT` also reports the total planned relocations.
 - Interdependent schema evolution is one transaction, preserves ALTER operation order, and includes
   all wire schema, internal schema, codec, and dependent-node mutations needed by the new graph.
+  Expect it to recreate the runtime state laid out by the altered schemas, such as deduplicator
+  keys, windows, materialized records, and WASM guest state; domain-owned Kafka offsets and node
+  metric summaries carry over.
 - Model-alteration entity holds, domain pauses, and memory-pressure quiescing consult the
   ingestor's mode. Planned drain, placement relocation, and explicit `RELOCATE` ignore that mode:
   they stop new intake only for moved ingestors, drain already admitted ACK work, then switch

@@ -90,7 +90,10 @@ pub enum ShutdownRequestOutcome {
 }
 
 /// The application phase currently owned by the coordinator.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// Phases are declared in the order a shutdown moves through them, so a later phase compares
+/// greater than every phase before it.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ShutdownPhase {
     Serving,
     StopRequested,
@@ -553,5 +556,139 @@ mod tests {
             }
         );
         assert!(!outcome.deadline_expired());
+    }
+}
+
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_tests {
+    use shuttle::{future::block_on, thread};
+
+    use super::*;
+    use crate::{
+        application::test_fixtures::{FAR_FUTURE_SHUTDOWN_TIMEOUT, shut_down_in_phase_order},
+        shuttle_test::{check_pct, check_random},
+    };
+
+    const MODEL_THREAD_JOINS: &str =
+        "Shuttle fails the whole execution when a model thread panics, so no join observes one";
+    const PCT_DEPTH: usize = 3;
+    const PCT_ITERATIONS: usize = 1_000;
+    const RANDOM_ITERATIONS: usize = 1_000;
+
+    /// Samples the phase of `shutdown` until it has finished, and fails when a sample precedes the
+    /// one taken before it.
+    fn observe_phases_until_finished(shutdown: &ShutdownCoordinator) {
+        let mut previous = shutdown.phase();
+        while previous != ShutdownPhase::Finished {
+            // The observer waits on nothing, so it yields between samples; otherwise a PCT schedule
+            // that ranks it first would spin until the step bound instead of moving shutdown on.
+            thread::yield_now();
+            let phase = shutdown.phase();
+            assert!(
+                phase >= previous,
+                "shutdown moved back from {previous:?} to {phase:?}"
+            );
+            previous = phase;
+        }
+    }
+
+    /// Two stop requests race each other and a task waiting for the first request.
+    fn racing_stop_requests() {
+        let shutdown = ShutdownCoordinator::new(FAR_FUTURE_SHUTDOWN_TIMEOUT);
+        let waiting = shutdown.clone();
+        let waiter = thread::spawn(move || block_on(waiting.requested()));
+        let first_requester = shutdown.clone();
+        let first = thread::spawn(move || first_requester.request_stop());
+        let second_requester = shutdown.clone();
+        let second = thread::spawn(move || second_requester.request_stop());
+
+        let first = first.join().assured(MODEL_THREAD_JOINS);
+        let second = second.join().assured(MODEL_THREAD_JOINS);
+        let accepted = match (first, second) {
+            (
+                ShutdownRequestOutcome::Accepted(accepted),
+                ShutdownRequestOutcome::AlreadyRequested(observed),
+            )
+            | (
+                ShutdownRequestOutcome::AlreadyRequested(observed),
+                ShutdownRequestOutcome::Accepted(accepted),
+            ) => {
+                assert_eq!(
+                    observed, accepted,
+                    "the stop request that lost the race must observe the accepted request and \
+                     its deadline"
+                );
+                accepted
+            }
+            outcomes => {
+                panic!("exactly one of two racing stop requests must be accepted, got {outcomes:?}")
+            }
+        };
+        let awaited = waiter.join().assured(MODEL_THREAD_JOINS);
+        assert_eq!(
+            awaited, accepted,
+            "a task waiting for the stop request must observe the accepted request and its \
+             deadline"
+        );
+        assert_eq!(shutdown.request(), Some(accepted));
+        assert_eq!(
+            shutdown.request_stop(),
+            ShutdownRequestOutcome::AlreadyRequested(accepted),
+            "a stop request after the race must observe the accepted deadline rather than replace \
+             it"
+        );
+    }
+
+    /// The composition root moves shutdown through its phases while a phase observer samples them
+    /// and completion waiters subscribe before and during the transitions.
+    fn phases_racing_their_observers() {
+        let shutdown = ShutdownCoordinator::new(FAR_FUTURE_SHUTDOWN_TIMEOUT);
+        let early_waiting = shutdown.clone();
+        let early_completion = thread::spawn(move || block_on(early_waiting.completion()));
+        let observing = shutdown.clone();
+        let phase_observer = thread::spawn(move || observe_phases_until_finished(&observing));
+        let composing = shutdown.clone();
+        let composition_root = thread::spawn(move || block_on(shut_down_in_phase_order(composing)));
+        let late_waiting = shutdown.clone();
+        let late_completion = thread::spawn(move || block_on(late_waiting.completion()));
+        shutdown.request_stop();
+
+        composition_root.join().assured(MODEL_THREAD_JOINS);
+        phase_observer.join().assured(MODEL_THREAD_JOINS);
+        let outcome = shutdown
+            .outcome()
+            .verified("the composition root finished shutdown before it was joined");
+        assert_eq!(
+            outcome,
+            ShutdownOutcome {
+                stop_admission: ShutdownPhaseOutcome::Completed,
+                drain_support: ShutdownPhaseOutcome::Abandoned,
+                terminal_teardown: ShutdownPhaseOutcome::Completed,
+            }
+        );
+        for completion in [early_completion, late_completion] {
+            let observed = completion.join().assured(MODEL_THREAD_JOINS);
+            assert_eq!(
+                observed, outcome,
+                "every completion waiter must observe the one outcome shutdown finished with"
+            );
+        }
+        assert_eq!(
+            block_on(shutdown.completion()),
+            outcome,
+            "a completion waiter that subscribes after shutdown finished must observe that outcome"
+        );
+    }
+
+    #[test]
+    fn shuttle_racing_stop_requests_accept_exactly_one_and_keep_its_deadline() {
+        check_random(racing_stop_requests, RANDOM_ITERATIONS);
+        check_pct(racing_stop_requests, PCT_ITERATIONS, PCT_DEPTH);
+    }
+
+    #[test]
+    fn shuttle_phases_only_advance_and_every_completion_waiter_observes_the_one_outcome() {
+        check_random(phases_racing_their_observers, RANDOM_ITERATIONS);
+        check_pct(phases_racing_their_observers, PCT_ITERATIONS, PCT_DEPTH);
     }
 }

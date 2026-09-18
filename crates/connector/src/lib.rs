@@ -26,6 +26,9 @@
 //! connector reads a Model. Capabilities the registry validates live in the vocabulary, where
 //! validation reads them without naming a connector crate.
 
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+
 mod client_config;
 mod http_client;
 mod ingest_metadata;
@@ -37,9 +40,9 @@ mod tls;
 
 pub use client_config::{
     ClientConfigError, ClientConfigResult, ClientResourceMounts, ClientTlsPaths, ParsedRetryPolicy,
-    ResolvedClientConfig, client_config_entries, client_config_value, client_tls_paths,
-    next_retry_delay, optional_bool_client_config_value, optional_client_config_value,
-    read_tls_file, render_client_config_template,
+    ResolvedClientConfig, client_config_value, client_tls_paths, next_retry_delay,
+    optional_bool_client_config_value, optional_client_config_value, read_tls_file,
+    render_client_config_template,
 };
 pub use http_client::{HttpClientConfig, HttpClientConfigError};
 pub use ingest_metadata::{

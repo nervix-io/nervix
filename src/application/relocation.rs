@@ -663,7 +663,7 @@ fn format_node_list(nodes: &[ClusterNodeName]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{CreateJunction, JunctionName, ModelKind, ModelName};
+    use nervix_models::{CreateJunction, JunctionName, ModelKind, ModelName, SchemaFingerprint};
 
     use super::*;
 
@@ -671,15 +671,18 @@ mod tests {
         let identifier = ModelName::try_from(name).expect("test name must be an identifier");
         let mut assigned_nodes = vec![node_name(primary)];
         assigned_nodes.extend(replicas.iter().map(|node| node_name(node)));
-        ScheduledNode::new(Model::Junction(CreateJunction {
-            name: JunctionName::from(&identifier),
-            from: nervix_models::ProcessorInputs::new(Vec::new(), Vec::new()),
-            output_routes: nervix_models::ProcessorOutputs::new(Vec::new()),
-            branched_by: nervix_models::BranchSelection::unbranched(),
-            mode: Default::default(),
-            filter_where: None,
-            materialized_state: Vec::new(),
-        }))
+        ScheduledNode::new(
+            Model::Junction(CreateJunction {
+                name: JunctionName::from(&identifier),
+                from: nervix_models::ProcessorInputs::new(Vec::new(), Vec::new()),
+                output_routes: nervix_models::ProcessorOutputs::new(Vec::new()),
+                branched_by: nervix_models::BranchSelection::unbranched(),
+                mode: Default::default(),
+                filter_where: None,
+                materialized_state: Vec::new(),
+            }),
+            SchemaFingerprint::from_digest([1; 32]),
+        )
         .placed_on(
             Some(ClusterNodeName::parse(primary).expect("valid node name")),
             assigned_nodes,

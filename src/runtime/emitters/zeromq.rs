@@ -1,5 +1,5 @@
 use ::zeromq::{PushSocket, Socket, SocketSend};
-use nervix_connector::{ResolvedClientConfig, client_config_entries, optional_client_config_value};
+use nervix_connector::optional_client_config_value;
 
 use super::*;
 
@@ -8,15 +8,8 @@ pub(in crate::runtime) struct ZeroMqEmitter {
 }
 
 impl ZeroMqEmitter {
-    pub(in crate::runtime) async fn new(
-        client: &CreateClientZeroMq,
-        resolved: Option<&ResolvedClientConfig>,
-    ) -> EmitterRuntimeResult<Self> {
-        let socket = Self::push_socket_from_config(client_config_entries(
-            resolved,
-            client.config.as_slice(),
-        ))
-        .await?;
+    pub(in crate::runtime) async fn new(plan: &ZeroMqSinkPlan) -> EmitterRuntimeResult<Self> {
+        let socket = Self::push_socket_from_config(&plan.client.config.entries).await?;
         Ok(Self {
             socket: Some(socket),
         })

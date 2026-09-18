@@ -70,6 +70,8 @@ struct FaultInjectionState {
     transaction_binding_drops: DashMap<ClusterNodeName, (), RandomState>,
     /// One-shot installation failures, consumed by the next resource version a node installs.
     failed_resource_installations: DashMap<ClusterNodeName, (), RandomState>,
+    /// One-shot failures, consumed by the next HTTPS listener configuration a node installs.
+    failed_https_listener_installations: DashMap<ClusterNodeName, (), RandomState>,
     consensus_probes: DashMap<ClusterNodeName, ConsensusProbeState, RandomState>,
     /// Consensus storage failures armed as each named node builds its storage, before it answers
     /// any Raft traffic.
@@ -96,6 +98,10 @@ struct FaultInjectionState {
     /// Wall time already elapsed when the next newly supplied mapping for a domain starts.
     domain_clock_initial_elapsed: DashMap<DomainName, Duration, RandomState>,
     state_replica_polling_paused: AtomicBool,
+    /// While set, every node's WASM guest-state checkpoint fails to reach its stable storage.
+    wasm_checkpoint_storage_failing: AtomicBool,
+    /// While set, every node refuses to install a runtime-state checkpoint it replicates.
+    state_replica_installation_failing: AtomicBool,
     syslog_ingestor_bind_ips: DashMap<ClusterNodeName, IpAddr, RandomState>,
     branch_instance_expiration_scan_interval: RwLock<Option<Duration>>,
     domain_drain_timeout: RwLock<Option<Duration>>,
@@ -194,6 +200,7 @@ impl Default for FaultInjection {
                 forced_entity_drain_timeouts: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
+                failed_https_listener_installations: DashMap::default(),
                 consensus_probes: DashMap::default(),
                 startup_consensus_faults: DashMap::default(),
                 bulk_executions: DashMap::default(),
@@ -207,6 +214,8 @@ impl Default for FaultInjection {
                 domain_clock_progress_pauses: DashMap::default(),
                 domain_clock_initial_elapsed: DashMap::default(),
                 state_replica_polling_paused: AtomicBool::new(false),
+                wasm_checkpoint_storage_failing: AtomicBool::new(false),
+                state_replica_installation_failing: AtomicBool::new(false),
                 syslog_ingestor_bind_ips: DashMap::default(),
                 branch_instance_expiration_scan_interval: RwLock::new(None),
                 domain_drain_timeout: RwLock::new(None),
@@ -445,6 +454,14 @@ impl FaultInjection {
     /// whose archive is present.
     pub fn fail_next_resource_installation_on(&self, node_id: ClusterNodeName) {
         self.inner.failed_resource_installations.insert(node_id, ());
+    }
+
+    /// Fails the next HTTPS listener configuration `node_id` installs, after it loaded the
+    /// certificates and before it replaces the configuration its listener serves.
+    pub fn fail_next_https_listener_installation_on(&self, node_id: ClusterNodeName) {
+        self.inner
+            .failed_https_listener_installations
+            .insert(node_id, ());
     }
 
     /// Fill every bulk worker on `node_id` and return once every occupying job is running.
@@ -818,6 +835,34 @@ impl FaultInjection {
             .store(true, Ordering::Release);
     }
 
+    /// Make every node's WASM guest-state checkpoint fail to reach its stable storage, as a failing
+    /// disk would, until [`Self::restore_wasm_checkpoint_storage`].
+    pub fn fail_wasm_checkpoint_storage(&self) {
+        self.inner
+            .wasm_checkpoint_storage_failing
+            .store(true, Ordering::Release);
+    }
+
+    pub fn restore_wasm_checkpoint_storage(&self) {
+        self.inner
+            .wasm_checkpoint_storage_failing
+            .store(false, Ordering::Release);
+    }
+
+    /// Make every node refuse to install the runtime-state checkpoints it replicates, until
+    /// [`Self::restore_state_replica_installation`].
+    pub fn fail_state_replica_installation(&self) {
+        self.inner
+            .state_replica_installation_failing
+            .store(true, Ordering::Release);
+    }
+
+    pub fn restore_state_replica_installation(&self) {
+        self.inner
+            .state_replica_installation_failing
+            .store(false, Ordering::Release);
+    }
+
     pub async fn wait_for_domain_clock_progress_pause(&self, domain: &str) {
         let point = DomainClockProgressPausePoint {
             domain: domain.to_ascii_lowercase(),
@@ -952,6 +997,17 @@ impl FaultInjection {
     ) -> bool {
         self.inner
             .failed_resource_installations
+            .remove(node_id)
+            .is_some()
+    }
+
+    /// Consumes an armed listener failure for `node_id` at its next HTTPS listener installation.
+    pub(crate) fn take_armed_https_listener_installation_failure(
+        &self,
+        node_id: &ClusterNodeName,
+    ) -> bool {
+        self.inner
+            .failed_https_listener_installations
             .remove(node_id)
             .is_some()
     }
@@ -1233,6 +1289,18 @@ impl FaultInjection {
     pub(crate) fn state_replica_polling_is_paused(&self) -> bool {
         self.inner
             .state_replica_polling_paused
+            .load(Ordering::Acquire)
+    }
+
+    pub(crate) fn wasm_checkpoint_storage_fails(&self) -> bool {
+        self.inner
+            .wasm_checkpoint_storage_failing
+            .load(Ordering::Acquire)
+    }
+
+    pub(crate) fn state_replica_installation_fails(&self) -> bool {
+        self.inner
+            .state_replica_installation_failing
             .load(Ordering::Acquire)
     }
 

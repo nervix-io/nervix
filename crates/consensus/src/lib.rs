@@ -10,6 +10,13 @@
 //! - **Must not know.** What the replicated state means. Domain lifecycle, transactions, validation
 //!   and scheduling belong above; this crate agrees on values and hands them back.
 
+#[cfg(feature = "shuttle")]
+extern crate shuttle_parking_lot as parking_lot;
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio_util as tokio_util;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
@@ -107,12 +114,12 @@ pub use storage_fault::{StorageBoundary, StorageFault, StoragePause};
 mod wire;
 
 pub use transaction::{
-    FinishedTransaction, ReplicatedTransaction, TransactionActivity, TransactionApplyingStep,
-    TransactionCommandResult, TransactionCommitAdvance, TransactionCommitProgress,
-    TransactionDiagnostic, TransactionMutationError, TransactionMutationResponse,
-    TransactionOutcome, TransactionQueueAdmission, TransactionQueueLimits, TransactionState,
-    TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
-    TransactionStepResult,
+    FinishedTransaction, ReplicatedTransaction, TransactionActivity, TransactionApplicationOutcome,
+    TransactionApplyingStep, TransactionCommandResult, TransactionCommitAdvance,
+    TransactionCommitProgress, TransactionDiagnostic, TransactionMutationError,
+    TransactionMutationResponse, TransactionOutcome, TransactionQueueAdmission,
+    TransactionQueueLimits, TransactionState, TransactionStatement, TransactionStatementRequest,
+    TransactionStepEffect, TransactionStepResult,
 };
 
 /// A sorted set archived as a vector so vocabulary types need no second archived ordering.
@@ -440,7 +447,7 @@ pub enum ConsensusCommand {
         id: String,
         expected_next_statement: usize,
         at: nervix_models::Timestamp,
-        application_failure: Option<String>,
+        outcome: TransactionApplicationOutcome,
     },
     FinishEmptyTransactionCommit {
         id: String,
@@ -3214,13 +3221,13 @@ impl Proposer {
         id: String,
         expected_next_statement: usize,
         at: nervix_models::Timestamp,
-        application_failure: Option<String>,
+        outcome: TransactionApplicationOutcome,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
         self.write_transaction(ConsensusCommand::CompleteTransactionApplication {
             id,
             expected_next_statement,
             at,
-            application_failure,
+            outcome,
         })
         .await
     }
@@ -4828,7 +4835,7 @@ fn apply_consensus_command_at(
             id,
             expected_next_statement,
             at,
-            application_failure,
+            outcome,
         } => {
             let outcome_revision = match &state.last_applied_log_id {
                 Some(log_id) => log_id.index,
@@ -4846,14 +4853,33 @@ fn apply_consensus_command_at(
                     changes,
                 );
             }
+            let restored_schedule = match outcome {
+                TransactionApplicationOutcome::RolledBack { inputs, .. } => {
+                    match transaction_schedule_rollback(state, &transaction, inputs) {
+                        Ok(schedule) => Some(schedule),
+                        Err(error) => {
+                            return AppliedConsensusCommand::transaction(
+                                Err(error.current_context().clone()),
+                                changes,
+                            );
+                        }
+                    }
+                }
+                TransactionApplicationOutcome::Applied
+                | TransactionApplicationOutcome::Failed { .. } => None,
+            };
             let domain_mutation = transaction.domain_mutation().cloned();
             if let Err(error) = transaction.complete_application(
                 *expected_next_statement,
                 *at,
                 outcome_revision,
-                application_failure.clone(),
+                outcome.error().map(ToOwned::to_owned),
             ) {
                 return AppliedConsensusCommand::transaction(Err(error), changes);
+            }
+            if let Some(schedule) = restored_schedule {
+                state.replace_domain_schedule(&transaction.domain, schedule.as_ref());
+                changes.schedule_changed = true;
             }
             if matches!(transaction.state, TransactionState::Finished(_))
                 && let Some(lease) = domain_mutation
@@ -5114,6 +5140,53 @@ fn validate_transaction_step_effect(
     }
 }
 
+/// The schedule a failed model step replaced, which a rollback of that step puts back.
+///
+/// Only a step that replaced the domain schedule can roll back, and only while `inputs`, captured
+/// after that step, still describe the domain; the schedule itself comes from the planning basis
+/// the step recorded, so a rollback cannot install anything but the schedule the step replaced.
+fn transaction_schedule_rollback(
+    state: &StateMachineData,
+    transaction: &ReplicatedTransaction,
+    inputs: &DomainPlanningInputs,
+) -> Result<Option<DomainSchedule>, Report<TransactionMutationError>> {
+    let TransactionState::Committing(progress) = &transaction.state else {
+        return Err(Report::new(TransactionMutationError::NotCommitting {
+            id: transaction.id.clone(),
+            state: transaction.state.as_str().to_string(),
+        }));
+    };
+    let Some(applying) = progress.applying.as_ref() else {
+        return Err(Report::new(
+            TransactionMutationError::NoApplicationInProgress {
+                id: transaction.id.clone(),
+                statement: progress.next_statement,
+            },
+        ));
+    };
+    let Some(TransactionStepEffect::ReplaceDomainSchedule {
+        inputs: step_inputs,
+        ..
+    }) = &applying.effect
+    else {
+        return Err(Report::new(TransactionMutationError::EffectMismatch {
+            id: transaction.id.clone(),
+        }));
+    };
+    if inputs.domain() != &transaction.domain {
+        return Err(Report::new(TransactionMutationError::EffectMismatch {
+            id: transaction.id.clone(),
+        }));
+    }
+    if let Err(reason) = validate_domain_planning_inputs(state, inputs) {
+        return Err(Report::new(TransactionMutationError::StepConflict {
+            id: transaction.id.clone(),
+            reason: reason.to_string(),
+        }));
+    }
+    Ok(step_inputs.schedule().cloned())
+}
+
 fn apply_transaction_step_effect(
     state: &mut StateMachineData,
     domain: &DomainName,
@@ -5208,11 +5281,11 @@ mod tests {
         CommandExecutionState, ConsensusCommand, ConsensusResponse, FjallLogReader, FjallStore,
         GossipNode, GossipState, LeaderTenure, MembershipMutation, MembershipSnapshot,
         ProtocolOriginError, ResourceRecords, StateMachineChanges, StateMachineData,
-        TransactionCommandResult, TransactionMutationError, TransactionOutcome,
-        TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
-        TransactionStepResult, TypeConfig, UserCredentials, apply_consensus_command,
-        apply_consensus_command_at, apply_transaction_step_effect, io_error, storage_decode,
-        validate_protocol_origin,
+        TransactionApplicationOutcome, TransactionCommandResult, TransactionMutationError,
+        TransactionOutcome, TransactionStatement, TransactionStatementRequest,
+        TransactionStepEffect, TransactionStepResult, TypeConfig, UserCredentials,
+        apply_consensus_command, apply_consensus_command_at, apply_transaction_step_effect,
+        io_error, storage_decode, validate_protocol_origin,
     };
     use crate::{
         ClusterNodeName, ConsensusError, LogIdOf, ReplicatedTransaction, TransactionActivity,
@@ -6717,6 +6790,195 @@ mod tests {
         assert!(!state.transactions.contains_key("retained"));
     }
 
+    fn vhost_schedule(raw: &str, tls_version: u64) -> DomainSchedule {
+        let vhost = nervix_models::Model::Vhost(nervix_models::CreateVhost {
+            name: nervix_models::VhostName::try_from("edge").expect("valid vhost name"),
+            hostnames: vec!["edge.example.com".to_string()],
+            tls: Some(nervix_models::VhostTlsResource {
+                resource: ResourceName::try_from("tls_bundle").expect("valid resource name"),
+                version: tls_version,
+            }),
+        });
+        DomainSchedule::new(
+            domain(raw),
+            vec![nervix_models::ScheduledNode::new(
+                vhost,
+                nervix_models::SchemaFingerprint::from_digest([1; 32]),
+            )],
+            Vec::new(),
+        )
+    }
+
+    /// Opens `tx-1` with one model mutation and applies its step, which replaces `before` with
+    /// `after`, leaving the step applying.
+    fn applying_model_step(
+        state: &mut StateMachineData,
+        before: &DomainSchedule,
+        after: &DomainSchedule,
+    ) {
+        let owner =
+            UserName::parse("app_user").assured("the test owner is an identifier-shaped literal");
+        let domain_id = domain("tenant");
+        state
+            .domains
+            .insert(domain_id.clone(), running_domain_state("tenant"));
+        state.replace_domain_schedule(&domain_id, Some(before));
+        apply_consensus_command(
+            state,
+            &ConsensusCommand::OpenTransaction {
+                transaction: Box::new(ReplicatedTransaction::open(
+                    "tx-1".to_string(),
+                    domain_id.clone(),
+                    owner.clone(),
+                    transaction_activity(1),
+                )),
+                max_open_transactions: 4,
+            },
+        );
+        apply_consensus_command(
+            state,
+            &ConsensusCommand::QueueTransactionStatement {
+                id: "tx-1".to_string(),
+                owner: owner.clone(),
+                domain: domain_id.clone(),
+                activity: transaction_activity(2),
+                statement: Box::new(TransactionStatement::test_admitted(
+                    TransactionStatementRequest {
+                        request_reference: nervix_models::CommandExecutionReference::parse(
+                            "request-rebind".to_string(),
+                        )
+                        .assured("the test reference uses accepted characters"),
+                        expected_position: 0,
+                        source: "rebind".to_string(),
+                        statement: Statement::Drop(nervix_models::DropModel {
+                            kind: nervix_models::ModelKind::Vhost,
+                            name: nervix_models::ModelName::try_from("edge")
+                                .expect("valid model name"),
+                        }),
+                    },
+                )),
+                limits: TransactionQueueLimits {
+                    max_statements: 4,
+                    max_source_bytes: 1024,
+                },
+            },
+        );
+        apply_consensus_command(
+            state,
+            &ConsensusCommand::StartTransactionCommit {
+                id: "tx-1".to_string(),
+                owner,
+                activity: transaction_activity(3),
+            },
+        );
+        let inputs = captured_inputs(state, "tenant");
+        let advanced = apply_consensus_command(
+            state,
+            &ConsensusCommand::AdvanceTransactionCommit {
+                id: "tx-1".to_string(),
+                expected_next_statement: 0,
+                next_statement: 1,
+                at: nervix_models::Timestamp::from_unix_nanos(4),
+                result: Box::new(TransactionStepResult {
+                    impact: crate::transaction::test_step_impact(0, 1),
+                    result: TransactionCommandResult {
+                        success: true,
+                        message: "rebound".to_string(),
+                        diagnostics: Vec::new(),
+                        already_existed: false,
+                    },
+                }),
+                effect: Some(Box::new(TransactionStepEffect::ReplaceDomainSchedule {
+                    inputs,
+                    schedule: Some(Box::new(after.clone())),
+                })),
+                completion: Some(TransactionOutcome::Committed),
+            },
+        );
+        let ConsensusResponse::Transaction(response) = advanced.response else {
+            panic!("a transaction step answers with a transaction response");
+        };
+        response
+            .result
+            .expect("the model step applies against the captured schedule");
+        assert_eq!(state.schedule.domains.get(&domain_id), Some(after));
+    }
+
+    #[test]
+    fn a_rolled_back_model_step_restores_the_schedule_it_replaced_with_its_failure() {
+        let domain_id = domain("tenant");
+        let before = vhost_schedule("tenant", 1);
+        let after = vhost_schedule("tenant", 2);
+        let mut state = StateMachineData::default();
+        applying_model_step(&mut state, &before, &after);
+        let current = captured_inputs(&state, "tenant");
+
+        let applied = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::CompleteTransactionApplication {
+                id: "tx-1".to_string(),
+                expected_next_statement: 0,
+                at: nervix_models::Timestamp::from_unix_nanos(5),
+                outcome: TransactionApplicationOutcome::RolledBack {
+                    error: "listener failed".to_string(),
+                    inputs: current,
+                },
+            },
+        );
+
+        assert!(applied.schedule_changed);
+        assert_eq!(state.schedule.domains.get(&domain_id), Some(&before));
+        let transaction = state.transactions.get("tx-1").expect("tombstone remains");
+        assert!(matches!(
+            transaction.finished_outcome(),
+            Some(TransactionOutcome::Failed {
+                failing_step: 0,
+                error,
+            }) if error == "listener failed"
+        ));
+    }
+
+    #[test]
+    fn a_rollback_planned_against_a_stale_domain_changes_nothing() {
+        let domain_id = domain("tenant");
+        let before = vhost_schedule("tenant", 1);
+        let after = vhost_schedule("tenant", 2);
+        let mut state = StateMachineData::default();
+        let stale = {
+            let mut probe = StateMachineData::default();
+            probe
+                .domains
+                .insert(domain_id.clone(), running_domain_state("tenant"));
+            probe.replace_domain_schedule(&domain_id, Some(&before));
+            captured_inputs(&probe, "tenant")
+        };
+        applying_model_step(&mut state, &before, &after);
+
+        let applied = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::CompleteTransactionApplication {
+                id: "tx-1".to_string(),
+                expected_next_statement: 0,
+                at: nervix_models::Timestamp::from_unix_nanos(5),
+                outcome: TransactionApplicationOutcome::RolledBack {
+                    error: "listener failed".to_string(),
+                    inputs: stale,
+                },
+            },
+        );
+
+        let ConsensusResponse::Transaction(response) = applied.response else {
+            panic!("a rollback answers with a transaction response");
+        };
+        assert!(matches!(
+            response.result,
+            Err(TransactionMutationError::StepConflict { .. })
+        ));
+        assert_eq!(state.schedule.domains.get(&domain_id), Some(&after));
+        let transaction = state.transactions.get("tx-1").expect("transaction remains");
+        assert!(matches!(transaction.state, TransactionState::Committing(_)));
+    }
+
     #[test]
     fn transaction_step_effect_and_progress_are_applied_once() {
         let owner =
@@ -6845,7 +7107,7 @@ mod tests {
                 id: "tx-1".to_string(),
                 expected_next_statement: 0,
                 at: nervix_models::Timestamp::from_unix_nanos(6),
-                application_failure: None,
+                outcome: TransactionApplicationOutcome::Applied,
             },
         );
         let transaction = state
@@ -6887,7 +7149,7 @@ mod tests {
                 id: "tx-1".to_string(),
                 expected_next_statement: 1,
                 at: nervix_models::Timestamp::from_unix_nanos(8),
-                application_failure: None,
+                outcome: TransactionApplicationOutcome::Applied,
             },
         );
         let transaction = state.transactions.get("tx-1").expect("tombstone remains");

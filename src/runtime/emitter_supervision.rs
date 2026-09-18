@@ -386,13 +386,49 @@ impl Runtime {
             })
     }
 
+    /// Plans `emitter`'s sink from the client Models it names, resolves the mounts those clients
+    /// declare, and starts the emitter's task on the resulting plan.
+    ///
+    /// The Models are read here, once, by the start-plan decision; the task and its sink
+    /// constructors receive only the plan.
     pub(in crate::runtime) fn spawn_emitter_task(
         &self,
         build: EmitterTaskBuildDeps<'_>,
+        clients: &HashMap<ClientName, Arc<Model>>,
         emitter: CreateEmitter,
         inputs: Vec<(RelayName, RelayRuntimeFanIn)>,
     ) -> Result<ScheduledEmitterTask, RuntimeError> {
-        emitters::EmitterTask::spawn(self, build, emitter, inputs)
+        let domain = build.domain;
+        let client = clients
+            .get(emitter.sink.client())
+            .map(|model| model.as_ref());
+        let catalog_client = match emitter.sink.iceberg_catalog_client() {
+            Some(catalog) => clients.get(catalog).map(|model| model.as_ref()),
+            None => None,
+        };
+        let decided = EmitterStartPlan::decide(
+            &emitter,
+            EmitterClientModels {
+                client,
+                catalog_client,
+            },
+        )
+        .map_err(|error| RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason: format!("cannot plan emitter '{}': {error}", emitter.name.as_str()),
+        })?;
+        let plan = decided.resolve_clients(|client| {
+            self.resolve_client_config(domain, client.config.mount.as_ref(), &client.config.entries)
+                .map_err(|error| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!(
+                        "failed to resolve client '{}' for emitter '{}': {error}",
+                        client.name.as_str(),
+                        emitter.name.as_str()
+                    ),
+                })
+        })?;
+        emitters::EmitterTask::spawn(self, build, emitter, plan, inputs)
     }
 }
 

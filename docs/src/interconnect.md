@@ -482,24 +482,47 @@ bulk class. Receivers stage and validate the owning artifact while releasing HTT
 chunk. The whole transfer may exceed the 32 MiB bulk-memory budget because only bounded chunks and
 the active decoded section are resident at once.
 
-A runtime-state placement names exactly the state it addresses: the domain, entity, state kind,
-schema fingerprint, and concrete branch, and for WASM processor guest state the generation the
-committed schedule names for that branch. A node answers a synchronization request, and acts on a
-checkpoint announcement or a handoff checkpoint, only while the placement is current on that node,
-so an owner never serves, and a replica never installs, guest state of a generation that has been
-replaced. A replication acknowledgement counts only toward the placement it names, so an
-acknowledgement for a replaced generation never satisfies the replica quorum of the current one.
-The schedule fingerprint an ownership handoff or forced recovery is bound to covers those
-generations, so a preparation staged against an earlier generation cannot activate after a later one
-is committed.
+A runtime-state placement names exactly the state it addresses: the domain, entity, state kind, and
+concrete branch; for every kind of state except branch-aggregated metrics and Kafka domain offsets,
+the fingerprint of the schemas the state is laid out by; and for WASM processor guest state the
+generation the committed schedule names for that branch. Branch-aggregated metrics and Kafka domain
+offsets depend on no schema, so their placements carry no fingerprint and stay current across every
+schema change of their entity. A checkpoint carries no identity of its own: a synchronization reply,
+a handoff checkpoint, and a forced-recovery preparation each carry it beside the placement that
+names it. A node answers a synchronization request, and acts on a checkpoint announcement or a
+handoff checkpoint, only while the placement is current on that node, so an owner never serves, and
+a replica never installs, state written under a replaced schema fingerprint or guest state of a
+generation that has been replaced. A node that has not applied a schedule naming the entity has no
+fingerprint to place its schema-bound state under, and refuses to place it rather than address the
+state under an assumed identity. A replication acknowledgement counts only toward the placement it
+names, so an acknowledgement for a replaced generation never satisfies the replica quorum of the
+current one.
+The schedule fingerprint an ownership handoff or forced recovery is bound to covers those schema
+fingerprints and generations, so a preparation staged against an earlier schema or generation cannot
+activate after a later one is committed.
+
+A replica acknowledges a branch-state checkpoint — WASM guest state, deduplicator and window state,
+and the branch lifecycle that names the branches — only after it has written the checkpoint to its
+own stable storage and synchronized it, never on receipt. A replica that already holds the announced
+revision, or a newer one, synchronizes and acknowledges what it holds again, so an acknowledgement
+lost in transit is replaced by the next announcement instead of stranding the owner. A node without
+stable storage acknowledges nothing. The owner of a WASM processor branch releases the source
+acknowledgements a guest checkpoint covers only once every replica the committed schedule assigns
+has acknowledged that checkpoint's revision; a replica that is unreachable, lagging, or failing to
+install stops those acknowledgements from being released rather than letting them through, and the
+checkpoint fails after its ten-second deadline. The owner announces a WASM processor's new branch to
+its replicas as soon as the branch appears. A replica that receives a checkpoint of a branch its
+replicated branch lifecycle does not name yet first synchronizes the owner's branch lifecycle, and
+refuses the checkpoint only when that lifecycle does not name the branch either, as for a branch the
+owner has evicted.
 
 Runtime-state synchronization replies and materialized-snapshot descriptions carry the shared
 typed remote-operation failure envelope. Rejection, absence, temporary unreadiness, and execution
 failure remain distinct across the node boundary, and the requester keeps that classification in
 its local replication or snapshot-exchange error. Only an execution failure includes the serving
 node's opaque diagnostic text. A materialized snapshot is streamed only after a successful typed
-description identifies its exact length, digest, schema fingerprint, revision, fence, and branch
-generation.
+description identifies its exact length, digest, revision, fence, and branch generation; the
+placement that the request names supplies its schema fingerprint.
 
 A materialized dependency reader may observe the committed destination just before that node
 activates its prepared state, or the previous destination just after it leaves the assignment. A
@@ -537,6 +560,23 @@ The receiver authenticates the reporting node and applies the committed generati
 authority, and fence checks before retaining the frontier. A stale, duplicate, reordered, or
 superseded report cannot replace the mapping or move logical time backward. See
 [Domains And Time](./domains-and-time.md) for clock semantics outside the transport boundary.
+
+## HTTPS Listener Installation
+
+Every node's HTTPS listener presents the TLS VHOST certificates of the runtime revision that node
+applied, and it installs them before it reports that revision prepared. A command that creates,
+changes, or drops a VHOST confirms the installation with the typed management request
+`https_listener_installation`, which uses the reserved progress subquota and a two-second deadline.
+The leader answers for itself in process and asks every other live process incarnation for its
+latest installation at or after the command's runtime revision. The answer names the answering
+incarnation and reports the installed revision, a failure with that node's own description, or that
+the revision is still pending.
+
+An answer from another incarnation, a transport failure, and a pending answer all leave that
+incarnation pending, and it is asked again every 250 milliseconds until the command's completion
+deadline. A failed installation ends the wait at once, so the command reports the failing node
+without waiting for the deadline. The request reads installation state and changes nothing, so a
+repeated or late request is harmless.
 
 ## Application Health And Availability
 
@@ -656,8 +696,8 @@ bulk-transfer bytes. Interconnect memory, worker queues, reactor delay, and cons
 whether pressure originates in transport, execution, or the protocol using it.
 
 Typed-request observations identify application health as operation `liveness` and replaceable
-domain-clock delivery as operation `progress`, so their request counts, outcomes, latency, and quota
-failures can be evaluated independently.
+domain-clock delivery and HTTPS listener installation probes as operation `progress`, so their
+request counts, outcomes, latency, and quota failures can be evaluated independently.
 
 Metric labels are bounded dimensions such as traffic class, direction, operation, outcome, and
 reason. They do not include peer, domain, relay, branch, delivery identity, or payload values.

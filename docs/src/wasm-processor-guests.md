@@ -11,14 +11,17 @@ The runtime creates one guest instance per concrete branch. Guest state must the
 
 ## Module Sharing And Branch Memory
 
-The runtime compiles a WASM processor module once for the scheduled processor and reuses that
-compiled module to instantiate branches. Each branch instance still has its own Wasmtime store,
-linear memory, guest state, and timeout handles. Compiled code is shared. Mutable guest
-memory is not.
+A node compiles the module file a WASM processor pins once, and keeps the compiled module for as
+long as the schedule assigns the processor to that node, as its owner or as a replica. The owner
+instantiates every branch from it, and a replica that
+[forced recovery](shutdown.md#when-the-former-owner-is-gone) promotes restores the branches' guests
+from it, so taking over a processor never waits for its module to compile. Each branch instance
+still has its own Wasmtime store, linear memory, guest state, and timeout handles. Compiled code is
+shared. Mutable guest memory is not.
 
 Capacity therefore grows with the linear-memory pages dirtied by each live branch, not with a full
-copy of compiled machine code per branch. See
-[Capacity Planning For Branched Graphs](capacity-planning.md#per-branch-cost-structure).
+copy of compiled machine code per branch; each node the processor is assigned to holds one copy.
+See [Capacity Planning For Branched Graphs](capacity-planning.md#per-branch-cost-structure).
 
 WASM processor output flush is guest-controlled. `CREATE WASM PROCESSOR` does not accept `FLUSH EACH` or `FLUSH IMMEDIATE`; Nervix routes batches returned from `nervix_process_batch`, batches returned later from `nervix_on_timeout` callbacks requested by the guest, and batches released by `nervix_flush` when the host quiesces the branch, through the processor's declared `TO` clauses.
 
@@ -46,9 +49,9 @@ the module's initial pages and reusable ABI buffer. It does not include shared c
 host-side Arrow or FlatBuffer data, or Wasmtime store bookkeeping.
 
 Fuel or memory exhaustion is handled by the processor's node-wide `ON GLOBAL ERROR` policy. Nervix
-discards that concrete branch's trapped guest instance; later work may instantiate a replacement
-from the last replicated guest snapshot. Other branch instances are independent and continue
-running. There is no separate WASM wall-clock timeout clause.
+discards that concrete branch's trapped guest instance; later work instantiates a replacement from
+the branch's committed [checkpoint](#checkpoints-and-acknowledgements). Other branch instances are
+independent and continue running. There is no separate WASM wall-clock timeout clause.
 
 Before every guest operation, Nervix supplies one explicit domain execution snapshot to the WASM
 host. Initialization, input processing, a timeout callback, quiesce flush, and state save, load, or
@@ -358,14 +361,16 @@ Use branch-local guest state for the durable computation state a recreated insta
 continue: counters, aggregates, open windows, or whatever else the guest derives from the input it
 has already accepted.
 
-Nervix saves guest state through `nervix_dump_state` after it dispatches the output of a successful
-`nervix_process_batch` or `nervix_on_timeout` call, and when it checkpoints a branch for an
-ownership handoff. It persists and replicates the returned bytes and restores them through
-`nervix_load_state`, after `nervix_init`, when the branch instance is recreated.
+Nervix saves guest state through `nervix_dump_state` at the end of every guest callback, as the
+checkpoint described below, and when it checkpoints a branch for an ownership handoff. It restores
+the committed checkpoint through `nervix_load_state`, after `nervix_init`, when the branch instance
+is recreated.
 
 A save that fails — a negative `nervix_dump_state` code, a trap, or an exhausted limit — is reported
-as a `state snapshot` failure and leaves the state saved last in place. Nervix never replaces saved
-state with the result of a failed save, so a recreated instance restores the last completed save.
+as a `state snapshot` failure and fails the checkpoint. Nervix never replaces the committed
+checkpoint with the result of a failed save, so a recreated instance restores the last checkpoint
+that completed. A save is bounded by the host's 64 MiB guest buffer limit; a larger state fails the
+save the same way.
 
 Guest state holds computation state only. Everything an instance uses to execute belongs to that
 instance and is never saved:
@@ -413,11 +418,107 @@ that generation; a branch with no surviving checkpoint of the generation being r
 fresh, and `SHOW CLUSTER STATUS` reports it as a `wasm_processor` reset. Applying the same committed
 schedule again, after a restart or a rebuild, publishes nothing new.
 
-A save from an instance whose generation or ownership has already moved on is refused before
-anything is persisted or replicated, and is reported as a `state authority check` failure. Saves are
-written to the node's state store on its storage workers, never on the worker that runs the guest.
+A checkpoint of an instance whose generation or ownership has already moved on is refused before
+anything is saved, persisted or replicated, and is reported as a `state authority check` failure.
+Checkpoints are written to the node's state store on its storage workers, never on the worker that
+runs the guest.
 
-ACK tokens are separate from guest state. They are host-local hot-path runtime capabilities and are not persisted or replicated. If ACK state is lost with a processor owner, the upstream ingestor reacts according to its delivery mode and retry policy.
+ACK tokens are separate from guest state. They are host-local hot-path runtime capabilities and are
+not persisted or replicated. If ACK state is lost with a processor owner, the upstream ingestor
+reacts according to its delivery mode and retry policy.
+
+### Checkpoints And Acknowledgements
+
+Every guest callback that runs — an input batch, a timeout callback, and a quiesce flush that emits
+output — ends with a checkpoint of the guest instance it leaves behind, and Nervix acknowledges an
+input as successful only after the checkpoint that covers it has completed. A branch handles one
+callback at a time, in this order:
+
+1. Nervix runs the callback with its execution snapshot and reads every output group the guest
+   emits.
+2. It validates the callback's output as a whole. Output that fails validation dispatches nothing,
+   and every input the branch holds goes through `ON GLOBAL ERROR` instead.
+3. It dispatches the output rows to their relays, negatively acknowledges the `nacked` inputs, and
+   routes `message_errors` through the route's `ON MESSAGE ERROR` policy. It holds back the success
+   of every other input the callback decided: inputs carried into output rows, `acked` inputs,
+   handled message errors, and inputs that `ON GLOBAL ERROR IGNORE` accepts after a failed
+   callback. Output reaches downstream nodes, and can reach sinks, while its checkpoint is still on
+   its way; only the acknowledgement waits.
+4. It saves the guest with `nervix_dump_state`. The saved state is **captured** and stamped with the
+   branch's next revision.
+5. It writes that revision to the node's stable storage and waits until the storage is
+   synchronized. The state is then **locally durable**. Checkpoints taken by different branches at
+   the same time share one synchronization.
+6. When the committed schedule assigns the processor replicas, every replica fetches the revision,
+   writes it to its own stable storage, synchronizes it, and only then acknowledges it. Nervix
+   waits until every assigned replica has, and the state is then **replica-confirmed**. A processor
+   with no assigned replica, which is always the case with a replica count of `0`, completes its
+   checkpoints on local storage alone.
+7. It commits the checkpoint, which becomes the state a recreated instance restores, and releases
+   the held acknowledgements. An input's acknowledgement then succeeds as soon as every delivery the
+   callback made for it has succeeded as well.
+8. Only then does the branch run its next callback.
+
+The replicas a checkpoint waits for are the ones the committed schedule assigns when it is captured,
+and `SHOW CLUSTER STATUS` lists them. While it waits, the checkpoint follows the schedule: a replica
+the schedule replaces is replaced in the wait as well. It never completes with fewer replicas than it
+was captured for, and never after the branch's state generation or owner has moved on. A later
+checkpoint uses the replicas assigned when it is captured.
+
+The whole checkpoint, from the save to the last replica's acknowledgement, must complete within ten
+seconds. Branches are independent: one branch waiting for its checkpoint delays no other branch's
+callbacks.
+
+### When A Checkpoint Fails
+
+A checkpoint fails when the guest cannot save (`state snapshot`), when this node cannot write or
+synchronize it (`local state persistence`), when an assigned replica does not hold it within the
+deadline or the schedule assigns fewer replicas than it was captured for (`state replication`), and
+when the branch's state generation or ownership has moved on (`state authority check`). Each
+failure is reported as a runtime error at its [stage](#failure-diagnostics), whatever the
+processor's `ON GLOBAL ERROR` policy, and then:
+
+- Every input the callback decided, and every input the guest still buffers, is negatively
+  acknowledged. A source with acknowledgements redelivers them.
+- The committed checkpoint stays where it was.
+- The guest instance is discarded with the state nothing committed, together with its buffered
+  input, pending output and timeouts. The branch never continues from that state: its next input
+  instantiates the guest again from the committed checkpoint.
+
+`DESCRIBE WASM PROCESSOR` reports, for the branches on the node that answers it, how many latest
+checkpoints are awaiting local storage, awaiting replicas, or failed. A branch counts as failed until
+its next checkpoint completes.
+
+A failed synchronization of a node's stable storage is not retried. The operating system may have
+dropped the writes it could not flush, and the database refuses to synchronize again, so every later
+checkpoint on that node fails until the node restarts.
+
+### Recovery, Replay And Duplicates
+
+A checkpoint is not a transaction that spans the guest, its output and external sinks. It guarantees
+exactly one thing: once a source has received a successful acknowledgement for an input, the guest
+state that reflects the input is on the stable storage of the branch's owner and of every replica the
+checkpoint was confirmed by. What that means differs for guest state, for the source, and for sinks.
+
+- **Guest state.** A restarted node restores each branch from the newest checkpoint on its own
+  storage. After an owner is lost, [forced recovery](#state-generations) continues each branch from
+  the newest surviving checkpoint of its generation, and with replicas, a replica holds every
+  checkpoint whose acknowledgements were released. Without replicas, only the owner's own storage
+  holds a branch's checkpoints, so recovering without that node resets the branch.
+- **Source replay.** An input whose acknowledgement is withheld — its checkpoint failed, its node
+  stopped first, or the guest still buffers it — is redelivered by a source with acknowledgements
+  and lost by one without. The state the branch continues from can already reflect a redelivered
+  input: a guest counts buffered input as it accepts it, a checkpoint that failed at its replicas
+  stays on the owner's storage, and a replica can hold a checkpoint whose acknowledgement it sent too
+  late. A guest therefore applies a redelivered input again unless it recognizes the input itself.
+- **External delivery.** Output is dispatched before its checkpoint completes, so a sink can emit
+  output whose input is later negatively acknowledged and redelivered, and the redelivered input
+  produces that output again. Delivery through a WASM processor is at least once; see
+  [ACK Semantics And Effective Delivery](emitters.md#ack-semantics-and-effective-delivery).
+
+A branch holds back the acknowledgements of one callback at a time, for no longer than the
+checkpoint deadline. Stopping a node ends a branch still waiting for its checkpoint after the
+branch's stop grace, and whatever it held is negatively acknowledged when the node's drain ends.
 
 ## Timeouts
 
@@ -449,14 +550,16 @@ nervix_flush()
 ```
 
 Emit every buffered output group during this call; the host drains them with `nervix_read_emit()`
-exactly as it does after a timeout, and only then snapshots the guest through `nervix_dump_state`.
-A guest that keeps input past `nervix_flush` leaves it unacknowledged until the branch resumes, so
-a guest that buffers between calls must release that buffer here instead of waiting for more input
-or for its next timeout. A guest that never buffers can return success without emitting.
+exactly as it does after a timeout, and a flush that emitted output is completed by a
+[checkpoint](#checkpoints-and-acknowledgements) like any other callback. A flush that emits nothing
+decides no input, so no checkpoint follows it. A guest that keeps input past `nervix_flush` leaves
+it unacknowledged until the branch resumes, so a guest that buffers between calls must release that
+buffer here instead of waiting for more input or for its next timeout. A guest that never buffers
+can return success without emitting.
 
 This is what lets a WASM processor participate in `ENTITY_PAUSE` like every other stateful node:
-the host pauses intake at the relay gate, asks the guest to flush, snapshots it, and restores that
-snapshot into the replacement instance.
+the host pauses intake at the relay gate, asks the guest to flush, checkpoints it, and restores that
+checkpoint into the replacement instance.
 
 ## Rust SDK
 
@@ -622,8 +725,8 @@ another node reaches the session unchanged.
 | `quiesce flush` | `nervix_flush` and the emit reads that follow it. |
 | `output emission` | An emitted envelope the host cannot decode, or output that fails validation. |
 | `state snapshot` | `nervix_dump_state`. Nervix keeps the state saved last. |
-| `local state persistence` | Writing the saved state to the node's state store. |
-| `state replication` | Confirming the saved state with its replicas. |
+| `local state persistence` | Writing the checkpoint to the node's stable storage and synchronizing it. |
+| `state replication` | Waiting for every assigned replica to hold the checkpoint on its stable storage, or the schedule assigning fewer replicas than the checkpoint was captured for. |
 | `state authority check` | The state's authority refused it: a replica or peer that is not the state's authority, or this node after the branch's state generation or ownership moved on. |
 
 For example, a branch whose guest rejects its saved counters after an instance was recreated is
