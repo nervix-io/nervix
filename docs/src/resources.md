@@ -24,6 +24,8 @@ CREATE [IF NOT EXISTS] RESOURCE <name>;
 UPLOAD RESOURCE <name> VERSION '<local_directory>';
 DESCRIBE RESOURCE <name>;
 DESCRIBE RESOURCE <name> VERSION <n>;
+REBIND RESOURCE <name> TO VERSION <n>|LATEST
+  [FOR <kind> <name> [, <kind> <name> ...]];
 ```
 
 `CREATE RESOURCE` registers the logical resource name.
@@ -46,6 +48,7 @@ complete upload and can be sent again with the same identity.
 upload has completed. Its `versions` list and version details include every version whose metadata
 has been published, including a version whose upload is still applying or finished with failure.
 This keeps incomplete upload diagnostics visible without making that version eligible for use.
+Its `usages` section lists every model currently bound to the resource and its pinned version.
 
 `DESCRIBE RESOURCE <name> VERSION <n>` shows the detailed state for one version, including:
 
@@ -53,6 +56,7 @@ This keeps incomplete upload diagnostics visible without making that version eli
 - total file count and size
 - the terminal upload outcome
 - per-incarnation replica state and installation diagnostics
+- the models pinned to that specific version
 
 Descriptions are observations. They are useful for diagnosis and recovery visibility, but a caller
 does not poll them to finish an upload.
@@ -74,6 +78,48 @@ the version each `LATEST` resolved to, `SHOW CREATE` renders the stored number, 
 moves an existing binding.
 
 `latest` in `DESCRIBE RESOURCE` is the version `VERSION LATEST` would select at that moment.
+
+## Rebinding Existing Models
+
+`REBIND RESOURCE` moves existing bindings without changing the resource catalog:
+
+```nspl,ignore
+REBIND RESOURCE fraud_model TO VERSION LATEST;
+REBIND RESOURCE fraud_model TO VERSION 3
+  FOR INFERENCER score_model, HASH MAP scores_by_id, CLIENT model_store;
+```
+
+Without `FOR`, every usage in the selected domain is included. With `FOR`, every member is
+kind-qualified and must exist and already bind that resource. The supported kinds are `VHOST`,
+`CODEC`, `SIGNALING PROTOCOL`, `INFERENCER`, `WASM PROCESSOR`, `HASH MAP`, and `CLIENT`. Duplicate
+members are rejected, and written member order has no semantic effect.
+
+Nervix resolves the target from one captured planning snapshot, rebuilds every selected model,
+runs the same model and external-file validation used by `CREATE`, and commits the resulting model
+replacements as one mutation batch. If one selected model fails validation, none of the bindings
+move. A stopped domain still stores the replacements without a runtime pause. An already-pinned
+selection succeeds at `DYNAMIC`, reports every selected usage as `unchanged`, and writes no model.
+
+`LATEST` follows the same timing as other model bindings: immediate for a standalone command,
+provisional during transaction admission, and resolved again when `COMMIT` plans the queued
+statement. The result reports the number of changed and selected usages, the effective quiesce
+level, and one sorted `from`/`to` line per selected model.
+
+```text
+rebound 2 of 3 usage(s) of resource 'fraud_model' to version 3 (latest)
+quiesce level: ENTITY_PAUSE
+- kind=inferencer name=score_model from=1 to=3
+- kind=hash_map name=scores_by_id from=2 to=3
+- kind=client name=model_store from=3 to=3 unchanged
+```
+
+Rotate a resource by uploading the replacement first and then moving its usages. The upload must
+complete everywhere before the rebind can select it:
+
+```nspl,ignore
+UPLOAD RESOURCE fraud_model VERSION './models/2026-09-17';
+REBIND RESOURCE fraud_model TO VERSION LATEST;
+```
 
 ## Upload Format
 
