@@ -18,4 +18,5 @@ reqwest = { workspace = true, features = ["json", "rustls"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 testcontainers = { workspace = true }
-tokio = { workspace = true, features = ["net", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "net", "rt", "sync", "time"] }
+uuid = { workspace = true, features = ["v7"] }
