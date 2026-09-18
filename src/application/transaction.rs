@@ -1197,7 +1197,6 @@ impl SessionServiceImpl {
             }
             TransactionState::Committing(_) | TransactionState::Finished(_) => current,
         };
-        self.pause_transaction_commit_if_armed(&committing).await;
         let finished = if matches!(committing.state, TransactionState::Finished(_)) {
             Ok(committing)
         } else {
@@ -1763,8 +1762,8 @@ impl SessionServiceImpl {
         let finished = if matches!(started.state, TransactionState::Finished(_)) {
             Ok(started)
         } else {
-            self.pause_transaction_commit_if_armed(&started).await;
             if started.statements.is_empty() {
+                self.pause_transaction_commit_if_armed(&started).await;
                 self.inner
                     .consensus
                     .finish_empty_transaction_commit(id.clone(), current_timestamp())
@@ -1847,6 +1846,7 @@ impl SessionServiceImpl {
             .ok_or_else(|| {
                 Report::new(TransactionCommitError::UnknownTransaction { id: id.to_string() })
             })?;
+        self.pause_transaction_commit_if_armed(&transaction).await;
         let result = if matches!(transaction.state, TransactionState::Finished(_)) {
             Ok(transaction)
         } else {
