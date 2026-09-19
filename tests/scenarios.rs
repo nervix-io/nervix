@@ -4010,7 +4010,26 @@ async fn reset_wasm_processor_branch(
     branch: Vec<nervix_models::RemoteRuntimeField>,
 ) -> error_stack::Result<(), WasmStateResetRequestError> {
     let reference = wasm_state_reset_reference(world);
+    reset_wasm_processor_branch_with_reference(world, processor, reference, branch).await
+}
+
+async fn reset_wasm_processor_branch_with_reference(
+    world: &mut ScenarioWorld,
+    processor: String,
+    reference: nervix_models::CommandExecutionReference,
+    branch: Vec<nervix_models::RemoteRuntimeField>,
+) -> error_stack::Result<(), WasmStateResetRequestError> {
     let leader = current_leader_node(world).await;
+    reset_wasm_processor_branch_through_node(world, leader, processor, reference, branch).await
+}
+
+async fn reset_wasm_processor_branch_through_node(
+    world: &mut ScenarioWorld,
+    node: String,
+    processor: String,
+    reference: nervix_models::CommandExecutionReference,
+    branch: Vec<nervix_models::RemoteRuntimeField>,
+) -> error_stack::Result<(), WasmStateResetRequestError> {
     let domain = nervix_models::DomainName::try_from(world.domain.as_str())
         .expect("the scenario domain must be valid");
     let processor = nervix_models::ModelName::try_from(processor.as_str())
@@ -4018,7 +4037,7 @@ async fn reset_wasm_processor_branch(
     world
         .fault_injection
         .reset_wasm_processor_branch(
-            &crate::common::cluster::node_name(&leader),
+            &crate::common::cluster::node_name(&node),
             domain,
             processor,
             reference,
@@ -4049,6 +4068,55 @@ async fn when_wasm_processor_state_reset_for_branch_fails(
     let error = reset_wasm_processor_branch(world, processor, branch)
         .await
         .expect_err("the armed WASM processor state reset must fail");
+    world.last_command_error = Some(format!("{error:#}"));
+}
+
+#[when(expr = "WASM processor {string} state is reset through node {string} for branch")]
+async fn when_wasm_processor_state_is_reset_through_node_for_branch(
+    world: &mut ScenarioWorld,
+    processor: String,
+    node: String,
+    step: &Step,
+) {
+    let node = expand_placeholders(world, &node);
+    let reference = wasm_state_reset_reference(world);
+    let branch = wasm_state_reset_branch(step);
+    reset_wasm_processor_branch_through_node(world, node, processor, reference, branch)
+        .await
+        .unwrap_or_else(|error| panic!("WASM processor state reset failed: {error:#}"));
+}
+
+#[when(expr = "WASM processor {string} state reset through node {string} for branch fails")]
+async fn when_wasm_processor_state_reset_through_node_for_branch_fails(
+    world: &mut ScenarioWorld,
+    processor: String,
+    node: String,
+    step: &Step,
+) {
+    let node = expand_placeholders(world, &node);
+    let reference = wasm_state_reset_reference(world);
+    let branch = wasm_state_reset_branch(step);
+    let error = reset_wasm_processor_branch_through_node(world, node, processor, reference, branch)
+        .await
+        .expect_err("the WASM processor state reset through the selected node must fail");
+    world.last_command_error = Some(format!("{error:#}"));
+}
+
+#[when(expr = "WASM processor {string} state reset for branch with a different request fails")]
+async fn when_wasm_processor_state_reset_for_branch_with_a_different_request_fails(
+    world: &mut ScenarioWorld,
+    processor: String,
+    step: &Step,
+) {
+    let reference = nervix_models::CommandExecutionReference::parse(format!(
+        "different-wasm-state-reset-{}",
+        uuid::Uuid::now_v7()
+    ))
+    .assured("the generated UUID uses only execution-reference characters");
+    let branch = wasm_state_reset_branch(step);
+    let error = reset_wasm_processor_branch_with_reference(world, processor, reference, branch)
+        .await
+        .expect_err("a different request must conflict with the reset already publishing");
     world.last_command_error = Some(format!("{error:#}"));
 }
 
@@ -4105,6 +4173,21 @@ async fn given_branched_state_counting_wasm_reset_graph_is_running(world: &mut S
         true,
         false,
         WasmStateResetGraphPlacement::Unconstrained,
+        true,
+    )
+    .await;
+}
+
+#[given("a branched state-counting WASM reset graph is running in the existing domain")]
+async fn given_branched_state_counting_wasm_reset_graph_is_running_in_the_existing_domain(
+    world: &mut ScenarioWorld,
+) {
+    configure_wasm_state_reset_graph(
+        world,
+        true,
+        false,
+        WasmStateResetGraphPlacement::Unconstrained,
+        false,
     )
     .await;
 }
@@ -4113,8 +4196,14 @@ async fn given_branched_state_counting_wasm_reset_graph_is_running(world: &mut S
 async fn given_node_one_owned_branched_state_counting_wasm_reset_graph_is_running(
     world: &mut ScenarioWorld,
 ) {
-    configure_wasm_state_reset_graph(world, true, false, WasmStateResetGraphPlacement::NodeOne)
-        .await;
+    configure_wasm_state_reset_graph(
+        world,
+        true,
+        false,
+        WasmStateResetGraphPlacement::NodeOne,
+        true,
+    )
+    .await;
 }
 
 #[given("a non-node-1-owned branched state-counting WASM reset graph is running")]
@@ -4126,6 +4215,7 @@ async fn given_non_node_one_owned_branched_state_counting_wasm_reset_graph_is_ru
         true,
         false,
         WasmStateResetGraphPlacement::AwayFromNodeOne,
+        true,
     )
     .await;
 }
@@ -4137,6 +4227,7 @@ async fn given_unbranched_state_counting_wasm_reset_graph_is_running(world: &mut
         false,
         false,
         WasmStateResetGraphPlacement::Unconstrained,
+        true,
     )
     .await;
 }
@@ -4148,6 +4239,7 @@ async fn given_branched_timeout_buffering_wasm_reset_graph_is_running(world: &mu
         true,
         true,
         WasmStateResetGraphPlacement::Unconstrained,
+        true,
     )
     .await;
 }
@@ -4164,12 +4256,15 @@ async fn configure_wasm_state_reset_graph(
     branched: bool,
     timeout_buffering: bool,
     placement: WasmStateResetGraphPlacement,
+    create_domain: bool,
 ) {
     let leader = current_leader_node(world).await;
-    let domain_commands = format!("CREATE UNPACED DOMAIN {};", world.domain);
-    execute_nspl_commands_on_node(world, &leader, &domain_commands)
-        .await
-        .expect("the WASM reset scenario domain must be created");
+    if create_domain {
+        let domain_commands = format!("CREATE UNPACED DOMAIN {};", world.domain);
+        execute_nspl_commands_on_node(world, &leader, &domain_commands)
+            .await
+            .expect("the WASM reset scenario domain must be created");
+    }
 
     let grpc_uri = world
         .cluster()

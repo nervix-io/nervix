@@ -208,6 +208,139 @@ Feature: Coordinated WASM processor state reset
       """
     Then the relay subscription does not receive a payload within "1500ms"
 
+  Scenario: Failed generation publication aborts preparation and preserves the current lifetime
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a 1 node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And a branched state-counting WASM reset graph is running
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When the next schedule publication for domain "{{domain}}" fails
+    And WASM processor "counting_guest" state reset for branch fails
+      """
+      {"tenant":"alpha"}
+      """
+    Then the last command error contains
+      """
+      failed to publish a new guest-state generation for WASM processor 'counting_guest'
+      """
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      """
+    When WASM processor "counting_guest" state is reset for branch
+      """
+      {"tenant":"alpha"}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":3}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+
+  Scenario: One request reference cannot select two reset scopes
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a 1 node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And a branched state-counting WASM reset graph is running
+    When WASM processor "counting_guest" state reset for branch fails
+      """
+      {"unexpected":"alpha"}
+      """
+    Then the last command error contains
+      """
+      reset target does not match WASM processor 'counting_guest' branching
+      """
+    When WASM processor "counting_guest" state is reset for branch
+      """
+      {"tenant":"alpha"}
+      """
+    And WASM processor "counting_guest" state reset for branch fails
+      """
+      {"tenant":"beta"}
+      """
+    Then the last command error contains
+      """
+      conflicts with the reset already publishing for WASM processor 'counting_guest'
+      """
+
+  Scenario: A follower forwards reset validation and coordination to the leader
+    Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    When leadership is transferred to node "node-2"
+    Then node "node-1" eventually reports leader "node-2"
+    When WASM processor "counting_guest" state reset through node "node-1" for branch fails
+      """
+      {"tenant":"alpha"}
+      """
+    Then the last command error contains
+      """
+      domain '{{domain}}' does not exist
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And WASM processor "counting_guest" state reset through node "node-1" for branch fails
+      """
+      {"tenant":"alpha"}
+      """
+    Then the last command error contains
+      """
+      domain '{{domain}}' is not running
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      START;
+      """
+    And WASM processor "counting_guest" state reset through node "node-1" for branch fails
+      """
+      {"tenant":"alpha"}
+      """
+    Then the last command error contains
+      """
+      WASM processor 'counting_guest' does not exist in domain '{{domain}}'
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      STOP;
+      """
+    Given node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And a branched state-counting WASM reset graph is running in the existing domain
+    When WASM processor "counting_guest" state reset through node "node-1" for branch fails
+      """
+      {"unexpected":"alpha"}
+      """
+    Then the last command error contains
+      """
+      reset target does not match WASM processor 'counting_guest' branching
+      """
+    When WASM processor "counting_guest" state is reset through node "node-1" for branch
+      """
+      {"tenant":"alpha"}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      """
+
   Scenario: A committed reset retries its initial checkpoint without starting another lifetime
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
     And a 3 node nervix cluster is started
@@ -227,19 +360,41 @@ Feature: Coordinated WASM processor state reset
       """
       reset was committed but its new lifetime is not usable
       """
+    When WASM processor "counting_guest" state reset for branch with a different request fails
+      """
+      {"tenant":"alpha"}
+      """
+    Then the last command error contains
+      """
+      conflicts with the reset already publishing for WASM processor 'counting_guest'
+      """
     When WASM guest-state checkpoints reach stable storage again on every node
-    And WASM processor "counting_guest" state is reset for branch
+    And the next schedule publication for domain "{{domain}}" fails
+    And WASM processor "counting_guest" state reset for branch fails
+      """
+      {"tenant":"alpha"}
+      """
+    Then the last command error contains
+      """
+      reset was committed but its new lifetime is not usable
+      """
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When WASM processor "counting_guest" state is reset for branch
       """
       {"tenant":"alpha"}
       """
     And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
       """
-      {"tenant":"alpha","sequence":2}
+      {"tenant":"alpha","sequence":3}
       """
     Then the relay subscription does not receive a payload within "1500ms"
     When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
       """
-      {"tenant":"alpha","sequence":3}
+      {"tenant":"alpha","sequence":4}
       """
     Then within "10s" the relay subscription receives payloads containing all fragments
       """

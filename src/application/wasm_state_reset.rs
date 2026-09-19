@@ -155,37 +155,69 @@ impl SessionServiceImpl {
                 let Some(request) = request else {
                     break;
                 };
-                let processor = request.processor.clone();
                 let result = service
-                    .reset_wasm_processor_state(
-                        &request.domain,
-                        &request.processor,
+                    .handle_wasm_state_reset_test_request(
+                        request.domain,
+                        request.processor,
                         request.reference,
-                        match request.target {
-                            crate::fault_injection::WasmStateResetRequestTarget::Unbranched => {
-                                WasmStateResetTarget::Unbranched
-                            }
-                            crate::fault_injection::WasmStateResetRequestTarget::Branch(branch) => {
-                                WasmStateResetTarget::Branch(branch)
-                            }
-                            crate::fault_injection::WasmStateResetRequestTarget::AllBranches => {
-                                WasmStateResetTarget::AllBranches
-                            }
-                        },
-                        None,
+                        request.target,
                     )
-                    .await
-                    .change_context(
-                        crate::fault_injection::WasmStateResetRequestError::ResetFailed {
-                            processor,
-                        },
-                    );
+                    .await;
                 request
                     .response
                     .send(result)
                     .means_peer_left("WASM state reset test requester");
             }
         });
+    }
+
+    #[cfg(feature = "testing")]
+    async fn handle_wasm_state_reset_test_request(
+        &self,
+        domain: DomainName,
+        processor: ModelName,
+        reference: CommandExecutionReference,
+        target: crate::fault_injection::WasmStateResetRequestTarget,
+    ) -> error_stack::Result<(), crate::fault_injection::WasmStateResetRequestError> {
+        let target = match target {
+            crate::fault_injection::WasmStateResetRequestTarget::Unbranched => {
+                WasmStateResetTarget::Unbranched
+            }
+            crate::fault_injection::WasmStateResetRequestTarget::Branch(branch) => {
+                WasmStateResetTarget::Branch(branch)
+            }
+            crate::fault_injection::WasmStateResetRequestTarget::AllBranches => {
+                WasmStateResetTarget::AllBranches
+            }
+        };
+        let failed = || crate::fault_injection::WasmStateResetRequestError::ResetFailed {
+            processor: processor.clone(),
+        };
+        if let Some(leader) = self.inner.consensus.current_leader().await
+            && &leader != self.inner.consensus.local_node_id()
+        {
+            let response = self
+                .inner
+                .interconnect
+                .request(
+                    &leader,
+                    CoordinateWasmStateResetRequest {
+                        domain,
+                        processor: processor.clone(),
+                        request: reference,
+                        target,
+                    },
+                )
+                .await
+                .change_context_lazy(failed)?;
+            return response
+                .result
+                .map_err(Report::new)
+                .change_context_lazy(failed);
+        }
+        self.reset_wasm_processor_state(&domain, &processor, reference, target, None)
+            .await
+            .change_context_lazy(failed)
     }
 
     pub(in crate::application) async fn reset_wasm_processor_state(
@@ -436,6 +468,24 @@ impl SessionServiceImpl {
                     processor: processor.clone(),
                 }));
             }
+            #[cfg(feature = "testing")]
+            if self
+                .inner
+                .runtime
+                .take_armed_schedule_publication_fault(domain)
+            {
+                self.abort_unpublished_wasm_state_reset(
+                    &plan.owner,
+                    gate,
+                    processor,
+                    request,
+                    plan.scope,
+                )
+                .await?;
+                return Err(Report::new(WasmStateResetError::Publish {
+                    processor: processor.clone(),
+                }));
+            }
             let publication = self
                 .inner
                 .consensus
@@ -497,6 +547,16 @@ impl SessionServiceImpl {
                 })
             })?;
             if !node.complete_wasm_state_reset(request) {
+                return Err(Report::new(WasmStateResetError::CommittedNotUsable {
+                    processor: processor.clone(),
+                }));
+            }
+            #[cfg(feature = "testing")]
+            if self
+                .inner
+                .runtime
+                .take_armed_schedule_publication_fault(domain)
+            {
                 return Err(Report::new(WasmStateResetError::CommittedNotUsable {
                     processor: processor.clone(),
                 }));

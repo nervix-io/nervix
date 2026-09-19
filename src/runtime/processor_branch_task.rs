@@ -1719,8 +1719,8 @@ mod tests {
     use ahash::HashMap;
     use nervix_execution::sync::ArcSwapOption;
     use nervix_models::{
-        CreateSchema, ErrorPolicies, MessageErrorPolicy, ModelKind, ModelName, NodeRef,
-        ParseAsType, RelayName, SchemaField,
+        CommandExecutionReference, CreateSchema, ErrorPolicies, MessageErrorPolicy, ModelKind,
+        ModelName, NodeRef, ParseAsType, RelayName, SchemaField,
     };
     use tokio::{
         sync::{mpsc, watch},
@@ -1734,6 +1734,119 @@ mod tests {
         runtime_ack::AckSet,
         runtime_schema::{RuntimeValue, compile_schema, test_runtime_row},
     };
+
+    fn reset_target_template(source_kind: ModelKind, branched: bool) -> BranchInstanceTemplate {
+        BranchInstanceTemplate {
+            source_kind,
+            source: named("counting_guest"),
+            root_relay: named("counted_input_events"),
+            branch: branched.then(|| named("by_tenant")),
+            branch_ttl: None,
+            branch_max_instances: None,
+            error_policies: ErrorPolicies::handled_by_log(),
+            relays: HashMap::default(),
+            processors: HashMap::default(),
+            wasm_state_reset: None,
+        }
+    }
+
+    #[test]
+    fn reset_target_keys_enforce_processor_kind_branching_and_fingerprint() {
+        let processor = named::<ModelName>("counting_guest");
+        let instances = BranchInstanceRegistry::new();
+        let alpha =
+            string_branch_key("tenant", "alpha").expect("the fixture branch key must be present");
+        let alpha_scope = WasmStateResetScope::Branch(alpha.fingerprint());
+
+        let not_wasm = reset_target_template(ModelKind::Deduplicator, false);
+        let error = processor_reset_target_keys(
+            &processor,
+            &not_wasm,
+            &instances,
+            WasmStateResetScope::Unbranched,
+            None,
+        )
+        .expect_err("a non-WASM processor cannot accept a WASM state reset");
+        assert!(matches!(
+            error.current_context(),
+            WasmStateResetRuntimeError::NotWasmProcessor { .. }
+        ));
+
+        let unbranched = reset_target_template(ModelKind::WasmProcessor, false);
+        let targets = processor_reset_target_keys(
+            &processor,
+            &unbranched,
+            &instances,
+            WasmStateResetScope::Unbranched,
+            None,
+        )
+        .expect("an unbranched reset must select the singleton instance");
+        assert_eq!(targets, vec![None]);
+
+        let branched = reset_target_template(ModelKind::WasmProcessor, true);
+        let targets =
+            processor_reset_target_keys(&processor, &branched, &instances, alpha_scope, None)
+                .expect(
+                    "a published branch scope may recover without its original branch key fields",
+                );
+        assert!(targets.is_empty());
+
+        let beta =
+            string_branch_key("tenant", "beta").expect("the fixture branch key must be present");
+        let error =
+            processor_reset_target_keys(&processor, &branched, &instances, alpha_scope, Some(beta))
+                .expect_err("branch key fields must match the selected branch fingerprint");
+        assert!(matches!(
+            error.current_context(),
+            WasmStateResetRuntimeError::InvalidScope { .. }
+        ));
+    }
+
+    #[test]
+    fn reset_completion_rejects_a_different_fence_or_preparation() {
+        let processor = named::<ModelName>("counting_guest");
+        let request = CommandExecutionReference::parse("reset-alpha")
+            .expect("the fixture reset reference must be valid");
+        let other = CommandExecutionReference::parse("reset-beta")
+            .expect("the fixture reset reference must be valid");
+        let mut ready = nervix_models::WasmStateReset::publishing(
+            request.clone(),
+            WasmStateResetScope::Unbranched,
+        );
+        ready.mark_ready();
+
+        let mut fence = Some(nervix_models::WasmStateReset::publishing(
+            other.clone(),
+            WasmStateResetScope::Unbranched,
+        ));
+        let mut prepared = None;
+        let error =
+            complete_processor_wasm_state_reset(&processor, &ready, &mut fence, &mut prepared)
+                .expect_err("a ready revision cannot clear another request's fence");
+        assert!(matches!(
+            error.current_context(),
+            WasmStateResetRuntimeError::RequestConflict { .. }
+        ));
+
+        fence = Some(nervix_models::WasmStateReset::publishing(
+            request.clone(),
+            WasmStateResetScope::Unbranched,
+        ));
+        prepared = Some(PreparedWasmStateReset {
+            request: other,
+            scope: WasmStateResetScope::Unbranched,
+            published: true,
+            branches: Vec::new(),
+        });
+        let error =
+            complete_processor_wasm_state_reset(&processor, &ready, &mut fence, &mut prepared)
+                .expect_err("a ready revision cannot clear another request's preparation");
+        assert!(matches!(
+            error.current_context(),
+            WasmStateResetRuntimeError::RequestConflict { .. }
+        ));
+    }
+
     #[tokio::test]
     async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
         let runtime = Runtime::default();
