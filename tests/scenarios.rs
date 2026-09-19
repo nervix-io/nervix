@@ -120,7 +120,10 @@ static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<StdMutex<BTreeMap<String, String>>> 
 // Every scenario holds a read guard; `@exclusive` scenarios hold the write guard.
 static SCENARIO_EXECUTION_LOCK: OnceLock<StdArc<tokio::sync::RwLock<()>>> = OnceLock::new();
 static WEB_CONSOLE_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> = OnceLock::new();
+static WASM_STATE_RESET_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> =
+    OnceLock::new();
 const MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS: usize = 2;
+const MAX_CONCURRENT_WASM_STATE_RESET_SCENARIOS: usize = 1;
 const WEB_CONSOLE_ASSERTION_TIMEOUT: Duration = Duration::from_secs(30);
 const ZEROMQ_OBSERVER_BIND_ATTEMPTS: usize = 8;
 const DURABLE_CATCH_UP_STORAGE_COMMITS_PER_ENTRY: u32 = 2;
@@ -132,6 +135,7 @@ const COMMANDS_MEMORY_LABEL: &str = "class=\"commands\"";
 const BULK_MEMORY_LABEL: &str = "class=\"bulk\"";
 const WEB_CONSOLE_FEATURE_NAMES: [&str; 2] =
     ["Web console NSPL REPL", "Web console execution graph"];
+const WASM_STATE_RESET_FEATURE_NAME: &str = "Coordinated WASM processor state reset";
 const DEPENDENCY_LIFECYCLE_HELPER_ENV: &str = "NERVIX_DEPENDENCY_LIFECYCLE_HELPER";
 const DEPENDENCY_LIFECYCLE_STARTED: &str = "NERVIX_DEPENDENCY_LIFECYCLE_STARTED=";
 
@@ -243,6 +247,7 @@ struct ScenarioWorld {
     browser: Option<playwright_rs::Browser>,
     playwright: Option<Playwright>,
     web_console_scenario_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    wasm_state_reset_scenario_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     dependencies: TestDependencies,
     background_nspl: Option<AbortOnDropHandle<Result<String, String>>>,
     background_command_result:
@@ -330,6 +335,10 @@ impl fmt::Debug for ScenarioWorld {
             .field(
                 "web_console_permit_acquired",
                 &self.web_console_scenario_permit.is_some(),
+            )
+            .field(
+                "wasm_state_reset_permit_acquired",
+                &self.wasm_state_reset_scenario_permit.is_some(),
             )
             .field("dependencies", &self.dependencies)
             .field(
@@ -19498,6 +19507,28 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
                 .chain(&feature.tags)
                 .any(|tag| tag == "exclusive");
             Box::pin(async move {
+                let wasm_state_reset_scenario_permit =
+                    if feature_name == WASM_STATE_RESET_FEATURE_NAME {
+                        // Every reset scenario starts a cluster and compiles WASM. Running more
+                        // than one with the suite's coverage concurrency starves unrelated
+                        // scenario nodes, stretching subsecond assertions into tens of seconds.
+                        // Acquire this before the shared execution guard so queued reset scenarios
+                        // cannot keep an exclusive scenario from taking that guard.
+                        Some(
+                            WASM_STATE_RESET_SCENARIO_PERMITS
+                                .get_or_init(|| {
+                                    StdArc::new(tokio::sync::Semaphore::new(
+                                        MAX_CONCURRENT_WASM_STATE_RESET_SCENARIOS,
+                                    ))
+                                })
+                                .clone()
+                                .acquire_owned()
+                                .await
+                                .expect("WASM state reset scenario semaphore must remain open"),
+                        )
+                    } else {
+                        None
+                    };
                 let execution_lock = SCENARIO_EXECUTION_LOCK
                     .get_or_init(|| StdArc::new(tokio::sync::RwLock::new(())))
                     .clone();
@@ -19510,6 +19541,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
                         _permit: execution_lock.read_owned().await,
                     }
                 };
+                world.wasm_state_reset_scenario_permit = wasm_state_reset_scenario_permit;
                 world.scenario_execution_permit = Some(execution_permit);
                 append_cucumber_log_line(&format!(
                     "scenario started: feature={feature_name:?} scenario={scenario_name:?}"
@@ -19574,6 +19606,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
                         }
                     }
                     world.web_console_scenario_permit = None;
+                    world.wasm_state_reset_scenario_permit = None;
                     world.scenario_execution_permit = None;
                 }
             })
