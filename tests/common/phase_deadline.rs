@@ -80,6 +80,12 @@ impl PhaseDeadline {
     where
         F: Future,
     {
+        // `timeout` may complete an already-ready future after its duration has elapsed. Check the
+        // phase explicitly so a stream of immediately available work cannot keep a phase alive
+        // forever.
+        if self.has_passed() {
+            return BeforeDeadline::Passed;
+        }
         let bounded = tokio::time::timeout(self.remaining(), operation).await;
         match bounded {
             Ok(output) => BeforeDeadline::Finished(output),

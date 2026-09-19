@@ -24,6 +24,8 @@ use triomphe::Arc;
 
 use super::{BranchKey, WasmGuestState};
 
+#[cfg(test)]
+mod alignment_tests;
 mod durability;
 
 use durability::DurabilityBarrier;
@@ -602,6 +604,12 @@ impl PersistedRuntimeStateEntry {
             None => true,
         }
     }
+
+    fn align_stored_bytes(raw: &[u8]) -> rkyv::util::AlignedVec<16> {
+        let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(raw.len());
+        aligned.extend_from_slice(raw);
+        aligned
+    }
 }
 
 #[derive(Debug, Clone, Error)]
@@ -704,10 +712,11 @@ impl LatestSnapshotWriter {
         else {
             return Ok(None);
         };
+        let aligned = PersistedRuntimeStateEntry::align_stored_bytes(raw.as_ref());
         let archived = rkyv::access::<
             <PersistedRuntimeStateEntry as Archive>::Archived,
             rkyv::rancor::Error,
-        >(raw.as_ref())
+        >(&aligned)
         .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
         Ok(Some(archived.lsm.into()))
     }
@@ -1673,10 +1682,11 @@ impl RuntimeStateStore {
         else {
             return Ok(None);
         };
+        let aligned = PersistedRuntimeStateEntry::align_stored_bytes(raw.as_ref());
         let archived = rkyv::access::<
             <PersistedRuntimeStateEntry as Archive>::Archived,
             rkyv::rancor::Error,
-        >(raw.as_ref())
+        >(&aligned)
         .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
         Ok(Some(PersistedRuntimeStateEntry {
             lsm: archived.lsm.into(),
