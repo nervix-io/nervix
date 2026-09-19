@@ -12,6 +12,91 @@ use super::*;
 const WASM_CHECKPOINT_REPLAN_INTERVAL: Duration = Duration::from_millis(100);
 
 impl Runtime {
+    /// Wait until every assigned replica has installed the branch lifecycle that authorizes a
+    /// branch checkpoint. A reset uses this before offering its first guest checkpoint, so a
+    /// replica can never reject that checkpoint merely because the lifecycle announcement raced
+    /// it.
+    pub(in crate::runtime) async fn confirm_branch_lru_checkpoint(
+        &self,
+        placement: &RuntimeStatePlacement,
+        lsm: u64,
+        deadline: Instant,
+    ) -> error_stack::Result<(), StateReplicationError> {
+        if !self.runtime_state_placement_is_current(placement) {
+            return Err(Report::new(StateReplicationError::Superseded {
+                placement: placement.clone(),
+            }));
+        }
+        let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
+            return Ok(());
+        };
+        let replicas = {
+            let execution = self
+                .inner
+                .executions
+                .get(&placement.domain)
+                .ok_or_else(|| {
+                    Report::new(StateReplicationError::Superseded {
+                        placement: placement.clone(),
+                    })
+                })?;
+            let node = execution
+                .schedule
+                .nodes
+                .get(&NodeRef::new(placement.kind, placement.identifier.clone()))
+                .ok_or_else(|| {
+                    Report::new(StateReplicationError::Superseded {
+                        placement: placement.clone(),
+                    })
+                })?;
+            if !node.is_primary_on(dispatcher.local_node_id()) {
+                return Err(Report::new(StateReplicationError::Superseded {
+                    placement: placement.clone(),
+                }));
+            }
+            node.replica_nodes()
+                .into_iter()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        };
+        if replicas.is_empty() {
+            return Ok(());
+        }
+        loop {
+            tokio::task::consume_budget().await;
+            let awaiting = match self
+                .inner
+                .pending_state_checkpoint_announcements
+                .get(placement)
+            {
+                Some(pending) => replicas
+                    .iter()
+                    .filter(|replica| {
+                        pending
+                            .replica_progress
+                            .get(*replica)
+                            .is_none_or(|progress| *progress < lsm)
+                    })
+                    .cloned()
+                    .collect::<BTreeSet<_>>(),
+                // The announcement owner removes this entry only after every assigned replica
+                // acknowledged its target LSM.
+                None => return Ok(()),
+            };
+            if awaiting.is_empty() {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(Report::new(StateReplicationError::ReplicaConfirmation {
+                    placement: placement.clone(),
+                    lsm,
+                    awaiting: AwaitedReplicas(awaiting),
+                }));
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     pub(super) async fn prepare_ownership_handoff_wasm_guests(
         &self,
         domain: &DomainName,

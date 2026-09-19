@@ -74,6 +74,7 @@ pub(super) struct BranchedProcessorNodeSpec {
     pub(super) branch: Option<BranchName>,
     pub(super) branch_ttl: Option<String>,
     pub(super) branch_max_instances: Option<NonZeroU64>,
+    pub(super) wasm_state_reset: Option<nervix_models::WasmStateReset>,
 }
 
 #[derive(Debug, Clone)]
@@ -226,6 +227,7 @@ pub(super) struct BranchInstanceTemplate {
     pub(super) error_policies: ErrorPolicies,
     pub(super) relays: HashMap<RelayName, RelayProcessorRelayTemplate>,
     pub(super) processors: HashMap<ModelName, RelayProcessorTemplate>,
+    pub(super) wasm_state_reset: Option<nervix_models::WasmStateReset>,
 }
 
 #[derive(Debug, Clone)]

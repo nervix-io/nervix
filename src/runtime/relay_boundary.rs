@@ -208,12 +208,56 @@ pub(super) struct RelayBoundaryBuilder {
 #[derive(Debug)]
 pub(super) struct RelayConsumerFanout {
     pub(super) dispatch_gate: Arc<RelayDispatchGate>,
+    /// Branch-scoped fences published under a short whole-relay fence. Dispatch reads one immutable
+    /// set and takes permits only from entries selecting its branch.
+    branch_dispatch_gates: Arc<BranchRelayDispatchGates>,
     pub(super) owner_buffer: ArcSwapOption<RelayOwnerBuffer>,
     pub(super) owner_capacity: AtomicUsize,
     pub(super) owner_pending_batches: Arc<AtomicUsize>,
     pub(super) subscriptions: RelayBroadcast<RelayRecordBatch>,
     pub(super) attached_runtime_consumers: RelayBroadcast<RelayRecordBatch>,
     pub(super) detached_runtime_consumers: RelayBroadcast<RelayRecordBatch>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct BranchRelayDispatchGate {
+    id: u64,
+    scope: WasmStateResetScope,
+    gate: Arc<RelayDispatchGate>,
+}
+
+#[derive(Debug)]
+struct BranchRelayDispatchGates {
+    entries: ArcSwap<Vec<BranchRelayDispatchGate>>,
+    next_id: AtomicU64,
+}
+
+impl BranchRelayDispatchGates {
+    fn remove(&self, id: u64) {
+        self.entries.rcu(|current| {
+            current
+                .iter()
+                .filter(|entry| entry.id != id)
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+    }
+}
+
+/// One branch-scoped relay fence. Removing its immutable registry entry and releasing its gate
+/// admits the selected branch again; sibling branches never wait on this lease after publication.
+#[derive(Debug)]
+pub(in crate::runtime) struct BranchRelayDispatchGateLease {
+    gates: Arc<BranchRelayDispatchGates>,
+    id: u64,
+    gate: Option<RelayDispatchGateLease>,
+}
+
+impl Drop for BranchRelayDispatchGateLease {
+    fn drop(&mut self) {
+        self.gates.remove(self.id);
+        self.gate.take();
+    }
 }
 
 #[derive(Debug)]
@@ -461,6 +505,10 @@ impl RelayConsumerFanout {
         let dispatch_capacity = NonZeroUsize::MIN;
         Self {
             dispatch_gate: Arc::new(RelayDispatchGate::new()),
+            branch_dispatch_gates: Arc::new(BranchRelayDispatchGates {
+                entries: ArcSwap::from_pointee(Vec::new()),
+                next_id: AtomicU64::new(0),
+            }),
             owner_buffer: ArcSwapOption::empty(),
             owner_capacity: AtomicUsize::new(capacity.get()),
             owner_pending_batches: Arc::new(AtomicUsize::new(0)),
@@ -530,6 +578,77 @@ impl RelayConsumerFanout {
 
     pub(super) fn dispatch_gate(&self) -> Arc<RelayDispatchGate> {
         self.dispatch_gate.clone()
+    }
+
+    async fn acquire_branch_dispatch_gates(
+        &self,
+        key: &Option<BranchKey>,
+    ) -> Vec<OwnedRelayDispatchPermit> {
+        let fingerprint = key.as_ref().map(BranchKey::fingerprint);
+        let gates = self.branch_dispatch_gates.entries.load_full();
+        let mut permits = Vec::new();
+        for scoped in gates.iter() {
+            tokio::task::consume_budget().await;
+            if scoped.scope.contains(fingerprint.as_ref()) {
+                permits.push(RelayDispatchGate::acquire_owned(&scoped.gate).await);
+            }
+        }
+        permits
+    }
+
+    async fn engage_branch_dispatch_gate(
+        &self,
+        scope: WasmStateResetScope,
+        deadline: Instant,
+        reason: &str,
+    ) -> Option<BranchRelayDispatchGateLease> {
+        let branch_gate = Arc::new(RelayDispatchGate::new());
+        let mut branch_lease =
+            RelayDispatchGateLease::engage(branch_gate.clone(), deadline, reason.to_string());
+        let mut publication_fence = RelayDispatchGateLease::engage(
+            self.dispatch_gate.clone(),
+            deadline,
+            reason.to_string(),
+        );
+        if !publication_fence.wait_quiescent().await {
+            return None;
+        }
+        let id = self
+            .branch_dispatch_gates
+            .next_id
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1)
+            })
+            .assured("a relay cannot publish 2^64 branch-scoped gate leases");
+        self.branch_dispatch_gates.entries.rcu(|current| {
+            let mut next = Vec::with_capacity(
+                current
+                    .len()
+                    .checked_add(1)
+                    .assured("a process cannot hold usize::MAX branch-scoped relay gates"),
+            );
+            next.extend(current.iter().cloned());
+            next.push(BranchRelayDispatchGate {
+                id,
+                scope,
+                gate: branch_gate.clone(),
+            });
+            next
+        });
+        drop(publication_fence);
+        if !branch_lease.wait_quiescent().await {
+            self.remove_branch_dispatch_gate(id);
+            return None;
+        }
+        Some(BranchRelayDispatchGateLease {
+            gates: self.branch_dispatch_gates.clone(),
+            id,
+            gate: Some(branch_lease),
+        })
+    }
+
+    fn remove_branch_dispatch_gate(&self, id: u64) {
+        self.branch_dispatch_gates.remove(id);
     }
 
     pub(super) fn dispatch_is_fenced(&self) -> bool {
@@ -748,6 +867,42 @@ impl RelayBoundaryFanout {
         match self {
             Self::Direct(fanout) => fanout.dispatch_gate(),
             Self::BranchCollapse(branch_collapse) => branch_collapse.fanout.dispatch_gate(),
+        }
+    }
+
+    pub(super) async fn engage_branch_dispatch_gate(
+        &self,
+        scope: WasmStateResetScope,
+        deadline: Instant,
+        reason: &str,
+    ) -> Option<BranchRelayDispatchGateLease> {
+        match self {
+            Self::Direct(fanout) => {
+                fanout
+                    .engage_branch_dispatch_gate(scope, deadline, reason)
+                    .await
+            }
+            Self::BranchCollapse(branch_collapse) => {
+                branch_collapse
+                    .fanout
+                    .engage_branch_dispatch_gate(scope, deadline, reason)
+                    .await
+            }
+        }
+    }
+
+    async fn acquire_branch_dispatch_gates(
+        &self,
+        key: &Option<BranchKey>,
+    ) -> Vec<OwnedRelayDispatchPermit> {
+        match self {
+            Self::Direct(fanout) => fanout.acquire_branch_dispatch_gates(key).await,
+            Self::BranchCollapse(branch_collapse) => {
+                branch_collapse
+                    .fanout
+                    .acquire_branch_dispatch_gates(key)
+                    .await
+            }
         }
     }
 
@@ -1072,6 +1227,7 @@ impl RelayBoundaryServices {
     ) -> RelayDispatchResult {
         let dispatch_gate = self.fanout.dispatch_gate();
         let _dispatch_permit = dispatch_gate.acquire_dispatch().await;
+        let _branch_dispatch_permits = self.fanout.acquire_branch_dispatch_gates(&batch.key).await;
         let Some(buffer) = self.fanout.owner_buffer() else {
             for ack in batch.acks.iter() {
                 ack.no_ack("relay owner buffer is unavailable");
@@ -1102,6 +1258,7 @@ impl RelayBoundaryServices {
     ) -> RelayDispatchResult {
         let dispatch_gate = self.fanout.dispatch_gate();
         let _dispatch_permit = dispatch_gate.acquire_dispatch().await;
+        let _branch_dispatch_permits = self.fanout.acquire_branch_dispatch_gates(&batch.key).await;
         let Some(owner_node) = self.owner_node.load_full() else {
             for ack in batch.acks.iter() {
                 ack.no_ack("relay owner is unavailable");

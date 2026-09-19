@@ -1687,13 +1687,24 @@ impl Runtime {
                 reason: format!("failed to build dynamic schedule graph: {error}"),
             }
         })?;
+        // A reset's new generation must be visible before its supervisor writes the generation's
+        // initial checkpoint. Publishing the identity first is safe because the selected inputs
+        // remain fenced until the same schedule reaches Ready.
+        self.install_state_identities(&schedule);
         self.apply_dynamic_model_updates(domain, updates).await?;
         let graph_handle = self.domain_graph_handle(domain).await;
         graph_handle.store(Some(StdArc::new(graph)));
         if let Some(mut execution) = self.inner.executions.get_mut(domain) {
             execution.schedule = schedule;
         }
-        self.force_flush_domain(domain);
+        if updates.iter().any(|update| {
+            !matches!(
+                update,
+                nervix_models::DynamicModelUpdate::WasmStateReset { .. }
+            )
+        }) {
+            self.force_flush_domain(domain);
+        }
         Ok(())
     }
 
@@ -1709,6 +1720,46 @@ impl Runtime {
                     self.set_relay_capacity(domain, relay, *capacity);
                 }
                 nervix_models::DynamicModelUpdate::Processor { .. } => {}
+                nervix_models::DynamicModelUpdate::WasmStateReset { processor, reset } => {
+                    let commands = if let Some(execution) = self.inner.executions.get(domain)
+                        && let Some(task) = execution
+                            .node_tasks
+                            .get(&NodeRef::new(ModelKind::WasmProcessor, processor.clone()))
+                    {
+                        Some(task.commands.clone())
+                    } else {
+                        None
+                    };
+                    if let Some(commands) = commands {
+                        let (response, receiver) = oneshot::channel();
+                        commands
+                            .send(ProcessorNodeCommand::ApplyWasmStateReset {
+                                reset: reset.clone(),
+                                response,
+                            })
+                            .await
+                            .map_err(|_| RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!(
+                                    "WASM processor '{}' reset command channel closed",
+                                    processor.as_str()
+                                ),
+                            })?;
+                        receiver
+                            .await
+                            .map_err(|_| RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!(
+                                    "WASM processor '{}' dropped its reset response",
+                                    processor.as_str()
+                                ),
+                            })?
+                            .map_err(|error| RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!("{error:#}"),
+                            })?;
+                    }
+                }
                 // Endpoint routing reads only a VHOST's hostnames. The certificate belongs to the
                 // HTTPS listener, which installs it from the same admitted state on every node.
                 nervix_models::DynamicModelUpdate::VhostTlsVersion { .. } => {}

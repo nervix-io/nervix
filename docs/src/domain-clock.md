@@ -244,6 +244,14 @@ logical instants. Message-error handling retains the failing operation's snapsho
 later, such as a processor flush, scheduled callback, or message released from materialized
 `REQUIRED WAIT`, receives a fresh snapshot for that execution.
 
+A coordinated WASM state reset does not change the domain lifecycle generation, mapping, authority,
+or logical frontier. Preparing a fresh guest and saving its initial state each use a snapshot from
+the currently installed domain clock. The snapshot belongs only to that initialization operation;
+it is not inherited from the branch instance being replaced. Publication cancels the old branch
+instance and all timeout handles it owned. A fresh initialization may request its own timeouts, but
+no deadline armed by the replaced instance can fire in the new state lifetime even though domain
+logical time continued across the reset.
+
 Generated records use the snapshot assigned to their generating operation. Buffered emitter
 batches and their retries retain the snapshot from acceptance, while external observation fields
 whose contract is actual UTC obtain that value at the shared source-host intake boundary or their
@@ -288,6 +296,12 @@ for it follows a loop:
 The monotonic timer is an implementation mechanism for waiting; the due predicate remains in the
 domain's logical coordinate. Lifecycle changes are checked after every wake. Cancellation is a
 separate typed outcome rather than a clock read.
+
+Reset coordination and its ten-second initial-checkpoint deadline are physical, monotonic bounds.
+They do not wait for, pause, or re-anchor logical time. A reset that fails before generation
+publication restores the old branch instance with its existing logical deadlines. After generation
+publication, recovery completes the fresh lifetime and never recreates the old instance or its
+timers.
 
 Recurring domain cadence is anchored to its initial logical schedule. HTTP polling and generator
 cadence begin immediately, while Prometheus polling begins after one interval. When work misses
