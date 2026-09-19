@@ -273,7 +273,15 @@ pub struct TransactionApplyingStep {
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum TransactionOutcome {
     Committed,
-    Failed { failing_step: usize, error: String },
+    Failed {
+        failing_step: usize,
+        error: String,
+    },
+    #[strum(serialize = "FAILED")]
+    PlanningInputsChanged {
+        failing_step: usize,
+        error: String,
+    },
     Reverted,
     Expired,
 }

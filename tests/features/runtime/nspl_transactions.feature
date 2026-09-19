@@ -34,6 +34,37 @@ Feature: NSPL transactions
       | 1            |
       | 3            |
 
+  @standalone_transaction_refresh
+  Scenario: An ordinary command refreshes a frozen plan that loses its planning inputs
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Given client "owner" is connected to the leader node
+    And client "contender" is connected to the leader node
+    Given transaction commit admission on the leader node pauses before execution
+    When client "owner" begins executing these NSPL commands in the background
+      """
+      CREATE IF NOT EXISTS RESOURCE refreshed_command_resource;
+      """
+    Then the transaction commit admission pause on the leader node is reached
+    When client "contender" executes these NSPL commands
+      """
+      CREATE RESOURCE refreshed_command_resource;
+      """
+    And the transaction commit admission pause on the leader node is released
+    Then the background NSPL execution succeeds
+    When these NSPL commands are executed on the leader node
+      """
+      DESCRIBE RESOURCE refreshed_command_resource;
+      """
+    Then the last command output contains
+      """
+      resource: refreshed_command_resource
+      """
+
   @transaction_report_restart
   Scenario: A queued transaction preview survives a full cluster restart
     Given a 1 node nervix cluster is started

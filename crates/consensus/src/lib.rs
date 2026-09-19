@@ -5504,6 +5504,10 @@ fn validate_transaction_step_contract<'a>(
         Some(TransactionOutcome::Failed {
             failing_step,
             error,
+        })
+        | Some(TransactionOutcome::PlanningInputsChanged {
+            failing_step,
+            error,
         }) => !success && *failing_step == first_statement && error == &result.result.message,
         Some(TransactionOutcome::Reverted | TransactionOutcome::Expired) => false,
     };

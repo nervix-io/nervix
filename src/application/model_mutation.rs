@@ -1191,13 +1191,21 @@ impl SessionServiceImpl {
                 && let Some(inputs) = inputs.as_ref()
                 && let Err(error) = self.validate_domain_planning_inputs(inputs).await
             {
-                return command_error(error.to_string());
+                let message = error.to_string();
+                if let Some(step) = transaction_step.as_ref() {
+                    step.retain_planning_input_conflict(message.clone());
+                }
+                return command_error(message);
             }
             if !is_noop
                 && let Some(planning) = planning.as_ref()
                 && let Err(error) = planning.validate_eligibility(self).await
             {
-                return command_error(error.to_string());
+                let message = error.to_string();
+                if let Some(step) = transaction_step.as_ref() {
+                    step.retain_planning_input_conflict(message.clone());
+                }
+                return command_error(message);
             }
             if !is_noop
                 && let Some(eligibility) = transaction_eligibility.as_ref()
@@ -1205,7 +1213,11 @@ impl SessionServiceImpl {
                     .validate_transaction_schedule_eligibility(eligibility)
                     .await
             {
-                return command_error(error.to_string());
+                let message = error.to_string();
+                if let Some(step) = transaction_step.as_ref() {
+                    step.retain_planning_input_conflict(message.clone());
+                }
+                return command_error(message);
             }
             let schedule_delta =
                 ScheduleDelta::between(expected_schedule.as_ref(), prepared_schedule.as_ref());

@@ -19,6 +19,11 @@ record remains present. Reusing it with changed content, credentials, owner, or 
 Repeating the same request joins the applying execution or returns the retained terminal result.
 An expired reference remains a tombstone and cannot start a new effect.
 
+An ordinary configuration command applies through a frozen internal transaction attempt. If its
+captured planning inputs change before the effect is recorded, the command retains that failed
+attempt and starts a revision-derived attempt under the same execution reference. An explicit
+transaction remains frozen after `COMMIT` admission and reports the conflict instead of replanning.
+
 Resource uploads use the same rule with a domain-owned upload identity and the verified archive
 digest. Transaction appends additionally carry their expected queue position. This makes a replay
 an exact append check rather than a request to append another copy.
