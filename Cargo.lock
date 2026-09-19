@@ -6668,6 +6668,7 @@ name = "nervix-consensus"
 version = "0.1.0-dev"
 dependencies = [
  "arch-into",
+ "blake3",
  "error-stack",
  "fjall",
  "futures-util",

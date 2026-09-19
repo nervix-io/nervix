@@ -126,11 +126,20 @@ provisional at admission and are planned again from the captured commit basis. A
 pass ordinary creation and external-resource validation before the one model step can commit.
 A rejected statement does not change the pending count or the transaction's activity time, so the
 client can correct it and continue the same transaction. The admitted result is stored with the
-statement; an exact retry with the same request reference, source, semantic statement, and expected
-position returns that result without rerunning preflight or extending activity. A reused reference
-with different content is rejected. Limits are checked before preflight and the same ordered
-planner runs from a refreshed snapshot during `COMMIT`, because other sessions may change relevant
-control-plane state after admission.
+statement. The same consensus update also stores its stable operation number and the report revision
+for the resulting prefix. A report identity contains the transaction id, accepted queue position,
+and a fingerprint of the coherent planning basis. An exact retry with the same request reference,
+source, semantic statement, and expected position returns that admission and identity without
+rerunning preflight or extending activity. A reused reference with different content is rejected.
+Limits are checked before preflight.
+
+Side-effect-free preview planning always reads the replicated semantic transaction content and one
+coherent set of authoritative inputs. `COMMIT` requires a complete identified preview. Admission
+validates its position and captured inputs, then stores the report, exact execution plan, and domain
+mutation fence in the same transition to `COMMITTING`. A stale preview returns the typed refreshed
+identity while the transaction remains `OPEN`; no gate or external effect has begun. Once admitted,
+each step uses the stored decisions and captured inputs. A restart or new leader does not replan it
+from newer configuration.
 
 The plan records affected topology on both sides of every execution step. The before side retains
 nodes and edges that the step drops or rewires; the after side records the graph that activation
@@ -181,6 +190,14 @@ readiness, remote stopping, ownership handoff, or gate release is outstanding. I
 authoritatively visible. Its successful output is only the highest quiesce level actually executed
 across the transaction; it does not repeat the individual command outputs.
 
+The retained report starts with every frozen step unattempted. The authoritative effect transition
+records that step as applying with its planned and actual impact, and application completion records
+it as applied or failed. Operation summaries and before/after topology are independent of the
+executable statement payload, so clearing statements at a terminal outcome does not erase the facts
+an inspection reads. Reports use keyed header, operation, and step records. Topology graphs are
+content-addressed, stored as bounded node and edge records, and shared by every report revision that
+names the same content instead of being copied into one growing transaction value.
+
 A new leader automatically resumes every `COMMITTING` transaction from its recorded applying step.
 Completed effects are not repeated, and a failed remaining step records its statement number and
 error while preserving the applied prefix. A model step that did not pause and whose VHOSTs an HTTPS
@@ -191,8 +208,11 @@ this execution and waits for the retained terminal result. Atomicity still does 
 transaction.
 
 Finished transactions remain as small tombstones containing the outcome, step progress, errors,
-and executed quiesce levels. During retention, attach reports the exact outcome and aggregate
-commit output; after removal the id is unknown. `SHOW TRANSACTIONS;`
+and executed quiesce levels. Their final report revision remains available for committed, failed,
+reverted, and expired outcomes even after later graph changes. Removing the tombstone removes its
+plan and report records and any topology content no retained report references. During retention,
+attach reports the exact outcome and aggregate commit output; after removal the id is unknown.
+`SHOW TRANSACTIONS;`
 can be served by any node from locally applied replicated state and lists the id, owner, domain,
 state, pending count, progress, age, and idle time for live transactions and retained tombstones.
 

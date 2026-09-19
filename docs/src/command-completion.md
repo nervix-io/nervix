@@ -19,6 +19,11 @@ record remains present. Reusing it with changed content, credentials, owner, or 
 Repeating the same request joins the applying execution or returns the retained terminal result.
 An expired reference remains a tombstone and cannot start a new effect.
 
+An ordinary configuration command applies through a frozen internal transaction attempt. If its
+captured planning inputs change before the effect is recorded, the command retains that failed
+attempt and starts a revision-derived attempt under the same execution reference. An explicit
+transaction remains frozen after `COMMIT` admission and reports the conflict instead of replanning.
+
 Resource uploads use the same rule with a domain-owned upload identity and the verified archive
 digest. Transaction appends additionally carry their expected queue position. This makes a replay
 an exact append check rather than a request to append another copy.
@@ -120,20 +125,23 @@ recovery and application owners perform repair before declaring readiness.
 
 `BEGIN` creates an `OPEN` transaction for one existing selected domain. A queueable statement is
 validated by planning the ordered candidate formed by the existing prefix, then durably appended
-with its request reference, expected position, and admitted result. The plan uses one captured set
-of relevant control-plane inputs and the exact execution-step segmentation used at commit. Queue
-success means validation and staging only. It does not replace a live graph, start or stop a domain,
-install a resource, or engage a runtime gate. Other sessions continue to see the committed
-configuration. Retrying the exact append returns the retained admitted result without touching the
-transaction.
+with its request reference, expected position, admitted result, stable operation metadata, and
+identified preview revision. The plan uses one captured set of relevant control-plane inputs and the
+exact execution-step segmentation used at commit. Queue success means validation and staging only.
+It does not replace a live graph, start or stop a domain, install a resource, or engage a runtime
+gate. Other sessions continue to see the committed configuration. Retrying the exact append returns
+the retained admitted result and preview without touching the transaction.
 
-`COMMIT` changes the transaction to `COMMITTING`, refreshes the ordered plan from a new coherent
-snapshot, and applies its ordered steps. Consecutive model mutations are one step; lifecycle,
-domain, and resource statements each end a model run and form their own step. Durable effect
-progress and completed application are separate records. A step whose authoritative write is
-committed remains applying until activation, handoff, drain, source readiness, lifecycle work, and
-command-owned gate release are complete. Only then can the next step advance. The transaction
-becomes `COMMITTED` after the final application record and terminal visibility barrier.
+`COMMIT` first computes a side-effect-free complete preview from replicated content and a new
+coherent snapshot. Its admission validates the identified basis and atomically freezes the report,
+ordered plan, and captured inputs before changing the transaction to `COMMITTING`. A stale basis
+leaves it `OPEN` and returns a typed refresh result. Consecutive model mutations are one frozen step;
+lifecycle, domain, and resource statements each end a model run and form their own step. Durable
+effect progress changes the retained step from unattempted to applying, while completed application
+records applied or failed separately. A step whose authoritative write is committed remains applying
+until activation, handoff, drain, source readiness, lifecycle work, and command-owned gate release
+are complete. Only then can the next step advance. The transaction becomes `COMMITTED` after the
+final application record and terminal visibility barrier.
 
 ```mermaid
 sequenceDiagram
@@ -157,10 +165,12 @@ sequenceDiagram
     R-->>C: terminal commit result
 ```
 
-A leadership change resumes a `COMMITTING` transaction from its recorded applying step. It does not
-repeat a completed effect or advance past an incompletely applied effect. A reconnecting commit
-waiter attaches to the transaction and continues waiting for that terminal result. A definitive
-failure records one `FAILED` outcome, the failing step, and the committed prefix.
+A leadership change resumes a `COMMITTING` transaction from its recorded applying step and frozen
+plan. It does not replan, repeat a completed effect, or advance past an incompletely applied effect.
+A reconnecting commit waiter attaches to the transaction and continues waiting for that terminal
+result. A definitive failure records one `FAILED` outcome, the failing step, and the committed
+prefix. The final operation and topology report remains with the transaction tombstone until the
+configured retention boundary.
 
 ## Effect-specific completion
 

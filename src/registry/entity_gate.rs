@@ -81,6 +81,13 @@ impl EntityGatePlan {
     pub(crate) fn relays(&self) -> &[RelayName] {
         &self.relays
     }
+
+    pub(crate) fn from_commit_plan(plan: nervix_models::TransactionEntityGatePlan) -> Self {
+        Self {
+            affected_entities: plan.affected_entities,
+            relays: plan.relays,
+        }
+    }
 }
 
 pub(crate) fn scheduled_impact_coverage(node: &ScheduledNode) -> ImpactNodeCoverage {

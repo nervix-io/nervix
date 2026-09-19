@@ -14,7 +14,7 @@ use nervix_models::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, AffectedTopology,
     AttributedGateBoundary, AttributedImpactNode, CanonicalImpactSet, ConfigurationImpact,
     ConfigurationTransition, DomainLifecycleAction, DomainLifecycleImpact, DomainName,
-    DomainSchedule, DomainState as ControlDomainState, DomainStatus, DropModel, DynamicModelUpdate,
+    DomainSchedule, DomainState as ControlDomainState, DomainStatus, DynamicModelUpdate,
     ExecutionStepImpactReport, ForceFlushImpact, ImpactAttribution, ImpactDiagnostic,
     ImpactDiagnosticKind, ImpactEffects, ImpactNodeCoverage, ImpactPlanningBasis,
     ImpactReportCompleteness, ImpactReportError, ImpactTopology, ImpactTopologyEdge,
@@ -23,8 +23,9 @@ use nervix_models::{
     QuiesceLevel, QuiesceSubgraph, RebuildImpact, RebuildReason, RequestedResourceVersion,
     ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact, ResourceName,
     ResourceUploads, ResourceVersionResolutionError, StateResetImpact, Statement,
-    TransactionImpactReport, TransactionOperation, TransactionOperationNumber,
-    TransactionOperationRange, TransactionPosition,
+    TransactionCommitPlanStep, TransactionCommitStepKind, TransactionImpactReport,
+    TransactionOperation, TransactionOperationNumber, TransactionOperationRange,
+    TransactionPosition,
 };
 use thiserror::Error;
 
@@ -33,6 +34,11 @@ use crate::registry::{
     ActiveGraph, EntityGatePlan, PlannedMutations, Registry, RegistryError, RegistryMutation,
     ScheduleDelta, entity_pause_relays_for_schedule, gate_boundary, scheduled_impact_coverage,
 };
+
+mod commit_plan;
+mod rebind;
+
+use rebind::plan_resource_rebind;
 
 /// Every mutable control-plane input one planning pass may inspect.
 #[derive(Debug, Clone)]
@@ -119,6 +125,7 @@ impl PlannedTransaction {
         &self.steps
     }
 
+    #[cfg(test)]
     pub(crate) fn first_step(&self) -> Option<&PlannedTransactionStep> {
         self.steps.first()
     }
@@ -216,6 +223,31 @@ pub(crate) enum TransactionPlanningError {
     PlanningBasisEncoding,
     #[error("a plan beginning at operation {first_operation} has no whole-transaction report")]
     PartialPlanHasNoTransactionReport { first_operation: usize },
+}
+
+impl TransactionPlanningError {
+    pub(crate) const fn operation(&self) -> Option<TransactionOperationNumber> {
+        match self {
+            Self::InvalidOperation { operation }
+            | Self::ResourceVersion { operation, .. }
+            | Self::ModelPreflight { operation, .. }
+            | Self::ExternalModelValidation { operation }
+            | Self::UdfPreparation { operation } => Some(*operation),
+            Self::DomainNotFound { .. }
+            | Self::DomainPaused { .. }
+            | Self::ConcurrentDomainAlter { .. }
+            | Self::DomainAlreadyRunning { .. }
+            | Self::DomainAlreadyStopped { .. }
+            | Self::DomainStartGenerationOverflow { .. }
+            | Self::ResourceAlreadyExists { .. }
+            | Self::ResourceNotFound { .. }
+            | Self::RebindMemberNotFound { .. }
+            | Self::RebindMemberDoesNotBind { .. }
+            | Self::InvalidImpactReport { .. }
+            | Self::PlanningBasisEncoding
+            | Self::PartialPlanHasNoTransactionReport { .. } => None,
+        }
+    }
 }
 
 struct ModelContribution {
@@ -325,6 +357,74 @@ struct ModelImpactInput<'a> {
 }
 
 impl Registry {
+    pub(crate) fn restore_transaction_commit_step(
+        domain: &DomainName,
+        current_models: ModelIndex,
+        previous: ControlDomainState,
+        expected_schedule: Option<DomainSchedule>,
+        step: TransactionCommitPlanStep,
+    ) -> Result<PlannedTransactionStep, Report<TransactionPlanningError>> {
+        let operation = step.impact.operations().first();
+        let kind = match step.kind {
+            TransactionCommitStepKind::Models {
+                transitions,
+                schedule,
+                no_op_operations,
+                model_gate,
+                ownership_gate,
+            } => {
+                let operation_count = step.impact.operations().operation_count().get();
+                let planned = Self::restore_transaction_model_plan(
+                    domain,
+                    current_models,
+                    &transitions,
+                    operation_count,
+                )
+                .map_err(|error| {
+                    Report::new(TransactionPlanningError::ModelPreflight { operation, error })
+                })?;
+                PlannedTransactionStepKind::Models {
+                    plan: Box::new(PlannedModelTransactionStep {
+                        planned: Some(planned),
+                        expected_schedule,
+                        schedule: schedule.map(|schedule| *schedule),
+                        no_op_operations: no_op_operations.into_iter().collect(),
+                        model_gate: EntityGatePlan::from_commit_plan(model_gate),
+                        ownership_gate: EntityGatePlan::from_commit_plan(ownership_gate),
+                    }),
+                }
+            }
+            TransactionCommitStepKind::AlterDomain {
+                next,
+                schedule,
+                ownership_gate,
+            } => PlannedTransactionStepKind::AlterDomain {
+                plan: Box::new(PlannedAlterDomainTransactionStep {
+                    previous,
+                    next: *next,
+                    expected_schedule,
+                    schedule: schedule.map(|schedule| *schedule),
+                    ownership_gate: EntityGatePlan::from_commit_plan(ownership_gate),
+                }),
+            },
+            TransactionCommitStepKind::StartDomain { .. } => {
+                PlannedTransactionStepKind::StartDomain { previous }
+            }
+            TransactionCommitStepKind::StopDomain => PlannedTransactionStepKind::StopDomain,
+            TransactionCommitStepKind::CreateResource {
+                resource,
+                already_existed,
+            } => PlannedTransactionStepKind::CreateResource {
+                resource,
+                already_existed,
+            },
+        };
+        Ok(PlannedTransactionStep {
+            impact: step.impact,
+            kind,
+        })
+    }
+
     /// Plans `statements` from `first_operation_index` in their written order. The callback is a
     /// synchronous schedule decision over topology inputs captured beside `snapshot`.
     pub(crate) fn plan_transaction<F>(
@@ -955,101 +1055,6 @@ fn ensure_domain_not_paused(
         }));
     }
     Ok(())
-}
-
-fn plan_resource_rebind(
-    domain: &DomainName,
-    resources: &BTreeSet<ResourceName>,
-    resource_uploads: &ResourceUploads,
-    prefix_models: &mut ModelIndex,
-    rebind: &nervix_models::RebindResource,
-    operation: TransactionOperationNumber,
-) -> Result<PlannedResourceRebind, Report<TransactionPlanningError>> {
-    if !resources.contains(&rebind.resource) {
-        return Err(Report::new(TransactionPlanningError::ResourceNotFound {
-            resource: rebind.resource.clone(),
-        }));
-    }
-    let resolved = resource_uploads
-        .resolve_completed_version(domain, &rebind.resource, rebind.version)
-        .map_err(|error| {
-            let resolution = error.current_context().clone();
-            error.change_context(TransactionPlanningError::ResourceVersion {
-                operation,
-                error: resolution,
-            })
-        })?;
-    let selected: BTreeSet<NodeRef> = match &rebind.selection {
-        nervix_models::RebindResourceSelection::Members(members) => {
-            members.iter().cloned().collect()
-        }
-        nervix_models::RebindResourceSelection::All => prefix_models
-            .iter()
-            .filter_map(|(node, model)| {
-                model
-                    .resource_version(&rebind.resource)
-                    .map(|_| node.clone())
-            })
-            .collect(),
-    };
-    let before = prefix_models.clone();
-    let mut reasons = Vec::with_capacity(selected.len());
-    let mut bindings = Vec::with_capacity(selected.len());
-    let mut mutations = Vec::new();
-
-    for node in selected {
-        let model = prefix_models.get(&node).ok_or_else(|| {
-            Report::new(TransactionPlanningError::RebindMemberNotFound {
-                domain: domain.clone(),
-                node: node.clone(),
-            })
-        })?;
-        let rebound = model
-            .rebind_resource(&rebind.resource, resolved.version)
-            .ok_or_else(|| {
-                Report::new(TransactionPlanningError::RebindMemberDoesNotBind {
-                    node: node.clone(),
-                    resource: rebind.resource.clone(),
-                })
-            })?;
-        reasons.push(OperationImpactReason::ResourceRebinding {
-            node: node.clone(),
-            resource: rebind.resource.clone(),
-            from_version: rebound.previous_version,
-            to_version: resolved.version,
-        });
-        bindings.push(ResourceBindingImpact {
-            node: node.clone(),
-            resource: rebind.resource.clone(),
-            requested: rebind.version,
-            version: resolved.version,
-            attribution: ImpactAttribution::single(operation),
-        });
-        if rebound.previous_version == resolved.version {
-            continue;
-        }
-        mutations.push(RegistryMutation::Drop(DropModel {
-            kind: node.kind,
-            name: node.identifier.clone(),
-        }));
-        mutations.push(RegistryMutation::Create(Box::new(rebound.model.clone())));
-        prefix_models.insert(rebound.model);
-    }
-
-    let mut contribution = model_contribution(&before, prefix_models, operation);
-    contribution.reasons = reasons;
-    contribution.effects.resource_bindings = CanonicalImpactSet::new(bindings.clone());
-    Ok(PlannedResourceRebind {
-        operation: TransactionOperation::RebindResource {
-            domain: domain.clone(),
-            resource: rebind.resource.clone(),
-            requested: rebind.version,
-            version: resolved.version,
-        },
-        contribution,
-        mutations,
-        bindings,
-    })
 }
 
 fn model_operation(
@@ -2001,7 +2006,7 @@ mod rebind_tests;
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use nervix_models::{
         AckMode, AlterJunction, AlterProcessorOperation, AlterRelay, AlterRelayOperation,
@@ -2335,11 +2340,37 @@ mod tests {
             .first_step()
             .verified("the relay alteration produces one execution step");
         assert_eq!(step.impact.planned().pause, PauseRequirement::NoPause);
-        let PlannedTransactionStepKind::Models { plan } = &step.kind else {
+        let PlannedTransactionStepKind::Models { plan: model_plan } = &step.kind else {
             unreachable!("the relay alteration produces a model step");
         };
-        assert_eq!(plan.ownership_gate.affected_entities(), &[expected_moved]);
-        assert_eq!(plan.ownership_gate.relays(), &[named("events")]);
+        assert_eq!(
+            model_plan.ownership_gate.affected_entities(),
+            std::slice::from_ref(&expected_moved)
+        );
+        assert_eq!(model_plan.ownership_gate.relays(), &[named("events")]);
+
+        let ownership_transition_ids =
+            BTreeMap::from([(step.impact.operations().first(), "transition-1".to_string())]);
+        let commit = plan.commit_plan(
+            "tx".to_string(),
+            &ownership_transition_ids,
+            &BTreeMap::new(),
+        );
+        let TransactionCommitStepKind::Models { schedule, .. } = &commit.steps[0].kind else {
+            unreachable!("the relay alteration commits one model step");
+        };
+        let schedule = schedule
+            .as_deref()
+            .verified("the scheduled relay alteration retains its target schedule");
+        let transition = schedule
+            .nodes
+            .get(&expected_moved)
+            .and_then(|node| node.ownership_transition.as_ref())
+            .verified("the admitted target schedule freezes its ownership transition");
+        assert_eq!(transition.source.as_str(), "node-a");
+        assert_eq!(transition.destination.as_str(), "node-b");
+        assert_eq!(transition.state_recovery.as_ref(), "complete");
+        assert_eq!(transition.id, "transition-1");
     }
 
     #[test]

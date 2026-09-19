@@ -9,14 +9,16 @@ use std::collections::BTreeSet;
 
 use blake3::Hasher;
 use error_stack::Report;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
     CommandExecution, CommandExecutionChildResult, CommandExecutionDiagnostic,
     CommandExecutionEffect, CommandExecutionResult, CommandExecutionResultKind,
     CommandExecutionState, CommandExecutionTransactionStatus,
 };
 use nervix_models::{
-    CommandExecutionReference, DomainName, DomainStartPoint, DomainState, DomainStatus, Statement,
-    Timestamp, UserName,
+    CommandExecutionReference, DomainName, DomainStartPoint, DomainState, DomainStatus,
+    ImpactPlanningBasis, Statement, Timestamp, TransactionOperationAdmission,
+    TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity, UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
 use thiserror::Error;
@@ -492,6 +494,10 @@ fn durable_command_result(result: &CommandResult) -> CommandExecutionResult {
                 failing_step: transaction.failing_step,
             }
         }),
+        transaction_admission: result
+            .transaction_admission
+            .as_ref()
+            .map(durable_transaction_admission),
     }
 }
 
@@ -526,6 +532,7 @@ fn command_result(result: CommandExecutionResult) -> CommandResult {
                 error: transaction.error,
                 failing_step: transaction.failing_step,
             }),
+        transaction_admission: result.transaction_admission.map(api_transaction_admission),
         ..Default::default()
     }
 }
@@ -550,6 +557,10 @@ fn durable_child_result(result: &CommandResult) -> CommandExecutionChildResult {
             })
             .collect(),
         already_existed: result.already_existed,
+        transaction_admission: result
+            .transaction_admission
+            .as_ref()
+            .map(durable_transaction_admission),
     }
 }
 
@@ -571,13 +582,61 @@ fn child_result(result: CommandExecutionChildResult) -> CommandResult {
             CommandExecutionResultKind::Error => i32::from(CommandResultKind::Error),
         },
         already_existed: result.already_existed,
+        transaction_admission: result.transaction_admission.map(api_transaction_admission),
         ..Default::default()
+    }
+}
+
+fn durable_transaction_admission(
+    admission: &crate::proto::TransactionOperationAdmission,
+) -> TransactionOperationAdmission {
+    let operation = usize::try_from(admission.operation)
+        .assured("server-produced transaction operation numbers fit the target pointer width");
+    let operation_index = operation
+        .checked_sub(1)
+        .assured("server-produced transaction operation numbers are one-based");
+    let operation = TransactionOperationNumber::from_index(operation_index)
+        .assured("server-produced transaction operation numbers are addressable");
+    let preview = admission
+        .preview
+        .as_ref()
+        .assured("server-produced transaction admissions always carry a preview");
+    let position = usize::try_from(preview.position)
+        .assured("server-produced transaction positions fit the target pointer width");
+    let planning_basis = <[u8; 32]>::try_from(preview.planning_basis.as_ref())
+        .assured("server-produced transaction planning bases contain 32 bytes");
+    TransactionOperationAdmission {
+        operation,
+        preview: TransactionPreviewIdentity {
+            transaction_id: preview.transaction_id.clone(),
+            position: TransactionPosition::new(position),
+            planning_basis: ImpactPlanningBasis::new(planning_basis),
+        },
+    }
+}
+
+fn api_transaction_admission(
+    admission: TransactionOperationAdmission,
+) -> crate::proto::TransactionOperationAdmission {
+    crate::proto::TransactionOperationAdmission {
+        operation: u64::try_from(admission.operation.get())
+            .assured("supported targets have a pointer width no larger than u64"),
+        preview: Some(crate::proto::TransactionPreviewIdentity {
+            transaction_id: admission.preview.transaction_id,
+            position: u64::try_from(admission.preview.position.accepted_operations())
+                .assured("supported targets have a pointer width no larger than u64"),
+            planning_basis: admission
+                .preview
+                .planning_basis
+                .fingerprint()
+                .to_vec()
+                .into(),
+        }),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{CreateStatement, CreateUser};
 
     use super::*;
@@ -648,6 +707,14 @@ mod tests {
             }],
             kind: i32::from(CommandResultKind::Ok),
             already_existed: true,
+            transaction_admission: Some(crate::proto::TransactionOperationAdmission {
+                operation: 1,
+                preview: Some(crate::proto::TransactionPreviewIdentity {
+                    transaction_id: "transaction-1".to_string(),
+                    position: 1,
+                    planning_basis: vec![3; 32].into(),
+                }),
+            }),
             ..Default::default()
         };
         let failed_child = CommandResult {
@@ -680,6 +747,14 @@ mod tests {
                 total_count: 3,
                 error: "retained detail".to_string(),
                 failing_step: Some(1),
+            }),
+            transaction_admission: Some(crate::proto::TransactionOperationAdmission {
+                operation: 2,
+                preview: Some(crate::proto::TransactionPreviewIdentity {
+                    transaction_id: "transaction-1".to_string(),
+                    position: 2,
+                    planning_basis: vec![7; 32].into(),
+                }),
             }),
             ..Default::default()
         };

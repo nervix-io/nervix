@@ -1,10 +1,9 @@
-//! Transaction control-plane unit tests.
+//! Transaction control-plane tests.
 //!
-//! Layer: test harness.
-//!
-//! - **Owns.** Regression coverage for transaction admission, recovery, and command processing.
-//! - **Depends on.** The transaction control plane and the server test fixture.
-//! - **Must not know.** Connector implementations or runtime execution details.
+//! Test harness outside the product layer order.
+//! - **Owns.** Focused transaction lifecycle and recovery assertions.
+//! - **Depends on.** Transaction control-plane internals and test fixtures.
+//! - **Must not know.** Production ownership beyond the parent module under test.
 
 use std::time::Duration;
 

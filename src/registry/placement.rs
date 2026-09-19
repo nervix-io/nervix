@@ -80,7 +80,7 @@ pub(crate) struct PlacementRequireGroupPlan {
     pub(crate) bonds: Vec<PlacementEffectivePair>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(in crate::registry) struct PlacementPair {
     pub(in crate::registry) left: NodeRef,
     pub(in crate::registry) right: NodeRef,
@@ -234,8 +234,10 @@ impl PlacementAnalysis {
             });
         }
 
+        let mut ordered_claims = claims_by_pair.into_iter().collect::<Vec<_>>();
+        ordered_claims.sort_by(|(left, _), (right, _)| left.cmp(right));
         let mut explicit_pairs = HashMap::default();
-        for (pair, claims) in claims_by_pair {
+        for (pair, claims) in ordered_claims {
             let strongest = claims
                 .iter()
                 .map(|claim| placement_rank_key(claim.rank))
@@ -1106,12 +1108,9 @@ mod tests {
         };
         assert_eq!(error_domain, domain.as_str());
         assert_eq!([left_rule.as_str(), right_rule.as_str()], ["cut", "glue"]);
-        let witness = [left_identifier.as_str(), right_identifier.as_str()];
-        assert_ne!(witness[0], witness[1]);
-        assert!(
-            witness
-                .iter()
-                .all(|member| { ["ing", "notifications", "p99_proc"].contains(member) })
+        assert_eq!(
+            [left_identifier.as_str(), right_identifier.as_str()],
+            ["p99_proc", "ing"]
         );
 
         let _ = fs::remove_dir_all(path);

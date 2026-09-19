@@ -883,7 +883,7 @@ impl SessionServiceImpl {
                     Ok(captured) => captured,
                     Err(error) => return command_error(transaction_planning_error_message(&error)),
                 };
-            let Some(step) = captured.plan.first_step().cloned() else {
+            let Some(step) = captured.plan.steps().first().cloned() else {
                 return command_error(
                     "resource rebind planning produced no model step".to_string(),
                 );
@@ -1140,6 +1140,7 @@ impl SessionServiceImpl {
                 planned_relocations,
                 mut inputs,
                 planning,
+                transaction_eligibility,
             } = if let Some(decision) = &transaction_decision {
                 if is_noop {
                     ScheduleTransition::default()
@@ -1150,7 +1151,7 @@ impl SessionServiceImpl {
                         (None, None) => None,
                     };
                     let captured_schedule_inputs = match (&transaction_step, &direct_plan) {
-                        (Some(step), _) => Some(step.schedule_inputs.clone()),
+                        (Some(_), _) => None,
                         (None, Some(plan)) => Some(plan.schedule_inputs.clone()),
                         (None, None) => None,
                     };
@@ -1160,6 +1161,9 @@ impl SessionServiceImpl {
                         planned_relocations: decision.planned_relocations,
                         inputs: captured_inputs,
                         planning: captured_schedule_inputs,
+                        transaction_eligibility: transaction_step
+                            .as_ref()
+                            .map(|step| step.eligibility.clone()),
                     }
                 }
             } else if !is_noop {
@@ -1176,6 +1180,7 @@ impl SessionServiceImpl {
                         planned_relocations: prepared.relocations,
                         inputs: Some(prepared.inputs),
                         planning: Some(prepared.planning),
+                        transaction_eligibility: None,
                     },
                     Err(error) => return command_error(error),
                 }
@@ -1186,13 +1191,33 @@ impl SessionServiceImpl {
                 && let Some(inputs) = inputs.as_ref()
                 && let Err(error) = self.validate_domain_planning_inputs(inputs).await
             {
-                return command_error(error.to_string());
+                let message = error.to_string();
+                if let Some(step) = transaction_step.as_ref() {
+                    step.retain_planning_input_conflict(message.clone());
+                }
+                return command_error(message);
             }
             if !is_noop
                 && let Some(planning) = planning.as_ref()
                 && let Err(error) = planning.validate_eligibility(self).await
             {
-                return command_error(error.to_string());
+                let message = error.to_string();
+                if let Some(step) = transaction_step.as_ref() {
+                    step.retain_planning_input_conflict(message.clone());
+                }
+                return command_error(message);
+            }
+            if !is_noop
+                && let Some(eligibility) = transaction_eligibility.as_ref()
+                && let Err(error) = self
+                    .validate_transaction_schedule_eligibility(eligibility)
+                    .await
+            {
+                let message = error.to_string();
+                if let Some(step) = transaction_step.as_ref() {
+                    step.retain_planning_input_conflict(message.clone());
+                }
+                return command_error(message);
             }
             let schedule_delta =
                 ScheduleDelta::between(expected_schedule.as_ref(), prepared_schedule.as_ref());
@@ -1214,7 +1239,9 @@ impl SessionServiceImpl {
                 }
             };
             let requires_domain_pause = classified_level.requires_domain_pause();
-            if let Some(prepared_schedule) = prepared_schedule.as_mut() {
+            if transaction_step.is_none()
+                && let Some(prepared_schedule) = prepared_schedule.as_mut()
+            {
                 mark_complete_ownership_transitions(expected_schedule.as_ref(), prepared_schedule);
             }
             let model_gate = match &transaction_decision {

@@ -624,7 +624,8 @@ Feature: Resource version bindings
       BEGIN;
       REBIND RESOURCE tls_bundle TO VERSION LATEST FOR VHOST edge;
       """
-    Then the last command output contains
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    And the last command output contains
       """
       rebound 0 of 1 usage(s) of resource 'tls_bundle' to version 1 (latest)
       """
@@ -633,7 +634,16 @@ Feature: Resource version bindings
       provisionally resolved VERSION LATEST of resource 'tls_bundle' to version 1 for vhost 'edge'
       """
     When client "uploader" uploads resource "tls_bundle" from "{{tls_v2}}" with identity "after-queue"
-    And client "owner" executes these NSPL commands
+    And client "owner" fails to execute these NSPL commands
+      """
+      COMMIT;
+      """
+    Then the last command error contains
+      """
+      transaction preview is stale
+      """
+    And transaction "{{transaction_id}}" eventually has state "OPEN"
+    When client "owner" executes these NSPL commands
       """
       COMMIT;
       """
@@ -641,6 +651,7 @@ Feature: Resource version bindings
       """
       resolved VERSION LATEST of resource 'tls_bundle' to version 2 for vhost 'edge'
       """
+    And transaction "{{transaction_id}}" eventually has state "COMMITTED"
     When these NSPL commands are executed on the leader node
       """
       SHOW CREATE VHOST edge;

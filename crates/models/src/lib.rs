@@ -83,9 +83,12 @@ pub use quiesce::{
     OperationImpactReport, OwnershipMoveImpact, PauseRequirement, PlannedExecutionStepImpact,
     QuiesceLevel, QuiesceSubgraph, QuiescenceOutcome, RebuildImpact, RebuildReason,
     ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact, StatePurge,
-    StateResetImpact, TransactionImpactReport, TransactionImpactSummary,
-    TransactionInspectionTarget, TransactionOperation, TransactionOperationNumber,
-    TransactionOperationRange, TransactionPosition, TransactionPreviewIdentity,
+    StateResetImpact, TransactionCommitPlan, TransactionCommitPlanHeader,
+    TransactionCommitPlanStep, TransactionCommitStepKind, TransactionEntityGatePlan,
+    TransactionImpactReport, TransactionImpactSummary, TransactionInspectionTarget,
+    TransactionModelTransition, TransactionOperation, TransactionOperationAdmission,
+    TransactionOperationNumber, TransactionOperationRange, TransactionPosition,
+    TransactionPreviewIdentity, TransactionResolvedDomainStart,
 };
 pub use rebind_resource::{RebindResource, RebindResourceMembers, RebindResourceSelection};
 pub use remote::{

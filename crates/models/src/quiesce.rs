@@ -19,9 +19,11 @@ use crate::{
     ProcessorOutput, ProcessorOutputs, RelayName, VhostName, WasmStateReset,
 };
 
+mod commit;
 mod impact;
 mod inspection;
 
+pub use commit::*;
 pub use impact::*;
 pub use inspection::*;
 

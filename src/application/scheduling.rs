@@ -16,6 +16,7 @@ use nervix_client_core::Client as NervixClient;
 use nervix_connector_kafka::TopicPartitionInspector;
 use nervix_consensus::{
     CommandExecution, ConsensusError, DomainMutationLease, DomainPlanningInputs,
+    TransactionScheduleEligibility,
 };
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, DomainName, IngestSource, IngestorName, KafkaOffsetMode,
@@ -159,6 +160,7 @@ pub(in crate::application) struct ScheduleTransition {
     pub(in crate::application) planned_relocations: usize,
     pub(in crate::application) inputs: Option<DomainPlanningInputs>,
     pub(in crate::application) planning: Option<DomainSchedulePlanningSnapshot>,
+    pub(in crate::application) transaction_eligibility: Option<TransactionScheduleEligibility>,
 }
 
 /// One Kafka partition watcher the leader runs: the ingestor it watches for, and the task doing
