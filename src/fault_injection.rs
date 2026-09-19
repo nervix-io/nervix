@@ -16,15 +16,16 @@ use std::{
 };
 
 use ahash::RandomState;
+use error_stack::Report;
 use meticulous::ResultExt as _;
 use nervix_execution::{CpuClass, Executor, MemoryClass, sync::DashMap};
 use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, DomainName, EmitterName,
-    IngestorName,
+    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
+    DomainName, EmitterName, IngestorName, ModelName, RemoteRuntimeField,
 };
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use parking_lot::{Mutex, RwLock};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use triomphe::Arc;
 
@@ -100,6 +101,8 @@ struct FaultInjectionState {
     state_replica_polling_paused: AtomicBool,
     /// While set, every node's WASM guest-state checkpoint fails to reach its stable storage.
     wasm_checkpoint_storage_failing: AtomicBool,
+    /// While set, every coordinated WASM reset fails while building its fresh guest instance.
+    wasm_state_reset_fresh_initialization_failing: AtomicBool,
     /// While set, every node refuses to install a runtime-state checkpoint it replicates.
     state_replica_installation_failing: AtomicBool,
     syslog_ingestor_bind_ips: DashMap<ClusterNodeName, IpAddr, RandomState>,
@@ -108,6 +111,34 @@ struct FaultInjectionState {
     entity_gate_deadline: RwLock<Option<Duration>>,
     scheduler_mode: RwLock<SchedulerMode>,
     leadership_transfers: broadcast::Sender<LeadershipTransferRequest>,
+    wasm_state_reset_coordinators:
+        DashMap<ClusterNodeName, mpsc::Sender<WasmStateResetRequest>, RandomState>,
+}
+
+pub(crate) struct WasmStateResetRequest {
+    pub(crate) domain: DomainName,
+    pub(crate) processor: ModelName,
+    pub(crate) reference: CommandExecutionReference,
+    pub(crate) target: WasmStateResetRequestTarget,
+    pub(crate) response: oneshot::Sender<error_stack::Result<(), WasmStateResetRequestError>>,
+}
+
+pub(crate) enum WasmStateResetRequestTarget {
+    Unbranched,
+    Branch(Vec<RemoteRuntimeField>),
+    AllBranches,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum WasmStateResetRequestError {
+    #[error("node '{}' has no WASM state reset coordinator", .node.as_str())]
+    CoordinatorUnavailable { node: ClusterNodeName },
+    #[error("node '{}' stopped its WASM state reset coordinator", .node.as_str())]
+    CoordinatorStopped { node: ClusterNodeName },
+    #[error("node '{}' dropped the WASM state reset response", .node.as_str())]
+    ResponseDropped { node: ClusterNodeName },
+    #[error("WASM processor '{}' state reset failed", .processor.as_str())]
+    ResetFailed { processor: ModelName },
 }
 
 struct ConsensusProbe {
@@ -215,6 +246,7 @@ impl Default for FaultInjection {
                 domain_clock_initial_elapsed: DashMap::default(),
                 state_replica_polling_paused: AtomicBool::new(false),
                 wasm_checkpoint_storage_failing: AtomicBool::new(false),
+                wasm_state_reset_fresh_initialization_failing: AtomicBool::new(false),
                 state_replica_installation_failing: AtomicBool::new(false),
                 syslog_ingestor_bind_ips: DashMap::default(),
                 branch_instance_expiration_scan_interval: RwLock::new(None),
@@ -222,12 +254,110 @@ impl Default for FaultInjection {
                 entity_gate_deadline: RwLock::new(None),
                 scheduler_mode: RwLock::new(SchedulerMode::default()),
                 leadership_transfers,
+                wasm_state_reset_coordinators: DashMap::default(),
             }),
         }
     }
 }
 
 impl FaultInjection {
+    pub(crate) fn register_wasm_state_reset_coordinator(
+        &self,
+        node: ClusterNodeName,
+    ) -> mpsc::Receiver<WasmStateResetRequest> {
+        let (sender, receiver) = mpsc::channel(1);
+        self.inner
+            .wasm_state_reset_coordinators
+            .insert(node, sender);
+        receiver
+    }
+
+    pub async fn reset_wasm_processor_branch(
+        &self,
+        node: &ClusterNodeName,
+        domain: DomainName,
+        processor: ModelName,
+        reference: CommandExecutionReference,
+        branch: Vec<RemoteRuntimeField>,
+    ) -> error_stack::Result<(), WasmStateResetRequestError> {
+        self.request_wasm_state_reset(
+            node,
+            domain,
+            processor,
+            reference,
+            WasmStateResetRequestTarget::Branch(branch),
+        )
+        .await
+    }
+
+    pub async fn reset_unbranched_wasm_processor(
+        &self,
+        node: &ClusterNodeName,
+        domain: DomainName,
+        processor: ModelName,
+        reference: CommandExecutionReference,
+    ) -> error_stack::Result<(), WasmStateResetRequestError> {
+        self.request_wasm_state_reset(
+            node,
+            domain,
+            processor,
+            reference,
+            WasmStateResetRequestTarget::Unbranched,
+        )
+        .await
+    }
+
+    pub async fn reset_all_wasm_processor_branches(
+        &self,
+        node: &ClusterNodeName,
+        domain: DomainName,
+        processor: ModelName,
+        reference: CommandExecutionReference,
+    ) -> error_stack::Result<(), WasmStateResetRequestError> {
+        self.request_wasm_state_reset(
+            node,
+            domain,
+            processor,
+            reference,
+            WasmStateResetRequestTarget::AllBranches,
+        )
+        .await
+    }
+
+    async fn request_wasm_state_reset(
+        &self,
+        node: &ClusterNodeName,
+        domain: DomainName,
+        processor: ModelName,
+        reference: CommandExecutionReference,
+        target: WasmStateResetRequestTarget,
+    ) -> error_stack::Result<(), WasmStateResetRequestError> {
+        let sender = match self.inner.wasm_state_reset_coordinators.get(node) {
+            Some(sender) => sender.clone(),
+            None => {
+                return Err(Report::new(
+                    WasmStateResetRequestError::CoordinatorUnavailable { node: node.clone() },
+                ));
+            }
+        };
+        let (response, receiver) = oneshot::channel();
+        sender
+            .send(WasmStateResetRequest {
+                domain,
+                processor,
+                reference,
+                target,
+                response,
+            })
+            .await
+            .map_err(|_| {
+                Report::new(WasmStateResetRequestError::CoordinatorStopped { node: node.clone() })
+            })?;
+        receiver.await.map_err(|_| {
+            Report::new(WasmStateResetRequestError::ResponseDropped { node: node.clone() })
+        })?
+    }
+
     pub fn unregister_consensus(&self, node: &ClusterNodeName) {
         if let Some(mut state) = self.inner.consensus_probes.get_mut(node) {
             state.probe = None;
@@ -849,6 +979,19 @@ impl FaultInjection {
             .store(false, Ordering::Release);
     }
 
+    /// Make fresh guest construction fail before a reset publishes its new generation.
+    pub fn fail_wasm_state_reset_fresh_initialization(&self) {
+        self.inner
+            .wasm_state_reset_fresh_initialization_failing
+            .store(true, Ordering::Release);
+    }
+
+    pub fn restore_wasm_state_reset_fresh_initialization(&self) {
+        self.inner
+            .wasm_state_reset_fresh_initialization_failing
+            .store(false, Ordering::Release);
+    }
+
     /// Make every node refuse to install the runtime-state checkpoints it replicates, until
     /// [`Self::restore_state_replica_installation`].
     pub fn fail_state_replica_installation(&self) {
@@ -1295,6 +1438,12 @@ impl FaultInjection {
     pub(crate) fn wasm_checkpoint_storage_fails(&self) -> bool {
         self.inner
             .wasm_checkpoint_storage_failing
+            .load(Ordering::Acquire)
+    }
+
+    pub(crate) fn wasm_state_reset_fresh_initialization_fails(&self) -> bool {
+        self.inner
+            .wasm_state_reset_fresh_initialization_failing
             .load(Ordering::Acquire)
     }
 

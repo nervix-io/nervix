@@ -27,11 +27,12 @@ use std::{
 use error_stack::Report;
 use nervix_execution::{ChargedBytes, Executor, Reservation};
 use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CodecName, CoordinationIdentity,
-    DomainClockProgress, DomainName, EmitterName, FieldName, IngestorName, LookupName, ModelKind,
-    ModelName, NodeRef, OwnershipStateRecoveryOutcome, OwnershipStateReset, RelayName,
-    RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata,
-    ResourceName, SubscriptionBinding,
+    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CodecName,
+    CommandExecutionReference, CoordinationIdentity, DomainClockProgress, DomainName, EmitterName,
+    FieldName, IngestorName, LookupName, ModelKind, ModelName, NodeRef,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, RelayName, RemoteAckRegistration,
+    RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata, ResourceName,
+    SubscriptionBinding, WasmStateResetScope,
 };
 use nervix_recovery::Discarded as _;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -499,6 +500,7 @@ pub struct DomainDrainStatusResponse {
 pub enum EntityGatePurpose {
     ModelAlteration,
     OwnershipHandoff,
+    WasmStateReset(WasmStateResetScope),
 }
 
 impl EntityGatePurpose {
@@ -506,6 +508,7 @@ impl EntityGatePurpose {
         match self {
             Self::ModelAlteration => "model alteration",
             Self::OwnershipHandoff => "ownership handoff",
+            Self::WasmStateReset(_) => "WASM state reset",
         }
     }
 }
@@ -523,6 +526,59 @@ pub struct EntityGateRequest {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityGateResponse {
+    pub result: Result<(), RemoteOperationFailure>,
+}
+
+/// The owner-side stage of one coordinated WASM guest-state reset.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub enum WasmStateResetRuntimeAction {
+    /// Quiesce the selected branch tasks and construct their fresh initial guest snapshots. A
+    /// `published` request resumes a generation that is already durable and can never roll back.
+    Prepare {
+        branch_key: Option<Vec<RemoteRuntimeField>>,
+        published: bool,
+    },
+    /// Apply the currently committed schedule while the reset gate remains held. Replicas install
+    /// the new generation before the execution owner writes its initial checkpoint.
+    ActivateCommittedSchedule,
+    /// Restore the preceding branch tasks after a failure before generation publication.
+    Abort,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub struct WasmStateResetRuntimeRequest {
+    pub coordination: CoordinationIdentity,
+    pub domain: DomainName,
+    pub processor: ModelName,
+    pub request: CommandExecutionReference,
+    pub scope: WasmStateResetScope,
+    pub action: WasmStateResetRuntimeAction,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WasmStateResetRuntimeResponse {
+    pub result: Result<(), RemoteOperationFailure>,
+}
+
+/// The typed target of the shared leader-side WASM guest-state reset coordinator.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub enum WasmStateResetTarget {
+    Unbranched,
+    Branch(Vec<RemoteRuntimeField>),
+    AllBranches,
+}
+
+/// Invoke the durable reset coordinator on the current control-plane leader.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub struct CoordinateWasmStateResetRequest {
+    pub domain: DomainName,
+    pub processor: ModelName,
+    pub request: CommandExecutionReference,
+    pub target: WasmStateResetTarget,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoordinateWasmStateResetResponse {
     pub result: Result<(), RemoteOperationFailure>,
 }
 
@@ -683,6 +739,28 @@ impl InterconnectRequest for EntityGateReleaseRequest {
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
     }
+}
+
+impl InterconnectRequest for WasmStateResetRuntimeRequest {
+    type Response = WasmStateResetRuntimeResponse;
+
+    const NAME: &'static str = "wasm_state_reset_runtime";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Admission;
+    const TIMEOUT: Duration = Duration::from_secs(60);
+
+    fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
+        Some(&self.coordination)
+    }
+}
+
+impl InterconnectRequest for CoordinateWasmStateResetRequest {
+    type Response = CoordinateWasmStateResetResponse;
+
+    const NAME: &'static str = "coordinate_wasm_state_reset";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Admission;
+    const TIMEOUT: Duration = Duration::from_secs(120);
 }
 
 impl InterconnectRequest for DescribeMetricsRequest {

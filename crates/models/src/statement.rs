@@ -22,16 +22,17 @@ use thiserror::Error;
 
 use crate::{
     AlterSchema, AlterWireSchema, AvroType, BranchKeyFingerprint, BranchName, CborType,
-    ChannelName, ClientName, ClusterNodeName, CodecName, CollectionName, ConsumerGroupName,
-    CorrelatorName, CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, CreateSchema,
-    CreateUdf, DeduplicatorName, DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName,
-    DomainTimeRate, EmitterName, EndpointName, FieldName, GeneratorName, InferencerName,
-    IngestorName, JsonType, JunctionName, LookupName, ModelName, NodeRef, ParseAsType,
-    PlacementName, PulsarSubscriptionName, QueueGroupName, QueueName, RebindResource,
-    ReingestorName, RelayName, ReordererName, RequestedResourceVersion, ResourceName,
-    SchemaFingerprint, SchemaName, SignalingProtocolName, SubjectName, SubscriptionName, TableName,
-    Timestamp, TopicName, UdfName, UserName, VhostName, WasmProcessorName, WasmStateGenerations,
-    WindowProcessorName, WireSchemaName,
+    ChannelName, ClientName, ClusterNodeName, CodecName, CollectionName, CommandExecutionReference,
+    ConsumerGroupName, CorrelatorName, CreateAvroWireSchema, CreateCborWireSchema,
+    CreateJsonWireSchema, CreateSchema, CreateUdf, DeduplicatorName, DomainClockPeriod,
+    DomainClockSkew, DomainClockState, DomainName, DomainTimeRate, EmitterName, EndpointName,
+    FieldName, GeneratorName, InferencerName, IngestorName, JsonType, JunctionName, LookupName,
+    ModelName, NodeRef, ParseAsType, PlacementName, PulsarSubscriptionName, QueueGroupName,
+    QueueName, RebindResource, ReingestorName, RelayName, ReordererName, RequestedResourceVersion,
+    ResourceName, SchemaFingerprint, SchemaName, SignalingProtocolName, SubjectName,
+    SubscriptionName, TableName, Timestamp, TopicName, UdfName, UserName, VhostName,
+    WasmProcessorName, WasmStateGenerations, WasmStateReset, WasmStateResetPhase,
+    WasmStateResetScope, WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
@@ -4489,6 +4490,9 @@ pub struct ScheduledNode {
     /// The guest-state generation of every branch when this node is a WASM processor, and nothing
     /// for every other kind. Only [`Self::new`] decides which, from the configuration it places.
     wasm_state_generations: Option<WasmStateGenerations>,
+    /// The latest coordinated reset of this WASM processor, including an incomplete publication
+    /// whose selected scope must remain fenced. Every other kind of node carries nothing.
+    wasm_state_reset: Option<WasmStateReset>,
 }
 
 impl ScheduledNode {
@@ -4509,6 +4513,7 @@ impl ScheduledNode {
             assigned_nodes: Vec::new(),
             ownership_transition: None,
             wasm_state_generations,
+            wasm_state_reset: None,
         }
     }
 
@@ -4555,6 +4560,11 @@ impl ScheduledNode {
         self.wasm_state_generations.as_ref()
     }
 
+    /// The latest coordinated guest-state reset this WASM processor published.
+    pub fn wasm_state_reset(&self) -> Option<&WasmStateReset> {
+        self.wasm_state_reset.as_ref()
+    }
+
     /// Continue the guest-state lifetimes `existing` published for this same node.
     ///
     /// A generation belongs to the pinned module binding it was published for. When this entry
@@ -4578,6 +4588,7 @@ impl ScheduledNode {
             generations.begin_every_branch();
         }
         self.wasm_state_generations = Some(generations);
+        self.wasm_state_reset = existing.wasm_state_reset.clone();
     }
 
     /// Start a new guest-state lifetime for every branch of this WASM processor, including branches
@@ -4594,6 +4605,43 @@ impl ScheduledNode {
         if let Some(generations) = self.wasm_state_generations.as_mut() {
             generations.begin_branch(branch);
         }
+    }
+
+    /// Start or resume the coordinated reset identified by `request`.
+    ///
+    /// Returns `false` when this node has no WASM guest state or when this exact request and scope
+    /// are already published. A caller validates a reused request with a different scope before
+    /// invoking this method.
+    pub fn begin_wasm_state_reset(
+        &mut self,
+        request: CommandExecutionReference,
+        scope: WasmStateResetScope,
+    ) -> bool {
+        let Some(generations) = self.wasm_state_generations.as_mut() else {
+            return false;
+        };
+        if self
+            .wasm_state_reset
+            .as_ref()
+            .is_some_and(|reset| reset.request() == &request && reset.scope() == &scope)
+        {
+            return false;
+        }
+        generations.begin_reset(&scope);
+        self.wasm_state_reset = Some(WasmStateReset::publishing(request, scope));
+        true
+    }
+
+    /// Mark the initial checkpoint of this exact reset durable and ready for runtime admission.
+    pub fn complete_wasm_state_reset(&mut self, request: &CommandExecutionReference) -> bool {
+        let Some(reset) = self.wasm_state_reset.as_mut() else {
+            return false;
+        };
+        if reset.request() != request || reset.phase() == WasmStateResetPhase::Ready {
+            return false;
+        }
+        reset.mark_ready();
+        true
     }
 
     pub fn ownership_state_components(&self) -> Vec<OwnershipStateComponent> {

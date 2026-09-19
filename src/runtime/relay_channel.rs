@@ -90,6 +90,16 @@ pub(in crate::runtime) struct RelayDispatchPermit<'gate> {
     gate: &'gate RelayDispatchGate,
 }
 
+/// Owned proof that one relay dispatch entered a dynamically selected gate.
+///
+/// Branch-scoped holds are published through an immutable gate set. An owned permit lets a
+/// dispatch retain every matching gate after that set's load guard is gone, without putting a lock
+/// on the dispatch path.
+#[derive(Debug)]
+pub(in crate::runtime) struct OwnedRelayDispatchPermit {
+    gate: Arc<RelayDispatchGate>,
+}
+
 impl RelayDispatchGate {
     pub(in crate::runtime) fn new() -> Self {
         Self {
@@ -141,11 +151,21 @@ impl RelayDispatchGate {
     }
 
     pub(in crate::runtime) async fn acquire_dispatch(&self) -> RelayDispatchPermit<'_> {
+        self.acquire().await;
+        RelayDispatchPermit { gate: self }
+    }
+
+    pub(in crate::runtime) async fn acquire_owned(gate: &Arc<Self>) -> OwnedRelayDispatchPermit {
+        gate.acquire().await;
+        OwnedRelayDispatchPermit { gate: gate.clone() }
+    }
+
+    async fn acquire(&self) {
         loop {
             tokio::task::consume_budget().await;
             self.increment_in_flight_dispatches();
             if !self.closed.load(Ordering::SeqCst) {
-                return RelayDispatchPermit { gate: self };
+                return;
             }
             self.decrement_in_flight_dispatches();
 
@@ -385,6 +405,12 @@ impl Default for RelayDispatchGate {
 }
 
 impl Drop for RelayDispatchPermit<'_> {
+    fn drop(&mut self) {
+        self.gate.decrement_in_flight_dispatches();
+    }
+}
+
+impl Drop for OwnedRelayDispatchPermit {
     fn drop(&mut self) {
         self.gate.decrement_in_flight_dispatches();
     }

@@ -6,7 +6,7 @@
 //! This module breaks its contract: `DomainSchedule` still carries raw node Models. Runtime
 //! planning must close that boundary before ownership handoffs consume the schedule.
 
-use nervix_models::WasmStateGenerations;
+use nervix_models::{WasmStateGenerations, WasmStateReset};
 
 use super::*;
 
@@ -24,6 +24,7 @@ impl Runtime {
             primary_node: &'a Option<ClusterNodeName>,
             assigned_nodes: &'a [ClusterNodeName],
             wasm_state_generations: Option<&'a WasmStateGenerations>,
+            wasm_state_reset: Option<&'a WasmStateReset>,
         }
 
         #[derive(serde::Serialize)]
@@ -45,6 +46,7 @@ impl Runtime {
                 primary_node: &node.primary_node,
                 assigned_nodes: &node.assigned_nodes,
                 wasm_state_generations: node.wasm_state_generations(),
+                wasm_state_reset: node.wasm_state_reset(),
             })
             .collect::<Vec<_>>();
         let fingerprint = DomainScheduleFingerprint {

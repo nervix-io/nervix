@@ -64,27 +64,28 @@ use nervix_interconnect::{
 use nervix_models::{
     AckMode, Assignment, AtomicTimestamp, BranchKeyFingerprint, BranchName, ClickHouseValueMapping,
     ClientConfigEntry, ClientName, ClientPoolBounds, ClientResourceMount, ClusterNodeIncarnation,
-    ClusterNodeName, ClusterSchedule, CodecName, CodecWireFormat, CoordinationIdentity,
-    CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateCodec, CreateEmitter, CreateGenerator,
-    CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateSignalingProtocol,
-    CreateUdf, DomainClockAuthority, DomainConfig, DomainName, DomainNodeRef, DomainSchedule,
-    DomainState, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName,
-    EndpointType, ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy,
-    GeneratorName, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
-    InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
-    IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode,
-    KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
-    MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind,
-    ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
-    MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality, OtelMetric,
-    OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch, OwnershipStateComponent,
-    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
-    PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
-    RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
-    RemoteRuntimeField, ResolvedBranching, ResourceId, ResourceName, RetryPolicy,
-    RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes, SchemaFingerprint,
-    SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
-    StructuredMessageError, SubscriptionName, Timestamp,
+    ClusterNodeName, ClusterSchedule, CodecName, CodecWireFormat, CommandExecutionReference,
+    CoordinationIdentity, CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateCodec,
+    CreateEmitter, CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay,
+    CreateSignalingProtocol, CreateUdf, DomainClockAuthority, DomainConfig, DomainName,
+    DomainNodeRef, DomainSchedule, DomainState, EmitSink, EmitterAckWindow, EmitterName,
+    EmitterPublishingMode, EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath,
+    FlushPolicy, GeneralErrorPolicy, GeneratorName, IcebergCatalog, IcebergStorageBackend,
+    IcebergValueMapping, InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode,
+    IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode,
+    KafkaOffsetMode, KafkaPartitionSchedule, Literal as ModelLiteral, LookupName,
+    MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model,
+    ModelIndex, ModelKind, ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
+    MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NodeRef,
+    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
+    OtelValueMapping, OutputBranch, OwnershipStateComponent, OwnershipStateRecoveryOutcome,
+    OwnershipStateReset, OwnershipStateResetCause, ParseAsType, PostgresConflictAction,
+    PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName,
+    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField,
+    ResolvedBranching, ResourceId, ResourceName, RetryPolicy, RouteConstruction, ScheduledModel,
+    ScheduledNode, ScheduledNodes, SchemaFingerprint, SignalingProtocolName, SignalingWireFormat,
+    SqsFifoGroup, SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp,
+    WasmStateResetScope,
 };
 #[cfg(test)]
 use nervix_models::{
@@ -423,13 +424,14 @@ use reingestor::ReingestorInputSpec;
 pub(in crate::runtime) use relay_batch::RelayDispatchResult;
 use relay_batch::build_stream_record_batch_preserving_acks;
 use relay_boundary::{
-    ConcreteRelayRuntime, ConcreteRelayRuntimeBuild, ExpiringRelayState, RelayBoundaryBuilder,
-    RelayBoundaryFanout, RelayBoundaryFanoutMap, RelayBoundaryServices, RelayOutboundSlot,
-    RelayOwnerTask, RelayRegistry, RelayRetention, RelayRuntimeFanIn, RelayStateTask,
-    RelayStateTaskSpec, RemoteRuntimeConsumer, addressable_count,
+    BranchRelayDispatchGateLease, ConcreteRelayRuntime, ConcreteRelayRuntimeBuild,
+    ExpiringRelayState, RelayBoundaryBuilder, RelayBoundaryFanout, RelayBoundaryFanoutMap,
+    RelayBoundaryServices, RelayOutboundSlot, RelayOwnerTask, RelayRegistry, RelayRetention,
+    RelayRuntimeFanIn, RelayStateTask, RelayStateTaskSpec, RemoteRuntimeConsumer,
+    addressable_count,
 };
 pub(in crate::runtime) use relay_channel::{
-    RelayDispatchGate, RelayDispatchGateLease, RelayTryRecv,
+    OwnedRelayDispatchPermit, RelayDispatchGate, RelayDispatchGateLease, RelayTryRecv,
 };
 use relay_interaction::{
     RelayInteraction, RelayInteractionCommand, RelayInteractionError, RelayInteractionEvent,
@@ -501,8 +503,8 @@ use vm_input::{
     vm_typed_batch_to_runtime_batch,
 };
 use wasm_checkpoint::{
-    WasmCallbackReporting, WasmCheckpointHolds, checkpoint_wasm_guest_state,
-    wasm_callback_decided_tokens,
+    WASM_CHECKPOINT_DEADLINE, WasmCallbackReporting, WasmCheckpointHolds,
+    checkpoint_wasm_guest_state, wasm_callback_decided_tokens,
 };
 use wasm_output::{WasmMaterializedOutput, WasmOutputContext, dispatch_wasm_output_envelopes};
 use wasm_processor::{
@@ -513,6 +515,10 @@ use wasm_state::{
     CapturedWasmCheckpoint, CompletedWasmCheckpoint, LocallyDurableWasmCheckpoint,
     ReplicatedWasmProcessorState, RestorableGuestState, WasmCheckpointBoundary,
     WasmCheckpointProgress, WasmGuestState,
+};
+pub(crate) use wasm_state_reset::WasmStateResetPreparation;
+use wasm_state_reset::{
+    PreparedWasmStateReset, PreparedWasmStateResetBranch, WasmStateResetRuntimeError,
 };
 pub(in crate::runtime) use websocket_signaling::SignalingProtobufDescriptors;
 use window_accumulator::{
@@ -537,6 +543,7 @@ pub mod wasm_checkpoint_benchmark;
 mod wasm_output;
 mod wasm_processor;
 mod wasm_state;
+mod wasm_state_reset;
 mod websocket_signaling;
 mod window_accumulator;
 mod window_processor;

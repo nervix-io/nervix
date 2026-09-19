@@ -55,7 +55,7 @@ writer.
 | Active graph | The runtime lifecycle publishes one optional graph for each domain on a node. Installation replaces the complete graph, and stop or removal publishes absence. | A unit of work sees one complete graph or no active graph. An in-flight reader may finish against the graph it already loaded. |
 | Domain routing snapshot | Each domain retains one stable publication handle across execution rebuilds. Schedule application stages and replaces the relay services, schemas, branch declarations, materialized-state ownership, lookups, UDFs, codecs, and signaling protocols together. | A task sees the old routing revision or the new routing revision, never a mixture of their fields. Long-lived tasks use a local pointer cache instead of returning to the domain execution registry per batch. |
 | Node identity and remote dispatcher | The node runtime publishes this once after cluster join, when the authenticated interconnect and process incarnation are known. Relay boundaries created afterwards retain the same dispatcher handle. | Readers borrow the stable node identity, incarnation, transport, admission service, and ACK registry without a write-once lock or repeated name allocation. |
-| Relay owner state | Each relay boundary publishes its scheduled owner, installed owner buffer, and remote runtime-consumer set. Schedule and relay lifecycle operations replace these values at their cutover points. | A batch borrows the current owner and buffer. Multi-step ownership changes use the dispatch gate described below so teardown cannot race an admitted dispatch. |
+| Relay owner state | Each relay boundary publishes its scheduled owner, installed owner buffer, remote runtime-consumer set, and immutable branch-reset gate set. Schedule and relay lifecycle operations replace these values at their cutover points. | A batch borrows the current owner and buffer, then takes permits only from reset gates whose typed scope selects its branch. Multi-step ownership changes use the whole-relay dispatch gate described below so teardown cannot race an admitted dispatch. |
 | Subscription interest | The cluster live-state watcher rebuilds an immutable index from domain and relay to interested node incarnations whenever gossip changes. | A relay owner performs borrowed lookups in one published index. It neither formats gossip keys nor waits on the gossip mutex per batch. Subscription creation waits until every live node has observed the exact subscriber incarnation before reporting success. |
 | Clock installation | Each domain-clock lifecycle on each node publishes the complete missing, stopped, uninstalled, unpaced, or paced installation. | A read validates its bound lifecycle generation against one installation, then advances that installation's nondecreasing timestamp watermark atomically. A same-generation replacement retains the watermark; a different generation cannot be clamped by a stale reader. |
 | Runtime-state assignment | Each state placement publishes one packed atomic binding containing its generation and capability. Replication roles are a separate immutable published snapshot. | A per-message operation admits itself, compares the exact binding it was granted, and proceeds only while that generation still grants the required capability. It never takes the assignment barrier. |
@@ -112,6 +112,14 @@ recovery publishes a new generation with the replacement schedule, so a late sav
 installation, or recovered checkpoint from the generation it replaced cannot address current
 state. The state store performs durable guest-state writes on its storage workers; the async worker
 that owns the branch never performs that storage operation synchronously.
+
+A coordinated reset enters the selected branch task through its existing supervisor command lane.
+That lane is the serialization point with input callbacks, timeout callbacks, branch eviction, and
+task replacement. Preparation takes ownership of the selected task, reaches its stop boundary, and
+keeps the handoff only until either pre-publication abort restores it or generation publication
+makes it obsolete. Sibling branch tasks keep their own lanes and continue running. After
+publication, the supervisor creates fresh tasks and waits for their initial checkpoints before it
+drops the retained old tasks and accepts completion.
 
 ### Materialized relay entries
 
@@ -181,6 +189,13 @@ The engagement state is consulted only while the gate is closed. Once all earlie
 the engagement owns a lease and the protected mutation can proceed. The acquisition deadline bounds
 waiting for that fence; a successfully acquired lease remains engaged until its owner releases or
 drops it.
+
+A WASM state reset adds a narrower gate without putting a lock on relay dispatch. Under a short
+whole-relay publication fence, the relay atomically replaces an immutable list of scoped reset
+gates. Dispatch loads that list once, compares the batch's branch fingerprint with each typed scope,
+and waits only on matching gates. Removing a lease atomically republishes the list and releases its
+gate. This gives publication and dispatch one total order while unrelated branches neither acquire
+shared locks nor wait for the reset.
 
 ### Assignment generations
 

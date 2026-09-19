@@ -1118,6 +1118,7 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
             .into_iter()
             .collect(),
             processors: HashMap::default(),
+            wasm_state_reset: None,
         },
         Duration::from_secs(30),
     );
@@ -1226,6 +1227,7 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
                     .into_iter()
                     .collect(),
                     processors: HashMap::default(),
+                    wasm_state_reset: None,
                 },
                 ack_boundary,
                 flush_policy: RuntimeFlushPolicy::Each {

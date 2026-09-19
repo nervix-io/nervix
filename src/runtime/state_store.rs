@@ -24,8 +24,6 @@ use triomphe::Arc;
 
 use super::{BranchKey, WasmGuestState};
 
-#[cfg(test)]
-mod alignment_tests;
 mod durability;
 
 use durability::DurabilityBarrier;
@@ -605,10 +603,11 @@ impl PersistedRuntimeStateEntry {
         }
     }
 
-    fn align_stored_bytes(raw: &[u8]) -> rkyv::util::AlignedVec<16> {
+    fn decode(raw: &[u8]) -> error_stack::Result<Self, RuntimePersistenceError> {
         let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(raw.len());
         aligned.extend_from_slice(raw);
-        aligned
+        rkyv::from_bytes::<Self, rkyv::rancor::Error>(&aligned)
+            .map_err(|error| Report::new(RuntimePersistenceError::DecodeState(error.to_string())))
     }
 }
 
@@ -712,13 +711,7 @@ impl LatestSnapshotWriter {
         else {
             return Ok(None);
         };
-        let aligned = PersistedRuntimeStateEntry::align_stored_bytes(raw.as_ref());
-        let archived = rkyv::access::<
-            <PersistedRuntimeStateEntry as Archive>::Archived,
-            rkyv::rancor::Error,
-        >(&aligned)
-        .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
-        Ok(Some(archived.lsm.into()))
+        Ok(Some(PersistedRuntimeStateEntry::decode(raw.as_ref())?.lsm))
     }
 
     /// Replace the stored snapshot of `placement` with `snapshot` unless the stored one is as new,
@@ -1682,16 +1675,9 @@ impl RuntimeStateStore {
         else {
             return Ok(None);
         };
-        let aligned = PersistedRuntimeStateEntry::align_stored_bytes(raw.as_ref());
-        let archived = rkyv::access::<
-            <PersistedRuntimeStateEntry as Archive>::Archived,
-            rkyv::rancor::Error,
-        >(&aligned)
-        .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
-        Ok(Some(PersistedRuntimeStateEntry {
-            lsm: archived.lsm.into(),
-            payload: archived.payload.as_slice().to_vec(),
-        }))
+        let decoded = PersistedRuntimeStateEntry::decode(raw.as_ref())
+            .map_err(|error| error.current_context().clone())?;
+        Ok(Some(decoded))
     }
 
     #[cfg(test)]
@@ -2640,6 +2626,23 @@ mod tests {
         assert_eq!(every_branch, generation(3));
         assert_eq!(loaded("acme", 2), None);
         assert_eq!(loaded("beta", 1), None);
+    }
+
+    #[test]
+    fn persisted_runtime_state_decodes_from_unaligned_storage() {
+        let expected = PersistedRuntimeStateEntry {
+            lsm: 7,
+            payload: vec![1, 2, 3],
+        };
+        let encoded =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&expected).expect("runtime state should encode");
+        let mut unaligned = vec![0];
+        unaligned.extend_from_slice(&encoded);
+
+        let decoded = PersistedRuntimeStateEntry::decode(&unaligned[1..])
+            .expect("runtime state should decode from an unaligned database buffer");
+
+        assert_eq!(decoded, expected);
     }
 
     /// Guest checkpoints and replica installations go through the store's storage workers and

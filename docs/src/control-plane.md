@@ -358,6 +358,50 @@ operator `PAUSE` or `RESUME` statement.
 An entity-paused model change also gates everything downstream of the affected model, so a
 dependent node cannot observe a half-applied change through its input relay.
 
+## Coordinated WASM Guest-State Reset
+
+The control plane owns one reset operation for a WASM processor. Its target is always one of three
+typed scopes: the explicit unbranched instance, one concrete branch, or every concrete branch. A
+request for an unbranched instance is rejected for a branched processor, and a concrete or
+all-branches request is rejected for an unbranched processor. The operation takes the domain's
+exclusive alteration lock, so reset, lifecycle, model, placement, ownership-handoff, and resource
+rebinding decisions cannot publish competing schedules.
+
+The coordinator engages a branch-selective gate on every live node for each input relay of the
+processor. A one-branch gate waits for dispatches already admitted to that branch and leaves sibling
+branches open; the unbranched and all-branches forms select their complete declared scope. The owner
+then drains accepted input and stops each selected branch task at its serialized callback boundary.
+Completed callbacks and their buffered output are finalized once through the ordinary output,
+checkpoint, and acknowledgement paths. Work still suspended on a materialized dependency is
+discarded with the old task and negatively acknowledged, and old timeout handles are cancelled.
+
+Before changing durable state, the owner creates a fresh guest for every selected live branch,
+runs initialization without restoring saved state, and captures its initial save in memory. A
+failure here restores the stopped branch tasks and releases the gate; the schedule, generation,
+stored checkpoints, and branch lifetimes remain unchanged.
+
+Publication is a two-phase schedule transition identified by the administrative command's stable
+execution reference:
+
+1. `Publishing` advances the selected branch generation in the Raft-backed schedule. Every live
+   replica installs the new state identity before the owner while the selected relay scope remains
+   gated. This ordered local activation does not wait on the ordinary cluster runtime-revision
+   barrier, because a failed owner checkpoint leaves that same barrier incomplete. This is the
+   point of no return: checkpoints and replica state of the replaced generation can no longer
+   address current state.
+2. The owner installs the selected fresh branch tasks, durably publishes their branch lifecycle,
+   writes each initial guest checkpoint, and waits for every assigned replica. Only then does the
+   coordinator publish `Ready` and release the gates.
+
+A failure before `Publishing` preserves the previous lifetime. A failure after it reports that the
+reset is committed but not usable and leaves the scope fenced. Repeating the same execution
+reference resumes the same generation and missing durability work; it does not start another
+lifetime. Restart, leadership change, and owner recovery read the published phase and follow the
+same path. Offline replicas catch up under the new generation, and a stale former owner, replica, or
+handoff preparation cannot reinstall bytes from the generation that was replaced. The control-plane
+operation is the single owner that later administrative, SDK, or restore interfaces call; it is not
+currently a separate NSPL graph statement.
+
 ## Planned Ownership Handoffs And Failover
 
 Node drain, the ownership move of a graceful-shutdown drain, placement consolidation, and `RELOCATE`
