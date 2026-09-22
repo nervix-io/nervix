@@ -67,4 +67,4 @@ pub use source::{
     SourceIntakeMode, SourceIntakeOutcome, SourceIntakeResult, SourceMessage, SourceMetadataScope,
     SourcePlan, SourcePoll, SourcePollMessage, SourceResult, SourceResume,
 };
-pub use tls::{RustlsClientConfigSource, TlsClientConfigError};
+pub use tls::{RustlsClientConfigSource, TlsClientConfigError, install_rustls_crypto_provider};

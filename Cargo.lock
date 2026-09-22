@@ -6800,6 +6800,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-connector-syslog"
+version = "0.1.0-dev"
+dependencies = [
+ "ahash",
+ "async-trait",
+ "error-stack",
+ "meticulous",
+ "nervix-connector",
+ "nervix-models",
+ "nonzero_ext",
+ "rustls",
+ "rustls-pki-types",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "nervix-connector-websockets"
+version = "0.1.0-dev"
+dependencies = [
+ "async-trait",
+ "error-stack",
+ "futures-util",
+ "humantime",
+ "meticulous",
+ "nervix-connector",
+ "nervix-jaq",
+ "nervix-models",
+ "parking_lot",
+ "prost 0.13.5",
+ "prost-reflect",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "triomphe",
+]
+
+[[package]]
 name = "nervix-consensus"
 version = "0.1.0-dev"
 dependencies = [
@@ -6917,6 +6960,23 @@ dependencies = [
  "ubyte",
  "url",
  "x509-parser",
+]
+
+[[package]]
+name = "nervix-jaq"
+version = "0.1.0-dev"
+dependencies = [
+ "bytes",
+ "ciborium",
+ "error-stack",
+ "jaq-core",
+ "jaq-fmts",
+ "jaq-json",
+ "jaq-std",
+ "nervix-models",
+ "serde_json",
+ "strum 0.26.3",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -7083,10 +7143,6 @@ dependencies = [
  "iceberg-catalog-rest",
  "iceberg-storage-opendal",
  "indexmap 2.14.2",
- "jaq-core",
- "jaq-fmts",
- "jaq-json",
- "jaq-std",
  "lapin",
  "meticulous",
  "mongodb",
@@ -7104,11 +7160,14 @@ dependencies = [
  "nervix-connector-otel",
  "nervix-connector-postgres",
  "nervix-connector-prometheus",
+ "nervix-connector-syslog",
+ "nervix-connector-websockets",
  "nervix-consensus",
  "nervix-dataflow-graph",
  "nervix-execution",
  "nervix-expiry-map",
  "nervix-interconnect",
+ "nervix-jaq",
  "nervix-models",
  "nervix-nspl",
  "nervix-proto",

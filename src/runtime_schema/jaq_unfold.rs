@@ -12,6 +12,7 @@
 use std::fmt;
 
 use bytes::Bytes;
+use nervix_jaq::{CompiledJaqProgram, JaqFormatError, JaqInput, JaqProgramError};
 use serde_json::Value as JsonValue;
 use tracing::trace;
 
@@ -19,7 +20,6 @@ use super::{
     CodecError, CompiledCodec, CompiledJaqNativeCodec, CompiledWireSchema,
     RuntimeRecordBatchBuilder, decode_json_value, decode_protobuf_payload, finish_decoded_row,
 };
-use crate::jaq_program::{CompiledJaqProgram, JaqFormatError, JaqInput, JaqProgramError};
 
 /// The most messages one payload may unfold into.
 ///

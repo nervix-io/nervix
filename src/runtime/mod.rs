@@ -245,7 +245,6 @@ mod state_snapshot_exchange;
 mod state_snapshot_transfer;
 mod state_store;
 mod subscription_predicate;
-mod syslog;
 #[cfg(test)]
 mod test_fixtures;
 
@@ -526,7 +525,6 @@ pub(crate) use wasm_state_reset::WasmStateResetPreparation;
 use wasm_state_reset::{
     PreparedWasmStateReset, PreparedWasmStateResetBranch, WasmStateResetRuntimeError,
 };
-pub(in crate::runtime) use websocket_signaling::SignalingProtobufDescriptors;
 use window_accumulator::{
     RetainedWindowRows, WindowAccumulator, WindowAccumulatorPlan, WindowArgumentColumns, WindowRow,
 };
@@ -552,7 +550,6 @@ mod wasm_processor;
 mod wasm_state;
 mod wasm_state_recovery;
 mod wasm_state_reset;
-mod websocket_signaling;
 mod window_accumulator;
 mod window_processor;
 mod window_state;
@@ -624,7 +621,4 @@ pub(crate) use subscription_predicate::{
 pub(crate) use vm_compile::{
     CompiledDomainUdfs, CompiledProgramWithMaterializedInterest, MaterializedProgramInterest,
     RuntimeMaterializedRelaySpec, RuntimeVmCompileContext,
-};
-pub(crate) use websocket_signaling::{
-    CompiledSignalingProtocol, SignalingDataSink, WebsocketSignalingSession,
 };

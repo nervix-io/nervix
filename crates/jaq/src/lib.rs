@@ -1,7 +1,7 @@
 //! Compiled jaq programs and the schemaless wire formats they read and write.
 //!
 //! Codecs and websocket signaling protocols both express boundary behavior as jaq programs over
-//! self-describing payloads. This module owns compiling those programs once, running them, and
+//! self-describing payloads. This crate owns compiling those programs once, running them, and
 //! converting each supported format to and from the JSON values programs operate on.
 //!
 //! Layer: engines and infrastructure.
@@ -10,7 +10,7 @@
 //!   schemaless format to and from the JSON values a program operates on.
 //! - **Depends on.** `jaq` and the wire-format crates.
 //! - **Must not know.** Schemas, relays or branches. Its callers decide what a program means; this
-//!   module only runs it.
+//!   crate only runs it.
 
 use std::{fmt::Display, io, str::FromStr};
 

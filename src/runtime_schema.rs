@@ -45,6 +45,7 @@ use chrono::{DateTime, FixedOffset};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto;
+use nervix_jaq::{CompiledJaqProgram, JaqNativeFormat};
 use nervix_models::{
     AvroType, CodecJaqTransformations, CreateCodec, CreateSchema, CreateWireSchema, JsonType,
     ModelName, ParseAsType, RemoteRuntimeElementValue, RemoteRuntimeField, RemoteRuntimeRecord,
@@ -65,8 +66,6 @@ use serde::{
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use thiserror::Error;
 use triomphe::Arc;
-
-use crate::jaq_program::{CompiledJaqProgram, JaqNativeFormat};
 
 mod arrow_body;
 mod jaq_unfold;
