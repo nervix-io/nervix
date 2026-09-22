@@ -31,8 +31,9 @@ use crate::{
     QueueName, RebindResource, ReingestorName, RelayName, ReordererName, RequestedResourceVersion,
     ResourceName, SchemaFingerprint, SchemaName, SignalingProtocolName, SubjectName,
     SubscriptionName, TableName, Timestamp, TopicName, UdfName, UserName, VhostName,
-    WasmProcessorName, WasmStateGenerations, WasmStateReset, WasmStateResetPhase,
-    WasmStateResetScope, WindowProcessorName, WireSchemaName,
+    WasmProcessorName, WasmSavedStateRejection, WasmStateGeneration, WasmStateGenerations,
+    WasmStateRecoveries, WasmStateRecoveryAdmission, WasmStateRecoveryOutcome, WasmStateReset,
+    WasmStateResetPhase, WasmStateResetScope, WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
@@ -3197,6 +3198,7 @@ pub struct CreateWasmProcessor<Version = u64> {
     pub file: String,
     pub limits: WasmProcessorLimits,
     pub global_error_policy: GeneralErrorPolicy,
+    pub rejected_state_policy: WasmRejectedStatePolicy,
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3219,6 +3221,38 @@ pub struct CreateWasmProcessor<Version = u64> {
 pub struct WasmProcessorLimits {
     pub max_fuel: NonZeroU64,
     pub max_memory_bytes: NonZeroU64,
+}
+
+/// What a WASM processor does with a saved snapshot its guest refused to restore.
+///
+/// A guest's verdict on the bytes it was handed is the only failure that classifies saved state as
+/// unusable, so it is the only failure this policy answers. Every other way instantiating a branch
+/// can fail — compiling the module, initializing the guest, an exhausted limit, storage,
+/// replication, or the state's authority — leaves the saved state exactly as usable as it was and
+/// never reaches this decision.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    strum::AsRefStr,
+)]
+#[strum(serialize_all = "UPPERCASE")]
+pub enum WasmRejectedStatePolicy {
+    /// Keep the refused snapshot and report the refusal. Every later instance of the branch is
+    /// handed the same bytes and reports the same failure until an operator acts.
+    #[default]
+    Preserve,
+    /// Replace the refused lifetime once, through the coordinated reset, and resume the branch on
+    /// the fresh lifetime it publishes. One refused lifetime is worth exactly one attempt.
+    Reset,
 }
 
 #[derive(
@@ -4493,6 +4527,9 @@ pub struct ScheduledNode {
     /// The latest coordinated reset of this WASM processor, including an incomplete publication
     /// whose selected scope must remain fenced. Every other kind of node carries nothing.
     wasm_state_reset: Option<WasmStateReset>,
+    /// The recovery attempts this WASM processor's refused guest-state lifetimes have spent. Every
+    /// other kind of node carries nothing, because no other kind restores guest state.
+    wasm_state_recoveries: Option<WasmStateRecoveries>,
 }
 
 impl ScheduledNode {
@@ -4500,8 +4537,10 @@ impl ScheduledNode {
     /// covers, before a scheduler decides which cluster nodes run it.
     pub fn new(config: Model, schema_fingerprint: SchemaFingerprint) -> Self {
         let mut wasm_state_generations = None;
+        let mut wasm_state_recoveries = None;
         if let Model::WasmProcessor(_) = &config {
             wasm_state_generations = Some(WasmStateGenerations::first());
+            wasm_state_recoveries = Some(WasmStateRecoveries::empty());
         }
         Self {
             identifier: config.name(),
@@ -4514,6 +4553,7 @@ impl ScheduledNode {
             ownership_transition: None,
             wasm_state_generations,
             wasm_state_reset: None,
+            wasm_state_recoveries,
         }
     }
 
@@ -4565,6 +4605,42 @@ impl ScheduledNode {
         self.wasm_state_reset.as_ref()
     }
 
+    /// The recovery attempts this WASM processor's refused guest-state lifetimes have spent.
+    pub fn wasm_state_recoveries(&self) -> Option<&WasmStateRecoveries> {
+        self.wasm_state_recoveries.as_ref()
+    }
+
+    /// Decide what the refused `generation` of `scope` is entitled to, recording an admitted
+    /// attempt so that a restart, a leader change, or another owner reads the same decision.
+    ///
+    /// Returns `None` when this node holds no WASM guest state, and therefore nothing that could
+    /// have been refused.
+    pub fn admit_wasm_state_recovery(
+        &mut self,
+        scope: WasmStateResetScope,
+        generation: WasmStateGeneration,
+        rejection: WasmSavedStateRejection,
+    ) -> Option<WasmStateRecoveryAdmission> {
+        let recoveries = self.wasm_state_recoveries.as_mut()?;
+        let request = scope.recovery_request(generation);
+        Some(recoveries.admit(scope, generation, rejection, request))
+    }
+
+    /// Record what the admitted recovery attempt of `scope` achieved.
+    ///
+    /// Returns `false` when this node holds no unresolved attempt for `scope` under `request`.
+    pub fn settle_wasm_state_recovery(
+        &mut self,
+        scope: &WasmStateResetScope,
+        request: &CommandExecutionReference,
+        outcome: WasmStateRecoveryOutcome,
+    ) -> bool {
+        let Some(recoveries) = self.wasm_state_recoveries.as_mut() else {
+            return false;
+        };
+        recoveries.settle(scope, request, outcome)
+    }
+
     /// Continue the guest-state lifetimes `existing` published for this same node.
     ///
     /// A generation belongs to the pinned module binding it was published for. When this entry
@@ -4589,6 +4665,13 @@ impl ScheduledNode {
         }
         self.wasm_state_generations = Some(generations);
         self.wasm_state_reset = existing.wasm_state_reset.clone();
+        // A recovery attempt is spent on the lifetime it was admitted for. A changed binding
+        // restarts every lifetime, so the attempts recorded against the previous ones no longer
+        // name anything this entry can refuse.
+        self.wasm_state_recoveries = match binding_changed {
+            true => Some(WasmStateRecoveries::empty()),
+            false => existing.wasm_state_recoveries.clone(),
+        };
     }
 
     /// Start a new guest-state lifetime for every branch of this WASM processor, including branches

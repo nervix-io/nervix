@@ -5,6 +5,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckMode, CreateStatement, CreateWasmProcessor, GeneralErrorPolicy, ProcessorOutput,
     ProcessorOutputs, RequestedResourceVersion, RouteConstruction, WasmProcessorLimits,
+    WasmRejectedStatePolicy,
 };
 
 use crate::{
@@ -12,7 +13,7 @@ use crate::{
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, branch_selection, byte_size_lit,
         filter_where_clause, from_relay_clauses, if_not_exists_clause, into_parse_error, kw,
-        kw_phrase2, lex_input, materialized_state_dependencies, message_error_policy,
+        kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies, message_error_policy,
         nonzero_u64_value, relay_ref, resource_ref, resource_version_clause,
         set_or_where_route_construction, string_lit, suggest_from, tok, wasm_processor_name,
     },
@@ -41,6 +42,20 @@ fn wasm_processor_limits<'src>()
             max_fuel,
             max_memory_bytes,
         })
+        .boxed()
+}
+
+/// `ON REJECTED STATE ...`, the node-wide answer to a guest that refuses the snapshot it is handed.
+///
+/// The clause is optional because preserving refused state is the behaviour a processor gets
+/// without asking: discarding computation state is the choice that has to be written down.
+fn rejected_state_policy<'src>()
+-> impl Parser<'src, &'src [Token], WasmRejectedStatePolicy, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase3(Identifier::On, Identifier::Rejected, Identifier::State)
+        .ignore_then(choice((
+            kw(Identifier::Preserve).to(WasmRejectedStatePolicy::Preserve),
+            kw(Identifier::Reset).to(WasmRejectedStatePolicy::Reset),
+        )))
         .boxed()
 }
 
@@ -128,9 +143,10 @@ pub fn create_wasm_processor_parser<'src>() -> impl Parser<
         .then(materialized_state_dependencies())
         .then(wasm_processor_outputs())
         .boxed()
+        .then(rejected_state_policy().or_not())
         .then(global_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
-        .map(|(base, global_error_policy)| {
+        .map(|((base, rejected_state_policy), global_error_policy)| {
             let (
                 (
                     (
@@ -153,6 +169,7 @@ pub fn create_wasm_processor_parser<'src>() -> impl Parser<
                 ),
                 outputs,
             ) = base;
+            let rejected_state_policy = rejected_state_policy.unwrap_or_default();
             CreateStatement::new(
                 CreateWasmProcessor {
                     name,
@@ -164,6 +181,7 @@ pub fn create_wasm_processor_parser<'src>() -> impl Parser<
                     file,
                     limits,
                     global_error_policy,
+                    rejected_state_policy,
                     mode: mode.unwrap_or(AckMode::Attached),
                     filter_where,
                     materialized_state,
@@ -359,6 +377,74 @@ mod tests {
             nervix_models::MessageErrorPolicy::Log
         );
         assert_eq!(parsed.global_error_policy, GeneralErrorPolicy::Ignore);
+    }
+
+    #[test]
+    fn parses_the_rejected_state_policy_and_defaults_it_to_preserving_state() {
+        let without_clause = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE \
+                              'p.wasm' MAX FUEL 1000 MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE \
+                              ERROR LOG ON GLOBAL ERROR LOG;";
+        let parsed = parse_create_wasm_processor(without_clause).expect("parse should work");
+        assert_eq!(
+            parsed.rejected_state_policy,
+            WasmRejectedStatePolicy::Preserve
+        );
+
+        for (clause, expected) in [
+            (
+                "ON REJECTED STATE PRESERVE",
+                WasmRejectedStatePolicy::Preserve,
+            ),
+            ("ON REJECTED STATE RESET", WasmRejectedStatePolicy::Reset),
+        ] {
+            let input = format!(
+                "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE 'p.wasm' MAX FUEL \
+                 1000 MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE ERROR LOG {clause} ON GLOBAL \
+                 ERROR LOG;"
+            );
+            let parsed = parse_create_wasm_processor(&input).expect("parse should work");
+            assert_eq!(parsed.rejected_state_policy, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_a_rejected_state_policy_that_is_not_one_of_the_two_answers() {
+        for input in [
+            "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE 'p.wasm' MAX FUEL \
+             1000 MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE ERROR LOG ON REJECTED STATE IGNORE \
+             ON GLOBAL ERROR LOG;",
+            "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE 'p.wasm' MAX FUEL \
+             1000 MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE ERROR LOG ON REJECTED STATE ON \
+             GLOBAL ERROR LOG;",
+            "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE 'p.wasm' MAX FUEL \
+             1000 MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE ERROR LOG ON REJECTED STATE RESET;",
+        ] {
+            assert!(parse_create_wasm_processor_tokens(&to_tokens(input)).is_err());
+        }
+    }
+
+    #[test]
+    fn completes_the_rejected_state_policy_beside_the_global_error_policy() {
+        let prefix = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE 'p.wasm' MAX \
+                      FUEL 1000 MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE ERROR LOG ";
+        let suggestions = suggest_create_wasm_processor(prefix, prefix.len());
+        assert!(suggestions.contains(&"ON REJECTED STATE".to_string()));
+        assert!(suggestions.contains(&"ON".to_string()));
+
+        let policy_prefix = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE \
+                             'p.wasm' MAX FUEL 1000 MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE \
+                             ERROR LOG ON REJECTED STATE ";
+        let policy_suggestions = suggest_create_wasm_processor(policy_prefix, policy_prefix.len());
+        assert!(policy_suggestions.contains(&"PRESERVE".to_string()));
+        assert!(policy_suggestions.contains(&"RESET".to_string()));
+        assert!(!policy_suggestions.contains(&"LOG".to_string()));
+
+        let after_policy = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE \
+                            'p.wasm' MAX FUEL 1000 MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE \
+                            ERROR LOG ON REJECTED STATE RESET ";
+        let after_suggestions = suggest_create_wasm_processor(after_policy, after_policy.len());
+        assert!(after_suggestions.contains(&"ON".to_string()));
+        assert!(!after_suggestions.contains(&"ON REJECTED STATE".to_string()));
     }
 
     #[test]

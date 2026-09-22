@@ -443,6 +443,7 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
                         resource_version: processor.resource_version,
                         file: processor.file.clone(),
                         limits: processor.limits,
+                        rejected_state_policy: processor.rejected_state_policy,
                     },
                 };
                 processors.push(processor_node_spec(spec, &processor.branched_by, &branches));
@@ -883,6 +884,7 @@ fn materialize_nodes(
                     resource_version,
                     file,
                     limits,
+                    rejected_state_policy,
                 } => RelayProcessorOperationTemplate::WasmProcessor {
                     output_routes: materialize_outputs(
                         node.kind,
@@ -894,6 +896,7 @@ fn materialize_nodes(
                     resource_version: *resource_version,
                     file: file.clone(),
                     limits: *limits,
+                    rejected_state_policy: *rejected_state_policy,
                     compiled: None,
                 },
             },
@@ -2552,6 +2555,7 @@ mod tests {
                             max_memory_bytes: nonzero!(67_108_864u64),
                         },
                         global_error_policy: GeneralErrorPolicy::Ignore,
+                        rejected_state_policy: Default::default(),
                         mode: AckMode::Attached,
                         filter_where: None,
                         materialized_state: Vec::new(),

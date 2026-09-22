@@ -688,6 +688,7 @@ CREATE ATTACHED WASM PROCESSOR geoip_device_location_resolver
         distance_to_hub_km = distance_to_hub_km
     WHERE distance_to_hub_km > 0.0
     ON MESSAGE ERROR LOG
+  ON REJECTED STATE PRESERVE
   ON GLOBAL ERROR LOG;
 
 CREATE ATTACHED DEDUPLICATOR device_location_distance

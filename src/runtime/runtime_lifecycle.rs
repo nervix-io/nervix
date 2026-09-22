@@ -144,6 +144,8 @@ impl Runtime {
                 materialized_state_changed: Notify::new(),
                 replicated_window_processor_states: DashMap::default(),
                 replicated_wasm_processor_states: DashMap::default(),
+                wasm_state_recovery_requests: ArcSwapOption::empty(),
+                raised_wasm_state_recoveries: RaisedWasmStateRecoveries::default(),
                 replicated_branch_aggregated_states: DashMap::default(),
                 wasm_runtime: WasmRuntime::new(WasmRuntimeConfig::default())
                     .assured("wasmtime accepts its own default configuration"),

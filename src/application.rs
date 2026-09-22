@@ -154,6 +154,7 @@ pub(crate) mod test_fixtures;
 mod tls;
 mod tracing_setup;
 mod transaction;
+mod wasm_state_recovery;
 mod wasm_state_reset;
 mod web_console;
 
@@ -1957,6 +1958,8 @@ impl Application {
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
         service.register_wasm_state_reset_interconnect_handler()?;
+        service.register_wasm_state_recovery_interconnect_handler()?;
+        service.register_wasm_state_recovery_coordinator(shutdown.clone());
 
         let entity_drain_service = service.clone();
         interconnect

@@ -165,6 +165,12 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<RuntimeStatePlacement, Arc<ReplicatedWindowProcessorState>, RandomState>,
     pub(in crate::runtime) replicated_wasm_processor_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedWasmProcessorState>, RandomState>,
+    /// Published once, when the node's control plane starts draining refused WASM guest-state
+    /// lifetimes. Branch tasks read it on the path a refused restore takes.
+    pub(in crate::runtime) wasm_state_recovery_requests:
+        ArcSwapOption<mpsc::Sender<WasmStateRecoveryRequest>>,
+    /// The refused guest-state lifetimes this node has raised and not yet seen answered.
+    pub(in crate::runtime) raised_wasm_state_recoveries: RaisedWasmStateRecoveries,
     pub(in crate::runtime) replicated_branch_aggregated_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedBranchAggregatedState>, RandomState>,
     pub(in crate::runtime) wasm_runtime: WasmRuntime,
