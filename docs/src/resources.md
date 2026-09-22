@@ -135,6 +135,15 @@ without guest state. If any node's listener cannot install the new certificate, 
 fails; when none of its usages paused, as when it moves only VHOSTs, every usage keeps its previous
 version.
 
+A rebinding that leaves a WASM processor on the version it already binds moves nothing and so
+resets nothing. Nervix compiles each candidate module before the batch is published, so a module it
+cannot compile rejects the whole rebinding with every previous binding and its saved guest state
+still in place:
+
+```text
+invalid WASM PROCESSOR 'counting_guest': wasm processor 'counting_guest' module compilation failed
+```
+
 ## Upload Format
 
 The client builds a deterministic tar archive of the directory's subdirectories and regular files,
