@@ -266,6 +266,70 @@ Use `SHOW TRANSACTIONS;` to inspect live transactions and retained outcomes. See
 [Control Plane](control-plane.md#replicated-nspl-transactions) for attach,
 failover, commit-step, expiry, and limit semantics.
 
+`DESCRIBE TRANSACTION` reads one transaction's impact report without changing
+that transaction:
+
+```nspl,ignore
+DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TEXT | JSON ];
+```
+
+Without an id it reads the transaction attached to the session. A quoted id, as
+`BEGIN` and `SHOW TRANSACTIONS` print it, reads that transaction instead; it must
+belong to the same user, and reading it never attaches it or selects its domain.
+`OPERATION <n>` names an accepted operation, numbered from 1 in the order the
+statements were queued, and leads the report with that operation and the
+execution step it belongs to without narrowing the rest. `TEXT` is the default;
+`FORMAT JSON` prints the same report as one JSON document.
+
+The statement is the one read-only statement allowed while a transaction is
+open. It is answered before queueing, so it never becomes transaction content and
+never consumes an operation number, but it must be sent on its own rather than
+inside a multi-statement request:
+
+```nspl
+// The transaction attached to this session.
+DESCRIBE TRANSACTION;
+// Its second queued operation first.
+DESCRIBE TRANSACTION OPERATION 2;
+// A transaction by id, as one JSON document.
+DESCRIBE TRANSACTION '01a0ca64-7062-7302-ac1e-43138ccc2067' FORMAT JSON;
+```
+
+For two queued schemas, the text report reads:
+
+```text
+transaction: 01a0ca64-7062-7302-ac1e-43138ccc2067
+domain: production
+state: OPEN
+operations: 2 accepted, 0 applied, 2 pending
+report: COMPLETE
+planning basis: 10b2c6ecf022ec0f2d9149fe98039cc065533d326e5dba7ea74660f64b893ef8
+quiesce level: DYNAMIC
+pause: NO_PAUSE
+operation 1: CREATE_CONFIGURATION kind=schema name=notification
+  execution step: 1-2
+  reason: CONFIGURATION kind=schema name=notification aspect=ENTITY_CREATED
+operation 2: CREATE_CONFIGURATION kind=schema name=delivery
+  execution step: 1-2
+  reason: CONFIGURATION kind=schema name=delivery aspect=ENTITY_CREATED
+execution step 1-2: planned DYNAMIC, actual DYNAMIC, outcome UNATTEMPTED
+  pause: NO_PAUSE
+  effect: configuration CREATED kind=schema name=delivery operations=2
+  effect: configuration CREATED kind=schema name=notification operations=1
+  effect: topology before nodes=0 edges=0 after nodes=2 edges=0
+```
+
+A paused subgraph lists each paused node and admission gate under its `pause:`
+line with the operations that require it, and a finished transaction reports the
+`APPLIED` or `FAILED` outcome each execution step recorded, for as long as its
+outcome is retained. An inspection that cannot be answered says why: no
+transaction is attached, the id is unknown or its retention has expired, the
+transaction belongs to another user, the operation number is past the operations
+it accepted, or no coherent report can be read for it, as for a transaction that
+ended before planning any operation. See
+[Control Plane](control-plane.md#inspecting-a-transaction) for what each
+transaction state reports.
+
 Ingestors, relay-consuming processors, and generated-output processors use optional node-level
 arrival filters and route-local construction. Relay-consuming processors may also attach a
 source-level filter to `FROM`:

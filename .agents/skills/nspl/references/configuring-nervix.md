@@ -82,7 +82,9 @@ Use separate execution phases so transaction and active-domain rules stay clear.
    queued prefix without applying its effect; a rejection can be corrected before commit. Queued
    model mutations report their own preflighted quiesce levels, and `COMMIT` reports only the
    maximum level actually executed. `CREATE DOMAIN`, `CREATE USER`, read-only statements,
-   subscriptions, uploads, and node administration remain outside the transaction.
+   subscriptions, uploads, and node administration remain outside the transaction. The exception
+   is `DESCRIBE TRANSACTION;`, sent on its own, which reads the open transaction's planned impact
+   before `COMMIT` without becoming content or shifting operation numbers.
 5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended. A
    paced `START` establishes one replicated clock generation that joining nodes install before
    execution. One committed authority revision identifies the producing node incarnation; owner

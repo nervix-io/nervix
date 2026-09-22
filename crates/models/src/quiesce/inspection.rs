@@ -21,7 +21,18 @@ use super::{
 use crate::DomainName;
 
 /// Which transaction an inspection reads.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub enum TransactionInspectionTarget {
     /// The transaction bound to the inspecting session.
     Attached,
@@ -31,7 +42,18 @@ pub enum TransactionInspectionTarget {
 }
 
 /// One side-effect-free read of a transaction's impact report.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct TransactionInspectionRequest {
     pub target: TransactionInspectionTarget,
     /// The accepted operation the reader focuses on. Absent reads the whole transaction.
@@ -39,7 +61,9 @@ pub struct TransactionInspectionRequest {
 }
 
 /// Where a replicated transaction is in its lifecycle.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, AsRefStr)]
+#[serde(tag = "state", rename_all = "SCREAMING_SNAKE_CASE")]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum TransactionLifecycle {
     Open,
     Committing,
@@ -61,10 +85,11 @@ impl TransactionLifecycle {
 }
 
 /// A replicated transaction as the serving leader records it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TransactionStatus {
     transaction_id: String,
     domain: DomainName,
+    #[serde(flatten)]
     lifecycle: TransactionLifecycle,
     accepted_operations: TransactionPosition,
     applied_operations: usize,
@@ -141,7 +166,10 @@ pub enum TransactionStatusError {
 /// The report always describes the whole transaction. `operation` names the accepted operation
 /// the reader asked about, so a presentation can lead with that operation's contribution and the
 /// execution step containing it without the report itself losing topology.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Its JSON representation is the one `DESCRIBE TRANSACTION ... FORMAT JSON` prints: the status
+/// with its lifecycle state inline, the selected operation or `null`, and the whole report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TransactionInspection {
     pub transaction: TransactionStatus,
     /// The inspected operation, when the request selected one.

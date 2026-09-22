@@ -202,6 +202,7 @@ impl SessionSubscriptions {
                     operations.push(SessionCommandOperation::Revert);
                 }
                 statement => {
+                    let inspects_transaction = statement.inspects_transaction();
                     let request_reference = execution_reference.derive_step(statement_index);
                     let command = PendingSessionCommand {
                         request_reference,
@@ -210,7 +211,20 @@ impl SessionSubscriptions {
                         statement,
                         domain: request_domain.to_string(),
                     };
-                    if transaction_active {
+                    if inspects_transaction {
+                        // An inspection reads the transaction instead of joining it, so it is
+                        // dispatched before queueing: it never becomes transaction content and
+                        // never takes the queue position the next append expects. Sharing a
+                        // request with other statements would make it part of their durable
+                        // admission and replay, so it is always sent on its own.
+                        if multi_statement {
+                            return Err("DESCRIBE TRANSACTION must be executed separately; it \
+                                        reads a transaction and never joins a multi-statement \
+                                        request"
+                                .to_string());
+                        }
+                        operations.push(SessionCommandOperation::Execute(command));
+                    } else if transaction_active {
                         let Some(current_position) = transaction_position else {
                             return Err("transaction command is missing its expected queue \
                                         position"

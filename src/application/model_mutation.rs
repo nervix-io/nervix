@@ -114,6 +114,7 @@ fn requires_request_domain(statement: &Statement) -> bool {
             | Statement::StopDomain(_)
             | Statement::ShowClusterStatus(_)
             | Statement::ShowTransactions(_)
+            | Statement::DescribeTransaction(_)
             | Statement::DropNode(_)
             | Statement::CordonNode(_)
             | Statement::UncordonNode(_)
@@ -129,6 +130,7 @@ pub(in crate::application) fn requires_existing_domain(statement: &Statement) ->
             | Statement::StopDomain(_)
             | Statement::ShowClusterStatus(_)
             | Statement::ShowTransactions(_)
+            | Statement::DescribeTransaction(_)
             | Statement::DropNode(_)
             | Statement::CordonNode(_)
             | Statement::UncordonNode(_)
@@ -2447,6 +2449,10 @@ impl SessionServiceImpl {
                 ..Default::default()
             },
             Statement::ShowTransactions(_) => self.show_transactions().await,
+            Statement::DescribeTransaction(describe) => {
+                self.describe_transaction(describe, query, subscriptions)
+                    .await
+            }
         }
     }
 }

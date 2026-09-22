@@ -103,3 +103,27 @@ returns an unsuccessful command outcome whose transaction status names `Committe
 aggregate rather than the individual statement results. Attach to an id removed after retention
 returns an unknown-id outcome. `transaction_status()` keeps the
 latest structured status so an interactive caller can render `Open` and `Committing` differently.
+
+## Inspecting A Transaction
+
+`DESCRIBE TRANSACTION` answers twice: rendered in the outcome's `message`, as `TEXT` by default or as
+one JSON document with `FORMAT JSON`, and typed in `CommandOutcome::inspection`. The typed
+`TransactionInspection` holds the inspected transaction's status, the selected operation if the
+statement named one, and the whole `TransactionImpactReport`, whichever format rendered the message:
+
+```rust
+let described = client.execute("DESCRIBE TRANSACTION OPERATION 2;").await?;
+if let Some(inspection) = &described.inspection {
+    println!(
+        "{} operation(s) in {} execution step(s)",
+        inspection.report.operations().len(),
+        inspection.report.execution_steps().len()
+    );
+}
+```
+
+`CommandOutcome::transaction` keeps describing this session's own binding, so inspecting another
+transaction by id changes neither `transaction_status()` nor the selected domain. An inspection
+consumes no queue position: the next queued statement receives the operation number it would have
+had, and the preview the client fences `COMMIT` with stays the one its last accepted append
+reported. A refused inspection is an unsuccessful outcome whose message names why nothing was read.

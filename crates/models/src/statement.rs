@@ -30,10 +30,11 @@ use crate::{
     ModelName, NodeRef, ParseAsType, PlacementName, PulsarSubscriptionName, QueueGroupName,
     QueueName, RebindResource, ReingestorName, RelayName, ReordererName, RequestedResourceVersion,
     ResourceName, SchemaFingerprint, SchemaName, SignalingProtocolName, SubjectName,
-    SubscriptionName, TableName, Timestamp, TopicName, UdfName, UserName, VhostName,
-    WasmProcessorName, WasmSavedStateRejection, WasmStateGeneration, WasmStateGenerations,
-    WasmStateRecoveries, WasmStateRecoveryAdmission, WasmStateRecoveryOutcome, WasmStateReset,
-    WasmStateResetPhase, WasmStateResetScope, WindowProcessorName, WireSchemaName,
+    SubscriptionName, TableName, Timestamp, TopicName, TransactionInspectionRequest, UdfName,
+    UserName, VhostName, WasmProcessorName, WasmSavedStateRejection, WasmStateGeneration,
+    WasmStateGenerations, WasmStateRecoveries, WasmStateRecoveryAdmission,
+    WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetPhase, WasmStateResetScope,
+    WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
@@ -92,6 +93,7 @@ pub enum Statement {
     ShowRelayMaterializedState(ShowRelayMaterializedState),
     ShowClusterStatus(ShowClusterStatus),
     ShowTransactions(ShowTransactions),
+    DescribeTransaction(DescribeTransaction),
 }
 
 impl Statement {
@@ -161,7 +163,8 @@ impl Statement {
             | Self::ShowPlacements(_)
             | Self::ShowRelayMaterializedState(_)
             | Self::ShowClusterStatus(_)
-            | Self::ShowTransactions(_) => false,
+            | Self::ShowTransactions(_)
+            | Self::DescribeTransaction(_) => false,
         }
     }
 }
@@ -925,6 +928,42 @@ pub struct DescribeUdf {
 )]
 pub struct DescribePlacement {
     pub name: PlacementName,
+}
+
+/// `DESCRIBE TRANSACTION`: one side-effect-free read of a transaction's impact report.
+///
+/// The request is exactly what the inspection service consumes, so the statement is answered
+/// without a second representation of which transaction and operation it names.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct DescribeTransaction {
+    pub request: TransactionInspectionRequest,
+    pub format: TransactionReportFormat,
+}
+
+/// How `DESCRIBE TRANSACTION` renders the report it read. `TEXT` is the default; both formats
+/// render the same report, and the typed report travels beside either rendering.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum TransactionReportFormat {
+    #[default]
+    Text,
+    Json,
 }
 
 #[derive(

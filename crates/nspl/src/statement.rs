@@ -128,6 +128,8 @@ pub fn statement_parser<'src>()
         crate::drop_stmt::drop_parser().map(Statement::Drop),
         crate::show_cluster_status::show_cluster_status_parser().map(Statement::ShowClusterStatus),
         crate::show_transactions::show_transactions_parser().map(Statement::ShowTransactions),
+        crate::describe_transaction::describe_transaction_parser()
+            .map(Statement::DescribeTransaction),
         crate::show_create::show_create_parser().map(Statement::ShowCreate),
         crate::show_stream_state::show_stream_materialized_state_parser()
             .map(Statement::ShowRelayMaterializedState),
@@ -191,6 +193,8 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
             && !normalized.contains(" VERSION ")
         {
             vec!["VERSION".to_string()]
+        } else if open && let Statement::DescribeTransaction(describe) = &statement {
+            crate::describe_transaction::describe_transaction_tail(describe, &tokens)
         } else if open && let Statement::RebindResource(rebind) = &statement {
             if matches!(
                 rebind.selection,

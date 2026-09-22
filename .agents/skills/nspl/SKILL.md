@@ -75,7 +75,11 @@ resumable, but their content is deliberately limited to that domain's model muta
 configuration/lifecycle, and `CREATE RESOURCE`. Keep `CREATE DOMAIN`, `CREATE USER`, read-only
 statements, subscriptions, `USE`, resource uploads, and node administration outside the
 transaction. Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
-verification. Queue admission preflights each statement against the replicated prefix without
+verification. Use `DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TEXT | JSON ];` to
+explain what an open, committing, or retained transaction requires and changes before or after
+`COMMIT`; it is the one read allowed while a transaction is open, is sent on its own, and neither
+queues content nor shifts operation numbers. Read `NSPL Overview` for its forms and `Control Plane`
+→ `Inspecting A Transaction` for what each transaction state reports. Queue admission preflights each statement against the replicated prefix without
 applying effects. Consecutive model mutations form one atomic run and report the run's effective
 base-to-final quiesce level at the current prefix; a lifecycle, domain, or resource statement ends
 that run, and a later run cannot repair it. `COMMIT` reports only the maximum level actually

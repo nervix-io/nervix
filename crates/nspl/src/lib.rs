@@ -29,6 +29,7 @@ pub mod describe_reingestor;
 pub mod describe_reorderer;
 pub mod describe_resource;
 pub mod describe_stream;
+pub mod describe_transaction;
 pub mod describe_wasm_processor;
 pub mod describe_window_processor;
 pub mod domain;

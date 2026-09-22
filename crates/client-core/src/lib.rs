@@ -16,6 +16,7 @@ extern crate shuttle_tokio_stream as tokio_stream;
 
 use std::{
     collections::VecDeque,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
@@ -26,10 +27,11 @@ use async_tar::{Builder as AsyncTarBuilder, EntryType, Header, HeaderMode};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_models::{DomainName, TransactionLifecycle};
 pub use nervix_models::{
     ImpactPlanningBasis, ResourceUploadIdentity, SubscriptionDeliveryBehavior,
-    TransactionOperationAdmission, TransactionOperationNumber, TransactionPosition,
-    TransactionPreviewIdentity,
+    TransactionImpactReport, TransactionInspection, TransactionOperationAdmission,
+    TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity,
 };
 use nervix_nspl::client_statement::ClientStatement;
 pub use nervix_proto as proto;
@@ -100,6 +102,9 @@ pub struct CommandOutcome {
     /// Present when a COMMIT was refused because its expected preview no longer described the
     /// transaction. Nothing applied and the transaction stays open.
     pub preview_stale: Option<TransactionPreviewStale>,
+    /// The transaction a `DESCRIBE TRANSACTION` read, whichever format rendered its message. It
+    /// may name a transaction other than `transaction`, which stays this session's own binding.
+    pub inspection: Option<Box<TransactionInspection>>,
     pub resource_upload: Option<ResourceUploadOutcome>,
     pub results: Vec<CommandOutcome>,
 }
@@ -1027,6 +1032,7 @@ impl Client {
                 transaction: None,
                 transaction_admission: None,
                 preview_stale: None,
+                inspection: None,
                 resource_upload: Some(ResourceUploadOutcome {
                     identity: upload_identity.clone(),
                     version: response.version,
@@ -1066,6 +1072,7 @@ impl Client {
             transaction: None,
             transaction_admission: None,
             preview_stale: None,
+            inspection: None,
             resource_upload: Some(ResourceUploadOutcome {
                 identity: upload_identity,
                 version: 0,
@@ -1454,6 +1461,7 @@ fn command_ok_outcome(message: String) -> CommandOutcome {
         transaction: None,
         transaction_admission: None,
         preview_stale: None,
+        inspection: None,
         resource_upload: None,
         results: Vec::new(),
     }
@@ -1472,6 +1480,7 @@ fn command_error_outcome(message: String) -> CommandOutcome {
         transaction: None,
         transaction_admission: None,
         preview_stale: None,
+        inspection: None,
         resource_upload: None,
         results: Vec::new(),
     }
@@ -1546,10 +1555,60 @@ impl From<proto::CommandResult> for CommandOutcome {
                 .transaction_admission
                 .and_then(transaction_operation_admission),
             preview_stale: value.preview_stale.and_then(transaction_preview_stale),
+            inspection: value.inspection.and_then(transaction_inspection),
             resource_upload: None,
             results: value.results.into_iter().map(Into::into).collect(),
         }
     }
+}
+
+/// The transaction a command inspected, when the server sent a complete typed report.
+///
+/// A server always sends the inspected status and the report together. An envelope it could not
+/// have produced describes no read, so it is dropped rather than shown as a report the server never
+/// sent.
+fn transaction_inspection(
+    inspection: proto::TransactionInspection,
+) -> Option<Box<TransactionInspection>> {
+    let transaction = inspected_transaction_status(inspection.transaction?)?;
+    let operation = match inspection.operation {
+        Some(operation) => Some(transaction_operation_number(operation)?),
+        None => None,
+    };
+    let report = serde_json::from_slice::<TransactionImpactReport>(&inspection.report).ok()?;
+    Some(Box::new(TransactionInspection {
+        transaction,
+        operation,
+        report,
+    }))
+}
+
+/// The inspected transaction's status, as the report it arrived with counts its operations.
+fn inspected_transaction_status(
+    status: proto::TransactionStatus,
+) -> Option<nervix_models::TransactionStatus> {
+    let domain = DomainName::parse(&status.domain).ok()?;
+    let lifecycle = match proto::TransactionState::try_from(status.state).ok()? {
+        proto::TransactionState::Open => TransactionLifecycle::Open,
+        proto::TransactionState::Committing => TransactionLifecycle::Committing,
+        proto::TransactionState::Committed => TransactionLifecycle::Committed,
+        proto::TransactionState::Failed => TransactionLifecycle::Failed {
+            failing_operation: transaction_operation_number(status.failing_step?)?,
+            error: status.error,
+        },
+        proto::TransactionState::Reverted => TransactionLifecycle::Reverted,
+        proto::TransactionState::Expired => TransactionLifecycle::Expired,
+        proto::TransactionState::Unspecified => return None,
+    };
+    let accepted = TransactionPosition::new(usize::try_from(status.total_count).ok()?);
+    let applied = usize::try_from(status.completed_count).ok()?;
+    nervix_models::TransactionStatus::new(status.id, domain, lifecycle, accepted, applied).ok()
+}
+
+/// A one-based operation number as the server sends it. Zero numbers no operation.
+fn transaction_operation_number(number: u64) -> Option<TransactionOperationNumber> {
+    let number = NonZeroUsize::new(usize::try_from(number).ok()?)?;
+    Some(TransactionOperationNumber::new(number))
 }
 
 /// The admission a server reported, when it carries a complete preview identity.
@@ -1680,18 +1739,19 @@ mod tests {
         time::Duration,
     };
 
-    use meticulous::ResultExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
+    use nervix_models::ImpactReportCompleteness;
     use tokio::sync::{Mutex, mpsc, oneshot};
     use triomphe::Arc;
 
     use super::{
         Client, ClientError, ClientInner, CommandOutcome, CommandOutcomeKind, ConnectOptions,
-        Diagnostic, GrpcConnector, ImpactPlanningBasis, LeaderRouting, PendingResponse,
+        Diagnostic, DomainName, GrpcConnector, ImpactPlanningBasis, LeaderRouting, PendingResponse,
         ServerEvent, ServerEventLevel, SessionResponseDispatch, SubscriptionEvent,
-        SubscriptionRequest, TlsRequirement, TransactionPosition, TransactionPreviewIdentity,
-        TransactionPreviewStale, TransactionState, TransactionStatus, clear_pending_responses,
-        command_error_outcome, expand_user_path, proto, reconnect_candidates,
-        split_query_statements, upload_status_is_retryable,
+        SubscriptionRequest, TlsRequirement, TransactionImpactReport, TransactionLifecycle,
+        TransactionPosition, TransactionPreviewIdentity, TransactionPreviewStale, TransactionState,
+        TransactionStatus, clear_pending_responses, command_error_outcome, expand_user_path, proto,
+        reconnect_candidates, split_query_statements, upload_status_is_retryable,
     };
 
     #[test]
@@ -1805,6 +1865,129 @@ mod tests {
             client.transaction_expectation().await.preview,
             Some(test_preview("tx-1", 2))
         );
+    }
+
+    fn empty_report() -> TransactionImpactReport {
+        TransactionImpactReport::new(
+            DomainName::parse("tenant").assured("the test domain is an accepted literal"),
+            TransactionPosition::new(0),
+            ImpactPlanningBasis::new([7; 32]),
+            ImpactReportCompleteness::Complete,
+            Vec::new(),
+            Vec::new(),
+        )
+        .assured("an empty report numbers no operation and so needs no execution step")
+    }
+
+    fn inspected_status(state: proto::TransactionState) -> proto::TransactionStatus {
+        proto::TransactionStatus {
+            id: "tx-inspected".to_string(),
+            state: i32::from(state),
+            domain: "tenant".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn inspection_result(
+        status: proto::TransactionStatus,
+        report: &TransactionImpactReport,
+    ) -> proto::CommandResult {
+        let report =
+            serde_json::to_vec(report).assured("an impact report has a JSON representation");
+        proto::CommandResult {
+            success: true,
+            kind: i32::from(proto::CommandResultKind::Ok),
+            inspection: Some(proto::TransactionInspection {
+                transaction: Some(status),
+                operation: None,
+                report: report.into(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_inspected_report_arrives_typed_beside_the_callers_own_binding() {
+        let report = empty_report();
+        let mut result =
+            inspection_result(inspected_status(proto::TransactionState::Open), &report);
+        result.transaction = Some(proto::TransactionStatus {
+            id: "tx-bound".to_string(),
+            ..inspected_status(proto::TransactionState::Open)
+        });
+
+        let outcome = CommandOutcome::from(result);
+
+        let inspection = outcome
+            .inspection
+            .as_ref()
+            .verified("the server sent a complete inspection envelope");
+        assert_eq!(inspection.transaction.transaction_id(), "tx-inspected");
+        assert_eq!(
+            inspection.transaction.lifecycle(),
+            &TransactionLifecycle::Open
+        );
+        assert_eq!(inspection.operation, None);
+        assert_eq!(inspection.report, report);
+        let binding = outcome
+            .transaction
+            .as_ref()
+            .verified("the result reports the session's own binding");
+        assert_eq!(
+            binding.id, "tx-bound",
+            "the inspected transaction does not replace the session's own binding"
+        );
+    }
+
+    #[test]
+    fn a_failed_inspected_transaction_names_its_failing_operation() {
+        let status = proto::TransactionStatus {
+            failing_step: Some(1),
+            error: "domain start refused".to_string(),
+            ..inspected_status(proto::TransactionState::Failed)
+        };
+        let outcome = CommandOutcome::from(inspection_result(status, &empty_report()));
+
+        let inspection = outcome
+            .inspection
+            .as_ref()
+            .verified("the server sent a complete inspection envelope");
+        let TransactionLifecycle::Failed {
+            failing_operation,
+            error,
+        } = inspection.transaction.lifecycle()
+        else {
+            panic!("a failed status must decode as a failure");
+        };
+        assert_eq!(failing_operation.get(), 1);
+        assert_eq!(error, "domain start refused");
+    }
+
+    #[test]
+    fn an_envelope_the_server_could_not_have_sent_is_dropped() {
+        let unspecified = inspection_result(
+            inspected_status(proto::TransactionState::Unspecified),
+            &empty_report(),
+        );
+        assert_eq!(CommandOutcome::from(unspecified).inspection, None);
+
+        let mut operation_zero = inspection_result(
+            inspected_status(proto::TransactionState::Open),
+            &empty_report(),
+        );
+        if let Some(inspection) = operation_zero.inspection.as_mut() {
+            inspection.operation = Some(0);
+        }
+        assert_eq!(CommandOutcome::from(operation_zero).inspection, None);
+
+        let mut unreadable_report = inspection_result(
+            inspected_status(proto::TransactionState::Open),
+            &empty_report(),
+        );
+        if let Some(inspection) = unreadable_report.inspection.as_mut() {
+            inspection.report = b"not a report".to_vec().into();
+        }
+        assert_eq!(CommandOutcome::from(unreadable_report).inspection, None);
     }
 
     #[tokio::test]
@@ -2033,6 +2216,7 @@ mod tests {
             execution_reference: "command-1".to_string(),
             transaction_admission: None,
             preview_stale: None,
+            inspection: None,
         });
         assert!(!outcome.success);
         assert_eq!(outcome.kind, CommandOutcomeKind::NotLeader);
@@ -2122,6 +2306,7 @@ mod tests {
             transaction: None,
             transaction_admission: None,
             preview_stale: None,
+            inspection: None,
             resource_upload: None,
             results: Vec::new(),
         };
