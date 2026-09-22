@@ -26,7 +26,6 @@ mod mysql;
 mod nats;
 mod otel;
 mod postgres;
-mod rabbitmq;
 mod sqs;
 
 use clickhouse::ClickHouseEmitter;
@@ -43,7 +42,7 @@ use otel::{OtelEmitter, OtelEmitterInit};
 use postgres::PostgresEmitter;
 pub(in crate::runtime) use postgres::{PgPool, open_postgres_pool};
 use nervix_connector_pulsar::{PulsarSink, PulsarSinkConfig};
-use rabbitmq::{RabbitMqSink, RabbitMqSinkConfig};
+use nervix_connector_rabbitmq::{RabbitMqSink, RabbitMqSinkConfig};
 pub(in crate::runtime) use nervix_connector_redis::{
     RedisClientError, RedisCommandPool, open_redis_command_pool,
 };
