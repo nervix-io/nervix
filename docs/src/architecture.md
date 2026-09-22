@@ -101,14 +101,16 @@ through periodic snapshots and replication, but in-flight message batches and AC
 hot-path memory only. Relay buffers, concrete presence, fan-out, and metrics are owner-local and
 unreplicated; optional materialized records use the relay's state replicas.
 
-`RESOURCE` sits between the control plane and the runtime. The control plane versions and replicates it across the cluster, while runtime nodes use its unpacked local directory form when a model depends on concrete files.
+`RESOURCE` sits between the control plane and the runtime. The control plane numbers each uploaded
+version and completes it only after every live node has verified and installed the same archive.
+Every model that uses a resource pins one completed version, and its runtime consumers load exactly
+that version from their node's local copy. An upload adds a version and moves nothing; only a model
+mutation, such as `REBIND RESOURCE`, changes the version a model binds. A TLS `VHOST` is one such
+binding: the HTTPS listener of every node presents the certificate of the version it pins.
 
-One concrete example is `VHOST` TLS:
-
-- the control plane tracks uploaded certificate bundles as resource versions
-- a `VHOST` binds one completed version of one of those resources, always pinned to that number
-  whether the statement wrote `VERSION <n>` or resolved `VERSION LATEST` when it was applied
-- the data plane serves HTTPS and WSS from a dedicated HTTPS listener using the local replicated resource files
+The [Resource Versions And Bindings](./resource-versions.md) chapter defines catalog and store
+ownership, the version lifecycle, what each binding loads and when, `LATEST` resolution, rebinding,
+the `DYNAMIC` TLS refresh, and failure and recovery.
 
 All node-to-node traffic uses one mutually authenticated TLS 1.3 and HTTP/2 listener. Independent
 management, command, replication, relay, and bulk pools isolate traffic, while typed operations,
